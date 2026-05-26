@@ -1,3 +1,5 @@
 *.sif
 *.ext3
 HighwayEnv-sourcecode/
+logs/
+__pycache__/

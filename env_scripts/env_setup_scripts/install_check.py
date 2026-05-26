@@ -14,6 +14,8 @@ def import_package(module_name: str, dist_name: str | None = None) -> None:
 
 
 def main() -> None:
+    require_cuda = os.environ.get("REQUIRE_CUDA", "1") != "0"
+
     print("python:", sys.executable)
     print("python version:", sys.version.split()[0])
 
@@ -67,10 +69,12 @@ def main() -> None:
     print("highway-env OK")
 
     print("torch cuda available:", torch.cuda.is_available())
-    if not torch.cuda.is_available():
+    if require_cuda and not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available to PyTorch")
     if torch.cuda.is_available():
         print("torch cuda device:", torch.cuda.get_device_name(torch.cuda.current_device()))
+    elif not require_cuda:
+        print("torch cuda check skipped")
 
     print("all core packages imported")
 

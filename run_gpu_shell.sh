@@ -43,7 +43,7 @@ print('[info] cuda available:', torch.cuda.is_available())
 if torch.cuda.is_available():
     print('[info] cuda device:', torch.cuda.get_device_name(torch.cuda.current_device()))
 PY
-    python /scratch/ab9738/dsrc/env_setup_scripts/install_check.py
+    python /scratch/ab9738/dsrc/env_scripts/env_setup_scripts/install_check.py
     exec bash
   "
 '
