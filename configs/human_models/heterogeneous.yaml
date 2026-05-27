@@ -1,0 +1,11 @@
+id: heterogeneous
+kind: human_model
+description: Mixed cautious, normal, and aggressive human-driver behavior.
+mix:
+  cautious: 0.3
+  normal: 0.5
+  aggressive: 0.2
+defaults:
+  lane_change_model: mobil
+  car_following_model: idm
+

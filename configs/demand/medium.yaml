@@ -1,0 +1,16 @@
+id: medium
+kind: demand
+description: Medium traffic demand for baseline throughput experiments.
+total_vehicles_per_hour: 1800
+av_penetration: 0.1
+role_distribution:
+  av: 0.1
+  human: 0.9
+branch_split:
+  main: 1.0
+burst:
+  enabled: false
+speed_distribution:
+  mean_mps: 24.0
+  std_mps: 2.5
+

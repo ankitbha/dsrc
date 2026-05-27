@@ -1,0 +1,30 @@
+id: exp_ring_wave_damping
+kind: experiment
+refs:
+  topology: ring
+  demand: medium
+  human_model: heterogeneous
+  training: mappo
+experiment:
+  id: exp_ring_wave_damping
+  description: Ring-road wave damping reference experiment.
+  seed: 7
+controller:
+  family: rl
+  name: mappo
+  requires_global_state: true
+metrics:
+  primary:
+    - mean_speed
+    - speed_std
+    - jam_fraction
+    - wave_amplitude
+    - recovery_time
+outputs:
+  episode_summary: outputs/metrics/exp_ring_wave_damping/episode_summary.json
+  step_metrics: outputs/metrics/exp_ring_wave_damping/step_metrics.csv
+  segment_metrics: outputs/metrics/exp_ring_wave_damping/segment_metrics.parquet
+overrides:
+  demand:
+    total_vehicles_per_hour: 1600
+
