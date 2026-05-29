@@ -160,7 +160,8 @@ python -m pip install \
   stable-baselines3 sb3-contrib \
   numpy scipy pandas matplotlib pyyaml tqdm networkx numba \
   tensorboard wandb rich h5py pyarrow \
-  pygame imageio imageio-ffmpeg moviepy opencv-python-headless
+  pygame imageio imageio-ffmpeg moviepy opencv-python-headless \
+  pytest
 
 echo \"[info] checking overlay capacity\"
 du -sh /ext3

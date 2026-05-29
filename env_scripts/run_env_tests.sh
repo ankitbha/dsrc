@@ -69,7 +69,11 @@ run_in_container --nv --fakeroot
 "
   else
     echo "[info] running env tests without srun"
-    run_in_container "" ""
+    if [[ "${REQUIRE_CUDA}" == "1" ]]; then
+      run_in_container --nv --fakeroot
+    else
+      run_in_container "" ""
+    fi
   fi
 } >"${LOG_FILE}" 2>&1; then
   echo "[info] env tests passed"

@@ -29,6 +29,7 @@ def main() -> None:
         ("torch", None),
         ("torchvision", None),
         ("torchaudio", None),
+        ("pytest", None),
         ("highway_env", "highway-env"),
         ("gymnasium", None),
         ("stable_baselines3", "stable-baselines3"),
