@@ -131,6 +131,8 @@ def main() -> int:
     assert bundle["training"]["id"] == "mappo"
     assert bundle["experiment"]["id"] == "exp_ring_wave_damping"
     assert bundle["outputs"]["episode_summary"].endswith("episode_summary.json")
+    assert bundle["outputs"]["step_metrics"].endswith("step_metrics.csv")
+    assert bundle["outputs"]["segment_metrics"].endswith("segment_metrics.csv")
 
     controller = DummyController()
     local_obs = {

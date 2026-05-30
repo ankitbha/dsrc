@@ -8,11 +8,23 @@ Every experiment should use these canonical artifact names:
 
 - `episode_summary.json`
 - `step_metrics.csv`
-- `segment_metrics.parquet`
+- `segment_metrics.csv`
 
 Expected output root:
 
 - `outputs/metrics/<experiment_id>/`
+
+Parquet can be added later as an optional compatibility artifact, but JSON/CSV are the canonical task-6 outputs.
+
+## Metric Thresholds
+
+Experiment configs may define optional metric thresholds:
+
+- `metrics.thresholds.queue_speed_mps`
+- `metrics.thresholds.hard_braking_mps2`
+- `metrics.thresholds.throughput_window_s`
+- `metrics.thresholds.low_speed_free_flow_delta_mps`
+- `metrics.thresholds.uncongested_density_threshold_veh_per_km`
 
 ## Step Metrics
 
@@ -57,6 +69,16 @@ Standard segment-level metric names:
 - `jam_fraction`
 - `inflow`
 - `outflow`
+
+Segment records may also include additive lane-use and obstruction-analysis fields:
+
+- `lane_counts`
+- `lane_fractions`
+- `lane_av_counts`
+- `all_lane_av_low_speed_occupancy`
+- `rolling_roadblock_score`
+- `branch_queue_length`
+- `spillback_depth`
 
 Active counts and segment counts should exclude vehicles that have exited the topology. Exited vehicles should contribute to completed vehicle counts, throughput, and episode summaries, but not to active AV/RV computation.
 
