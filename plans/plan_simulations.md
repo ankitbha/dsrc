@@ -1126,7 +1126,7 @@ Directional warnings are not final paper claims. They are smoke signals for impl
 
 ## Phase 9: RL training, simple first
 
-Start with independent PPO or shared-policy PPO before full MAPPO.
+Start with plain-PyTorch shared PPO and IPPO before full MAPPO. All algorithms use the same decentralized actor; only MAPPO uses `global_state` through a centralized critic during training.
 
 Training order:
 

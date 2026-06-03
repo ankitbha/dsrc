@@ -1,18 +1,18 @@
-id: mappo
+id: ippo
 kind: training
-description: Centralized critic, decentralized actor training defaults.
-algorithm: mappo
-policy_mode: ctde
-action_profile: full
-total_updates: 100
-rollout_steps: 512
+description: Independent PPO-style decentralized critic baseline with shared actor parameters.
+algorithm: ippo
+policy_mode: decentralized
+action_profile: speed_headway
+total_updates: 50
+rollout_steps: 256
 actor:
   observation_scope: local
   hidden_sizes:
     - 128
     - 128
 critic:
-  observation_scope: global
+  observation_scope: local
 optimization:
   learning_rate: 0.0003
   gamma: 0.99

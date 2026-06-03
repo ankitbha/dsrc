@@ -1,18 +1,18 @@
-id: mappo
+id: shared_ppo
 kind: training
-description: Centralized critic, decentralized actor training defaults.
-algorithm: mappo
-policy_mode: ctde
-action_profile: full
-total_updates: 100
-rollout_steps: 512
+description: Shared actor PPO with local critic for early decentralized policy training.
+algorithm: shared_ppo
+policy_mode: decentralized
+action_profile: speed_only
+total_updates: 50
+rollout_steps: 256
 actor:
   observation_scope: local
   hidden_sizes:
     - 128
     - 128
 critic:
-  observation_scope: global
+  observation_scope: local
 optimization:
   learning_rate: 0.0003
   gamma: 0.99

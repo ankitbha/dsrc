@@ -51,3 +51,5 @@ Controller configs may set `controller.safety_mode`. Use `integrated_rl` for the
 - `human_models/heterogeneous.yaml`
 - `experiments/exp_ring_wave_damping.yaml`
 - `training/mappo.yaml`
+- `training/shared_ppo.yaml`
+- `training/ippo.yaml`

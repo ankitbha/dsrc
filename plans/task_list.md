@@ -33,7 +33,7 @@ Approach these tasks sequentially. Each item is intentionally broad enough to be
     For each topology, verify spawning, routing, exits, detector counts, metrics, baseline behavior, and logical directional sanity checks such as selfish AV early speed, density/smoothing behavior under high demand, merge gap creation, branch fairness, and low rolling-roadblock scores before moving to the next topology.
 
 11. **Train the CTDE policy**
-    Add centralized-training/decentralized-execution RL for local AV policies once environments and baselines are stable. The actor should learn smooth speed/headway targets with conservative lane preferences; it must not learn obstruction, lane hogging, or coordinated roadblock behavior.
+    Add shared PPO, IPPO, and MAPPO RL for local AV policies once environments and baselines are stable. The actor should learn smooth speed/headway targets with conservative lane preferences; MAPPO may use a centralized critic during training, but learned-policy execution must remain local-only and must not learn obstruction, lane hogging, or coordinated roadblock behavior.
 
 12. **Evaluate and compare experiments**
     Sweep topology, demand level, AV penetration, human-driver model, sensing noise, and baselines.
