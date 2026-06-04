@@ -6,11 +6,19 @@ import torch
 from src.envs.wrappers import validate_action_mapping
 from src.rl.actions import ActionSpec, action_to_indices, indices_to_action
 from src.rl.controller import LearnedPolicyController
-from src.rl.encoders import encode_global_state, encode_local_observation, global_state_dim, local_obs_dim
+from src.rl.encoders import (
+    encode_action_mask,
+    encode_global_state,
+    encode_local_observation,
+    encode_physical_global_state,
+    global_state_dim,
+    local_obs_dim,
+    physical_global_state_dim,
+)
 from src.rl.models import GlobalCritic, LocalCritic, MultiCategoricalActor
 from src.rl.ppo import PPOConfig, ppo_update
 from src.rl.rollout_buffer import RolloutBuffer
-from src.rl.trainers import MAPPOTrainer, TrainingConfig
+from src.rl.trainers import MAPPOTrainer, SharedPPOTrainer, TrainingConfig
 
 
 def local_obs(**overrides):
@@ -57,6 +65,7 @@ def global_state():
         },
         "demand_state": {"current_vehicles_per_hour": 1000.0, "av_penetration": 0.1},
         "branch_state": {"per_branch_spawned": {"main": 2}, "per_branch_completed": {"main": 0}},
+        "previous_step_metrics": {"mean_speed": 10.0, "completed_vehicle_count": 0},
     }
 
 
@@ -84,6 +93,17 @@ def test_encoder_bounds_nonfinite_local_observation_values() -> None:
     assert encoded.abs().max() <= 200.0
 
 
+def test_action_mask_is_encoded_separately_from_local_numeric_features() -> None:
+    masked = local_obs(action_mask={"desired_speed_bin": {"slow": True, "nominal": False, "fast": False}})
+    encoded_with_mask = encode_local_observation(masked)
+    encoded_without_mask = encode_local_observation(local_obs())
+    mask = encode_action_mask(masked, ActionSpec("full"))
+
+    assert torch.equal(encoded_with_mask, encoded_without_mask)
+    assert mask.shape == (4, 3)
+    assert mask[0].tolist() == [True, False, False]
+
+
 @pytest.mark.parametrize("profile", ["speed_only", "speed_headway", "full"])
 def test_actor_emits_valid_v2_actions_for_profiles(profile: str) -> None:
     actor = MultiCategoricalActor(local_obs_dim(), hidden_sizes=(16,), action_spec=ActionSpec(profile))  # type: ignore[arg-type]
@@ -99,6 +119,55 @@ def test_actor_emits_valid_v2_actions_for_profiles(profile: str) -> None:
         assert all(action["lane_preference"] == "keep" for action in actions)
     if profile == "speed_headway":
         assert all(action["lane_preference"] == "keep" for action in actions)
+
+
+def test_actor_sampling_and_evaluation_respect_hard_masks() -> None:
+    actor = MultiCategoricalActor(local_obs_dim(), hidden_sizes=(16,), action_spec=ActionSpec("full"))
+    obs = torch.stack([encode_local_observation(local_obs()), encode_local_observation(local_obs(ego_speed=10.0))])
+    masks = torch.stack(
+        [
+            encode_action_mask(
+                local_obs(
+                    action_mask={
+                        "desired_speed_bin": {"slow": False, "nominal": False, "fast": True},
+                        "desired_headway_bin": {"normal": False, "larger": True, "largest": False},
+                        "lane_preference": {"keep": False, "prefer_left_if_safe": True, "prefer_right_if_safe": False},
+                        "merge_mode": {"normal": False, "create_gap": True, "hold_lane": False},
+                    }
+                ),
+                ActionSpec("full"),
+            ),
+            encode_action_mask(
+                local_obs(
+                    action_mask={
+                        "desired_speed_bin": {"slow": True, "nominal": False, "fast": False},
+                        "desired_headway_bin": {"normal": False, "larger": False, "largest": True},
+                        "lane_preference": {"keep": False, "prefer_left_if_safe": False, "prefer_right_if_safe": True},
+                        "merge_mode": {"normal": False, "create_gap": False, "hold_lane": True},
+                    }
+                ),
+                ActionSpec("full"),
+            ),
+        ]
+    )
+
+    actions, indices, log_probs, entropies = actor.sample(obs, deterministic=True, action_masks=masks)
+    evaluated_log_probs, evaluated_entropies = actor.evaluate_actions(obs, indices, action_masks=masks)
+
+    assert actions[0] == {
+        "desired_speed_bin": "fast",
+        "desired_headway_bin": "larger",
+        "lane_preference": "prefer_left_if_safe",
+        "merge_mode": "create_gap",
+    }
+    assert actions[1] == {
+        "desired_speed_bin": "slow",
+        "desired_headway_bin": "largest",
+        "lane_preference": "prefer_right_if_safe",
+        "merge_mode": "hold_lane",
+    }
+    assert torch.allclose(log_probs, evaluated_log_probs)
+    assert torch.allclose(entropies, evaluated_entropies)
 
 
 def test_action_index_round_trip() -> None:
@@ -173,6 +242,7 @@ def test_ppo_update_runs_one_minibatch() -> None:
         reward=1.0,
         value=value,
         done=True,
+        action_mask=encode_action_mask(local_obs(), ActionSpec("speed_only")),
         agent_id="av_0",
     )
     batch = buffer.compute_returns_and_advantages(gamma=0.99, gae_lambda=0.95, normalize_advantages=False)
@@ -186,9 +256,74 @@ def test_mappo_critic_uses_global_state_but_controller_rejects_global_state() ->
     trainer = MAPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
     local = torch.stack([encode_local_observation(local_obs())])
     value_obs = trainer.value_observation_tensor(global_state(), local, 1)
-    assert value_obs.shape == (1, global_state_dim() + local_obs_dim())
+    assert value_obs.shape == (1, physical_global_state_dim() + local_obs_dim())
     controller = LearnedPolicyController(trainer.actor)
     action = controller.act({"av_0": local_obs()})
     validate_action_mapping(action, expected_agent_ids=["av_0"])
     with pytest.raises(ValueError):
         controller.act({"av_0": local_obs()}, global_state=global_state())
+
+
+def test_learned_policy_controller_respects_hard_masks() -> None:
+    actor = MultiCategoricalActor(local_obs_dim(), hidden_sizes=(16,), action_spec=ActionSpec("speed_only"))
+    controller = LearnedPolicyController(actor)
+
+    actions = controller.act(
+        {
+            "av_0": local_obs(
+                action_mask={
+                    "desired_speed_bin": {"slow": False, "nominal": False, "fast": True},
+                }
+            )
+        }
+    )
+
+    assert actions["av_0"]["desired_speed_bin"] == "fast"
+    assert actions["av_0"]["desired_headway_bin"] == "normal"
+    assert actions["av_0"]["lane_preference"] == "keep"
+
+
+def test_physical_global_state_excludes_cumulative_counters() -> None:
+    baseline = global_state()
+    changed = {
+        **baseline,
+        "completed_vehicle_count": 999,
+        "demand_state": {
+            **baseline["demand_state"],
+            "spawned_vehicle_count": 100,
+            "completed_vehicle_count": 90,
+            "skipped_spawn_count": 12,
+        },
+        "branch_state": {
+            "per_branch_spawned": {"main": 100},
+            "per_branch_completed": {"main": 90},
+            "branch_travel_time_mean": {"main": 42.0},
+        },
+        "previous_step_metrics": {"mean_speed": 1.0, "completed_vehicle_count": 777},
+    }
+
+    assert torch.equal(encode_physical_global_state(baseline), encode_physical_global_state(changed))
+    assert not torch.equal(encode_global_state(baseline), encode_global_state(changed))
+
+
+def test_trainer_state_resume_loads_latest_and_rejects_incompatible_config(tmp_path) -> None:
+    config = TrainingConfig(algorithm="shared_ppo", action_profile="speed_only", hidden_sizes=(16,))
+    trainer = SharedPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
+    trainer.save_checkpoint(tmp_path, best_score=1.5)
+    trainer.save_checkpoint(tmp_path, best_score=1.5, actor_filename="latest_actor.pt", critic_filename="latest_critic.pt")
+    trainer.save_trainer_state(tmp_path, completed_update=3, best_score=1.5, metrics_rows=[{"update": 3, "score": 1.5}])
+
+    resumed = SharedPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
+    start_update, best_score, rows = resumed.load_training_state(tmp_path, resume_latest=True)
+
+    assert start_update == 4
+    assert best_score == pytest.approx(1.5)
+    assert rows == [{"update": 3, "score": 1.5}]
+
+    incompatible = SharedPPOTrainer(
+        TrainingConfig(algorithm="shared_ppo", action_profile="full", hidden_sizes=(16,)),
+        PPOConfig(update_epochs=1),
+        device="cpu",
+    )
+    with pytest.raises(ValueError, match="action_profile"):
+        incompatible.load_training_state(tmp_path, resume_latest=True)

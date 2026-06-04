@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.distributions import Categorical
 
-from src.rl.actions import ACTION_HEADS, ACTION_VALUES, ActionSpec, action_indices_to_flat, flat_to_action_indices, indices_to_action
+from src.rl.actions import ACTION_HEADS, ACTION_VALUES, ActionSpec, flat_to_action_indices, indices_to_action
 
 
 def mlp(input_dim: int, hidden_sizes: tuple[int, ...], output_dim: int) -> nn.Sequential:
@@ -41,7 +41,12 @@ class MultiCategoricalActor(nn.Module):
         body = self.backbone(obs)
         return {head: Categorical(logits=layer(body)) for head, layer in self.heads.items()}
 
-    def sample(self, obs: torch.Tensor, deterministic: bool = False) -> tuple[list[dict[str, str]], torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample(
+        self,
+        obs: torch.Tensor,
+        deterministic: bool = False,
+        action_masks: torch.Tensor | None = None,
+    ) -> tuple[list[dict[str, str]], torch.Tensor, torch.Tensor, torch.Tensor]:
         distributions = self.distributions(obs)
         defaults = self.action_spec.default_indices()
         batch_size = obs.shape[0]
@@ -52,13 +57,19 @@ class MultiCategoricalActor(nn.Module):
         entropy_terms: list[torch.Tensor] = []
         head_to_column = {head: index for index, head in enumerate(ACTION_HEADS)}
         for head, distribution in distributions.items():
+            column = head_to_column[head]
+            head_distribution = distribution
+            if action_masks is not None:
+                head_distribution = Categorical(
+                    logits=_masked_logits(distribution.logits, action_masks[:, column, : distribution.logits.shape[-1]])
+                )
             if deterministic:
-                sampled = torch.argmax(distribution.logits, dim=-1)
+                sampled = torch.argmax(head_distribution.logits, dim=-1)
             else:
-                sampled = distribution.sample()
-            action_indices[:, head_to_column[head]] = sampled
-            log_prob_terms.append(distribution.log_prob(sampled))
-            entropy_terms.append(distribution.entropy())
+                sampled = head_distribution.sample()
+            action_indices[:, column] = sampled
+            log_prob_terms.append(head_distribution.log_prob(sampled))
+            entropy_terms.append(head_distribution.entropy())
         log_probs = (
             torch.stack(log_prob_terms, dim=0).sum(dim=0)
             if log_prob_terms
@@ -80,7 +91,12 @@ class MultiCategoricalActor(nn.Module):
             entropies,
         )
 
-    def evaluate_actions(self, obs: torch.Tensor, action_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def evaluate_actions(
+        self,
+        obs: torch.Tensor,
+        action_indices: torch.Tensor,
+        action_masks: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         distributions = self.distributions(obs)
         log_probs: list[torch.Tensor] = []
         entropies: list[torch.Tensor] = []
@@ -88,8 +104,13 @@ class MultiCategoricalActor(nn.Module):
         for head, distribution in distributions.items():
             column = head_to_column[head]
             head_actions = action_indices[:, column]
-            log_probs.append(distribution.log_prob(head_actions))
-            entropies.append(distribution.entropy())
+            head_distribution = distribution
+            if action_masks is not None:
+                head_distribution = Categorical(
+                    logits=_masked_logits(distribution.logits, action_masks[:, column, : distribution.logits.shape[-1]])
+                )
+            log_probs.append(head_distribution.log_prob(head_actions))
+            entropies.append(head_distribution.entropy())
         if not log_probs:
             batch = obs.shape[0]
             return torch.zeros(batch, device=obs.device), torch.zeros(batch, device=obs.device)
@@ -101,9 +122,10 @@ class MultiCategoricalActor(nn.Module):
         obs_tensor: torch.Tensor,
         *,
         deterministic: bool = True,
+        action_masks: torch.Tensor | None = None,
     ) -> dict[str, dict[str, str]]:
         with torch.no_grad():
-            actions, _, _, _ = self.sample(obs_tensor, deterministic=deterministic)
+            actions, _, _, _ = self.sample(obs_tensor, deterministic=deterministic, action_masks=action_masks)
         return {agent_id: action for agent_id, action in zip(agent_ids, actions, strict=True)}
 
     def checkpoint_metadata(self) -> dict[str, Any]:
@@ -142,3 +164,11 @@ def load_actor_from_checkpoint(checkpoint: Mapping[str, Any], map_location: str 
     actor.to(map_location)
     actor.eval()
     return actor
+
+
+def _masked_logits(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    mask = mask.to(device=logits.device, dtype=torch.bool).clone()
+    all_invalid = ~mask.any(dim=-1)
+    if bool(all_invalid.any()):
+        mask[all_invalid] = True
+    return logits.masked_fill(~mask, -1.0e9)

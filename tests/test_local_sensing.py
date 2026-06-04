@@ -230,3 +230,34 @@ def test_latency_uses_oldest_frame_until_buffer_is_warm_then_delayed_frame() -> 
 
     assert first["ego_speed"] == pytest.approx(10.0)
     assert delayed["ego_speed"] == pytest.approx(10.0)
+
+
+def test_lane_gap_context_reuses_frame_recorded_by_build_all() -> None:
+    topology = build_topology("straight_multilane")
+    builder = LocalObservationBuilder(SensingConfig())
+    snapshots = [
+        snapshot("av_0", longitudinal_m=100.0),
+        snapshot("human_rear", role="human", longitudinal_m=80.0),
+    ]
+    kwargs = {
+        "topology": topology,
+        "current_av_ids": ["av_0"],
+        "safety_states": {"av_0": SafetyState()},
+        "target_headways": {"av_0": 1.6},
+        "target_lanes": {"av_0": ("s0", "s1", 1)},
+        "segment_metrics": {"straight_upstream": {"density": 1.0, "jam_fraction": 0.0}},
+        "constraints": SafetyConstraints(),
+    }
+
+    builder.build_all(time_s=2.0, snapshots=snapshots, rng=np.random.RandomState(3), **kwargs)
+    frame_count = len(builder.buffer._frames)
+    builder.lane_gap_context(
+        ego_id="av_0",
+        time_s=2.0,
+        topology=topology,
+        snapshots=snapshots,
+        target_lane=("s0", "s1", 1),
+        rng=np.random.RandomState(3),
+    )
+
+    assert len(builder.buffer._frames) == frame_count

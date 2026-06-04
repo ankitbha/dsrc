@@ -8,7 +8,7 @@ import torch
 
 from src.controllers import BaseController, ControllerMetadata
 from src.envs.base_ctde_env import AVActionMap, AVObservationMap, GlobalState
-from src.rl.encoders import encode_local_batch
+from src.rl.encoders import encode_action_mask_batch, encode_local_batch
 from src.rl.models import MultiCategoricalActor, load_actor_from_checkpoint
 
 
@@ -60,4 +60,5 @@ class LearnedPolicyController(BaseController):
         if not agent_ids:
             return {}
         obs_tensor = obs_tensor.to(self.device)
-        return self.actor.act_mapping(agent_ids, obs_tensor, deterministic=self.deterministic)
+        action_masks = encode_action_mask_batch(local_obs, agent_ids, self.actor.action_spec).to(self.device)
+        return self.actor.act_mapping(agent_ids, obs_tensor, deterministic=self.deterministic, action_masks=action_masks)

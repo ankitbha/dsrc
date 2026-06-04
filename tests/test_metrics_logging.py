@@ -132,6 +132,8 @@ def test_logger_writes_json_and_csv_artifacts(tmp_path) -> None:
 def test_env_exposes_canonical_metrics_for_all_topologies(topology_id: str) -> None:
     env = HighwayTopologyEnv(topology_id, {"controlled_vehicles": 2, "duration_steps": 2})
     obs, _ = env.reset(seed=13)
+    for local_obs in obs.values():
+        assert "action_mask" in local_obs
     obs, _, _, _, info = env.step({agent_id: action() for agent_id in obs})
 
     for key in (
@@ -150,6 +152,24 @@ def test_env_exposes_canonical_metrics_for_all_topologies(topology_id: str) -> N
         assert "lane_fractions" in segment
         assert "rolling_roadblock_score" in segment
         assert "all_lane_av_low_speed_occupancy" in segment
+
+
+def test_segment_metrics_cache_reuses_state_and_invalidates_on_step_and_reset() -> None:
+    env = HighwayTopologyEnv("ring", {"controlled_vehicles": 2, "duration_steps": 2})
+    obs, _ = env.reset(seed=13)
+
+    first = env.get_segment_metrics()
+    assert env.get_segment_metrics() is first
+
+    obs, _, _, _, _ = env.step({agent_id: action() for agent_id in obs})
+    after_step = env.get_segment_metrics()
+    assert after_step is env.get_segment_metrics()
+    assert after_step is not first
+
+    env.reset(seed=14)
+    after_reset = env.get_segment_metrics()
+    assert after_reset is env.get_segment_metrics()
+    assert after_reset is not after_step
 
 
 def test_rear_ttc_after_av_lane_change_uses_closing_rear_vehicle() -> None:

@@ -97,6 +97,10 @@ class SensingBuffer:
         else:
             self._frames.append(frame)
 
+    def has_frame(self, time_s: float, snapshots: Sequence[VehicleSnapshot]) -> bool:
+        frame = SensingFrame(float(time_s), tuple(snapshots))
+        return bool(self._frames and self._frames[-1] == frame)
+
     def frame_for_latency(self, time_s: float, latency_s: float) -> SensingFrame | None:
         if not self._frames:
             return None
@@ -279,7 +283,8 @@ class LocalObservationBuilder:
         target_lane: LaneIndex | None,
         rng: np.random.RandomState,
     ) -> LaneGapContext:
-        self.buffer.record(time_s, snapshots)
+        if not self.buffer.has_frame(time_s, snapshots):
+            self.buffer.record(time_s, snapshots)
         by_id = {snapshot.vehicle_id: snapshot for snapshot in snapshots}
         ego = by_id[ego_id]
         measured = [self._measure_neighbor(ego, neighbor, rng) for neighbor in self._sensed_neighbors(ego, snapshots)]

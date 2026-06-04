@@ -25,7 +25,7 @@ from src.metrics.safety_metrics import rear_ttc
 from src.road.highway_imports import ensure_highway_env_importable
 from src.road.segment_graph import TopologySpec
 from src.road.topology_factory import build_topology
-from src.safety import SafetyConstraints, SafetyContext, SafetyState, apply_safety_layer
+from src.safety import SafetyConstraints, SafetyContext, SafetyState, apply_safety_layer, safety_action_mask
 from src.sensing import LocalObservationBuilder, SensingConfig, VehicleSnapshot
 from src.vehicles import HumanBehaviorModel, apply_human_behavior_profile, load_human_behavior_model
 
@@ -105,6 +105,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self._demand_spawner: DemandSpawner | None = None
         self._sensing = LocalObservationBuilder(SensingConfig.from_config(self.config))
         self._last_step_metrics: dict[str, Any] = {}
+        self._cached_segment_metrics: dict[str, dict[str, Any]] | None = None
         self._step_count = 0
         self._time = 0.0
 
@@ -155,6 +156,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self._next_human_index = 0
         self._sensing.reset(SensingConfig.from_config(self.config))
         self._last_step_metrics = {}
+        self._invalidate_segment_metrics()
         self._step_count = 0
         self._time = 0.0
         self._human_behavior_model = load_human_behavior_model(self._human_model_config())
@@ -178,6 +180,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         if self.road is None:
             raise RuntimeError("environment must be reset before step")
 
+        self._invalidate_segment_metrics()
         self._step_inflow = {segment_id: 0 for segment_id in self.topology.segment_ids}
         self._step_outflow = {segment_id: 0 for segment_id in self.topology.segment_ids}
         self._last_spawn_events = []
@@ -233,6 +236,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self._clear_exited_vehicles()
         self._spawn_demand_vehicles()
         self.agent_ids = list(self._av_vehicles)
+        self._invalidate_segment_metrics()
         segment_metrics = self.get_segment_metrics()
         self._last_step_metrics = self._compute_step_metrics(segment_metrics, diagnostics)
 
@@ -259,7 +263,8 @@ class HighwayTopologyEnv(BaseCTDEEnv):
     def get_local_observations(self) -> AVObservationMap:
         if self.road is None:
             return {}
-        return self._sensing.build_all(
+        segment_metrics = self.get_segment_metrics()
+        observations = self._sensing.build_all(
             time_s=self._time,
             topology=self.topology,
             snapshots=self._vehicle_snapshots(),
@@ -267,10 +272,13 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             safety_states=self._safety_states,
             target_headways=self._target_headways,
             target_lanes={agent_id: vehicle.target_lane_index for agent_id, vehicle in self._av_vehicles.items()},
-            segment_metrics=self.get_segment_metrics(),
+            segment_metrics=segment_metrics,
             constraints=self._safety_constraints(),
             rng=self.road.np_random,
         )
+        for agent_id in observations:
+            observations[agent_id]["action_mask"] = self._action_mask_for_agent(agent_id)
+        return observations
 
     def get_global_state(self) -> GlobalState:
         return {
@@ -293,15 +301,20 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         }
 
     def get_segment_metrics(self) -> SegmentMetrics:
-        return compute_segment_metrics(
-            segment_ids=self.topology.segment_ids,
-            segment_lengths_m=self.topology.segment_lengths,
-            lane_counts=self.topology.lane_counts,
-            active_vehicle_records=self._active_vehicle_records(),
-            step_inflow=self._step_inflow,
-            step_outflow=self._step_outflow,
-            thresholds=self._metric_thresholds(),
-        )
+        if self._cached_segment_metrics is None:
+            self._cached_segment_metrics = compute_segment_metrics(
+                segment_ids=self.topology.segment_ids,
+                segment_lengths_m=self.topology.segment_lengths,
+                lane_counts=self.topology.lane_counts,
+                active_vehicle_records=self._active_vehicle_records(),
+                step_inflow=self._step_inflow,
+                step_outflow=self._step_outflow,
+                thresholds=self._metric_thresholds(),
+            )
+        return self._cached_segment_metrics
+
+    def _invalidate_segment_metrics(self) -> None:
+        self._cached_segment_metrics = None
 
     def get_episode_summary(self) -> EpisodeSummary:
         return {
@@ -412,6 +425,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self._vehicle_meta = {vehicle_key: meta for vehicle_key, meta in self._vehicle_meta.items() if vehicle_key in active_vehicle_objects}
         self.road.vehicles = [vehicle for vehicle in self.road.vehicles if id(vehicle) in active_vehicle_objects]
         self.agent_ids = list(self._av_vehicles)
+        self._invalidate_segment_metrics()
 
     def _has_exited(self, vehicle: ControlledVehicle) -> bool:
         if vehicle.lane_index is None:
@@ -499,6 +513,16 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         lane_action = None if action["merge_mode"] == "hold_lane" else lane_preference_to_action(action["lane_preference"])
         if self.topology.supports_lane_change and lane_action is not None:
             self._apply_lane_action(agent_id, vehicle, lane_action, diagnostics)
+
+    def _action_mask_for_agent(self, agent_id: str) -> dict[str, dict[str, bool]]:
+        vehicle = self._av_vehicles.get(agent_id)
+        if vehicle is None:
+            return {}
+        return safety_action_mask(
+            self._safety_states.get(agent_id, SafetyState()),
+            self._safety_context_for_vehicle(vehicle),
+            self._safety_constraints(),
+        )
 
     def _safety_context_for_vehicle(self, vehicle: ControlledVehicle) -> SafetyContext:
         if self.road is None:
@@ -702,6 +726,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self._per_branch_spawned[branch_id] = self._per_branch_spawned.get(branch_id, 0) + 1
         self._step_inflow[branch.entry_segment] = self._step_inflow.get(branch.entry_segment, 0) + 1
         self.agent_ids = list(self._av_vehicles)
+        self._invalidate_segment_metrics()
         return vehicle_id
 
     def _register_existing_av(
@@ -726,6 +751,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             self._next_av_index = max(self._next_av_index, int(agent_id.split("_", 1)[1]) + 1)
         except (IndexError, ValueError):
             pass
+        self._invalidate_segment_metrics()
 
     def _register_existing_human(
         self,
@@ -750,6 +776,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         if behavior_profile is not None:
             self._spawned_human_by_profile[behavior_profile] = self._spawned_human_by_profile.get(behavior_profile, 0) + 1
         self._per_branch_spawned[branch_id] = self._per_branch_spawned.get(branch_id, 0) + 1
+        self._invalidate_segment_metrics()
 
     def _record_vehicle_exit(self, vehicle: ControlledVehicle) -> None:
         meta = self._vehicle_meta.get(id(vehicle))

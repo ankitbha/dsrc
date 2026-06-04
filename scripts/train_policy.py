@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--initial-human-vehicles", type=int, default=12)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-root", default="outputs/checkpoints")
+    parser.add_argument("--resume-from", default=None, help="Resume training from an existing checkpoint directory.")
+    parser.add_argument("--resume-latest", action="store_true", help="Resume model weights from latest_actor.pt/latest_critic.pt.")
     return parser.parse_args()
 
 
@@ -40,7 +42,7 @@ def main() -> int:
     training_config = TrainingConfig.from_mapping(config)
     ppo_config = PPOConfig.from_mapping(config.get("training", config))
     trainer = make_trainer(training_config, ppo_config, device=args.device)
-    result = trainer.train()
+    result = trainer.train(resume_from=args.resume_from, resume_latest=args.resume_latest)
     print(f"checkpoint_dir: {result['output_dir']}")
     print(f"updates: {result['updates']}")
     print(f"best_score: {result['best_score']}")

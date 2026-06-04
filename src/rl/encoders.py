@@ -6,6 +6,8 @@ from typing import Any
 
 import torch
 
+from src.rl.actions import ACTION_HEADS, ACTION_VALUES, ActionSpec
+
 
 LOCAL_OBS_FIELDS: tuple[str, ...] = (
     "is_active",
@@ -55,6 +57,11 @@ GLOBAL_FIELDS: tuple[str, ...] = (
     "active_av_count",
     "completed_vehicle_count",
 )
+PHYSICAL_GLOBAL_FIELDS: tuple[str, ...] = (
+    "time",
+    "active_vehicle_count",
+    "active_av_count",
+)
 SEGMENT_FIELDS: tuple[str, ...] = (
     "vehicle_count",
     "av_count",
@@ -74,6 +81,10 @@ DEMAND_FIELDS: tuple[str, ...] = (
     "spawned_vehicle_count",
     "completed_vehicle_count",
     "skipped_spawn_count",
+)
+PHYSICAL_DEMAND_FIELDS: tuple[str, ...] = (
+    "current_vehicles_per_hour",
+    "av_penetration",
 )
 
 
@@ -96,6 +107,10 @@ def encode_local_observation(obs: Mapping[str, Any]) -> torch.Tensor:
 
 def global_state_dim(max_segments: int = 10, max_branches: int = 6) -> int:
     return len(GLOBAL_FIELDS) + max_segments * len(SEGMENT_FIELDS) + len(DEMAND_FIELDS) + max_branches * 3
+
+
+def physical_global_state_dim(max_segments: int = 10) -> int:
+    return len(PHYSICAL_GLOBAL_FIELDS) + max_segments * len(SEGMENT_FIELDS) + len(PHYSICAL_DEMAND_FIELDS)
 
 
 def encode_global_state(
@@ -139,11 +154,74 @@ def encode_global_state(
     return torch.tensor(values, dtype=torch.float32)
 
 
+def encode_physical_global_state(
+    state: Mapping[str, Any],
+    *,
+    max_segments: int = 10,
+) -> torch.Tensor:
+    values = [_number(state.get(field)) for field in PHYSICAL_GLOBAL_FIELDS]
+    segment_state = state.get("segment_state", {})
+    if not isinstance(segment_state, Mapping):
+        segment_state = {}
+    for segment_id in sorted(segment_state)[:max_segments]:
+        segment = segment_state[segment_id]
+        if not isinstance(segment, Mapping):
+            segment = {}
+        values.extend(_number(segment.get(field)) for field in SEGMENT_FIELDS)
+    values.extend([0.0] * ((max_segments - min(len(segment_state), max_segments)) * len(SEGMENT_FIELDS)))
+
+    demand_state = state.get("demand_state", {})
+    if not isinstance(demand_state, Mapping):
+        demand_state = {}
+    values.extend(_number(demand_state.get(field)) for field in PHYSICAL_DEMAND_FIELDS)
+    return torch.tensor(values, dtype=torch.float32)
+
+
 def encode_local_batch(observations: Mapping[str, Mapping[str, Any]]) -> tuple[list[str], torch.Tensor]:
     agent_ids = sorted(observations)
     if not agent_ids:
         return [], torch.empty((0, local_obs_dim()), dtype=torch.float32)
     return agent_ids, torch.stack([encode_local_observation(observations[agent_id]) for agent_id in agent_ids])
+
+
+def action_mask_shape() -> tuple[int, int]:
+    return len(ACTION_HEADS), max(len(values) for values in ACTION_VALUES.values())
+
+
+def encode_action_mask(obs: Mapping[str, Any], spec: ActionSpec | None = None) -> torch.Tensor:
+    spec = spec or ActionSpec("full")
+    heads, values_per_head = action_mask_shape()
+    mask_tensor = torch.ones((heads, values_per_head), dtype=torch.bool)
+    raw_mask = obs.get("action_mask", {})
+    if not isinstance(raw_mask, Mapping):
+        raw_mask = {}
+    active_heads = set(spec.active_heads)
+    for head_index, head in enumerate(ACTION_HEADS):
+        values = ACTION_VALUES[head]
+        if head not in active_heads:
+            mask_tensor[head_index, :] = False
+            default_index = spec.default_indices()[head]
+            mask_tensor[head_index, default_index] = True
+            continue
+        head_mask = raw_mask.get(head, {})
+        if not isinstance(head_mask, Mapping):
+            continue
+        for value_index, value in enumerate(values):
+            mask_tensor[head_index, value_index] = bool(head_mask.get(value, True))
+        if not bool(mask_tensor[head_index, : len(values)].any()):
+            mask_tensor[head_index, : len(values)] = True
+    return mask_tensor
+
+
+def encode_action_mask_batch(
+    observations: Mapping[str, Mapping[str, Any]],
+    agent_ids: list[str],
+    spec: ActionSpec | None = None,
+) -> torch.Tensor:
+    heads, values_per_head = action_mask_shape()
+    if not agent_ids:
+        return torch.empty((0, heads, values_per_head), dtype=torch.bool)
+    return torch.stack([encode_action_mask(observations[agent_id], spec) for agent_id in agent_ids])
 
 
 def _number(value: Any) -> float:
