@@ -156,5 +156,5 @@ def _number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     if not math.isfinite(result):
-        return 1.0e6 if result > 0 else -1.0e6
+        return 200.0 if result > 0 else -200.0
     return result

@@ -69,6 +69,21 @@ def test_encoders_have_stable_dimensions() -> None:
     assert torch.isfinite(global_encoded).all()
 
 
+def test_encoder_bounds_nonfinite_local_observation_values() -> None:
+    encoded = encode_local_observation(
+        local_obs(
+            ego_headway_s=float("inf"),
+            time_since_last_lane_change=float("inf"),
+            distance_to_downstream_bottleneck=float("inf"),
+            leader_gap=float("inf"),
+            follower_gap=float("-inf"),
+        )
+    )
+
+    assert torch.isfinite(encoded).all()
+    assert encoded.abs().max() <= 200.0
+
+
 @pytest.mark.parametrize("profile", ["speed_only", "speed_headway", "full"])
 def test_actor_emits_valid_v2_actions_for_profiles(profile: str) -> None:
     actor = MultiCategoricalActor(local_obs_dim(), hidden_sizes=(16,), action_spec=ActionSpec(profile))  # type: ignore[arg-type]
@@ -122,6 +137,26 @@ def test_rollout_buffer_handles_interleaved_agents_and_finite_gae() -> None:
     assert torch.isfinite(batch.returns).all()
 
 
+def test_rollout_buffer_bootstraps_nonterminal_final_transition() -> None:
+    buffer = RolloutBuffer()
+    obs = encode_local_observation(local_obs())
+    action = torch.tensor([1, 0, 0, 0])
+    buffer.add(
+        observation=obs,
+        action=action,
+        log_prob=torch.tensor(-1.0),
+        reward=1.0,
+        value=torch.tensor(0.25),
+        done=False,
+        agent_id="av_0",
+    )
+    buffer.set_bootstrap_values({"av_0": 0.75})
+
+    batch = buffer.compute_returns_and_advantages(gamma=0.5, gae_lambda=1.0, normalize_advantages=False)
+
+    assert batch.returns[0] == pytest.approx(1.375)
+
+
 def test_ppo_update_runs_one_minibatch() -> None:
     actor = MultiCategoricalActor(local_obs_dim(), hidden_sizes=(16,), action_spec=ActionSpec("speed_only"))
     critic = LocalCritic(local_obs_dim(), hidden_sizes=(16,))
@@ -151,7 +186,7 @@ def test_mappo_critic_uses_global_state_but_controller_rejects_global_state() ->
     trainer = MAPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
     local = torch.stack([encode_local_observation(local_obs())])
     value_obs = trainer.value_observation_tensor(global_state(), local, 1)
-    assert value_obs.shape == (1, global_state_dim())
+    assert value_obs.shape == (1, global_state_dim() + local_obs_dim())
     controller = LearnedPolicyController(trainer.actor)
     action = controller.act({"av_0": local_obs()})
     validate_action_mapping(action, expected_agent_ids=["av_0"])

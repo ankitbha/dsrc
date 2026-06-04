@@ -44,31 +44,40 @@ class MultiCategoricalActor(nn.Module):
     def sample(self, obs: torch.Tensor, deterministic: bool = False) -> tuple[list[dict[str, str]], torch.Tensor, torch.Tensor, torch.Tensor]:
         distributions = self.distributions(obs)
         defaults = self.action_spec.default_indices()
-        index_rows: list[tuple[int, int, int, int]] = []
-        log_probs: list[torch.Tensor] = []
-        entropies: list[torch.Tensor] = []
-        for row_index in range(obs.shape[0]):
-            indices = dict(defaults)
-            row_log_probs = []
-            row_entropies = []
-            for head, distribution in distributions.items():
-                row_distribution = Categorical(logits=distribution.logits[row_index])
-                if deterministic:
-                    sampled = torch.argmax(row_distribution.logits, dim=-1)
-                else:
-                    sampled = row_distribution.sample()
-                indices[head] = int(sampled.item())
-                row_log_probs.append(row_distribution.log_prob(sampled))
-                row_entropies.append(row_distribution.entropy())
-            index_rows.append(action_indices_to_flat(indices))
-            log_probs.append(torch.stack(row_log_probs).sum() if row_log_probs else torch.tensor(0.0, device=obs.device))
-            entropies.append(torch.stack(row_entropies).sum() if row_entropies else torch.tensor(0.0, device=obs.device))
-        actions = [indices_to_action(flat_to_action_indices(indices), self.action_spec) for indices in index_rows]
+        batch_size = obs.shape[0]
+        action_indices = torch.empty((batch_size, len(ACTION_HEADS)), dtype=torch.long, device=obs.device)
+        for column, head in enumerate(ACTION_HEADS):
+            action_indices[:, column] = defaults[head]
+        log_prob_terms: list[torch.Tensor] = []
+        entropy_terms: list[torch.Tensor] = []
+        head_to_column = {head: index for index, head in enumerate(ACTION_HEADS)}
+        for head, distribution in distributions.items():
+            if deterministic:
+                sampled = torch.argmax(distribution.logits, dim=-1)
+            else:
+                sampled = distribution.sample()
+            action_indices[:, head_to_column[head]] = sampled
+            log_prob_terms.append(distribution.log_prob(sampled))
+            entropy_terms.append(distribution.entropy())
+        log_probs = (
+            torch.stack(log_prob_terms, dim=0).sum(dim=0)
+            if log_prob_terms
+            else torch.zeros(batch_size, device=obs.device)
+        )
+        entropies = (
+            torch.stack(entropy_terms, dim=0).sum(dim=0)
+            if entropy_terms
+            else torch.zeros(batch_size, device=obs.device)
+        )
+        actions = [
+            indices_to_action(flat_to_action_indices(tuple(int(value) for value in row.tolist())), self.action_spec)
+            for row in action_indices
+        ]
         return (
             actions,
-            torch.tensor(index_rows, dtype=torch.long, device=obs.device),
-            torch.stack(log_probs),
-            torch.stack(entropies),
+            action_indices,
+            log_probs,
+            entropies,
         )
 
     def evaluate_actions(self, obs: torch.Tensor, action_indices: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

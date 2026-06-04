@@ -5,8 +5,9 @@ import json
 
 import pytest
 
-from src.envs.topology_env import HighwayTopologyEnv
+from src.envs.topology_env import HighwayTopologyEnv, VehicleRuntime
 from src.metrics import MetricThresholds, MetricsLogger, compute_segment_metrics, compute_step_metrics, jain_fairness
+from src.sensing.local import VehicleSnapshot
 
 
 def action() -> dict[str, str]:
@@ -149,6 +150,60 @@ def test_env_exposes_canonical_metrics_for_all_topologies(topology_id: str) -> N
         assert "lane_fractions" in segment
         assert "rolling_roadblock_score" in segment
         assert "all_lane_av_low_speed_occupancy" in segment
+
+
+def test_rear_ttc_after_av_lane_change_uses_closing_rear_vehicle() -> None:
+    env = HighwayTopologyEnv("straight_multilane")
+    lane_index = ("s0", "s1", 1)
+    env._vehicle_runtime = {
+        "av_0": VehicleRuntime(
+            vehicle_id="av_0",
+            role="av",
+            branch_id="main",
+            spawn_time_s=0.0,
+            previous_speed_mps=10.0,
+            previous_lane_index=("s0", "s1", 0),
+            previous_segment_id="straight_upstream",
+            lane_changed_this_step=True,
+        ),
+        "human_0": VehicleRuntime(
+            vehicle_id="human_0",
+            role="human",
+            branch_id="main",
+            spawn_time_s=0.0,
+            previous_speed_mps=20.0,
+            previous_lane_index=lane_index,
+            previous_segment_id="straight_upstream",
+        ),
+    }
+    env._vehicle_snapshots = lambda: [  # type: ignore[method-assign]
+        VehicleSnapshot(
+            vehicle_id="av_0",
+            role="av",
+            segment_id="straight_upstream",
+            lane_index=lane_index,
+            lane_id=1,
+            position=(30.0, 0.0),
+            longitudinal_m=30.0,
+            speed_mps=10.0,
+            acceleration_mps2=0.0,
+            free_flow_speed_mps=30.0,
+        ),
+        VehicleSnapshot(
+            vehicle_id="human_0",
+            role="human",
+            segment_id="straight_upstream",
+            lane_index=lane_index,
+            lane_id=1,
+            position=(10.0, 0.0),
+            longitudinal_m=10.0,
+            speed_mps=20.0,
+            acceleration_mps2=0.0,
+            free_flow_speed_mps=30.0,
+        ),
+    ]
+
+    assert env._rear_ttc_after_av_lane_change_min() == pytest.approx(2.0)
 
 
 def test_exited_vehicles_count_for_throughput_and_travel_time_not_active_segments() -> None:

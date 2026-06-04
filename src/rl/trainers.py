@@ -3,8 +3,10 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 from pathlib import Path
+import random
 from typing import Any, Mapping
 
+import numpy as np
 import torch
 import yaml
 
@@ -80,7 +82,7 @@ class BasePPOTrainer:
             hidden_sizes=config.hidden_sizes,
             action_spec=self.action_spec,
         ).to(self.device)
-        critic_input_dim = global_state_dim() if self.critic_scope == "global" else local_obs_dim()
+        critic_input_dim = self.critic_input_dim()
         critic_cls = GlobalCritic if self.critic_scope == "global" else LocalCritic
         self.critic = critic_cls(critic_input_dim, hidden_sizes=config.hidden_sizes).to(self.device)
         self.optimizer = torch.optim.Adam(
@@ -93,7 +95,7 @@ class BasePPOTrainer:
         return f"{self.config.algorithm}_{self.config.topology}_{self.config.action_profile}_seed{self.config.seed}"
 
     def train(self) -> dict[str, Any]:
-        torch.manual_seed(self.config.seed)
+        seed_everything(self.config.seed)
         output_dir = Path(self.config.output_root) / self.experiment_id
         output_dir.mkdir(parents=True, exist_ok=True)
         metrics_path = output_dir / "training_metrics.csv"
@@ -117,10 +119,18 @@ class BasePPOTrainer:
                 device=self.device,
             )
             score = float(episode_metrics.get("mean_speed", 0.0)) - float(episode_metrics.get("jam_fraction", 0.0))
+            is_best = score > best_score
             best_score = max(best_score, score)
             row = {"update": update, "score": score, **stats, **episode_metrics}
             rows.append(row)
-            self.save_checkpoint(output_dir, best_score=best_score)
+            self.save_checkpoint(
+                output_dir,
+                best_score=best_score,
+                actor_filename="latest_actor.pt",
+                critic_filename="latest_critic.pt",
+            )
+            if is_best:
+                self.save_checkpoint(output_dir, best_score=best_score)
             write_training_metrics(metrics_path, rows)
         write_resolved_config(output_dir / "config_resolved.yaml", self.config, self.ppo_config)
         return {"output_dir": str(output_dir), "updates": self.config.total_updates, "best_score": best_score}
@@ -148,7 +158,6 @@ class BasePPOTrainer:
             action_map = {agent_id: action for agent_id, action in zip(agent_ids, actions, strict=True)}
             next_observations, _, terminated, truncated, info = env.step(action_map)
             team_reward = build_team_reward(info.get("metrics", {})) * self.ppo_config.reward_scale
-            done = bool(terminated or truncated)
             for index, agent_id in enumerate(agent_ids):
                 reward = team_reward - safety_penalty_for_agent(info, agent_id)
                 reward = max(-self.ppo_config.reward_clip, min(self.ppo_config.reward_clip, reward))
@@ -158,17 +167,45 @@ class BasePPOTrainer:
                     log_prob=log_probs[index],
                     reward=reward,
                     value=values[index],
-                    done=done or agent_id not in next_observations,
+                    done=bool(terminated or agent_id not in next_observations),
                     value_observation=value_obs[index],
                     agent_id=agent_id,
                 )
             observations = next_observations
             episode_metrics = dict(info.get("metrics", {}))
             steps += 1
+        self._set_bootstrap_values(buffer, env, observations, terminated)
         return buffer, episode_metrics
+
+    def critic_input_dim(self) -> int:
+        return global_state_dim() if self.critic_scope == "global" else local_obs_dim()
 
     def value_observation_tensor(self, global_state: Mapping[str, Any], obs_tensor: torch.Tensor, agent_count: int) -> torch.Tensor:
         return obs_tensor
+
+    def _set_bootstrap_values(
+        self,
+        buffer: RolloutBuffer,
+        env: HighwayTopologyEnv,
+        observations: Mapping[str, Mapping[str, Any]],
+        terminated: bool,
+    ) -> None:
+        if terminated or not observations:
+            return
+        agent_ids, obs_tensor = encode_local_batch(observations)
+        if not agent_ids:
+            return
+        obs_tensor = obs_tensor.to(self.device)
+        with torch.no_grad():
+            value_obs = self.value_observation_tensor(env.get_global_state(), obs_tensor, len(agent_ids))
+            values = self.critic(value_obs)
+        bootstrap_values = {
+            agent_id: float(values[index].detach().cpu().item())
+            for index, agent_id in enumerate(agent_ids)
+        }
+        if not self.advantage_group_by_agent and bootstrap_values:
+            bootstrap_values["__shared__"] = float(values[-1].detach().cpu().item())
+        buffer.set_bootstrap_values(bootstrap_values)
 
     def env_config(self) -> dict[str, Any]:
         topology_cfg = load_named_config("topology", self.config.topology)
@@ -185,7 +222,14 @@ class BasePPOTrainer:
             "dt": self.config.dt,
         }
 
-    def save_checkpoint(self, output_dir: Path, *, best_score: float) -> None:
+    def save_checkpoint(
+        self,
+        output_dir: Path,
+        *,
+        best_score: float,
+        actor_filename: str = "actor.pt",
+        critic_filename: str = "critic.pt",
+    ) -> None:
         actor_payload = {
             "state_dict": self.actor.state_dict(),
             "metadata": self.actor.checkpoint_metadata(),
@@ -199,8 +243,8 @@ class BasePPOTrainer:
             "hidden_sizes": self.config.hidden_sizes,
             "best_score": best_score,
         }
-        torch.save(actor_payload, output_dir / "actor.pt")
-        torch.save(critic_payload, output_dir / "critic.pt")
+        torch.save(actor_payload, output_dir / actor_filename)
+        torch.save(critic_payload, output_dir / critic_filename)
 
 
 class SharedPPOTrainer(BasePPOTrainer):
@@ -217,9 +261,12 @@ class MAPPOTrainer(BasePPOTrainer):
     critic_scope = "global"
     advantage_group_by_agent = False
 
+    def critic_input_dim(self) -> int:
+        return global_state_dim() + local_obs_dim()
+
     def value_observation_tensor(self, global_state: Mapping[str, Any], obs_tensor: torch.Tensor, agent_count: int) -> torch.Tensor:
         encoded = encode_global_state(global_state).to(self.device)
-        return encoded.unsqueeze(0).repeat(agent_count, 1)
+        return torch.cat([encoded.unsqueeze(0).repeat(agent_count, 1), obs_tensor], dim=1)
 
 
 def make_trainer(config: TrainingConfig, ppo_config: PPOConfig, *, device: str | torch.device = "cpu") -> BasePPOTrainer:
@@ -245,3 +292,11 @@ def write_training_metrics(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def write_resolved_config(path: Path, config: TrainingConfig, ppo_config: PPOConfig) -> None:
     path.write_text(yaml.safe_dump({"training": config.__dict__, "ppo": ppo_config.__dict__}, sort_keys=True))
+
+
+def seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)

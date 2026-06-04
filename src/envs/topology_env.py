@@ -21,6 +21,7 @@ from src.envs.base_ctde_env import (
 from src.envs.base_ctde_env import BaseCTDEEnv
 from src.envs.wrappers import decode_speed_bin, default_agent_ids, lane_preference_to_action, validate_action_mapping
 from src.metrics import MetricThresholds, compute_segment_metrics, compute_step_metrics, metric_thresholds_from_config
+from src.metrics.safety_metrics import rear_ttc
 from src.road.highway_imports import ensure_highway_env_importable
 from src.road.segment_graph import TopologySpec
 from src.road.topology_factory import build_topology
@@ -237,7 +238,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
 
         observations = self.get_local_observations()
         rewards = {agent_id: self._reward_for_vehicle(vehicle) for agent_id, vehicle in self._av_vehicles.items()}
-        terminated = any(vehicle.crashed for vehicle in self._active_vehicles())
+        terminated = any(vehicle.crashed for vehicle in self._av_vehicles.values())
         truncated = self._step_count >= int(self.config.get("duration_steps", 120))
         info: InfoDict = {
             "topology_id": self.topology_id,
@@ -429,7 +430,9 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         return 0.0 if vehicle.crashed else float(vehicle.speed)
 
     def _safety_constraints(self) -> SafetyConstraints:
-        cfg = self.config.get("safety", {})
+        topology_cfg = self.config.get("topology", {})
+        nested_cfg = topology_cfg.get("safety", {}) if isinstance(topology_cfg, Mapping) else {}
+        cfg = self.config.get("safety", nested_cfg)
         if not isinstance(cfg, Mapping):
             cfg = {}
         return SafetyConstraints(
@@ -935,9 +938,38 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             hard_braking_count=hard_braking_count,
             hard_brakes_caused_by_av=hard_brakes_caused_by_av,
             follower_delay_imposed_by_av=float(len(diagnostics.get("follower_disruption_blocked", []))),
-            rear_ttc_after_av_lane_change_min=float("inf"),
+            rear_ttc_after_av_lane_change_min=self._rear_ttc_after_av_lane_change_min(),
             thresholds=thresholds,
         )
+
+    def _rear_ttc_after_av_lane_change_min(self) -> float:
+        snapshots = self._vehicle_snapshots()
+        by_id = {snapshot.vehicle_id: snapshot for snapshot in snapshots}
+        values: list[float] = []
+        for runtime in self._vehicle_runtime.values():
+            if runtime.role != "av" or not runtime.lane_changed_this_step:
+                continue
+            ego = by_id.get(runtime.vehicle_id)
+            if ego is None or ego.lane_index is None:
+                continue
+            rear_candidates = [
+                snapshot
+                for snapshot in snapshots
+                if snapshot.vehicle_id != ego.vehicle_id
+                and snapshot.lane_index == ego.lane_index
+                and snapshot.longitudinal_m < ego.longitudinal_m
+            ]
+            if not rear_candidates:
+                continue
+            rear = max(rear_candidates, key=lambda snapshot: snapshot.longitudinal_m)
+            rear_gap_m = max(0.0, ego.longitudinal_m - rear.longitudinal_m)
+            values.append(
+                rear_ttc(
+                    rear_gap_m=rear_gap_m,
+                    rear_relative_speed_mps=rear.speed_mps - ego.speed_mps,
+                )
+            )
+        return float(min(values)) if values else float("inf")
 
     def _lane_change_dwell_times(self) -> list[float]:
         dwell_times: list[float] = []

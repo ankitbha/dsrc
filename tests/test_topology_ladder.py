@@ -129,6 +129,64 @@ def test_integrated_rl_safety_mode_bounds_av_acceleration() -> None:
     assert acceleration <= 0.25 + 1e-9
 
 
+def test_nested_topology_safety_config_bounds_av_acceleration() -> None:
+    env = HighwayTopologyEnv(
+        "ring",
+        {
+            "controlled_vehicles": 1,
+            "duration_steps": 2,
+            "initial_speed_mps": 5.0,
+            "controller": {"safety_mode": "integrated_rl"},
+            "topology": {"safety": {"max_accel_mps2": 0.1}},
+        },
+    )
+    obs, _ = env.reset(seed=17)
+    _, _, _, _, _ = env.step({agent_id: safe_action() | {"desired_speed_bin": "fast"} for agent_id in obs})
+
+    acceleration = env._active_vehicle_records()[0]["acceleration"]
+    assert acceleration <= 0.1 + 1e-9
+
+
+def test_top_level_safety_config_overrides_nested_topology_safety_config() -> None:
+    env = HighwayTopologyEnv(
+        "ring",
+        {
+            "controlled_vehicles": 1,
+            "duration_steps": 2,
+            "initial_speed_mps": 5.0,
+            "controller": {"safety_mode": "integrated_rl"},
+            "topology": {"safety": {"max_accel_mps2": 0.1}},
+            "safety": {"max_accel_mps2": 0.3},
+        },
+    )
+    obs, _ = env.reset(seed=17)
+    _, _, _, _, _ = env.step({agent_id: safe_action() | {"desired_speed_bin": "fast"} for agent_id in obs})
+
+    acceleration = env._active_vehicle_records()[0]["acceleration"]
+    assert acceleration <= 0.3 + 1e-9
+    assert acceleration > 0.1
+
+
+def test_human_crash_does_not_terminate_without_av_crash() -> None:
+    env = HighwayTopologyEnv(
+        "ring",
+        {
+            "controlled_vehicles": 0,
+            "initial_human_vehicles": 1,
+            "duration_steps": 2,
+        },
+    )
+    obs, _ = env.reset(seed=17)
+    assert obs == {}
+    for vehicle in env._human_vehicles.values():
+        vehicle.crashed = True
+
+    _, _, terminated, _, info = env.step({})
+
+    assert terminated is False
+    assert info["metrics"]["collision_count"] == 1
+
+
 def test_simulator_default_safety_mode_skips_dsrc_penalties_for_baseline_avs() -> None:
     env = HighwayTopologyEnv(
         "ring",

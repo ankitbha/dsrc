@@ -27,6 +27,7 @@ class RolloutBuffer:
         self.dones: list[bool] = []
         self.value_observations: list[torch.Tensor] = []
         self.agent_ids: list[str] = []
+        self.bootstrap_values: dict[str, float] = {}
 
     def __len__(self) -> int:
         return len(self.rewards)
@@ -52,6 +53,9 @@ class RolloutBuffer:
         self.value_observations.append((value_observation if value_observation is not None else observation).detach().cpu())
         self.agent_ids.append(agent_id)
 
+    def set_bootstrap_values(self, values: dict[str, float]) -> None:
+        self.bootstrap_values = dict(values)
+
     def clear(self) -> None:
         self.__init__()
 
@@ -76,7 +80,7 @@ class RolloutBuffer:
                 index = indices[position]
                 has_next = position < len(indices) - 1
                 next_index = indices[position + 1] if has_next else -1
-                next_value = self.values[next_index] if has_next else 0.0
+                next_value = self.values[next_index] if has_next else self.bootstrap_values.get(key, 0.0)
                 next_non_terminal = 0.0 if self.dones[index] else 1.0
                 delta = self.rewards[index] + gamma * next_value * next_non_terminal - self.values[index]
                 last_gae = delta + gamma * gae_lambda * next_non_terminal * last_gae
