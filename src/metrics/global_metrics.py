@@ -54,6 +54,7 @@ def compute_step_metrics(
     speeds = [float(record.get("speed", 0.0)) for record in active_vehicle_records]
     active_av_count = sum(1 for record in active_vehicle_records if record.get("role") == "av")
     collision_count = sum(1 for record in active_vehicle_records if bool(record.get("crashed", False)))
+    new_collision_count = sum(1 for record in active_vehicle_records if bool(record.get("newly_crashed", False)))
     queue_length_total = int(sum(int(metrics.get("queue_length", 0)) for metrics in segment_metrics.values()))
     jam_values = [float(metrics.get("jam_fraction", 0.0)) for metrics in segment_metrics.values()]
     lane_change_count = sum(1 for record in active_vehicle_records if bool(record.get("lane_changed_this_step", False)))
@@ -78,6 +79,7 @@ def compute_step_metrics(
         "jam_fraction": _mean(jam_values),
         "hard_braking_count": int(hard_braking_count),
         "collision_count": int(collision_count),
+        "new_collision_count": int(new_collision_count),
         "lane_change_count": int(lane_change_count),
         "lane_changes_per_av_km": float(lane_change_count / max(av_distance_km, 1e-9)) if active_av_count else 0.0,
         "min_lane_change_dwell_time": float(min(lane_change_dwell_times)) if lane_change_dwell_times else float("inf"),

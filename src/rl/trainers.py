@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+import os
 from pathlib import Path
 import random
 from typing import Any, Mapping
+import warnings
 
 import numpy as np
 import torch
@@ -155,6 +157,7 @@ class BasePPOTrainer:
         observations, _ = env.reset(seed=seed)
         buffer = RolloutBuffer()
         episode_metrics: dict[str, Any] = {}
+        metric_history: list[dict[str, Any]] = []
         terminated = False
         truncated = False
         steps = 0
@@ -163,6 +166,7 @@ class BasePPOTrainer:
             if not agent_ids:
                 observations, _, terminated, truncated, info = env.step({})
                 episode_metrics = dict(info.get("metrics", {}))
+                metric_history.append(episode_metrics)
                 steps += 1
                 continue
             obs_tensor = obs_tensor.to(self.device)
@@ -173,7 +177,9 @@ class BasePPOTrainer:
                 values = self.critic(value_obs)
             action_map = {agent_id: action for agent_id, action in zip(agent_ids, actions, strict=True)}
             next_observations, _, terminated, truncated, info = env.step(action_map)
-            team_reward = build_team_reward(info.get("metrics", {})) * self.ppo_config.reward_scale
+            episode_metrics = dict(info.get("metrics", {}))
+            metric_history.append(episode_metrics)
+            team_reward = build_team_reward(episode_metrics) * self.ppo_config.reward_scale
             for index, agent_id in enumerate(agent_ids):
                 reward = team_reward - safety_penalty_for_agent(info, agent_id)
                 reward = max(-self.ppo_config.reward_clip, min(self.ppo_config.reward_clip, reward))
@@ -189,10 +195,9 @@ class BasePPOTrainer:
                     agent_id=agent_id,
                 )
             observations = next_observations
-            episode_metrics = dict(info.get("metrics", {}))
             steps += 1
         self._set_bootstrap_values(buffer, env, observations, terminated)
-        return buffer, episode_metrics
+        return buffer, aggregate_rollout_metrics(metric_history)
 
     def critic_input_dim(self) -> int:
         return physical_global_state_dim() if self.critic_scope == "global" else local_obs_dim()
@@ -220,8 +225,6 @@ class BasePPOTrainer:
             agent_id: float(values[index].detach().cpu().item())
             for index, agent_id in enumerate(agent_ids)
         }
-        if not self.advantage_group_by_agent and bootstrap_values:
-            bootstrap_values["__shared__"] = float(values[-1].detach().cpu().item())
         buffer.set_bootstrap_values(bootstrap_values)
 
     def env_config(self) -> dict[str, Any]:
@@ -252,6 +255,7 @@ class BasePPOTrainer:
             "metadata": self.actor.checkpoint_metadata(),
             "hidden_sizes": self.config.hidden_sizes,
             "best_score": best_score,
+            "device_type": self.device.type,
         }
         critic_payload = {
             "state_dict": self.critic.state_dict(),
@@ -259,9 +263,10 @@ class BasePPOTrainer:
             "scope": self.critic_scope,
             "hidden_sizes": self.config.hidden_sizes,
             "best_score": best_score,
+            "device_type": self.device.type,
         }
-        torch.save(actor_payload, output_dir / actor_filename)
-        torch.save(critic_payload, output_dir / critic_filename)
+        atomic_torch_save(actor_payload, output_dir / actor_filename)
+        atomic_torch_save(critic_payload, output_dir / critic_filename)
 
     def save_trainer_state(
         self,
@@ -271,7 +276,7 @@ class BasePPOTrainer:
         best_score: float,
         metrics_rows: list[dict[str, Any]],
     ) -> None:
-        torch.save(
+        atomic_torch_save(
             {
                 "completed_update": int(completed_update),
                 "best_score": float(best_score),
@@ -283,6 +288,7 @@ class BasePPOTrainer:
                 "critic_scope": self.critic_scope,
                 "critic_input_dim": self.critic.input_dim,
                 "hidden_sizes": self.config.hidden_sizes,
+                "device_type": self.device.type,
                 "metrics_rows": list(metrics_rows),
                 "rng_state": {
                     "python": random.getstate(),
@@ -306,10 +312,11 @@ class BasePPOTrainer:
         state = torch.load(state_path, map_location=self.device, weights_only=False)
         self._validate_training_state(state)
 
-        actor_path = checkpoint_dir / ("latest_actor.pt" if resume_latest or (checkpoint_dir / "latest_actor.pt").exists() else "actor.pt")
-        critic_path = checkpoint_dir / ("latest_critic.pt" if resume_latest or (checkpoint_dir / "latest_critic.pt").exists() else "critic.pt")
+        actor_path = checkpoint_dir / ("latest_actor.pt" if resume_latest else "actor.pt")
+        critic_path = checkpoint_dir / ("latest_critic.pt" if resume_latest else "critic.pt")
         actor_payload = torch.load(actor_path, map_location=self.device, weights_only=False)
         critic_payload = torch.load(critic_path, map_location=self.device, weights_only=False)
+        self._warn_device_mismatch(state, actor_payload, critic_payload)
         self._validate_model_payloads(actor_payload, critic_payload)
         self.actor.load_state_dict(actor_payload["state_dict"])
         self.critic.load_state_dict(critic_payload["state_dict"])
@@ -350,6 +357,20 @@ class BasePPOTrainer:
         if int(critic_payload.get("input_dim", -1)) != self.critic.input_dim:
             raise ValueError("critic checkpoint input_dim does not match current critic")
 
+    def _warn_device_mismatch(
+        self,
+        state: Mapping[str, Any],
+        actor_payload: Mapping[str, Any],
+        critic_payload: Mapping[str, Any],
+    ) -> None:
+        saved_device = state.get("device_type") or actor_payload.get("device_type") or critic_payload.get("device_type")
+        if saved_device is not None and str(saved_device) != self.device.type:
+            warnings.warn(
+                f"resuming checkpoint saved on device type {saved_device!r} on {self.device.type!r}; RNG replay may differ",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     def _restore_rng_state(self, rng_state: Mapping[str, Any]) -> None:
         if not isinstance(rng_state, Mapping):
             return
@@ -365,7 +386,7 @@ class BasePPOTrainer:
 
 class SharedPPOTrainer(BasePPOTrainer):
     critic_scope = "local"
-    advantage_group_by_agent = False
+    advantage_group_by_agent = True
 
 
 class IPPOTrainer(BasePPOTrainer):
@@ -375,7 +396,7 @@ class IPPOTrainer(BasePPOTrainer):
 
 class MAPPOTrainer(BasePPOTrainer):
     critic_scope = "global"
-    advantage_group_by_agent = False
+    advantage_group_by_agent = True
 
     def critic_input_dim(self) -> int:
         return physical_global_state_dim() + local_obs_dim()
@@ -404,6 +425,34 @@ def write_training_metrics(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in fieldnames})
+
+
+def aggregate_rollout_metrics(metric_history: list[dict[str, Any]]) -> dict[str, Any]:
+    if not metric_history:
+        return {}
+    result = dict(metric_history[-1])
+    numeric_fields = {
+        key
+        for row in metric_history
+        for key, value in row.items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    for key in numeric_fields:
+        values = [
+            float(row[key])
+            for row in metric_history
+            if isinstance(row.get(key), (int, float)) and not isinstance(row.get(key), bool)
+        ]
+        if values:
+            result[key] = sum(values) / len(values)
+    return result
+
+
+def atomic_torch_save(payload: Mapping[str, Any], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, path)
 
 
 def write_resolved_config(path: Path, config: TrainingConfig, ppo_config: PPOConfig) -> None:

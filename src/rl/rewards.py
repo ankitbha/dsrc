@@ -22,7 +22,8 @@ def build_team_reward(metrics: Mapping[str, Any], weights: Mapping[str, float] |
     reward_weights.update(dict(weights or {}))
     reward = 0.0
     for key, weight in reward_weights.items():
-        value = _float(metrics.get(key), 0.0)
+        metric_key = "new_collision_count" if key == "collision_count" and "new_collision_count" in metrics else key
+        value = _float(metrics.get(metric_key), 0.0)
         reward += float(weight) * value
     return float(reward)
 

@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
+from src.rl.encoders import action_mask_shape
+
 
 @dataclass
 class RolloutBatch:
@@ -55,7 +57,7 @@ class RolloutBuffer:
         self.dones.append(bool(done))
         self.value_observations.append((value_observation if value_observation is not None else observation).detach().cpu())
         if action_mask is None:
-            action_mask = torch.ones((4, 3), dtype=torch.bool)
+            action_mask = torch.ones(action_mask_shape(), dtype=torch.bool)
         self.action_masks.append(action_mask.detach().cpu().bool())
         self.agent_ids.append(agent_id)
 
@@ -80,7 +82,7 @@ class RolloutBuffer:
         for index, agent_id in enumerate(self.agent_ids):
             key = agent_id or "__shared__" if group_by_agent else "__shared__"
             by_agent.setdefault(key, []).append(index)
-        for indices in by_agent.values():
+        for key, indices in by_agent.items():
             last_gae = 0.0
             for position in reversed(range(len(indices))):
                 index = indices[position]

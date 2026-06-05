@@ -7,6 +7,7 @@ import pytest
 
 from src.envs.topology_env import HighwayTopologyEnv, VehicleRuntime
 from src.metrics import MetricThresholds, MetricsLogger, compute_segment_metrics, compute_step_metrics, jain_fairness
+from src.rl.rewards import build_team_reward
 from src.sensing.local import VehicleSnapshot
 
 
@@ -224,6 +225,109 @@ def test_rear_ttc_after_av_lane_change_uses_closing_rear_vehicle() -> None:
     ]
 
     assert env._rear_ttc_after_av_lane_change_min() == pytest.approx(2.0)
+
+
+def test_rear_ttc_after_av_lane_change_wraps_on_ring() -> None:
+    env = HighwayTopologyEnv("ring", {"controlled_vehicles": 0, "initial_human_vehicles": 0})
+    env.reset(seed=3)
+    lane_index = ("r0", "r1", 0)
+    lane_length = env.road.network.get_lane(lane_index).length
+    env._vehicle_runtime = {
+        "av_0": VehicleRuntime(
+            vehicle_id="av_0",
+            role="av",
+            branch_id="main",
+            spawn_time_s=0.0,
+            previous_speed_mps=10.0,
+            previous_lane_index=lane_index,
+            previous_segment_id="ring",
+            lane_changed_this_step=True,
+        ),
+        "human_0": VehicleRuntime(
+            vehicle_id="human_0",
+            role="human",
+            branch_id="main",
+            spawn_time_s=0.0,
+            previous_speed_mps=20.0,
+            previous_lane_index=lane_index,
+            previous_segment_id="ring",
+        ),
+    }
+    env._vehicle_snapshots = lambda: [  # type: ignore[method-assign]
+        VehicleSnapshot(
+            vehicle_id="av_0",
+            role="av",
+            segment_id="ring",
+            lane_index=lane_index,
+            lane_id=0,
+            position=(0.0, 0.0),
+            longitudinal_m=10.0,
+            speed_mps=10.0,
+            acceleration_mps2=0.0,
+            free_flow_speed_mps=30.0,
+        ),
+        VehicleSnapshot(
+            vehicle_id="human_0",
+            role="human",
+            segment_id="ring",
+            lane_index=lane_index,
+            lane_id=0,
+            position=(0.0, 0.0),
+            longitudinal_m=lane_length - 10.0,
+            speed_mps=20.0,
+            acceleration_mps2=0.0,
+            free_flow_speed_mps=30.0,
+        ),
+    ]
+
+    assert env._rear_ttc_after_av_lane_change_min() == pytest.approx(20.0 / 10.0)
+
+
+def test_human_crash_reward_penalty_is_impulsive_but_metric_persists() -> None:
+    env = HighwayTopologyEnv("ring", {"controlled_vehicles": 0, "initial_human_vehicles": 1, "duration_steps": 3})
+    env.reset(seed=5)
+    for vehicle in env._human_vehicles.values():
+        vehicle.crashed = True
+
+    _, _, _, _, first_info = env.step({})
+    _, _, _, _, second_info = env.step({})
+
+    assert first_info["metrics"]["collision_count"] == 1
+    assert first_info["metrics"]["new_collision_count"] == 1
+    assert second_info["metrics"]["collision_count"] == 1
+    assert second_info["metrics"]["new_collision_count"] == 0
+    assert build_team_reward(first_info["metrics"]) < build_team_reward(second_info["metrics"])
+
+
+def test_initial_human_spawn_avoids_existing_vehicle_overlap() -> None:
+    env = HighwayTopologyEnv("ring", {"controlled_vehicles": 2, "initial_human_vehicles": 3})
+    env.reset(seed=7)
+    by_lane: dict[tuple[str, str, int], list[float]] = {}
+    for vehicle in env._active_vehicles():
+        assert vehicle.lane_index is not None
+        lane = env.road.network.get_lane(vehicle.lane_index)
+        longitudinal, _ = lane.local_coordinates(vehicle.position)
+        by_lane.setdefault(vehicle.lane_index, []).append(float(longitudinal))
+
+    for lane_index, positions in by_lane.items():
+        lane_length = env.road.network.get_lane(lane_index).length
+        for index, position in enumerate(positions):
+            for other in positions[index + 1 :]:
+                gap = abs(position - other)
+                assert min(gap, lane_length - gap) >= 8.9
+
+
+def test_active_vehicle_records_use_precomputed_segment_density_and_reverse_lookup() -> None:
+    env = HighwayTopologyEnv("ring", {"controlled_vehicles": 2, "initial_human_vehicles": 2})
+    env.reset(seed=11)
+    records = env._active_vehicle_records()
+    segment_metrics = env.get_segment_metrics()
+
+    for record in records:
+        segment_id = record["segment_id"]
+        assert record["segment_density"] == pytest.approx(segment_metrics[segment_id]["density"])
+    for agent_id, vehicle in env._av_vehicles.items():
+        assert env._agent_id_for_vehicle(vehicle) == agent_id
 
 
 def test_exited_vehicles_count_for_throughput_and_travel_time_not_active_segments() -> None:

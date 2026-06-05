@@ -101,11 +101,10 @@ def apply_safety_layer(
 
     if lane_action is not None:
         dwell = float("inf") if state.last_lane_change_time_s is None else context.time_s - state.last_lane_change_time_s
-        lane_changes_per_km = state.lane_changes_last_km / max(state.distance_since_window_start_m / 1000.0, 1e-9)
         if dwell < constraints.lane_change_dwell_s:
             lane_action = None
             diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "lane_change_dwell"})
-        elif lane_changes_per_km >= constraints.max_lane_changes_per_km:
+        elif _lane_change_count_exceeded(state, constraints):
             lane_action = None
             diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "lane_changes_per_km"})
         elif not context.target_lane_exists:
@@ -217,10 +216,9 @@ def _lane_preference_safe(
     constraints: SafetyConstraints,
 ) -> bool:
     dwell = float("inf") if state.last_lane_change_time_s is None else context.time_s - state.last_lane_change_time_s
-    lane_changes_per_km = state.lane_changes_last_km / max(state.distance_since_window_start_m / 1000.0, 1e-9)
     return (
         dwell >= constraints.lane_change_dwell_s
-        and lane_changes_per_km < constraints.max_lane_changes_per_km
+        and not _lane_change_count_exceeded(state, constraints)
         and context.target_lane_exists
         and context.target_lane_front_gap_m >= constraints.min_front_gap_m
         and context.target_lane_rear_gap_m >= constraints.min_rear_gap_m
@@ -230,6 +228,10 @@ def _lane_preference_safe(
         >= constraints.min_lane_change_ttc_s
         and context.target_lane_rear_required_decel_mps2 <= constraints.max_follower_braking_mps2
     )
+
+
+def _lane_change_count_exceeded(state: SafetyState, constraints: SafetyConstraints) -> bool:
+    return state.lane_changes_last_km >= constraints.max_lane_changes_per_km
 
 
 def _forward_ttc(context: SafetyContext) -> float:

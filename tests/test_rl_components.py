@@ -18,7 +18,7 @@ from src.rl.encoders import (
 from src.rl.models import GlobalCritic, LocalCritic, MultiCategoricalActor
 from src.rl.ppo import PPOConfig, ppo_update
 from src.rl.rollout_buffer import RolloutBuffer
-from src.rl.trainers import MAPPOTrainer, SharedPPOTrainer, TrainingConfig
+from src.rl.trainers import MAPPOTrainer, SharedPPOTrainer, TrainingConfig, aggregate_rollout_metrics
 
 
 def local_obs(**overrides):
@@ -90,7 +90,7 @@ def test_encoder_bounds_nonfinite_local_observation_values() -> None:
     )
 
     assert torch.isfinite(encoded).all()
-    assert encoded.abs().max() <= 200.0
+    assert encoded.abs().max() <= 5.0
 
 
 def test_action_mask_is_encoded_separately_from_local_numeric_features() -> None:
@@ -170,6 +170,20 @@ def test_actor_sampling_and_evaluation_respect_hard_masks() -> None:
     assert torch.allclose(entropies, evaluated_entropies)
 
 
+def test_all_invalid_action_mask_falls_back_to_default_only() -> None:
+    actor = MultiCategoricalActor(local_obs_dim(), hidden_sizes=(16,), action_spec=ActionSpec("full"))
+    obs = torch.stack([encode_local_observation(local_obs())])
+    mask = encode_action_mask(
+        local_obs(action_mask={"desired_speed_bin": {"slow": False, "nominal": False, "fast": False}}),
+        ActionSpec("full"),
+    ).unsqueeze(0)
+
+    actions, indices, _, _ = actor.sample(obs, deterministic=True, action_masks=mask)
+
+    assert actions[0]["desired_speed_bin"] == "slow"
+    assert indices[0, 0].item() == 0
+
+
 def test_action_index_round_trip() -> None:
     spec = ActionSpec("full")
     action = {
@@ -204,6 +218,42 @@ def test_rollout_buffer_handles_interleaved_agents_and_finite_gae() -> None:
     assert batch.observations.shape[0] == 4
     assert torch.isfinite(batch.advantages).all()
     assert torch.isfinite(batch.returns).all()
+
+
+def test_interleaved_rollout_gae_matches_isolated_agent_trajectories() -> None:
+    obs = encode_local_observation(local_obs())
+    action = torch.tensor([1, 0, 0, 0])
+    interleaved = RolloutBuffer()
+    isolated: dict[str, RolloutBuffer] = {"av_0": RolloutBuffer(), "av_1": RolloutBuffer()}
+    transitions = (
+        ("av_0", 1.0, 0.2),
+        ("av_1", 0.5, 0.1),
+        ("av_0", 1.5, 0.3),
+        ("av_1", 0.7, 0.2),
+    )
+    for agent_id, reward, value in transitions:
+        kwargs = {
+            "observation": obs,
+            "action": action,
+            "log_prob": torch.tensor(-1.0),
+            "reward": reward,
+            "value": torch.tensor(value),
+            "done": False,
+            "agent_id": agent_id,
+        }
+        interleaved.add(**kwargs)
+        isolated[agent_id].add(**kwargs)
+    bootstrap = {"av_0": 0.4, "av_1": 0.25}
+    interleaved.set_bootstrap_values(bootstrap)
+    for agent_id, buffer in isolated.items():
+        buffer.set_bootstrap_values({agent_id: bootstrap[agent_id]})
+
+    batch = interleaved.compute_returns_and_advantages(gamma=0.9, gae_lambda=0.8, normalize_advantages=False)
+    av0 = isolated["av_0"].compute_returns_and_advantages(gamma=0.9, gae_lambda=0.8, normalize_advantages=False)
+    av1 = isolated["av_1"].compute_returns_and_advantages(gamma=0.9, gae_lambda=0.8, normalize_advantages=False)
+
+    assert batch.returns[[0, 2]].tolist() == pytest.approx(av0.returns.tolist())
+    assert batch.returns[[1, 3]].tolist() == pytest.approx(av1.returns.tolist())
 
 
 def test_rollout_buffer_bootstraps_nonterminal_final_transition() -> None:
@@ -306,19 +356,45 @@ def test_physical_global_state_excludes_cumulative_counters() -> None:
     assert not torch.equal(encode_global_state(baseline), encode_global_state(changed))
 
 
-def test_trainer_state_resume_loads_latest_and_rejects_incompatible_config(tmp_path) -> None:
+def test_aggregate_rollout_metrics_averages_numeric_fields_for_score() -> None:
+    metrics = aggregate_rollout_metrics(
+        [
+            {"mean_speed": 10.0, "jam_fraction": 0.2, "branch_throughput": {"main": 1}},
+            {"mean_speed": 20.0, "jam_fraction": 0.4, "branch_throughput": {"main": 2}},
+        ]
+    )
+
+    assert metrics["mean_speed"] == pytest.approx(15.0)
+    assert metrics["jam_fraction"] == pytest.approx(0.3)
+    assert metrics["branch_throughput"] == {"main": 2}
+
+
+def test_trainer_state_resume_selects_best_or_latest_and_rejects_incompatible_config(tmp_path) -> None:
     config = TrainingConfig(algorithm="shared_ppo", action_profile="speed_only", hidden_sizes=(16,))
     trainer = SharedPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
+    best_state = {key: value.detach().clone() for key, value in trainer.actor.state_dict().items()}
     trainer.save_checkpoint(tmp_path, best_score=1.5)
+    with torch.no_grad():
+        for parameter in trainer.actor.parameters():
+            parameter.add_(1.0)
+    latest_state = {key: value.detach().clone() for key, value in trainer.actor.state_dict().items()}
     trainer.save_checkpoint(tmp_path, best_score=1.5, actor_filename="latest_actor.pt", critic_filename="latest_critic.pt")
     trainer.save_trainer_state(tmp_path, completed_update=3, best_score=1.5, metrics_rows=[{"update": 3, "score": 1.5}])
 
     resumed = SharedPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
-    start_update, best_score, rows = resumed.load_training_state(tmp_path, resume_latest=True)
+    start_update, best_score, rows = resumed.load_training_state(tmp_path, resume_latest=False)
 
     assert start_update == 4
     assert best_score == pytest.approx(1.5)
     assert rows == [{"update": 3, "score": 1.5}]
+    for key, value in resumed.actor.state_dict().items():
+        assert torch.equal(value, best_state[key])
+    assert not (tmp_path / ".actor.pt.tmp").exists()
+
+    resumed_latest = SharedPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
+    resumed_latest.load_training_state(tmp_path, resume_latest=True)
+    for key, value in resumed_latest.actor.state_dict().items():
+        assert torch.equal(value, latest_state[key])
 
     incompatible = SharedPPOTrainer(
         TrainingConfig(algorithm="shared_ppo", action_profile="full", hidden_sizes=(16,)),
@@ -327,3 +403,16 @@ def test_trainer_state_resume_loads_latest_and_rejects_incompatible_config(tmp_p
     )
     with pytest.raises(ValueError, match="action_profile"):
         incompatible.load_training_state(tmp_path, resume_latest=True)
+
+
+def test_trainer_state_resume_warns_on_device_mismatch(tmp_path) -> None:
+    config = TrainingConfig(algorithm="shared_ppo", action_profile="speed_only", hidden_sizes=(16,))
+    trainer = SharedPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
+    trainer.save_checkpoint(tmp_path, best_score=1.0)
+    trainer.save_trainer_state(tmp_path, completed_update=1, best_score=1.0, metrics_rows=[])
+    state = torch.load(tmp_path / "trainer_state.pt", map_location="cpu", weights_only=False)
+    state["device_type"] = "cuda"
+    torch.save(state, tmp_path / "trainer_state.pt")
+
+    with pytest.warns(RuntimeWarning, match="RNG replay may differ"):
+        trainer.load_training_state(tmp_path, resume_latest=False)

@@ -76,6 +76,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self.road: Road | None = None
         self._av_vehicles: dict[str, ControlledVehicle] = {}
         self._human_vehicles: dict[str, IDMVehicle] = {}
+        self._vehicle_to_agent_id: dict[int, str] = {}
         self._vehicle_meta: dict[int, VehicleMeta] = {}
         self._vehicle_runtime: dict[str, VehicleRuntime] = {}
         self._safety_states: dict[str, SafetyState] = {}
@@ -97,6 +98,8 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self._step_outflow: dict[str, int] = {}
         self._last_spawn_events: list[dict[str, Any]] = []
         self._last_skipped_spawn_events: list[dict[str, Any]] = []
+        self._crashed_vehicle_ids: set[str] = set()
+        self._newly_crashed_vehicle_ids: set[str] = set()
         self._next_av_index = 0
         self._next_human_index = 0
         self._route_plan: RoutePlan = build_route_plan(self.topology)
@@ -131,6 +134,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         )
         self._av_vehicles = {}
         self._human_vehicles = {}
+        self._vehicle_to_agent_id = {}
         self._vehicle_meta = {}
         self._vehicle_runtime = {}
         self._safety_states = {}
@@ -152,6 +156,8 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self._step_outflow = {segment_id: 0 for segment_id in self.topology.segment_ids}
         self._last_spawn_events = []
         self._last_skipped_spawn_events = []
+        self._crashed_vehicle_ids = set()
+        self._newly_crashed_vehicle_ids = set()
         self._next_av_index = 0
         self._next_human_index = 0
         self._sensing.reset(SensingConfig.from_config(self.config))
@@ -232,6 +238,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         self._step_count += 1
         self._time += float(self.config.get("dt", 1.0))
         self._update_vehicle_runtime_after_step()
+        self._update_crash_state()
         self._update_safety_distances()
         self._clear_exited_vehicles()
         self._spawn_demand_vehicles()
@@ -361,7 +368,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         for index in range(human_count):
             lane_index = spawn_lanes[index % len(spawn_lanes)]
             lane = self.road.network.get_lane(lane_index)
-            longitudinal = (20.0 + 35.0 * index) % max(lane.length, 1.0)
+            longitudinal = self._initial_human_longitudinal(lane_index, index, lane.length)
             speed = float(self.config.get("initial_speed_mps", min(lane.speed_limit or 24.0, 24.0)))
             vehicle = IDMVehicle.make_on_lane(self.road, lane_index, longitudinal=longitudinal, speed=speed)
             vehicle.enable_lane_change = self.topology.supports_lane_change
@@ -378,6 +385,40 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             vehicle.route = road_route_to_destination(lane_index, destination, self.topology)
             self.road.vehicles.append(vehicle)
             self._register_existing_human(vehicle, "initial", self.topology.segment_for_lane(lane_index) or "", profile_id)
+
+    def _initial_human_longitudinal(self, lane_index: LaneIndex, index: int, lane_length: float) -> float:
+        base = 20.0 + 35.0 * (index + len(self.agent_ids))
+        length = max(float(lane_length), 1.0)
+        min_gap = max(float(self.config.get("initial_spawn_min_gap_m", 12.0)), 2.0 * ControlledVehicle.LENGTH)
+        best_longitudinal = base % length
+        best_gap = -1.0
+        step = max(1.0, min_gap / 2.0)
+        for offset in range(200):
+            longitudinal = (base + step * offset) % length
+            gap = self._minimum_initial_gap(lane_index, longitudinal, length)
+            if gap > best_gap:
+                best_gap = gap
+                best_longitudinal = longitudinal
+            if self._lane_has_initial_gap(lane_index, longitudinal, length):
+                return longitudinal
+        return best_longitudinal
+
+    def _lane_has_initial_gap(self, lane_index: LaneIndex, longitudinal: float, lane_length: float) -> bool:
+        min_gap = max(float(self.config.get("initial_spawn_min_gap_m", 12.0)), 2.0 * ControlledVehicle.LENGTH)
+        return self._minimum_initial_gap(lane_index, longitudinal, lane_length) >= min_gap
+
+    def _minimum_initial_gap(self, lane_index: LaneIndex, longitudinal: float, lane_length: float) -> float:
+        if self.road is None:
+            return float("inf")
+        length = max(float(lane_length), 1.0)
+        minimum_gap = float("inf")
+        for vehicle in self.road.vehicles:
+            if vehicle.lane_index != lane_index:
+                continue
+            existing, _ = self.road.network.get_lane(lane_index).local_coordinates(vehicle.position)
+            gap = abs(float(existing) - longitudinal)
+            minimum_gap = min(minimum_gap, min(gap, length - gap))
+        return minimum_gap
 
     def _spawn_lanes_and_destination(self) -> tuple[list[LaneIndex], str]:
         inverted_tree_entries = [
@@ -420,6 +461,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
 
         self._av_vehicles = active_av
         self._human_vehicles = active_human
+        self._vehicle_to_agent_id = {id(vehicle): agent_id for agent_id, vehicle in active_av.items()}
         self._safety_states = {agent_id: state for agent_id, state in self._safety_states.items() if agent_id in active_av}
         self._target_headways = {agent_id: headway for agent_id, headway in self._target_headways.items() if agent_id in active_av}
         self._vehicle_meta = {vehicle_key: meta for vehicle_key, meta in self._vehicle_meta.items() if vehicle_key in active_vehicle_objects}
@@ -585,10 +627,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         return max(0.0, float(vehicle.lane_distance_to(leader)) / max(float(vehicle.speed), 1e-6))
 
     def _agent_id_for_vehicle(self, vehicle: ControlledVehicle) -> str | None:
-        for agent_id, candidate in self._av_vehicles.items():
-            if candidate is vehicle:
-                return agent_id
-        return None
+        return self._vehicle_to_agent_id.get(id(vehicle))
 
     def _vehicle_snapshots(self) -> list[VehicleSnapshot]:
         if self.road is None:
@@ -700,6 +739,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             vehicle_id = f"av_{self._next_av_index}"
             self._next_av_index += 1
             self._av_vehicles[vehicle_id] = vehicle
+            self._vehicle_to_agent_id[id(vehicle)] = vehicle_id
             self._safety_states[vehicle_id] = SafetyState(last_lane_index=vehicle.lane_index)
             self._target_headways[vehicle_id] = 1.6
             self._spawned_av_count += 1
@@ -737,6 +777,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         entry_segment: str,
     ) -> None:
         self._av_vehicles[agent_id] = vehicle
+        self._vehicle_to_agent_id[id(vehicle)] = agent_id
         self._vehicle_meta[id(vehicle)] = VehicleMeta(
             vehicle_id=agent_id,
             role="av",
@@ -881,6 +922,15 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             runtime.previous_lane_index = vehicle.lane_index
             runtime.previous_segment_id = self.topology.segment_for_lane(vehicle.lane_index)
 
+    def _update_crash_state(self) -> None:
+        current = {
+            meta.vehicle_id
+            for vehicle in self._active_vehicles()
+            if bool(vehicle.crashed) and (meta := self._vehicle_meta.get(id(vehicle))) is not None
+        }
+        self._newly_crashed_vehicle_ids = current - self._crashed_vehicle_ids
+        self._crashed_vehicle_ids = current
+
     def _runtime_for_vehicle(self, meta: VehicleMeta, vehicle: ControlledVehicle) -> VehicleRuntime:
         return VehicleRuntime(
             vehicle_id=meta.vehicle_id,
@@ -894,6 +944,11 @@ class HighwayTopologyEnv(BaseCTDEEnv):
 
     def _active_vehicle_records(self) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
+        segment_counts: dict[str, int] = {}
+        for vehicle in self._active_vehicles():
+            segment_id = self.topology.segment_for_lane(vehicle.lane_index)
+            if segment_id is not None:
+                segment_counts[segment_id] = segment_counts.get(segment_id, 0) + 1
         for vehicle in self._active_vehicles():
             meta = self._vehicle_meta.get(id(vehicle))
             if meta is None:
@@ -915,17 +970,18 @@ class HighwayTopologyEnv(BaseCTDEEnv):
                     "lane_changed_this_step": bool(runtime.lane_changed_this_step if runtime is not None else False),
                     "lane_change_times_s": list(runtime.lane_change_times_s if runtime is not None else []),
                     "free_flow_speed_mps": self._free_flow_speed_for_vehicle(vehicle),
-                    "segment_density": self._segment_density(segment_id),
+                    "segment_density": self._segment_density_from_counts(segment_id, segment_counts),
                     "crashed": bool(vehicle.crashed),
+                    "newly_crashed": meta.vehicle_id in self._newly_crashed_vehicle_ids,
                 }
             )
         return records
 
-    def _segment_density(self, segment_id: str | None) -> float:
+    def _segment_density_from_counts(self, segment_id: str | None, segment_counts: Mapping[str, int]) -> float:
         if segment_id is None:
             return 0.0
         length_km = self.topology.segment_lengths[segment_id] / 1000.0
-        count = sum(1 for vehicle in self._active_vehicles() if self.topology.segment_for_lane(vehicle.lane_index) == segment_id)
+        count = int(segment_counts.get(segment_id, 0))
         return count / max(length_km, 1e-9)
 
     def _compute_step_metrics(
@@ -979,17 +1035,16 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             ego = by_id.get(runtime.vehicle_id)
             if ego is None or ego.lane_index is None:
                 continue
-            rear_candidates = [
-                snapshot
-                for snapshot in snapshots
-                if snapshot.vehicle_id != ego.vehicle_id
-                and snapshot.lane_index == ego.lane_index
-                and snapshot.longitudinal_m < ego.longitudinal_m
-            ]
+            rear_candidates: list[tuple[float, VehicleSnapshot]] = []
+            for snapshot in snapshots:
+                if snapshot.vehicle_id == ego.vehicle_id or snapshot.lane_index != ego.lane_index:
+                    continue
+                rear_gap = self._rear_gap_for_snapshot(ego, snapshot)
+                if rear_gap is not None:
+                    rear_candidates.append((rear_gap, snapshot))
             if not rear_candidates:
                 continue
-            rear = max(rear_candidates, key=lambda snapshot: snapshot.longitudinal_m)
-            rear_gap_m = max(0.0, ego.longitudinal_m - rear.longitudinal_m)
+            rear_gap_m, rear = min(rear_candidates, key=lambda candidate: candidate[0])
             values.append(
                 rear_ttc(
                     rear_gap_m=rear_gap_m,
@@ -997,6 +1052,15 @@ class HighwayTopologyEnv(BaseCTDEEnv):
                 )
             )
         return float(min(values)) if values else float("inf")
+
+    def _rear_gap_for_snapshot(self, ego: VehicleSnapshot, rear: VehicleSnapshot) -> float | None:
+        if self.topology_id == "ring" and self.road is not None and ego.lane_index is not None:
+            lane = self.road.network.get_lane(ego.lane_index)
+            gap = (ego.longitudinal_m - rear.longitudinal_m) % max(float(lane.length), 1e-9)
+            return gap if gap > 1e-9 else None
+        if rear.longitudinal_m >= ego.longitudinal_m:
+            return None
+        return max(0.0, ego.longitudinal_m - rear.longitudinal_m)
 
     def _lane_change_dwell_times(self) -> list[float]:
         dwell_times: list[float] = []

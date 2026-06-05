@@ -86,6 +86,62 @@ PHYSICAL_DEMAND_FIELDS: tuple[str, ...] = (
     "current_vehicles_per_hour",
     "av_penetration",
 )
+FIELD_SCALES: dict[str, float] = {
+    "time": 120.0,
+    "ego_speed": 40.0,
+    "ego_acceleration": 8.0,
+    "ego_lane": 3.0,
+    "ego_headway_s": 10.0,
+    "target_headway_s": 10.0,
+    "time_since_last_lane_change": 120.0,
+    "lane_changes_last_km": 5.0,
+    "distance_to_next_merge": 500.0,
+    "distance_to_downstream_bottleneck": 500.0,
+    "leader_gap": 150.0,
+    "leader_relative_speed": 40.0,
+    "follower_gap": 150.0,
+    "follower_relative_speed": 40.0,
+    "left_lane_front_gap": 150.0,
+    "left_lane_rear_gap": 150.0,
+    "right_lane_front_gap": 150.0,
+    "right_lane_rear_gap": 150.0,
+    "target_lane_front_gap": 150.0,
+    "target_lane_rear_gap": 150.0,
+    "target_lane_rear_required_decel": 8.0,
+    "downstream_congestion_estimate": 1.0,
+    "merge_pressure": 1.0,
+    "segment_target_speed": 40.0,
+    "uncongested_low_speed_flag": 1.0,
+    "local_density_bin": 2.0,
+    "local_mean_speed_bin": 2.0,
+    "local_queue_estimate": 20.0,
+    "active_vehicle_count_local": 50.0,
+    "active_av_count_local": 50.0,
+    "nearby_av_count": 50.0,
+    "nearby_av_density": 100.0,
+    "nearby_av_mean_speed": 40.0,
+    "active_vehicle_count": 500.0,
+    "active_av_count": 500.0,
+    "completed_vehicle_count": 1000.0,
+    "vehicle_count": 500.0,
+    "av_count": 500.0,
+    "mean_speed": 40.0,
+    "speed_std": 20.0,
+    "density": 200.0,
+    "queue_length": 200.0,
+    "jam_fraction": 1.0,
+    "inflow": 100.0,
+    "outflow": 100.0,
+    "rolling_roadblock_score": 1.0,
+    "all_lane_av_low_speed_occupancy": 1.0,
+    "current_vehicles_per_hour": 7200.0,
+    "av_penetration": 1.0,
+    "spawned_vehicle_count": 1000.0,
+    "skipped_spawn_count": 1000.0,
+    "branch_spawned": 1000.0,
+    "branch_completed": 1000.0,
+    "branch_travel_time_mean": 300.0,
+}
 
 
 def local_obs_dim() -> int:
@@ -93,11 +149,11 @@ def local_obs_dim() -> int:
 
 
 def encode_local_observation(obs: Mapping[str, Any]) -> torch.Tensor:
-    values = [_number(obs.get(field)) for field in LOCAL_OBS_FIELDS]
+    values = [_field_number(field, obs.get(field)) for field in LOCAL_OBS_FIELDS]
     cooperation = obs.get("cooperation", {})
     if not isinstance(cooperation, Mapping):
         cooperation = {}
-    values.extend(_number(cooperation.get(field)) for field in COOPERATION_FIELDS)
+    values.extend(_field_number(field, cooperation.get(field)) for field in COOPERATION_FIELDS)
     lane_distribution = obs.get("nearby_av_lane_distribution", {})
     if not isinstance(lane_distribution, Mapping):
         lane_distribution = {}
@@ -119,7 +175,7 @@ def encode_global_state(
     max_segments: int = 10,
     max_branches: int = 6,
 ) -> torch.Tensor:
-    values = [_number(state.get(field)) for field in GLOBAL_FIELDS]
+    values = [_field_number(field, state.get(field)) for field in GLOBAL_FIELDS]
     segment_state = state.get("segment_state", {})
     if not isinstance(segment_state, Mapping):
         segment_state = {}
@@ -127,13 +183,13 @@ def encode_global_state(
         segment = segment_state[segment_id]
         if not isinstance(segment, Mapping):
             segment = {}
-        values.extend(_number(segment.get(field)) for field in SEGMENT_FIELDS)
+        values.extend(_field_number(field, segment.get(field)) for field in SEGMENT_FIELDS)
     values.extend([0.0] * ((max_segments - min(len(segment_state), max_segments)) * len(SEGMENT_FIELDS)))
 
     demand_state = state.get("demand_state", {})
     if not isinstance(demand_state, Mapping):
         demand_state = {}
-    values.extend(_number(demand_state.get(field)) for field in DEMAND_FIELDS)
+    values.extend(_field_number(field, demand_state.get(field)) for field in DEMAND_FIELDS)
 
     branch_state = state.get("branch_state", {})
     if not isinstance(branch_state, Mapping):
@@ -149,7 +205,13 @@ def encode_global_state(
         travel = {}
     branch_ids = sorted(set(completed) | set(spawned) | set(travel))[:max_branches]
     for branch_id in branch_ids:
-        values.extend((_number(spawned.get(branch_id)), _number(completed.get(branch_id)), _number(travel.get(branch_id))))
+        values.extend(
+            (
+                _number(spawned.get(branch_id), FIELD_SCALES["branch_spawned"]),
+                _number(completed.get(branch_id), FIELD_SCALES["branch_completed"]),
+                _number(travel.get(branch_id), FIELD_SCALES["branch_travel_time_mean"]),
+            )
+        )
     values.extend([0.0] * ((max_branches - len(branch_ids)) * 3))
     return torch.tensor(values, dtype=torch.float32)
 
@@ -159,7 +221,7 @@ def encode_physical_global_state(
     *,
     max_segments: int = 10,
 ) -> torch.Tensor:
-    values = [_number(state.get(field)) for field in PHYSICAL_GLOBAL_FIELDS]
+    values = [_field_number(field, state.get(field)) for field in PHYSICAL_GLOBAL_FIELDS]
     segment_state = state.get("segment_state", {})
     if not isinstance(segment_state, Mapping):
         segment_state = {}
@@ -167,13 +229,13 @@ def encode_physical_global_state(
         segment = segment_state[segment_id]
         if not isinstance(segment, Mapping):
             segment = {}
-        values.extend(_number(segment.get(field)) for field in SEGMENT_FIELDS)
+        values.extend(_field_number(field, segment.get(field)) for field in SEGMENT_FIELDS)
     values.extend([0.0] * ((max_segments - min(len(segment_state), max_segments)) * len(SEGMENT_FIELDS)))
 
     demand_state = state.get("demand_state", {})
     if not isinstance(demand_state, Mapping):
         demand_state = {}
-    values.extend(_number(demand_state.get(field)) for field in PHYSICAL_DEMAND_FIELDS)
+    values.extend(_field_number(field, demand_state.get(field)) for field in PHYSICAL_DEMAND_FIELDS)
     return torch.tensor(values, dtype=torch.float32)
 
 
@@ -209,7 +271,8 @@ def encode_action_mask(obs: Mapping[str, Any], spec: ActionSpec | None = None) -
         for value_index, value in enumerate(values):
             mask_tensor[head_index, value_index] = bool(head_mask.get(value, True))
         if not bool(mask_tensor[head_index, : len(values)].any()):
-            mask_tensor[head_index, : len(values)] = True
+            mask_tensor[head_index, :] = False
+            mask_tensor[head_index, spec.default_indices()[head]] = True
     return mask_tensor
 
 
@@ -224,7 +287,11 @@ def encode_action_mask_batch(
     return torch.stack([encode_action_mask(observations[agent_id], spec) for agent_id in agent_ids])
 
 
-def _number(value: Any) -> float:
+def _field_number(field: str, value: Any) -> float:
+    return _number(value, FIELD_SCALES.get(field, 1.0))
+
+
+def _number(value: Any, scale: float = 1.0) -> float:
     if isinstance(value, bool):
         return float(value)
     if value is None:
@@ -234,5 +301,7 @@ def _number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     if not math.isfinite(result):
-        return 200.0 if result > 0 else -200.0
-    return result
+        result = 200.0 if result > 0 else -200.0
+        limit = 5.0 * max(float(scale), 1e-9)
+        result = max(-limit, min(limit, result))
+    return result / max(float(scale), 1e-9)

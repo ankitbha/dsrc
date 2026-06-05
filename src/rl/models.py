@@ -61,7 +61,11 @@ class MultiCategoricalActor(nn.Module):
             head_distribution = distribution
             if action_masks is not None:
                 head_distribution = Categorical(
-                    logits=_masked_logits(distribution.logits, action_masks[:, column, : distribution.logits.shape[-1]])
+                    logits=_masked_logits(
+                        distribution.logits,
+                        action_masks[:, column, : distribution.logits.shape[-1]],
+                        self.action_spec.default_indices()[head],
+                    )
                 )
             if deterministic:
                 sampled = torch.argmax(head_distribution.logits, dim=-1)
@@ -107,7 +111,11 @@ class MultiCategoricalActor(nn.Module):
             head_distribution = distribution
             if action_masks is not None:
                 head_distribution = Categorical(
-                    logits=_masked_logits(distribution.logits, action_masks[:, column, : distribution.logits.shape[-1]])
+                    logits=_masked_logits(
+                        distribution.logits,
+                        action_masks[:, column, : distribution.logits.shape[-1]],
+                        self.action_spec.default_indices()[head],
+                    )
                 )
             log_probs.append(head_distribution.log_prob(head_actions))
             entropies.append(head_distribution.entropy())
@@ -166,9 +174,10 @@ def load_actor_from_checkpoint(checkpoint: Mapping[str, Any], map_location: str 
     return actor
 
 
-def _masked_logits(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def _masked_logits(logits: torch.Tensor, mask: torch.Tensor, default_index: int) -> torch.Tensor:
     mask = mask.to(device=logits.device, dtype=torch.bool).clone()
     all_invalid = ~mask.any(dim=-1)
     if bool(all_invalid.any()):
-        mask[all_invalid] = True
+        mask[all_invalid] = False
+        mask[all_invalid, int(default_index)] = True
     return logits.masked_fill(~mask, -1.0e9)
