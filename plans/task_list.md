@@ -1,45 +1,142 @@
 # DSRC Project Task List
 
-Approach these tasks sequentially. Each item is intentionally broad enough to be planned and implemented as its own focused work unit.
+This task list is status-aware. The simulator foundation is already substantially implemented, so the remaining work should first complete the full world-model code path and experiment-launch infrastructure. Final training, evaluation sweeps, and paper plots happen only after the implementation and launch scripts are in place.
 
-1. **Confirm simulator integration**
-   Make sure the installed `highway_env` package runs correctly from this repo, including reset/step/render, multi-agent actions, and basic straight/merge environments.
+## A. Simulator Foundation Status
 
-2. **Define the project interface**
-   Standardize the environment wrapper API, v2 action format, observation format, config loading, and controller interface before building many experiments. The v2 action contract is `desired_speed_bin`, `desired_headway_bin`, `lane_preference`, and `merge_mode`; lane preferences are conservative and must pass a safety/etiquette layer. Include active vehicle lifecycle semantics, aggregate-only cooperation, the CTDE integrated safety contract, and forward-weighted safety metrics.
+The following foundation is substantially implemented and should be maintained with regression tests rather than rebuilt from scratch:
 
-3. **Build the topology ladder**
-   Implement or wrap the four target road setups in order: ring road, straight highway, merge/bottleneck, then inverted tree.
+1. **Simulator integration**
+   Installed `highway_env` integration, reset/step behavior, local source fallback, and environment smoke checks.
 
-4. **Add traffic demand generation**
-   Create reproducible spawning, inflow/outflow handling, AV penetration rates, branch splits, low/medium/high/burst demand profiles, and explicit active/inactive vehicle lifecycle handling after vehicles leave the topology.
+2. **Project interfaces**
+   Public environment API, v2 action schema, observation schema, controller contract, config loading, active vehicle lifecycle, aggregate-only cooperation, and common execution-time safety contract.
 
-5. **Implement vehicle roles and behavior profiles**
-   Separate AVs from regular vehicles, then add cautious, normal, aggressive, and heterogeneous human-driver settings.
+3. **Topology ladder**
+   Ring, straight single-lane, straight multi-lane, merge, inverted tree, and inverted tree bottleneck topologies.
 
-6. **Create metrics and logging**
-   Log throughput, travel time, speed variance, queues, hard braking, lane use, collisions, segment metrics, fairness, follower disruption, lane-change dwell, all-lane low-speed occupancy, and rolling-roadblock score before serious control work.
+4. **Demand and vehicle lifecycle**
+   Reproducible spawning, inflow/outflow handling, AV penetration, branch splits, demand profiles, and exited-vehicle accounting.
 
-7. **Implement local sensing for AVs**
-   Give each AV local observations first, including local aggregate AV cooperation fields with neutral fallback when no AVs are nearby. Then add noisy sensing, limited range, latency, and density/speed estimates.
+5. **Vehicle roles and human behavior profiles**
+   AV/human role accounting plus cautious, normal, aggressive, and heterogeneous human-driver profiles.
 
-8. **Add the safety, etiquette, and physical-control layer**
-   Convert speed/headway bins and conservative lane preferences into bounded, safe vehicle behavior with acceleration limits, headway control, lane-change dwell, safe front/rear gap checks, follower-disruption blocks, low-speed-uncongested blocks, and emergency overrides. Integrate safety-aware masking/penalties with CTDE controllers, and keep a separate external safety path for baselines/RVs/human drivers where needed.
+6. **Metrics and logging**
+   Canonical JSON/CSV artifacts, step metrics, segment metrics, fairness metrics, safety diagnostics, obstruction metrics, and validation reports.
 
-9. **Build the baseline ladder**
-   Add human-only, random AVs, selfish AVs, density lookup, local dynamic speed advisory, local speed harmonization, local backpressure-inspired speed metering, and cooperative smoothing.
+7. **Local sensing**
+   AV-local observations, aggregate local cooperation fields, neutral fallback, range/noise/latency support, density and speed bins.
 
-10. **Run topology-by-topology validation**
-    For each topology, verify spawning, routing, exits, detector counts, metrics, baseline behavior, and logical directional sanity checks such as selfish AV early speed, density/smoothing behavior under high demand, merge gap creation, branch fairness, and low rolling-roadblock scores before moving to the next topology.
+8. **Common safety, etiquette, and physical-control layer**
+   Shared execution-time action filtering for all controllers, including speed/headway decoding, bounded acceleration, lane-change dwell, follower-disruption checks, low-speed-uncongested blocks, emergency overrides, and rolling lane-change limits.
 
-11. **Train the CTDE policy**
-    Add shared PPO, IPPO, and MAPPO RL for local AV policies once environments and baselines are stable. The actor should learn smooth speed/headway targets with conservative lane preferences; MAPPO may use a centralized critic during training, but learned-policy execution must remain local-only and must not learn obstruction, lane hogging, or coordinated roadblock behavior.
+9. **Baseline ladder**
+   `no_av`, `random_av`, `selfish_av`, `density_lookup`, `dynamic_speed_limit`, `av_mediated_speed_harmonization`, `backpressure`, and `cooperative_smoothing`.
 
-12. **Evaluate and compare experiments**
-    Sweep topology, demand level, AV penetration, human-driver model, sensing noise, and baselines.
+10. **Model-free RL entrypoints**
+    Shared PPO, IPPO, MAPPO, learned-policy evaluation, checkpointing/resume, and smoke validation.
 
-13. **Analyze and visualize results**
-    Generate plots for time series, speed heatmaps, queues, throughput, branch fairness, merge delay, and spillback.
+## B. Finish Implementation Before Final Experiments
 
-14. **Package reproducible experiments**
-    Clean up configs, scripts, output structure, seeds, and README instructions so experiments can be rerun consistently.
+Do these tasks before running final paper sweeps.
+
+1. **Add world-model package skeleton**
+   Create `src/world_model/` with graph, field, data, model, policy, loss, reward, and evaluation modules.
+
+2. **Build GraphSpec adapter**
+   Convert existing `TopologySpec` objects into `GraphSpec` using canonical segment IDs, segment lengths, lane counts, lane-segment maps, merge nodes, and bottleneck segments.
+
+3. **Implement traffic field extractor**
+   Convert highway-env vehicle state into edge-bin traffic fields `Z_t` with density, speed, flow, AV/human channels, speed variance, occupancy, and jam indicators.
+
+4. **Implement executed-action field aggregator**
+   Convert actually executed safe AV interventions into edge-bin action fields `U_t`, including AV count, target speed/headway summaries, lane preference fractions, merge-mode fractions, and action intensity.
+
+5. **Implement world-model transition dataset**
+   Add `WorldModelTransition`, dataset writer/loader, storage format, metadata, and same-topology batching.
+
+6. **Add data collection script**
+   Add `scripts/collect_world_model_data.py` to collect simulator transitions across topologies, demand profiles, seeds, and controllers.
+
+7. **Implement functional graph world model**
+   Add input encoding, edge-wise Conv1D dynamics, relation-typed graph message passing, residual prediction, and bounded output handling.
+
+8. **Implement world-model losses and validation metrics**
+   Add one-step prediction loss, multi-step rollout loss, flow consistency, bounds loss, optional conservation loss, reward auxiliary loss, and prediction reports.
+
+9. **Add world-model baselines and ablations**
+   Add persistence, scalar-GNN, and no-graph Conv1D models so the functional edge-field contribution can be isolated.
+
+10. **Add world-model train/evaluate scripts**
+    Add `scripts/train_world_model.py`, `scripts/evaluate_world_model.py`, and `scripts/validate_world_model_pipeline.py`.
+
+11. **Add model-based policy hook**
+    Add a frozen-world-model imagined rollout objective that can be combined with model-free PPO/MAPPO loss. Use differentiable soft safety penalties only as training regularizers, while final execution still goes through the common environment safety layer.
+
+12. **Add model-based policy script**
+    Add `scripts/train_model_based_policy.py` with an `alpha=0` setting that reproduces model-free behavior and positive-alpha settings for imagined rollout training.
+
+13. **Add experiment matrix launcher**
+    Add `scripts/run_experiment_matrix.py` with dry-run and launch modes for all paper experiments.
+
+14. **Add plot/table generation scripts**
+    Add scripts for world-model prediction plots, speed heatmaps, queues, throughput, branch fairness, merge delay, spillback, safety diagnostics, and deployment metrics.
+
+15. **Package configs**
+    Add `configs/world_model/`, `configs/training/model_based_policy.yaml`, and experiment configs for world-model data collection, world-model training, model-based policy training, and final evaluation.
+
+## C. Validation Before Final Sweeps
+
+1. **Validate current simulator stack**
+   Keep running project interface, topology, baseline, metrics, safety, and model-free training smoke tests.
+
+2. **Validate world-model data path**
+   Confirm graph construction, field extraction, action aggregation, transition writing, transition loading, and shape consistency for ring, merge, and inverted tree.
+
+3. **Validate world-model prediction**
+   Require the functional graph model to beat persistence on one-step and multi-step prediction before using it for control.
+
+4. **Validate model-based policy hook**
+   Confirm imagined rollout gradients update the policy, not the frozen world model, and `alpha=0` matches model-free behavior.
+
+5. **Validate launch scripts**
+   Dry-run the complete experiment matrix and verify every expected output path before starting long training jobs.
+
+## D. Final Experimentation
+
+Run final experiments only after Sections B and C are complete.
+
+1. **Model-free reference experiments**
+   Run baselines, Shared PPO, IPPO, and MAPPO across the selected topology/demand/human-model matrix.
+
+2. **World-model prediction experiments**
+   Compare persistence, scalar-GNN, no-graph Conv1D, functional graph, and functional graph plus physics losses.
+
+3. **Model-based policy experiments**
+   Compare model-free policies against model-based policies using functional graph world models and ablations.
+
+4. **Robustness sweeps**
+   Sweep AV penetration, demand, human-driver model, sensing range/noise/latency, and topology.
+
+5. **Safety and obstruction analysis**
+   Report collisions, hard braking, follower disruption, lane-change rates, low-speed-uncongested behavior, all-lane low-speed occupancy, rolling-roadblock score, and branch starvation.
+
+6. **Deployment prototype metrics**
+   Report Jetson advisory-only latency, FPS, policy inference time, observation quality, and sim-to-prototype observation alignment.
+
+7. **Paper figures and tables**
+   Generate prediction-error tables, sample-efficiency curves, highway-env final performance tables, speed heatmaps, queue plots, fairness plots, ablation tables, and deployment feasibility figures.
+
+## E. Reproducibility Package
+
+1. **One-command dry runs**
+   Provide commands to dry-run all experiment matrices without launching long jobs.
+
+2. **One-command smoke validation**
+   Keep smoke validation small enough for routine regression testing.
+
+3. **HPC/container instructions**
+   Document SIF/overlay use, output roots, seeds, and expected artifacts.
+
+4. **Artifact manifest**
+   Standardize where checkpoints, datasets, metrics, plots, and validation summaries live.

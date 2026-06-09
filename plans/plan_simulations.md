@@ -255,12 +255,11 @@ Jain fairness over branch throughputs
 
 # 3. Updated project structure
 
-Organize the project like this:
+The current repository is organized like this, with world-model additions planned under the same conventions:
 
 ```text
 dsrc/
-  README.md
-  requirements.txt
+  REDME.md
 
   configs/
     topology/
@@ -269,6 +268,7 @@ dsrc/
       straight_multilane.yaml
       merge.yaml
       inverted_tree.yaml
+      inverted_tree_bottleneck.yaml
 
     demand/
       low.yaml
@@ -284,20 +284,23 @@ dsrc/
 
     experiments/
       exp_ring_wave_damping.yaml
-      exp_straight_throughput.yaml
-      exp_merge_lane_placement.yaml
-      exp_tree_network_control.yaml
+      ... planned final experiment configs ...
 
     training/
-      mappo.yaml
+      shared_ppo.yaml
       ippo.yaml
-      ppo_speed_only.yaml
-      ppo_lane_only.yaml
+      mappo.yaml
+      model_based_policy.yaml        # planned
+
+    world_model/                     # planned
+      functional_graph.yaml
+      scalar_gnn.yaml
+      persistence.yaml
 
   src/
     envs/
       base_ctde_env.py
-      highway_tree_env.py
+      topology_env.py
       wrappers.py
 
     road/
@@ -314,16 +317,15 @@ dsrc/
       route_sampler.py
 
     vehicles/
-      av_vehicle.py
-      human_vehicle.py
       behavior_profiles.py
-      safety_layer.py
 
     sensing/
-    local_sensor.py
-      noise_models.py
-      latency_buffer.py
-      observation_encoder.py
+      local.py
+
+    safety/
+      constraints.py
+      etiquette.py
+      safety_layer.py
 
     metrics/
       segment_metrics.py
@@ -333,44 +335,48 @@ dsrc/
       logger.py
 
     baselines/
-      no_av.py
-      random_av.py
-      selfish_av.py
-      density_lookup.py
-      dynamic_speed_limit.py
-      av_mediated_speed_harmonization.py
-      backpressure.py
-      cooperative_acc.py
+      controllers.py
+      registry.py
 
     rl/
+      actions.py
+      controller.py
+      encoders.py
       models.py
+      ppo.py
+      rewards.py
       rollout_buffer.py
-      mappo.py
-      ippo.py
-      train.py
-      evaluate.py
+      trainers.py
 
-    analysis/
-      aggregate_results.py
-      plot_timeseries.py
-      plot_speed_heatmap.py
-      plot_segment_occupancy.py
-      plot_topology.py
+    world_model/                    # planned
+      graph/
+      fields/
+      data/
+      models/
+      policies/
+      losses.py
+      rewards.py
+      evaluation.py
 
   scripts/
     run_baseline.py
     train_policy.py
     evaluate_policy.py
-    sweep_topologies.py
-    sweep_demand.py
-    sweep_human_models.py
-    make_plots.py
+    validate_project_interface.py
+    validate_topology_baselines.py
+    validate_training_eval.py
+    collect_world_model_data.py      # planned
+    train_world_model.py             # planned
+    evaluate_world_model.py          # planned
+    train_model_based_policy.py      # planned
+    validate_world_model_pipeline.py # planned
+    run_experiment_matrix.py         # planned
 
   outputs/
     checkpoints/
-    logs/
     metrics/
-    plots/
+    validation/
+    world_model/                     # planned datasets/checkpoints/evaluation
 ```
 
 ---
@@ -893,7 +899,7 @@ Deliverable:
 
 ```text
 outputs/metrics/<experiment>/step_metrics.csv
-outputs/metrics/<experiment>/segment_metrics.parquet
+outputs/metrics/<experiment>/segment_metrics.csv
 outputs/metrics/<experiment>/episode_summary.json
 ```
 
@@ -953,14 +959,15 @@ This directly connects to your current paper’s sensing-range/latency/noise sto
 
 ## Phase 6: Safety, etiquette, and physical-control layer
 
-Safety has two paths:
+Safety has one DSRC controller path:
 
 ```text
-CTDE learned AVs: safety-aware action masking, reward penalties, and bounded action heads integrated with the RL controller
-non-learning baselines/RVs/human drivers: external safety filter or highway-env IDM/MOBIL safety behavior where appropriate
+all controllers: propose public v2 AV actions
+HighwayTopologyEnv.step(): applies the common safety, etiquette, and physical-control layer
+human drivers: continue to use highway-env IDM/MOBIL behavior where appropriate
 ```
 
-The RL policy should not directly set unsafe acceleration. For CTDE, unsafe actions should be masked or penalized during training before the final runtime guardrail sees them.
+The RL policy should not directly set unsafe acceleration. Learned controllers and baselines request speed/headway/lane-preference/merge-mode actions, and the common execution-time safety layer converts those requests into bounded physical behavior while reporting diagnostics and penalties.
 
 Implement:
 
@@ -1225,7 +1232,7 @@ merge queues
 demand level
 ```
 
-Training should include safety-aware action masks and penalties in the CTDE controller path. Runtime wrappers should still keep a final guardrail for invalid simulator actions and should report masked/overridden/blocked actions separately.
+Training should use the same public v2 action interface as baselines. Unsafe or inappropriate learned actions are handled by the common execution-time safety layer, which reports masked, overridden, and blocked actions separately and supplies safety penalties for learning.
 
 If no AVs are in the local neighborhood, the actor must fall back to individual operation using neutral aggregate cooperation fields.
 
