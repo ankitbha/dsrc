@@ -204,3 +204,84 @@ def test_simulator_default_safety_mode_skips_dsrc_penalties_for_baseline_avs() -
     assert info["safety"]["mode"] == "simulator_default"
     assert info["safety"]["penalties"] == {}
     assert info["diagnostics"]["external_safety_override"] == []
+
+
+def test_ring_initial_spawn_spreads_full_loop() -> None:
+    import math
+
+    env = HighwayTopologyEnv(
+        "ring",
+        {
+            "controlled_vehicles": 2,
+            "initial_human_vehicles": 12,
+            "duration_steps": 30,
+            "controller": {"safety_mode": "integrated_rl"},
+        },
+    )
+    env.reset(seed=11)
+    road = env.road
+    assert road is not None
+    assert len(road.vehicles) == 14
+    assert not any(vehicle.crashed for vehicle in road.vehicles)
+
+    radius = float(env.topology.metadata["radius_m"])
+    circumference = float(env.topology.metadata["circumference_m"])
+    arc_positions = sorted(
+        (math.atan2(float(v.position[1]), float(v.position[0])) % (2.0 * math.pi)) * radius
+        for v in road.vehicles
+    )
+    gaps = [b - a for a, b in zip(arc_positions, arc_positions[1:])]
+    gaps.append(circumference - arc_positions[-1] + arc_positions[0])
+    spacing = circumference / 14.0
+    assert min(gaps) > 10.0, f"vehicles overlap at spawn: min gap {min(gaps):.1f} m"
+    assert max(gaps) < 2.0 * spacing, f"spawn clustered on part of the ring: max gap {max(gaps):.1f} m"
+
+
+def test_ring_moderate_density_episode_survives_slow_commands() -> None:
+    env = HighwayTopologyEnv(
+        "ring",
+        {
+            "controlled_vehicles": 2,
+            "initial_human_vehicles": 8,
+            "duration_steps": 40,
+            "controller": {"safety_mode": "integrated_rl"},
+        },
+    )
+    observations, _ = env.reset(seed=11)
+    info: dict = {}
+    for step in range(25):
+        actions = {agent_id: safe_action() | {"desired_speed_bin": "slow"} for agent_id in observations}
+        observations, _, terminated, truncated, info = env.step(actions)
+        metrics = info.get("metrics", {})
+        assert not terminated, f"episode terminated at step {step + 1}"
+        assert not truncated
+        assert float(metrics.get("new_collision_count", 0.0)) == 0.0
+    assert float(info["metrics"]["mean_speed"]) > 5.0
+
+
+def test_ring_av_slots_interleaved_across_loop() -> None:
+    import math
+
+    env = HighwayTopologyEnv(
+        "ring",
+        {
+            "controlled_vehicles": 2,
+            "initial_human_vehicles": 12,
+            "duration_steps": 5,
+            "controller": {"safety_mode": "integrated_rl"},
+        },
+    )
+    env.reset(seed=3)
+    road = env.road
+    assert road is not None
+    radius = float(env.topology.metadata["radius_m"])
+    circumference = float(env.topology.metadata["circumference_m"])
+    av_arcs = [
+        (math.atan2(float(v.position[1]), float(v.position[0])) % (2.0 * math.pi)) * radius
+        for v in env._av_vehicles.values()
+    ]
+    assert len(av_arcs) == 2
+    separation = abs(av_arcs[0] - av_arcs[1])
+    separation = min(separation, circumference - separation)
+    spacing = circumference / 14.0
+    assert separation > circumference / 2.0 - 2.0 * spacing

@@ -82,7 +82,12 @@ def build_config(args: argparse.Namespace) -> dict[str, Any]:
 
     demand_cfg = deep_merge(demand_cfg, demand_overrides) if demand_overrides else demand_cfg
     controlled_vehicles = 0 if args.controller == "no_av" else args.controlled_vehicles
-    initial_humans = args.initial_human_vehicles if args.controller == "no_av" and args.topology == "ring" else 0
+    if args.topology == "ring":
+        # keep the total ring population identical across controllers: no_av
+        # replaces the would-be AVs with humans instead of running fewer vehicles
+        initial_humans = args.initial_human_vehicles + (args.controlled_vehicles - controlled_vehicles)
+    else:
+        initial_humans = 0
     controller_cfg = {
         "name": args.controller,
         "family": "baseline",

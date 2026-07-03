@@ -229,14 +229,21 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             else:
                 self._apply_simulator_default_av_action(agent_id, vehicle, action, diagnostics)
 
-        self.road.act()
-        for agent_id, acceleration in physical_accelerations.items():
-            vehicle = self._av_vehicles.get(agent_id)
-            if vehicle is not None:
-                vehicle.action["acceleration"] = float(acceleration)
-        self.road.step(float(self.config.get("dt", 1.0)))
+        # decisions happen once per dt, but the physics must integrate at a
+        # finer grid (highway_env is built for ~10-15 Hz): a single 1 s Euler
+        # step drives IDM vehicles through each other and to negative speeds
+        dt = float(self.config.get("dt", 1.0))
+        substeps = max(1, int(self.config.get("physics_substeps", 10)))
+        sub_dt = dt / substeps
+        for _ in range(substeps):
+            self.road.act()
+            for agent_id, acceleration in physical_accelerations.items():
+                vehicle = self._av_vehicles.get(agent_id)
+                if vehicle is not None:
+                    vehicle.action["acceleration"] = float(acceleration)
+            self.road.step(sub_dt)
         self._step_count += 1
-        self._time += float(self.config.get("dt", 1.0))
+        self._time += dt
         self._update_vehicle_runtime_after_step()
         self._update_crash_state()
         self._update_safety_distances()
@@ -336,21 +343,90 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             **self._demand_state(),
         }
 
+    _RING_ARC_ORDER: tuple[LaneIndex, ...] = (
+        ("r0", "r1", 0),
+        ("r1", "r2", 0),
+        ("r2", "r3", 0),
+        ("r3", "r0", 0),
+    )
+
+    def _ring_initial_layout(self) -> tuple[list[tuple[LaneIndex, float]], list[tuple[LaneIndex, float]], float]:
+        """Uniform slots around the full ring (all arcs), AV slots interleaved evenly.
+
+        The ring is a closed loop of several arc lanes; placing initial vehicles
+        per-arc packs them onto one arc and they spawn pre-crashed. Returns
+        (av_slots, human_slots, initial_speed_mps) in (lane_index, longitudinal) form.
+        """
+        if self.road is None:
+            raise RuntimeError("road is not initialized")
+        human_count = int(self.config.get("initial_human_vehicles", 0))
+        av_count = len(self.agent_ids)
+        total = av_count + human_count
+        if total <= 0:
+            return [], [], 0.0
+        arcs = [
+            (lane_index, float(self.road.network.get_lane(lane_index).length))
+            for lane_index in self._RING_ARC_ORDER
+        ]
+        circumference = sum(length for _, length in arcs)
+        vehicle_length = float(ControlledVehicle.LENGTH)
+        spacing = circumference / total
+        if spacing < vehicle_length + 2.0:
+            raise ValueError(
+                f"ring cannot fit {total} initial vehicles on {circumference:.0f} m"
+                f" (spacing {spacing:.1f} m < vehicle length + 2 m)"
+            )
+
+        def locate(s: float) -> tuple[LaneIndex, float]:
+            s = s % circumference
+            for lane_index, length in arcs:
+                if s < length:
+                    return lane_index, s
+                s -= length
+            return arcs[-1][0], max(0.0, arcs[-1][1] - 1.0)
+
+        av_positions: set[int] = set()
+        if av_count:
+            av_positions = {int(round(i * total / av_count)) % total for i in range(av_count)}
+            while len(av_positions) < av_count:
+                av_positions.add(min(set(range(total)) - av_positions))
+        av_slots = [locate(slot * spacing) for slot in sorted(av_positions)]
+        human_slots = [locate(slot * spacing) for slot in range(total) if slot not in av_positions]
+        configured_speed = self.config.get("initial_speed_mps")
+        speed_limit = float(self.road.network.get_lane(arcs[0][0]).speed_limit or 24.0)
+        if configured_speed is not None:
+            initial_speed = float(configured_speed)
+        else:
+            # spawn at the car-following equilibrium for this density so the
+            # platoon starts feasible instead of in a synchronized panic brake
+            equilibrium = (spacing - vehicle_length - 2.0) / 1.5
+            initial_speed = max(1.0, min(equilibrium, speed_limit, 24.0))
+        return av_slots, human_slots, initial_speed
+
     def _spawn_controlled_vehicles(self) -> None:
         if self.road is None:
             raise RuntimeError("road is not initialized")
         if not self.agent_ids:
             return
         spawn_lanes, destination = self._spawn_lanes_and_destination()
+        ring_av_slots: list[tuple[LaneIndex, float]] | None = None
+        ring_speed = 0.0
+        if self.topology_id == "ring":
+            ring_av_slots, _, ring_speed = self._ring_initial_layout()
         for index, agent_id in enumerate(self.agent_ids):
-            lane_index = spawn_lanes[index % len(spawn_lanes)]
-            lane = self.road.network.get_lane(lane_index)
-            longitudinal = min(20.0 + 35.0 * index, max(5.0, lane.length - 10.0))
+            if ring_av_slots is not None:
+                lane_index, longitudinal = ring_av_slots[index]
+                speed = ring_speed
+            else:
+                lane_index = spawn_lanes[index % len(spawn_lanes)]
+                lane = self.road.network.get_lane(lane_index)
+                longitudinal = min(20.0 + 35.0 * index, max(5.0, lane.length - 10.0))
+                speed = float(self.config.get("initial_speed_mps", min(lane.speed_limit or 24.0, 24.0)))
             vehicle = ControlledVehicle.make_on_lane(
                 self.road,
                 lane_index,
                 longitudinal=longitudinal,
-                speed=float(self.config.get("initial_speed_mps", min(lane.speed_limit or 24.0, 24.0))),
+                speed=float(speed),
             )
             vehicle.route = road_route_to_destination(lane_index, destination, self.topology)
             self.road.vehicles.append(vehicle)
@@ -363,11 +439,24 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         if human_count <= 0:
             return
         spawn_lanes, destination = self._spawn_lanes_and_destination()
+        ring_human_slots: list[tuple[LaneIndex, float]] | None = None
+        ring_speed = 0.0
+        if self.topology_id == "ring":
+            _, ring_human_slots, ring_speed = self._ring_initial_layout()
         for index in range(human_count):
-            lane_index = spawn_lanes[index % len(spawn_lanes)]
-            lane = self.road.network.get_lane(lane_index)
-            longitudinal = self._initial_human_longitudinal(lane_index, index, lane.length)
-            speed = float(self.config.get("initial_speed_mps", min(lane.speed_limit or 24.0, 24.0)))
+            if ring_human_slots is not None:
+                lane_index, longitudinal = ring_human_slots[index]
+                lane = self.road.network.get_lane(lane_index)
+                speed = float(ring_speed)
+                # cruise targets stay tied to the road, not the (density-limited)
+                # spawn speed, or the whole ring settles at the spawn speed
+                target_base = float(min(lane.speed_limit or 24.0, 24.0))
+            else:
+                lane_index = spawn_lanes[index % len(spawn_lanes)]
+                lane = self.road.network.get_lane(lane_index)
+                longitudinal = self._initial_human_longitudinal(lane_index, index, lane.length)
+                speed = float(self.config.get("initial_speed_mps", min(lane.speed_limit or 24.0, 24.0)))
+                target_base = speed
             vehicle = IDMVehicle.make_on_lane(self.road, lane_index, longitudinal=longitudinal, speed=speed)
             vehicle.enable_lane_change = self.topology.supports_lane_change
             profile_id = self._human_behavior_model.sample_profile_id(self.road.np_random)
@@ -375,7 +464,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             apply_human_behavior_profile(
                 vehicle,
                 profile,
-                base_target_speed_mps=speed,
+                base_target_speed_mps=target_base,
                 min_speed_mps=float(self.config.get("min_speed_mps", 0.0)),
                 max_speed_mps=float(self.config.get("max_speed_mps", 40.0)),
                 lane_speed_limit_mps=lane.speed_limit,
