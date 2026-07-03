@@ -1,0 +1,33 @@
+id: shared_ppo_deploysense
+kind: training
+description: Shared PPO speed_only trained under the deployment-measured sensing profile (Jetson camera ranging + GPS noise; latency is sub-step at dt=1.0 so left at 0).
+algorithm: shared_ppo
+policy_mode: decentralized
+action_profile: speed_only
+total_updates: 50
+rollout_steps: 256
+sensing:
+  range_m: 100.0
+  latency_s: 0.0
+  position_noise_std: 1.5
+  speed_noise_std: 0.15
+actor:
+  observation_scope: local
+  hidden_sizes:
+    - 128
+    - 128
+critic:
+  observation_scope: local
+optimization:
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.005
+  max_grad_norm: 0.5
+  update_epochs: 4
+  minibatch_size: 256
+  reward_scale: 0.05
+  reward_clip: 10.0
+  crash_penalty: 2.0

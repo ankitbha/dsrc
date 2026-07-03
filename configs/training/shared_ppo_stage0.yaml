@@ -1,0 +1,28 @@
+id: shared_ppo_stage0
+kind: training
+description: Stage-0 shared PPO speed_only with terminal crash penalty and sharpened entropy (v3 ring training; see deployment/jetson PROGRESS 2026-07-02).
+algorithm: shared_ppo
+policy_mode: decentralized
+action_profile: speed_only
+total_updates: 3000
+rollout_steps: 256
+actor:
+  observation_scope: local
+  hidden_sizes:
+    - 128
+    - 128
+critic:
+  observation_scope: local
+optimization:
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.005
+  max_grad_norm: 0.5
+  update_epochs: 4
+  minibatch_size: 256
+  reward_scale: 0.05
+  reward_clip: 10.0
+  crash_penalty: 2.0

@@ -44,6 +44,7 @@ class TrainingConfig:
     dt: float = 1.0
     output_root: str = "outputs/checkpoints"
     hidden_sizes: tuple[int, ...] = (128, 128)
+    sensing: Mapping[str, Any] | None = None
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> TrainingConfig:
@@ -51,6 +52,7 @@ class TrainingConfig:
         env = dict(config.get("env", {}))
         actor_cfg = dict(training.get("actor", {})) if isinstance(training.get("actor", {}), Mapping) else {}
         hidden = actor_cfg.get("hidden_sizes", (128, 128))
+        sensing_cfg = training.get("sensing", env.get("sensing"))
         return cls(
             algorithm=str(training.get("algorithm", "shared_ppo")),
             action_profile=str(training.get("action_profile", actor_cfg.get("action_profile", "speed_only"))),
@@ -66,6 +68,7 @@ class TrainingConfig:
             dt=float(env.get("dt", config.get("dt", 1.0))),
             output_root=str(config.get("output_root", training.get("output_root", "outputs/checkpoints"))),
             hidden_sizes=tuple(int(value) for value in hidden),
+            sensing=dict(sensing_cfg) if isinstance(sensing_cfg, Mapping) and sensing_cfg else None,
         )
 
 
@@ -184,8 +187,15 @@ class BasePPOTrainer:
             episode_metrics = dict(info.get("metrics", {}))
             metric_history.append(episode_metrics)
             team_reward = build_team_reward(episode_metrics) * self.ppo_config.reward_scale
+            crashed_agents = {
+                agent_id for agent_id, vehicle in env._av_vehicles.items() if vehicle.crashed
+            } if self.ppo_config.crash_penalty else set()
             for index, agent_id in enumerate(agent_ids):
                 reward = team_reward - safety_penalty_for_agent(info, agent_id)
+                if agent_id in crashed_agents:
+                    # the dense speed reward otherwise dominates the one-step
+                    # collision term and argmax collapses to constant "fast"
+                    reward -= self.ppo_config.crash_penalty
                 reward = max(-self.ppo_config.reward_clip, min(self.ppo_config.reward_clip, reward))
                 buffer.add(
                     observation=obs_tensor[index],
@@ -236,7 +246,7 @@ class BasePPOTrainer:
         topology_cfg = load_named_config("topology", self.config.topology)
         demand_cfg = load_named_config("demand", self.config.demand)
         human_cfg = load_named_config("human_model", self.config.human_model)
-        return {
+        config = {
             "topology": topology_cfg,
             "demand": demand_cfg,
             "human_model": human_cfg,
@@ -246,6 +256,9 @@ class BasePPOTrainer:
             "duration_steps": self.config.duration_steps,
             "dt": self.config.dt,
         }
+        if self.config.sensing:
+            config["sensing"] = dict(self.config.sensing)
+        return config
 
     def save_checkpoint(
         self,
@@ -343,7 +356,7 @@ class BasePPOTrainer:
                 raise ValueError(f"checkpoint {key}={state.get(key)!r} does not match expected {expected_value!r}")
         saved_config = state.get("training_config", {})
         if isinstance(saved_config, Mapping):
-            for key in ("topology", "demand", "human_model"):
+            for key in ("topology", "demand", "human_model", "sensing"):
                 if saved_config.get(key) != getattr(self.config, key):
                     raise ValueError(
                         f"checkpoint {key}={saved_config.get(key)!r} does not match expected {getattr(self.config, key)!r}"

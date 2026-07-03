@@ -23,6 +23,7 @@ class PPOConfig:
     gae_lambda: float = 0.95
     reward_clip: float = 10.0
     reward_scale: float = 0.05
+    crash_penalty: float = 0.0
 
     @classmethod
     def from_mapping(cls, config: dict[str, Any] | None) -> PPOConfig:
@@ -42,6 +43,7 @@ class PPOConfig:
             gae_lambda=float(opt.get("gae_lambda", cfg.get("gae_lambda", cls.gae_lambda))),
             reward_clip=float(opt.get("reward_clip", cfg.get("reward_clip", cls.reward_clip))),
             reward_scale=float(opt.get("reward_scale", cfg.get("reward_scale", cls.reward_scale))),
+            crash_penalty=max(0.0, float(opt.get("crash_penalty", cfg.get("crash_penalty", cls.crash_penalty)))),
         )
 
 

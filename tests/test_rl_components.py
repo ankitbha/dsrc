@@ -462,3 +462,31 @@ def test_trainer_state_resume_warns_on_device_mismatch(tmp_path) -> None:
 
     with pytest.warns(RuntimeWarning, match="RNG replay may differ"):
         trainer.load_training_state(tmp_path, resume_latest=False)
+
+
+def test_training_config_sensing_passthrough_reaches_env_config() -> None:
+    bundle = {
+        "training": {
+            "algorithm": "shared_ppo",
+            "action_profile": "speed_only",
+            "sensing": {"range_m": 100.0, "position_noise_std": 1.5, "speed_noise_std": 0.15},
+        },
+        "env": {"topology": "ring"},
+    }
+    config = TrainingConfig.from_mapping(bundle)
+    assert config.sensing == {"range_m": 100.0, "position_noise_std": 1.5, "speed_noise_std": 0.15}
+    trainer = SharedPPOTrainer(config, PPOConfig(update_epochs=1), device="cpu")
+    env_config = trainer.env_config()
+    assert env_config["sensing"] == config.sensing
+
+    clean = TrainingConfig.from_mapping({"training": {"algorithm": "shared_ppo"}})
+    assert clean.sensing is None
+    clean_trainer = SharedPPOTrainer(clean, PPOConfig(update_epochs=1), device="cpu")
+    assert "sensing" not in clean_trainer.env_config()
+
+
+def test_ppo_config_reads_crash_penalty_from_optimization_block() -> None:
+    config = PPOConfig.from_mapping({"optimization": {"crash_penalty": 2.0, "entropy_coef": 0.005}})
+    assert config.crash_penalty == 2.0
+    assert config.entropy_coef == 0.005
+    assert PPOConfig.from_mapping({}).crash_penalty == 0.0
