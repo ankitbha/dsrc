@@ -1,0 +1,21 @@
+\section{Discussion: Open Networking Questions}
+\label{sec:discussion}
+
+Treating self-regulating cars as a communication-abstraction problem turns their hardest questions into networking questions. Several are central.
+
+\noindent\textbf{What is the right semantic API?}
+The contract of Section~\ref{sec:vision} is a starting point. The community needs principled positions on rate, precision, aggregation radius, freshness horizon, and trust: how stale a signal may be before it misleads, how coarse before it stops helping, and how a receiver should weight summaries of unknown provenance. That points to work on adaptive beacon rates, confidence-weighted aggregation, and semantic compression under packet loss.
+
+\noindent\textbf{Can the aggregate be computed privately?}
+Our contract keeps the semantic unit anonymous: the receiver consumes a neighborhood aggregate, not a per-vehicle record. But a naive realization still has each sender emit its own position, as a Basic Safety Message already does. The open problem is to produce the aggregate without any raw per-vehicle trajectory leaving the vehicle, through in-network or gossip-style aggregation, randomized-response or differentially private counts, and neighborhood summaries that are useful for a flow regulator yet carry no linkable identity.
+
+\noindent\textbf{How robust is the system to partial deployment?}
+The relevant adoption unit is not market share but the fraction of vehicles present in a specific traffic stream. Evaluation should sweep penetration, compliance, message loss, sensing range and noise, and demand bursts across a topology ladder (ring roads, straight highways, merges, and inverted trees), with metrics spanning throughput, jam fraction, and delay alongside safety and passability measures such as hard braking, collisions, and follower delay, so that a network gain is never bought by making human traffic less safe or less passable.
+
+\noindent\textbf{How should safety be verified?}
+A local policy can optimize a network objective and still be unacceptable if it surprises human drivers. The safety layer should be specified, tested, and audited separately from the learned controller, with explicit checks for stale state, follower disruption, low-speed obstruction, and unsafe merges. This separation can become a systems requirement: the execution contract can report how often a suggestion was masked, blocked for etiquette, blocked for follower disruption, or overridden, giving evidence that a network objective is being achieved safely.
+
+\noindent\textbf{Who benefits, and who decides?}
+Infrastructure-free control is most compelling where roadside upgrades are unlikely, but a voluntary advisory system can also shift delay across drivers, lanes, or vehicle classes. A deployable system therefore needs measurement and incentives that make the network benefit visible and its distribution accountable.
+
+As vehicles become networked computers, congestion control need not remain a roadside service. The controller and the radio already exist; the open question is how to design the communication substrate so that each vehicle sees enough of the local traffic state to help the network while still acting independently, safely, privately, and without a cloud coordinator. We think this is a productive new problem space for the networking community.

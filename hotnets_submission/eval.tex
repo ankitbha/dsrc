@@ -1,0 +1,34 @@
+\section{Feasibility: What We Can Ground Today}
+\label{sec:eval}
+
+This paper is a vision, not a closed-loop traffic-control evaluation. The current evidence supports the edge-feasibility premise: a commodity embedded platform can run the perception, observation, and advisory loop needed to estimate local traffic state, and aggregate-state messages are small enough to avoid the bandwidth profile of raw perception sharing.
+
+\begin{table}[t]
+\centering
+\caption{Prototype measurements on Jetson Orin Nano. These numbers ground edge feasibility, not decentralized traffic-control effectiveness.}
+\label{tab:jetson}
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{p{0.31\linewidth}p{0.29\linewidth}p{0.29\linewidth}}
+\toprule
+\textbf{Component} & \textbf{Measured point} & \textbf{Use in system} \\
+\midrule
+YOLOv8n TensorRT FP16~\cite{redmon2016yolo} & 17.7 ms p50 detection & Forward vehicle detections \\
+Tracking + distance & 1.1 ms p50 & Leader gap and closing speed \\
+Observation + policy & 0.9 ms p50 & Local observation and advisory \\
+End-to-end compute & 19.8 ms p50 / 20.2 ms p95 (synthetic bench) & Capture-to-advisory path \\
+Simulated drives & 34--38 ms p95 & Real-time dashcam + scripted GPS \\
+Aggregate beacon & 2 Hz, 2 s TTL, 150 m & Nearby AV summaries \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+The latency and accuracy requirements are different from full autonomy. A self-regulating-car advisory does not need centimeter-accurate reconstruction of the scene; it needs stable estimates of headway, density, speed, and queue pressure at timescales relevant to human reaction and smooth longitudinal control. Our Jetson measurements suggest a plausible operating point for dashboard-grade or retrofit deployments on Jetson-class devices~\cite{nvidia2023jetson}. The prototype makes a latency-first choice: TensorRT YOLOv8n, lightweight tracking, and pinhole or width-prior distance estimation rather than a dense monocular-depth network. That choice is swappable, but it grounds the claim that the observation and advisory loop can run comfortably below a 200 ms design budget. The end-to-end figures above are a synthetic benchmark and a real-detector simulated drive; an on-road camera run is future work.
+
+The communication footprint is also modest. Raw or even compressed video is orders of magnitude larger than the semantic state needed here: the congestion signal carries counts, mean speed, lane distribution, queue estimate, and merge pressure, which at a few hertz is kilobits per second per vehicle and does not grow with scene complexity the way perception sharing would.
+
+A simulated-drive harness gives a path from desk to road: it couples real dashcam footage with a scripted GPS profile and runs the full detector-to-advisory stack in real time, gating p95 latency, tick rate, GPS freshness, ego-speed error, and perception coverage. These gates do not prove that traffic control works, but they catch the systems failures (stale GPS, decode stalls, missing observations) that would otherwise contaminate a later traffic experiment.
+
+\noindent\textbf{Toward a pilot.}
+What we establish here is edge feasibility, not a traffic-flow result. We plan to build toward the latter in a staged pilot: hardware-in-the-loop replay of many vehicles through the same stack under varying message loss, GPS delay, sensing range, and compliance; a microscopic-simulation study that replaces the predecessor's global observation with the local observation and aggregate contract of Section~\ref{sec:vision}, comparing local-only, local-plus-aggregate, and oracle global-state controllers under the same safety layer; and a closed-course study of whether advisories can be followed without uncomfortable braking or lane churn. The same pilot would exercise the model-based training of Section~\ref{sec:architecture}, testing whether a learned model cuts the interactions needed to adapt to an unseen topology.

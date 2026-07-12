@@ -1,0 +1,50 @@
+{
+  "latex-workshop.latex.rootFile.useSubFile": false,
+  "latex-workshop.latex.tools": [
+    {
+      "name": "pdflatex-dsrc-overlay",
+      "command": "/share/apps/apptainer/bin/apptainer",
+      "args": [
+        "exec",
+        "--overlay",
+        "/scratch/ab9738/dsrc/dsrc_gpu_env.ext3:ro",
+        "/scratch/ab9738/dsrc/cuda11.8.86-cudnn8.7-devel-ubuntu22.04.2.sif",
+        "bash",
+        "-lc",
+        "cd '%DIR%' && export TEXINPUTS=.:./: && pdflatex -synctex=1 -interaction=nonstopmode -file-line-error '%DOCFILE%.tex'"
+      ]
+    },
+    {
+      "name": "bibtex-dsrc-overlay",
+      "command": "/share/apps/apptainer/bin/apptainer",
+      "args": [
+        "exec",
+        "--overlay",
+        "/scratch/ab9738/dsrc/dsrc_gpu_env.ext3:ro",
+        "/scratch/ab9738/dsrc/cuda11.8.86-cudnn8.7-devel-ubuntu22.04.2.sif",
+        "bash",
+        "-lc",
+        "cd '%DIR%' && export TEXINPUTS=.:./: && bibtex '%DOCFILE%'"
+      ]
+    }
+  ],
+  "latex-workshop.latex.recipes": [
+    {
+      "name": "apptainer: pdflatex -> bibtex -> pdflatex -> pdflatex",
+      "tools": [
+        "pdflatex-dsrc-overlay",
+        "bibtex-dsrc-overlay",
+        "pdflatex-dsrc-overlay",
+        "pdflatex-dsrc-overlay"
+      ]
+    }
+  ],
+  "latex-workshop.latex.recipe.default": "apptainer: pdflatex -> bibtex -> pdflatex -> pdflatex",
+
+  "latex-workshop.latex.autoBuild.run": "onSave",
+  "latex-workshop.latex.outDir": "%DIR%",
+
+  "latex-workshop.view.pdf.viewer": "tab",
+  "latex-workshop.synctex.afterBuild.enabled": true,
+  "latex-workshop.view.pdf.internal.synctex.keybinding": "double-click"
+}

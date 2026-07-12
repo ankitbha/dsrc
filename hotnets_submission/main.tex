@@ -1,0 +1,37 @@
+\documentclass[sigconf,10pt,anonymous,nonacm]{acmart}
+
+\settopmatter{printacmref=false, printccs=false, printfolios=true}
+\setcopyright{none}
+\citestyle{acmnumeric}
+
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,calc,positioning}
+
+\newcommand{\sys}{self-regulating cars}
+\newcommand{\vstate}{local-aggregate V2V}
+
+\begin{document}
+
+\title[Signaling Road-Network Congestion]{Signaling Road-Network Congestion: Aggregate V2V for Decentralized Traffic Control}
+
+\input{abstract}
+
+\keywords{}
+
+\maketitle
+
+\input{intro}
+\input{vision}
+\input{architecture}
+\input{eval}
+\input{related}
+\input{discussion}
+
+\clearpage
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}

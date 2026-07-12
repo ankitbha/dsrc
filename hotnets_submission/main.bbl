@@ -1,0 +1,214 @@
+\begin{thebibliography}{30}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{\texttt{#1}}
+\expandafter\ifx\csname urlstyle\endcsname\relax
+  \providecommand{\doi}[1]{doi: #1}\else
+  \providecommand{\doi}{doi: \begingroup \urlstyle{rm}\Url}\fi
+
+\bibitem[Arnold(1998)]{arnold1998ramp}
+Edward~D. Arnold, Jr.
+\newblock Ramp metering: a review of the literature.
+\newblock Technical report, Virginia Transportation Research Council, 1998.
+
+\bibitem[Authors(2026)]{self_regulating_cars}
+Anonymous Authors.
+\newblock Anonymous title.
+\newblock In \emph{Proceedings of AAAI Conference on Artificial Intelligence},
+  2026.
+
+\bibitem[Bhardwaj et~al.(2023)Bhardwaj, Iyer, Ramesh, White, and
+  Subramanian]{bhardwaj2023understanding}
+Ankit Bhardwaj, Shiva~R Iyer, Sriram Ramesh, Jerome White, and Lakshminarayanan
+  Subramanian.
+\newblock Understanding sudden traffic jams: From emergence to impact.
+\newblock \emph{Development Engineering}, 8:\penalty0 100105, 2023.
+
+\bibitem[Cho et~al.(2023)Cho, Li, Kim, and Wu]{cho2023temporal}
+Jung-Hoon Cho, Sirui Li, Jeongyun Kim, and Cathy Wu.
+\newblock Temporal transfer learning for traffic optimization with
+  coarse-grained advisory autonomy.
+\newblock \emph{arXiv preprint arXiv:2312.09436}, 2023.
+
+\bibitem[{CIRCLES Consortium}(2024)]{lee2024traffic}
+{CIRCLES Consortium}.
+\newblock Traffic control via connected and automated vehicles: An open-road
+  field experiment with 100 cavs.
+\newblock \emph{arXiv preprint arXiv:2402.17043}, 2024.
+
+\bibitem[{ETSI}(2019)]{etsi2019cam}
+{ETSI}.
+\newblock Intelligent transport systems ({ITS}); vehicular communications;
+  basic set of applications; part 2: Specification of cooperative awareness
+  basic service.
+\newblock Technical Report EN 302 637-2 V1.4.1, European Telecommunications
+  Standards Institute, 2019.
+
+\bibitem[Fridman(2018)]{fridman2018human}
+Lex Fridman.
+\newblock Human-centered autonomous vehicle systems: Principles of effective
+  shared autonomy.
+\newblock \emph{arXiv preprint arXiv:1810.01835}, 2018.
+
+\bibitem[Greenshields et~al.(1935)Greenshields, Bibbins, Channing, and
+  Miller]{greenshields1935study}
+Bruce~D Greenshields, J~Rowland Bibbins, WS~Channing, and Harvey~H Miller.
+\newblock A study of traffic capacity.
+\newblock In \emph{Highway research board proceedings}, volume~14, pages
+  448--477. Washington, DC, 1935.
+
+\bibitem[Hafner et~al.(2020)Hafner, Lillicrap, Ba, and
+  Norouzi]{hafner2020dream}
+Danijar Hafner, Timothy Lillicrap, Jimmy Ba, and Mohammad Norouzi.
+\newblock Dream to control: Learning behaviors by latent imagination.
+\newblock In \emph{International Conference on Learning Representations
+  (ICLR)}, 2020.
+
+\bibitem[Janner et~al.(2019)Janner, Fu, Zhang, and Levine]{janner2019trust}
+Michael Janner, Justin Fu, Marvin Zhang, and Sergey Levine.
+\newblock When to trust your model: Model-based policy optimization.
+\newblock In \emph{Advances in Neural Information Processing Systems
+  (NeurIPS)}, 2019.
+
+\bibitem[Kang et~al.(2017)Kang, Emmons, Abuzaid, Bailis, and
+  Zaharia]{kang2017noscope}
+Daniel Kang, John Emmons, Firas Abuzaid, Peter Bailis, and Matei Zaharia.
+\newblock Noscope: Optimizing neural network queries over video at scale.
+\newblock \emph{Proceedings of the VLDB Endowment}, 10\penalty0 (11):\penalty0
+  1586--1597, 2017.
+
+\bibitem[Kang et~al.(2018)Kang, Bailis, and Zaharia]{kang2018blazeit}
+Daniel Kang, Peter Bailis, and Matei Zaharia.
+\newblock Blazeit: An optimizing query engine for video analytics.
+\newblock In \emph{Proceedings of the 1st Conference on Systems for Machine
+  Learning (SysML)}, pages 1--13, 2018.
+
+\bibitem[Kenney(2011)]{kenney2011dedicated}
+John~B. Kenney.
+\newblock Dedicated short-range communications ({DSRC}) standards in the united
+  states.
+\newblock \emph{Proceedings of the IEEE}, 99\penalty0 (7):\penalty0 1162--1182,
+  2011.
+
+\bibitem[Kreidieh et~al.(2018)Kreidieh, Wu, and Bayen]{kreidieh2018dissipating}
+Abdul~Rahman Kreidieh, Cathy Wu, and Alexandre~M. Bayen.
+\newblock Dissipating stop-and-go waves in closed and open networks via deep
+  reinforcement learning.
+\newblock In \emph{2018 21st International Conference on Intelligent
+  Transportation Systems (ITSC)}, pages 1475--1480. IEEE, 2018.
+
+\bibitem[Lighthill and Whitham(1955)]{lighthill1955kinematic}
+Michael~James Lighthill and Gerald~Beresford Whitham.
+\newblock On kinematic waves ii. a theory of traffic flow on long crowded
+  roads.
+\newblock \emph{Proceedings of the royal society of london. series a.
+  mathematical and physical sciences}, 229\penalty0 (1178):\penalty0 317--345,
+  1955.
+
+\bibitem[{NVIDIA Corporation}(2023)]{nvidia2023jetson}
+{NVIDIA Corporation}.
+\newblock \emph{NVIDIA Jetson Platform Services Documentation}, 2023.
+\newblock URL \url{https://docs.nvidia.com/jetson/jps/index.html}.
+\newblock Accessed: 2025-08-22.
+
+\bibitem[Papageorgiou and Kotsialos(2002)]{papageorgiou2002freeway}
+Markos Papageorgiou and Apostolos Kotsialos.
+\newblock Freeway ramp metering: An overview.
+\newblock \emph{IEEE transactions on intelligent transportation systems},
+  3\penalty0 (4):\penalty0 271--281, 2002.
+
+\bibitem[Redmon et~al.(2016)Redmon, Divvala, Girshick, and
+  Farhadi]{redmon2016yolo}
+Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali Farhadi.
+\newblock You only look once: Unified, real-time object detection.
+\newblock In \emph{Proceedings of the IEEE Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, pages 779--788, 2016.
+
+\bibitem[Richards(1956)]{richards1956shock}
+Paul~I Richards.
+\newblock Shock waves on the highway.
+\newblock \emph{Operations research}, 4\penalty0 (1):\penalty0 42--51, 1956.
+
+\bibitem[{SAE International}(2020)]{sae2020j2735}
+{SAE International}.
+\newblock {V2X} communications message set dictionary.
+\newblock Technical Report J2735, SAE International, 2020.
+
+\bibitem[Stern et~al.(2018)Stern, Cui, Delle~Monache, Bhadani, Bunting,
+  Churchill, Hamilton, Haulcy, Pohlmann, Wu, Piccoli, Seibold, Sprinkle, and
+  Work]{stern2018dissipation}
+Raphael~E. Stern, Shumo Cui, Maria~Laura Delle~Monache, Rahul Bhadani, Matt
+  Bunting, Miles Churchill, Nathaniel Hamilton, R'mani Haulcy, Hannah Pohlmann,
+  Fangyu Wu, Benedetto Piccoli, Benjamin Seibold, Jonathan Sprinkle, and
+  Daniel~B. Work.
+\newblock Dissipation of stop-and-go waves via control of autonomous vehicles:
+  Field experiments.
+\newblock \emph{Transportation Research Part C: Emerging Technologies},
+  89:\penalty0 205--221, 2018.
+
+\bibitem[Sugiyama et~al.(2008)Sugiyama, Fukui, Kikuchi, Hasebe, Nakayama,
+  Nishinari, Tadaki, and Yukawa]{sugiyama2008traffic}
+Yuki Sugiyama, Minoru Fukui, Macoto Kikuchi, Katsuya Hasebe, Akihiro Nakayama,
+  Katsuhiro Nishinari, Shin-ichi Tadaki, and Satoshi Yukawa.
+\newblock Traffic jams without bottlenecks—experimental evidence for the
+  physical mechanism of the formation of a jam.
+\newblock \emph{New journal of physics}, 10\penalty0 (3):\penalty0 033001,
+  2008.
+
+\bibitem[Sutton(1991)]{sutton1991dyna}
+Richard~S. Sutton.
+\newblock Dyna, an integrated architecture for learning, planning, and
+  reacting.
+\newblock \emph{ACM SIGART Bulletin}, 2\penalty0 (4):\penalty0 160--163, 1991.
+
+\bibitem[Tassiulas and Ephremides(1990)]{tassiulas1990stability}
+Leandros Tassiulas and Anthony Ephremides.
+\newblock Stability properties of constrained queueing systems and scheduling
+  policies for maximum throughput in multihop radio networks.
+\newblock In \emph{29th IEEE Conference on Decision and Control}, pages
+  2130--2132. IEEE, 1990.
+
+\bibitem[{Transport for New South Wales}(2024)]{scats}
+{Transport for New South Wales}.
+\newblock \emph{{SCATS} {T}raffic {S}ystem: {S}ydney {C}oordinated {A}daptive
+  {T}raffic {S}ystem}, 2024.
+\newblock Accessed: 2024-10-21.
+
+\bibitem[{Transport Research Laboratory (TRL)}(2024)]{scoot}
+{Transport Research Laboratory (TRL)}.
+\newblock \emph{{SCOOT}: {S}plit {C}ycle {O}ffset {O}ptimisation {T}echnique},
+  2024.
+\newblock Accessed: 2024-10-21.
+
+\bibitem[Vinitsky et~al.(2018)Vinitsky, Kreidieh, Flem, Kheterpal, Jang, Wu,
+  Wu, Liaw, Liang, and Bayen]{vinitsky2018benchmarks}
+Eugene Vinitsky, Aboudy Kreidieh, Luc~Le Flem, Nishant Kheterpal, Kathy Jang,
+  Fangyu Wu, Cathy Wu, Richard Liaw, Eric Liang, and Alexandre~M. Bayen.
+\newblock Benchmarks for reinforcement learning in mixed-autonomy traffic.
+\newblock In \emph{Proceedings of the 2nd Conference on Robot Learning}, pages
+  399--409. PMLR, 2018.
+
+\bibitem[Wu et~al.(2017)Wu, Kreidieh, Parvate, Vinitsky, and Bayen]{wu2017flow}
+Cathy Wu, Aboudy Kreidieh, Kanaad Parvate, Eugene Vinitsky, and Alexandre~M.
+  Bayen.
+\newblock Flow: A modular learning framework for mixed autonomy traffic.
+\newblock \emph{arXiv preprint arXiv:1710.05465}, 2017.
+
+\bibitem[Yan et~al.(2023)Yan, Kreidieh, Vinitsky, Bayen, and Wu]{Yan_2023}
+Zhongxia Yan, Abdul~Rahman Kreidieh, Eugene Vinitsky, Alexandre~M. Bayen, and
+  Cathy Wu.
+\newblock Unified automatic control of vehicular systems with reinforcement
+  learning.
+\newblock \emph{IEEE Transactions on Automation Science and Engineering},
+  20\penalty0 (2):\penalty0 789–804, April 2023.
+\newblock ISSN 1558-3783.
+\newblock \doi{10.1109/tase.2022.3168621}.
+\newblock URL \url{http://dx.doi.org/10.1109/TASE.2022.3168621}.
+
+\bibitem[Yang et~al.(2024)Yang, Kang, Huang, Xu, Feng, and Zhao]{yang2024depth}
+Lihe Yang, Bingyi Kang, Zilong Huang, Xiaogang Xu, Jiashi Feng, and Hengshuang
+  Zhao.
+\newblock Depth anything: Unleashing the power of large-scale unlabeled data.
+\newblock In \emph{Proceedings of the IEEE/CVF conference on computer vision
+  and pattern recognition}, pages 10371--10381, 2024.
+
+\end{thebibliography}

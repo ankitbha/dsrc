@@ -1,0 +1,44 @@
+\section{Introduction}
+\label{sec:intro}
+
+Traffic jams on free-flow highways are not only a capacity problem; they are a distributed stability problem. When local density crosses a critical threshold, small braking events, merge bursts, or overreactions can amplify into persistent stop-and-go waves even without a crash or a fixed bottleneck~\cite{bhardwaj2023understanding,sugiyama2008traffic}. The classical traffic-flow view captures this with the fundamental diagram: flow grows with density until a critical operating point, then collapses as interactions dominate~\cite{greenshields1935study,lighthill1955kinematic,richards1956shock}. Keeping density below that critical point, while holding speed high, keeps the whole stream on the productive branch of the diagram and maximizes sustained network throughput. Small, well-timed local speed adjustments are enough to do this, which is what makes decentralized control a plausible lever on a network-level objective.
+
+Fixed highway controllers are poorly matched to this failure mode. Ramp meters, variable speed limits, and centralized traffic-management systems act from fixed infrastructure and coarse network views~\cite{arnold1998ramp,papageorgiou2002freeway}. They are valuable where deployed, but they are expensive to install, unevenly available, and slow relative to local disturbances. A recent self-regulating-cars formulation showed that learned speed modulation can improve highway flow in simulation, but its controller observes global segment state and broadcasts recommendations through a cloud service~\cite{self_regulating_cars}. That is a useful predecessor, but it leaves an open question: can traffic control move off both the roadside and the cloud, coordinated only by what vehicles can tell each other locally?
+
+The timing makes this worth asking now. Connected and automated vehicles are moving from pilots to revenue service, and an evolving policy and regulatory environment is permitting more of them onto public roads, so the fraction of a highway stream that can be programmed is rising rather than hypothetical. The computation needed to estimate local traffic state is, separately, already widely available: robotaxis carry substantial on-board compute, modern smartphones can run the required perception and inference, and even human-driven vehicles increasingly ship with cameras, sensors, and on-board computers. What has been missing is not the computer but the coordination substrate and the regulatory room to use it, and both are now arriving.
+
+The default trajectory, however, is that each automated vehicle optimizes only its own trip, so the network-control opportunity, the effect each car has on the flow around it, is left untapped. Highways make that opportunity controllable because their dominant problem is flow regulation rather than conflict arbitration. Surface-street intersections need a central arbiter because streams have mutually exclusive rights of way. Highways mostly have merges: vehicles interleave, and the control primitive is smooth speed and headway adjustment. That primitive already lives in the vehicle. The opportunity is to turn a sparse set of vehicles into mobile sensing, computing, and actuating nodes that regulate the flow from inside the stream.
+
+Our key design choice is to make communication semantic and aggregate. Vehicles should not exchange raw video, persistent identities, direct commands, or lane-occupation plans. They should exchange compact traffic-state summaries: nearby AV and non-AV density, mean speed, queue pressure, downstream congestion, and merge pressure, from which each car builds its own ego-centric view. Control remains independent and local: each vehicle fuses onboard perception with aggregate vehicle-to-vehicle (V2V) state, updates a rolling digital twin, computes a speed and headway advisory, and passes that advisory through a safety layer before exposing it to a driver or automated interface.
+
+This makes self-regulating cars a networking problem, and a specific one. Cars can already talk: connected-vehicle standards have them broadcast position and velocity for collision avoidance~\cite{sae2020j2735,etsi2019cam}. The question is not whether a vehicle can run a neural detector, whether an optimizer can smooth a simulated merge, or whether a radio exists. It is what communication abstraction lets independently operated vehicles help a shared physical network without creating a new central planner. High-bandwidth perception sharing and V2V command exchange both entangle privacy, liability, and real-time authority, and, as we discuss, the per-vehicle safety broadcast that today's connected-vehicle stack provides is not designed for flow regulation either. The abstraction we propose is closer to a congestion signal: small, stale-aware, lossy, local, and useful even when only a few vehicles participate.
+
+\begin{figure}[t]
+\centering
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=7mm,
+  box/.style={draw, rounded corners=2pt, align=center, inner sep=4pt, font=\scriptsize},
+  car/.style={box, minimum width=20mm, fill=gray!8},
+  twin/.style={box, minimum width=27mm, fill=blue!6},
+  link/.style={-{Latex[length=2mm]}, thick}
+]
+\node[car] (ego) {ego vehicle\\edge AI};
+\node[car, above left=of ego] (a) {peer};
+\node[car, below left=of ego] (b) {peer};
+\node[twin, right=14mm of ego] (twin) {ego-centric\\digital twin};
+\node[box, right=10mm of twin, fill=green!7] (safe) {safety /\\etiquette filter};
+\node[box, below=7mm of safe, fill=orange!8] (adv) {bounded\\advisory};
+\draw[link] (a) -- node[above, sloped, font=\tiny] {aggregate state} (ego);
+\draw[link] (b) -- node[below, sloped, font=\tiny] {aggregate state} (ego);
+\draw[link] (ego) -- node[above, font=\tiny] {sense + fuse} (twin);
+\draw[link] (twin) -- node[above, font=\tiny] {policy} (safe);
+\draw[link] (safe) -- (adv);
+\end{tikzpicture}
+}
+\caption{Self-regulating cars use low-rate aggregate V2V to improve each vehicle's local observability. Each car independently maintains an ego-centric digital twin and emits only safety-filtered advisories; no roadside sensor, cloud coordinator, or command exchange is in the real-time loop.}
+\Description{A schematic showing peer vehicles sending aggregate state to an ego vehicle, which updates an ego-centric digital twin and safety-filters a bounded advisory.}
+\label{fig:system-vision}
+\end{figure}
+
+This paper contributes a vision for this architecture. First, it reframes highway congestion control as a decentralized network-control problem coordinated by a low-rate aggregate-state substrate rather than by infrastructure or a cloud coordinator. Second, it specifies that substrate as a bounded, semantic, aggregate-state V2V contract, a road-network congestion signal, and distinguishes it from the per-vehicle broadcast of existing connected-vehicle standards. Third, it identifies model-based training as a route to sample-efficient adaptation across road topologies, with the policy trained centrally and executed on purely local observation. Finally, it grounds the vision with measured Jetson-class pipeline feasibility and lays out the open networking questions needed to make such systems deployable.

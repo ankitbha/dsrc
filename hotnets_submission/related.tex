@@ -1,0 +1,17 @@
+\section{Related Work}
+\label{sec:related}
+
+\noindent\textbf{Sparse AVs as traffic actuators.}
+Stern et al. showed that a single controlled vehicle can damp stop-and-go waves on a ring track~\cite{stern2018dissipation}, establishing the sparse-actuator premise. Flow and related mixed-autonomy RL work show that learned controllers can improve simulated traffic at low AV penetration~\cite{wu2017flow,vinitsky2018benchmarks,kreidieh2018dissipating}. CIRCLES/MegaVanderTest is the strongest field evidence that controlled vehicles can affect open-road traffic, but it uses purpose-built controlled vehicles and a centralized speed planner that assigns targets over cellular connectivity~\cite{lee2024traffic}. Our focus is different: a vehicle-native, edge-executed design whose runtime communication is aggregate state rather than command dispatch.
+
+\noindent\textbf{Connected-vehicle messaging.}
+Connected-vehicle standards let cars broadcast their own position, speed, and heading for collision avoidance: SAE J2735 Basic Safety Messages over DSRC and ETSI Cooperative Awareness Messages over C-V2X, at up to ten hertz~\cite{sae2020j2735,etsi2019cam,kenney2011dedicated}. These are per-vehicle and sender-centered, so recovering a density or queue estimate means tracking and fusing many senders. Our contract instead exchanges a receiver-side neighborhood aggregate in which no sender is addressed or reconstructable, reporting whether local flow is approaching a bad operating region rather than the position of any individual car.
+
+\noindent\textbf{Infrastructure-centric traffic control.}
+Ramp metering, variable speed limits, adaptive signal control, and freeway management systems remain the dominant deployed tools~\cite{arnold1998ramp,papageorgiou2002freeway,scats,scoot}. They are powerful where sensors and actuators exist, but they depend on fixed infrastructure and centralized operational visibility. Self-regulating cars instead treat vehicles as mobile actuators that can be introduced incrementally.
+
+\noindent\textbf{Advisory systems.}
+Human-compatible advisory systems show how network objectives can be translated into driver-facing recommendations~\cite{Yan_2023,cho2023temporal,fridman2018human}. This matters because early deployment will be mixed: some vehicles may be automated, some may show dashboard advisories, and many will ignore the system. The open systems question is therefore not only control optimality, but compliance, incentives, and fairness under partial adoption.
+
+\noindent\textbf{Edge AI and networked sensing.}
+Embedded perception models and Jetson-class hardware make on-vehicle traffic-state estimation increasingly practical~\cite{nvidia2023jetson,redmon2016yolo,yang2024depth}. Cloud video analytics demonstrates the value of centralized visual processing but also the cost of moving raw data off the edge~\cite{kang2017noscope,kang2018blazeit}. Our communication model takes the opposite position: infer locally, exchange only semantic aggregate state, and keep safety-critical control on the vehicle.
