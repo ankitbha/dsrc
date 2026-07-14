@@ -1,34 +1,44 @@
-\section{Feasibility: What We Can Ground Today}
+\section{Prototype and Measurements}
 \label{sec:eval}
 
-This paper is a vision, not a closed-loop traffic-control evaluation. The current evidence supports the edge-feasibility premise: a commodity embedded platform can run the perception, observation, and advisory loop needed to estimate local traffic state, and aggregate-state messages are small enough to avoid the bandwidth profile of raw perception sharing.
+The evidence for tier 1 is a system that exists. We built the full capture-to-advisory stack on a Jetson Orin Nano developer kit, trained a policy in simulation on a desktop machine, deployed it to the device, and validated the loop end to end on scripted drives that replay real dashcam footage through the live detector in real time. The numbers below establish edge feasibility and behavioral correctness of the deployed loop; they are deliberately not a traffic-flow result, and we close with what would be.
+
+\noindent\textbf{Prototype stack.}
+The board runs JetPack~6 with TensorRT~10.3. Detection is a YOLOv8n engine exported to TensorRT FP16 and invoked directly through the CUDA runtime~\cite{redmon2016yolo}, a choice forced partly by the platform, whose stock PyTorch build is CPU-only. Tracking is a SORT-style associator, and distance comes from pinhole geometry with vehicle-width priors rather than a dense monocular-depth network, a latency-first choice that is swappable if accuracy becomes the binding constraint~\cite{yang2024depth}. The observation builder implements the vendored 39-field contract of Section~\ref{sec:architecture}; the policy is a two-layer network mirrored in NumPy on the CPU, costing 0.5\,ms per decision. Ego speed comes from a u-blox USB GPS receiver with hold-on-stale dropout handling (an OBD-II feed is planned as the primary source); a dashboard renders the advisory, and every field is logged with provenance.
+
+\noindent\textbf{Policy training.}
+The deployed policy was trained with PPO in a microscopic simulator: a shared policy controlling two vehicles among eight heterogeneous simulated human drivers on a ring, 3{,}000 updates of 256 steps, roughly ninety minutes per seed on a single desktop CPU. Five seeds were trained, one of them under sensing noise matched to the deployment measurements (100\,m range, 1.5\,m position noise, 0.15\,m/s speed noise). One training lesson transfers: with a dense speed reward, a one-step crash cost is invisible and the greedy policy collapses to a constant ``fast''; an explicit crash penalty restored gap-conditioned behavior. In simulation the learned policy matches a hand-designed cooperative-smoothing controller on flow, mean speeds of 11.8--12.6 versus 11.1\,m/s, and does not beat it, while an uncontrolled stream collapses into stop-and-go under the same demand. We state this plainly: the claim is the behavior's shape and its edge feasibility, not a simulation leaderboard.
 
 \begin{table}[t]
 \centering
-\caption{Prototype measurements on Jetson Orin Nano. These numbers ground edge feasibility, not decentralized traffic-control effectiveness.}
+\caption{Measured prototype performance on a Jetson Orin Nano developer kit. Scripted drives replay real dashcam footage with a scripted GPS profile through the live detector-to-advisory stack, paced at 30\,Hz. These numbers ground edge feasibility, not traffic-control effectiveness.}
 \label{tab:jetson}
 \small
 \resizebox{\columnwidth}{!}{%
 \begin{tabular}{p{0.31\linewidth}p{0.29\linewidth}p{0.29\linewidth}}
 \toprule
-\textbf{Component} & \textbf{Measured point} & \textbf{Use in system} \\
+\textbf{Component} & \textbf{Measured point} & \textbf{Notes} \\
 \midrule
-YOLOv8n TensorRT FP16~\cite{redmon2016yolo} & 17.7 ms p50 detection & Forward vehicle detections \\
-Tracking + distance & 1.1 ms p50 & Leader gap and closing speed \\
-Observation + policy & 0.9 ms p50 & Local observation and advisory \\
-End-to-end compute & 19.8 ms p50 / 20.2 ms p95 (synthetic bench) & Capture-to-advisory path \\
-Simulated drives & 34--38 ms p95 & Real-time dashcam + scripted GPS \\
-Aggregate beacon & 2 Hz, 2 s TTL, 150 m & Nearby AV summaries \\
+YOLOv8n TensorRT FP16~\cite{redmon2016yolo} & 17.7 ms p50 (3.9 ms GPU) & Forward vehicle detections \\
+Tracking + distance & 1.1 ms p50 & Leader gap, closing speed \\
+Observation + policy & 0.9 ms p50 & Advisory proposal \\
+End-to-end compute & 19.8 / 20.2 ms p50/p95 & Unpaced bench, 48.5 FPS \\
+Scripted cruise drive & 24.2 / 25.0 ms p50/p95 & 8{,}383 ticks, 29.9 Hz \\
+Scripted braking drive & 20.1 / 21.9 ms p50/p95 & Leader closes 42 m to 5 m \\
+Ego-speed error & 0.121 m/s RMSE & Includes 4 s GPS dropout \\
+Perception coverage & 100\% / 86.8\% & Cruise / braking scenario \\
+Aggregate beacon & 2 Hz, 2 s TTL, 150 m & Tens of bytes per message \\
 \bottomrule
 \end{tabular}
 }
 \end{table}
 
-The latency and accuracy requirements are different from full autonomy. A self-regulating-car advisory does not need centimeter-accurate reconstruction of the scene; it needs stable estimates of headway, density, speed, and queue pressure at timescales relevant to human reaction and smooth longitudinal control. Our Jetson measurements suggest a plausible operating point for dashboard-grade or retrofit deployments on Jetson-class devices~\cite{nvidia2023jetson}. The prototype makes a latency-first choice: TensorRT YOLOv8n, lightweight tracking, and pinhole or width-prior distance estimation rather than a dense monocular-depth network. That choice is swappable, but it grounds the claim that the observation and advisory loop can run comfortably below a 200 ms design budget. The end-to-end figures above are a synthetic benchmark and a real-detector simulated drive; an on-road camera run is future work.
+\noindent\textbf{Measured performance.}
+Table~\ref{tab:jetson} summarizes the deployed loop. The compute path runs at a 19.8\,ms median on an unpaced bench and sustains 29.9\,Hz on paced scripted drives, with end-to-end p95 latencies of 21.9--25.0\,ms, an order of magnitude inside our 200\,ms capture-to-advisory budget. Ego-speed error over a 280\,s drive was 0.121\,m/s RMSE, at the injected noise floor and inclusive of a scripted 4\,s GPS dropout absorbed by hold-on-stale. The trained policy passed behavioral gates on both scenarios: with a leader within 60\,m it recommended the nominal bin on 100\% of ticks, on open road it recommended fast on 100\%, it held nominal through 97\% of a hard-braking approach, and its advisory churn was 31 head switches per minute against roughly 170 for a random-weights policy, low enough for a human to follow. Offline replay reproduced all 902 decisions of the braking scenario tick for tick, which makes the safety filter auditable after the fact.
 
-The communication footprint is also modest. Raw or even compressed video is orders of magnitude larger than the semantic state needed here: the congestion signal carries counts, mean speed, lane distribution, queue estimate, and merge pressure, which at a few hertz is kilobits per second per vehicle and does not grow with scene complexity the way perception sharing would.
-
-A simulated-drive harness gives a path from desk to road: it couples real dashcam footage with a scripted GPS profile and runs the full detector-to-advisory stack in real time, gating p95 latency, tick rate, GPS freshness, ego-speed error, and perception coverage. These gates do not prove that traffic control works, but they catch the systems failures (stale GPS, decode stalls, missing observations) that would otherwise contaminate a later traffic experiment.
+\noindent\textbf{Limitations.}
+The dashcam footage is borrowed, so absolute distances carry roughly a factor-of-two scale uncertainty from an assumed camera field of view; lane assignment and the sign of closing speed are invariant to it, and a one-time calibration of the mounted camera removes it. Rear and cooperation fields are currently neutral, leaving mean observation missingness at 0.477 until a rear camera and live peers are added. Advisories still flicker briefly when a leader track is first acquired near a bin boundary; a small hysteresis in the advisory layer would damp this. The driver-facing speed readout currently mirrors the raw decode rather than the filter's gap-aware cap, a display-layer gap we are closing, and an on-road run with a live camera is future work.
 
 \noindent\textbf{Toward a pilot.}
-What we establish here is edge feasibility, not a traffic-flow result. We plan to build toward the latter in a staged pilot: hardware-in-the-loop replay of many vehicles through the same stack under varying message loss, GPS delay, sensing range, and compliance; a microscopic-simulation study that replaces the predecessor's global observation with the local observation and aggregate contract of Section~\ref{sec:vision}, comparing local-only, local-plus-aggregate, and oracle global-state controllers under the same safety layer; and a closed-course study of whether advisories can be followed without uncomfortable braking or lane churn. The same pilot would exercise the model-based training of Section~\ref{sec:architecture}, testing whether a learned model cuts the interactions needed to adapt to an unseen topology.
+We plan to build from edge feasibility toward a traffic-flow result in stages: hardware-in-the-loop replay of many vehicles through this stack under swept message loss, delay, sensing range, and compliance; a microscopic-simulation study that replaces the predecessor's global observation with the local-plus-aggregate contract of Section~\ref{sec:vision}, comparing local-only, local-plus-aggregate, and oracle global-state controllers under the same safety layer; a closed-course study of whether human drivers can follow the advisories without uncomfortable braking; and, as the endpoint, a Holland-Tunnel-shaped corridor study seeding a single instrumented fleet on the feeder lanes of Section~\ref{sec:vision}. The same pilot would exercise the model-based training of Section~\ref{sec:architecture}.
+\vspace{-0.35cm}
