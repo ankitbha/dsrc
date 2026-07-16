@@ -1,4 +1,4 @@
-\begin{thebibliography}{34}
+\begin{thebibliography}{37}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
@@ -22,6 +22,12 @@ Ankit Bhardwaj, Shiva~R Iyer, Sriram Ramesh, Jerome White, and Lakshminarayanan
   Subramanian.
 \newblock Understanding sudden traffic jams: From emergence to impact.
 \newblock \emph{Development Engineering}, 8:\penalty0 100105, 2023.
+
+\bibitem[{Cambridge Mobile Telematics}(2025)]{cmt2025}
+{Cambridge Mobile Telematics}.
+\newblock Cambridge mobile telematics, 2025.
+\newblock URL \url{https://www.cmtelematics.com/}.
+\newblock Accessed: 2025-05-15.
 
 \bibitem[Cho et~al.(2023)Cho, Li, Kim, and Wu]{cho2023temporal}
 Jung-Hoon Cho, Sirui Li, Jeongyun Kim, and Cathy Wu.
@@ -132,6 +138,13 @@ Markos Papageorgiou and Apostolos Kotsialos.
 \newblock \emph{IEEE transactions on intelligent transportation systems},
   3\penalty0 (4):\penalty0 271--281, 2002.
 
+\bibitem[{Port Authority of New York and New Jersey}(2024)]{panynj2024traffic}
+{Port Authority of New York and New Jersey}.
+\newblock Traffic and volume information: Bridges and tunnels, 2024.
+\newblock URL
+  \url{https://www.panynj.gov/bridges-tunnels/en/traffic---volume-information.html}.
+\newblock Accessed: 2026-07-14.
+
 \bibitem[Redmon et~al.(2016)Redmon, Divvala, Girshick, and
   Farhadi]{redmon2016yolo}
 Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali Farhadi.
@@ -148,6 +161,12 @@ Paul~I Richards.
 {SAE International}.
 \newblock {V2X} communications message set dictionary.
 \newblock Technical Report J2735, SAE International, 2020.
+
+\bibitem[{Samsara Inc.}(2025)]{samsara2025}
+{Samsara Inc.}
+\newblock Samsara: The connected operations cloud, 2025.
+\newblock URL \url{https://www.samsara.com/}.
+\newblock Accessed: 2025-05-15.
 
 \bibitem[Seo et~al.(2017)Seo, Bayen, Kusakabe, and Asakura]{seo2017traffic}
 Toru Seo, Alexandre~M. Bayen, Takahiko Kusakabe, and Yasuo Asakura.
@@ -170,7 +189,7 @@ Raphael~E. Stern, Shumo Cui, Maria~Laura Delle~Monache, Rahul Bhadani, Matt
   Nishinari, Tadaki, and Yukawa]{sugiyama2008traffic}
 Yuki Sugiyama, Minoru Fukui, Macoto Kikuchi, Katsuya Hasebe, Akihiro Nakayama,
   Katsuhiro Nishinari, Shin-ichi Tadaki, and Satoshi Yukawa.
-\newblock Traffic jams without bottlenecks—experimental evidence for the
+\newblock Traffic jams without bottlenecks: experimental evidence for the
   physical mechanism of the formation of a jam.
 \newblock \emph{New journal of physics}, 10\penalty0 (3):\penalty0 033001,
   2008.

@@ -19,42 +19,55 @@
 \citation{bhardwaj2023understanding,sugiyama2008traffic}
 \citation{greenshields1935study,lighthill1955kinematic,richards1956shock}
 \citation{arnold1998ramp,papageorgiou2002freeway}
+\citation{stern2018dissipation}
+\citation{lee2024traffic}
 \citation{self_regulating_cars}
+\citation{cmt2025,samsara2025}
+\citation{self_regulating_cars,stern2018dissipation}
+\citation{sae2020j2735,etsi2019cam,kenney2011dedicated}
 \@writefile{toc}{\contentsline {section}{Abstract}{1}{section*.1}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
 \newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
-\citation{sae2020j2735,etsi2019cam}
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Self-regulating cars use low-rate aggregate V2V to improve each vehicle's local observability. Each car independently maintains an ego-centric digital twin and emits only safety-filtered advisories; no roadside sensor, cloud coordinator, or command exchange is in the real-time loop.\relax }}{2}{figure.caption.3}\protected@file@percent }
-\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
-\newlabel{fig:system-vision}{{1}{2}{Self-regulating cars use low-rate aggregate V2V to improve each vehicle's local observability. Each car independently maintains an ego-centric digital twin and emits only safety-filtered advisories; no roadside sensor, cloud coordinator, or command exchange is in the real-time loop.\relax }{figure.caption.3}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {2}Vision: A Road-Network Congestion Signal}{2}{section.2}\protected@file@percent }
-\newlabel{sec:vision}{{2}{2}{Vision: A Road-Network Congestion Signal}{section.2}{}}
-\citation{greenshields1935study,lighthill1955kinematic,richards1956shock}
 \citation{stern2018dissipation,lee2024traffic}
 \citation{swaroop1996string}
 \citation{tassiulas1990stability}
-\@writefile{toc}{\contentsline {section}{\numberline {3}Architecture: Ego-Centric Digital Twin}{3}{section.3}\protected@file@percent }
-\newlabel{sec:architecture}{{3}{3}{Architecture: Ego-Centric Digital Twin}{section.3}{}}
+\citation{sae2020j2735,etsi2019cam,kenney2011dedicated}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces A self-regulating car keeps the real-time loop on board: onboard sensing feeds an ego-centric digital twin, a learned policy proposes a coarse advisory, and a safety and etiquette filter bounds what is shown or executed. Low-rate aggregate summaries from nearby participants, carried over existing radios, extend observability past the camera horizon; no roadside sensor, cloud coordinator, or command exchange is in the loop.\relax }}{2}{figure.caption.3}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:system-vision}{{1}{2}{A self-regulating car keeps the real-time loop on board: onboard sensing feeds an ego-centric digital twin, a learned policy proposes a coarse advisory, and a safety and etiquette filter bounds what is shown or executed. Low-rate aggregate summaries from nearby participants, carried over existing radios, extend observability past the camera horizon; no roadside sensor, cloud coordinator, or command exchange is in the loop.\relax }{figure.caption.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}The Case for Self-Regulation}{2}{section.2}\protected@file@percent }
+\newlabel{sec:vision}{{2}{2}{The Case for Self-Regulation}{section.2}{}}
+\citation{panynj2024traffic}
+\citation{stern2018dissipation}
+\citation{self_regulating_cars}
 \citation{self_regulating_cars}
 \citation{sutton1991dyna,janner2019trust,hafner2020dream}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Architecture: Minimal Changes to the Vehicle}{3}{section.3}\protected@file@percent }
+\newlabel{sec:architecture}{{3}{3}{Architecture: Minimal Changes to the Vehicle}{section.3}{}}
 \citation{self_regulating_cars}
 \citation{Yan_2023,cho2023temporal,fridman2018human}
-\citation{redmon2016yolo}
+\citation{cmt2025,samsara2025}
+\citation{self_regulating_cars}
 \citation{nvidia2023jetson}
+\citation{redmon2016yolo}
+\citation{yang2024depth}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Prototype and Measurements}{4}{section.4}\protected@file@percent }
+\newlabel{sec:eval}{{4}{4}{Prototype and Measurements}{section.4}{}}
+\citation{redmon2016yolo}
 \citation{stern2018dissipation}
 \citation{wu2017flow,vinitsky2018benchmarks,kreidieh2018dissipating}
 \citation{lee2024traffic}
+\citation{self_regulating_cars}
 \citation{sae2020j2735,etsi2019cam,kenney2011dedicated}
 \citation{etsi2023cpm}
 \citation{seo2017traffic,herrera2010evaluation}
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Prototype measurements on Jetson Orin Nano. These numbers ground edge feasibility, not decentralized traffic-control effectiveness.\relax }}{5}{table.caption.4}\protected@file@percent }
-\newlabel{tab:jetson}{{1}{5}{Prototype measurements on Jetson Orin Nano. These numbers ground edge feasibility, not decentralized traffic-control effectiveness.\relax }{table.caption.4}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {4}Feasibility: What We Can Ground Today}{5}{section.4}\protected@file@percent }
-\newlabel{sec:eval}{{4}{5}{Feasibility: What We Can Ground Today}{section.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Measured prototype performance on a Jetson Orin Nano developer kit. Scripted drives replay real dashcam footage with a scripted GPS profile through the live detector-to-advisory stack, paced at 30\,Hz. These numbers ground edge feasibility, not traffic-control effectiveness.\relax }}{5}{table.caption.4}\protected@file@percent }
+\newlabel{tab:jetson}{{1}{5}{Measured prototype performance on a Jetson Orin Nano developer kit. Scripted drives replay real dashcam footage with a scripted GPS profile through the live detector-to-advisory stack, paced at 30\,Hz. These numbers ground edge feasibility, not traffic-control effectiveness.\relax }{table.caption.4}{}}
 \@writefile{toc}{\contentsline {section}{\numberline {5}Related Work}{5}{section.5}\protected@file@percent }
 \newlabel{sec:related}{{5}{5}{Related Work}{section.5}{}}
 \citation{arnold1998ramp,papageorgiou2002freeway,scats,scoot}
 \citation{Yan_2023,cho2023temporal,fridman2018human}
+\citation{cmt2025,samsara2025}
 \citation{nvidia2023jetson,redmon2016yolo,yang2024depth}
 \citation{kang2017noscope,kang2018blazeit}
 \@writefile{toc}{\contentsline {section}{\numberline {6}Discussion: Open Networking Questions}{6}{section.6}\protected@file@percent }
@@ -64,37 +77,40 @@
 \bibcite{arnold1998ramp}{{1}{1998}{{Arnold}}{{}}}
 \bibcite{self_regulating_cars}{{2}{2026}{{Authors}}{{}}}
 \bibcite{bhardwaj2023understanding}{{3}{2023}{{Bhardwaj et~al.}}{{Bhardwaj, Iyer, Ramesh, White, and Subramanian}}}
-\bibcite{cho2023temporal}{{4}{2023}{{Cho et~al.}}{{Cho, Li, Kim, and Wu}}}
-\bibcite{lee2024traffic}{{5}{2024}{{CIRCLES Consortium}}{{}}}
-\bibcite{etsi2019cam}{{6}{2019}{{ETSI}}{{}}}
-\bibcite{etsi2023cpm}{{7}{2023}{{ETSI}}{{}}}
-\bibcite{fridman2018human}{{8}{2018}{{Fridman}}{{}}}
-\bibcite{greenshields1935study}{{9}{1935}{{Greenshields et~al.}}{{Greenshields, Bibbins, Channing, and Miller}}}
-\bibcite{hafner2020dream}{{10}{2020}{{Hafner et~al.}}{{Hafner, Lillicrap, Ba, and Norouzi}}}
-\bibcite{herrera2010evaluation}{{11}{2010}{{Herrera et~al.}}{{Herrera, Work, Herring, Ban, Jacobson, and Bayen}}}
-\bibcite{janner2019trust}{{12}{2019}{{Janner et~al.}}{{Janner, Fu, Zhang, and Levine}}}
-\bibcite{kang2017noscope}{{13}{2017}{{Kang et~al.}}{{Kang, Emmons, Abuzaid, Bailis, and Zaharia}}}
-\bibcite{kang2018blazeit}{{14}{2018}{{Kang et~al.}}{{Kang, Bailis, and Zaharia}}}
-\bibcite{kenney2011dedicated}{{15}{2011}{{Kenney}}{{}}}
-\bibcite{kreidieh2018dissipating}{{16}{2018}{{Kreidieh et~al.}}{{Kreidieh, Wu, and Bayen}}}
-\bibcite{lighthill1955kinematic}{{17}{1955}{{Lighthill and Whitham}}{{}}}
-\bibcite{nvidia2023jetson}{{18}{2023}{{NVIDIA Corporation}}{{}}}
-\bibcite{papageorgiou2002freeway}{{19}{2002}{{Papageorgiou and Kotsialos}}{{}}}
-\bibcite{redmon2016yolo}{{20}{2016}{{Redmon et~al.}}{{Redmon, Divvala, Girshick, and Farhadi}}}
-\bibcite{richards1956shock}{{21}{1956}{{Richards}}{{}}}
-\bibcite{sae2020j2735}{{22}{2020}{{SAE International}}{{}}}
-\bibcite{seo2017traffic}{{23}{2017}{{Seo et~al.}}{{Seo, Bayen, Kusakabe, and Asakura}}}
-\bibcite{stern2018dissipation}{{24}{2018}{{Stern et~al.}}{{Stern, Cui, Delle~Monache, Bhadani, Bunting, Churchill, Hamilton, Haulcy, Pohlmann, Wu, Piccoli, Seibold, Sprinkle, and Work}}}
-\bibcite{sugiyama2008traffic}{{25}{2008}{{Sugiyama et~al.}}{{Sugiyama, Fukui, Kikuchi, Hasebe, Nakayama, Nishinari, Tadaki, and Yukawa}}}
-\bibcite{sutton1991dyna}{{26}{1991}{{Sutton}}{{}}}
-\bibcite{swaroop1996string}{{27}{1996}{{Swaroop and Hedrick}}{{}}}
-\bibcite{tassiulas1990stability}{{28}{1990}{{Tassiulas and Ephremides}}{{}}}
-\bibcite{scats}{{29}{2024}{{Transport for New South Wales}}{{}}}
-\bibcite{scoot}{{30}{2024}{{Transport Research Laboratory (TRL)}}{{}}}
-\bibcite{vinitsky2018benchmarks}{{31}{2018}{{Vinitsky et~al.}}{{Vinitsky, Kreidieh, Flem, Kheterpal, Jang, Wu, Wu, Liaw, Liang, and Bayen}}}
-\bibcite{wu2017flow}{{32}{2017}{{Wu et~al.}}{{Wu, Kreidieh, Parvate, Vinitsky, and Bayen}}}
-\bibcite{Yan_2023}{{33}{2023}{{Yan et~al.}}{{Yan, Kreidieh, Vinitsky, Bayen, and Wu}}}
-\bibcite{yang2024depth}{{34}{2024}{{Yang et~al.}}{{Yang, Kang, Huang, Xu, Feng, and Zhao}}}
+\bibcite{cmt2025}{{4}{2025}{{Cambridge Mobile Telematics}}{{}}}
+\bibcite{cho2023temporal}{{5}{2023}{{Cho et~al.}}{{Cho, Li, Kim, and Wu}}}
+\bibcite{lee2024traffic}{{6}{2024}{{CIRCLES Consortium}}{{}}}
+\bibcite{etsi2019cam}{{7}{2019}{{ETSI}}{{}}}
+\bibcite{etsi2023cpm}{{8}{2023}{{ETSI}}{{}}}
+\bibcite{fridman2018human}{{9}{2018}{{Fridman}}{{}}}
+\bibcite{greenshields1935study}{{10}{1935}{{Greenshields et~al.}}{{Greenshields, Bibbins, Channing, and Miller}}}
+\bibcite{hafner2020dream}{{11}{2020}{{Hafner et~al.}}{{Hafner, Lillicrap, Ba, and Norouzi}}}
+\bibcite{herrera2010evaluation}{{12}{2010}{{Herrera et~al.}}{{Herrera, Work, Herring, Ban, Jacobson, and Bayen}}}
+\bibcite{janner2019trust}{{13}{2019}{{Janner et~al.}}{{Janner, Fu, Zhang, and Levine}}}
+\bibcite{kang2017noscope}{{14}{2017}{{Kang et~al.}}{{Kang, Emmons, Abuzaid, Bailis, and Zaharia}}}
+\bibcite{kang2018blazeit}{{15}{2018}{{Kang et~al.}}{{Kang, Bailis, and Zaharia}}}
+\bibcite{kenney2011dedicated}{{16}{2011}{{Kenney}}{{}}}
+\bibcite{kreidieh2018dissipating}{{17}{2018}{{Kreidieh et~al.}}{{Kreidieh, Wu, and Bayen}}}
+\bibcite{lighthill1955kinematic}{{18}{1955}{{Lighthill and Whitham}}{{}}}
+\bibcite{nvidia2023jetson}{{19}{2023}{{NVIDIA Corporation}}{{}}}
+\bibcite{papageorgiou2002freeway}{{20}{2002}{{Papageorgiou and Kotsialos}}{{}}}
+\bibcite{panynj2024traffic}{{21}{2024}{{Port Authority of New York and New Jersey}}{{}}}
+\bibcite{redmon2016yolo}{{22}{2016}{{Redmon et~al.}}{{Redmon, Divvala, Girshick, and Farhadi}}}
+\bibcite{richards1956shock}{{23}{1956}{{Richards}}{{}}}
+\bibcite{sae2020j2735}{{24}{2020}{{SAE International}}{{}}}
+\bibcite{samsara2025}{{25}{2025}{{Samsara Inc.}}{{}}}
+\bibcite{seo2017traffic}{{26}{2017}{{Seo et~al.}}{{Seo, Bayen, Kusakabe, and Asakura}}}
+\bibcite{stern2018dissipation}{{27}{2018}{{Stern et~al.}}{{Stern, Cui, Delle~Monache, Bhadani, Bunting, Churchill, Hamilton, Haulcy, Pohlmann, Wu, Piccoli, Seibold, Sprinkle, and Work}}}
+\bibcite{sugiyama2008traffic}{{28}{2008}{{Sugiyama et~al.}}{{Sugiyama, Fukui, Kikuchi, Hasebe, Nakayama, Nishinari, Tadaki, and Yukawa}}}
+\bibcite{sutton1991dyna}{{29}{1991}{{Sutton}}{{}}}
+\bibcite{swaroop1996string}{{30}{1996}{{Swaroop and Hedrick}}{{}}}
+\bibcite{tassiulas1990stability}{{31}{1990}{{Tassiulas and Ephremides}}{{}}}
+\bibcite{scats}{{32}{2024}{{Transport for New South Wales}}{{}}}
+\bibcite{scoot}{{33}{2024}{{Transport Research Laboratory (TRL)}}{{}}}
+\bibcite{vinitsky2018benchmarks}{{34}{2018}{{Vinitsky et~al.}}{{Vinitsky, Kreidieh, Flem, Kheterpal, Jang, Wu, Wu, Liaw, Liang, and Bayen}}}
+\bibcite{wu2017flow}{{35}{2017}{{Wu et~al.}}{{Wu, Kreidieh, Parvate, Vinitsky, and Bayen}}}
+\bibcite{Yan_2023}{{36}{2023}{{Yan et~al.}}{{Yan, Kreidieh, Vinitsky, Bayen, and Wu}}}
+\bibcite{yang2024depth}{{37}{2024}{{Yang et~al.}}{{Yang, Kang, Huang, Xu, Feng, and Zhao}}}
 \newlabel{tocindent-1}{0pt}
 \newlabel{tocindent0}{0pt}
 \newlabel{tocindent1}{4.65pt}
