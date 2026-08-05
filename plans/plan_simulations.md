@@ -259,7 +259,7 @@ The current repository is organized like this, with world-model additions planne
 
 ```text
 dsrc/
-  REDME.md
+  README.md
 
   configs/
     topology/
