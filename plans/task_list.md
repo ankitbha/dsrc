@@ -1,6 +1,6 @@
 # DSRC Project Task List
 
-This task list is status-aware. The simulator foundation is already substantially implemented, so the remaining work should first complete the full world-model code path and experiment-launch infrastructure. Final training, evaluation sweeps, and paper plots happen only after the implementation and launch scripts are in place.
+This task list is status-aware. The simulator foundation is already substantially implemented and the deployment prototype is code-complete and validated on simulated drives, so the remaining work is closing the prototype's hardware loop, converting placeholder observation fields into measured ones, and building experiment-launch infrastructure. Final training, evaluation sweeps, and paper plots happen only after the implementation and launch scripts are in place.
 
 ## A. Simulator Foundation Status
 
@@ -36,68 +36,87 @@ The following foundation is substantially implemented and should be maintained w
 10. **Model-free RL entrypoints**
     Shared PPO, IPPO, MAPPO, learned-policy evaluation, checkpointing/resume, and smoke validation.
 
+## A2. Deployment Prototype Status
+
+The prototype is code-complete, benchmarked, and validated end-to-end on simulated drives with a trained policy. Maintain rather than rebuild:
+
+1. **Pipeline and entrypoints**
+   Capture-to-advisory loop, live demo, selfcheck, headless and scenario modes, replay, latency bench, and gated run scoring.
+
+2. **Perception and observation**
+   TensorRT detector, lightweight tracker, geometric distance estimation, and the full observation builder with per-field provenance tags.
+
+3. **Policy and advisory path**
+   Vendored sim contract with equality tests, checkpoint export, fast inference runtime, and the driver-facing advisory decode.
+
+4. **Simulated-drive harness**
+   Scripted-GPS twin, scenario definitions, test footage, and PASS/FAIL gates on latency, tick rate, GPS freshness, ego-speed error, and perception coverage.
+
 ## B. Finish Implementation Before Final Experiments
 
 Do these tasks before running final paper sweeps.
 
-1. **Add world-model package skeleton**
-   Create `src/world_model/` with graph, field, data, model, policy, loss, reward, and evaluation modules.
+1. **Resolve GPS device permissions**
+   Add the operator account to the serial device group, re-login, and confirm the observed fix rate through selfcheck.
 
-2. **Build GraphSpec adapter**
-   Convert existing `TopologySpec` objects into `GraphSpec` using canonical segment IDs, segment lengths, lane counts, lane-segment maps, merge nodes, and bottleneck segments.
+2. **Attach and exercise the camera**
+   Attach the USB camera, pass selfcheck, run a desk session, and confirm detections and distances are sane.
 
-3. **Implement traffic field extractor**
-   Convert highway-env vehicle state into edge-bin traffic fields `Z_t` with density, speed, flow, AV/human channels, speed variance, occupancy, and jam indicators.
+3. **Record and replay a live run**
+   Capture a real logged run and replay it to confirm tick-for-tick decision agreement on real data.
 
-4. **Implement executed-action field aggregator**
-   Convert actually executed safe AV interventions into edge-bin action fields `U_t`, including AV count, target speed/headway summaries, lane preference fractions, merge-mode fractions, and action intensity.
+4. **Calibrate the mounted camera**
+   Run the calibration helpers, commit the resulting camera values to config, and set the hood line if the mount sees the hood.
 
-5. **Implement world-model transition dataset**
-   Add `WorldModelTransition`, dataset writer/loader, storage format, metadata, and same-topology batching.
+5. **Add advisory hysteresis**
+   Damp the leader-acquisition flicker at the fast/nominal bin boundary and re-measure the advisory switch rate.
 
-6. **Add data collection script**
-   Add `scripts/collect_world_model_data.py` to collect simulator transitions across topologies, demand profiles, seeds, and controllers.
+6. **Fix the driver-facing readout**
+   Show the safety filter's gap-aware cap rather than the raw decode.
 
-7. **Implement functional graph world model**
-   Add input encoding, edge-wise Conv1D dynamics, relation-typed graph message passing, residual prediction, and bounded output handling.
+7. **Run the in-vehicle advisory-only drive**
+   Windshield mount plus the passenger-operated, non-actuating drive protocol from the deployment plan.
 
-8. **Implement world-model losses and validation metrics**
-   Add one-step prediction loss, multi-step rollout loss, flow consistency, bounds loss, optional conservation loss, reward auxiliary loss, and prediction reports.
+8. **Add rear sensing**
+   Second camera to convert the follower and rear-gap fields from neutral fallback into measured values.
 
-9. **Add world-model baselines and ablations**
-   Add persistence, scalar-GNN, and no-graph Conv1D models so the functional edge-field contribution can be isolated.
+9. **Add OBD-II speed**
+   Prefer a fresh OBD speed over GPS, and use the GPS-vs-OBD comparison as an observation-quality measurement.
 
-10. **Add world-model train/evaluate scripts**
-    Add `scripts/train_world_model.py`, `scripts/evaluate_world_model.py`, and `scripts/validate_world_model_pipeline.py`.
+10. **Run the two-unit cooperative demo**
+    Enable beacons on two units so the nearby-AV and cooperation fields come live while preserving the aggregate-only constraint.
 
-11. **Add model-based policy hook**
-    Add a frozen-world-model imagined rollout objective that can be combined with model-free PPO/MAPPO loss. Use differentiable soft safety penalties only as training regularizers, while final execution still goes through the common environment safety layer.
+11. **Add map matching**
+    Derive segment and distance-to-merge from a preloaded route so the two sim-parity fields become measured. Note that the simulator itself currently hardcodes `distance_to_next_merge = 0.0`, so this task has a simulator-side counterpart.
 
-12. **Add model-based policy script**
-    Add `scripts/train_model_based_policy.py` with an `alpha=0` setting that reproduces model-free behavior and positive-alpha settings for imagined rollout training.
+12. **Add the local-plus-aggregate observation regime**
+    Support local-only, aggregate-assisted, and oracle/global observation conditions behind one config switch so they can be compared under a single safety layer.
 
-13. **Add experiment matrix launcher**
+13. **Add partial-deployment sweep support**
+    Config and runner support for message loss, delay, staleness, compliance, and penetration sweeps, including bottleneck-seeded versus uniform placement at equal fleet size.
+
+14. **Add experiment matrix launcher**
     Add `scripts/run_experiment_matrix.py` with dry-run and launch modes for all paper experiments.
 
-14. **Add plot/table generation scripts**
-    Add scripts for world-model prediction plots, speed heatmaps, queues, throughput, branch fairness, merge delay, spillback, safety diagnostics, and deployment metrics.
+15. **Add plot/table generation scripts**
+    Add scripts for speed heatmaps, queues, throughput, branch fairness, merge delay, spillback, safety diagnostics, observation-regime comparisons, and deployment metrics.
 
-15. **Package configs**
-    Add `configs/world_model/`, `configs/training/model_based_policy.yaml`, and experiment configs for world-model data collection, world-model training, model-based policy training, and final evaluation.
+16. **Package configs**
+    Add experiment configs for the observation-regime comparison, partial-deployment sweeps, and final evaluation.
 
 ## C. Validation Before Final Sweeps
 
-1. **Validate current simulator stack**
+1. **Validate the current simulator stack**
    Keep running project interface, topology, baseline, metrics, safety, and model-free training smoke tests.
 
-2. **Validate world-model data path**
-   Confirm graph construction, field extraction, action aggregation, transition writing, transition loading, and shape consistency for ring, merge, and inverted tree.
+2. **Validate observation-contract parity**
+   Whenever the simulator's observation contract changes, update the vendored prototype contract, re-run the contract-equality tests, and re-export the policy bundle.
 
-3. **Validate world-model prediction**
-   Require the functional graph model to beat persistence on one-step and multi-step prediction before using it for control.
+3. **Validate the prototype gates**
+   Re-run both shipped scenarios and require all gates to pass after any contract, calibration, or advisory change.
 
-4. **Validate model-based policy hook**
-   Confirm imagined rollout gradients update the policy, not the frozen world model, and `alpha=0` matches model-free behavior.
+4. **Validate the observation regimes**
+   Confirm that local-only, aggregate-assisted, and oracle conditions differ only in observation content, and that the aggregate path still degrades to local-only when no peers are heard.
 
 5. **Validate launch scripts**
    Dry-run the complete experiment matrix and verify every expected output path before starting long training jobs.
@@ -109,23 +128,23 @@ Run final experiments only after Sections B and C are complete.
 1. **Model-free reference experiments**
    Run baselines, Shared PPO, IPPO, and MAPPO across the selected topology/demand/human-model matrix.
 
-2. **World-model prediction experiments**
-   Compare persistence, scalar-GNN, no-graph Conv1D, functional graph, and functional graph plus physics losses.
+2. **Observation-regime experiments**
+   Compare local-only, aggregate-assisted, and oracle controllers under one safety layer to quantify what the aggregate signal buys.
 
-3. **Model-based policy experiments**
-   Compare model-free policies against model-based policies using functional graph world models and ablations.
+3. **Partial-deployment experiments**
+   Sweep penetration, compliance, message loss, delay, and sensing noise, and compare bottleneck seeding against uniform adoption at equal fleet size.
 
 4. **Robustness sweeps**
-   Sweep AV penetration, demand, human-driver model, sensing range/noise/latency, and topology.
+   Sweep demand, human-driver model, sensing range/noise/latency, and topology.
 
 5. **Safety and obstruction analysis**
    Report collisions, hard braking, follower disruption, lane-change rates, low-speed-uncongested behavior, all-lane low-speed occupancy, rolling-roadblock score, and branch starvation.
 
 6. **Deployment prototype metrics**
-   Report Jetson advisory-only latency, FPS, policy inference time, observation quality, and sim-to-prototype observation alignment.
+   Report advisory-only latency, FPS, policy inference time, ego-speed accuracy under dropout, observation quality and missingness, and sim-to-prototype observation alignment.
 
 7. **Paper figures and tables**
-   Generate prediction-error tables, sample-efficiency curves, highway-env final performance tables, speed heatmaps, queue plots, fairness plots, ablation tables, and deployment feasibility figures.
+   Generate the deployment feasibility table, highway-env final performance tables, speed heatmaps, queue plots, fairness plots, observation-regime and partial-deployment tables, and the observation provenance breakdown.
 
 ## E. Reproducibility Package
 
@@ -139,4 +158,4 @@ Run final experiments only after Sections B and C are complete.
    Document SIF/overlay use, output roots, seeds, and expected artifacts.
 
 4. **Artifact manifest**
-   Standardize where checkpoints, datasets, metrics, plots, and validation summaries live.
+   Standardize where checkpoints, metrics, plots, prototype run logs, and validation summaries live.

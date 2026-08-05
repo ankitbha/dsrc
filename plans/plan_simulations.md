@@ -255,7 +255,7 @@ Jain fairness over branch throughputs
 
 # 3. Updated project structure
 
-The current repository is organized like this, with world-model additions planned under the same conventions:
+The current repository is organized like this:
 
 ```text
 dsrc/
@@ -290,12 +290,6 @@ dsrc/
       shared_ppo.yaml
       ippo.yaml
       mappo.yaml
-      model_based_policy.yaml        # planned
-
-    world_model/                     # planned
-      functional_graph.yaml
-      scalar_gnn.yaml
-      persistence.yaml
 
   src/
     envs/
@@ -348,16 +342,6 @@ dsrc/
       rollout_buffer.py
       trainers.py
 
-    world_model/                    # planned
-      graph/
-      fields/
-      data/
-      models/
-      policies/
-      losses.py
-      rewards.py
-      evaluation.py
-
   scripts/
     run_baseline.py
     train_policy.py
@@ -365,18 +349,12 @@ dsrc/
     validate_project_interface.py
     validate_topology_baselines.py
     validate_training_eval.py
-    collect_world_model_data.py      # planned
-    train_world_model.py             # planned
-    evaluate_world_model.py          # planned
-    train_model_based_policy.py      # planned
-    validate_world_model_pipeline.py # planned
     run_experiment_matrix.py         # planned
 
   outputs/
     checkpoints/
     metrics/
     validation/
-    world_model/                     # planned datasets/checkpoints/evaluation
 ```
 
 ---

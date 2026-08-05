@@ -3,19 +3,18 @@
 This is the top-level paper-facing roadmap. The subsystem details remain in:
 
 - `plans/plan_simulations.md`
-- `plans/plan_world_model.md`
 - `plans/plan_deployment.md`
 - `plans/task_list.md`
 
 ## 1. Paper Claim
 
-Sparse autonomous vehicles can regulate traffic from inside the flow using only local sensing, conservative public actions, and a common execution-time safety layer. The main technical contribution is a differentiable functional graph world model that represents each road segment as a spatial traffic field and uses learned graph dynamics for model-based policy improvement.
+Sparse autonomous vehicles can regulate traffic from inside the flow using only local sensing, conservative public actions, and a common execution-time safety layer. The contribution is a deployability argument backed by a working system: how little must change in an ordinary vehicle for it to self-regulate, and how few such vehicles a road network needs.
 
-Final performance claims must be measured in the original highway-env simulator through the project environment wrapper. Learned-model rollouts are used for training, prediction evaluation, and ablation, not as the final evaluator.
+Two consequences shape everything below. Nothing central sits in the real-time loop: the cloud trains and ships model updates offline, and communication is an observability hint, not a control dependency. And performance claims are separated by kind — traffic-control effects are measured in the original highway-env simulator through the project environment wrapper, while edge-feasibility claims are measured on the prototype hardware. Neither substitutes for the other.
 
 ## 2. System Stack
 
-The project has three connected layers.
+The project has two connected layers.
 
 ### Simulator and control foundation
 
@@ -34,43 +33,29 @@ baseline controllers
 model-free PPO/IPPO/MAPPO
 ```
 
-This foundation establishes that sparse AVs can act as mobile actuators through smooth speed/headway targets and conservative lane preferences.
-
-### Functional graph world model
-
-The main method adds:
-
-```text
-TopologySpec -> GraphSpec
-vehicle state -> traffic field Z_t
-executed AV interventions -> action field U_t
-(Z_t, U_t, G) -> differentiable world model -> Z_{t+1}
-imagined rollout loss -> model-based policy improvement
-final policy evaluation -> highway-env
-```
-
-Each graph edge is a road segment with a 1D traffic field, not just one scalar node feature. This is the key methodological distinction.
+This foundation establishes that sparse AVs can act as mobile actuators through smooth speed/headway targets and conservative lane preferences, and it is where every traffic-control number comes from.
 
 ### Advisory-only deployment prototype
 
-The deployment plan demonstrates feasibility of local observation and policy inference on edge hardware:
+The deployment plan demonstrates that local observation and policy inference run on vehicle-edge hardware:
 
 ```text
 camera/GPS/optional OBD
 perception and tracking
-observation builder
+observation builder (sim-parity contract)
 trained actor inference
+safety/etiquette filter
 dashboard and logs
 no actuation
 ```
 
-Deployment supports the practical story but is not the core control evaluation.
+The prototype is non-actuating. It is edge-feasibility evidence and the deployment argument's proof of existence, not an autonomous driving deployment.
 
 ## 3. Implementation Roadmap
 
-### Phase 1: Preserve and validate simulator foundation
+### Phase 1: Preserve and validate the simulator foundation
 
-Maintain the current environment, topology, demand, sensing, safety, metrics, baselines, and model-free RL stack. Continue using smoke validations before adding major world-model changes.
+Maintain the current environment, topology, demand, sensing, safety, metrics, baselines, and model-free RL stack. Keep running smoke validations before any behavioral change.
 
 Primary scripts:
 
@@ -83,64 +68,48 @@ scripts/validate_topology_baselines.py
 scripts/validate_training_eval.py
 ```
 
-### Phase 2: Build world-model data path
+### Phase 2: Close the prototype hardware loop
 
-Add `src/world_model/` with graph adapters, field extraction, executed-action aggregation, transition schemas, and dataset storage.
-
-Deliverables:
-
-```text
-GraphSpec for all current topologies
-TrafficFieldExtractor
-ActionFieldAggregator
-WorldModelTransition dataset
-scripts/collect_world_model_data.py
-scripts/validate_world_model_pipeline.py
-```
-
-### Phase 3: Train and validate world models
-
-Implement the functional graph model and ablations:
-
-```text
-persistence baseline
-scalar-GNN world model
-no-graph Conv1D model
-functional graph world model
-functional graph + physics losses
-```
+The prototype is code-complete and validated on simulated drives. Remaining work is hardware, not software.
 
 Deliverables:
 
 ```text
-scripts/train_world_model.py
-scripts/evaluate_world_model.py
-world-model prediction reports
-multi-step rollout validation
+GPS device permissions resolved and rate confirmed
+camera attached, selfcheck passing
+mounted-camera calibration committed to config
+recorded live run replayed for decision agreement
+advisory hysteresis to damp leader-acquisition flicker
+driver-facing readout showing the filtered cap, not the raw decode
+in-vehicle advisory-only drive
 ```
 
-Acceptance:
+### Phase 3: Extend prototype observation coverage
 
-```text
-functional graph model beats persistence on one-step and multi-step prediction
-functional edge-field representation beats scalar graph ablation
-graph message passing improves over no-graph Conv1D where topology matters
-```
-
-### Phase 4: Add model-based policy improvement
-
-Freeze the trained world model and add an imagined rollout objective as an auxiliary policy loss.
+Roughly half the deployed observation is currently neutral fallback. Each item below converts placeholders into measured fields.
 
 Deliverables:
 
 ```text
-src/world_model/policies/
-scripts/train_model_based_policy.py
-configs/training/model_based_policy.yaml
-alpha sweep where alpha=0 reproduces model-free behavior
+rear camera for follower and rear-gap fields
+OBD-II speed as the primary ego-speed source
+two-unit cooperative demo for nearby-AV and cooperation fields
+map matching for distance-to-merge and downstream bottleneck
 ```
 
-Final policies still execute in `HighwayTopologyEnv` and pass through the common runtime safety layer.
+### Phase 4: Local-plus-aggregate simulation study
+
+Replace global observation with the local-plus-aggregate contract and quantify what the aggregate buys, under one safety layer.
+
+Deliverables:
+
+```text
+local-only, aggregate-assisted, and oracle controller comparison
+message loss, delay, and staleness sweeps
+sensing range and noise sweeps
+compliance and penetration sweeps
+bottleneck seeding vs uniform adoption at equal fleet size
+```
 
 ### Phase 5: Build experiment launch infrastructure
 
@@ -155,7 +124,7 @@ plot/table scripts
 artifact manifest
 ```
 
-The launcher should cover model-free baselines, world-model prediction runs, model-based policy runs, ablations, and deployment metrics.
+The launcher should cover model-free baselines, learned-policy runs, robustness sweeps, and deployment metrics.
 
 ### Phase 6: Run final experiments and analysis
 
@@ -164,8 +133,7 @@ Only after all code paths and launchers are in place:
 ```text
 run final training sweeps
 run highway-env final evaluations
-run world-model prediction evaluations
-run ablations
+run robustness and partial-deployment sweeps
 run deployment prototype measurements
 generate figures and tables
 ```
@@ -222,10 +190,14 @@ cooperative_smoothing
 SharedPPO
 IPPO
 MAPPO
-scalar-GNN model-based policy
-no-graph Conv1D model-based policy
-functional graph model-based policy
-functional graph + physics losses
+```
+
+### Observation regimes
+
+```text
+local-only
+local plus aggregate
+oracle/global (reference upper bound, not a deployable condition)
 ```
 
 ### Primary evaluation axes
@@ -245,24 +217,24 @@ collisions
 follower disruption
 lane-change rate
 rolling-roadblock score
-model one-step prediction error
-model multi-step prediction error
 sample efficiency
 deployment latency/FPS
+observation quality and field provenance
 ```
 
 ## 5. Safety And Evaluation Principles
 
 - All controllers propose public v2 AV actions.
 - The common DSRC safety layer in `HighwayTopologyEnv.step()` is the runtime enforcement path.
-- Imagined world-model rollouts may include differentiable soft safety penalties as training regularizers.
-- The learned world model is never the final evaluator.
+- The action to train on and measure is the one actually executed, not the raw proposal.
 - Humans must remain passable when safe; performance must not come from obstruction.
 - Branch fairness is required for merge/tree results.
+- A network gain is never acceptable if bought by making human traffic less safe: report hard braking, collisions, and follower delay alongside every throughput result.
+- The safety layer is specified, tested, and audited separately from the learned controller.
 
 ## 6. Deployment Link
 
-The Jetson prototype demonstrates that the local observation and actor inference pipeline can plausibly run on vehicle-edge hardware.
+The Jetson prototype is a first-class result, not an appendix. It establishes that the observation builder, actor inference, and safety filter fit inside a real-time budget on commodity hardware.
 
 Deployment outputs:
 
@@ -270,20 +242,22 @@ Deployment outputs:
 perception FPS
 policy inference latency
 end-to-end latency
-observation quality
+ego-speed accuracy under dropout
+observation quality and missingness
+sim-to-prototype observation alignment
 example dashboard
 advisory-only safety statement
 ```
 
-The prototype is non-actuating and should be presented as edge-feasibility evidence, not as an autonomous driving deployment.
+Two properties carry the deployment argument and should be reported explicitly: the observation contract is shared bit-for-bit with training, and every field is logged with its provenance, so a reader can see which values were measured and which were neutral fallbacks.
 
 ## 7. Final Paper Story
 
 The paper should read as:
 
-1. Simulator foundation: sparse AVs interact with traffic using local observations and safe public actions.
-2. Baselines and model-free RL establish the traffic-control setting.
-3. Functional graph world model is introduced as the main contribution.
-4. World-model prediction ablations prove the value of edge-field graph dynamics.
-5. Model-based policy results show whether the learned surrogate improves sample efficiency, transfer, or final highway-env performance.
-6. Deployment prototype shows the local observation and inference stack can run on edge hardware in advisory-only mode.
+1. Highway congestion is a distributed stability problem, and the vehicle-side actuator has already been demonstrated; what remains is deployment.
+2. Self-regulation needs no coordinator: each vehicle decides alone, and communication carries bounded aggregate state rather than commands.
+3. The bill of changes that makes one ordinary car self-regulating, ending in a bounded advisory and a safety/etiquette filter.
+4. A working edge prototype: sustained real-time operation and end-to-end latency well inside budget on commodity hardware, in advisory-only mode.
+5. A minimal deployment model: because congestion is manufactured at bottlenecks, presence in a specific traffic stream beats market share, making a single fleet a sufficient launch vehicle.
+6. The open networking questions this system raises: how little communication suffices, whether it can be private, what belongs in the cloud and how late it may be, robustness under partial deployment, and how safety should be verified.
