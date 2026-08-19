@@ -1,3 +1,13 @@
+from src.analysis.simulator_health import (
+    CellSpec,
+    ControllerSummary,
+    HealthVerdict,
+    Run,
+    assess_cell,
+    run_condition,
+    select_operating_points,
+    summarise,
+)
 from src.analysis.observation_audit import (
     AuditResult,
     FieldAudit,
@@ -12,6 +22,14 @@ from src.analysis.observation_audit import (
 
 __all__ = [
     "AuditResult",
+    "CellSpec",
+    "ControllerSummary",
+    "HealthVerdict",
+    "Run",
+    "assess_cell",
+    "run_condition",
+    "select_operating_points",
+    "summarise",
     "FieldAudit",
     "SampleSpec",
     "audit_fields",
