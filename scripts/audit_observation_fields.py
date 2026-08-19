@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -57,6 +58,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def json_safe(value: object) -> object:
+    """Replace non-finite floats with null.
+
+    `constant_value` can legitimately be an infinity, and json.dumps writes that
+    as the bare token `Infinity`, which strict parsers reject.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [json_safe(v) for v in value]
+    return value
+
+
 def verdict(audit: FieldAudit) -> str:
     if audit.n_samples == 0:
         return "no-coverage"
@@ -88,7 +104,9 @@ def write_report(result: AuditResult, output_root: Path, args: argparse.Namespac
         "by_av_count": {str(k): [dataclasses.asdict(a) for a in v] for k, v in result.per_field_by_av_count.items()},
     }
     json_path = output_root / "observation_audit.json"
-    json_path.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    # allow_nan=False so a non-finite value raises here rather than silently
+    # producing a file that strict parsers reject.
+    json_path.write_text(json.dumps(json_safe(payload), indent=2, sort_keys=True, allow_nan=False))
 
     total = sum(result.samples_by_condition.values())
     sections = [

@@ -212,11 +212,20 @@ def audit_fields(
             continue
         unique = np.unique(column)
         strictly_constant = unique.size == 1
+        finite_mask = np.isfinite(column)
         if strictly_constant:
             variance = 0.0
+            near_constant = True
+        elif bool(finite_mask.all()):
+            variance = float(np.var(column))
+            near_constant = variance < float(near_constant_variance)
         else:
-            finite = column[np.isfinite(column)]
+            # The column crosses the sensed/unsensed boundary, which is the
+            # largest move a field can make. Variance of the finite subset alone
+            # would report 0.0 and call it near-constant, inverting the verdict.
+            finite = column[finite_mask]
             variance = float(np.var(finite)) if finite.size else 0.0
+            near_constant = False
         never_left = None
         if expected is not None:
             never_left = bool(
@@ -229,7 +238,7 @@ def audit_fields(
                 unique_values=int(unique.size),
                 variance=variance,
                 is_strictly_constant=strictly_constant,
-                is_near_constant=variance < float(near_constant_variance),
+                is_near_constant=near_constant,
                 never_left_fallback=never_left,
                 constant_value=float(unique[0]) if strictly_constant else None,
             )

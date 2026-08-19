@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
+import json
+import sys
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -14,6 +19,13 @@ from src.analysis import (
 )
 from src.analysis.observation_audit import _scale_for, build_env_config, run_audit
 from src.rl.encoders import encode_local_observation, local_obs_dim
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from audit_observation_fields import json_safe  # noqa: E402
+
+
+def _reject_constant(token: str) -> float:
+    raise AssertionError(f"non-finite token in JSON: {token}")
 
 
 # --------------------------------------------------------------------------
@@ -83,6 +95,34 @@ def test_raw_infinite_column_is_coherent_and_json_safe():
     assert result.is_strictly_constant is True
     assert result.is_near_constant is True, "a constant column cannot be non-near-constant"
     assert np.isfinite(result.variance), "NaN variance serialises to invalid JSON"
+    # the record itself must survive a strict parse, not just its variance field
+    payload = json_safe(dataclasses.asdict(result))
+    json.loads(json.dumps(payload, allow_nan=False), parse_constant=_reject_constant)
+
+
+def test_column_crossing_the_sensed_boundary_is_not_near_constant():
+    """A field alternating between a real reading and the unsensed sentinel is
+    the most informative thing it can do. Taking variance over finite values
+    alone reports 0.0 and inverts that verdict."""
+    for column in (
+        [[1.0]] * 10 + [[float("inf")]],
+        [[float("inf")], [float("-inf")], [float("inf")]],
+    ):
+        result = audit_fields(np.array(column), ["f"])[0]
+        assert result.unique_values > 1
+        assert result.is_strictly_constant is False
+        assert result.is_near_constant is False, "boundary-crossing column reported as carrying no signal"
+        assert np.isfinite(result.variance)
+
+
+def test_free_flow_speeds_are_read_from_topology_config():
+    """Pins the actual values: a stub returning a constant would otherwise change
+    every speed-valued fallback without any test noticing."""
+    assert free_flow_speeds_for_topology("ring") == (25.0,)
+    assert free_flow_speeds_for_topology("straight_multilane") == (30.0,)
+    # bottleneck lanes run slower, so these topologies carry two distinct speeds
+    assert free_flow_speeds_for_topology("merge") == (24.0, 30.0)
+    assert free_flow_speeds_for_topology("inverted_tree_bottleneck") == (24.0, 30.0)
 
 
 def test_run_audit_breaks_down_by_both_axes():
