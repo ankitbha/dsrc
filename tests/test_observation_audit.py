@@ -23,6 +23,8 @@ from src.rl.encoders import encode_local_observation, local_obs_dim
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from audit_observation_fields import json_safe  # noqa: E402
 
+from src.analysis import FieldAudit  # noqa: E402
+
 
 def _reject_constant(token: str) -> float:
     raise AssertionError(f"non-finite token in JSON: {token}")
@@ -112,7 +114,8 @@ def test_column_crossing_the_sensed_boundary_is_not_near_constant():
         assert result.unique_values > 1
         assert result.is_strictly_constant is False
         assert result.is_near_constant is False, "boundary-crossing column reported as carrying no signal"
-        assert np.isfinite(result.variance)
+        # variance is undefined here: no finite value reproduces the flag
+        assert result.variance is None
 
 
 def test_free_flow_speeds_are_read_from_topology_config():
@@ -315,3 +318,42 @@ def test_wrong_width_is_rejected_not_silently_reshaped():
         audit_fields(np.zeros(7), ["a", "b"])
     with pytest.raises(ValueError):
         audit_fields(np.zeros((2, 2, 2)), ["a", "b"])
+
+
+def test_verdict_labels_are_ordered_strictest_first():
+    """The near-constant branch must not shadow the constant one: a strictly
+    constant field is also near-constant, so branch order is the only thing
+    separating the two labels in the report's headline counts."""
+    from audit_observation_fields import verdict
+
+    def record(**kw):
+        base = dict(
+            field="f", n_samples=5, unique_values=1, variance=0.0,
+            is_strictly_constant=False, is_near_constant=False,
+            never_left_fallback=None, constant_value=None,
+        )
+        base.update(kw)
+        return FieldAudit(**base)
+
+    assert verdict(record(n_samples=0)) == "no-coverage"
+    assert verdict(record(is_strictly_constant=True, is_near_constant=True)) == "constant"
+    assert verdict(record(is_near_constant=True)) == "near-constant"
+    assert verdict(record(unique_values=9, variance=1.0)) == "informative"
+
+
+def test_zero_coverage_does_not_claim_fallback_adherence():
+    """With no samples there is no evidence the field stayed at its fallback."""
+    fallbacks = encoded_fallback_candidates([25.0])
+    result = audit_fields(np.empty((0, 1)), ["nearby_av_count"], fallback_candidates=fallbacks)[0]
+    assert result.n_samples == 0
+    assert result.never_left_fallback is False
+
+
+def test_boundary_crossing_variance_is_reported_as_undefined():
+    """Reporting a finite variance that does not reproduce is_near_constant would
+    contradict the threshold rule printed in the report header."""
+    result = audit_fields(np.array([[1.0]] * 10 + [[float("inf")]]), ["f"])[0]
+    assert result.variance is None
+    assert result.is_near_constant is False
+    payload = json_safe(dataclasses.asdict(result))
+    json.loads(json.dumps(payload, allow_nan=False), parse_constant=_reject_constant)

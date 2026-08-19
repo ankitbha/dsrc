@@ -58,12 +58,14 @@ class FieldAudit:
 
     `never_left_fallback` is None for fields the observation schema defines no
     neutral fallback for; reporting False there would imply a fallback exists.
+    `variance` is None where the column crosses the sensed/unsensed boundary and
+    no finite variance would reproduce `is_near_constant`.
     """
 
     field: str
     n_samples: int
     unique_values: int
-    variance: float
+    variance: float | None
     is_strictly_constant: bool
     is_near_constant: bool
     never_left_fallback: bool | None
@@ -223,8 +225,9 @@ def audit_fields(
             # The column crosses the sensed/unsensed boundary, which is the
             # largest move a field can make. Variance of the finite subset alone
             # would report 0.0 and call it near-constant, inverting the verdict.
-            finite = column[finite_mask]
-            variance = float(np.var(finite)) if finite.size else 0.0
+            # Variance is undefined here: the finite subset's variance would be
+            # reported alongside a flag it does not reproduce.
+            variance = None
             near_constant = False
         never_left = None
         if expected is not None:

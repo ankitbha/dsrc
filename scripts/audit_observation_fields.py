@@ -89,7 +89,8 @@ def markdown_table(title: str, audits: tuple[FieldAudit, ...]) -> str:
         fallback = "n/a" if audit.never_left_fallback is None else str(audit.never_left_fallback).lower()
         lines.append(
             f"| `{audit.field}` | {audit.n_samples} | {audit.unique_values} "
-            f"| {audit.variance:.3e} | {verdict(audit)} | {fallback} |"
+            f"| {'n/a' if audit.variance is None else f'{audit.variance:.3e}'} "
+            f"| {verdict(audit)} | {fallback} |"
         )
     return "\n".join(lines) + "\n"
 
