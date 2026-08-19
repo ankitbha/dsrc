@@ -12,6 +12,7 @@ from src.analysis import (
     encoded_field_names,
     free_flow_speeds_for_topology,
 )
+from src.analysis.observation_audit import _scale_for, build_env_config, run_audit
 from src.rl.encoders import encode_local_observation, local_obs_dim
 
 
@@ -28,6 +29,83 @@ def test_field_names_match_encoder_width_and_are_unique():
     names = encoded_field_names()
     assert len(names) == local_obs_dim() == 39
     assert len(set(names)) == len(names)
+
+
+def test_field_names_align_with_encoder_columns_and_scales():
+    """Round-trip every field through the encoder with a distinct sentinel.
+
+    This is the assertion the whole audit rests on: if a name is attached to the
+    wrong column, every verdict is reported against the wrong field.
+    """
+    from src.rl.encoders import COOPERATION_FIELDS, LANE_DISTRIBUTION_LANES, LOCAL_OBS_FIELDS
+
+    names = encoded_field_names()
+    sentinels = {name: float(index + 1) for index, name in enumerate(names)}
+    observation = {field: sentinels[field] for field in LOCAL_OBS_FIELDS}
+    observation["cooperation"] = {f: sentinels[f"cooperation.{f}"] for f in COOPERATION_FIELDS}
+    observation["nearby_av_lane_distribution"] = {
+        lane: sentinels[f"nearby_av_lane_distribution.{lane}"] for lane in LANE_DISTRIBUTION_LANES
+    }
+    encoded = encode_local_observation(observation).numpy()
+    assert encoded.shape == (len(names),)
+    for index, name in enumerate(names):
+        recovered = encoded[index] * _scale_for(name)
+        assert recovered == pytest.approx(sentinels[name]), f"{name} misaligned at column {index}"
+
+
+def test_multi_candidate_fallback_accepts_any_candidate():
+    """D6: speed-valued fallbacks differ per topology, so a field sitting at the
+    second candidate must still count as never having left its fallback."""
+    candidates = {"f": (0.60, 0.75)}
+    at_second = audit_fields(np.full((5, 1), 0.75), ["f"], fallback_candidates=candidates)[0]
+    assert at_second.never_left_fallback is True
+    mixed = audit_fields(np.array([[0.60], [0.75], [0.60]]), ["f"], fallback_candidates=candidates)[0]
+    assert mixed.never_left_fallback is True
+    departed = audit_fields(np.array([[0.60], [0.99]]), ["f"], fallback_candidates=candidates)[0]
+    assert departed.never_left_fallback is False
+
+
+def test_duplicated_sensing_fields_get_matching_fallback_verdicts():
+    """src/sensing/local.py writes identical values to these pairs, so a verdict
+    for one and n/a for the other would be incoherent."""
+    candidates = encoded_fallback_candidates(free_flow_speeds_for_topology("merge"))
+    for left, right in [
+        ("segment_target_speed", "cooperation.segment_target_speed"),
+        ("merge_pressure", "cooperation.merge_pressure"),
+        ("downstream_congestion_estimate", "cooperation.downstream_congestion_estimate"),
+        ("nearby_av_count", "active_av_count_local"),
+    ]:
+        assert candidates[left] == candidates[right], f"{left} vs {right}"
+
+
+def test_raw_infinite_column_is_coherent_and_json_safe():
+    result = audit_fields(np.array([[float("inf")]] * 3), ["f"])[0]
+    assert result.is_strictly_constant is True
+    assert result.is_near_constant is True, "a constant column cannot be non-near-constant"
+    assert np.isfinite(result.variance), "NaN variance serialises to invalid JSON"
+
+
+def test_run_audit_breaks_down_by_both_axes():
+    specs = [
+        SampleSpec(topology="ring", controller="random_av", seed=7, duration_steps=10, controlled_vehicles=2),
+        SampleSpec(topology="straight_single_lane", controller="random_av", seed=7, duration_steps=10, controlled_vehicles=8),
+    ]
+    result = run_audit(specs)
+    assert set(result.per_field_by_topology) == {"ring", "straight_single_lane"}
+    assert set(result.per_field_by_av_count) == {2, 8}
+    total = sum(result.samples_by_condition.values())
+    assert result.per_field_pooled[0].n_samples == total
+    assert len(result.samples_by_condition) == 2
+
+
+def test_ring_config_replaces_missing_avs_with_humans():
+    """no_av must not simply run a smaller ring population than the others."""
+    with_avs = build_env_config(SampleSpec(topology="ring", controller="random_av", seed=1, controlled_vehicles=4))
+    without = build_env_config(SampleSpec(topology="ring", controller="no_av", seed=1, controlled_vehicles=4))
+    assert with_avs["controlled_vehicles"] == 4
+    assert without["controlled_vehicles"] == 0
+    total = lambda cfg: cfg["controlled_vehicles"] + cfg["initial_human_vehicles"]
+    assert total(with_avs) == total(without)
 
 
 def test_exactly_constant_column_is_flagged_constant():
@@ -139,7 +217,17 @@ def merge_audit():
     return audit_condition("merge", 8)
 
 
-@pytest.mark.parametrize("topology,av_count", [("ring", 2), ("ring", 8), ("straight_multilane", 8), ("merge", 8)])
+ALL_TOPOLOGIES = (
+    "ring",
+    "straight_single_lane",
+    "straight_multilane",
+    "merge",
+    "inverted_tree",
+    "inverted_tree_bottleneck",
+)
+
+
+@pytest.mark.parametrize("topology,av_count", [(t, 8) for t in ALL_TOPOLOGIES] + [("ring", 2)])
 def test_distance_to_next_merge_is_constant_everywhere(topology, av_count):
     # hardcoded to 0.0 in src/sensing/local.py, so it cannot carry information
     result = audit_condition(topology, av_count)["distance_to_next_merge"]
@@ -164,9 +252,9 @@ def test_downstream_bottleneck_is_dead_on_ring_but_live_on_merge(ring_audit, mer
     assert merge_audit["distance_to_downstream_bottleneck"].is_strictly_constant is False
 
 
-@pytest.mark.parametrize("fixture_name", ["ring_audit", "multilane_audit", "merge_audit"])
-def test_ego_speed_always_varies(fixture_name, request):
-    result = request.getfixturevalue(fixture_name)["ego_speed"]
+@pytest.mark.parametrize("topology", ALL_TOPOLOGIES)
+def test_ego_speed_always_varies(topology):
+    result = audit_condition(topology, 8)["ego_speed"]
     assert result.is_strictly_constant is False
     assert result.is_near_constant is False
 

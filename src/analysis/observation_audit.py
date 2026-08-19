@@ -119,7 +119,9 @@ def free_flow_speeds_for_topology(topology_id: str) -> tuple[float, ...]:
     free-flow speed. Returned as a set of candidates because a topology may mix
     limits across lanes, and a single constant would then be the wrong target.
     """
-    spec = build_topology(topology_id, None)
+    topology_cfg = load_named_config("topology", topology_id)
+    road_cfg = topology_cfg.get("road", topology_cfg) if isinstance(topology_cfg, Mapping) else None
+    spec = build_topology(topology_id, road_cfg)
     limits = {
         float(lane.speed_limit)
         for lane in spec.road_network.lanes_dict().values()
@@ -135,9 +137,15 @@ def encoded_fallback_candidates(free_flow_speeds: Sequence[float]) -> dict[str, 
     field maps to every candidate value rather than a single constant.
     """
     speeds = tuple(free_flow_speeds) or (_DEFAULT_FREE_FLOW_MPS,)
+    # src/sensing/local.py writes the same float to the top-level key and its
+    # cooperation twin, and the same int to active_av_count_local and
+    # nearby_av_count. Identical columns must get identical verdicts.
     fixed: dict[str, float] = {
         "nearby_av_count": 0.0,
+        "active_av_count_local": 0.0,
         "nearby_av_density": 0.0,
+        "merge_pressure": 0.0,
+        "downstream_congestion_estimate": 0.0,
         f"{COOPERATION_PREFIX}merge_pressure": 0.0,
         f"{COOPERATION_PREFIX}downstream_congestion_estimate": 0.0,
     }
@@ -145,7 +153,11 @@ def encoded_fallback_candidates(free_flow_speeds: Sequence[float]) -> dict[str, 
         fixed[f"{LANE_DISTRIBUTION_PREFIX}{lane}"] = 0.0
 
     candidates = {field: (_encode_scalar(field, value),) for field, value in fixed.items()}
-    for field in ("nearby_av_mean_speed", f"{COOPERATION_PREFIX}segment_target_speed"):
+    for field in (
+        "nearby_av_mean_speed",
+        "segment_target_speed",
+        f"{COOPERATION_PREFIX}segment_target_speed",
+    ):
         candidates[field] = tuple(_encode_scalar(field, speed) for speed in speeds)
     return candidates
 
@@ -199,8 +211,12 @@ def audit_fields(
             )
             continue
         unique = np.unique(column)
-        variance = float(np.var(column))
         strictly_constant = unique.size == 1
+        if strictly_constant:
+            variance = 0.0
+        else:
+            finite = column[np.isfinite(column)]
+            variance = float(np.var(finite)) if finite.size else 0.0
         never_left = None
         if expected is not None:
             never_left = bool(
