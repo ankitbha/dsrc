@@ -76,15 +76,15 @@ class FieldAudit:
 class AuditResult:
     """Audit broken down along both axes that change the verdict.
 
-    Topology matters because geometry forbids some fields from moving. AV count
-    matters because the local-aggregate cooperation fields only populate when two
-    AVs come within sensing range, so a low-penetration run reports them dead for
-    reasons that have nothing to do with the observation design.
+    Topology matters because geometry forbids some fields from moving. AV
+    penetration matters because the local-aggregate cooperation fields only
+    populate when two AVs come within sensing range, so a sparse run reports them
+    dead for reasons unrelated to the observation design.
     """
 
     per_field_pooled: tuple[FieldAudit, ...]
     per_field_by_topology: Mapping[str, tuple[FieldAudit, ...]]
-    per_field_by_av_count: Mapping[int, tuple[FieldAudit, ...]]
+    per_field_by_av_penetration: Mapping[float, tuple[FieldAudit, ...]]
     samples_by_condition: Mapping[str, int]
 
 
@@ -96,12 +96,12 @@ class SampleSpec:
     duration_steps: int = 120
     demand: str = "medium"
     human_model: str = "normal"
-    controlled_vehicles: int = 2
-    initial_human_vehicles: int = 12
+    av_penetration: float = 0.10
+    ring_population: int = 20
 
     @property
     def condition_id(self) -> str:
-        return f"{self.topology}/{self.controller}/av{self.controlled_vehicles}/seed{self.seed}"
+        return f"{self.topology}/{self.controller}/pen{self.av_penetration:g}/seed{self.seed}"
 
 
 def _scale_for(field: str) -> float:
@@ -252,20 +252,26 @@ def audit_fields(
 def build_env_config(spec: SampleSpec) -> dict[str, Any]:
     """Environment config for one condition.
 
-    Mirrors `scripts/run_baseline.py`: `no_av` runs zero AVs, and on the ring its
-    would-be AVs are replaced by humans so the population is comparable across
-    controllers.
+    AV population is set by demand penetration, which is the only knob that works
+    on five of the six topologies: `HighwayTopologyEnv` clears `agent_ids` and
+    defers to the demand spawner whenever continuous demand is active, which is
+    every topology except ring. Ring disables demand, so there penetration is
+    realised by splitting a fixed population between AVs and humans.
     """
     topology_cfg = load_named_config("topology", spec.topology)
     demand_cfg = load_named_config("demand", spec.demand)
     human_cfg = load_named_config("human_model", spec.human_model)
 
-    if spec.controller == "no_av":
-        demand_cfg = deep_merge(demand_cfg, {"av_penetration": 0.0})
-    controlled = 0 if spec.controller == "no_av" else spec.controlled_vehicles
+    penetration = 0.0 if spec.controller == "no_av" else spec.av_penetration
+    demand_cfg = deep_merge(demand_cfg, {"av_penetration": penetration})
     if spec.topology == "ring":
-        initial_humans = spec.initial_human_vehicles + (spec.controlled_vehicles - controlled)
+        # demand is disabled on the ring, so realise the same penetration by
+        # splitting a fixed population; the total stays constant across
+        # conditions so counts remain comparable
+        controlled = round(penetration * spec.ring_population)
+        initial_humans = spec.ring_population - controlled
     else:
+        controlled = 0
         initial_humans = 0
     return {
         "topology": topology_cfg,
@@ -324,13 +330,13 @@ def run_audit(
     """
     names = encoded_field_names()
     by_topology: dict[str, list[np.ndarray]] = {}
-    by_av_count: dict[int, list[np.ndarray]] = {}
+    by_penetration: dict[float, list[np.ndarray]] = {}
     counts: dict[str, int] = {}
     for spec in specs:
         samples = collect_encoded_samples(spec)
         counts[spec.condition_id] = int(samples.shape[0])
         by_topology.setdefault(spec.topology, []).append(samples)
-        by_av_count.setdefault(spec.controlled_vehicles, []).append(samples)
+        by_penetration.setdefault(spec.av_penetration, []).append(samples)
 
     def stack(chunks: Sequence[np.ndarray]) -> np.ndarray:
         usable = [chunk for chunk in chunks if chunk.size]
@@ -349,11 +355,11 @@ def run_audit(
         for topology, chunks in by_topology.items()
     }
     all_speeds = sorted({speed for topology in by_topology for speed in free_flow_speeds_for_topology(topology)})
-    per_av_count = {count: audit(chunks, all_speeds) for count, chunks in by_av_count.items()}
+    per_penetration = {pen: audit(chunks, all_speeds) for pen, chunks in by_penetration.items()}
     pooled = audit([chunk for chunks in by_topology.values() for chunk in chunks], all_speeds)
     return AuditResult(
         per_field_pooled=pooled,
         per_field_by_topology=per_topology,
-        per_field_by_av_count=per_av_count,
+        per_field_by_av_penetration=per_penetration,
         samples_by_condition=counts,
     )

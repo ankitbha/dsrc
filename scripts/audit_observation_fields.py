@@ -37,7 +37,7 @@ TOPOLOGIES = (
     "inverted_tree_bottleneck",
 )
 CONTROLLERS = ("no_av", "cooperative_smoothing", "random_av")
-AV_COUNTS = (2, 8, 20)
+AV_PENETRATIONS = (0.05, 0.10, 0.20)
 SEEDS = (7, 17, 27)
 
 
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--topologies", nargs="+", default=list(TOPOLOGIES))
     parser.add_argument("--controllers", nargs="+", default=list(CONTROLLERS), choices=list(BASELINE_NAMES))
-    parser.add_argument("--av-counts", nargs="+", type=int, default=list(AV_COUNTS))
+    parser.add_argument("--av-penetrations", nargs="+", type=float, default=list(AV_PENETRATIONS))
     parser.add_argument("--seeds", nargs="+", type=int, default=list(SEEDS))
     parser.add_argument("--duration-steps", type=int, default=120)
     parser.add_argument(
@@ -102,7 +102,7 @@ def write_report(result: AuditResult, output_root: Path, args: argparse.Namespac
         "samples_by_condition": dict(result.samples_by_condition),
         "pooled": [dataclasses.asdict(a) for a in result.per_field_pooled],
         "by_topology": {k: [dataclasses.asdict(a) for a in v] for k, v in result.per_field_by_topology.items()},
-        "by_av_count": {str(k): [dataclasses.asdict(a) for a in v] for k, v in result.per_field_by_av_count.items()},
+        "by_av_penetration": {str(k): [dataclasses.asdict(a) for a in v] for k, v in result.per_field_by_av_penetration.items()},
     }
     json_path = output_root / "observation_audit.json"
     # allow_nan=False so a non-finite value raises here rather than silently
@@ -120,8 +120,8 @@ def write_report(result: AuditResult, output_root: Path, args: argparse.Namespac
     ]
     for topology in sorted(result.per_field_by_topology):
         sections.append(markdown_table(f"Topology: {topology}", result.per_field_by_topology[topology]))
-    for count in sorted(result.per_field_by_av_count):
-        sections.append(markdown_table(f"AV count: {count}", result.per_field_by_av_count[count]))
+    for pen in sorted(result.per_field_by_av_penetration):
+        sections.append(markdown_table(f"AV penetration: {pen:g}", result.per_field_by_av_penetration[pen]))
     sections.append("### Samples per condition\n")
     sections.append("| condition | samples |\n|---|---|")
     for condition in sorted(result.samples_by_condition):
@@ -139,11 +139,11 @@ def main() -> int:
             controller=controller,
             seed=seed,
             duration_steps=args.duration_steps,
-            controlled_vehicles=av_count,
+            av_penetration=penetration,
         )
         for topology in args.topologies
         for controller in args.controllers
-        for av_count in args.av_counts
+        for penetration in args.av_penetrations
         for seed in args.seeds
     ]
     print(f"auditing {len(specs)} conditions...", flush=True)

@@ -130,25 +130,59 @@ def test_free_flow_speeds_are_read_from_topology_config():
 
 def test_run_audit_breaks_down_by_both_axes():
     specs = [
-        SampleSpec(topology="ring", controller="random_av", seed=7, duration_steps=10, controlled_vehicles=2),
-        SampleSpec(topology="straight_single_lane", controller="random_av", seed=7, duration_steps=10, controlled_vehicles=8),
+        SampleSpec(topology="ring", controller="random_av", seed=7, duration_steps=10, av_penetration=0.05),
+        SampleSpec(topology="straight_single_lane", controller="random_av", seed=7, duration_steps=10, av_penetration=0.20),
     ]
     result = run_audit(specs)
     assert set(result.per_field_by_topology) == {"ring", "straight_single_lane"}
-    assert set(result.per_field_by_av_count) == {2, 8}
+    assert set(result.per_field_by_av_penetration) == {0.05, 0.20}
     total = sum(result.samples_by_condition.values())
     assert result.per_field_pooled[0].n_samples == total
     assert len(result.samples_by_condition) == 2
 
 
-def test_ring_config_replaces_missing_avs_with_humans():
-    """no_av must not simply run a smaller ring population than the others."""
-    with_avs = build_env_config(SampleSpec(topology="ring", controller="random_av", seed=1, controlled_vehicles=4))
-    without = build_env_config(SampleSpec(topology="ring", controller="no_av", seed=1, controlled_vehicles=4))
-    assert with_avs["controlled_vehicles"] == 4
+def test_ring_realises_penetration_at_constant_population():
+    """Ring disables demand, so penetration is realised by splitting a fixed
+    population. The total must not change with penetration, or sample counts
+    stop being comparable across conditions."""
+    totals = set()
+    for penetration, expected_avs in [(0.05, 1), (0.10, 2), (0.20, 4)]:
+        cfg = build_env_config(
+            SampleSpec(topology="ring", controller="random_av", seed=1, av_penetration=penetration)
+        )
+        assert cfg["controlled_vehicles"] == expected_avs
+        assert cfg["demand"]["av_penetration"] == penetration
+        totals.add(cfg["controlled_vehicles"] + cfg["initial_human_vehicles"])
+    assert totals == {20}
+    without = build_env_config(SampleSpec(topology="ring", controller="no_av", seed=1, av_penetration=0.20))
     assert without["controlled_vehicles"] == 0
-    total = lambda cfg: cfg["controlled_vehicles"] + cfg["initial_human_vehicles"]
-    assert total(with_avs) == total(without)
+    assert without["controlled_vehicles"] + without["initial_human_vehicles"] == 20
+
+
+def test_penetration_is_the_effective_knob_on_non_ring_topologies():
+    """HighwayTopologyEnv clears agent_ids when continuous demand is active, so
+    controlled_vehicles is inert everywhere except ring. The config must drive AV
+    population through demand penetration instead."""
+    from src.envs.topology_env import HighwayTopologyEnv
+
+    counts = set()
+    for penetration in (0.05, 0.20):
+        cfg = build_env_config(
+            SampleSpec(topology="merge", controller="random_av", seed=7, av_penetration=penetration)
+        )
+        assert cfg["controlled_vehicles"] == 0, "non-ring topologies must not rely on controlled_vehicles"
+        assert cfg["demand"]["av_penetration"] == penetration
+        env = HighwayTopologyEnv("merge", cfg)
+        env.reset(seed=7)
+        peak = 0
+        for _ in range(60):
+            observations = env.get_local_observations()
+            peak = max(peak, len(observations))
+            _, _, terminated, truncated, _ = env.step({a: {"desired_speed_bin": "nominal", "desired_headway_bin": "normal", "lane_preference": "keep", "merge_mode": "normal"} for a in observations})
+            if terminated or truncated:
+                break
+        counts.add(peak)
+    assert len(counts) > 1, f"penetration did not change AV population: {counts}"
 
 
 def test_exactly_constant_column_is_flagged_constant():
@@ -227,16 +261,30 @@ def test_column_count_mismatch_raises():
 SANITY_STEPS = 60
 
 
-def audit_condition(topology: str, av_count: int, seed: int = 7):
-    samples = collect_encoded_samples(
-        SampleSpec(
-            topology=topology,
-            controller="random_av",
-            seed=seed,
-            duration_steps=SANITY_STEPS,
-            controlled_vehicles=av_count,
+def audit_condition(topology: str, av_penetration: float | tuple[float, ...] = 0.20, seed: int = 7):
+    """Audit one topology, optionally pooling several penetrations.
+
+    Pooling matters for fields whose variation depends on an AV reaching a
+    particular segment: at high penetration the episode ends sooner, so a field
+    that varies at 0.10 can be constant at 0.20. The real audit pools, so a
+    sanity test pinned to a single penetration is testing something narrower
+    than the artifact it guards.
+    """
+    penetrations = (av_penetration,) if isinstance(av_penetration, float) else av_penetration
+    chunks = [
+        collect_encoded_samples(
+            SampleSpec(
+                topology=topology,
+                controller="random_av",
+                seed=seed,
+                duration_steps=SANITY_STEPS,
+                av_penetration=penetration,
+            )
         )
-    )
+        for penetration in penetrations
+    ]
+    usable = [c for c in chunks if c.size]
+    samples = np.concatenate(usable, axis=0) if usable else np.empty((0, 39))
     audits = audit_fields(
         samples,
         encoded_field_names(),
@@ -247,17 +295,17 @@ def audit_condition(topology: str, av_count: int, seed: int = 7):
 
 @pytest.fixture(scope="module")
 def ring_audit():
-    return audit_condition("ring", 8)
+    return audit_condition("ring", (0.05, 0.10, 0.20))
 
 
 @pytest.fixture(scope="module")
 def multilane_audit():
-    return audit_condition("straight_multilane", 8)
+    return audit_condition("straight_multilane", (0.05, 0.10, 0.20))
 
 
 @pytest.fixture(scope="module")
 def merge_audit():
-    return audit_condition("merge", 8)
+    return audit_condition("merge", (0.05, 0.10, 0.20))
 
 
 ALL_TOPOLOGIES = (
@@ -270,10 +318,10 @@ ALL_TOPOLOGIES = (
 )
 
 
-@pytest.mark.parametrize("topology,av_count", [(t, 8) for t in ALL_TOPOLOGIES] + [("ring", 2)])
-def test_distance_to_next_merge_is_constant_everywhere(topology, av_count):
+@pytest.mark.parametrize("topology,av_penetration", [(t, 0.20) for t in ALL_TOPOLOGIES] + [("ring", 0.05)])
+def test_distance_to_next_merge_is_constant_everywhere(topology, av_penetration):
     # hardcoded to 0.0 in src/sensing/local.py, so it cannot carry information
-    result = audit_condition(topology, av_count)["distance_to_next_merge"]
+    result = audit_condition(topology, av_penetration)["distance_to_next_merge"]
     assert result.is_strictly_constant is True
     assert result.constant_value == pytest.approx(0.0)
 
@@ -297,7 +345,7 @@ def test_downstream_bottleneck_is_dead_on_ring_but_live_on_merge(ring_audit, mer
 
 @pytest.mark.parametrize("topology", ALL_TOPOLOGIES)
 def test_ego_speed_always_varies(topology):
-    result = audit_condition(topology, 8)["ego_speed"]
+    result = audit_condition(topology, 0.20)["ego_speed"]
     assert result.is_strictly_constant is False
     assert result.is_near_constant is False
 
