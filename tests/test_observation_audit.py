@@ -357,3 +357,24 @@ def test_boundary_crossing_variance_is_reported_as_undefined():
     assert result.is_near_constant is False
     payload = json_safe(dataclasses.asdict(result))
     json.loads(json.dumps(payload, allow_nan=False), parse_constant=_reject_constant)
+
+
+def test_report_renders_undefined_variance_without_crashing():
+    """markdown_table formats variance with a float spec; an unguarded None
+    raises TypeError and takes the whole report down."""
+    from audit_observation_fields import markdown_table
+
+    record = FieldAudit(
+        field="f", n_samples=11, unique_values=2, variance=None,
+        is_strictly_constant=False, is_near_constant=False,
+        never_left_fallback=None, constant_value=None,
+    )
+    table = markdown_table("t", (record,))
+    assert "n/a" in table
+    assert table.count("|") == 3 * 7  # header, separator, one row
+
+
+def test_zero_coverage_variance_is_undefined_not_zero():
+    result = audit_fields(np.empty((0, 1)), ["f"])[0]
+    assert result.n_samples == 0
+    assert result.variance is None

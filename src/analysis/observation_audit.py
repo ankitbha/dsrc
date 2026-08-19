@@ -204,7 +204,7 @@ def audit_fields(
                     field=name,
                     n_samples=0,
                     unique_values=0,
-                    variance=0.0,
+                    variance=None,
                     is_strictly_constant=False,
                     is_near_constant=False,
                     never_left_fallback=None if expected is None else False,
