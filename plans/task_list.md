@@ -68,10 +68,40 @@ Tailscale at `ssh jetson`, so its runtime can be developed remotely.
 
 ## C. Simulation study — fully unblocked, Mac only
 
-5. Per-field variance audit to identify inert inputs before any ablation.
-   `distance_to_next_merge` is hardcoded to 0.0 and
-   `distance_to_downstream_bottleneck` is only ever inf or 0; ablating those
-   would produce artifacts.
+5. ~~Per-field variance audit to identify inert inputs before any ablation.~~
+   **DONE** — `src/analysis/observation_audit.py` + `scripts/audit_observation_fields.py`,
+   41 tests. Ran 162 conditions (6 topologies × 3 controllers × AV penetration
+   {0.05, 0.10, 0.20} × 3 seeds, 120 steps), 10,569 samples.
+   Plan: `scratchpad/plan_task_05_variance_audit.md`. Artifacts:
+   `outputs/validation/observation_audit/`.
+
+   **Findings that bind sections D–F:**
+
+   - **Only 2 of 39 encoded fields are uninformative everywhere.** `is_active`
+     is structurally constant at 1.0 — the observation map contains only active
+     AVs, so the flag can never be false. `distance_to_next_merge` is hardcoded
+     to `0.0` in `src/sensing/local.py`. Neither should be sensed, and neither
+     may be ablated as if the result meant anything.
+   - **8 fields are penetration-gated:** dead at 5% AV penetration, informative
+     at 20% — `nearby_av_count`, `active_av_count_local`, `nearby_av_density`,
+     `nearby_av_lane_distribution.{1,2}`, `downstream_congestion_estimate` and
+     its `cooperation.*` twin, and `target_lane_rear_required_decel`. No field
+     moves the other way. The local-aggregate cooperation block therefore only
+     earns its sensing cost above roughly 10% penetration, which the sampling
+     controller (task 29) should treat as a rate-allocation input rather than
+     sensing unconditionally.
+   - **Inertness is strongly topology-gated:** ring 18/39 constant,
+     `straight_single_lane` 14/39, `merge` 8/39, `straight_multilane` 7/39,
+     `inverted_tree` 4/39, `inverted_tree_bottleneck` 3/39. Any ablation must be
+     read per topology, never pooled.
+   - **Coverage caveat:** 60 of 162 conditions produced zero samples — 54 are
+     `no_av` (correct by design) and 6 are non-ring topologies at 5% penetration
+     where no AV spawns at all. The effective matrix is 102 conditions.
+   - **`controlled_vehicles` is inert outside ring.** `HighwayTopologyEnv`
+     clears `agent_ids` and defers to the demand spawner whenever continuous
+     demand is active, i.e. on every topology except ring. AV population must be
+     set through `demand.av_penetration`. This bit the first run and is recorded
+     as Amendment 2 in the plan.
 6. Sufficiency harness: evaluate a fixed policy under configurable observation
    degradation (field ablation, added lag, added noise, forced fallbacks).
 7. Baseline sweep with the current sensing defaults, to establish the reference
