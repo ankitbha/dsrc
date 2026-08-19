@@ -1,161 +1,216 @@
 # DSRC Project Task List
 
-This task list is status-aware. The simulator foundation is already substantially implemented and the deployment prototype is code-complete and validated on simulated drives, so the remaining work is closing the prototype's hardware loop, converting placeholder observation fields into measured ones, and building experiment-launch infrastructure. Final training, evaluation sweeps, and paper plots happen only after the implementation and launch scripts are in place.
+The active work is a live phone-plus-Jetson advisory system: the phone carries
+four sensors and the driver display, the Jetson does all compute, and a sampling
+controller on the Jetson adjusts each sensor's rate in real time.
 
-## A. Simulator Foundation Status
+Tasks are sequenced so that **nothing requiring the phone and Jetson to be in the
+same room happens until late**. The transport is built with two backends — a
+network backend over Tailscale for development, and a USB backend for
+deployment — so the whole system can be developed with the phone in hand and the
+Jetson wherever it lives. Tasks needing physical colocation are marked
+**[COLOCATED]**.
 
-The following foundation is substantially implemented and should be maintained with regression tests rather than rebuilt from scratch:
+## Architecture
 
-1. **Simulator integration**
-   Installed `highway_env` integration, reset/step behavior, local source fallback, and environment smoke checks.
+```text
+  phone                    transport                  jetson
+  -----                    ---------                  ------
+  camera --+          network (dev) / USB (car)   +-- perception (TensorRT)
+  GPS -----+-- sensor frames ------------------>  +-- fusion (camera + HERE)
+  IMU -----+   (each at its own commanded rate)   +-- policy inference
+  HERE ----+                                      +-- advisory decode
+                                                  |
+  display <---- advisory --------------------------+
+  rate ctl <--- per-sensor rate commands ----------+-- sampling controller
+```
 
-2. **Project interfaces**
-   Public environment API, v2 action schema, observation schema, controller contract, config loading, active vehicle lifecycle, aggregate-only cooperation, and common execution-time safety contract.
+The phone stays dumb: it captures or queries at the commanded rate and forwards
+raw data. All interpretation, association, and control live on the Jetson.
+The cloud supplies observability through HERE; it is not in the control loop.
 
-3. **Topology ladder**
-   Ring, straight single-lane, straight multi-lane, merge, inverted tree, and inverted tree bottleneck topologies.
+## Non-goals
 
-4. **Demand and vehicle lifecycle**
-   Reproducible spawning, inflow/outflow handling, AV penetration, branch splits, demand profiles, and exited-vehicle accounting.
+Both devices are powered from the car, so **energy and battery life are not
+metrics**. The binding costs for the sampling controller are HERE API quota,
+thermal headroom, and Jetson compute. Thermal is a real constraint and the phone
+must not overheat.
 
-5. **Vehicle roles and human behavior profiles**
-   AV/human role accounting plus cautious, normal, aggressive, and heterogeneous human-driver profiles.
+Out of scope entirely: any traffic-flow effect (one vehicle, advisory-only),
+human compliance with the advisory, and anything fleet-level. Those claims come
+from simulation or not at all.
 
-6. **Metrics and logging**
-   Canonical JSON/CSV artifacts, step metrics, segment metrics, fairness metrics, safety diagnostics, obstruction metrics, and validation reports.
+## A. Status: what already exists
 
-7. **Local sensing**
-   AV-local observations, aggregate local cooperation fields, neutral fallback, range/noise/latency support, density and speed bins.
+**Simulator foundation** — maintain, do not rebuild: simulator integration,
+project interfaces, the topology ladder, demand and vehicle lifecycle, human
+behavior profiles, metrics and logging, local sensing, the common
+safety/etiquette/physical-control layer, the baseline ladder, model-free RL.
 
-8. **Common safety, etiquette, and physical-control layer**
-   Shared execution-time action filtering for all controllers, including speed/headway decoding, bounded acceleration, lane-change dwell, follower-disruption checks, low-speed-uncongested blocks, emergency overrides, and rolling lane-change limits.
+**Jetson prototype** — reuse rather than rewrite:
 
-9. **Baseline ladder**
-   `no_av`, `random_av`, `selfish_av`, `density_lookup`, `dynamic_speed_limit`, `av_mediated_speed_harmonization`, `backpressure`, and `cooperative_smoothing`.
+- `perception/detector.py`, `tracker.py`, `distance.py`, `observation_builder.py`
+- `policy/sim_contract.py`, `actor_runtime.py`, `advisory.py`
+- `pipeline.py` tick loop and rolling latency tracking
+- `logio/` metadata logging, `eval_run.py` gated reporting
 
-10. **Model-free RL entrypoints**
-    Shared PPO, IPPO, MAPPO, learned-policy evaluation, checkpointing/resume, and smoke validation.
+`camera_stream.py` and `gps_reader.py` already abstract their sources and need a
+phone backend, not a rewrite. The GPS `dialout` blocker is resolved: the u-blox
+enumerates and `/dev/ttyACM0` is readable by `edge`. The Jetson is reachable over
+Tailscale at `ssh jetson`, so its runtime can be developed remotely.
 
-## A2. Deployment Prototype Status
+## B. Environments
 
-The prototype is code-complete, benchmarked, and validated end-to-end on simulated drives with a trained policy. Maintain rather than rebuild:
+1. ~~Python environment on the Mac with `highway_env`, torch, and the project dependencies.~~ **DONE** — Python 3.12.14 venv at `.venv/`; numpy 2.5.2, torch 2.13.0, gymnasium 1.3.0, highway_env 1.12.1; 138 tests pass. Section C is unblocked.
+2. ~~Android toolchain on the Mac.~~ **DONE** — command-line SDK only, no Studio (per plan). Temurin 17.0.20; cmdline-tools; platform-tools, platforms;android-35, build-tools;35.0.0, emulator, system-images;android-31;google_apis;arm64-v8a; AVD `dsrc_test` (Android 12, arm64); Gradle 8.9 wrapper on AGP 8.7.3; `adb` owned solely by the SDK. Plan: `scratchpad/plan_task_02_android_toolchain.md`.
+3. ~~`adb` on the Jetson.~~ **DONE** — adb 1.0.41 (platform-tools 28.0.2-debian) at `/usr/bin/adb`, plus `51-android.rules`; 8 packages added, nothing else changed. Carries the `adb forward` TCP tunnel that is the in-car transport (D1). RSA authorization still deferred to task 41. Plan: `scratchpad/plan_task_03_jetson_adb.md`.
+4. ~~Tailscale on the phone.~~ **DONE** — `moto-g-power` `100.75.142.126` under `bhardwaj.ankit275@` (same account matters: the Jetson is a *shared* node from `taila2630c`, and sharing is per-account). Phone→Jetson TCP verified with a real payload in both directions; path upgraded DERP→direct, 55 ms. Plan: `scratchpad/plan_task_04_phone_tailscale.md`.
 
-1. **Pipeline and entrypoints**
-   Capture-to-advisory loop, live demo, selfcheck, headless and scenario modes, replay, latency bench, and gated run scoring.
+## C. Simulation study — fully unblocked, Mac only
 
-2. **Perception and observation**
-   TensorRT detector, lightweight tracker, geometric distance estimation, and the full observation builder with per-field provenance tags.
+5. Per-field variance audit to identify inert inputs before any ablation.
+   `distance_to_next_merge` is hardcoded to 0.0 and
+   `distance_to_downstream_bottleneck` is only ever inf or 0; ablating those
+   would produce artifacts.
+6. Sufficiency harness: evaluate a fixed policy under configurable observation
+   degradation (field ablation, added lag, added noise, forced fallbacks).
+7. Baseline sweep with the current sensing defaults, to establish the reference
+   the degraded conditions are measured against.
+8. Exercise the topology ladder beyond ring so the study is not single-topology.
+9. Sensing model calibrated from drive measurements. *Waits on section G data;
+   the harness is built now and the parameters filled in later.*
+10. Sufficiency study proper: derive the sensing requirement specification.
+11. Sampling policy evaluated in simulation for the flow-level benefit one
+    vehicle cannot demonstrate. *Waits on the policy from section F.*
 
-3. **Policy and advisory path**
-   Vendored sim contract with equality tests, checkpoint export, fast inference runtime, and the driver-facing advisory decode.
+## D. Transport
 
-4. **Simulated-drive harness**
-   Scripted-GPS twin, scenario definitions, test footage, and PASS/FAIL gates on latency, tick rate, GPS freshness, ego-speed error, and perception coverage.
+Two backends behind one interface. Build the network backend first.
 
-## B. Finish Implementation Before Final Experiments
+**Binding constraint — phone initiates, Jetson listens.** The Jetson cannot
+originate ordinary IP traffic to tailnet peers: its Tegra kernel has
+`CONFIG_NF_CONNTRACK_MARK` unset, so the conntrack struct has no `mark` field and
+Tailscale's connmark rules cannot install. The feature is compiled out, not a
+missing module, so no package or out-of-tree build fixes it short of rebuilding
+NVIDIA's kernel. Inbound works, and both directions were verified on a
+phone-initiated TCP connection: sensor data up, advisory and rate commands back
+down the same socket. Design the transport so the phone always opens the
+connection. This affects the network backend only; the in-car `adb forward` path
+tunnels over USB and is unaffected.
 
-Do these tasks before running final paper sweeps.
+12. Transport interface: framed bidirectional messaging, backend-agnostic.
+13. Network backend over Tailscale, for development with devices apart.
+14. Wire protocol: sensor messages upstream, advisory and rate commands
+    downstream, each carrying its own timestamps.
+15. Shared timebase with clock-offset estimation and drift tracking, so
+    phone-side and Jetson-side events are comparable.
+16. Loopback test with synthetic sensor frames and synthetic advisories;
+    transport latency instrumented from the start.
 
-1. **Resolve GPS device permissions**
-   Add the operator account to the serial device group, re-login, and confirm the observed fix rate through selfcheck.
+## E. Phone app — phone is in hand, no Jetson needed
 
-2. **Attach and exercise the camera**
-   Attach the USB camera, pass selfcheck, run a desk session, and confirm detections and distances are sane.
+17. Android project skeleton: Kotlin, CameraX, permissions, foreground service.
+18. Camera capture at the commanded rate, JPEG encode, per-frame monotonic
+    timestamps from `elapsedRealtimeNanos`.
+19. GPS capture and forwarding, logging both fix time and receipt time.
+20. IMU capture and forwarding.
+21. HERE client: query around the current position at the commanded rate, forward
+    the raw response with request and response timestamps, no interpretation on
+    the phone. **Blocked: needs a HERE API key.**
+22. Rate-command handling across all four sensors, applied without restarting
+    capture.
+23. Advisory display: the driver-facing UI.
+24. Thermal monitoring reported upstream, plus throttle-safe capture that
+    degrades rather than failing.
+25. Local session logging on the phone, for ground truth and post-hoc analysis.
 
-3. **Record and replay a live run**
-   Capture a real logged run and replay it to confirm tick-for-tick decision agreement on real data.
+## F. Jetson runtime — developed over SSH
 
-4. **Calibrate the mounted camera**
-   Run the calibration helpers, commit the resulting camera values to config, and set the hood line if the mount sees the hood.
+26. Phone backends for `CameraStream` and `GpsReader`, fed from the transport.
+27. HERE response ingestion: link association from GPS, caching, staleness
+    tracking, explicit failure semantics.
+28. Fusion / estimator: per-field source ownership between the wide-lagging feed
+    and the narrow-current camera, with a staleness aging term. The sources
+    observe different parts of the state and are not substitutable.
+29. Sampling controller producing four independent rates. Inputs: the free
+    always-on IMU/GPS tier as a trigger proxy, advisory bin-boundary proximity,
+    disagreement between sources, and thermal backoff from the phone.
+30. Shadow / live mode flag. In shadow mode the controller emits the decisions it
+    would make without gating; in live mode it gates for real. Both paths
+    implemented, flag flippable at runtime.
+31. Integration into the existing tick loop, advisory returned to the phone.
+32. End-to-end run over the network backend, phone and Jetson apart, exercising
+    the whole loop before any USB work.
 
-5. **Add advisory hysteresis**
-   Damp the leader-acquisition flicker at the fast/nominal bin boundary and re-measure the advisory switch rate.
+## G. Instrumentation
 
-6. **Fix the driver-facing readout**
-   Show the safety filter's gap-aware cap rather than the raw decode.
+Written as part of the implementation, not added afterwards.
 
-7. **Run the in-vehicle advisory-only drive**
-   Windshield mount plus the passenger-operated, non-actuating drive protocol from the deployment plan.
+33. Per-stage timestamps across the loop: capture, encode, transport, detect,
+    track, fuse, infer, decode, return, render.
+34. Trigger attribution in the controller: which rule fired, for which sensor,
+    and why.
+35. Shadow-mode decision log emitted alongside the full-rate reference, so every
+    candidate policy can be scored against identical traffic from one drive.
+36. Per-tick field provenance and missingness.
+37. Thermal and throttle-event log for both devices.
+38. Failure event log: GPS dropout, HERE failure or quota exhaustion, dropped
+    frames, transport stalls, with recovery outcome.
+39. Session summary generator: latency percentiles, achieved versus commanded
+    rates, API calls made, trigger counts, failure counts.
 
-8. **Add rear sensing**
-   Second camera to convert the follower and rear-gap fields from neutral fallback into measured values.
+## H. Colocation and integration — **[COLOCATED]**
 
-9. **Add OBD-II speed**
-   Prefer a fresh OBD speed over GPS, and use the GPS-vs-OBD comparison as an observation-quality measurement.
+Everything above is done before the devices meet.
 
-10. **Run the two-unit cooperative demo**
-    Enable beacons on two units so the nearby-AV and cooperation fields come live while preserving the aggregate-only constraint.
+40. **[COLOCATED]** USB transport backend behind the same interface, swapped in
+    for the network backend.
+41. **[COLOCATED]** `adb` first connection: accept the RSA authorization on the
+    phone screen, tick "always allow".
+42. **[COLOCATED]** Bench loopback over USB with both devices on a desk;
+    end-to-end latency measured against the 200 ms target.
+43. **[COLOCATED]** Shadow-mode correctness: logged shadow decisions match what
+    live gating produces on the same input.
+44. **[COLOCATED]** Live-mode verification: flip the flag and confirm gating
+    genuinely changes sampling rates, the loop still closes, and the advisory
+    remains sane. Shadow mode is not evidence that live mode works.
+45. **[COLOCATED]** Thermal soak: sustained maximum-rate run to steady state;
+    confirm the phone stays within limits and the controller backs off.
+46. **[COLOCATED]** Failure injection: revoke GPS, kill HERE, unplug the link,
+    and confirm each degraded mode behaves as specified.
+47. **[COLOCATED]** Sim-contract parity: the observation vector produced live
+    matches the simulator's sensing model field for field.
+48. **[COLOCATED]** In-car install: 12 V power for both devices, mounts, cable
+    routing.
 
-11. **Add map matching**
-    Derive segment and distance-to-merge from a preloaded route so the two sim-parity fields become measured. Note that the simulator itself currently hardcodes `distance_to_next_merge = 0.0`, so this task has a simulator-side counterpart.
+## I. Measurement drives — **[COLOCATED]**
 
-12. **Add the local-plus-aggregate observation regime**
-    Support local-only, aggregate-assisted, and oracle/global observation conditions behind one config switch so they can be compared under a single safety layer.
+49. Shakedown drive: short and local, purely to confirm the system records
+    readable, aligned data.
+50. Drive set 1, shadow mode at maximum rate: the full-rate reference plus every
+    candidate policy's decisions against identical traffic.
+51. Drive set 2, live mode: the controller gating for real, verifying the
+    shadow-mode predictions held.
+52. Repeat across congested and free-flow conditions on at least three separate
+    days, on a corridor known to congest.
 
-13. **Add partial-deployment sweep support**
-    Config and runner support for message loss, delay, staleness, compliance, and penetration sweeps, including bottleneck-seeded versus uniform placement at equal fleet size.
+Measured on the drives: end-to-end and per-stage latency; achieved versus
+commanded rates and trigger attribution; HERE-reported speed against experienced
+speed, and feed lag; camera-derived local speed variance against the feed's
+scalar; how often the camera changes the advisory; provenance and missingness on
+real roads; advisory bin distribution and churn; safety-layer intervention
+counts; thermal behavior; and failure and recovery events.
 
-14. **Add experiment matrix launcher**
-    Add `scripts/run_experiment_matrix.py` with dry-run and launch modes for all paper experiments.
+## J. Reproducibility
 
-15. **Add plot/table generation scripts**
-    Add scripts for speed heatmaps, queues, throughput, branch fairness, merge delay, spillback, safety diagnostics, observation-regime comparisons, and deployment metrics.
+53. One-command dry runs for the simulation matrices.
+54. Smoke validation small enough for routine regression testing.
+55. Artifact manifest: where checkpoints, session recordings, metrics, plots, and
+    validation summaries live.
 
-16. **Package configs**
-    Add experiment configs for the observation-regime comparison, partial-deployment sweeps, and final evaluation.
+## Blockers
 
-## C. Validation Before Final Sweeps
-
-1. **Validate the current simulator stack**
-   Keep running project interface, topology, baseline, metrics, safety, and model-free training smoke tests.
-
-2. **Validate observation-contract parity**
-   Whenever the simulator's observation contract changes, update the vendored prototype contract, re-run the contract-equality tests, and re-export the policy bundle.
-
-3. **Validate the prototype gates**
-   Re-run both shipped scenarios and require all gates to pass after any contract, calibration, or advisory change.
-
-4. **Validate the observation regimes**
-   Confirm that local-only, aggregate-assisted, and oracle conditions differ only in observation content, and that the aggregate path still degrades to local-only when no peers are heard.
-
-5. **Validate launch scripts**
-   Dry-run the complete experiment matrix and verify every expected output path before starting long training jobs.
-
-## D. Final Experimentation
-
-Run final experiments only after Sections B and C are complete.
-
-1. **Model-free reference experiments**
-   Run baselines, Shared PPO, IPPO, and MAPPO across the selected topology/demand/human-model matrix.
-
-2. **Observation-regime experiments**
-   Compare local-only, aggregate-assisted, and oracle controllers under one safety layer to quantify what the aggregate signal buys.
-
-3. **Partial-deployment experiments**
-   Sweep penetration, compliance, message loss, delay, and sensing noise, and compare bottleneck seeding against uniform adoption at equal fleet size.
-
-4. **Robustness sweeps**
-   Sweep demand, human-driver model, sensing range/noise/latency, and topology.
-
-5. **Safety and obstruction analysis**
-   Report collisions, hard braking, follower disruption, lane-change rates, low-speed-uncongested behavior, all-lane low-speed occupancy, rolling-roadblock score, and branch starvation.
-
-6. **Deployment prototype metrics**
-   Report advisory-only latency, FPS, policy inference time, ego-speed accuracy under dropout, observation quality and missingness, and sim-to-prototype observation alignment.
-
-7. **Paper figures and tables**
-   Generate the deployment feasibility table, highway-env final performance tables, speed heatmaps, queue plots, fairness plots, observation-regime and partial-deployment tables, and the observation provenance breakdown.
-
-## E. Reproducibility Package
-
-1. **One-command dry runs**
-   Provide commands to dry-run all experiment matrices without launching long jobs.
-
-2. **One-command smoke validation**
-   Keep smoke validation small enough for routine regression testing.
-
-3. **HPC/container instructions**
-   Document SIF/overlay use, output roots, seeds, and expected artifacts.
-
-4. **Artifact manifest**
-   Standardize where checkpoints, metrics, plots, prototype run logs, and validation summaries live.
+- **HERE API key** — blocks task 21 only. Everything else in E proceeds.
+- **Physical colocation** — blocks section H onward. Nothing before it.
+- Repository layout: phone app in `dsrc/android/`, Jetson runtime extends
+  `deployment/jetson/`.

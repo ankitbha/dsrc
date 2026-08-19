@@ -7,3 +7,5 @@ __pycache__/
 texmf/
 texmf-config/
 texmf-var/
+.venv/
+
