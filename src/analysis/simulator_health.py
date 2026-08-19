@@ -27,6 +27,7 @@ DEFAULT_MIN_JAM_FRACTION = 0.05
 DEFAULT_MIN_SPEED_SEPARATION_MPS = 1.0
 DEFAULT_MIN_COMPLETED_SEEDS = 2
 DEFAULT_MIN_THROUGHPUT_RATIO = 0.8
+DEFAULT_MIN_CONGESTED_SEEDS = 2
 
 
 @dataclass(frozen=True)
@@ -62,13 +63,24 @@ class Run:
 
 @dataclass(frozen=True)
 class ControllerSummary:
+    """Metric means over runs that reached the configured duration ONLY.
+
+    A crashed run's metrics are not comparable with a completed run's:
+    `throughput_recent` is a 60 s rolling window, so a run that dies early
+    cannot report a comparable count, and mean speed decays as congestion
+    builds, so a run sampled at crash time looks faster than one sampled at
+    duration. Pooling the two manufactures both throughput collapse and speed
+    separation out of nothing. Means are None when no run completed.
+    """
+
     controller: str
     seeds: int
     completed_seeds: int
-    mean_speed: float
-    jam_fraction: float
-    throughput: float
-    collisions: float
+    mean_speed: float | None
+    jam_fraction: float | None
+    throughput: float | None
+    collisions: float | None
+    jam_by_seed: tuple[float, ...]
 
 
 @dataclass(frozen=True)
@@ -82,14 +94,15 @@ class HealthVerdict:
     cell: CellSpec
     by_controller: Mapping[str, ControllerSummary]
     congestion_reachable: bool
-    reference_jam_fraction: float
+    reference_jam_fraction: float | None
+    congested_seeds: int
     baselines_separate: bool
-    best_speed_separation: float
+    best_speed_separation: float | None
     best_controller: str | None
     episodes_complete: bool
     min_completed_seeds: int
     throughput_holds: bool
-    worst_throughput_ratio: float
+    worst_throughput_ratio: float | None
 
     @property
     def healthy(self) -> bool:
@@ -146,7 +159,10 @@ def run_condition(
         controller=controller,
         seed=seed,
         steps=steps,
-        completed=not terminated,
+        # `terminated` (a crash) and `truncated` (duration reached) are computed
+        # independently and both fire when an AV crashes on the final step, so
+        # `not terminated` marks a run that did reach its duration as crashed.
+        completed=bool(truncated),
         mean_speed=_number(metrics.get("mean_speed")),
         jam_fraction=_number(metrics.get("jam_fraction")),
         throughput=_number(metrics.get("throughput_recent")),
@@ -158,18 +174,20 @@ def summarise(runs: Sequence[Run]) -> dict[str, ControllerSummary]:
     by_controller: dict[str, list[Run]] = {}
     for run in runs:
         by_controller.setdefault(run.controller, []).append(run)
-    return {
-        controller: ControllerSummary(
+    summaries: dict[str, ControllerSummary] = {}
+    for controller, group in by_controller.items():
+        done = [run for run in group if run.completed]
+        summaries[controller] = ControllerSummary(
             controller=controller,
             seeds=len(group),
-            completed_seeds=sum(1 for run in group if run.completed),
-            mean_speed=mean(run.mean_speed for run in group),
-            jam_fraction=mean(run.jam_fraction for run in group),
-            throughput=mean(run.throughput for run in group),
-            collisions=mean(run.collisions for run in group),
+            completed_seeds=len(done),
+            mean_speed=mean(run.mean_speed for run in done) if done else None,
+            jam_fraction=mean(run.jam_fraction for run in done) if done else None,
+            throughput=mean(run.throughput for run in done) if done else None,
+            collisions=mean(run.collisions for run in done) if done else None,
+            jam_by_seed=tuple(run.jam_fraction for run in done),
         )
-        for controller, group in by_controller.items()
-    }
+    return summaries
 
 
 def assess_cell(
@@ -180,40 +198,50 @@ def assess_cell(
     min_speed_separation: float = DEFAULT_MIN_SPEED_SEPARATION_MPS,
     min_completed_seeds: int = DEFAULT_MIN_COMPLETED_SEEDS,
     min_throughput_ratio: float = DEFAULT_MIN_THROUGHPUT_RATIO,
+    min_congested_seeds: int = DEFAULT_MIN_CONGESTED_SEEDS,
 ) -> HealthVerdict:
     """Apply the four criteria to one cell's runs. Pure: no environment access."""
     summaries = summarise(runs)
     reference = summaries.get(REFERENCE_CONTROLLER)
     treatments = {name: s for name, s in summaries.items() if name != REFERENCE_CONTROLLER}
 
-    reference_jam = reference.jam_fraction if reference else 0.0
-    congestion = bool(reference) and reference_jam >= min_jam_fraction
+    # D5 per seed, not on the seed mean: a mean straddles the threshold on
+    # bimodal cells, admitting one that congests in 1 of 3 seeds and excluding
+    # one that congests in 2 of 3 by a thousandth.
+    reference_jam = reference.jam_fraction if reference else None
+    congested_seeds = sum(1 for jam in (reference.jam_by_seed if reference else ()) if jam >= min_jam_fraction)
+    congestion = bool(reference) and congested_seeds >= min_congested_seeds
 
-    separation = 0.0
+    separation: float | None = None
     best_controller: str | None = None
-    for name, summary in treatments.items():
-        if reference is None:
-            continue
-        delta = abs(summary.mean_speed - reference.mean_speed)
-        if delta > separation:
-            separation, best_controller = delta, name
-    separates = bool(treatments) and separation >= min_speed_separation
+    if reference is not None and reference.mean_speed is not None:
+        for name, summary in treatments.items():
+            if summary.mean_speed is None:
+                continue
+            delta = abs(summary.mean_speed - reference.mean_speed)
+            if separation is None or delta > separation:
+                separation, best_controller = delta, name
+    separates = separation is not None and separation >= min_speed_separation
 
     completed = min((s.completed_seeds for s in summaries.values()), default=0)
     complete = bool(summaries) and completed >= min_completed_seeds
 
-    # A reference throughput of zero cannot be improved on or collapse below;
-    # treat the ratio as undefined-but-passing rather than dividing by zero.
-    ratio = 1.0
-    if reference and reference.throughput > 0 and treatments:
-        ratio = min(s.throughput / reference.throughput for s in treatments.values())
-    holds = ratio >= min_throughput_ratio
+    # A zero reference throughput cannot be preserved or collapsed, so the
+    # criterion cannot be evaluated. Ring is structurally zero because
+    # _clear_exited_vehicles returns early there, and passing it vacuously would
+    # let total gridlock through the one criterion built to catch obstruction.
+    ratio: float | None = None
+    if reference is not None and reference.throughput and treatments:
+        ratios = [s.throughput / reference.throughput for s in treatments.values() if s.throughput is not None]
+        ratio = min(ratios) if ratios else None
+    holds = ratio is not None and ratio >= min_throughput_ratio
 
     return HealthVerdict(
         cell=cell,
         by_controller=summaries,
         congestion_reachable=congestion,
         reference_jam_fraction=reference_jam,
+        congested_seeds=congested_seeds,
         baselines_separate=separates,
         best_speed_separation=separation,
         best_controller=best_controller,
@@ -231,7 +259,7 @@ def select_operating_points(verdicts: Sequence[HealthVerdict]) -> tuple[HealthVe
     outcome and means the simulator cannot currently support a flow-level claim.
     """
     healthy = [v for v in verdicts if v.healthy]
-    return tuple(sorted(healthy, key=lambda v: v.best_speed_separation, reverse=True))
+    return tuple(sorted(healthy, key=lambda v: v.best_speed_separation or 0.0, reverse=True))
 
 
 def _number(value: Any) -> float:

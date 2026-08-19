@@ -53,6 +53,7 @@ def test_free_flow_cell_fails_congestion_only():
         runs.append(make_run("cooperative_smoothing", seed, speed=16.0, jam=0.0, throughput=22.0))
     v = assess_cell(CELL, runs)
     assert v.failed_criteria == ("congestion_reachable",)
+    assert v.healthy is False
 
 
 def test_indistinguishable_controllers_fail_separation_only():
@@ -62,6 +63,7 @@ def test_indistinguishable_controllers_fail_separation_only():
         runs.append(make_run("cooperative_smoothing", seed, speed=22.51, jam=0.20, throughput=23.0))
     v = assess_cell(CELL, runs)
     assert v.failed_criteria == ("baselines_separate",)
+    assert v.healthy is False
     assert v.best_speed_separation == pytest.approx(0.02, abs=1e-6)
 
 
@@ -70,8 +72,11 @@ def test_crashing_cell_fails_completion_only():
     for seed in (7, 17, 27):
         runs.append(make_run("no_av", seed, speed=12.0, jam=0.20, throughput=20.0))
         runs.append(make_run("cooperative_smoothing", seed, completed=(seed == 7), speed=16.0, throughput=19.0))
+    # crashed seeds carry wildly different metrics; if they were pooled the
+    # summary means would move
     v = assess_cell(CELL, runs)
     assert v.failed_criteria == ("episodes_complete",)
+    assert v.healthy is False
     assert v.min_completed_seeds == 1
 
 
@@ -84,6 +89,7 @@ def test_throughput_collapse_is_caught_even_when_speed_improves():
         runs.append(make_run("cooperative_smoothing", seed, speed=16.14, jam=0.10, throughput=3.0))
     v = assess_cell(CELL, runs)
     assert v.failed_criteria == ("throughput_holds",)
+    assert v.healthy is False, "a single failed criterion must sink the cell"
     assert v.worst_throughput_ratio == pytest.approx(0.15)
 
 
@@ -103,16 +109,18 @@ def test_cell_with_only_the_reference_controller_cannot_separate():
 
 
 def test_zero_reference_throughput_does_not_divide_by_zero():
+    """No division, and no vacuous pass either: see
+    test_zero_reference_throughput_fails_rather_than_passes_vacuously."""
     runs = []
     for seed in (7, 17, 27):
         runs.append(make_run("no_av", seed, speed=0.0, jam=1.0, throughput=0.0))
         runs.append(make_run("cooperative_smoothing", seed, speed=5.0, throughput=0.0))
     v = assess_cell(CELL, runs)
-    assert v.worst_throughput_ratio == pytest.approx(1.0)
-    assert v.throughput_holds is True
+    assert v.worst_throughput_ratio is None
+    assert v.throughput_holds is False
 
 
-def test_summarise_averages_across_seeds_and_counts_completions():
+def test_summarise_counts_all_seeds_but_averages_only_completed_ones():
     runs = [
         make_run("no_av", 7, speed=10.0, completed=True),
         make_run("no_av", 17, speed=20.0, completed=False),
@@ -120,7 +128,7 @@ def test_summarise_averages_across_seeds_and_counts_completions():
     s = summarise(runs)["no_av"]
     assert s.seeds == 2
     assert s.completed_seeds == 1
-    assert s.mean_speed == pytest.approx(15.0)
+    assert s.mean_speed == pytest.approx(10.0), "the crashed seed must not enter the mean"
 
 
 # --------------------------------------------------------------------------
@@ -162,17 +170,23 @@ def cell_runs(topology, demand, controllers=("no_av", "cooperative_smoothing"), 
 
 
 def test_ring_is_not_a_usable_operating_point():
-    """Ring under no_av is gridlock, not congestion: everything crashes and mean
-    speed goes to zero. It must not be classified as healthy."""
-    cell, runs = cell_runs("ring", "medium")
+    """Ring is gridlock, not congestion: mean speed goes to zero with everything
+    crashed. At the sweep's own settings it fails completion and, since ring
+    throughput is structurally zero, the throughput criterion too."""
+    cell, runs = cell_runs("ring", "medium", steps=120)
     verdict = assess_cell(cell, runs, min_completed_seeds=1)
     assert verdict.healthy is False
+    assert "throughput_holds" in verdict.failed_criteria
+    assert verdict.worst_throughput_ratio is None
 
 
 def test_free_flow_topology_fails_congestion():
-    cell, runs = cell_runs("straight_multilane", "medium")
-    verdict = assess_cell(cell, runs, min_completed_seeds=1)
-    assert verdict.congestion_reachable is False, "multilane at medium should not congest"
+    """Asserted at the sweep's duration, not the 60-step shortcut: congestion
+    needs ~90 steps to develop, so a short run would pass this for the wrong
+    reason (see test_congestion_needs_time_to_develop)."""
+    cell, runs = cell_runs("straight_multilane", "medium", steps=120)
+    verdict = assess_cell(cell, runs, min_completed_seeds=1, min_congested_seeds=1)
+    assert verdict.congestion_reachable is False, "multilane at medium should not congest on seed 7"
     assert "congestion_reachable" in verdict.failed_criteria
 
 
@@ -192,3 +206,78 @@ def test_merge_at_high_demand_congests():
     cell, runs = cell_runs("merge", "high", controllers=("no_av",), steps=120)
     verdict = assess_cell(cell, runs, min_completed_seeds=1)
     assert verdict.reference_jam_fraction > 0.0
+
+
+def test_crashed_runs_are_excluded_from_metric_means():
+    """throughput_recent is a 60 s rolling window, so a run that dies early cannot
+    report a comparable count. Pooling it with completed runs manufactures a
+    throughput collapse out of nothing — this was a real misclassification of
+    merge/high, where pooling gave ratio 0.721 and completed-only gives 1.000."""
+    runs = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    runs.append(make_run("cooperative_smoothing", 7, completed=False, speed=16.0, throughput=3.0, steps=80))
+    runs.append(make_run("cooperative_smoothing", 17, speed=12.5, throughput=21.0))
+    runs.append(make_run("cooperative_smoothing", 27, speed=12.5, throughput=20.0))
+    summary = summarise(runs)["cooperative_smoothing"]
+    assert summary.seeds == 3
+    assert summary.completed_seeds == 2
+    assert summary.throughput == pytest.approx(20.5), "crashed seed must not drag the mean"
+    assert summary.mean_speed == pytest.approx(12.5)
+    v = assess_cell(CELL, runs, min_completed_seeds=2)
+    assert v.throughput_holds is True
+    assert v.worst_throughput_ratio == pytest.approx(20.5 / 20.0)
+
+
+def test_controller_with_no_completed_runs_has_undefined_means():
+    runs = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    runs += [make_run("cooperative_smoothing", s, completed=False, speed=16.0) for s in (7, 17, 27)]
+    summary = summarise(runs)["cooperative_smoothing"]
+    assert summary.completed_seeds == 0
+    assert summary.mean_speed is None and summary.throughput is None
+    v = assess_cell(CELL, runs)
+    assert v.baselines_separate is False, "cannot separate against a controller with no valid runs"
+    assert v.healthy is False
+
+
+def test_zero_reference_throughput_fails_rather_than_passes_vacuously():
+    """Ring throughput is structurally zero (_clear_exited_vehicles returns early
+    there), so a pass-by-default would let total gridlock through the one
+    criterion built to catch obstruction."""
+    runs = []
+    for seed in (7, 17, 27):
+        runs.append(make_run("no_av", seed, speed=0.0, jam=1.0, throughput=0.0))
+        runs.append(make_run("cooperative_smoothing", seed, speed=3.0, throughput=0.0))
+    v = assess_cell(CELL, runs)
+    assert v.worst_throughput_ratio is None
+    assert v.throughput_holds is False
+    assert v.healthy is False
+
+
+def test_congestion_is_counted_per_seed_not_on_the_mean():
+    """A seed mean straddles the threshold: [0.096, 0.0, 0.051] means 0.049 and
+    reads as no congestion, though 2 of 3 seeds individually clear it."""
+    runs = []
+    for seed, jam in zip((7, 17, 27), (0.0963, 0.0, 0.0505)):
+        runs.append(make_run("no_av", seed, speed=12.0, jam=jam, throughput=20.0))
+        runs.append(make_run("cooperative_smoothing", seed, speed=16.0, throughput=19.0))
+    v = assess_cell(CELL, runs)
+    assert v.congested_seeds == 2
+    assert v.congestion_reachable is True, "2 of 3 seeds congest; the mean is 0.049 and would say no"
+
+
+def test_run_that_reaches_duration_while_crashing_counts_as_completed():
+    """terminated (a crash) and truncated (duration reached) both fire when an AV
+    crashes on the final step; `not terminated` would call that run crashed."""
+    cell = CellSpec(topology="merge", demand="high", av_penetration=0.05)
+    run = run_condition(cell, "backpressure", 7, duration_steps=120)
+    assert run.steps == 120
+    assert run.completed is True, "a run that reached its configured duration is not a crash"
+
+
+def test_real_run_metrics_come_from_the_expected_env_fields():
+    """Pins the extraction layer: reading speed_std or completed_vehicle_count
+    instead would change every ratio in the report without any test objecting."""
+    cell = CellSpec(topology="merge", demand="high", av_penetration=0.10)
+    run = run_condition(cell, "no_av", 7, duration_steps=120)
+    assert run.mean_speed == pytest.approx(12.40, abs=0.5)
+    assert run.throughput == pytest.approx(20.0, abs=2.0)
+    assert run.jam_fraction == pytest.approx(0.208, abs=0.02)

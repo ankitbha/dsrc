@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.analysis.simulator_health import (
     DEFAULT_MIN_COMPLETED_SEEDS,
+    DEFAULT_MIN_CONGESTED_SEEDS,
     DEFAULT_MIN_JAM_FRACTION,
     DEFAULT_MIN_SPEED_SEPARATION_MPS,
     DEFAULT_MIN_THROUGHPUT_RATIO,
@@ -58,6 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-jam-fraction", type=float, default=DEFAULT_MIN_JAM_FRACTION)
     parser.add_argument("--min-speed-separation", type=float, default=DEFAULT_MIN_SPEED_SEPARATION_MPS)
     parser.add_argument("--min-completed-seeds", type=int, default=DEFAULT_MIN_COMPLETED_SEEDS)
+    parser.add_argument("--min-congested-seeds", type=int, default=DEFAULT_MIN_CONGESTED_SEEDS,
+                        help="seeds that must individually congest; a seed mean straddles the threshold")
     parser.add_argument("--min-throughput-ratio", type=float, default=DEFAULT_MIN_THROUGHPUT_RATIO)
     parser.add_argument("--output-root", default="outputs/validation/simulator_health")
     return parser.parse_args()
@@ -75,13 +78,15 @@ def json_safe(value: object) -> object:
 
 def cell_row(verdict: HealthVerdict) -> str:
     mark = lambda ok: "yes" if ok else "NO"
+    num = lambda v, fmt: "n/a" if v is None else format(v, fmt)
     failed = ", ".join(verdict.failed_criteria) or "-"
     return (
         f"| `{verdict.cell.cell_id}` "
-        f"| {mark(verdict.congestion_reachable)} ({verdict.reference_jam_fraction:.3f}) "
-        f"| {mark(verdict.baselines_separate)} ({verdict.best_speed_separation:.2f}) "
+        f"| {mark(verdict.congestion_reachable)} ({verdict.congested_seeds} seeds, "
+        f"mean {num(verdict.reference_jam_fraction, '.3f')}) "
+        f"| {mark(verdict.baselines_separate)} ({num(verdict.best_speed_separation, '.2f')}) "
         f"| {mark(verdict.episodes_complete)} ({verdict.min_completed_seeds}) "
-        f"| {mark(verdict.throughput_holds)} ({verdict.worst_throughput_ratio:.2f}) "
+        f"| {mark(verdict.throughput_holds)} ({num(verdict.worst_throughput_ratio, '.2f')}) "
         f"| {'HEALTHY' if verdict.healthy else failed} |"
     )
 
@@ -98,6 +103,7 @@ def write_report(verdicts: list[HealthVerdict], operating: tuple[HealthVerdict, 
                 "failed_criteria": list(v.failed_criteria),
                 "congestion_reachable": v.congestion_reachable,
                 "reference_jam_fraction": v.reference_jam_fraction,
+                "congested_seeds": v.congested_seeds,
                 "baselines_separate": v.baselines_separate,
                 "best_speed_separation": v.best_speed_separation,
                 "best_controller": v.best_controller,
@@ -126,6 +132,8 @@ def write_report(verdicts: list[HealthVerdict], operating: tuple[HealthVerdict, 
         lines += ["## Recommended operating point", ""]
         lines += [f"- `{v.cell.cell_id}` — separation {v.best_speed_separation:.2f} m/s "
                   f"via `{v.best_controller}`" for v in operating]
+        lines += ["", "Separation is an absolute difference, so confirm the direction before "
+                  "treating a recommended cell as a control benefit."]
     else:
         lines += [
             "## No usable operating point",
@@ -170,6 +178,7 @@ def main() -> int:
                 min_speed_separation=args.min_speed_separation,
                 min_completed_seeds=args.min_completed_seeds,
                 min_throughput_ratio=args.min_throughput_ratio,
+                min_congested_seeds=args.min_congested_seeds,
             )
         )
         print(f"  [{index}/{len(cells)}] {cell.cell_id}: "
