@@ -410,3 +410,65 @@ def test_thresholds_are_inclusive_at_the_boundary():
     assert DEFAULT_MIN_COMPLETED_SEEDS == 2
     assert v.min_completed_seeds == 2
     assert v.episodes_complete is True, "at least 2 of 3, not all 3"
+
+
+def test_paired_comparison_covers_throughput_not_just_speed():
+    """The round-2 bias appeared on both metrics: inverted_tree/medium/pen0.05
+    reported ratio 1.57 arm-wise and 1.00 paired. Pinning only the speed half
+    would leave the throughput half free to regress."""
+    runs = [
+        make_run("no_av", 7, speed=10.76, jam=0.20, throughput=4.0),
+        make_run("no_av", 17, speed=21.70, jam=0.20, throughput=12.0),
+        make_run("no_av", 27, speed=10.52, jam=0.20, throughput=4.0),
+        make_run("t", 7, completed=False, speed=11.57, throughput=4.0, steps=98),
+        make_run("t", 17, speed=21.70, throughput=12.0),
+        make_run("t", 27, completed=False, speed=20.78, throughput=4.0, steps=62),
+    ]
+    v = assess_cell(CELL, runs, min_completed_seeds=1)
+    comparison = v.comparisons["t"]
+    assert comparison.shared_seeds == 1
+    # paired on seed 17 only: 12/12. Over all reference completions it would be
+    # 12 / mean(4,12,4) = 1.8
+    assert comparison.throughput_ratio == pytest.approx(1.0)
+    assert v.worst_throughput_ratio == pytest.approx(1.0)
+
+
+def test_best_controller_is_the_largest_separation_not_the_smallest():
+    runs = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    runs += [make_run("weak", s, speed=12.5, throughput=20.0) for s in (7, 17, 27)]
+    runs += [make_run("strong", s, speed=18.0, throughput=20.0) for s in (7, 17, 27)]
+    v = assess_cell(CELL, runs)
+    assert v.best_controller == "strong"
+    assert v.best_speed_separation == pytest.approx(6.0)
+
+
+def test_congested_shared_seeds_distinguishes_no_effect_from_died_under_load():
+    """merge/high: the reference congests on seed 7 only, and a controller that
+    crashes there is then measured on two free-flow seeds. Without this counter
+    the report reads 'cannot affect congestion' when the truth is 'never faced
+    it'."""
+    runs = []
+    for seed, jam in zip((7, 17, 27), (0.208, 0.0, 0.0)):
+        runs.append(make_run("no_av", seed, speed=12.0, jam=jam, throughput=20.0))
+    runs.append(make_run("dies_under_load", 7, completed=False, speed=16.0, throughput=3.0, steps=80))
+    runs.append(make_run("dies_under_load", 17, speed=12.5, throughput=20.0))
+    runs.append(make_run("dies_under_load", 27, speed=12.5, throughput=20.0))
+    runs += [make_run("survives", s, speed=12.4, throughput=20.0) for s in (7, 17, 27)]
+    v = assess_cell(CELL, runs, min_congested_seeds=1, min_completed_seeds=2)
+    assert v.comparisons["dies_under_load"].shared_seeds == 2
+    assert v.comparisons["dies_under_load"].congested_shared_seeds == 0, "never evaluated under load"
+    assert v.comparisons["survives"].congested_shared_seeds == 1
+
+
+def test_duplicate_seeds_cannot_satisfy_a_per_seed_threshold():
+    """One seed run twice is one sample. jam_by_seed must collapse it, or D5's
+    'two seeds congest' is satisfiable by a single run counted twice."""
+    runs = [
+        make_run("no_av", 17, speed=12.0, jam=0.333, throughput=20.0),
+        make_run("no_av", 17, speed=12.0, jam=0.333, throughput=20.0),
+        make_run("t", 17, speed=13.0, throughput=20.0),
+        make_run("t", 17, speed=13.0, throughput=20.0),
+    ]
+    v = assess_cell(CELL, runs, min_completed_seeds=1)
+    assert v.congested_seeds == 1, "a duplicated seed is one congesting seed, not two"
+    assert v.congestion_reachable is False, "the default requires two distinct congesting seeds"

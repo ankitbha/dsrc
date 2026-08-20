@@ -64,13 +64,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-throughput-ratio", type=float, default=DEFAULT_MIN_THROUGHPUT_RATIO)
     parser.add_argument("--output-root", default="outputs/validation/simulator_health")
     args = parser.parse_args()
+    if len(set(args.seeds)) != len(args.seeds):
+        parser.error(f"--seeds contains duplicates ({args.seeds}); one seed run twice is not two samples")
     seeds = len(args.seeds)
     for name, value in (("--min-congested-seeds", args.min_congested_seeds),
                         ("--min-completed-seeds", args.min_completed_seeds)):
         if value > seeds:
             parser.error(
                 f"{name}={value} exceeds the {seeds} seed(s) given, so no cell can ever pass; "
-                f"lower it or pass more --seeds"
+                f"lower it or pass more distinct --seeds"
             )
     return args
 
@@ -85,6 +87,11 @@ def json_safe(value: object) -> object:
     return value
 
 
+def best_congested(verdict: HealthVerdict) -> int:
+    best = verdict.comparisons.get(verdict.best_controller or "")
+    return best.congested_shared_seeds if best else 0
+
+
 def cell_row(verdict: HealthVerdict) -> str:
     mark = lambda ok: "yes" if ok else "NO"
     num = lambda v, fmt: "n/a" if v is None else format(v, fmt)
@@ -93,8 +100,8 @@ def cell_row(verdict: HealthVerdict) -> str:
         f"| `{verdict.cell.cell_id}` "
         f"| {mark(verdict.congestion_reachable)} ({verdict.congested_seeds}/"
         f"{verdict.reference_completed_seeds} seeds, mean {num(verdict.reference_jam_fraction, '.3f')}) "
-        f"| {mark(verdict.baselines_separate)} ({num(verdict.best_speed_delta, '+.2f')} "
-        f"on {verdict.best_shared_seeds} shared) "
+        f"| {mark(verdict.baselines_separate)} ({num(verdict.best_speed_delta, '+.2f')} on "
+        f"{verdict.best_shared_seeds} shared, {best_congested(verdict)} congested) "
         f"| {mark(verdict.episodes_complete)} ({verdict.min_completed_seeds}) "
         f"| {mark(verdict.throughput_holds)} ({num(verdict.worst_throughput_ratio, '.2f')}) "
         f"| {'HEALTHY' if verdict.healthy else failed} |"
@@ -142,6 +149,9 @@ def write_report(verdicts: list[HealthVerdict], operating: tuple[HealthVerdict, 
         f"separation >= {args.min_speed_separation:g} m/s, completed seeds >= {args.min_completed_seeds}, "
         f"throughput ratio >= {args.min_throughput_ratio:g}.",
         "",
+        "A separation measured on 0 congested shared seeds says nothing about the",
+        "controller: it was evaluated only where there was nothing to control.",
+        "",
         "Speed and throughput are compared per treatment on seeds where both that",
         "treatment and the reference completed. Comparing each arm's own mean is not a",
         "comparison between controllers: the reference never crashes, so a treatment's",
@@ -169,7 +179,7 @@ def write_report(verdicts: list[HealthVerdict], operating: tuple[HealthVerdict, 
         "",
         "## All cells",
         "",
-        "| cell | congestion (seeds, jam) | speed delta (m/s, signed) | complete (seeds) | throughput (ratio) | verdict |",
+        "| cell | congestion (seeds, jam) | speed delta (signed, shared/congested) | complete (shared seeds) | throughput (ratio) | verdict |",
         "|---|---|---|---|---|---|",
     ]
     lines += [cell_row(v) for v in sorted(verdicts, key=lambda v: v.cell.cell_id)]
@@ -211,7 +221,10 @@ def main() -> int:
     paths = write_report(verdicts, operating, Path(args.output_root), args)
     print(f"\nhealthy cells: {len(operating)}/{len(verdicts)}")
     if operating:
-        print(f"recommended: {operating[0].cell.cell_id} (separation {operating[0].best_speed_separation:.2f} m/s)")
+        best = operating[0]
+        print(f"recommended: {best.cell.cell_id} ({best.best_speed_delta:+.2f} m/s via "
+              f"{best.best_controller} on {best.best_shared_seeds} shared seed(s), "
+              f"{best_congested(best)} congested)")
     else:
         print("NO usable operating point: no cell passes all four criteria")
     for key, path in paths.items():

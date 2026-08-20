@@ -96,6 +96,7 @@ class TreatmentComparison:
 
     controller: str
     shared_seeds: int
+    congested_shared_seeds: int
     speed_delta: float | None
     speed_separation: float | None
     throughput_ratio: float | None
@@ -207,7 +208,7 @@ def summarise(runs: Sequence[Run]) -> dict[str, ControllerSummary]:
             jam_fraction=mean(run.jam_fraction for run in done) if done else None,
             throughput=mean(run.throughput for run in done) if done else None,
             collisions=mean(run.collisions for run in done) if done else None,
-            jam_by_seed=tuple(run.jam_fraction for run in done),
+            jam_by_seed=tuple({run.seed: run.jam_fraction for run in done}.values()),
         )
     return summaries
 
@@ -240,7 +241,7 @@ def assess_cell(
     for name in treatments:
         shared = sorted(reference_seeds & {seed for controller, seed in completed if controller == name})
         if not shared:
-            comparisons[name] = TreatmentComparison(name, 0, None, None, None)
+            comparisons[name] = TreatmentComparison(name, 0, 0, None, None, None)
             continue
         treated_speed = mean(completed[(name, seed)].mean_speed for seed in shared)
         base_speed = mean(completed[(REFERENCE_CONTROLLER, seed)].mean_speed for seed in shared)
@@ -250,6 +251,14 @@ def assess_cell(
         comparisons[name] = TreatmentComparison(
             controller=name,
             shared_seeds=len(shared),
+            # A controller that crashes on the congested seeds is then measured
+            # only where there is nothing to control, so a failed separation says
+            # nothing about its quality. Without this the report cannot tell
+            # "cannot affect congestion" from "died on the congested seed".
+            congested_shared_seeds=sum(
+                1 for seed in shared
+                if completed[(REFERENCE_CONTROLLER, seed)].jam_fraction >= min_jam_fraction
+            ),
             speed_delta=delta,
             speed_separation=abs(delta),
             # A zero reference throughput cannot be preserved or collapsed, so
@@ -267,7 +276,12 @@ def assess_cell(
     separation = best.speed_separation if best else None
     separates = separation is not None and separation >= min_speed_separation
 
-    completed_min = min((s.completed_seeds for s in summaries.values()), default=0)
+    # Counted over shared seeds, not raw completions: a seed where the treatment
+    # crashed does not reach the configured duration for that comparison, and
+    # counting it lets a cell pass D7 with an intersection of one.
+    completed_min = min((c.shared_seeds for c in comparisons.values()), default=0) if comparisons else 0
+    if not comparisons:
+        completed_min = min((s.completed_seeds for s in summaries.values()), default=0)
     complete = bool(summaries) and completed_min >= min_completed_seeds
 
     ratios = [c.throughput_ratio for c in comparisons.values() if c.throughput_ratio is not None]
