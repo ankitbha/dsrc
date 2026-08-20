@@ -1,0 +1,373 @@
+"""Sanity tests for the listener: accept, refuse, displace, and end sessions.
+
+The phone opens connections and the Jetson accepts them, so these tests drive
+a loopback client through a real handshake against a running listener.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+
+from transport.channels import Channel
+from transport.endpoint import (
+    SessionEnded,
+    SessionRefused,
+    SessionStarted,
+    TransportListener,
+)
+from transport.frames import PROTOCOL_VERSION, Frame, encode, read_frame
+from transport.handshake import Hello, Role, VersionMismatch, perform_handshake
+from transport.loopback import LoopbackAcceptor
+from transport.session import Session, SessionEndReason
+
+JETSON = Hello(device_id="jetson-orin", role=Role.JETSON)
+
+
+def wait_until(predicate, timeout=3.0, interval=0.005):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def wait_for_event(listener, kind, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        event = listener.next_event(timeout=0.05)
+        if isinstance(event, kind):
+            return event
+    return None
+
+
+class Phone:
+    """A loopback client that speaks the protocol, standing in for the app."""
+
+    def __init__(self, acceptor, device_id="moto-g-power", version=PROTOCOL_VERSION):
+        self.connection = acceptor.connect(device_id)
+        self.handshake = perform_handshake(
+            self.connection, Hello(device_id, Role.PHONE, protocol_version=version)
+        )
+        self.session = None
+
+    def open_session(self, session_id=999, **kwargs):
+        options = {"heartbeat_s": None, "stall_timeout_s": None}
+        options.update(kwargs)
+        self.session = Session(self.connection, session_id=session_id, **options).start()
+        return self.session
+
+    def close(self):
+        if self.session is not None:
+            self.session.close()
+        else:
+            self.connection.close()
+
+
+def listener_for(acceptor, **kwargs):
+    options = {"heartbeat_s": None, "stall_timeout_s": None, "accept_poll_s": 0.01}
+    options.update(kwargs)
+    return TransportListener(acceptor, JETSON, **options).start()
+
+
+# -- accepting ---------------------------------------------------------------
+
+
+def test_a_connection_becomes_a_session():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        phone = Phone(acceptor)
+        event = wait_for_event(listener, SessionStarted)
+        assert event is not None
+        assert event.handshake.remote.device_id == "moto-g-power"
+        assert event.handshake.remote.role is Role.PHONE
+        assert listener.current_session is event.session
+        assert listener.accepted == 1
+        phone.close()
+    finally:
+        listener.stop()
+
+
+def test_session_ids_start_at_one_and_increase():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    ids = []
+    try:
+        for _ in range(3):
+            phone = Phone(acceptor)
+            event = wait_for_event(listener, SessionStarted)
+            assert event is not None
+            ids.append(event.session.session_id)
+            phone.close()
+            assert wait_for_event(listener, SessionEnded) is not None
+        assert ids == [1, 2, 3]
+    finally:
+        listener.stop()
+
+
+def test_data_flows_over_an_accepted_session():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        phone = Phone(acceptor)
+        started = wait_for_event(listener, SessionStarted)
+        phone.open_session()
+        phone.session.send(Channel.GPS, b"fix")
+        message = started.session.recv(Channel.GPS, timeout=2.0)
+        assert message is not None and message.payload == b"fix"
+
+        started.session.send(Channel.ADVISORY, b"slow")
+        reply = phone.session.recv(Channel.ADVISORY, timeout=2.0)
+        assert reply is not None and reply.payload == b"slow"
+        phone.close()
+    finally:
+        listener.stop()
+
+
+def test_sequence_numbers_restart_on_a_fresh_session():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        seqs = []
+        for _ in range(2):
+            phone = Phone(acceptor)
+            started = wait_for_event(listener, SessionStarted)
+            assert started is not None
+            started.session.send(Channel.ADVISORY, b"a")
+            seqs.append(read_frame(phone.connection.recv_exact).seq)
+            phone.close()
+            wait_for_event(listener, SessionEnded)
+        assert seqs == [0, 0]
+    finally:
+        listener.stop()
+
+
+# -- refusing ----------------------------------------------------------------
+
+
+def test_a_version_mismatch_is_refused_and_starts_no_session():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        with pytest.raises(VersionMismatch):
+            Phone(acceptor, device_id="stale-app", version=PROTOCOL_VERSION + 1)
+        event = wait_for_event(listener, SessionRefused)
+        assert event is not None
+        assert str(PROTOCOL_VERSION + 1) in event.error
+        assert listener.refused == 1
+        assert listener.accepted == 0
+        assert listener.current_session is None
+    finally:
+        listener.stop()
+
+
+def test_a_non_hello_first_frame_is_refused():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        connection = acceptor.connect("rude")
+        connection.send_all(
+            encode(Frame(channel=Channel.GPS, seq=0, t_mono_ns=1, t_wall_ns=2, payload=b"x"))
+        )
+        assert wait_for_event(listener, SessionRefused) is not None
+        assert listener.accepted == 0
+    finally:
+        listener.stop()
+
+
+def test_a_refusal_does_not_disturb_a_live_session():
+    """Displacement happens only once the newcomer has proved it speaks the
+    protocol; a garbage connection must not cost us a working one."""
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        good = Phone(acceptor)
+        started = wait_for_event(listener, SessionStarted)
+        assert started is not None
+
+        with pytest.raises(VersionMismatch):
+            Phone(acceptor, device_id="stale", version=99)
+        assert wait_for_event(listener, SessionRefused) is not None
+
+        assert listener.current_session is started.session
+        assert not started.session.is_closed
+        good.open_session()
+        good.session.send(Channel.GPS, b"still here")
+        message = started.session.recv(Channel.GPS, timeout=2.0)
+        assert message is not None and message.payload == b"still here"
+        good.close()
+    finally:
+        listener.stop()
+
+
+# -- displacement ------------------------------------------------------------
+
+
+def test_a_new_connection_displaces_the_live_session():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        first = Phone(acceptor, device_id="phone-a")
+        first_started = wait_for_event(listener, SessionStarted)
+        assert first_started is not None
+
+        second = Phone(acceptor, device_id="phone-b")
+        ended = wait_for_event(listener, SessionEnded)
+        assert ended is not None
+        assert ended.session_id == first_started.session.session_id
+        assert ended.reason is SessionEndReason.DISPLACED
+        assert listener.displaced == 1
+
+        second_started = wait_for_event(listener, SessionStarted)
+        assert second_started is not None
+        assert second_started.session.session_id != first_started.session.session_id
+        assert first_started.session.is_closed
+
+        second.open_session()
+        second.session.send(Channel.GPS, b"took over")
+        message = second_started.session.recv(Channel.GPS, timeout=2.0)
+        assert message is not None and message.payload == b"took over"
+        second.close()
+    finally:
+        listener.stop()
+
+
+def test_the_displaced_session_carries_its_reason_in_its_stats():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        Phone(acceptor, device_id="phone-a")
+        first = wait_for_event(listener, SessionStarted)
+        Phone(acceptor, device_id="phone-b")
+        ended = wait_for_event(listener, SessionEnded)
+        assert ended.stats.end_reason == "displaced"
+        assert first.session.end_reason is SessionEndReason.DISPLACED
+    finally:
+        listener.stop()
+
+
+def test_reconnecting_five_times_leaves_one_live_session():
+    """A reconnect-looping phone must not accumulate sessions."""
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    phones = []
+    try:
+        for index in range(5):
+            phones.append(Phone(acceptor, device_id=f"phone-{index}"))
+            assert wait_for_event(listener, SessionStarted) is not None
+        assert listener.accepted == 5
+        assert listener.displaced == 4
+        assert listener.current_session is not None
+        assert listener.current_session.session_id == 5
+        assert listener.current_session.stats().end_reason is None
+    finally:
+        for phone in phones:
+            phone.close()
+        listener.stop()
+
+
+# -- ending ------------------------------------------------------------------
+
+
+def test_a_phone_hangup_ends_the_session():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        phone = Phone(acceptor)
+        assert wait_for_event(listener, SessionStarted) is not None
+        phone.connection.close()
+        ended = wait_for_event(listener, SessionEnded)
+        assert ended is not None
+        assert ended.reason is SessionEndReason.PEER_CLOSED
+        assert listener.current_session is None
+    finally:
+        listener.stop()
+
+
+def test_a_silent_phone_is_declared_stalled():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor, stall_timeout_s=0.2)
+    try:
+        Phone(acceptor)  # connects, handshakes, then says nothing
+        assert wait_for_event(listener, SessionStarted) is not None
+        ended = wait_for_event(listener, SessionEnded, timeout=4.0)
+        assert ended is not None
+        assert ended.reason is SessionEndReason.STALLED
+    finally:
+        listener.stop()
+
+
+def test_a_heartbeating_phone_is_not_declared_stalled():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor, heartbeat_s=0.05, stall_timeout_s=0.5)
+    try:
+        phone = Phone(acceptor)
+        started = wait_for_event(listener, SessionStarted)
+        phone.open_session(heartbeat_s=0.05, stall_timeout_s=0.5)
+        time.sleep(1.2)
+        assert not started.session.is_closed
+        assert started.session.stats().heartbeats_received > 0
+        phone.close()
+    finally:
+        listener.stop()
+
+
+def test_stopping_the_listener_closes_the_live_session():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    phone = Phone(acceptor)
+    started = wait_for_event(listener, SessionStarted)
+    assert started is not None
+    listener.stop()
+    assert started.session.is_closed
+    assert started.session.end_reason is SessionEndReason.CLOSED_LOCAL
+    phone.close()
+
+
+def test_no_listener_thread_outlives_stop():
+    before = {thread.name for thread in threading.enumerate()}
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    Phone(acceptor)
+    assert wait_for_event(listener, SessionStarted) is not None
+    listener.stop()
+    assert wait_until(
+        lambda: not [
+            thread
+            for thread in threading.enumerate()
+            if thread.name not in before and ("listener" in thread.name or "session" in thread.name)
+        ]
+    )
+
+
+def test_events_are_ordered_end_before_the_replacement_start():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        Phone(acceptor, device_id="a")
+        assert wait_for_event(listener, SessionStarted) is not None
+        Phone(acceptor, device_id="b")
+        collected = []
+        deadline = time.monotonic() + 3.0
+        while len(collected) < 2 and time.monotonic() < deadline:
+            event = listener.next_event(timeout=0.05)
+            if event is not None:
+                collected.append(event)
+        kinds = [type(event).__name__ for event in collected]
+        assert kinds == ["SessionEnded", "SessionStarted"], kinds
+    finally:
+        listener.stop()
+
+
+def test_next_event_returns_none_when_nothing_happened():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        assert listener.next_event(timeout=0.0) is None
+        assert listener.next_event(timeout=0.05) is None
+    finally:
+        listener.stop()
