@@ -416,8 +416,16 @@ def test_counters_are_exact_over_a_clean_run():
         assert out.bytes_sent > 0
 
         inbound = receiver.stats().channels[Channel.GPS]
-        assert (inbound.received, inbound.delivered, inbound.dropped_inbound) == (10, 10, 0)
+        assert (inbound.received, inbound.delivered, inbound.dropped_inbound) == (10, 0, 0)
         assert inbound.bytes_received == 30  # three payload bytes each
+
+        # `delivered` counts messages handed to a caller, so it moves on recv,
+        # not on arrival. Counting it on arrival made it always equal
+        # `received` -- carrying no information -- and double-counted anything
+        # later displaced.
+        for _ in range(10):
+            assert receiver.recv(Channel.GPS) is not None
+        assert receiver.stats().channels[Channel.GPS].delivered == 10
     finally:
         sender.close()
         receiver.close()
@@ -1469,3 +1477,58 @@ def test_a_raising_callback_does_not_mask_the_real_failure():
         assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
     finally:
         session.close()
+
+
+def test_the_inbound_account_closes_under_overflow():
+    """Every frame read off the wire is delivered to a caller, dropped by
+    policy, or abandoned at shutdown. Found by the loopback experiment: with a
+    consumer slower than the offered rate, `received` was 301 while `delivered`
+    was also 301 and 241 were dropped -- messages counted twice, and no way to
+    tell how many a caller actually got."""
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        depth = policy_for(Channel.GPS).depth
+        total = depth + 25
+        for seq in range(total):
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.GPS,
+                        seq=seq,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=f"{seq}".encode(),
+                    )
+                )
+            )
+        assert wait_until(
+            lambda: session.stats().channels[Channel.GPS].received == total, timeout=5.0
+        )
+        collected = 0
+        while session.recv(Channel.GPS) is not None:
+            collected += 1
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.dropped_inbound == 25
+        assert stats.delivered == collected == depth
+        assert stats.received == stats.delivered + stats.dropped_inbound + stats.abandoned_inbound
+    finally:
+        session.close()
+
+
+def test_messages_never_collected_are_counted_as_abandoned():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    for seq in range(4):
+        far.send_all(
+            encode(
+                Frame(channel=Channel.GPS, seq=seq, t_mono_ns=1, t_wall_ns=2, payload=b"fix")
+            )
+        )
+    assert wait_until(lambda: session.pending(Channel.GPS) == 4)
+    session.close()
+    stats = session.stats().channels[Channel.GPS]
+    assert stats.abandoned_inbound == 4
+    assert stats.delivered == 0
+    assert stats.received == stats.delivered + stats.dropped_inbound + stats.abandoned_inbound
+    assert "abandoned_inbound" in stats.to_record()

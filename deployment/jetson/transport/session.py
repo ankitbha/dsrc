@@ -101,6 +101,7 @@ class ChannelStats:
     received: int = 0
     delivered: int = 0
     dropped_inbound: int = 0
+    abandoned_inbound: int = 0
     bytes_received: int = 0
     seq_gaps: int = 0
     missing_seqs: int = 0
@@ -118,6 +119,7 @@ class ChannelStats:
             "received": self.received,
             "delivered": self.delivered,
             "dropped_inbound": self.dropped_inbound,
+            "abandoned_inbound": self.abandoned_inbound,
             "bytes_received": self.bytes_received,
             "seq_gaps": self.seq_gaps,
             "missing_seqs": self.missing_seqs,
@@ -303,6 +305,10 @@ class Session:
         summary can only recover it as queued - sent - dropped. Deriving a loss
         by subtraction is how a counting bug hides.
 
+        The inbound side needs the same treatment: a message read off the wire
+        but never collected by a caller is neither delivered nor dropped by
+        policy, and would otherwise be missing from the account entirely.
+
         Only the queues. The frame the writer has already taken is the writer's
         to account for -- it is the only thread that knows whether the write
         completed. Guessing here instead produced the opposite error: a frame
@@ -313,6 +319,11 @@ class Session:
                 if queue:
                     self._stats[channel].abandoned_outbound += len(queue)
                     queue.clear()
+        with self._in_cond:
+            for channel, inbound in self._inbound.items():
+                if inbound:
+                    self._stats[channel].abandoned_inbound += len(inbound)
+                    inbound.clear()
 
     # -- sending ---------------------------------------------------------
 
@@ -511,7 +522,6 @@ class Session:
                 queue.popleft()
                 stats.dropped_inbound += 1
             queue.append(ReceivedMessage(frame=frame, t_recv_mono_ns=t_recv))
-            stats.delivered += 1
             stats.inbound_high_water = max(stats.inbound_high_water, len(queue))
             self._in_cond.notify_all()
 
@@ -523,6 +533,11 @@ class Session:
             while True:
                 queue = self._inbound[channel]
                 if queue:
+                    # Counted here, on the way out. Counting it on arrival made
+                    # `delivered` always equal `received` -- no information --
+                    # and double-counted every message later displaced by a
+                    # newer one, so the inbound account could not be checked.
+                    self._stats[channel].delivered += 1
                     return queue.popleft()
                 if self._end_reason is not None:
                     return None
