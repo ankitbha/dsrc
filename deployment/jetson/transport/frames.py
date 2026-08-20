@@ -86,14 +86,25 @@ class Frame:
 
 
 def encode_header(header: Mapping[str, Any]) -> bytes:
-    """Canonical JSON bytes. Any implementation must match this exactly."""
-    return json.dumps(
-        header,
-        separators=(",", ":"),
-        sort_keys=True,
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
+    """Canonical JSON bytes. Any implementation must match this exactly.
+
+    NaN and Infinity are refused rather than emitted. Python would write the
+    bare tokens NaN and Infinity, which its own parser accepts and a strict
+    parser in another language rejects -- a bug that round-trips perfectly on
+    one side and desyncs on the first interop attempt. A sensor extension
+    carrying an unavailable reading as NaN is an ordinary thing for a caller to
+    do, so the refusal is reported as FramingError like every other bad frame.
+    """
+    try:
+        return json.dumps(
+            header,
+            separators=(",", ":"),
+            sort_keys=True,
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except ValueError as exc:
+        raise FramingError(f"header is not encodable: {exc}") from None
 
 
 def encode(frame: Frame) -> bytes:

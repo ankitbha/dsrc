@@ -18,6 +18,7 @@ from transport.endpoint import (
     SessionStarted,
     TransportListener,
 )
+from transport.connection import ConnectionClosed
 from transport.frames import PROTOCOL_VERSION, Frame, encode, read_frame
 from transport.handshake import Hello, Role, VersionMismatch, perform_handshake
 from transport.loopback import LoopbackAcceptor
@@ -371,3 +372,148 @@ def test_next_event_returns_none_when_nothing_happened():
         assert listener.next_event(timeout=0.05) is None
     finally:
         listener.stop()
+
+
+# -- event ordering ---------------------------------------------------------
+
+
+def test_a_session_that_dies_at_once_still_reports_started_first():
+    """A consumer must never see an end for a session it was not told began.
+
+    Session boundaries are the whole point of these events: clock offset,
+    tracker state and the HERE cache are reset at one. An inverted pair has a
+    consumer tear down state it never built, then build state for a session
+    that is already dead.
+    """
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        connection = acceptor.connect("dies-at-once")
+        perform_handshake(connection, Hello("dies-at-once", Role.PHONE))
+        # Valid prefix, header is a JSON array: a framing error on the first
+        # frame after the handshake.
+        connection.send_all(bytes([0, 0, 0, 0, 0, 2]) + b"[]")
+
+        collected = []
+        deadline = time.monotonic() + 3.0
+        while len(collected) < 2 and time.monotonic() < deadline:
+            event = listener.next_event(timeout=0.05)
+            if event is not None:
+                collected.append(event)
+        kinds = [type(event).__name__ for event in collected]
+        assert kinds == ["SessionStarted", "SessionEnded"], kinds
+        assert collected[1].session_id == collected[0].session.session_id
+        assert collected[1].reason is SessionEndReason.FRAMING_ERROR
+    finally:
+        listener.stop()
+
+
+# -- a peer that connects and says nothing ----------------------------------
+
+
+def test_a_connection_that_never_sends_a_hello_is_refused_not_tolerated():
+    """The lockout displacement exists to prevent, one step earlier: a phone
+    that completes the TCP handshake and loses signal before its hello would
+    otherwise hold the accept loop forever, and the phone is the only party
+    that can reconnect."""
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor, handshake_timeout_s=0.3)
+    try:
+        acceptor.connect("mute")  # connects, sends nothing, ever
+        event = wait_for_event(listener, SessionRefused, timeout=3.0)
+        assert event is not None
+        assert "hello" in event.error
+        assert listener.refused == 1
+        assert listener.accepted == 0
+    finally:
+        listener.stop()
+
+
+def test_a_healthy_phone_still_connects_after_a_mute_one():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor, handshake_timeout_s=0.3)
+    try:
+        acceptor.connect("mute")
+        assert wait_for_event(listener, SessionRefused, timeout=3.0) is not None
+        phone = Phone(acceptor, device_id="healthy")
+        started = wait_for_event(listener, SessionStarted, timeout=3.0)
+        assert started is not None
+        assert started.handshake.remote.device_id == "healthy"
+        phone.close()
+    finally:
+        listener.stop()
+
+
+def test_stop_returns_and_leaves_no_thread_with_a_peer_mid_handshake():
+    before = {thread.name for thread in threading.enumerate()}
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor, handshake_timeout_s=30.0)
+    acceptor.connect("mute")
+    time.sleep(0.2)  # let the accept loop pick it up and block on the hello
+    started = time.monotonic()
+    listener.stop()
+    assert time.monotonic() - started < 5.0
+    assert wait_until(
+        lambda: not [
+            thread
+            for thread in threading.enumerate()
+            if thread.name not in before
+            and ("listener" in thread.name or "handshake" in thread.name)
+        ],
+        timeout=5.0,
+    )
+
+
+def test_a_refused_connection_is_closed():
+    """Otherwise a rejected peer's socket is held until the process exits."""
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        connection = acceptor.connect("stale")
+        with pytest.raises(VersionMismatch):
+            perform_handshake(
+                connection, Hello("stale", Role.PHONE, protocol_version=PROTOCOL_VERSION + 1)
+            )
+        assert wait_for_event(listener, SessionRefused) is not None
+        with pytest.raises(ConnectionClosed):
+            connection.recv_exact(1)
+    finally:
+        listener.stop()
+
+
+# -- guards -----------------------------------------------------------------
+
+
+def test_an_old_session_ending_late_does_not_clear_the_live_one():
+    """A displaced session can finish ending after its replacement is
+    installed. Without the identity check the late callback would clear
+    current_session and emit an end after the new start."""
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    try:
+        first = Phone(acceptor, device_id="phone-a")
+        first_started = wait_for_event(listener, SessionStarted)
+        second = Phone(acceptor, device_id="phone-b")
+        assert wait_for_event(listener, SessionEnded) is not None
+        second_started = wait_for_event(listener, SessionStarted)
+        assert second_started is not None
+
+        listener._on_session_end(first_started.session, SessionEndReason.PEER_CLOSED)
+        assert listener.current_session is second_started.session
+        first.close()
+        second.close()
+    finally:
+        listener.stop()
+
+
+def test_a_connection_arriving_after_stop_never_becomes_a_session():
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    listener.stop()
+    try:
+        acceptor.connect("late")
+    except ConnectionClosed:
+        pass  # the acceptor is closed, which is also correct
+    time.sleep(0.2)
+    assert listener.accepted == 0
+    assert listener.current_session is None

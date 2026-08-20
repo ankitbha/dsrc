@@ -263,3 +263,58 @@ def test_two_frames_read_in_sequence_from_one_stream():
 def test_heartbeat_extension_survives_roundtrip():
     decoded = decode(encode(make_frame(channel=Channel.CONTROL, extensions={HEARTBEAT_KEY: True})))
     assert decoded.extensions[HEARTBEAT_KEY] is True
+
+
+# -- non-finite numbers ------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_numbers_are_refused_as_framing_errors(value):
+    """Python writes the bare tokens NaN and Infinity, which its own parser
+    accepts and a strict parser elsewhere rejects: a bug that round-trips
+    perfectly here and desyncs on the first interop attempt. A sensor reading
+    that is unavailable is a plausible source of one, so the refusal has to be
+    a FramingError like any other bad frame, not a bare ValueError escaping
+    past the caller's except clause."""
+    with pytest.raises(FramingError, match="not encodable"):
+        encode(make_frame(extensions={"reading": value}))
+
+
+def test_nested_non_finite_numbers_are_refused_too():
+    with pytest.raises(FramingError, match="not encodable"):
+        encode(make_frame(extensions={"imu": {"accel": [1.0, float("nan")]}}))
+
+
+def test_finite_floats_still_encode():
+    decoded = decode(encode(make_frame(extensions={"reading": 1.5, "zero": 0.0})))
+    assert decoded.extensions == {"reading": 1.5, "zero": 0.0}
+
+
+# -- header size boundary ----------------------------------------------------
+
+
+def pad_to_header_size(target: int) -> Frame:
+    """A frame whose encoded header is exactly `target` bytes."""
+    probe = make_frame(payload=b"", extensions={"pad": ""})
+    overhead = len(encode_header(probe.header()))
+    return make_frame(payload=b"", extensions={"pad": "x" * (target - overhead)})
+
+
+def test_header_at_exactly_the_limit_encodes():
+    """The payload limit has both an at-limit and an over-limit test. Without
+    the same pair here, an off-by-one lets us emit a header our own reader
+    would refuse, so we would kill the session with our own frame."""
+    frame = pad_to_header_size(MAX_HEADER_BYTES)
+    encoded = encode(frame)
+    assert len(encode_header(frame.header())) == MAX_HEADER_BYTES
+    assert decode(encoded).extensions == frame.extensions
+
+
+def test_header_one_byte_over_the_limit_is_refused():
+    with pytest.raises(FramingError, match="header"):
+        encode(pad_to_header_size(MAX_HEADER_BYTES + 1))
+
+
+def test_a_header_at_the_limit_survives_a_round_trip_through_a_reader():
+    frame = pad_to_header_size(MAX_HEADER_BYTES)
+    assert read_frame(reader_for(encode(frame))).extensions == frame.extensions

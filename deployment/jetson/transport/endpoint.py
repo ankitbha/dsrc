@@ -88,6 +88,7 @@ class TransportListener:
         mono_clock: MonoClock = now_mono_ns,
         wall_clock: WallClock = now_wall_ns,
         accept_poll_s: float = 0.05,
+        handshake_timeout_s: float | None = DEFAULT_STALL_TIMEOUT_S,
     ) -> None:
         self._acceptor = acceptor
         self._local_hello = local_hello
@@ -96,11 +97,13 @@ class TransportListener:
         self._mono = mono_clock
         self._wall = wall_clock
         self._accept_poll_s = accept_poll_s
+        self._handshake_timeout_s = handshake_timeout_s
 
         self._session_ids = itertools.count(1)
         self._events: Queue[SessionEvent] = Queue()
         self._lock = threading.Lock()
         self._current: Session | None = None
+        self._pending: ByteConnection | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.accepted = 0
@@ -120,6 +123,16 @@ class TransportListener:
             self._acceptor.close()
         except Exception:
             pass
+        # Closing the acceptor does not touch a connection already handed to
+        # the accept loop, so a peer mid-handshake has to be closed by hand or
+        # the accept loop never returns and stop() leaves its thread running.
+        with self._lock:
+            pending = self._pending
+        if pending is not None:
+            try:
+                pending.close()
+            except Exception:
+                pass
         session = self.current_session
         if session is not None:
             session.close(SessionEndReason.CLOSED_LOCAL)
@@ -166,14 +179,55 @@ class TransportListener:
                 return
             self._admit(connection)
 
-    def _admit(self, connection: ByteConnection) -> None:
-        try:
-            handshake = perform_handshake(
-                connection,
-                self._local_hello,
-                mono_clock=self._mono,
-                wall_clock=self._wall,
+    def _handshake_with_timeout(self, connection: ByteConnection) -> HandshakeResult:
+        """Handshake without letting a silent peer wedge the accept loop.
+
+        perform_handshake blocks reading the peer's hello. A phone that
+        completes the TCP handshake and then loses signal before its hello
+        would otherwise hold this loop forever: no later connection is ever
+        accepted, so the phone -- the only party that can reconnect -- is
+        locked out for the rest of the drive, and stop() cannot end the
+        listener thread either. This is the same lockout displacement exists to
+        prevent, arriving one step earlier.
+        """
+        if self._handshake_timeout_s is None:
+            return perform_handshake(
+                connection, self._local_hello, mono_clock=self._mono, wall_clock=self._wall
             )
+
+        outcome: dict[str, object] = {}
+
+        def attempt() -> None:
+            try:
+                outcome["result"] = perform_handshake(
+                    connection, self._local_hello, mono_clock=self._mono, wall_clock=self._wall
+                )
+            except BaseException as exc:  # re-raised on the accept loop below
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=attempt, name="handshake", daemon=True)
+        worker.start()
+        worker.join(self._handshake_timeout_s)
+        if worker.is_alive():
+            # Closing the connection is what unblocks the worker's read.
+            try:
+                connection.close()
+            except Exception:
+                pass
+            worker.join(1.0)
+            raise HandshakeError(
+                f"no hello within {self._handshake_timeout_s}s"
+            )
+        error = outcome.get("error")
+        if error is not None:
+            raise error
+        return outcome["result"]  # type: ignore[return-value]
+
+    def _admit(self, connection: ByteConnection) -> None:
+        with self._lock:
+            self._pending = connection
+        try:
+            handshake = self._handshake_with_timeout(connection)
         except (HandshakeError, ConnectionClosed, OSError) as exc:
             self.refused += 1
             peer = getattr(connection, "peer", "?")
@@ -182,6 +236,16 @@ class TransportListener:
             except Exception:
                 pass
             self._events.put(SessionRefused(peer=peer, error=str(exc)))
+            return
+        finally:
+            with self._lock:
+                self._pending = None
+
+        if self._stop.is_set():
+            try:
+                connection.close()
+            except Exception:
+                pass
             return
 
         # Only displace once the newcomer has proved it speaks the protocol.
@@ -202,8 +266,15 @@ class TransportListener:
         with self._lock:
             self._current = session
         self.accepted += 1
-        session.start()
+        # Announce before starting the threads. A session can die immediately
+        # -- a malformed first frame is enough -- and starting first lets its
+        # SessionEnded reach the consumer ahead of the SessionStarted for the
+        # same id, so the consumer tears down state it never built and then
+        # builds state for a session already dead. Sending on a session whose
+        # writer has not started only queues, and its reader has consumed
+        # nothing, so announcing first loses nothing.
         self._events.put(SessionStarted(session=session, handshake=handshake))
+        session.start()
 
     def _on_session_end(self, session: Session, reason: SessionEndReason) -> None:
         with self._lock:

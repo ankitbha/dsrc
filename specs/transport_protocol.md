@@ -73,7 +73,13 @@ reconcile.
 Any other key is a header **extension** and carries message-level meaning the
 transport ignores. Extensions are additive: a receiver MUST accept and preserve
 keys it does not recognize, which is why the header is JSON rather than a
-struct. One key is reserved: `hello`, described below.
+struct.
+
+Two extension keys are reserved for the transport itself on every channel:
+`hello` and `heartbeat`, both described below. A sender MUST NOT put either on
+a caller's message. A message carrying one would be read as transport traffic
+by the peer and consumed instead of delivered -- lost with no drop counted and
+no sequence gap to show it, so invisible in the session summary as well.
 
 ### Clocks
 
@@ -91,6 +97,13 @@ Two clocks, following the discipline in `deployment/jetson/sensors/time_sync.py`
 enqueue, before any overflow decision, so a **gap in received `seq` is how a
 receiver observes that the sender dropped something**. Sequence numbers do not
 survive a reconnect: a new session restarts every channel at 0.
+
+One exception, and both sides must implement it: the hello spends `control`
+seq 0, so a session's own `control` traffic continues from **1**. A peer that
+restarted control at 0 would duplicate the hello's seq, and the gap rule above
+detects nothing -- it only fires on a seq greater than expected -- so the
+divergence would be silent and would offset every control-channel gap
+statistic permanently.
 
 ## Channels
 
@@ -191,9 +204,33 @@ A **session** is one accepted connection. The listener accepts one at a time.
   it: the live session ends with reason `displaced` and the new one starts. The
   alternative, refusing the newcomer, would let one half-open drop that the
   Jetson has not yet noticed lock the phone out for the rest of a drive.
-- **Stall.** Each side sends a `control` heartbeat every **1.0 s**. A session
-  with no bytes of any kind received for **5.0 s** ends with reason `stalled`.
-  Without this, a half-open TCP connection looks healthy indefinitely.
+- **Stall.** Each side sends a keepalive every **1.0 s**. A session that has
+  made no read progress for **5.0 s** ends with reason `stalled`. Without this,
+  a half-open TCP connection looks healthy indefinitely.
+
+  A keepalive is a `control` frame with an empty payload and the reserved
+  `heartbeat` header extension set to `true`:
+
+  ```json
+  {"ch": "control", "seq": 7, "t_mono_ns": 123, "t_wall_ns": 456,
+   "n": 0, "heartbeat": true}
+  ```
+
+  It consumes a `control` sequence number like any other frame. A receiver
+  MUST consume it and MUST NOT deliver it to the application -- the transport
+  generates keepalives, so it also absorbs them. The reserved key is honoured
+  on `control` only: the same key arriving on a data channel is a caller's
+  message and MUST be delivered.
+
+  "No read progress" is measured against reads completing, in chunks of at
+  most **8192 bytes**. This matters: measuring per completed *frame* instead
+  would end any session whose frame takes longer than the timeout to arrive,
+  which at a 4 MiB limit and a 5 s timeout is any link under about 839 KB/s --
+  and the session would then reconnect and re-send, so the link never recovers.
+  Chunked, the floor is 8192 bytes per 5 s, about 1.6 KB/s (13 kbps): below
+  any link that could carry this system at all. The consequence to accept is
+  that a peer dribbling bytes indefinitely holds a session open; for a system
+  whose only peer runs our own app, that is the right trade.
 
 Session-end reasons: `closed_local`, `peer_closed`, `displaced`, `stalled`,
 `framing_error`, `transport_error`.

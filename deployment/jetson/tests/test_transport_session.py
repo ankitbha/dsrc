@@ -10,13 +10,26 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from transport.channels import Channel, policy_for
-from transport.frames import HEARTBEAT_KEY, MAX_PAYLOAD_BYTES, Frame, encode, read_frame
+from transport.frames import (
+    HEARTBEAT_KEY,
+    MAX_PAYLOAD_BYTES,
+    Frame,
+    FramingError,
+    encode,
+    read_frame,
+)
 from transport.loopback import loopback_pair
-from transport.session import Session, SessionEndReason
+from transport.session import (
+    DEFAULT_HEARTBEAT_S,
+    DEFAULT_STALL_TIMEOUT_S,
+    Session,
+    SessionEndReason,
+)
 
 SMALL_BUFFER = 64
 
@@ -408,8 +421,6 @@ def test_high_water_marks_record_the_deepest_backlog():
 
 
 def test_an_oversize_payload_raises_in_the_callers_thread():
-    from transport.frames import FramingError
-
     near, _ = loopback_pair()
     session = quiet_session(near)
     try:
@@ -421,8 +432,6 @@ def test_an_oversize_payload_raises_in_the_callers_thread():
 
 
 def test_an_extension_shadowing_a_reserved_key_raises_in_send():
-    from transport.frames import FramingError
-
     near, _ = loopback_pair()
     session = quiet_session(near)
     try:
@@ -573,3 +582,413 @@ def test_heartbeat_frames_carry_the_reserved_extension():
         assert frame.payload == b""
     finally:
         session.close()
+
+
+# -- reserved extensions belong to the transport ----------------------------
+
+
+@pytest.mark.parametrize("key", ["hello", "heartbeat"])
+def test_send_refuses_a_reserved_extension(key):
+    """A caller message carrying one of these would be read as transport
+    traffic by the peer and consumed instead of delivered -- lost with no drop
+    counted and no sequence gap, so invisible in the session summary too. Task
+    14 defines message fields on top of this and could pick either name."""
+    near, _ = loopback_pair()
+    session = quiet_session(near)
+    try:
+        with pytest.raises(FramingError, match="reserved"):
+            session.send(Channel.GPS, b"x", {key: True})
+    finally:
+        session.close()
+
+
+def test_a_data_channel_message_carrying_heartbeat_is_still_delivered():
+    """Belt and braces for the receive side: if a peer ever does send one, it
+    is a caller's message on a data channel and must arrive."""
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        far.send_all(
+            encode(
+                Frame(
+                    channel=Channel.GPS,
+                    seq=0,
+                    t_mono_ns=1,
+                    t_wall_ns=2,
+                    payload=b"realdata",
+                    extensions={HEARTBEAT_KEY: True},
+                )
+            )
+        )
+        message = session.recv(Channel.GPS, timeout=2.0)
+        assert message is not None
+        assert message.payload == b"realdata"
+        stats = session.stats().channels[Channel.GPS]
+        assert (stats.received, stats.delivered, stats.dropped_inbound) == (1, 1, 0)
+        assert session.stats().heartbeats_received == 0
+    finally:
+        session.close()
+
+
+def test_a_control_channel_heartbeat_is_still_consumed():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        far.send_all(
+            encode(
+                Frame(
+                    channel=Channel.CONTROL,
+                    seq=1,
+                    t_mono_ns=1,
+                    t_wall_ns=2,
+                    extensions={HEARTBEAT_KEY: True},
+                )
+            )
+        )
+        assert wait_until(lambda: session.stats().heartbeats_received == 1)
+        assert session.pending(Channel.CONTROL) == 0
+    finally:
+        session.close()
+
+
+# -- receive order and inbound overflow at depth > 1 ------------------------
+
+
+def test_recv_returns_the_oldest_queued_message():
+    """Every other test drains after one message per channel, where FIFO and
+    LIFO are the same thing."""
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for seq in range(5):
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.GPS,
+                        seq=seq,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=f"fix{seq}".encode(),
+                    )
+                )
+            )
+        assert wait_until(lambda: session.pending(Channel.GPS) == 5)
+        drained = [session.recv(Channel.GPS).payload for _ in range(5)]
+        assert drained == [b"fix0", b"fix1", b"fix2", b"fix3", b"fix4"]
+    finally:
+        session.close()
+
+
+def test_a_reliable_inbound_queue_drops_the_oldest_at_its_bound():
+    depth = policy_for(Channel.GPS).depth
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for seq in range(depth + 3):
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.GPS,
+                        seq=seq,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=f"{seq}".encode(),
+                    )
+                )
+            )
+        assert wait_until(
+            lambda: session.stats().channels[Channel.GPS].received == depth + 3, timeout=5.0
+        )
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.dropped_inbound == 3
+        assert session.pending(Channel.GPS) == depth
+        # The three oldest went, so the queue starts at 3 and ends at the newest.
+        first = session.recv(Channel.GPS).payload
+        assert first == b"3"
+        remaining = [session.recv(Channel.GPS).payload for _ in range(depth - 1)]
+        assert remaining[-1] == f"{depth + 2}".encode()
+    finally:
+        session.close()
+
+
+def test_inbound_high_water_is_the_peak_not_the_current_depth():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for seq in range(5):
+            far.send_all(
+                encode(Frame(channel=Channel.GPS, seq=seq, t_mono_ns=1, t_wall_ns=2, payload=b"f"))
+            )
+        assert wait_until(lambda: session.pending(Channel.GPS) == 5)
+        for _ in range(5):
+            session.recv(Channel.GPS)
+        far.send_all(
+            encode(Frame(channel=Channel.GPS, seq=5, t_mono_ns=1, t_wall_ns=2, payload=b"f"))
+        )
+        assert wait_until(lambda: session.stats().channels[Channel.GPS].received == 6)
+        assert session.stats().channels[Channel.GPS].inbound_high_water == 5
+    finally:
+        session.close()
+
+
+def test_outbound_high_water_is_the_peak_not_the_current_depth():
+    session, far = stalled_writer_session()
+    try:
+        for _ in range(5):
+            session.send(Channel.HERE, b"x")
+        assert session.stats().channels[Channel.HERE].outbound_high_water == 5
+        drain_channels(far, 6)  # the blocking camera frame plus the five
+        assert wait_until(lambda: session.outbound_pending(Channel.HERE) == 0)
+        session.send(Channel.HERE, b"x")
+        assert session.stats().channels[Channel.HERE].outbound_high_water == 5
+    finally:
+        session.close()
+
+
+def test_a_repeated_or_reordered_sequence_number_is_not_counted_as_a_gap():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for seq in (0, 1, 1, 0, 2):
+            far.send_all(
+                encode(Frame(channel=Channel.GPS, seq=seq, t_mono_ns=1, t_wall_ns=2, payload=b"f"))
+            )
+        assert wait_until(lambda: session.stats().channels[Channel.GPS].received == 5)
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.seq_gaps == 0
+        assert stats.missing_seqs == 0
+    finally:
+        session.close()
+
+
+# -- counters -------------------------------------------------------------
+
+
+def test_bytes_sent_counts_whole_frames_not_payloads():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for _ in range(4):
+            session.send(Channel.GPS, b"fix")
+        frames = drain_channels(far, 4)
+        on_the_wire = sum(len(encode(frame)) for frame in frames)
+        assert wait_until(lambda: session.stats().channels[Channel.GPS].sent == 4)
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.bytes_sent == on_the_wire
+        assert stats.bytes_sent > 4 * len(b"fix")
+    finally:
+        session.close()
+
+
+def test_everything_queued_is_sent_dropped_or_abandoned():
+    """The identity has to close from the counters alone. Recovering a loss as
+    queued - sent - dropped is derivation by subtraction, which is how a
+    counting bug hides."""
+    session, _far = stalled_writer_session()
+    for index in range(10):
+        session.send(Channel.HERE, f"{index}".encode())
+    session.close()
+
+    stats = session.stats().channels[Channel.HERE]
+    assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+    assert stats.abandoned_outbound > 0
+    assert session.outbound_pending(Channel.HERE) == 0
+    assert "abandoned_outbound" in stats.to_record()
+
+
+def test_a_clean_run_abandons_nothing():
+    left, right = loopback_pair()
+    sender = quiet_session(left, session_id=1)
+    receiver = quiet_session(right, session_id=2)
+    try:
+        for _ in range(10):
+            sender.send(Channel.GPS, b"fix")
+        assert wait_until(lambda: receiver.stats().channels[Channel.GPS].received == 10)
+    finally:
+        sender.close()
+        receiver.close()
+    stats = sender.stats().channels[Channel.GPS]
+    assert (stats.queued, stats.sent, stats.abandoned_outbound) == (10, 10, 0)
+
+
+def test_the_in_flight_frame_is_counted_once():
+    """A shutdown racing a completed write must not count the same frame as
+    both sent and abandoned."""
+    for _ in range(12):
+        near, far = loopback_pair()
+        session = quiet_session(near)
+        session.send(Channel.GPS, b"fix")
+        session.close()
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.sent + stats.abandoned_outbound == 1, stats.to_record()
+
+
+# -- what the stall timer actually watches ----------------------------------
+
+
+def test_the_stall_timer_watches_arrivals_not_our_own_transmissions():
+    """The case the timer exists for: half-open, we transmit fine, nothing
+    comes back. Every other timer test either disables our heartbeat or has
+    both sides beating, so both clocks move together and the two are
+    indistinguishable."""
+    near, far = loopback_pair()
+    drain = threading.Event()
+
+    def keep_reading():
+        while not drain.is_set():
+            try:
+                far.recv_exact(1)
+            except Exception:
+                return
+
+    reader = threading.Thread(target=keep_reading, daemon=True)
+    reader.start()
+    session = Session(near, session_id=1, heartbeat_s=0.05, stall_timeout_s=0.3).start()
+    try:
+        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        assert session.end_reason is SessionEndReason.STALLED
+        assert session.stats().heartbeats_sent > 0  # we were talking the whole time
+    finally:
+        drain.set()
+        session.close()
+
+
+def test_a_slow_but_continuous_frame_is_not_declared_stalled():
+    """A frame larger than the link can deliver inside the timeout must not
+    kill the session -- it would reconnect, re-send, and never recover."""
+    near, far = loopback_pair()
+    session = Session(
+        near, session_id=1, heartbeat_s=None, stall_timeout_s=0.4, rx_chunk_bytes=512
+    ).start()
+    payload = bytes(range(256)) * 80  # 20 KiB at 4 KB/s: five times the timeout
+    blob = encode(Frame(channel=Channel.CAMERA, seq=0, t_mono_ns=1, t_wall_ns=2, payload=payload))
+
+    def dribble():
+        for offset in range(0, len(blob), 200):
+            if session.is_closed:
+                return
+            try:
+                far.send_all(blob[offset : offset + 200])
+            except Exception:
+                return
+            time.sleep(0.05)
+
+    threading.Thread(target=dribble, daemon=True).start()
+    try:
+        message = session.recv(Channel.CAMERA, timeout=20.0)
+        assert message is not None, f"session died: {session.end_reason}"
+        assert message.payload == payload
+        assert not session.is_closed
+    finally:
+        session.close()
+
+
+def test_a_chunk_slower_than_the_timeout_still_stalls():
+    """The floor is real: progress has to arrive at some rate."""
+    near, far = loopback_pair()
+    session = Session(
+        near, session_id=1, heartbeat_s=None, stall_timeout_s=0.3, rx_chunk_bytes=8192
+    ).start()
+    blob = encode(
+        Frame(channel=Channel.CAMERA, seq=0, t_mono_ns=1, t_wall_ns=2, payload=b"\x5a" * 60_000)
+    )
+
+    def dribble():
+        for offset in range(0, len(blob), 200):
+            if session.is_closed:
+                return
+            try:
+                far.send_all(blob[offset : offset + 200])
+            except Exception:
+                return
+            time.sleep(0.05)
+
+    threading.Thread(target=dribble, daemon=True).start()
+    try:
+        assert wait_until(lambda: session.is_closed, timeout=5.0)
+        assert session.end_reason is SessionEndReason.STALLED
+    finally:
+        session.close()
+
+
+def test_the_read_chunk_and_stall_timeout_set_a_documented_rate_floor():
+    from transport.session import RX_CHUNK_BYTES
+
+    floor_bytes_per_s = RX_CHUNK_BYTES / DEFAULT_STALL_TIMEOUT_S
+    assert RX_CHUNK_BYTES == 8192
+    assert floor_bytes_per_s < 2000, "the floor must stay far below any usable link"
+    # Without chunking the floor would be a whole frame per timeout.
+    assert MAX_PAYLOAD_BYTES / DEFAULT_STALL_TIMEOUT_S > 400 * floor_bytes_per_s
+
+
+# -- the confirmed timing parameters ----------------------------------------
+
+
+def test_the_shipped_timing_defaults_match_the_spec():
+    """Both numbers are in the cross-language contract, and the channel table
+    gets a spec cross-check while these got nothing."""
+    spec = (Path(__file__).resolve().parents[3] / "specs" / "transport_protocol.md").read_text()
+    assert f"**{DEFAULT_HEARTBEAT_S:.1f} s**" in spec
+    assert f"**{DEFAULT_STALL_TIMEOUT_S:.1f} s**" in spec
+    assert DEFAULT_HEARTBEAT_S == 1.0
+    assert DEFAULT_STALL_TIMEOUT_S == 5.0
+
+
+def test_keepalives_go_out_at_the_interval_not_once_per_tick():
+    """The timer wakes several times per interval. Sending on every wake would
+    quietly multiply the keepalive rate on a metered link."""
+    near, far = loopback_pair()
+    drain = threading.Event()
+
+    def keep_reading():
+        while not drain.is_set():
+            try:
+                far.recv_exact(1)
+            except Exception:
+                return
+
+    threading.Thread(target=keep_reading, daemon=True).start()
+    session = Session(near, session_id=1, heartbeat_s=0.3, stall_timeout_s=None).start()
+    try:
+        time.sleep(1.05)
+        sent = session.stats().heartbeats_sent
+        assert 2 <= sent <= 6, f"{sent} keepalives in 1.05s at a 0.3s interval"
+    finally:
+        drain.set()
+        session.close()
+
+
+# -- signalling, not polling ------------------------------------------------
+
+
+def test_a_message_is_delivered_far_faster_than_the_polling_tick():
+    """Every wait in the session has a timeout, so a lost wakeup degrades to
+    latency instead of a hang and no functional assertion can see it. This
+    pins the signalling by measuring."""
+    left, right = loopback_pair()
+    sender = Session(left, session_id=1, heartbeat_s=1.0, stall_timeout_s=5.0).start()
+    receiver = Session(right, session_id=2, heartbeat_s=1.0, stall_timeout_s=5.0).start()
+    try:
+        worst = 0.0
+        for index in range(20):
+            started = time.monotonic()
+            sender.send(Channel.GPS, f"{index}".encode())
+            message = receiver.recv(Channel.GPS, timeout=2.0)
+            assert message is not None
+            worst = max(worst, time.monotonic() - started)
+        # The tick is 0.25s at these settings; a dropped notify would show up
+        # as roughly a tick per hop.
+        assert worst < 0.1, f"worst one-way delivery {worst * 1000:.0f} ms"
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_no_session_thread_is_alive_the_moment_close_returns():
+    """The acceptance criterion is that no thread outlives close(), which is
+    stronger than eventually."""
+    near, _ = loopback_pair()
+    session = quiet_session(near, session_id=91)
+    session.close()
+    alive = [thread.name for thread in threading.enumerate() if "session91" in thread.name]
+    assert alive == []

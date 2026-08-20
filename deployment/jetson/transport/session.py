@@ -36,7 +36,6 @@ from typing import Any, Callable, Mapping
 
 from transport.channels import (
     Channel,
-    OverflowPolicy,
     channels_by_priority,
     policy_for,
 )
@@ -44,11 +43,16 @@ from transport.clock import MonoClock, WallClock, now_mono_ns, now_wall_ns
 from transport.connection import ByteConnection, ConnectionClosed
 from transport.frames import (
     HEARTBEAT_KEY,
+    RESERVED_EXTENSIONS,
     Frame,
     FramingError,
     encode,
     read_frame,
 )
+
+# Largest read the reader will issue in one go. Bounds how long the stall
+# clock can go unrefreshed while a large payload is still arriving.
+RX_CHUNK_BYTES = 8192
 
 DEFAULT_HEARTBEAT_S = 1.0
 DEFAULT_STALL_TIMEOUT_S = 5.0
@@ -91,6 +95,7 @@ class ChannelStats:
     queued: int = 0
     sent: int = 0
     dropped_outbound: int = 0
+    abandoned_outbound: int = 0
     bytes_sent: int = 0
     received: int = 0
     delivered: int = 0
@@ -107,6 +112,7 @@ class ChannelStats:
             "queued": self.queued,
             "sent": self.sent,
             "dropped_outbound": self.dropped_outbound,
+            "abandoned_outbound": self.abandoned_outbound,
             "bytes_sent": self.bytes_sent,
             "received": self.received,
             "delivered": self.delivered,
@@ -159,6 +165,7 @@ class Session:
         wall_clock: WallClock = now_wall_ns,
         on_end: Callable[["Session", SessionEndReason], None] | None = None,
         control_seq_start: int = 1,
+        rx_chunk_bytes: int = RX_CHUNK_BYTES,
     ) -> None:
         self._connection = connection
         self.session_id = session_id
@@ -167,6 +174,7 @@ class Session:
         self._mono = mono_clock
         self._wall = wall_clock
         self._on_end = on_end
+        self._rx_chunk_bytes = max(1, rx_chunk_bytes)
 
         # The handshake already spent CONTROL seq 0 on the hello, so the
         # session's own control traffic continues from 1.
@@ -187,6 +195,7 @@ class Session:
         self._state_lock = threading.Lock()
         self._stop = threading.Event()
 
+        self._inflight: _Outbound | None = None
         self._end_reason: SessionEndReason | None = None
         self._heartbeats_sent = 0
         self._heartbeats_received = 0
@@ -240,6 +249,7 @@ class Session:
                 return
             self._end_reason = reason
         self._stop.set()
+        self._abandon_outbound()
         try:
             self._connection.close()
         except Exception:
@@ -251,6 +261,23 @@ class Session:
         if self._on_end is not None:
             self._on_end(self, reason)
 
+    def _abandon_outbound(self) -> None:
+        """Count what will never be sent, at the moment we decide not to send it.
+
+        Without this, a message that was queued and then orphaned by shutdown
+        appears in `queued` and in nothing else, so a reader of the session
+        summary can only recover it as queued - sent - dropped. Deriving a loss
+        by subtraction is how a counting bug hides.
+        """
+        with self._out_cond:
+            for channel, queue in self._outbound.items():
+                if queue:
+                    self._stats[channel].abandoned_outbound += len(queue)
+                    queue.clear()
+            if self._inflight is not None:
+                self._stats[self._inflight.frame.channel].abandoned_outbound += 1
+                self._inflight = None
+
     # -- sending ---------------------------------------------------------
 
     def send(
@@ -259,10 +286,28 @@ class Session:
         payload: bytes = b"",
         extensions: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Queue a message. False means it was not queued: either the session
-        has ended, or the queue was full and this message displaced nothing
-        (which cannot happen -- a full queue always drops to make room, so a
-        False here is always an ended session)."""
+        """Queue a message. False means the session has already ended.
+
+        Raises FramingError in the caller's thread for anything the frame codec
+        will not accept, including a reserved header extension: `hello` and
+        `heartbeat` belong to the transport, and a caller message carrying one
+        would be consumed as transport traffic and silently never delivered.
+        """
+        if extensions:
+            clash = [key for key in extensions if key in RESERVED_EXTENSIONS]
+            if clash:
+                raise FramingError(
+                    f"extension(s) {', '.join(sorted(clash))} are reserved for the transport"
+                )
+        return self._enqueue(channel, payload, extensions)
+
+    def _enqueue(
+        self,
+        channel: Channel,
+        payload: bytes = b"",
+        extensions: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """The transport's own path, which may use the reserved extensions."""
         if self.is_closed:
             return False
         policy = policy_for(channel)
@@ -310,6 +355,7 @@ class Session:
                         return
                     item = self._next_outbound()
                     if item is not None:
+                        self._inflight = item
                         break
                     self._out_cond.wait(self._tick_s)
             try:
@@ -320,6 +366,14 @@ class Session:
             except OSError:
                 self._shutdown(SessionEndReason.TRANSPORT_ERROR)
                 return
+            # A concurrent shutdown may have already written this one off as
+            # abandoned; counting it sent as well would count it twice.
+            with self._out_cond:
+                still_ours = self._inflight is item
+                if still_ours:
+                    self._inflight = None
+            if not still_ours:
+                return
             stats = self._stats[item.frame.channel]
             stats.sent += 1
             stats.bytes_sent += len(item.encoded)
@@ -328,10 +382,38 @@ class Session:
 
     # -- receiving -------------------------------------------------------
 
+    def _timed_recv(self, n: int) -> bytes:
+        """recv_exact in bounded chunks, stamping the stall clock on each.
+
+        The stall timeout is meant to fire on silence, not on slowness.
+        Stamping once per completed frame kills any session whose frame takes
+        longer than the timeout to arrive -- at the shipped 4 MiB limit and 5 s
+        timeout, anything under about 839 KB/s, which is exactly the relayed
+        path the plan warns about, and the session then reconnects and re-sends
+        so the link never recovers on its own.
+
+        Stamping once per recv_exact call is no better: one call for a whole
+        payload spans the entire slow transfer without returning. So the read
+        is split, and progress on any chunk counts as liveness. The floor this
+        sets is RX_CHUNK_BYTES per stall_timeout_s -- 8 KiB per 5 s, about
+        1.6 KB/s. A link slower than that cannot carry this system at all.
+        """
+        if n == 0:
+            return b""
+        if n <= self._rx_chunk_bytes:
+            data = self._connection.recv_exact(n)
+            self._last_rx_mono_ns = self._mono()
+            return data
+        out = bytearray()
+        while len(out) < n:
+            out += self._connection.recv_exact(min(self._rx_chunk_bytes, n - len(out)))
+            self._last_rx_mono_ns = self._mono()
+        return bytes(out)
+
     def _reader_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                frame = read_frame(self._connection.recv_exact)
+                frame = read_frame(self._timed_recv)
             except ConnectionClosed:
                 self._shutdown(SessionEndReason.PEER_CLOSED)
                 return
@@ -342,9 +424,7 @@ class Session:
                 self._shutdown(SessionEndReason.TRANSPORT_ERROR)
                 return
 
-            t_recv = self._mono()
-            self._last_rx_mono_ns = t_recv
-            self._record_inbound(frame, t_recv)
+            self._record_inbound(frame, self._mono())
 
     def _record_inbound(self, frame: Frame, t_recv: int) -> None:
         stats = self._stats[frame.channel]
@@ -360,7 +440,9 @@ class Session:
 
         # The transport generates keepalives, so it also consumes them rather
         # than making every caller filter them out of the control channel.
-        if frame.extensions.get(HEARTBEAT_KEY):
+        # Only on control: the same key on a data channel is a caller's message
+        # and must be delivered, not eaten.
+        if frame.channel is Channel.CONTROL and frame.extensions.get(HEARTBEAT_KEY):
             self._heartbeats_received += 1
             return
 
@@ -409,7 +491,7 @@ class Session:
             now = self._mono()
             if self._heartbeat_ns and now - self._last_heartbeat_tx_ns >= self._heartbeat_ns:
                 self._last_heartbeat_tx_ns = now
-                self.send(Channel.CONTROL, extensions={HEARTBEAT_KEY: True})
+                self._enqueue(Channel.CONTROL, extensions={HEARTBEAT_KEY: True})
             if self._stall_ns and now - self._last_rx_mono_ns > self._stall_ns:
                 self._shutdown(SessionEndReason.STALLED)
                 return

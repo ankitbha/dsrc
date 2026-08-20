@@ -199,3 +199,72 @@ def test_mismatch_leaves_the_queued_data_frame_unread():
         perform_handshake(jetson_conn, JETSON)
     # The data frame is still sitting in the stream, untouched.
     assert phone_conn.unread_bytes > 0
+
+
+# -- the clock sample is the first thing the offset estimator gets -----------
+
+
+class ClockAdvancingConnection:
+    """A connection whose reads advance the clock the handshake is told to use.
+
+    This is what separates a receive stamp taken after the peer's hello was
+    read from one taken before it. A clock fed from a fixed list cannot: both
+    orderings consume the same two values.
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+        self.reads = 0
+
+    @property
+    def peer(self) -> str:
+        return self._inner.peer
+
+    def send_all(self, data: bytes) -> None:
+        self._inner.send_all(data)
+
+    def recv_exact(self, n: int) -> bytes:
+        data = self._inner.recv_exact(n)
+        self.reads += 1
+        return data
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_the_receive_stamp_is_taken_after_the_hello_has_been_read():
+    """Otherwise round_trip_ns measures nothing at all, and it is the first
+    sample the clock-offset estimator has to work from."""
+    phone_conn, jetson_conn = loopback_pair()
+    wrapped = ClockAdvancingConnection(jetson_conn)
+
+    thread = threading.Thread(
+        target=lambda: perform_handshake(phone_conn, PHONE), daemon=True
+    )
+    thread.start()
+    result = perform_handshake(
+        wrapped,
+        JETSON,
+        mono_clock=lambda: wrapped.reads * 1_000_000,
+        wall_clock=lambda: 1_700_000_000_000_000_000,
+    )
+    thread.join(timeout=2.0)
+
+    assert wrapped.reads >= 2  # prefix and header at least
+    assert result.clock.t_local_send_mono_ns == 0
+    assert result.clock.t_local_recv_mono_ns == wrapped.reads * 1_000_000
+    assert result.clock.round_trip_ns > 0
+
+
+def test_the_round_trip_spans_the_read_not_a_bare_clock_pair():
+    phone_conn, jetson_conn = loopback_pair()
+    wrapped = ClockAdvancingConnection(jetson_conn)
+    thread = threading.Thread(
+        target=lambda: perform_handshake(phone_conn, PHONE), daemon=True
+    )
+    thread.start()
+    result = perform_handshake(
+        wrapped, JETSON, mono_clock=lambda: wrapped.reads * 7, wall_clock=lambda: 1
+    )
+    thread.join(timeout=2.0)
+    assert result.clock.round_trip_ns == wrapped.reads * 7
