@@ -1384,9 +1384,13 @@ def test_an_unexpected_read_failure_ends_the_session():
         session_id=1,
         heartbeat_s=None,
         stall_timeout_s=None,
-    ).start()
+    )
     try:
-        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        with captured_thread_exceptions() as escaped:
+            session.start()
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+            assert wait_until(lambda: bool(escaped), timeout=3.0)
+        assert [type(exc) for exc in escaped] == [RuntimeError], escaped
         assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
     finally:
         session.close()
