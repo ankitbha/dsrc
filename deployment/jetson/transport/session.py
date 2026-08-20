@@ -28,6 +28,7 @@ gap on every fresh session.
 from __future__ import annotations
 
 import itertools
+import logging
 import threading
 from collections import deque
 from dataclasses import dataclass, field
@@ -196,6 +197,7 @@ class Session:
         self._stop = threading.Event()
 
         self._end_reason: SessionEndReason | None = None
+        self.on_end_failures = 0
         self._heartbeats_sent = 0
         self._heartbeats_received = 0
         self._last_rx_mono_ns = self._mono()
@@ -278,7 +280,20 @@ class Session:
         with self._in_cond:
             self._in_cond.notify_all()
         if self._on_end is not None:
-            self._on_end(self, reason)
+            try:
+                self._on_end(self, reason)
+            except Exception:
+                # A consumer callback must not decide the session's fate. Left
+                # unguarded it broke two things at once: close() propagated
+                # before reaching join(), so threads outlived a close() that
+                # had already unwound, and inside the loops' catch-alls the
+                # callback's exception replaced the one that actually killed
+                # the thread -- so the re-raise delivered the wrong traceback,
+                # which is the whole reason it is there.
+                self.on_end_failures += 1
+                logging.getLogger(__name__).exception(
+                    "session %s: on_end callback failed", self.session_id
+                )
 
     def _abandon_outbound(self) -> None:
         """Count what will never be sent, at the moment we decide not to send it.

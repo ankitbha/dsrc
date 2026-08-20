@@ -8,6 +8,7 @@ ever fires.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 import time
 from pathlib import Path
@@ -43,6 +44,24 @@ def wait_until(predicate, timeout=2.0, interval=0.005):
             return True
         time.sleep(interval)
     return False
+
+
+@contextlib.contextmanager
+def captured_thread_exceptions():
+    """Collect exceptions that escape session threads.
+
+    Asserting on these is what pins the `raise` in each loop's catch-all. The
+    session ends and the counters are right either way, so re-raising is only
+    observable here -- and without it a MemoryError on a large write and a
+    backend wrapper bug both present as a bare transport_error.
+    """
+    escaped: list[BaseException] = []
+    previous = threading.excepthook
+    threading.excepthook = lambda args: escaped.append(args.exc_value)
+    try:
+        yield escaped
+    finally:
+        threading.excepthook = previous
 
 
 def quiet_session(connection, session_id=1, **kwargs):
@@ -1245,7 +1264,6 @@ class FailingWriteConnection:
         self._inner.close()
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 @pytest.mark.parametrize(
     "error",
     [RuntimeError("a wrapper bug"), MemoryError()],
@@ -1261,8 +1279,14 @@ def test_an_unexpected_write_failure_ends_the_session(error):
     connection = FailingWriteConnection(near, error)
     session = Session(connection, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
     try:
-        session.send(Channel.GPS, b"payload")
-        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        with captured_thread_exceptions() as escaped:
+            session.send(Channel.GPS, b"payload")
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+            # Waited on the exception, not just the flag: _shutdown runs before
+            # the raise propagates, so the block can exit first and the
+            # traceback then lands outside the capture.
+            assert wait_until(lambda: bool(escaped), timeout=3.0)
+        assert [type(exc) for exc in escaped] == [type(error)], escaped
         assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
         stats = session.stats().channels[Channel.GPS]
         assert stats.abandoned_outbound == 1, stats.to_record()
@@ -1272,7 +1296,6 @@ def test_an_unexpected_write_failure_ends_the_session(error):
         session.close()
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_a_reset_connection_is_accounted_for():
     """The OSError branch, which is how a real TCP write fails and which the
     loopback backend can never reach on its own."""
@@ -1280,8 +1303,13 @@ def test_a_reset_connection_is_accounted_for():
     connection = FailingWriteConnection(near, ConnectionResetError(104, "reset by peer"))
     session = Session(connection, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
     try:
-        session.send(Channel.HERE, b"response")
-        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        with captured_thread_exceptions() as escaped:
+            session.send(Channel.HERE, b"response")
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+        # A reset is an OSError, so it is an expected failure with its own
+        # handler: the session ends and the frame is accounted for, and no
+        # traceback escapes. Only the unforeseen kinds re-raise.
+        assert escaped == [], escaped
         assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
         stats = session.stats().channels[Channel.HERE]
         assert stats.abandoned_outbound == 1, stats.to_record()
@@ -1346,7 +1374,6 @@ class FailingReadConnection:
         self._inner.close()
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_an_unexpected_read_failure_ends_the_session():
     """A dead reader would eventually be noticed by the peer's own stall timer,
     but only after the peer gives up on us -- a whole timeout of a drive spent
@@ -1365,7 +1392,6 @@ def test_an_unexpected_read_failure_ends_the_session():
         session.close()
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_an_unexpected_timer_failure_ends_the_session():
     """The timer carries the keepalive and the stall watchdog together, so
     losing it silently removes the very thing that would have noticed."""
@@ -1382,9 +1408,60 @@ def test_an_unexpected_timer_failure_ends_the_session():
         heartbeat_s=0.05,
         stall_timeout_s=5.0,
         mono_clock=clock_that_fails_only_in_the_timer,
-    ).start()
+    )
     try:
-        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        with captured_thread_exceptions() as escaped:
+            session.start()
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+            assert wait_until(lambda: bool(escaped), timeout=3.0)
+        assert [type(exc) for exc in escaped] == [RuntimeError], escaped
         assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+    finally:
+        session.close()
+
+
+def test_a_consumer_callback_that_raises_does_not_decide_the_session_s_fate():
+    """A raising on_end used to break two things at once: close() propagated
+    before reaching join(), so threads outlived a close() that had already
+    unwound, and inside a loop's catch-all the callback's exception replaced
+    the one that actually killed the thread."""
+    near, _far = loopback_pair()
+
+    def raising_on_end(session, reason):
+        raise RuntimeError("consumer bug in on_end")
+
+    session = Session(
+        near, session_id=41, heartbeat_s=None, stall_timeout_s=None, on_end=raising_on_end
+    )
+    session.start()
+    session.close()
+    assert session.end_reason is SessionEndReason.CLOSED_LOCAL
+    assert session.on_end_failures == 1
+    assert [t.name for t in threading.enumerate() if "session41" in t.name] == []
+
+
+def test_a_raising_callback_does_not_mask_the_real_failure():
+    near, _far = loopback_pair()
+
+    def raising_on_end(session, reason):
+        raise RuntimeError("consumer bug in on_end")
+
+    session = Session(
+        FailingWriteConnection(near, MemoryError()),
+        session_id=42,
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        on_end=raising_on_end,
+    )
+    try:
+        with captured_thread_exceptions() as escaped:
+            session.start()
+            session.send(Channel.GPS, b"payload")
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+            assert wait_until(lambda: bool(escaped), timeout=3.0)
+        assert [type(exc) for exc in escaped] == [MemoryError], escaped
+        assert session.on_end_failures == 1
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
     finally:
         session.close()
