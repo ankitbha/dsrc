@@ -678,3 +678,104 @@ def test_a_consumer_that_closes_on_started_gets_no_surviving_thread():
         phone.close()
     finally:
         listener.stop()
+
+
+class DeafConnection:
+    """A connection whose close() does not release a blocked reader.
+
+    Wrong, and documented as wrong in connection.py -- but it is what closing
+    a POSIX socket without shutdown() does, so it is the mistake tasks 13 and
+    40 are most likely to make.
+    """
+
+    peer = "deaf"
+
+    def __init__(self) -> None:
+        self._gate = threading.Event()
+        self.closed = False
+
+    def send_all(self, data: bytes) -> None:
+        return None
+
+    def recv_exact(self, n: int) -> bytes:
+        self._gate.wait()  # never set: close() below does not release it
+        return b""
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class DeafAcceptor:
+    def __init__(self, count: int) -> None:
+        self._remaining = count
+
+    def accept(self, timeout=None):
+        if self._remaining <= 0:
+            return None
+        self._remaining -= 1
+        return DeafConnection()
+
+    def close(self) -> None:
+        return None
+
+
+def test_a_backend_that_ignores_close_is_counted_not_hidden():
+    """The counter exists so a backend that breaks the close-unblocks-read
+    requirement shows up in the summary instead of quietly accumulating a
+    thread per connection attempt across a drive."""
+    listener = TransportListener(
+        DeafAcceptor(2),
+        JETSON,
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        accept_poll_s=0.01,
+        handshake_timeout_s=0.2,
+    ).start()
+    try:
+        assert wait_until(lambda: listener.refused >= 2, timeout=8.0)
+        assert listener.handshake_workers_leaked >= 2
+        assert listener.accepted == 0
+        events = [
+            listener.next_event(timeout=0.05) for _ in range(4)
+        ]
+        refusals = [event for event in events if isinstance(event, SessionRefused)]
+        assert refusals, "a leaked worker was never reported"
+        assert "worker thread abandoned" in refusals[0].error
+    finally:
+        listener.stop()
+
+
+def test_bailing_out_at_stop_closes_the_connection():
+    """Otherwise the fd is held past stop() and the phone still believes it has
+    a live link, so it does not reconnect promptly."""
+    acceptor = LoopbackAcceptor()
+    listener = TransportListener(
+        acceptor, JETSON, heartbeat_s=None, stall_timeout_s=None, accept_poll_s=0.01
+    )
+    connection = acceptor.connect("racer")
+    phone = threading.Thread(
+        target=lambda: perform_handshake(connection, Hello("racer", Role.PHONE)), daemon=True
+    )
+    phone.start()
+    server_side = acceptor.accept(timeout=2.0)
+    assert server_side is not None
+
+    listener._stop.set()
+    listener._admit(server_side)
+    phone.join(timeout=2.0)
+
+    assert listener.accepted == 0
+    outcome: list[str] = []
+
+    def read_until_closed():
+        try:
+            for _ in range(4096):
+                connection.recv_exact(1)
+            outcome.append("still open")
+        except ConnectionClosed:
+            outcome.append("closed")
+
+    reader = threading.Thread(target=read_until_closed, daemon=True)
+    reader.start()
+    reader.join(timeout=3.0)
+    assert outcome == ["closed"], f"connection held past the bail-out: {outcome}"

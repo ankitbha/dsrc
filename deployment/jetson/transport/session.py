@@ -211,15 +211,23 @@ class Session:
     def start(self) -> "Session":
         """Start the threads, unless the session has already been closed.
 
-        A consumer can close a session the moment it is announced -- rejecting
-        an unexpected device, say -- and on the listener's accept path that
-        happens before start(). Starting anyway leaves threads running behind a
-        close() that already returned, breaking the guarantee that nothing
-        outlives it. Held under the lock _shutdown uses, so only two orderings
-        are possible.
+        Idempotent, and both halves of that matter because the session is
+        announced to consumers before its threads exist.
+
+        Already closed: a consumer can close a session the moment it is
+        announced -- rejecting an unexpected device, say. Starting anyway leaves
+        threads running behind a close() that already returned.
+
+        Already started: a consumer handed a session that is demonstrably not
+        running may reasonably call start() on it. A second set of threads puts
+        two readers on one byte stream, and they split each other's frames --
+        which surfaces as a framing error, indistinguishable from a corrupt
+        link or a bad encoder on the phone.
+
+        Held under the lock _shutdown uses, so only two orderings are possible.
         """
         with self._state_lock:
-            if self._end_reason is not None:
+            if self._end_reason is not None or self._threads:
                 return self
             for target, name in (
                 (self._writer_loop, f"session{self.session_id}-tx"),
@@ -386,6 +394,16 @@ class Session:
                 stats.abandoned_outbound += 1
                 self._shutdown(SessionEndReason.TRANSPORT_ERROR)
                 return
+            except BaseException:
+                # Anything else -- a MemoryError on a 4 MiB write, a bug in a
+                # backend wrapper -- would otherwise kill this thread with the
+                # session still reporting itself healthy: send() keeps
+                # accepting, queues fill and start counting drops for messages
+                # nobody attempted, and no SessionEnded is ever emitted. End
+                # the session first, then let it propagate for the traceback.
+                stats.abandoned_outbound += 1
+                self._shutdown(SessionEndReason.TRANSPORT_ERROR)
+                raise
             stats.sent += 1
             stats.bytes_sent += len(item.encoded)
             if item.frame.extensions.get(HEARTBEAT_KEY):
@@ -427,6 +445,15 @@ class Session:
         return bytes(out)
 
     def _reader_loop(self) -> None:
+        try:
+            self._read_frames()
+        except BaseException:
+            # A dead reader would be caught eventually by the peer's own stall
+            # timer, but only after it gives up on us. End it here instead.
+            self._shutdown(SessionEndReason.TRANSPORT_ERROR)
+            raise
+
+    def _read_frames(self) -> None:
         while not self._stop.is_set():
             try:
                 frame = read_frame(self._timed_recv)
@@ -503,6 +530,15 @@ class Session:
     # -- timer -----------------------------------------------------------
 
     def _timer_loop(self) -> None:
+        try:
+            self._run_timer()
+        except BaseException:
+            # The timer carries both the keepalive and the stall watchdog, so
+            # losing it silently removes the very thing that would notice.
+            self._shutdown(SessionEndReason.TRANSPORT_ERROR)
+            raise
+
+    def _run_timer(self) -> None:
         while not self._stop.wait(self._tick_s):
             now = self._mono()
             if self._heartbeat_ns and now - self._last_heartbeat_tx_ns >= self._heartbeat_ns:

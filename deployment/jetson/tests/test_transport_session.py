@@ -1219,3 +1219,109 @@ def test_start_declines_to_run_threads_on_an_already_closed_session():
     assert session._threads == []
     assert [t.name for t in threading.enumerate() if "session93" in t.name] == []
     assert session.end_reason is SessionEndReason.CLOSED_LOCAL
+
+
+# -- a thread that dies must take the session with it -----------------------
+
+
+class FailingWriteConnection:
+    """A connection whose writes raise whatever it is handed."""
+
+    peer = "failing-write"
+
+    def __init__(self, inner, error) -> None:
+        self._inner = inner
+        self._error = error
+        self.writes = 0
+
+    def send_all(self, data: bytes) -> None:
+        self.writes += 1
+        raise self._error
+
+    def recv_exact(self, n: int) -> bytes:
+        return self._inner.recv_exact(n)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("a wrapper bug"), MemoryError()],
+    ids=["RuntimeError", "MemoryError"],
+)
+def test_an_unexpected_write_failure_ends_the_session(error):
+    """Without a catch-all the writer thread dies and the session goes on
+    claiming to be healthy: send() keeps returning True, the queues fill and
+    begin counting drops for messages nobody ever attempted, and no
+    SessionEnded is emitted, so the summary shows a session that transmitted
+    nothing. A MemoryError on a 4 MiB write is the plausible route."""
+    near, _far = loopback_pair()
+    connection = FailingWriteConnection(near, error)
+    session = Session(connection, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+    try:
+        session.send(Channel.GPS, b"payload")
+        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.abandoned_outbound == 1, stats.to_record()
+        assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+        assert session.send(Channel.GPS, b"more") is False
+    finally:
+        session.close()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_reset_connection_is_accounted_for():
+    """The OSError branch, which is how a real TCP write fails and which the
+    loopback backend can never reach on its own."""
+    near, _far = loopback_pair()
+    connection = FailingWriteConnection(near, ConnectionResetError(104, "reset by peer"))
+    session = Session(connection, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+    try:
+        session.send(Channel.HERE, b"response")
+        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+        stats = session.stats().channels[Channel.HERE]
+        assert stats.abandoned_outbound == 1, stats.to_record()
+        assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+    finally:
+        session.close()
+
+
+def test_start_is_idempotent():
+    """The session is announced to consumers before its threads exist, so a
+    consumer may reasonably call start() on one that is not running. A second
+    set of threads puts two readers on one byte stream, and they split each
+    other's frames -- reported as a framing error, indistinguishable from a
+    corrupt link or a bad encoder on the phone."""
+    near, far = loopback_pair()
+    session = Session(near, session_id=900, heartbeat_s=None, stall_timeout_s=None)
+    try:
+        session.start()
+        session.start()
+        session.start()
+        assert len(session._threads) == 3
+        names = sorted(thread.name for thread in threading.enumerate() if "session900" in thread.name)
+        assert names == ["session900-rx", "session900-timer", "session900-tx"], names
+
+        # And one reader still parses the stream correctly.
+        for seq in range(6):
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.TELEMETRY,
+                        seq=seq,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=b"payload-bytes",
+                    )
+                )
+            )
+        assert wait_until(
+            lambda: session.stats().channels[Channel.TELEMETRY].received == 6, timeout=3.0
+        )
+        assert not session.is_closed
+    finally:
+        session.close()
