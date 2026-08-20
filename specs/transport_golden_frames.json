@@ -1,0 +1,203 @@
+{
+  "protocol_version": 1,
+  "frozen": true,
+  "note": "Frozen cross-language encodings. Every implementation must encode each case to exactly these bytes and decode them back to these fields. Changing a byte here is a protocol change and needs a version bump.",
+  "payload_generator": "payload[i] = (i * 37 + 11) % 256",
+  "byte_order": "big-endian",
+  "header_encoding": "UTF-8 JSON object, keys sorted recursively, separators ',' and ':', no non-ASCII escaping, NaN and Infinity rejected",
+  "cases": [
+    {
+      "name": "empty_payload",
+      "why": "the degenerate frame: payload_len 0, and no payload read at all",
+      "frame": {
+        "ch": "control",
+        "seq": 0,
+        "t_mono_ns": 1,
+        "t_wall_ns": 2,
+        "extensions": {}
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "00000000003a",
+      "header_hex": "7b226368223a22636f6e74726f6c222c226e223a302c22736571223a302c22745f6d6f6e6f5f6e73223a312c22745f77616c6c5f6e73223a327d",
+      "header_len": 58,
+      "frame_len": 64,
+      "frame_sha256": "f72c8b0565044ec34b9894de583360d0bfcc88e7a115764cd7ba8d260ec66711"
+    },
+    {
+      "name": "typical_jpeg",
+      "why": "the common case: a camera frame at a realistic size",
+      "frame": {
+        "ch": "camera",
+        "seq": 1841,
+        "t_mono_ns": 987654321012,
+        "t_wall_ns": 1755648000123456789,
+        "extensions": {
+          "w": 1280,
+          "h": 720,
+          "fmt": "jpeg"
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 40960
+      },
+      "prefix_hex": "0000a000007b",
+      "header_hex": "7b226368223a2263616d657261222c22666d74223a226a706567222c2268223a3732302c226e223a34303936302c22736571223a313834312c22745f6d6f6e6f5f6e73223a3938373635343332313031322c22745f77616c6c5f6e73223a313735353634383030303132333435363738392c2277223a313238307d",
+      "header_len": 123,
+      "frame_len": 41089,
+      "frame_sha256": "f97fed640195b50a6bdf9295be325be2339965131edaccf6ade3b2fb6b5e84fd"
+    },
+    {
+      "name": "max_payload",
+      "why": "payload_len at the limit; one more byte must be refused",
+      "frame": {
+        "ch": "camera",
+        "seq": 2,
+        "t_mono_ns": 3,
+        "t_wall_ns": 4,
+        "extensions": {}
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 4194304
+      },
+      "prefix_hex": "00400000003f",
+      "header_hex": "7b226368223a2263616d657261222c226e223a343139343330342c22736571223a322c22745f6d6f6e6f5f6e73223a332c22745f77616c6c5f6e73223a347d",
+      "header_len": 63,
+      "frame_len": 4194373,
+      "frame_sha256": "e4ddfb0451fb7b3f7c6be161eade9b38ea33e5541f0a729d3627cf5ebaf76eba"
+    },
+    {
+      "name": "non_ascii_extension",
+      "why": "UTF-8 in a header string, unescaped; catches ensure_ascii and any implementation that escapes or transcodes",
+      "frame": {
+        "ch": "telemetry",
+        "seq": 7,
+        "t_mono_ns": 11,
+        "t_wall_ns": 13,
+        "extensions": {
+          "note": "señal 温度 ±2°C 🌡",
+          "unit": "°C"
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 3
+      },
+      "prefix_hex": "00000003006e",
+      "header_hex": "7b226368223a2274656c656d65747279222c226e223a332c226e6f7465223a227365c3b1616c20e6b8a9e5baa620c2b132c2b04320f09f8ca1222c22736571223a372c22745f6d6f6e6f5f6e73223a31312c22745f77616c6c5f6e73223a31332c22756e6974223a22c2b043227d",
+      "header_len": 110,
+      "frame_len": 119,
+      "frame_sha256": "0b976b3d8d34525ea27fb574510747aa8d576db176682e183f86f9b9c09d62ce"
+    },
+    {
+      "name": "large_ints",
+      "why": "2**53 and one past it, plus a realistic wall clock. Any implementation that routes these through a double loses digits",
+      "frame": {
+        "ch": "gps",
+        "seq": 9007199254740993,
+        "t_mono_ns": 9007199254740992,
+        "t_wall_ns": 1755648000987654321,
+        "extensions": {
+          "big": 9223372036854775807,
+          "neg": -9007199254740993
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 16
+      },
+      "prefix_hex": "000000100099",
+      "header_hex": "7b22626967223a393232333337323033363835343737353830372c226368223a22677073222c226e223a31362c226e6567223a2d393030373139393235343734303939332c22736571223a393030373139393235343734303939332c22745f6d6f6e6f5f6e73223a393030373139393235343734303939322c22745f77616c6c5f6e73223a313735353634383030303938373635343332317d",
+      "header_len": 153,
+      "frame_len": 175,
+      "frame_sha256": "e0519c04235ba6370f7baeb0849f7ef7ade8bfb389b06407ea856560c49416ef"
+    },
+    {
+      "name": "nested_unsorted_extension",
+      "why": "key ordering is canonical and recursive: nested objects sort too",
+      "frame": {
+        "ch": "here",
+        "seq": 5,
+        "t_mono_ns": 17,
+        "t_wall_ns": 19,
+        "extensions": {
+          "zulu": 1,
+          "alpha": {
+            "z": [
+              3,
+              2,
+              1
+            ],
+            "a": {
+              "n": null,
+              "b": true,
+              "a": 1.5
+            }
+          },
+          "mike": "m"
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 8
+      },
+      "prefix_hex": "000000080083",
+      "header_hex": "7b22616c706861223a7b2261223a7b2261223a312e352c2262223a747275652c226e223a6e756c6c7d2c227a223a5b332c322c315d7d2c226368223a2268657265222c226d696b65223a226d222c226e223a382c22736571223a352c22745f6d6f6e6f5f6e73223a31372c22745f77616c6c5f6e73223a31392c227a756c75223a317d",
+      "header_len": 131,
+      "frame_len": 145,
+      "frame_sha256": "2ad9c5569f913943863b9285d8ecd940376eb908732e2e35c90a04ba6e9e0e7c"
+    },
+    {
+      "name": "hello",
+      "why": "the frame that opens every connection",
+      "frame": {
+        "ch": "control",
+        "seq": 0,
+        "t_mono_ns": 123456789,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "hello": {
+            "protocol_version": 1,
+            "device_id": "moto-g-power",
+            "role": "phone"
+          }
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "00000000009d",
+      "header_hex": "7b226368223a22636f6e74726f6c222c2268656c6c6f223a7b226465766963655f6964223a226d6f746f2d672d706f776572222c2270726f746f636f6c5f76657273696f6e223a312c22726f6c65223a2270686f6e65227d2c226e223a302c22736571223a302c22745f6d6f6e6f5f6e73223a3132333435363738392c22745f77616c6c5f6e73223a313735353634383030303030303030303030307d",
+      "header_len": 157,
+      "frame_len": 163,
+      "frame_sha256": "c204f8bb42c99a2ee4d781627ab849fef878d41d1e08e45b040a91e36afdb493"
+    },
+    {
+      "name": "heartbeat",
+      "why": "the keepalive the transport consumes rather than delivering",
+      "frame": {
+        "ch": "control",
+        "seq": 42,
+        "t_mono_ns": 1000000000,
+        "t_wall_ns": 1755648001000000000,
+        "extensions": {
+          "heartbeat": true
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "000000000067",
+      "header_hex": "7b226368223a22636f6e74726f6c222c22686561727462656174223a747275652c226e223a302c22736571223a34322c22745f6d6f6e6f5f6e73223a313030303030303030302c22745f77616c6c5f6e73223a313735353634383030313030303030303030307d",
+      "header_len": 103,
+      "frame_len": 109,
+      "frame_sha256": "02725b320ae2259554385dbe3b6506f3f5aef20fbf8c174a87a2d10ba6672c48"
+    }
+  ]
+}
