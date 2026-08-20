@@ -475,8 +475,21 @@ def test_a_refused_connection_is_closed():
                 connection, Hello("stale", Role.PHONE, protocol_version=PROTOCOL_VERSION + 1)
             )
         assert wait_for_event(listener, SessionRefused) is not None
-        with pytest.raises(ConnectionClosed):
-            connection.recv_exact(1)
+        # Bounded: a blocking read would hang rather than fail if the
+        # connection were left open, and a hanging test reports nothing.
+        outcome: list[str] = []
+
+        def read_once():
+            try:
+                connection.recv_exact(1)
+                outcome.append("data")
+            except ConnectionClosed:
+                outcome.append("closed")
+
+        reader = threading.Thread(target=read_once, daemon=True)
+        reader.start()
+        reader.join(timeout=3.0)
+        assert outcome == ["closed"], f"refused connection left open: {outcome}"
     finally:
         listener.stop()
 
@@ -517,3 +530,30 @@ def test_a_connection_arriving_after_stop_never_becomes_a_session():
     time.sleep(0.2)
     assert listener.accepted == 0
     assert listener.current_session is None
+
+
+def test_admit_drops_a_connection_that_arrives_as_the_listener_stops():
+    """The accept loop can be sitting in a handshake when stop() is called.
+    Without the check, a session would start after stop() had returned, and
+    nothing would ever close it."""
+    acceptor = LoopbackAcceptor()
+    listener = TransportListener(
+        acceptor, JETSON, heartbeat_s=None, stall_timeout_s=None, accept_poll_s=0.01
+    )
+    # Not started: _admit is driven directly, because that is where the race
+    # lands and a scheduler cannot be asked to reproduce it on demand.
+    connection = acceptor.connect("racer")
+    phone = threading.Thread(
+        target=lambda: perform_handshake(connection, Hello("racer", Role.PHONE)), daemon=True
+    )
+    phone.start()
+    server_side = acceptor.accept(timeout=2.0)
+    assert server_side is not None
+
+    listener._stop.set()
+    listener._admit(server_side)
+    phone.join(timeout=2.0)
+
+    assert listener.accepted == 0
+    assert listener.current_session is None
+    assert listener.next_event(timeout=0.1) is None
