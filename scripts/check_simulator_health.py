@@ -145,6 +145,8 @@ def write_report(verdicts: list[HealthVerdict], operating: tuple[HealthVerdict, 
         "# Simulator health",
         "",
         f"{len(verdicts)} cells, {args.duration_steps} steps, seeds {args.seeds}.",
+        f"Controllers: {', '.join(args.controllers)}. Completion is a minimum over the whole",
+        "panel, so adding a controller can only make cells fail.",
         f"Thresholds: jam >= {args.min_jam_fraction:g} on >= {args.min_congested_seeds} seeds, "
         f"separation >= {args.min_speed_separation:g} m/s, completed seeds >= {args.min_completed_seeds}, "
         f"throughput ratio >= {args.min_throughput_ratio:g}.",

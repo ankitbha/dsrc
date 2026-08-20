@@ -472,3 +472,49 @@ def test_duplicate_seeds_cannot_satisfy_a_per_seed_threshold():
     v = assess_cell(CELL, runs, min_completed_seeds=1)
     assert v.congested_seeds == 1, "a duplicated seed is one congesting seed, not two"
     assert v.congestion_reachable is False, "the default requires two distinct congesting seeds"
+
+
+def test_completion_is_counted_over_shared_seeds_across_the_whole_panel():
+    """Pins the D7 rule, which three alternative formulations would otherwise
+    satisfy: raw completions, max over treatments, or best-controller-only all
+    pass the rest of the suite.
+
+    D7 is the only criterion that is a claim about the *cell* rather than about a
+    controller -- D5 is reference-only and D6/D8 pick the best arm. "Episodes
+    complete for one controller but not another" means the cell's dynamics are
+    not stable enough to support a study whichever arm gets reported, so the min
+    over the panel is the right reading. The permissive readings stay recoverable
+    from comparisons[*].shared_seeds in the artifact; the reverse is not true.
+    """
+    # partial overlap: reference completes {7,17}, treatment completes {17,27},
+    # so both arms show 2 raw completions but the intersection is 1
+    partial = [
+        make_run("no_av", 7, speed=12.0, jam=0.20, throughput=20.0),
+        make_run("no_av", 17, speed=12.0, jam=0.20, throughput=20.0),
+        make_run("no_av", 27, completed=False, speed=12.0, throughput=20.0),
+        make_run("t", 7, completed=False, speed=20.0, throughput=20.0),
+        make_run("t", 17, speed=13.0, throughput=20.0),
+        make_run("t", 27, speed=20.0, throughput=20.0),
+    ]
+    v = assess_cell(CELL, partial)
+    assert v.comparisons["t"].shared_seeds == 1
+    assert v.min_completed_seeds == 1, "raw completions would say 2"
+    assert v.episodes_complete is False
+    assert v.healthy is False
+
+    # one weak arm in the panel sinks the cell: max() or best-controller-only
+    # would let it through on the strong arm alone
+    panel = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    panel += [make_run("strong", s, speed=16.0, throughput=19.0) for s in (7, 17, 27)]
+    panel += [make_run("fragile", s, completed=False, speed=16.0, throughput=3.0) for s in (7, 17, 27)]
+    v = assess_cell(CELL, panel)
+    assert v.comparisons["strong"].shared_seeds == 3
+    assert v.comparisons["fragile"].shared_seeds == 0
+    assert v.min_completed_seeds == 0, "the whole panel must survive, not just the best arm"
+    assert v.episodes_complete is False
+
+
+def test_congested_shared_seed_threshold_is_inclusive():
+    runs = [make_run("no_av", s, speed=12.0, jam=DEFAULT_MIN_JAM_FRACTION, throughput=20.0) for s in (7, 17, 27)]
+    runs += [make_run("t", s, speed=16.0, throughput=20.0) for s in (7, 17, 27)]
+    assert assess_cell(CELL, runs).comparisons["t"].congested_shared_seeds == 3
