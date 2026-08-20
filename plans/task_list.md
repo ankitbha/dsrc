@@ -193,7 +193,57 @@ down the same socket. Design the transport so the phone always opens the
 connection. This affects the network backend only; the in-car `adb forward` path
 tunnels over USB and is unaffected.
 
-12. Transport interface: framed bidirectional messaging, backend-agnostic.
+12. ~~Transport interface: framed bidirectional messaging, backend-agnostic.~~
+    **DONE** — `deployment/jetson/transport/`, stdlib only, 291 tests. Plan:
+    `scratchpad/plan_task_12_transport_interface.md`; wire contract:
+    `specs/transport_protocol.md`; frozen encodings:
+    `specs/transport_golden_frames.json`.
+
+    One socket, channels multiplexed by a JSON header in front of an opaque
+    payload; framing, priority, overflow, sessions and counters all sit above a
+    three-method `ByteConnection` seam, so tasks 13 and 40 each implement a byte
+    stream rather than a transport. The loopback backend ships, so the pipeline
+    runs with no phone and no Jetson.
+
+    **Measured.** 291/291 tests pass identically on the Mac (3.12) and on the
+    Jetson (aarch64, 3.10). Loopback at the planned sensor rates: every channel
+    at its commanded rate, zero drops, zero gaps, transport latency p50 0.02–0.08 ms.
+    Over a real Tailscale socket, Mac standing in for the phone, 60 s at
+    **428 KB/s (3.4 Mbps)**: camera 10.02 Hz achieved against 10.0 commanded,
+    zero outbound drops on any channel, zero sequence gaps, round trip p50
+    **11.3 ms** / p95 21.0 ms / p99 70.2 ms, handshake 12.9 ms. The Jetson's own
+    per-channel account closes exactly on every channel. All four failure modes
+    provoked over the real link and independently confirmed in the listener's
+    record: version mismatch refused, `displaced`, `framing_error`, and
+    `stalled` at 5.0 s against a 5.0 s timeout — with the listener surviving
+    each and serving the next connection.
+
+    **Overflow only appears once the consumer is slower than the offered load.**
+    Throttled to 2 Hz against a 10 Hz camera: camera dropped 241 of 300 keeping
+    only the newest, IMU 1186 of 1501, GPS 28 of 150, while `advisory` and
+    `rate_cmd` dropped nothing and held sub-0.1 ms latency — the priority and
+    per-channel policy decisions working as specified.
+
+    **Validation: four rounds, 30 findings, 26 of them defects in the previous
+    round's fixes.** Worth reading before task 13 touches this code:
+    a caller message carrying a reserved key was destroyed with no counter and
+    no gap; one silent peer could wedge the listener for a whole drive; the
+    stall timer measured completed frames, so a slow link was killed and would
+    reconnect forever; a delivered frame was reported as a loss; a thread dying
+    outside its expected exception types left a session claiming to be healthy
+    while transmitting nothing; and `delivered` counted arrivals rather than
+    collections, so it was always equal to `received` and double-counted
+    anything displaced — that last one found by the experiment, not by
+    validation, because no test drove inbound overflow and checked the account
+    at the same time.
+
+    **Three assumptions only a real socket can break**, documented in
+    `connection.py` and untested until task 13: `recv_exact` must raise rather
+    than return short or empty (returning `b""` at EOF spun the reader at
+    millions of calls per second before it was guarded); `close()` must unblock
+    a read already in progress from another thread, or the handshake timeout
+    leaks a thread per attempt (counted in `handshake_workers_leaked`, not
+    prevented); and a write failure must surface as `OSError`.
 13. Network backend over Tailscale, for development with devices apart.
 14. Wire protocol: sensor messages upstream, advisory and rate commands
     downstream, each carrying its own timestamps.
