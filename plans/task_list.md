@@ -66,7 +66,20 @@ Tailscale at `ssh jetson`, so its runtime can be developed remotely.
 3. ~~`adb` on the Jetson.~~ **DONE** — adb 1.0.41 (platform-tools 28.0.2-debian) at `/usr/bin/adb`, plus `51-android.rules`; 8 packages added, nothing else changed. Carries the `adb forward` TCP tunnel that is the in-car transport (D1). RSA authorization still deferred to task 41. Plan: `scratchpad/plan_task_03_jetson_adb.md`.
 4. ~~Tailscale on the phone.~~ **DONE** — `moto-g-power` `100.75.142.126` under `bhardwaj.ankit275@` (same account matters: the Jetson is a *shared* node from `taila2630c`, and sharing is per-account). Phone→Jetson TCP verified with a real payload in both directions; path upgraded DERP→direct, 55 ms. Plan: `scratchpad/plan_task_04_phone_tailscale.md`.
 
-## C. Simulation study — fully unblocked, Mac only
+## C. Simulation study — BLOCKED IN SUBSTANCE by the task 8 result
+
+**Tasks 10 and 11 cannot produce meaningful numbers until the simulator can show
+a control effect.** The sufficiency study degrades an observation and measures
+what the controller loses; the sampling-policy evaluation credits a flow-level
+benefit. Both require an effect to degrade or to credit, and task 8 established
+there is none — +0.12 to +0.14 m/s where the measurement is cleanest.
+
+**Project-level risk, recorded here deliberately:** the paper's only outcome
+claim comes from simulation, and the simulator currently cannot produce one. One
+instrumented vehicle can never demonstrate throughput or delay. Repairing the
+simulator is therefore a prerequisite for the paper having a result at all, not a
+tidying task. It is not scheduled — sections D through G are unblocked and come
+first — but it must not be filed as done.
 
 5. ~~Per-field variance audit to identify inert inputs before any ablation.~~
    **DONE** — `src/analysis/observation_audit.py` + `scripts/audit_observation_fields.py`,
@@ -106,7 +119,59 @@ Tailscale at `ssh jetson`, so its runtime can be developed remotely.
    degradation (field ablation, added lag, added noise, forced fallbacks).
 7. Baseline sweep with the current sensing defaults, to establish the reference
    the degraded conditions are measured against.
-8. Exercise the topology ladder beyond ring so the study is not single-topology.
+8. ~~Exercise the topology ladder beyond ring so the study is not
+   single-topology.~~ **DONE — superseded by a simulator health check**, which
+   absorbed and extended it. `src/analysis/simulator_health.py` +
+   `scripts/check_simulator_health.py`, 213 tests. Ran 72 cells / 648 runs
+   (6 topologies × 4 demands × 3 penetrations × 3 controllers × 3 seeds, 120
+   steps) in 18m37s. Plan: `scratchpad/plan_task_08_simulator_health.md`.
+   Artifacts: `outputs/validation/simulator_health/`.
+
+   **Result: 0 of 72 cells pass all four criteria. There is no usable operating
+   point, and the simulator cannot currently support a flow-level claim.**
+
+   | criterion | fails in |
+   |---|---|
+   | `baselines_separate` | 68/72 |
+   | `episodes_complete` | 44/72 |
+   | `throughput_holds` | 31/72 |
+   | `congestion_reachable` | 27/72 |
+
+   - **The controllers have no measurable effect, and crashes are not the
+     reason.** Cells that complete separate in 7% of cases, cells that crash in
+     5% — the hypothesis that truncation was hiding the effect is refuted. In the
+     four cells that both congest *and* complete, measured on 2–3 congested
+     shared seeds, the best controller moves mean speed by **+0.12 to +0.14 m/s**
+     against a 1.0 m/s threshold. That is the cleanest measurement the grid
+     offers and it is near-zero.
+   - **Congestion is reachable but topology-structured.** `inverted_tree`,
+     `inverted_tree_bottleneck` and `ring` congest in 12/12 cells,
+     `straight_single_lane` in 9/12, and **`merge` and `straight_multilane` in
+     0/12** — including `merge`/high, which congests at a single penetration but
+     fails the per-seed rule.
+   - **Only 24 of 216 (cell, controller) pairs were ever measured with a
+     congested shared seed.** Most separation failures are therefore not
+     evidence that a controller cannot help; the controller was evaluated where
+     there was nothing to control. Without `congested_shared_seeds` the report
+     would have read as 68 controller failures.
+   - **40% of runs crash** (260 of 648 never reach their configured duration).
+   - **The penetration axis is substantially noise.** The mechanism is correct —
+     pooled realised spawn fraction is 0.200 against a nominal 0.20 — but only
+     60–78 vehicles spawn per run, so the standard error is ±0.05 and single-seed
+     realised penetration swings between 0.08 and 0.43 at a nominal 0.20. Per-cell
+     verdicts rest on single seeds, so nominal 0.05 and 0.10 cells can realise the
+     same fraction. Concurrent AV count, which is what actually acts as an
+     actuator, peaks at 5–6 out of ~40 active vehicles.
+   - **243 of the 648 runs are duplicates.** `burst` is bit-identical to `medium`
+     on all six topologies (162 runs), and ring disables demand so its four
+     demand levels collapse to one (81 runs). Config defects, out of scope here.
+
+   **Next diagnostic when this is picked up** (not run): raise demand *and*
+   episode length *and* penetration together, so concurrent AV count reaches
+   double digits. Raising nominal penetration alone would leave the realised
+   concurrent count in single figures for the same small-sample reason. That run
+   distinguishes "too few actuators" from "these controllers do not control this
+   simulator" — two diagnoses leading to completely different work.
 9. Sensing model calibrated from drive measurements. *Waits on section G data;
    the harness is built now and the parameters filled in later.*
 10. Sufficiency study proper: derive the sensing requirement specification.
