@@ -3,6 +3,10 @@ from __future__ import annotations
 import pytest
 
 from src.analysis.simulator_health import (
+    DEFAULT_MIN_COMPLETED_SEEDS,
+    DEFAULT_MIN_CONGESTED_SEEDS,
+    DEFAULT_MIN_JAM_FRACTION,
+    DEFAULT_MIN_SPEED_SEPARATION_MPS,
     CellSpec,
     HealthVerdict,
     Run,
@@ -224,7 +228,9 @@ def test_crashed_runs_are_excluded_from_metric_means():
     assert summary.mean_speed == pytest.approx(12.5)
     v = assess_cell(CELL, runs, min_completed_seeds=2)
     assert v.throughput_holds is True
+    # paired on seeds 17 and 27, where both arms completed
     assert v.worst_throughput_ratio == pytest.approx(20.5 / 20.0)
+    assert v.comparisons["cooperative_smoothing"].shared_seeds == 2
 
 
 def test_controller_with_no_completed_runs_has_undefined_means():
@@ -281,3 +287,126 @@ def test_real_run_metrics_come_from_the_expected_env_fields():
     assert run.mean_speed == pytest.approx(12.40, abs=0.5)
     assert run.throughput == pytest.approx(20.0, abs=2.0)
     assert run.jam_fraction == pytest.approx(0.208, abs=0.02)
+
+
+# --------------------------------------------------------------------------
+# paired (seed-matched) comparison
+# --------------------------------------------------------------------------
+
+
+def test_separation_is_paired_on_seeds_where_both_arms_completed():
+    """The reference has zero AVs so it never crashes and always contributes
+    every seed, while a treatment contributes only the seeds it survived — and
+    those it crashes on are the hard ones where the reference is slowest.
+    Comparing arm means then credits the controller for the absent seed.
+
+    Real case: straight_single_lane/medium/pen0.05 scored 1.90 m/s arm-wise and
+    0.14 m/s paired, which was the difference between the study reporting an
+    operating point and reporting none.
+    """
+    runs = [
+        make_run("no_av", 7, speed=0.17, jam=0.20, throughput=20.0),
+        make_run("no_av", 17, speed=9.97, jam=0.20, throughput=20.0),
+        make_run("no_av", 27, speed=0.96, jam=0.20, throughput=20.0),
+        make_run("backpressure", 7, completed=False, speed=17.11, throughput=5.0, steps=65),
+        make_run("backpressure", 17, speed=10.98, throughput=20.0),
+        make_run("backpressure", 27, speed=0.23, throughput=20.0),
+    ]
+    v = assess_cell(CELL, runs, min_completed_seeds=2)
+    comparison = v.comparisons["backpressure"]
+    assert comparison.shared_seeds == 2, "seed 7 crashed for the treatment and must be excluded from both arms"
+    assert comparison.speed_separation == pytest.approx(0.14, abs=0.01)
+    assert v.baselines_separate is False, "0.14 m/s is far below the 1.0 threshold"
+
+
+def test_zero_real_effect_is_not_reported_as_separation():
+    """inverted_tree/medium/pen0.05: the treatment's one surviving seed was
+    identical to the reference on that seed, i.e. no effect at all, and arm-wise
+    means reported 7.38 m/s of separation and a 57% throughput improvement."""
+    runs = [
+        make_run("no_av", 7, speed=10.76, jam=0.20, throughput=12.0),
+        make_run("no_av", 17, speed=21.70, jam=0.20, throughput=12.0),
+        make_run("no_av", 27, speed=10.52, jam=0.20, throughput=12.0),
+        make_run("cooperative_smoothing", 7, completed=False, speed=11.57, throughput=4.0, steps=98),
+        make_run("cooperative_smoothing", 17, speed=21.70, throughput=12.0),
+        make_run("cooperative_smoothing", 27, completed=False, speed=20.78, throughput=4.0, steps=62),
+    ]
+    v = assess_cell(CELL, runs, min_completed_seeds=1)
+    comparison = v.comparisons["cooperative_smoothing"]
+    assert comparison.shared_seeds == 1
+    assert comparison.speed_separation == pytest.approx(0.0)
+    assert comparison.throughput_ratio == pytest.approx(1.0)
+    assert v.baselines_separate is False
+
+
+def test_signed_delta_distinguishes_improvement_from_harm():
+    """The criterion is absolute, so a controller that makes traffic worse can
+    satisfy it. The signed delta is what makes that visible in the report."""
+    runs = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    runs += [make_run("worse", s, speed=8.0, throughput=20.0) for s in (7, 17, 27)]
+    v = assess_cell(CELL, runs)
+    assert v.baselines_separate is True, "abs() means harm satisfies the criterion"
+    assert v.best_speed_delta == pytest.approx(-4.0), "the sign is what reveals it as harm"
+    assert v.best_speed_separation == pytest.approx(4.0)
+
+
+def test_treatment_with_no_shared_seeds_cannot_separate():
+    runs = [make_run("no_av", 7, speed=12.0, jam=0.20, throughput=20.0)]
+    runs += [make_run("cooperative_smoothing", 17, speed=20.0, throughput=20.0)]
+    v = assess_cell(CELL, runs, min_completed_seeds=1)
+    comparison = v.comparisons["cooperative_smoothing"]
+    assert comparison.shared_seeds == 0
+    assert comparison.speed_separation is None
+    assert v.baselines_separate is False
+
+
+def test_throughput_ratio_takes_the_worst_treatment():
+    """Two treatments, so the min() aggregation is actually exercised."""
+    runs = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    runs += [make_run("good", s, speed=16.0, throughput=19.0) for s in (7, 17, 27)]
+    runs += [make_run("bad", s, speed=16.0, throughput=4.0) for s in (7, 17, 27)]
+    v = assess_cell(CELL, runs)
+    assert v.worst_throughput_ratio == pytest.approx(0.20)
+    assert v.throughput_holds is False
+
+
+# --------------------------------------------------------------------------
+# threshold boundaries and defaults
+# --------------------------------------------------------------------------
+
+
+def test_single_congesting_seed_fails_at_the_default():
+    """merge/high congests in 1 of 3 seeds. Lowering the default to 1 would flip
+    it, so the default itself is load-bearing."""
+    runs = []
+    for seed, jam in zip((7, 17, 27), (0.208, 0.0, 0.0)):
+        runs.append(make_run("no_av", seed, speed=12.0, jam=jam, throughput=20.0))
+        runs.append(make_run("cooperative_smoothing", seed, speed=16.0, throughput=19.0))
+    v = assess_cell(CELL, runs)
+    assert DEFAULT_MIN_CONGESTED_SEEDS == 2
+    assert v.congested_seeds == 1
+    assert v.congestion_reachable is False
+    assert assess_cell(CELL, runs, min_congested_seeds=1).congestion_reachable is True
+
+
+def test_thresholds_are_inclusive_at_the_boundary():
+    """Every criterion is specified as >=, and round 1's cases missed by 0.0011,
+    so > versus >= is not cosmetic."""
+    exact_jam = [make_run("no_av", s, speed=12.0, jam=DEFAULT_MIN_JAM_FRACTION, throughput=20.0) for s in (7, 17, 27)]
+    exact_jam += [make_run("t", s, speed=12.0, throughput=20.0) for s in (7, 17, 27)]
+    assert assess_cell(CELL, exact_jam).congestion_reachable is True
+
+    exact_sep = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    exact_sep += [make_run("t", s, speed=12.0 + DEFAULT_MIN_SPEED_SEPARATION_MPS, throughput=20.0) for s in (7, 17, 27)]
+    assert assess_cell(CELL, exact_sep).baselines_separate is True
+
+    exact_thr = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    exact_thr += [make_run("t", s, speed=16.0, throughput=16.0) for s in (7, 17, 27)]
+    assert assess_cell(CELL, exact_thr).throughput_holds is True, "ratio is exactly 0.8"
+
+    two_of_three = [make_run("no_av", s, speed=12.0, jam=0.20, throughput=20.0) for s in (7, 17, 27)]
+    two_of_three += [make_run("t", s, completed=(s != 27), speed=16.0, throughput=19.0) for s in (7, 17, 27)]
+    v = assess_cell(CELL, two_of_three)
+    assert DEFAULT_MIN_COMPLETED_SEEDS == 2
+    assert v.min_completed_seeds == 2
+    assert v.episodes_complete is True, "at least 2 of 3, not all 3"

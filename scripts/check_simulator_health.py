@@ -63,7 +63,16 @@ def parse_args() -> argparse.Namespace:
                         help="seeds that must individually congest; a seed mean straddles the threshold")
     parser.add_argument("--min-throughput-ratio", type=float, default=DEFAULT_MIN_THROUGHPUT_RATIO)
     parser.add_argument("--output-root", default="outputs/validation/simulator_health")
-    return parser.parse_args()
+    args = parser.parse_args()
+    seeds = len(args.seeds)
+    for name, value in (("--min-congested-seeds", args.min_congested_seeds),
+                        ("--min-completed-seeds", args.min_completed_seeds)):
+        if value > seeds:
+            parser.error(
+                f"{name}={value} exceeds the {seeds} seed(s) given, so no cell can ever pass; "
+                f"lower it or pass more --seeds"
+            )
+    return args
 
 
 def json_safe(value: object) -> object:
@@ -82,9 +91,10 @@ def cell_row(verdict: HealthVerdict) -> str:
     failed = ", ".join(verdict.failed_criteria) or "-"
     return (
         f"| `{verdict.cell.cell_id}` "
-        f"| {mark(verdict.congestion_reachable)} ({verdict.congested_seeds} seeds, "
-        f"mean {num(verdict.reference_jam_fraction, '.3f')}) "
-        f"| {mark(verdict.baselines_separate)} ({num(verdict.best_speed_separation, '.2f')}) "
+        f"| {mark(verdict.congestion_reachable)} ({verdict.congested_seeds}/"
+        f"{verdict.reference_completed_seeds} seeds, mean {num(verdict.reference_jam_fraction, '.3f')}) "
+        f"| {mark(verdict.baselines_separate)} ({num(verdict.best_speed_delta, '+.2f')} "
+        f"on {verdict.best_shared_seeds} shared) "
         f"| {mark(verdict.episodes_complete)} ({verdict.min_completed_seeds}) "
         f"| {mark(verdict.throughput_holds)} ({num(verdict.worst_throughput_ratio, '.2f')}) "
         f"| {'HEALTHY' if verdict.healthy else failed} |"
@@ -104,6 +114,10 @@ def write_report(verdicts: list[HealthVerdict], operating: tuple[HealthVerdict, 
                 "congestion_reachable": v.congestion_reachable,
                 "reference_jam_fraction": v.reference_jam_fraction,
                 "congested_seeds": v.congested_seeds,
+                "reference_completed_seeds": v.reference_completed_seeds,
+                "best_speed_delta": v.best_speed_delta,
+                "best_shared_seeds": v.best_shared_seeds,
+                "comparisons": {k: dataclasses.asdict(c) for k, c in v.comparisons.items()},
                 "baselines_separate": v.baselines_separate,
                 "best_speed_separation": v.best_speed_separation,
                 "best_controller": v.best_controller,
@@ -124,16 +138,25 @@ def write_report(verdicts: list[HealthVerdict], operating: tuple[HealthVerdict, 
         "# Simulator health",
         "",
         f"{len(verdicts)} cells, {args.duration_steps} steps, seeds {args.seeds}.",
-        f"Thresholds: jam >= {args.min_jam_fraction:g}, separation >= {args.min_speed_separation:g} m/s, "
-        f"completed seeds >= {args.min_completed_seeds}, throughput ratio >= {args.min_throughput_ratio:g}.",
+        f"Thresholds: jam >= {args.min_jam_fraction:g} on >= {args.min_congested_seeds} seeds, "
+        f"separation >= {args.min_speed_separation:g} m/s, completed seeds >= {args.min_completed_seeds}, "
+        f"throughput ratio >= {args.min_throughput_ratio:g}.",
+        "",
+        "Speed and throughput are compared per treatment on seeds where both that",
+        "treatment and the reference completed. Comparing each arm's own mean is not a",
+        "comparison between controllers: the reference never crashes, so a treatment's",
+        "surviving seeds are the easy ones.",
         "",
     ]
     if operating:
         lines += ["## Recommended operating point", ""]
-        lines += [f"- `{v.cell.cell_id}` — separation {v.best_speed_separation:.2f} m/s "
-                  f"via `{v.best_controller}`" for v in operating]
-        lines += ["", "Separation is an absolute difference, so confirm the direction before "
-                  "treating a recommended cell as a control benefit."]
+        lines += [
+            f"- `{v.cell.cell_id}` — {v.best_speed_delta:+.2f} m/s via `{v.best_controller}` "
+            f"on {v.best_shared_seeds} seed(s) where both arms completed"
+            for v in operating
+        ]
+        lines += ["", "The criterion is an absolute difference, so a negative delta above means "
+                  "the controller made traffic *worse* by that much and is not a control benefit."]
     else:
         lines += [
             "## No usable operating point",
@@ -146,7 +169,7 @@ def write_report(verdicts: list[HealthVerdict], operating: tuple[HealthVerdict, 
         "",
         "## All cells",
         "",
-        "| cell | congestion (jam) | separation (m/s) | complete (seeds) | throughput (ratio) | verdict |",
+        "| cell | congestion (seeds, jam) | speed delta (m/s, signed) | complete (seeds) | throughput (ratio) | verdict |",
         "|---|---|---|---|---|---|",
     ]
     lines += [cell_row(v) for v in sorted(verdicts, key=lambda v: v.cell.cell_id)]

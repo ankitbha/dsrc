@@ -84,6 +84,24 @@ class ControllerSummary:
 
 
 @dataclass(frozen=True)
+class TreatmentComparison:
+    """One treatment against the reference, on seeds where BOTH completed.
+
+    Comparing each arm's own mean is not a comparison between controllers: the
+    reference has zero AVs and so never crashes, while a treatment contributes
+    only the seeds it survived, and those it crashes on are the hard ones where
+    the reference is slowest. Dropping them lifts the treatment against a
+    reference average that still carries the hard seed. Pairing removes it.
+    """
+
+    controller: str
+    shared_seeds: int
+    speed_delta: float | None
+    speed_separation: float | None
+    throughput_ratio: float | None
+
+
+@dataclass(frozen=True)
 class HealthVerdict:
     """The four criteria plus the measured value behind each.
 
@@ -93,11 +111,15 @@ class HealthVerdict:
 
     cell: CellSpec
     by_controller: Mapping[str, ControllerSummary]
+    comparisons: Mapping[str, TreatmentComparison]
+    reference_completed_seeds: int
     congestion_reachable: bool
     reference_jam_fraction: float | None
     congested_seeds: int
     baselines_separate: bool
     best_speed_separation: float | None
+    best_speed_delta: float | None
+    best_shared_seeds: int
     best_controller: str | None
     episodes_complete: bool
     min_completed_seeds: int
@@ -202,6 +224,8 @@ def assess_cell(
 ) -> HealthVerdict:
     """Apply the four criteria to one cell's runs. Pure: no environment access."""
     summaries = summarise(runs)
+    completed = {(run.controller, run.seed): run for run in runs if run.completed}
+    reference_seeds = {seed for controller, seed in completed if controller == REFERENCE_CONTROLLER}
     reference = summaries.get(REFERENCE_CONTROLLER)
     treatments = {name: s for name, s in summaries.items() if name != REFERENCE_CONTROLLER}
 
@@ -212,41 +236,59 @@ def assess_cell(
     congested_seeds = sum(1 for jam in (reference.jam_by_seed if reference else ()) if jam >= min_jam_fraction)
     congestion = bool(reference) and congested_seeds >= min_congested_seeds
 
-    separation: float | None = None
-    best_controller: str | None = None
-    if reference is not None and reference.mean_speed is not None:
-        for name, summary in treatments.items():
-            if summary.mean_speed is None:
-                continue
-            delta = abs(summary.mean_speed - reference.mean_speed)
-            if separation is None or delta > separation:
-                separation, best_controller = delta, name
+    comparisons: dict[str, TreatmentComparison] = {}
+    for name in treatments:
+        shared = sorted(reference_seeds & {seed for controller, seed in completed if controller == name})
+        if not shared:
+            comparisons[name] = TreatmentComparison(name, 0, None, None, None)
+            continue
+        treated_speed = mean(completed[(name, seed)].mean_speed for seed in shared)
+        base_speed = mean(completed[(REFERENCE_CONTROLLER, seed)].mean_speed for seed in shared)
+        base_throughput = mean(completed[(REFERENCE_CONTROLLER, seed)].throughput for seed in shared)
+        treated_throughput = mean(completed[(name, seed)].throughput for seed in shared)
+        delta = treated_speed - base_speed
+        comparisons[name] = TreatmentComparison(
+            controller=name,
+            shared_seeds=len(shared),
+            speed_delta=delta,
+            speed_separation=abs(delta),
+            # A zero reference throughput cannot be preserved or collapsed, so
+            # the ratio is undefined rather than 1.0. Ring is structurally zero
+            # because _clear_exited_vehicles returns early there, and passing it
+            # vacuously would let gridlock through the obstruction criterion.
+            throughput_ratio=(treated_throughput / base_throughput) if base_throughput else None,
+        )
+
+    best = max(
+        (c for c in comparisons.values() if c.speed_separation is not None),
+        key=lambda c: c.speed_separation,
+        default=None,
+    )
+    separation = best.speed_separation if best else None
     separates = separation is not None and separation >= min_speed_separation
 
-    completed = min((s.completed_seeds for s in summaries.values()), default=0)
-    complete = bool(summaries) and completed >= min_completed_seeds
+    completed_min = min((s.completed_seeds for s in summaries.values()), default=0)
+    complete = bool(summaries) and completed_min >= min_completed_seeds
 
-    # A zero reference throughput cannot be preserved or collapsed, so the
-    # criterion cannot be evaluated. Ring is structurally zero because
-    # _clear_exited_vehicles returns early there, and passing it vacuously would
-    # let total gridlock through the one criterion built to catch obstruction.
-    ratio: float | None = None
-    if reference is not None and reference.throughput and treatments:
-        ratios = [s.throughput / reference.throughput for s in treatments.values() if s.throughput is not None]
-        ratio = min(ratios) if ratios else None
+    ratios = [c.throughput_ratio for c in comparisons.values() if c.throughput_ratio is not None]
+    ratio = min(ratios) if ratios else None
     holds = ratio is not None and ratio >= min_throughput_ratio
 
     return HealthVerdict(
         cell=cell,
         by_controller=summaries,
+        comparisons=comparisons,
+        reference_completed_seeds=len(reference_seeds),
         congestion_reachable=congestion,
         reference_jam_fraction=reference_jam,
         congested_seeds=congested_seeds,
         baselines_separate=separates,
         best_speed_separation=separation,
-        best_controller=best_controller,
+        best_speed_delta=best.speed_delta if best else None,
+        best_shared_seeds=best.shared_seeds if best else 0,
+        best_controller=best.controller if best else None,
         episodes_complete=complete,
-        min_completed_seeds=completed,
+        min_completed_seeds=completed_min,
         throughput_holds=holds,
         worst_throughput_ratio=ratio,
     )
