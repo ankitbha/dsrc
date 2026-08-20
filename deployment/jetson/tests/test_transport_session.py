@@ -1203,3 +1203,15 @@ def test_a_peer_sending_one_small_frame_per_timeout_holds_the_session():
         assert delivered == 6
     finally:
         session.close()
+
+
+def test_start_declines_to_run_threads_on_an_already_closed_session():
+    """A consumer can close a session the moment it is announced, which on the
+    accept path is before start(). Starting anyway leaves threads behind a
+    close() that already returned."""
+    near, _ = loopback_pair()
+    session = Session(near, session_id=93, heartbeat_s=None, stall_timeout_s=None)
+    session.close()
+    session.start()
+    assert [t.name for t in threading.enumerate() if "session93" in t.name] == []
+    assert session.end_reason is SessionEndReason.CLOSED_LOCAL

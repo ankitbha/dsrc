@@ -557,3 +557,124 @@ def test_admit_drops_a_connection_that_arrives_as_the_listener_stops():
     assert listener.accepted == 0
     assert listener.current_session is None
     assert listener.next_event(timeout=0.1) is None
+
+
+def test_a_healthy_phone_whose_hello_is_late_is_still_accepted():
+    """The only case where the timeout's duration matters. The Phone helper
+    handshakes before the listener accepts, so its hello is already buffered
+    and a zero-length wait would look fine."""
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor, handshake_timeout_s=2.0)
+    try:
+        connection = acceptor.connect("slow-to-speak")
+        threading.Timer(
+            0.4, lambda: perform_handshake(connection, Hello("slow-to-speak", Role.PHONE))
+        ).start()
+        started = wait_for_event(listener, SessionStarted, timeout=5.0)
+        assert started is not None, "a healthy phone with a late hello was refused"
+        assert started.handshake.remote.device_id == "slow-to-speak"
+        assert listener.refused == 0
+    finally:
+        listener.stop()
+
+
+def test_a_timed_out_handshake_closes_the_connection():
+    """The timeout works by closing the connection under the blocked reader; if
+    it did not close, the worker would never be released."""
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor, handshake_timeout_s=0.3)
+    try:
+        connection = acceptor.connect("mute")
+        assert wait_for_event(listener, SessionRefused, timeout=3.0) is not None
+        outcome: list[str] = []
+
+        def read_until_closed():
+            # The listener sends its own hello before blocking on ours, so
+            # there are buffered bytes to consume before the close surfaces.
+            try:
+                for _ in range(4096):
+                    connection.recv_exact(1)
+                outcome.append("still open")
+            except ConnectionClosed:
+                outcome.append("closed")
+
+        reader = threading.Thread(target=read_until_closed, daemon=True)
+        reader.start()
+        reader.join(timeout=3.0)
+        assert outcome == ["closed"], f"timed-out handshake left the connection open: {outcome}"
+        assert listener.handshake_workers_leaked == 0
+    finally:
+        listener.stop()
+
+
+def test_stop_racing_the_session_install_leaves_nothing_running(monkeypatch):
+    """stop() has to be a barrier against _admit, not a check _admit passed
+    earlier. The window in real code spans displacement plus Session
+    construction; the sleep here only widens it."""
+    import transport.endpoint as endpoint_module
+
+    class SlowSession(Session):
+        def __init__(self, *args, **kwargs):
+            time.sleep(0.4)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(endpoint_module, "Session", SlowSession)
+
+    acceptor = LoopbackAcceptor()
+    listener = TransportListener(
+        acceptor, JETSON, heartbeat_s=None, stall_timeout_s=None, accept_poll_s=0.01
+    )
+    connection = acceptor.connect("racer")
+    phone = threading.Thread(
+        target=lambda: perform_handshake(connection, Hello("racer", Role.PHONE)), daemon=True
+    )
+    phone.start()
+    server_side = acceptor.accept(timeout=2.0)
+    assert server_side is not None
+
+    before = {thread.name for thread in threading.enumerate()}
+    admit = threading.Thread(target=lambda: listener._admit(server_side), daemon=True)
+    admit.start()
+    time.sleep(0.15)  # _admit is inside SlowSession.__init__
+    listener.stop()
+    admit.join(timeout=4.0)
+    phone.join(timeout=2.0)
+
+    assert listener.current_session is None
+    assert listener.accepted == 0
+    assert wait_until(
+        lambda: not [
+            thread
+            for thread in threading.enumerate()
+            if thread.name not in before and "session" in thread.name
+        ],
+        timeout=3.0,
+    )
+
+
+def test_a_consumer_that_closes_on_started_gets_no_surviving_thread():
+    """Rejecting a session by device id on SessionStarted is an obvious thing
+    for the Jetson runtime to do, and it lands before start()."""
+    acceptor = LoopbackAcceptor()
+    listener = listener_for(acceptor)
+    alive_at_return: list[str] = []
+    original_put = listener._events.put
+
+    def put_and_close(event):
+        original_put(event)
+        if isinstance(event, SessionStarted):
+            event.session.close()
+            alive_at_return.extend(
+                thread.name
+                for thread in threading.enumerate()
+                if f"session{event.session.session_id}" in thread.name
+            )
+
+    listener._events.put = put_and_close
+    try:
+        phone = Phone(acceptor, device_id="unwanted")
+        assert wait_for_event(listener, SessionStarted, timeout=3.0) is not None
+        assert alive_at_return == [], f"threads outlived close(): {alive_at_return}"
+        phone.close()
+    finally:
+        listener.stop()
