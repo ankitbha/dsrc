@@ -91,9 +91,13 @@ def encode_header(header: Mapping[str, Any]) -> bytes:
     NaN and Infinity are refused rather than emitted. Python would write the
     bare tokens NaN and Infinity, which its own parser accepts and a strict
     parser in another language rejects -- a bug that round-trips perfectly on
-    one side and desyncs on the first interop attempt. A sensor extension
-    carrying an unavailable reading as NaN is an ordinary thing for a caller to
-    do, so the refusal is reported as FramingError like every other bad frame.
+    one side and desyncs on the first interop attempt.
+
+    Everything json refuses arrives as FramingError, not just the non-finite
+    floats: an unserializable value raises TypeError rather than ValueError,
+    and a numpy scalar is a likelier thing for a caller to hand us than a NaN
+    -- sensors/ produces them -- so both have to be caught or the exception
+    escapes the caller's except clause and kills the thread.
     """
     try:
         return json.dumps(
@@ -103,7 +107,7 @@ def encode_header(header: Mapping[str, Any]) -> bytes:
             ensure_ascii=False,
             allow_nan=False,
         ).encode("utf-8")
-    except ValueError as exc:
+    except (ValueError, TypeError) as exc:
         raise FramingError(f"header is not encodable: {exc}") from None
 
 

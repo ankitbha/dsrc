@@ -195,7 +195,6 @@ class Session:
         self._state_lock = threading.Lock()
         self._stop = threading.Event()
 
-        self._inflight: _Outbound | None = None
         self._end_reason: SessionEndReason | None = None
         self._heartbeats_sent = 0
         self._heartbeats_received = 0
@@ -210,14 +209,26 @@ class Session:
     # -- lifecycle -------------------------------------------------------
 
     def start(self) -> "Session":
-        for target, name in (
-            (self._writer_loop, f"session{self.session_id}-tx"),
-            (self._reader_loop, f"session{self.session_id}-rx"),
-            (self._timer_loop, f"session{self.session_id}-timer"),
-        ):
-            thread = threading.Thread(target=target, name=name, daemon=True)
-            thread.start()
-            self._threads.append(thread)
+        """Start the threads, unless the session has already been closed.
+
+        A consumer can close a session the moment it is announced -- rejecting
+        an unexpected device, say -- and on the listener's accept path that
+        happens before start(). Starting anyway leaves threads running behind a
+        close() that already returned, breaking the guarantee that nothing
+        outlives it. Held under the lock _shutdown uses, so only two orderings
+        are possible.
+        """
+        with self._state_lock:
+            if self._end_reason is not None:
+                return self
+            for target, name in (
+                (self._writer_loop, f"session{self.session_id}-tx"),
+                (self._reader_loop, f"session{self.session_id}-rx"),
+                (self._timer_loop, f"session{self.session_id}-timer"),
+            ):
+                thread = threading.Thread(target=target, name=name, daemon=True)
+                thread.start()
+                self._threads.append(thread)
         return self
 
     def close(self, reason: SessionEndReason = SessionEndReason.CLOSED_LOCAL) -> None:
@@ -268,15 +279,17 @@ class Session:
         appears in `queued` and in nothing else, so a reader of the session
         summary can only recover it as queued - sent - dropped. Deriving a loss
         by subtraction is how a counting bug hides.
+
+        Only the queues. The frame the writer has already taken is the writer's
+        to account for -- it is the only thread that knows whether the write
+        completed. Guessing here instead produced the opposite error: a frame
+        the peer had received, reported as abandoned.
         """
         with self._out_cond:
             for channel, queue in self._outbound.items():
                 if queue:
                     self._stats[channel].abandoned_outbound += len(queue)
                     queue.clear()
-            if self._inflight is not None:
-                self._stats[self._inflight.frame.channel].abandoned_outbound += 1
-                self._inflight = None
 
     # -- sending ---------------------------------------------------------
 
@@ -323,6 +336,11 @@ class Session:
 
         stats = self._stats[channel]
         with self._out_cond:
+            # Re-checked inside the lock. Shutdown drains the queues under this
+            # same lock, so a check outside it lets a message be appended after
+            # the drain -- counted in `queued`, in nothing else, and never sent.
+            if self._end_reason is not None:
+                return False
             queue = self._outbound[channel]
             while len(queue) >= policy.depth:
                 queue.popleft()
@@ -355,26 +373,19 @@ class Session:
                         return
                     item = self._next_outbound()
                     if item is not None:
-                        self._inflight = item
                         break
                     self._out_cond.wait(self._tick_s)
+            stats = self._stats[item.frame.channel]
             try:
                 self._connection.send_all(item.encoded)
             except ConnectionClosed:
+                stats.abandoned_outbound += 1
                 self._shutdown(SessionEndReason.PEER_CLOSED)
                 return
             except OSError:
+                stats.abandoned_outbound += 1
                 self._shutdown(SessionEndReason.TRANSPORT_ERROR)
                 return
-            # A concurrent shutdown may have already written this one off as
-            # abandoned; counting it sent as well would count it twice.
-            with self._out_cond:
-                still_ours = self._inflight is item
-                if still_ours:
-                    self._inflight = None
-            if not still_ours:
-                return
-            stats = self._stats[item.frame.channel]
             stats.sent += 1
             stats.bytes_sent += len(item.encoded)
             if item.frame.extensions.get(HEARTBEAT_KEY):
@@ -394,19 +405,24 @@ class Session:
 
         Stamping once per recv_exact call is no better: one call for a whole
         payload spans the entire slow transfer without returning. So the read
-        is split, and progress on any chunk counts as liveness. The floor this
-        sets is RX_CHUNK_BYTES per stall_timeout_s -- 8 KiB per 5 s, about
-        1.6 KB/s. A link slower than that cannot carry this system at all.
+        is split, and progress on a chunk counts as liveness. The stamp always
+        follows the bytes it evidences -- stamping before the blocking call
+        would credit liveness to data that has not arrived.
+
+        An empty chunk ends the session. A backend must raise rather than
+        return short or empty (see connection.py), but returning b"" at EOF is
+        the likeliest way to get that wrong -- it is what socket.recv does --
+        and treating it as progress spins this loop forever while refreshing
+        the very clock meant to notice.
         """
         if n == 0:
             return b""
-        if n <= self._rx_chunk_bytes:
-            data = self._connection.recv_exact(n)
-            self._last_rx_mono_ns = self._mono()
-            return data
         out = bytearray()
         while len(out) < n:
-            out += self._connection.recv_exact(min(self._rx_chunk_bytes, n - len(out)))
+            chunk = self._connection.recv_exact(min(self._rx_chunk_bytes, n - len(out)))
+            if not chunk:
+                raise ConnectionClosed(f"empty read with {len(out)} of {n} bytes")
+            out += chunk
             self._last_rx_mono_ns = self._mono()
         return bytes(out)
 

@@ -5,10 +5,22 @@ handshake, the counters -- is backend-independent. A backend supplies a duplex
 byte stream and nothing else, which is why the network backend and the USB
 backend are each three methods rather than each a transport.
 
-`recv_exact` returning short is not an option. A frame reader that accepts a
-short read has no way to distinguish "the rest is coming" from "the peer is
-gone", and would hand a truncated header to the JSON parser. Backends raise
-instead.
+Two requirements a backend must meet, both of which are easy to get wrong and
+neither of which the transport can work around:
+
+`recv_exact` raises rather than returning short or empty. A frame reader that
+accepts a short read has no way to distinguish "the rest is coming" from "the
+peer is gone", and would hand a truncated header to the JSON parser. Returning
+b"" at EOF -- which is what socket.recv does -- is the most likely mistake
+here; the reader treats an empty chunk as a closed connection rather than as
+progress, but a backend that does it is still wrong.
+
+`close()` unblocks a read already in progress, from another thread. Both the
+session shutdown path and the listener's handshake timeout work by closing the
+connection under a blocked reader. On a POSIX socket that means shutdown()
+before close(), because closing a socket does not release a thread already
+sitting in recv. A backend that does not honour this turns a timeout into an
+abandoned thread.
 """
 
 from __future__ import annotations

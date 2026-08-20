@@ -222,15 +222,26 @@ A **session** is one accepted connection. The listener accepts one at a time.
   on `control` only: the same key arriving on a data channel is a caller's
   message and MUST be delivered.
 
-  "No read progress" is measured against reads completing, in chunks of at
-  most **8192 bytes**. This matters: measuring per completed *frame* instead
-  would end any session whose frame takes longer than the timeout to arrive,
-  which at a 4 MiB limit and a 5 s timeout is any link under about 839 KB/s --
-  and the session would then reconnect and re-send, so the link never recovers.
-  Chunked, the floor is 8192 bytes per 5 s, about 1.6 KB/s (13 kbps): below
-  any link that could carry this system at all. The consequence to accept is
-  that a peer dribbling bytes indefinitely holds a session open; for a system
-  whose only peer runs our own app, that is the right trade.
+  "No read progress" means a read completing, where the reader never asks for
+  more than **8192 bytes** at a time. Measuring per completed *frame* instead
+  would end any session whose frame takes longer than the timeout to arrive --
+  at a 4 MiB limit and a 5 s timeout, any link under about 839 KB/s -- and the
+  session would then reconnect and re-send, so the link would never recover.
+
+  The floor this actually sets is low, and lower than a chunk-sized figure
+  suggests. A read asks for `min(8192, bytes still outstanding)`, and a frame
+  begins with a 6-byte prefix read and a header read, so a peer keeps a
+  session alive by completing **any one read per timeout** -- a single small
+  frame per two timeouts, on the order of tens of bytes per second at the
+  shipped values, not kilobytes.
+
+  That is a deliberate trade and not a strong liveness guarantee: a peer
+  dribbling a few bytes per second holds a session open and is
+  indistinguishable from a healthy one. What limits the damage is
+  displacement, not the timer -- a healthy phone reconnecting takes the slot
+  back. For a system whose only peer runs our own app, that is the right
+  balance, but an implementation should not read this timeout as a bandwidth
+  floor.
 
 Session-end reasons: `closed_local`, `peer_closed`, `displaced`, `stalled`,
 `framing_error`, `transport_error`.

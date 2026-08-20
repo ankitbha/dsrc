@@ -109,6 +109,12 @@ class TransportListener:
         self.accepted = 0
         self.refused = 0
         self.displaced = 0
+        # Handshake workers that outlived their timeout because closing the
+        # connection did not unblock their read. A backend that honours the
+        # ByteConnection contract never produces one; the count is here so that
+        # a backend which does not shows up in the summary instead of quietly
+        # accumulating threads across a drive.
+        self.handshake_workers_leaked = 0
 
     # -- lifecycle -------------------------------------------------------
 
@@ -118,7 +124,15 @@ class TransportListener:
         return self
 
     def stop(self, timeout: float = 2.0) -> None:
-        self._stop.set()
+        # The flag is set under the same lock _admit installs a session under,
+        # so the two serialize: either we see the session it installed and
+        # close it, or it sees the flag and refuses. Setting the flag outside
+        # left a window where _admit installed and started a session after
+        # stop() had already returned, and nothing would ever close it.
+        with self._lock:
+            self._stop.set()
+            pending = self._pending
+            session = self._current
         try:
             self._acceptor.close()
         except Exception:
@@ -126,14 +140,11 @@ class TransportListener:
         # Closing the acceptor does not touch a connection already handed to
         # the accept loop, so a peer mid-handshake has to be closed by hand or
         # the accept loop never returns and stop() leaves its thread running.
-        with self._lock:
-            pending = self._pending
         if pending is not None:
             try:
                 pending.close()
             except Exception:
                 pass
-        session = self.current_session
         if session is not None:
             session.close(SessionEndReason.CLOSED_LOCAL)
         if self._thread is not None and self._thread is not threading.current_thread():
@@ -215,9 +226,14 @@ class TransportListener:
             except Exception:
                 pass
             worker.join(1.0)
-            raise HandshakeError(
-                f"no hello within {self._handshake_timeout_s}s"
-            )
+            if worker.is_alive():
+                self.handshake_workers_leaked += 1
+                raise HandshakeError(
+                    f"no hello within {self._handshake_timeout_s}s, and closing the "
+                    f"connection did not release the read: worker thread abandoned "
+                    f"({self.handshake_workers_leaked} so far)"
+                )
+            raise HandshakeError(f"no hello within {self._handshake_timeout_s}s")
         error = outcome.get("error")
         if error is not None:
             raise error
@@ -263,8 +279,21 @@ class TransportListener:
             wall_clock=self._wall,
             on_end=self._on_session_end,
         )
+        # Installing and the stop flag are one step. Checking the flag earlier
+        # and installing later leaves a window -- displacement plus Session
+        # construction wide -- in which stop() sees only the old session,
+        # closes that, joins the accept thread and returns, while this call
+        # goes on to start a session nothing will ever close.
         with self._lock:
-            self._current = session
+            stopping = self._stop.is_set()
+            if not stopping:
+                self._current = session
+        if stopping:
+            try:
+                connection.close()
+            except Exception:
+                pass
+            return
         self.accepted += 1
         # Announce before starting the threads. A session can die immediately
         # -- a malformed first frame is enough -- and starting first lets its

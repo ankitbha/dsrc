@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from transport.channels import Channel, policy_for
+from transport.connection import ConnectionClosed
 from transport.frames import (
     HEARTBEAT_KEY,
     MAX_PAYLOAD_BYTES,
@@ -26,6 +27,7 @@ from transport.frames import (
 from transport.loopback import loopback_pair
 from transport.session import (
     DEFAULT_HEARTBEAT_S,
+    RX_CHUNK_BYTES,
     DEFAULT_STALL_TIMEOUT_S,
     Session,
     SessionEndReason,
@@ -61,12 +63,31 @@ def stalled_writer_session(**kwargs):
     return session, far
 
 
-def drain_channels(connection, count, timeout=3.0):
-    """Read `count` frames straight off the wire, returning their channels."""
+def drain_channels(connection, count, timeout=6.0):
+    """Read `count` frames off the wire, failing rather than hanging.
+
+    read_frame blocks, so a deadline checked between frames is decorative: once
+    a read blocks, the loop never re-evaluates it. A regression that stopped
+    the writer used to hang four tests forever, and a hung suite reports
+    nothing at all. The reads run on a worker with a join deadline instead.
+    """
     frames = []
-    deadline = time.monotonic() + timeout
-    while len(frames) < count and time.monotonic() < deadline:
-        frames.append(read_frame(connection.recv_exact))
+    errors = []
+
+    def reader():
+        try:
+            while len(frames) < count:
+                frames.append(read_frame(connection.recv_exact))
+        except Exception as exc:  # recorded so the assertion can name it
+            errors.append(exc)
+
+    worker = threading.Thread(target=reader, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    assert len(frames) == count, (
+        f"read {len(frames)} of {count} frames in {timeout}s"
+        + (f"; last error {errors[-1]!r}" if errors else "")
+    )
     return frames
 
 
@@ -150,7 +171,7 @@ def test_control_sequence_continues_past_the_hello():
     session = quiet_session(near)
     try:
         session.send(Channel.CONTROL, b"x")
-        assert read_frame(far.recv_exact).seq == 1
+        assert drain_channels(far, 1)[0].seq == 1
     finally:
         session.close()
 
@@ -161,7 +182,7 @@ def test_data_channels_start_at_zero_and_increment():
     try:
         for _ in range(3):
             session.send(Channel.GPS, b"f")
-        assert [read_frame(far.recv_exact).seq for _ in range(3)] == [0, 1, 2]
+        assert [frame.seq for frame in drain_channels(far, 3)] == [0, 1, 2]
     finally:
         session.close()
 
@@ -173,7 +194,7 @@ def test_sequence_numbers_are_independent_per_channel():
         session.send(Channel.GPS, b"a")
         session.send(Channel.IMU, b"b")
         session.send(Channel.GPS, b"c")
-        frames = [read_frame(far.recv_exact) for _ in range(3)]
+        frames = drain_channels(far, 3)
         by_channel = {}
         for frame in frames:
             by_channel.setdefault(frame.channel, []).append(frame.seq)
@@ -576,7 +597,7 @@ def test_heartbeat_frames_carry_the_reserved_extension():
     near, far = loopback_pair()
     session = Session(near, session_id=1, heartbeat_s=0.02, stall_timeout_s=None).start()
     try:
-        frame = read_frame(far.recv_exact)
+        frame = drain_channels(far, 1)[0]
         assert frame.channel is Channel.CONTROL
         assert frame.extensions[HEARTBEAT_KEY] is True
         assert frame.payload == b""
@@ -789,11 +810,20 @@ def test_everything_queued_is_sent_dropped_or_abandoned():
         session.send(Channel.HERE, f"{index}".encode())
     session.close()
 
-    stats = session.stats().channels[Channel.HERE]
-    assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
-    assert stats.abandoned_outbound > 0
-    assert session.outbound_pending(Channel.HERE) == 0
-    assert "abandoned_outbound" in stats.to_record()
+    for channel, stats in session.stats().channels.items():
+        assert stats.queued == (
+            stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+        ), f"{channel.value}: {stats.to_record()}"
+        assert session.outbound_pending(channel) == 0
+
+    here = session.stats().channels[Channel.HERE]
+    assert here.abandoned_outbound > 0
+    assert "abandoned_outbound" in here.to_record()
+    # The frame the writer had already taken is a camera frame in this fixture.
+    # Asserting only on HERE left that half of the accounting free.
+    camera = session.stats().channels[Channel.CAMERA]
+    assert camera.queued == 1
+    assert camera.sent + camera.abandoned_outbound == 1
 
 
 def test_a_clean_run_abandons_nothing():
@@ -809,18 +839,6 @@ def test_a_clean_run_abandons_nothing():
         receiver.close()
     stats = sender.stats().channels[Channel.GPS]
     assert (stats.queued, stats.sent, stats.abandoned_outbound) == (10, 10, 0)
-
-
-def test_the_in_flight_frame_is_counted_once():
-    """A shutdown racing a completed write must not count the same frame as
-    both sent and abandoned."""
-    for _ in range(12):
-        near, far = loopback_pair()
-        session = quiet_session(near)
-        session.send(Channel.GPS, b"fix")
-        session.close()
-        stats = session.stats().channels[Channel.GPS]
-        assert stats.sent + stats.abandoned_outbound == 1, stats.to_record()
 
 
 # -- what the stall timer actually watches ----------------------------------
@@ -911,16 +929,6 @@ def test_a_chunk_slower_than_the_timeout_still_stalls():
         session.close()
 
 
-def test_the_read_chunk_and_stall_timeout_set_a_documented_rate_floor():
-    from transport.session import RX_CHUNK_BYTES
-
-    floor_bytes_per_s = RX_CHUNK_BYTES / DEFAULT_STALL_TIMEOUT_S
-    assert RX_CHUNK_BYTES == 8192
-    assert floor_bytes_per_s < 2000, "the floor must stay far below any usable link"
-    # Without chunking the floor would be a whole frame per timeout.
-    assert MAX_PAYLOAD_BYTES / DEFAULT_STALL_TIMEOUT_S > 400 * floor_bytes_per_s
-
-
 # -- the confirmed timing parameters ----------------------------------------
 
 
@@ -992,3 +1000,206 @@ def test_no_session_thread_is_alive_the_moment_close_returns():
     session.close()
     alive = [thread.name for thread in threading.enumerate() if "session91" in thread.name]
     assert alive == []
+
+
+# -- who accounts for the frame in flight -----------------------------------
+
+
+class HookedConnection:
+    """Wraps a connection and runs a hook once, after a write completes.
+
+    Turns a race into a schedule: the hook stands in for a shutdown landing in
+    the window between send_all returning and the writer recording the
+    outcome, which is what the timer does on a stall and the reader on a
+    hangup.
+    """
+
+    def __init__(self, inner, hook) -> None:
+        self._inner = inner
+        self._hook = hook
+        self._fired = False
+
+    @property
+    def peer(self) -> str:
+        return self._inner.peer
+
+    def send_all(self, data: bytes) -> None:
+        self._inner.send_all(data)
+        if not self._fired:
+            self._fired = True
+            self._hook()
+
+    def recv_exact(self, n: int) -> bytes:
+        return self._inner.recv_exact(n)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_a_frame_the_peer_received_is_counted_sent_not_abandoned():
+    """The in-flight frame belongs to the writer, because it is the only thread
+    that knows whether the write completed. Splitting that decision with
+    shutdown and reconciling afterwards reported delivered frames as losses."""
+    near, far = loopback_pair()
+    holder: dict[str, Session] = {}
+
+    def hook():
+        closer = threading.Thread(
+            target=lambda: holder["session"].close(SessionEndReason.STALLED), daemon=True
+        )
+        closer.start()
+        closer.join(timeout=3.0)
+
+    session = Session(
+        HookedConnection(near, hook), session_id=1, heartbeat_s=None, stall_timeout_s=None
+    )
+    holder["session"] = session
+    session.start()
+    session.send(Channel.GPS, b"this-frame-reached-the-peer")
+    assert drain_channels(far, 1)[0].payload == b"this-frame-reached-the-peer"
+
+    def recorded():
+        stats = session.stats().channels[Channel.GPS]
+        return stats.sent + stats.abandoned_outbound >= 1
+
+    assert wait_until(recorded, timeout=8.0)
+    stats = session.stats().channels[Channel.GPS]
+    assert stats.sent == 1, stats.to_record()
+    assert stats.abandoned_outbound == 0, stats.to_record()
+    assert stats.bytes_sent > 0
+    assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+
+
+def test_sending_while_closing_never_orphans_a_message():
+    """The deployment shape: sensor threads keep calling send() while the
+    reader notices the phone hung up. A closed check outside the queue lock
+    lets a message land after shutdown drained -- counted in `queued`, in
+    nothing else, and never sent."""
+    for _ in range(8):
+        near, _far = loopback_pair(max_buffer_bytes=4096)
+        session = quiet_session(near)
+        stop = threading.Event()
+
+        def spam(target=session):
+            while not stop.is_set():
+                try:
+                    if not target.send(Channel.HERE, b"\x00" * 8192):
+                        return
+                except Exception:
+                    return
+
+        writer = threading.Thread(target=spam, daemon=True)
+        writer.start()
+        time.sleep(0.05)
+        session.close()
+        stop.set()
+        writer.join(timeout=3.0)
+
+        stats = session.stats().channels[Channel.HERE]
+        assert stats.queued == (
+            stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+        ), stats.to_record()
+        assert session.outbound_pending(Channel.HERE) == 0
+
+
+def test_a_backend_that_returns_empty_at_eof_ends_the_session():
+    """recv_exact must raise, but returning b"" at EOF is the likeliest way to
+    get it wrong -- it is what socket.recv does, and tasks 13 and 40 each write
+    one. Treating an empty chunk as progress spun the reader forever while
+    refreshing the very clock meant to notice."""
+
+    class EmptyAtEof:
+        peer = "empty-at-eof"
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.calls = 0
+
+        def send_all(self, data):
+            self._inner.send_all(data)
+
+        def recv_exact(self, n):
+            self.calls += 1
+            try:
+                return self._inner.recv_exact(n)
+            except ConnectionClosed:
+                return b""
+
+        def close(self):
+            self._inner.close()
+
+    for payload_len in (1024, RX_CHUNK_BYTES * 4):
+        near, far = loopback_pair()
+        connection = EmptyAtEof(near)
+        session = Session(connection, session_id=1, heartbeat_s=None, stall_timeout_s=0.3).start()
+        try:
+            blob = encode(
+                Frame(
+                    channel=Channel.CAMERA,
+                    seq=0,
+                    t_mono_ns=1,
+                    t_wall_ns=2,
+                    payload=b"\x5a" * payload_len,
+                )
+            )
+            far.send_all(blob[:200])
+            far.close()
+            assert wait_until(lambda: session.is_closed, timeout=4.0), (
+                f"payload {payload_len}: never ended after {connection.calls} calls"
+            )
+            assert connection.calls < 500, f"spun: {connection.calls} calls"
+        finally:
+            session.close()
+
+
+def test_recv_wakes_promptly_when_the_session_ends():
+    """A blocked reader is woken by shutdown rather than waiting out its tick."""
+    near, _far = loopback_pair()
+    session = Session(near, session_id=1, heartbeat_s=1.0, stall_timeout_s=5.0).start()
+    woke: list[float] = []
+
+    def wait_for_a_message():
+        started = time.monotonic()
+        session.recv(Channel.GPS, timeout=None)
+        woke.append(time.monotonic() - started)
+
+    waiter = threading.Thread(target=wait_for_a_message, daemon=True)
+    waiter.start()
+    time.sleep(0.1)
+    session.close()
+    waiter.join(timeout=3.0)
+    assert woke, "recv never returned"
+    assert woke[0] < 0.15, f"took {woke[0] * 1000:.0f} ms; the tick is 250 ms"
+
+
+def test_a_peer_sending_one_small_frame_per_timeout_holds_the_session():
+    """The floor the code actually enforces, rather than a bytes-per-second
+    figure. The stamp lands per completed read and a frame needs at least two,
+    so very little traffic keeps a session alive. That trade is accepted --
+    displacement lets a healthy phone take the slot back -- but the spec has to
+    state this floor and not a chunk-sized one."""
+    near, far = loopback_pair()
+    stall_s = 0.4
+    session = Session(near, session_id=1, heartbeat_s=None, stall_timeout_s=stall_s).start()
+    try:
+        delivered = 0
+        for index in range(6):
+            time.sleep(stall_s * 0.8)
+            if session.is_closed:
+                break
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.TELEMETRY,
+                        seq=index,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=b"hi",
+                    )
+                )
+            )
+            delivered += 1
+        assert not session.is_closed, f"closed after {delivered} frames"
+        assert delivered == 6
+    finally:
+        session.close()
