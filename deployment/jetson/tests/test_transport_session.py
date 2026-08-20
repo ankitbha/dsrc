@@ -1213,5 +1213,9 @@ def test_start_declines_to_run_threads_on_an_already_closed_session():
     session = Session(near, session_id=93, heartbeat_s=None, stall_timeout_s=None)
     session.close()
     session.start()
+    # Asserted on the thread list itself, not on threading.enumerate(): threads
+    # started on a closed session exit within a tick on their own, so an
+    # enumerate() check races their exit and passes either way.
+    assert session._threads == []
     assert [t.name for t in threading.enumerate() if "session93" in t.name] == []
     assert session.end_reason is SessionEndReason.CLOSED_LOCAL

@@ -124,11 +124,12 @@ class TransportListener:
         return self
 
     def stop(self, timeout: float = 2.0) -> None:
-        # The flag is set under the same lock _admit installs a session under,
-        # so the two serialize: either we see the session it installed and
-        # close it, or it sees the flag and refuses. Setting the flag outside
-        # left a window where _admit installed and started a session after
-        # stop() had already returned, and nothing would ever close it.
+        # The flag is set before _current is read, and _admit checks the flag
+        # in the same locked step that installs, so the two serialize: either
+        # we see the session it installed and close it, or it sees the flag and
+        # refuses. The install being one step is what closes the race -- a
+        # check passed earlier and installed later left a window in which a
+        # session started after stop() returned with nothing left to close it.
         with self._lock:
             self._stop.set()
             pending = self._pending

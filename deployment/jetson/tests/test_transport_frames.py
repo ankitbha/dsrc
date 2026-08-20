@@ -285,6 +285,25 @@ def test_nested_non_finite_numbers_are_refused_too():
         encode(make_frame(extensions={"imu": {"accel": [1.0, float("nan")]}}))
 
 
+@pytest.mark.parametrize(
+    "value",
+    [b"raw bytes", {1, 2}, 1j, object()],
+    ids=["bytes", "set", "complex", "object"],
+)
+def test_unserializable_values_are_refused_as_framing_errors(value):
+    """These raise TypeError, not ValueError. A numpy scalar is in this class
+    and is what sensors/ produces -- likelier by far than the NaN that
+    motivated the guard -- so catching only ValueError let it escape the
+    caller's except clause and kill the thread."""
+    with pytest.raises(FramingError, match="not encodable"):
+        encode(make_frame(extensions={"reading": value}))
+
+
+def test_a_non_string_header_key_is_refused_as_a_framing_error():
+    with pytest.raises(FramingError, match="not encodable"):
+        encode(make_frame(extensions={7: "numeric key"}))
+
+
 def test_finite_floats_still_encode():
     decoded = decode(encode(make_frame(extensions={"reading": 1.5, "zero": 0.0})))
     assert decoded.extensions == {"reading": 1.5, "zero": 0.0}
