@@ -1325,3 +1325,66 @@ def test_start_is_idempotent():
         assert not session.is_closed
     finally:
         session.close()
+
+
+class FailingReadConnection:
+    """A connection whose reads raise something the reader does not expect."""
+
+    peer = "failing-read"
+
+    def __init__(self, inner, error) -> None:
+        self._inner = inner
+        self._error = error
+
+    def send_all(self, data: bytes) -> None:
+        self._inner.send_all(data)
+
+    def recv_exact(self, n: int) -> bytes:
+        raise self._error
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_an_unexpected_read_failure_ends_the_session():
+    """A dead reader would eventually be noticed by the peer's own stall timer,
+    but only after the peer gives up on us -- a whole timeout of a drive spent
+    recording nothing. End it here instead."""
+    near, _far = loopback_pair()
+    session = Session(
+        FailingReadConnection(near, RuntimeError("a decoder wrapper bug")),
+        session_id=1,
+        heartbeat_s=None,
+        stall_timeout_s=None,
+    ).start()
+    try:
+        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+    finally:
+        session.close()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_an_unexpected_timer_failure_ends_the_session():
+    """The timer carries the keepalive and the stall watchdog together, so
+    losing it silently removes the very thing that would have noticed."""
+    near, _far = loopback_pair()
+
+    def clock_that_fails_only_in_the_timer():
+        if "timer" in threading.current_thread().name:
+            raise RuntimeError("clock unavailable")
+        return time.monotonic_ns()
+
+    session = Session(
+        near,
+        session_id=1,
+        heartbeat_s=0.05,
+        stall_timeout_s=5.0,
+        mono_clock=clock_that_fails_only_in_the_timer,
+    ).start()
+    try:
+        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+    finally:
+        session.close()

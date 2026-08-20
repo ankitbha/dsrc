@@ -651,6 +651,25 @@ def test_stop_racing_the_session_install_leaves_nothing_running(monkeypatch):
         timeout=3.0,
     )
 
+    # The connection has to be closed too, or the fd is held past stop() and the
+    # phone still believes it has a live link, so it does not reconnect. This is
+    # the only path that reaches the bail inside the install block -- the check
+    # before Session construction handles every case that is not a race.
+    outcome: list[str] = []
+
+    def read_until_closed():
+        try:
+            for _ in range(4096):
+                connection.recv_exact(1)
+            outcome.append("still open")
+        except ConnectionClosed:
+            outcome.append("closed")
+
+    reader = threading.Thread(target=read_until_closed, daemon=True)
+    reader.start()
+    reader.join(timeout=3.0)
+    assert outcome == ["closed"], f"connection held past stop(): {outcome}"
+
 
 def test_a_consumer_that_closes_on_started_gets_no_surviving_thread():
     """Rejecting a session by device id on SessionStarted is an obvious thing
