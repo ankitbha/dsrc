@@ -1258,12 +1258,23 @@ def test_every_reason_in_the_vocabulary_has_a_row_in_the_refusal_table():
 def test_the_spec_carries_the_numeric_bounds_the_code_enforces():
     """Both could be halved in the spec with every test still green, which for a
     cross-language contract means the other implementation reads the wrong
-    number and its messages are dropped here."""
+    number and its messages are dropped here.
+
+    Checks every interval in the document, not that the right one appears
+    somewhere: the rate ceiling is written twice, so falsifying the refusal row
+    alone left an "is in the spec" assertion satisfied by the other copy.
+    """
+    import re
+
     from transport.messages import MAX_COUNT, MAX_RATE_HZ
 
     text = (REPO / "specs" / "transport_protocol.md").read_text()
-    assert f"(0, {MAX_RATE_HZ:g}]" in text, f"the rate ceiling {MAX_RATE_HZ:g} is not in the spec"
-    assert f"[0, {MAX_COUNT}]" in text, f"the count ceiling {MAX_COUNT} is not in the spec"
+    rates = re.findall(r"\(0, ([0-9.]+)\]", text)
+    counts = re.findall(r"\[0, ([0-9]+)\]", text)
+    assert rates, "no rate interval in the spec at all"
+    assert counts, "no count interval in the spec at all"
+    assert set(rates) == {f"{MAX_RATE_HZ:g}"}, f"rate intervals disagree with the code: {rates}"
+    assert set(counts) == {str(MAX_COUNT)}, f"count intervals disagree with the code: {counts}"
 
 
 def test_the_refusal_table_covers_every_documented_channel_object():
@@ -1360,9 +1371,11 @@ def test_recv_returns_none_on_an_empty_queue_without_blocking():
     try:
         started = clock.monotonic()
         assert router.recv(Channel.IMU) is None
-        # Tight on purpose: at 0.5 s this passed with a 400 ms floor in
-        # place, which is not what "without blocking" means.
-        assert clock.monotonic() - started < 0.05
+        # Tight on purpose. At 0.5 s this passed with a 400 ms floor in place,
+        # which is not what "without blocking" means; measured, the poll costs
+        # 0.5 us at the median and 32 us at the worst of 2000, so 10 ms is still
+        # two orders of margin over the behaviour and kills a floor of 38 ms.
+        assert clock.monotonic() - started < 0.01
     finally:
         sender.close()
         receiver.close()
