@@ -57,7 +57,28 @@ from transport.handshake import (
     parse_hello,
     perform_handshake,
 )
+from transport.client import (
+    Backoff,
+    ClientAttemptFailed,
+    ClientEvent,
+    ClientGaveUp,
+    ClientSessionEnded,
+    ClientSessionStarted,
+    SessionClient,
+    connect_session,
+)
 from transport.loopback import LoopbackAcceptor, LoopbackConnection, loopback_pair
+from transport.tcp import (
+    CONNECT_TIMEOUT_S,
+    DEFAULT_PORT,
+    LISTEN_BACKLOG,
+    PEER_GONE_ERRNOS,
+    RECV_CHUNK_BYTES,
+    TcpAcceptor,
+    TcpConnection,
+    apply_socket_options,
+    dial,
+)
 from transport.session import (
     DEFAULT_HEARTBEAT_S,
     DEFAULT_STALL_TIMEOUT_S,
@@ -69,6 +90,23 @@ from transport.session import (
 )
 
 __all__ = [
+    "dial",
+    "connect_session",
+    "apply_socket_options",
+    "TcpConnection",
+    "TcpAcceptor",
+    "SessionClient",
+    "RECV_CHUNK_BYTES",
+    "PEER_GONE_ERRNOS",
+    "LISTEN_BACKLOG",
+    "DEFAULT_PORT",
+    "ClientSessionStarted",
+    "ClientSessionEnded",
+    "ClientGaveUp",
+    "ClientEvent",
+    "ClientAttemptFailed",
+    "CONNECT_TIMEOUT_S",
+    "Backoff",
     "Acceptor",
     "ByteConnection",
     "CHANNEL_POLICIES",
