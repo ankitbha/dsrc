@@ -18,7 +18,7 @@ from transport.connection import ConnectionClosed
 from transport.endpoint import SessionStarted, TransportListener
 from transport.handshake import Hello, Role, VersionMismatch, perform_handshake
 from transport.loopback import loopback_pair
-from transport.session import SessionEndReason
+from transport.session import Session, SessionEndReason
 from transport.tcp import PEER_GONE_ERRNOS, TcpAcceptor, dial
 from transport.client import (
     Backoff,
@@ -597,6 +597,98 @@ def test_current_session_never_hands_back_a_closed_session():
             time.sleep(0.001)
         assert client.connected >= 3, client.connected
         assert seen_closed == 0, f"handed back a closed session {seen_closed} times"
+    finally:
+        client.stop()
+
+
+def test_current_session_filters_a_closed_session_it_still_holds():
+    """The filter and the on_end clearing are redundant by design, so each hid
+    the other's absence under mutation. This pins the filter alone."""
+    near, _far = loopback_pair()
+    client = SessionClient("jetson", 1, local_hello=PHONE)
+    session = Session(near, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+    session.close()
+    client._current = session
+    assert client.current_session is None
+
+
+def test_the_session_reference_is_cleared_before_the_next_poll():
+    """And this pins the clearing alone: with a deliberately slow poll, a
+    reference cleared only by the maintain loop would linger for a whole
+    interval after the session ended."""
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=fast_backoff(),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(),
+        poll_s=2.0,
+    ).start()
+    try:
+        session = client.wait_for_session(timeout=5.0)
+        assert session is not None
+        session.close()
+        # Far shorter than poll_s, so only an immediate clear can satisfy it.
+        assert wait_until(lambda: client._current is None, timeout=0.5), (
+            "the reference survived the session, so only the property's filter "
+            "was hiding it"
+        )
+    finally:
+        client.stop()
+
+
+def test_the_retry_delay_escalates_for_short_lived_sessions():
+    """Pins the escalation's effect, not just the attempt numbering: the
+    counter increments whatever delay is used."""
+    backoff = fast_backoff()
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=backoff,
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(lifetime_s=0.01),
+        reset_after_s=10.0,
+        random_unit=lambda: 0.5,  # no jitter, so the sequence is exact
+        poll_s=0.01,
+    ).start()
+    try:
+        delays = []
+        deadline = time.monotonic() + 8.0
+        while len(delays) < 3 and time.monotonic() < deadline:
+            event = client.next_event(timeout=0.05)
+            if isinstance(event, ClientSessionEnded):
+                delays.append(event.retry_in_s)
+        assert len(delays) >= 3, delays
+        assert all(d is not None for d in delays), delays
+        assert delays[:3] == [
+            backoff.base_delay_for(1),
+            backoff.base_delay_for(2),
+            backoff.base_delay_for(3),
+        ], delays
+    finally:
+        client.stop()
+
+
+def test_a_durable_session_reports_no_retry_delay():
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=fast_backoff(),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(lifetime_s=0.1),
+        reset_after_s=0.01,
+        poll_s=0.01,
+    ).start()
+    try:
+        ended = wait_for_client_event(client, ClientSessionEnded, timeout=6.0)
+        assert ended is not None
+        assert ended.retry_in_s is None
     finally:
         client.stop()
 

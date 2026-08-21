@@ -287,13 +287,15 @@ class FlakyServerSocket:
     """Wraps the listening socket and fails the first `failures` accepts."""
 
     def __init__(self, inner, error, failures=1):
+        """failures=-1 fails forever."""
         self._inner = inner
         self._error = error
         self.remaining = failures
 
     def accept(self):
-        if self.remaining > 0:
-            self.remaining -= 1
+        if self.remaining != 0:
+            if self.remaining > 0:
+                self.remaining -= 1
             raise self._error
         return self._inner.accept()
 
@@ -348,12 +350,22 @@ def test_a_retry_respects_the_accept_deadline(acceptor):
     """The retry loop must not outlive the timeout it was given."""
     import errno as errno_module
 
+    # Never stops failing, so the deadline is the only way out. A finite count
+    # would just be exhausted and the test would pass either way.
     acceptor._server = FlakyServerSocket(
-        acceptor._server, OSError(errno_module.ECONNABORTED, "injected"), failures=10_000
+        acceptor._server, OSError(errno_module.ECONNABORTED, "injected"), failures=-1
     )
+    outcome: list[object] = []
     started = time.monotonic()
-    assert acceptor.accept(timeout=0.3) is None
+    worker = threading.Thread(
+        target=lambda: outcome.append(acceptor.accept(timeout=0.3)), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive(), "the retry loop outlived the deadline it was given"
+    assert outcome == [None]
     assert time.monotonic() - started < 3.0
+    assert acceptor.transient_accept_errors > 0
 
 
 # -- the whole transport over a real socket ----------------------------------

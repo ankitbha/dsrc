@@ -90,6 +90,11 @@ class ClientSessionEnded:
     reason: SessionEndReason
     stats: SessionStats
     uptime_s: float
+    # How long before the next attempt, and None when the session was durable
+    # enough to reset the schedule. Reported so the escalation is observable:
+    # the attempt counter increments whatever delay is used, so without this
+    # a loop that always waited the initial delay looked identical.
+    retry_in_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -417,20 +422,22 @@ class SessionClient:
             with self._lock:
                 if self._current is session:
                     self._current = None
+            durable = uptime_s >= self._reset_after_s
+            # Short-lived: keep escalating rather than reconnecting at the
+            # initial delay forever.
+            delay = None if durable else self._backoff.delay_for(attempt, self._random_unit())
             self._events.put(
                 ClientSessionEnded(
                     session_id=session.session_id,
                     reason=session.end_reason or SessionEndReason.CLOSED_LOCAL,
                     stats=session.stats(),
                     uptime_s=uptime_s,
+                    retry_in_s=delay,
                 )
             )
             if self._stop.is_set():
                 return
-            if uptime_s >= self._reset_after_s:
+            if durable:
                 attempt = 0
                 continue
-            # Short-lived: keep escalating rather than reconnecting at the
-            # initial delay forever.
-            delay = self._backoff.delay_for(attempt, self._random_unit())
             self._stop.wait(delay)
