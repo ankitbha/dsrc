@@ -738,12 +738,29 @@ def test_the_error_span_is_recorded_not_just_the_high_water_mark(acceptor):
     assert stats["accept_error_span_s"] < 1.0
 
 
-def test_stats_is_a_snapshot_and_does_not_race_the_accept_thread(acceptor):
-    """sorted() over the live dict raises if a key is inserted mid-iteration,
-    and a diagnostic that raises is worse than useless."""
-    import errno as errno_module
+def test_stats_is_callable_while_accepts_are_failing(acceptor):
+    """What this pins: stats() returns well-formed data under concurrent
+    accepts, and never raises.
 
-    acceptor._server = AlwaysFailingServer(OSError(errno_module.EMFILE, "injected"))
+    What it cannot pin, stated so nobody trusts it to: sorted() over the live
+    dict only raises when the dict changes *size* mid-iteration, and at most six
+    keys can ever exist -- the two errno frozensets -- so the race is six events
+    in a process lifetime. A test that reliably hit it would have to be flaky,
+    which is worse than an untested one-word snapshot. The dict() copy stays as
+    defence.
+    """
+    import errno as errno_module
+    import itertools
+
+    codes = itertools.cycle(
+        [errno_module.EMFILE, errno_module.ENFILE, errno_module.ECONNABORTED, errno_module.EINTR]
+    )
+
+    class CyclingFailure(RecordingServerSocket):
+        def accept(self):
+            raise OSError(next(codes), "injected")
+
+    acceptor._server = CyclingFailure()
     stop = threading.Event()
 
     def keep_failing():
@@ -756,8 +773,10 @@ def test_stats_is_a_snapshot_and_does_not_race_the_accept_thread(acceptor):
     worker = threading.Thread(target=keep_failing, daemon=True)
     worker.start()
     try:
-        for _ in range(200):
-            acceptor.stats()  # must never raise
+        for _ in range(400):
+            snapshot = acceptor.stats()
+            assert isinstance(snapshot["accept_errors_by_errno"], dict)
+            assert snapshot["transient_accept_errors"] >= 0
     finally:
         stop.set()
         worker.join(timeout=3.0)
