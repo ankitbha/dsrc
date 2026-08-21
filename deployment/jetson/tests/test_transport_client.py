@@ -489,6 +489,39 @@ def test_a_session_constructor_failure_closes_the_connection(monkeypatch):
     assert_closed(dialer.connections[0])
 
 
+def test_a_partly_started_session_is_closed_on_the_way_out(monkeypatch):
+    """The cleanup closes the session as well as the connection, and only a
+    partial start shows why: Session.start() creates its threads one at a time,
+    so a failure part-way leaves earlier threads running, and only close()
+    joins them. A start() that fails before creating anything cannot tell the
+    difference."""
+    import transport.client as client_module
+
+    started_threads: list[threading.Thread] = []
+
+    class PartlyStartingSession(client_module.Session):
+        def start(self):
+            thread = threading.Thread(
+                target=lambda: self._stop.wait(30.0), name="partial-session", daemon=True
+            )
+            thread.start()
+            started_threads.append(thread)
+            self._threads.append(thread)
+            raise RuntimeError("failed on the second thread")
+
+    monkeypatch.setattr(client_module, "Session", PartlyStartingSession)
+    dialer = RecordingDialer(lambda host, port: scripted_peer())
+    with pytest.raises(RuntimeError):
+        connect_session(
+            "jetson", 1, local_hello=PHONE, heartbeat_s=None, stall_timeout_s=None, dial_fn=dialer
+        )
+    assert_closed(dialer.connections[0])
+    assert started_threads, "the fixture did not start a thread"
+    assert wait_until(lambda: not started_threads[0].is_alive(), timeout=5.0), (
+        "a thread from a partly started session outlived the failure"
+    )
+
+
 def test_a_peer_that_never_sends_a_hello_is_given_up_on_and_retried():
     """A listener whose accept loop has died looks exactly like this: the TCP
     connection completes and nothing follows. dial's timeout covers only the
