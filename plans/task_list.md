@@ -314,12 +314,16 @@ tunnels over USB and is unaffected.
     added in round 3 created phantom sessions that inflated `connected` and
     `reconnects`, so I reverted it.
 
-    **Still open, and a decision for later:** `ByteConnection` is one property
-    short. Twice this task wanted to ask a connection "are you still usable" —
-    once to avoid `recv_exact` masking a local close, once to avoid the phantom
-    session — and there is no way to. Adding `is_closed` to the protocol means
-    touching `connection.py` and `loopback.py`, which task 12 closed, so it is
-    raised rather than done.
+    **The seam question is settled, the other way.** I raised `ByteConnection` as
+    one property short — twice this task wanted to ask a connection "are you
+    still usable". Checked: nothing consumed the `is_closed` that TcpConnection
+    already had, and both problems were already solved without it. So it was
+    **removed** rather than added: a liveness flag is stale the moment it is
+    read, and check-then-act on one is the exact shape of this task's two worst
+    races. The protocol stays at four members, `connection.py` says why there is
+    deliberately no liveness query, and the contract suite pins both that every
+    member is present and that no undeclared surface appears — so a backend's
+    extras are a deliberate act. Task 40 implements four, not five.
 14. Wire protocol: sensor messages upstream, advisory and rate commands
     downstream, each carrying its own timestamps.
 15. Shared timebase with clock-offset estimation and drift tracking, so
