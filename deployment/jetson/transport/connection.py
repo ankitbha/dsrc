@@ -21,6 +21,15 @@ connection under a blocked reader. On a POSIX socket that means shutdown()
 before close(), because closing a socket does not release a thread already
 sitting in recv. A backend that does not honour this turns a timeout into an
 abandoned thread.
+
+Measured on the Jetson (Linux 5.15 aarch64), which is where it matters:
+
+    blocking recv, close() only        never released (still blocked at 6 s)
+    blocking recv, shutdown()+close()  released in 0.001 s
+
+macOS is more forgiving and releases on close alone, which is why this has to
+be asserted as call order there and can only be verified as an outcome on
+Linux.
 """
 
 from __future__ import annotations

@@ -74,11 +74,14 @@ ACCEPT_TRANSIENT_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, 
 # ECONNABORTED spins accept() at over two million calls a second -- the same
 # pathology this file's docstring describes for the reader, on a different
 # errno, on a device with six cores and other work to do.
-# Cap on the socket timeout for a single accept attempt, so a close() is
-# noticed within one of these however long the caller asked to wait. A blocking
-# accept is interrupted by close on this platform, but a *timed* one is not --
-# CPython waits in select() under a timeout, and closing the fd does not break
-# that wait -- so an uncapped accept(timeout=5) ignored close for five seconds.
+# Cap on the socket timeout for a single accept attempt, so a close() is noticed
+# within one of these however long the caller asked to wait.
+#
+# Needed because the platforms disagree, measured rather than assumed:
+#   macOS  a blocking accept is released by close (0.00 s); a *timed* one is
+#          not, and ran its caller's full 5 s.
+#   Linux  both are released immediately (0.000 s).
+# So the cap is what macOS needs and Linux does not; it costs Linux nothing.
 INTERNAL_ACCEPT_POLL_S = 0.05
 
 ACCEPT_RETRY_PAUSE_S = 0.001
