@@ -472,3 +472,157 @@ def test_fifty_connect_disconnect_cycles_leak_no_descriptors(acceptor):
         assert wait_until(lambda: open_descriptor_count() <= before + 2), (
             f"descriptors grew from {before} to {open_descriptor_count()}"
         )
+
+
+# -- the acceptor's own close, and its counters -----------------------------
+
+
+class RecordingServerSocket:
+    """Records shutdown/close order on the listening socket."""
+
+    def __init__(self, address=("127.0.0.1", 1)):
+        self.calls: list[str] = []
+        self._address = address
+
+    def settimeout(self, timeout):
+        return None
+
+    def shutdown(self, how):
+        self.calls.append("shutdown")
+
+    def close(self):
+        self.calls.append("close")
+
+    def getsockname(self):
+        return self._address
+
+
+def test_the_acceptor_shuts_its_socket_down_before_closing_it(acceptor):
+    """Same requirement as TcpConnection, same platform blindness: on macOS
+    close() alone already wakes a blocked accept, so only the call order can be
+    asserted here. The stated reason for the change is Linux parity with
+    LoopbackAcceptor on the documented Acceptor protocol."""
+    recorder = RecordingServerSocket()
+    acceptor._server = recorder
+    acceptor.close()
+    assert recorder.calls == ["shutdown", "close"], recorder.calls
+
+
+def test_the_acceptor_still_closes_when_shutdown_is_refused(acceptor):
+    class RefusingShutdown(RecordingServerSocket):
+        def shutdown(self, how):
+            self.calls.append("shutdown-failed")
+            raise OSError(57, "socket is not connected")
+
+    recorder = RefusingShutdown()
+    acceptor._server = recorder
+    acceptor.close()
+    assert recorder.calls == ["shutdown-failed", "close"], recorder.calls
+
+
+class AlwaysFailingServer(RecordingServerSocket):
+    def __init__(self, error, address=("127.0.0.1", 1)):
+        super().__init__(address)
+        self.error = error
+        self.attempts = 0
+
+    def accept(self):
+        self.attempts += 1
+        raise self.error
+
+
+def test_a_retry_storm_does_not_become_a_busy_spin(acceptor):
+    """The module docstring names "spun at millions of calls per second" as the
+    pathology it exists to prevent. Without a pause on the retry branch, the
+    accept loop reached 2.2 million calls a second on a persistent
+    ECONNABORTED -- the same pathology, one errno over."""
+    import errno as errno_module
+
+    acceptor._server = AlwaysFailingServer(OSError(errno_module.ECONNABORTED, "injected"))
+    started = time.monotonic()
+    assert acceptor.accept(timeout=0.2) is None
+    elapsed = time.monotonic() - started
+    rate = acceptor.transient_accept_errors / elapsed
+    assert rate < 20_000, f"{rate:,.0f} retries/sec is a spin, not a retry"
+    assert acceptor.transient_accept_errors > 0
+
+
+@pytest.mark.parametrize("timeout", [0.01, 0.05])
+def test_a_transient_pause_never_outlives_the_deadline(acceptor, timeout):
+    """The pause was unconditional, so a 0.05s sleep overran a 0.01s deadline
+    fivefold -- and under a storm it set the accept loop's cadence instead of
+    the caller's poll interval."""
+    import errno as errno_module
+
+    acceptor._server = AlwaysFailingServer(OSError(errno_module.EMFILE, "injected"))
+    started = time.monotonic()
+    assert acceptor.accept(timeout=timeout) is None
+    overshoot = time.monotonic() - started - timeout
+    assert overshoot < 0.03, f"overshot its {timeout}s deadline by {overshoot:.3f}s"
+
+
+def test_the_transient_branch_pauses_at_all(acceptor):
+    """EMFILE retried flat out would spin the way the retry branch used to."""
+    import errno as errno_module
+
+    acceptor._server = AlwaysFailingServer(OSError(errno_module.EMFILE, "injected"))
+    started = time.monotonic()
+    acceptor.accept(timeout=0.25)
+    elapsed = time.monotonic() - started
+    rate = acceptor.transient_accept_errors / elapsed
+    assert rate < 200, f"{rate:,.0f} EMFILE retries/sec means the pause is gone"
+
+
+def test_retries_are_counted_per_errno_and_consecutively(acceptor):
+    """One number cannot tell our own descriptor leak (EMFILE) from somebody
+    else's (ENFILE), and retrying either indefinitely would otherwise turn our
+    own leak into a passing weather condition."""
+    import errno as errno_module
+
+    acceptor._server = AlwaysFailingServer(OSError(errno_module.EMFILE, "injected"))
+    acceptor.accept(timeout=0.2)
+    stats = acceptor.stats()
+    assert stats["accept_errors_by_errno"] == {"EMFILE": acceptor.transient_accept_errors}
+    assert stats["max_consecutive_accept_errors"] == acceptor.transient_accept_errors
+    assert stats["transient_accept_errors"] > 0
+    assert stats["address"] == list(acceptor.address)
+
+
+def test_a_successful_accept_resets_the_consecutive_count(acceptor):
+    import errno as errno_module
+
+    acceptor._server = FlakyServerSocket(
+        acceptor._server, OSError(errno_module.ECONNABORTED, "injected"), failures=2
+    )
+    client = dial("127.0.0.1", acceptor.port)
+    try:
+        assert acceptor.accept(timeout=5.0) is not None
+        assert acceptor.max_consecutive_accept_errors == 2
+        assert acceptor.stats()["accept_errors_by_errno"] == {"ECONNABORTED": 2}
+    finally:
+        client.close()
+
+
+def test_a_close_during_a_retry_ends_the_accept_cleanly(acceptor):
+    """The in-loop closed check: without it, a close() landing mid-retry
+    surfaces as an unclassified OSError rather than ConnectionClosed."""
+    import errno as errno_module
+
+    acceptor._server = AlwaysFailingServer(OSError(errno_module.EMFILE, "injected"))
+    outcome: list[object] = []
+
+    def do_accept():
+        try:
+            outcome.append(acceptor.accept(timeout=5.0))
+        except ConnectionClosed:
+            outcome.append("ConnectionClosed")
+        except OSError as exc:
+            outcome.append(f"OSError:{exc.errno}")
+
+    worker = threading.Thread(target=do_accept, daemon=True)
+    worker.start()
+    time.sleep(0.15)
+    acceptor.close()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive()
+    assert outcome == ["ConnectionClosed"], outcome

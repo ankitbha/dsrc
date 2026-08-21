@@ -101,7 +101,7 @@ class ClientSessionEnded:
 class ClientAttemptFailed:
     attempt: int
     error: str
-    retry_in_s: float
+    retry_in_s: float | None
 
 
 @dataclass(frozen=True)
@@ -119,6 +119,7 @@ def _handshake_with_timeout(
     timeout_s: float | None,
     mono_clock: MonoClock,
     wall_clock: WallClock,
+    on_worker_leaked: Callable[[], None] | None = None,
 ) -> HandshakeResult:
     """Handshake, but not forever.
 
@@ -154,6 +155,18 @@ def _handshake_with_timeout(
         except Exception:
             pass
         worker.join(1.0)
+        if worker.is_alive():
+            # A backend that does not honour the close-unblocks-read
+            # requirement leaks a thread and a socket per attempt. The
+            # escalation bounds the rate of that, not the total, and a leaked
+            # worker is not a connect failure -- so without counting it,
+            # nothing notices at all. The listener counts exactly this.
+            if on_worker_leaked is not None:
+                on_worker_leaked()
+            raise HandshakeError(
+                f"no hello from {connection.peer} within {timeout_s}s, and closing the "
+                f"connection did not release the read: worker thread abandoned"
+            )
         raise HandshakeError(f"no hello from {connection.peer} within {timeout_s}s")
     error = outcome.get("error")
     if error is not None:
@@ -176,6 +189,7 @@ def connect_session(
     on_end: Callable[[Session, SessionEndReason], None] | None = None,
     dial_fn: Callable[..., ByteConnection] = dial,
     on_connection: Callable[[ByteConnection | None], None] | None = None,
+    on_handshake_worker_leaked: Callable[[], None] | None = None,
 ) -> tuple[Session, HandshakeResult]:
     """Dial, handshake, and return a started session.
 
@@ -196,6 +210,7 @@ def connect_session(
             timeout_s=handshake_timeout_s,
             mono_clock=mono_clock,
             wall_clock=wall_clock,
+            on_worker_leaked=on_handshake_worker_leaked,
         )
         # Constructed inside the guard, not between the two: a failure here
         # left the socket open, and a guard around start() alone covered the
@@ -287,6 +302,11 @@ class SessionClient:
         self.connected = 0
         self.failed_attempts = 0
         self.reconnects = 0
+        # Handshake workers abandoned because closing the connection did not
+        # release their read. A backend honouring the ByteConnection contract
+        # never produces one; counted so that a backend which does not shows up
+        # instead of quietly accumulating threads across a drive.
+        self.handshake_workers_leaked = 0
 
     # -- lifecycle -------------------------------------------------------
 
@@ -363,6 +383,9 @@ class SessionClient:
         with self._lock:
             self._connecting = connection
 
+    def _note_worker_leaked(self) -> None:
+        self.handshake_workers_leaked += 1
+
     def _note_session_end(self, session: Session, reason: SessionEndReason) -> None:
         """Called from the session's own thread the instant it ends."""
         with self._lock:
@@ -394,13 +417,19 @@ class SessionClient:
                     dial_fn=self._dial,
                     on_connection=self._note_connecting,
                     on_end=self._note_session_end,
+                    on_handshake_worker_leaked=self._note_worker_leaked,
                 )
             except Exception as exc:
-                delay = self._backoff.delay_for(attempt, self._random_unit())
+                stopping = self._stop.is_set()
+                delay = (
+                    None if stopping else self._backoff.delay_for(attempt, self._random_unit())
+                )
                 self.failed_attempts += 1
                 self._events.put(
                     ClientAttemptFailed(attempt=attempt, error=str(exc), retry_in_s=delay)
                 )
+                if stopping:
+                    return
                 self._stop.wait(delay)
                 continue
 
@@ -417,15 +446,23 @@ class SessionClient:
             while not self._stop.is_set() and not session.is_closed:
                 self._stop.wait(self._poll_s)
 
-            session.close()
             uptime_s = (self._mono() - started_ns) / 1e9
+            session.close()
             with self._lock:
                 if self._current is session:
                     self._current = None
             durable = uptime_s >= self._reset_after_s
-            # Short-lived: keep escalating rather than reconnecting at the
-            # initial delay forever.
-            delay = None if durable else self._backoff.delay_for(attempt, self._random_unit())
+            stopping = self._stop.is_set()
+            # None when there will be no retry, whether because the session was
+            # durable enough to reset the schedule or because we are stopping.
+            # This field is the observable for the escalation, so a value that
+            # means "intended" on some paths and "actual" on others is the one
+            # thing it must not be.
+            delay = (
+                None
+                if durable or stopping
+                else self._backoff.delay_for(attempt, self._random_unit())
+            )
             self._events.put(
                 ClientSessionEnded(
                     session_id=session.session_id,
@@ -435,7 +472,7 @@ class SessionClient:
                     retry_in_s=delay,
                 )
             )
-            if self._stop.is_set():
+            if stopping:
                 return
             if durable:
                 attempt = 0

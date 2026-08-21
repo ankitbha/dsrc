@@ -128,8 +128,9 @@ def main() -> int:
             if started is not None:
                 round_trips.append(message.t_recv_mono_ns - started)
 
-    # Scaled to the run rather than hardcoded, and it leaves a machine-readable
-    # record: a run that never connects still saw attempt failures worth having.
+    # Bounded by the run for long runs, floored at 20s for short ones, and it
+    # leaves a machine-readable record either way: a run that never connects
+    # still saw attempt failures worth having.
     connect_deadline = max(20.0, min(args.duration, 60.0))
     if client.wait_for_session(timeout=connect_deadline) is None:
         failures = [e for e in client.drain_events() if isinstance(e, ClientAttemptFailed)]
@@ -141,6 +142,7 @@ def main() -> int:
             "connected": False,
             "waited_s": connect_deadline,
             "failed_attempts": client.failed_attempts,
+            "handshake_workers_leaked": client.handshake_workers_leaked,
             "attempt_failures": [
                 {"attempt": e.attempt, "error": e.error, "retry_in_s": round(e.retry_in_s, 3)}
                 for e in failures
@@ -165,14 +167,20 @@ def main() -> int:
     for thread in threads:
         thread.join(timeout=3.0)
 
+    # Drained after stop(), because the last session's end event is generated
+    # by the stop itself -- and the last session is the one most likely to have
+    # died interestingly.
+    live = client.current_session
+    applied_options = getattr(live._connection, "applied_options", None) if live else None
+    client.stop()
+    # Stats read after the stop, so the end reason is the one the session
+    # actually ended with rather than None. The reference is kept from before,
+    # because current_session correctly stops handing back a closed session.
+    stats = live.stats() if live is not None else None
     events = client.drain_events()
     sessions = [event for event in events if isinstance(event, ClientSessionStarted)]
     ended = [event for event in events if isinstance(event, ClientSessionEnded)]
     failures = [event for event in events if isinstance(event, ClientAttemptFailed)]
-    live = client.current_session
-    stats = live.stats() if live is not None else None
-    client.stop()
-
     report = {
         "host": args.host,
         "port": args.port,
@@ -186,6 +194,8 @@ def main() -> int:
         "connections": client.connected,
         "reconnects": client.reconnects,
         "failed_attempts": client.failed_attempts,
+        "handshake_workers_leaked": client.handshake_workers_leaked,
+        "applied_socket_options": applied_options,
         "sessions_started": [
             {"session_id": e.session.session_id, "attempt": e.attempt} for e in sessions
         ],

@@ -70,6 +70,11 @@ ACCEPT_RETRY_ERRNOS = frozenset({errno.ECONNABORTED, errno.EINTR})
 # fine either way.
 ACCEPT_TRANSIENT_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM})
 
+# Even a retryable failure gets a breath. Without one, a persistent
+# ECONNABORTED spins accept() at over two million calls a second -- the same
+# pathology this file's docstring describes for the reader, on a different
+# errno, on a device with six cores and other work to do.
+ACCEPT_RETRY_PAUSE_S = 0.001
 ACCEPT_TRANSIENT_PAUSE_S = 0.05
 
 
@@ -216,8 +221,12 @@ class TcpAcceptor:
         self._recv_chunk_bytes = recv_chunk_bytes
         self._closed = False
         # Retryable accept failures, counted so they are visible rather than
-        # silently absorbed.
+        # silently absorbed. Per-errno as well as in total: EMFILE is our own
+        # descriptor leak and ENFILE is somebody else's, and a single number
+        # cannot tell them apart.
         self.transient_accept_errors = 0
+        self.accept_errors_by_errno: dict[int, int] = {}
+        self.max_consecutive_accept_errors = 0
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -237,6 +246,22 @@ class TcpAcceptor:
     def port(self) -> int:
         return self.address[1]
 
+    def stats(self) -> dict[str, object]:
+        """The acceptor's own record, for a run report to carry.
+
+        These numbers existed and nothing read them, which is how a listener
+        that is alive and accepting nothing came to report perfect health.
+        """
+        return {
+            "address": list(self.address),
+            "transient_accept_errors": self.transient_accept_errors,
+            "max_consecutive_accept_errors": self.max_consecutive_accept_errors,
+            "accept_errors_by_errno": {
+                errno.errorcode.get(code, str(code)): count
+                for code, count in sorted(self.accept_errors_by_errno.items())
+            },
+        }
+
     def accept(self, timeout: float | None = None) -> TcpConnection | None:
         """A new connection, None on timeout, ConnectionClosed once closed.
 
@@ -246,10 +271,15 @@ class TcpAcceptor:
         OSError into ConnectionClosed was worse than useless: it claimed the
         acceptor was closed when it was still listening, and one aborted
         connection stopped the Jetson accepting for the rest of the drive.
+
+        Every retry pauses, and never past the caller's deadline. Retries are
+        counted per errno, because retrying EMFILE indefinitely would otherwise
+        turn our own descriptor leak into a passing weather condition.
         """
         if self._closed:
             raise ConnectionClosed("acceptor is closed")
         deadline = None if timeout is None else time.monotonic() + timeout
+        consecutive = 0
         while True:
             if self._closed:
                 raise ConnectionClosed("acceptor is closed")
@@ -258,22 +288,36 @@ class TcpAcceptor:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
-            self._server.settimeout(remaining)
             try:
+                # settimeout is inside the guard so that a close() landing here
+                # is classified like any other socket failure rather than
+                # escaping as an unhandled OSError.
+                self._server.settimeout(remaining)
                 sock, address = self._server.accept()
             except TimeoutError:
                 return None
             except OSError as exc:
                 if self._closed:
                     raise ConnectionClosed(f"acceptor closed: {exc}") from None
-                if exc.errno in ACCEPT_RETRY_ERRNOS:
-                    self.transient_accept_errors += 1
-                    continue
-                if exc.errno in ACCEPT_TRANSIENT_ERRNOS:
-                    self.transient_accept_errors += 1
-                    time.sleep(ACCEPT_TRANSIENT_PAUSE_S)
-                    continue
-                raise
+                retryable = exc.errno in ACCEPT_RETRY_ERRNOS
+                transient = exc.errno in ACCEPT_TRANSIENT_ERRNOS
+                if not (retryable or transient):
+                    raise
+                self.transient_accept_errors += 1
+                self.accept_errors_by_errno[exc.errno] = (
+                    self.accept_errors_by_errno.get(exc.errno, 0) + 1
+                )
+                consecutive += 1
+                self.max_consecutive_accept_errors = max(
+                    self.max_consecutive_accept_errors, consecutive
+                )
+                pause = ACCEPT_TRANSIENT_PAUSE_S if transient else ACCEPT_RETRY_PAUSE_S
+                if remaining is not None:
+                    pause = min(pause, max(0.0, remaining))
+                if pause > 0:
+                    time.sleep(pause)
+                continue
+            consecutive = 0
             return TcpConnection(
                 sock,
                 peer=f"{address[0]}:{address[1]}",

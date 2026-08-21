@@ -100,6 +100,9 @@ def main() -> int:
                     "session_id": event.session.session_id,
                     "device_id": remote.device_id,
                     "role": remote.role.value,
+                    "applied_socket_options": getattr(
+                        event.session._connection, "applied_options", None
+                    ),
                     "handshake_round_trip_ns": event.handshake.clock.round_trip_ns,
                     "remote_mono_ns": event.handshake.clock.t_remote_mono_ns,
                     "remote_wall_ns": event.handshake.clock.t_remote_wall_ns,
@@ -135,10 +138,14 @@ def main() -> int:
     log["refused"] = listener.refused
     log["displaced"] = listener.displaced
     log["handshake_workers_leaked"] = listener.handshake_workers_leaked
+    # The acceptor's own record. Without it, a listener that is alive and
+    # accepting nothing produces a report indistinguishable from a clean run.
+    log["acceptor"] = acceptor.stats()
     text = json.dumps(log, indent=2)
     if args.out:
         args.out.write_text(text + "\n")
         print(f"wrote {args.out}", flush=True)
+    acceptor_stats = acceptor.stats()
     print(
         json.dumps(
             {
@@ -146,6 +153,8 @@ def main() -> int:
                 "refused": listener.refused,
                 "displaced": listener.displaced,
                 "handshake_workers_leaked": listener.handshake_workers_leaked,
+                "transient_accept_errors": acceptor_stats["transient_accept_errors"],
+                "accept_errors_by_errno": acceptor_stats["accept_errors_by_errno"],
             }
         ),
         flush=True,

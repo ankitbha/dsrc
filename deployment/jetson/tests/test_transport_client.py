@@ -815,3 +815,190 @@ def test_twenty_reconnects_over_real_sockets_leak_no_descriptors():
         assert wait_until(
             lambda: open_descriptor_count() <= before_fds + 3, timeout=5.0
         ), f"descriptors grew from {before_fds} to {open_descriptor_count()}"
+
+
+# -- a backend that ignores close(), on the dialling side -------------------
+
+
+class DeafLoopbackConnection:
+    """Honours the ByteConnection API and ignores its close() requirement.
+
+    Wrong, and documented as wrong -- but it is what closing a POSIX socket
+    without shutdown() does, so it is the mistake the next backend is most
+    likely to make.
+    """
+
+    peer = "deaf-loopback"
+
+    def __init__(self):
+        self._gate = threading.Event()
+        self.closed = False
+
+    def send_all(self, data):
+        return None
+
+    def recv_exact(self, n):
+        self._gate.wait()  # never set; close() below does not release it
+        return b""
+
+    def close(self):
+        self.closed = True
+
+
+def test_an_abandoned_handshake_worker_is_counted_not_hidden():
+    """The escalation bounds the rate of this leak, not the total, and a leaked
+    worker is not a connect failure -- so without a counter nothing notices at
+    all. At the shipped defaults it is roughly one thread and one socket every
+    ten seconds: several hundred over a drive, with failed_attempts climbing
+    normally the whole time."""
+    before = {thread.name for thread in threading.enumerate()}
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=Backoff(initial_s=0.01, multiplier=1.0, cap_s=0.01, jitter=0.0),
+        handshake_timeout_s=0.1,
+        dial_fn=lambda host, port, timeout=None: DeafLoopbackConnection(),
+        poll_s=0.01,
+    ).start()
+    try:
+        assert wait_until(lambda: client.handshake_workers_leaked >= 2, timeout=10.0), (
+            f"leaked {client.handshake_workers_leaked}, counted none"
+        )
+        failure = wait_for_client_event(client, ClientAttemptFailed, timeout=5.0)
+        assert failure is not None
+        assert "abandoned" in failure.error
+    finally:
+        client.stop()
+    # The threads really are leaked; the point is that the count says so.
+    leaked = [
+        thread for thread in threading.enumerate()
+        if thread.name not in before and thread.name == "client-handshake"
+    ]
+    assert leaked, "the fixture did not actually leak a worker"
+
+
+def test_a_handshake_timeout_closes_the_connection_to_release_the_worker():
+    """Pins the close itself: HandshakeError is raised whether or not it
+    happened, so the previous test asserted the message, not the release."""
+    connections: list[object] = []
+
+    def dial_recording(host, port, timeout=None):
+        client_end, _server_end = loopback_pair()
+        connections.append(client_end)
+        return client_end
+
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=Backoff(initial_s=0.01, multiplier=1.0, cap_s=0.01, jitter=0.0),
+        handshake_timeout_s=0.1,
+        dial_fn=dial_recording,
+        poll_s=0.01,
+    ).start()
+    try:
+        assert wait_until(lambda: len(connections) >= 1, timeout=5.0)
+        assert wait_until(lambda: client.failed_attempts >= 1, timeout=5.0)
+        assert_closed(connections[0])
+        assert client.handshake_workers_leaked == 0
+    finally:
+        client.stop()
+
+
+# -- retry_in_s must never promise a retry that cannot happen ---------------
+
+
+def test_a_session_ended_by_stop_reports_no_retry():
+    """retry_in_s is the observable for the escalation, so a value meaning
+    "intended" on some paths and "actual" on others is the one thing it must
+    not be."""
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=fast_backoff(),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(),
+        reset_after_s=100.0,  # nothing here could ever be durable
+        poll_s=0.01,
+    ).start()
+    assert client.wait_for_session(timeout=5.0) is not None
+    client.stop()
+    ended = [
+        event for event in client.drain_events() if isinstance(event, ClientSessionEnded)
+    ]
+    assert ended, "no session-end event"
+    assert ended[-1].reason is SessionEndReason.CLOSED_LOCAL
+    assert ended[-1].retry_in_s is None, ended[-1]
+
+
+def test_an_attempt_failure_at_stop_reports_no_retry():
+    def refuse(host, port, timeout=None):
+        raise ConnectionRefusedError(61, "connection refused")
+
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=Backoff(initial_s=0.5, multiplier=1.0, cap_s=0.5, jitter=0.0),
+        dial_fn=refuse,
+        poll_s=0.01,
+    ).start()
+    try:
+        assert wait_for_client_event(client, ClientAttemptFailed, timeout=5.0) is not None
+    finally:
+        client.stop()
+    failures = [
+        event for event in client.drain_events() if isinstance(event, ClientAttemptFailed)
+    ]
+    # Whatever else, no failure reported after the stop may claim a retry.
+    for failure in failures:
+        if failure.retry_in_s is not None:
+            assert failure.retry_in_s > 0
+
+
+def test_uptime_is_measured_before_teardown():
+    """It decides durability, so join time inside it shifts the threshold. Small
+    in Python; the plan says this schedule gets ported to Kotlin."""
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=fast_backoff(),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(lifetime_s=0.05),
+        reset_after_s=10.0,
+        poll_s=0.01,
+    ).start()
+    try:
+        ended = wait_for_client_event(client, ClientSessionEnded, timeout=6.0)
+        assert ended is not None
+        # Generous, but it catches a teardown term of the size a close() join
+        # would contribute.
+        assert ended.uptime_s < 0.5, ended.uptime_s
+    finally:
+        client.stop()
+
+
+def test_the_connection_being_handshaked_is_released_after_success():
+    """The finally clause: without it, stop() could close a connection that had
+    already become a live session's."""
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=fast_backoff(),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(),
+        poll_s=0.01,
+    ).start()
+    try:
+        session = client.wait_for_session(timeout=5.0)
+        assert session is not None
+        assert client._connecting is None, "the handshake reference was never cleared"
+    finally:
+        client.stop()
