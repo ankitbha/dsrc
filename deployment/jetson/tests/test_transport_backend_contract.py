@@ -264,3 +264,34 @@ def test_close_still_closes_when_shutdown_is_refused():
     connection = TcpConnection(recorder, peer="recorded", set_options=False)
     connection.close()
     assert recorder.calls == ["shutdown-failed", "close"], recorder.calls
+
+
+# -- the surface itself ------------------------------------------------------
+
+
+# Members the protocol requires, and the per-backend extras that are allowed to
+# exist. Anything else appearing on a connection is a deliberate act that has to
+# update this list -- backend divergence was the defect class that recurred in
+# every validation round of this task.
+PROTOCOL_MEMBERS = {"peer", "send_all", "recv_exact", "close"}
+ALLOWED_EXTRAS = {
+    "loopback": {"unread_bytes"},
+    "tcp": {"applied_options"},
+}
+
+
+def test_a_connection_satisfies_the_protocol(pair):
+    assert isinstance(pair.a, ByteConnection)
+    for member in PROTOCOL_MEMBERS:
+        assert hasattr(pair.a, member), member
+
+
+def test_a_connection_carries_no_undeclared_surface(pair):
+    """Including no liveness query: `is_closed` used to exist on TcpConnection
+    and nowhere else, consumed by nothing, and a flag that is stale when read
+    invites the check-then-act pattern that caused this task's two worst races.
+    """
+    public = {name for name in dir(pair.a) if not name.startswith("_")}
+    unexpected = public - PROTOCOL_MEMBERS - ALLOWED_EXTRAS[pair.name]
+    assert unexpected == set(), f"{pair.name} exposes undeclared surface: {sorted(unexpected)}"
+    assert "is_closed" not in public

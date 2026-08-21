@@ -165,10 +165,6 @@ class TcpConnection:
     def peer(self) -> str:
         return self._peer
 
-    @property
-    def is_closed(self) -> bool:
-        return self._closed
-
     def send_all(self, data: bytes) -> None:
         if not data:
             return

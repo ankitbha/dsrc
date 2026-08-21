@@ -44,7 +44,21 @@ class ConnectionClosed(Exception):
 @runtime_checkable
 class ByteConnection(Protocol):
     """A duplex byte stream. Not required to be safe for concurrent senders;
-    a Session uses exactly one writer thread and one reader thread."""
+    a Session uses exactly one writer thread and one reader thread.
+
+    Four members, and deliberately no way to ask whether the connection is
+    still usable. Such a flag is stale the moment it is read, and the two worst
+    races in the layer above were exactly that shape: a send that checked a
+    closed flag outside the queue lock and landed a message nobody would ever
+    send, and a session accessor that handed back an object that had died since
+    the check. The honest question is not "are you open" but "did this work",
+    and every method here answers that by raising.
+
+    A backend may carry extra members -- TcpConnection reports which socket
+    options actually applied, LoopbackConnection reports unread bytes for
+    tests -- but nothing in the transport may require them, and callers reach
+    them through getattr precisely so a backend without them still works.
+    """
 
     @property
     def peer(self) -> str:
