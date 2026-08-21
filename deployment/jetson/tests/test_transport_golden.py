@@ -29,7 +29,8 @@ from transport.frames import (
     encode_header,
 )
 
-GOLDEN = Path(__file__).resolve().parents[3] / "specs" / "transport_golden_frames.json"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+GOLDEN = REPO_ROOT / "specs" / "transport_golden_frames.json"
 DOCUMENT = json.loads(GOLDEN.read_text())
 CASES = DOCUMENT["cases"]
 IDS = [case["name"] for case in CASES]
@@ -176,3 +177,101 @@ def test_the_hello_case_names_this_protocol_version():
     header = json.loads(bytes.fromhex(case_named("hello")["header_hex"]).decode())
     assert header["hello"]["protocol_version"] == PROTOCOL_VERSION
     assert header["hello"]["role"] == "phone"
+
+
+# -- the message layer, pinned in the same file -------------------------------
+
+MESSAGE_CASES = [case for case in CASES if case["name"].startswith("message_")]
+MESSAGE_IDS = [case["name"] for case in MESSAGE_CASES]
+
+
+def test_the_file_carries_message_cases_as_well_as_frame_cases():
+    assert len(MESSAGE_CASES) >= 7
+    frame_cases = [case for case in CASES if not case["name"].startswith("message_")]
+    assert len(frame_cases) >= 8
+
+
+def test_every_channel_with_a_typed_message_has_a_case():
+    from transport.messages import MESSAGE_FOR_CHANNEL
+
+    covered = {case["frame"]["ch"] for case in MESSAGE_CASES}
+    assert covered == {channel.value for channel in MESSAGE_FOR_CHANNEL}
+
+
+@pytest.mark.parametrize("case", MESSAGE_CASES, ids=MESSAGE_IDS)
+def test_a_message_case_decodes_to_a_valid_typed_message(case):
+    """Decoded from the file's own recorded bytes, not from what this
+    implementation just produced -- otherwise a symmetric bug passes."""
+    from transport.channels import Channel
+    from transport.messages import decode_message
+
+    header = json.loads(bytes.fromhex(case["header_hex"]).decode("utf-8"))
+    extensions = {k: v for k, v in header.items()
+                  if k not in {"ch", "seq", "t_mono_ns", "t_wall_ns", "n"}}
+    payload = pattern_payload(case["payload"]["length"])
+    message = decode_message(Channel(header["ch"]), extensions, payload)
+    assert message.t_capture_mono_ns == extensions["t_capture_mono_ns"]
+
+
+def test_the_all_null_gps_case_really_is_all_null():
+    """The null convention is a cross-language agreement, so it is pinned by
+    bytes rather than by a round trip."""
+    case = next(c for c in MESSAGE_CASES if c["name"] == "message_gps_all_null")
+    header = json.loads(bytes.fromhex(case["header_hex"]).decode("utf-8"))
+    for field in ("lat", "lon", "speed_mps", "heading_deg", "hdop", "altitude_m",
+                  "utc_epoch_ns"):
+        assert field in header, f"{field} must be present, not absent"
+        assert header[field] is None, f"{field} should be null"
+    assert header["valid"] is False
+    assert "NaN" not in bytes.fromhex(case["header_hex"]).decode("utf-8")
+
+
+def test_no_message_case_contains_a_nan_token():
+    """Python would write a bare NaN that a strict parser elsewhere rejects; the
+    null convention exists to prevent it, and this checks the bytes."""
+    for case in MESSAGE_CASES:
+        text = bytes.fromhex(case["header_hex"]).decode("utf-8")
+        assert "NaN" not in text and "Infinity" not in text, case["name"]
+
+
+def test_the_advisory_case_carries_both_the_display_text_and_the_action():
+    case = next(c for c in MESSAGE_CASES if c["name"] == "message_advisory")
+    header = json.loads(bytes.fromhex(case["header_hex"]).decode("utf-8"))
+    assert header["lane_text"] == "Keep lane"
+    assert header["units"] == "mph"
+    assert set(header["action"]) == {
+        "desired_speed_bin", "desired_headway_bin", "lane_preference", "merge_mode",
+    }
+
+
+def test_the_note_says_adding_a_case_is_not_a_protocol_change():
+    """Because regeneration rewrites the whole file, and a reader has to know
+    which kind of change they are looking at."""
+    assert "ADDING a case is not" in DOCUMENT["note"]
+
+
+def test_regeneration_leaves_every_recorded_case_byte_identical():
+    """The guard the note promises. The generator rewrites the whole file, so
+    the only thing standing between "added a message case" and "silently moved
+    a frame case" is this check -- and it has to be a test, not a habit.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    script = REPO_ROOT / "scripts" / "generate_transport_golden_frames.py"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "regenerated.json"
+        result = subprocess.run(
+            [sys.executable, str(script), "--out", str(out), "--force"],
+            capture_output=True, text=True, timeout=300,
+        )
+        assert result.returncode == 0, result.stderr
+        fresh = json.loads(out.read_text())
+    recorded = {case["name"]: case for case in DOCUMENT["cases"]}
+    regenerated = {case["name"]: case for case in fresh["cases"]}
+    assert set(recorded) == set(regenerated), "the case set moved"
+    for name, case in recorded.items():
+        assert regenerated[name]["frame_sha256"] == case["frame_sha256"], name
+        assert regenerated[name]["header_hex"] == case["header_hex"], name
+        assert regenerated[name]["prefix_hex"] == case["prefix_hex"], name
