@@ -780,3 +780,58 @@ def test_stats_is_callable_while_accepts_are_failing(acceptor):
     finally:
         stop.set()
         worker.join(timeout=3.0)
+
+
+def test_close_is_noticed_within_one_internal_accept_poll(acceptor):
+    """TCP's own bound. A timed accept cannot be woken by a close -- CPython
+    waits in select() and closing the fd does not break that wait -- so the
+    acceptor caps its own socket timeout and re-checks. Without that cap,
+    accept(timeout=5) ignored close for the full five seconds."""
+    from transport.tcp import INTERNAL_ACCEPT_POLL_S
+
+    released = threading.Event()
+
+    def wait_to_accept():
+        try:
+            acceptor.accept(timeout=5.0)
+        except BaseException:
+            pass
+        released.set()
+
+    waiter = threading.Thread(target=wait_to_accept, daemon=True)
+    waiter.start()
+    time.sleep(0.15)
+    assert not released.is_set()
+    started = time.monotonic()
+    acceptor.close()
+    assert released.wait(timeout=5.0)
+    elapsed = time.monotonic() - started
+    assert elapsed < INTERNAL_ACCEPT_POLL_S * 3, (
+        f"released after {elapsed:.3f}s, more than three internal polls"
+    )
+
+
+def test_a_timed_accept_still_honours_its_own_timeout(acceptor):
+    """The internal poll must not turn a bounded wait into an unbounded one."""
+    started = time.monotonic()
+    assert acceptor.accept(timeout=0.3) is None
+    elapsed = time.monotonic() - started
+    assert 0.28 <= elapsed < 0.6, f"a 0.3s accept took {elapsed:.3f}s"
+
+
+def test_a_blocking_accept_is_released_by_close(acceptor):
+    released = threading.Event()
+
+    def wait_forever():
+        try:
+            acceptor.accept(timeout=None)
+        except BaseException:
+            pass
+        released.set()
+
+    waiter = threading.Thread(target=wait_forever, daemon=True)
+    waiter.start()
+    time.sleep(0.15)
+    assert not released.is_set()
+    acceptor.close()
+    assert released.wait(timeout=5.0), "a blocking accept was never released"

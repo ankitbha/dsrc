@@ -1114,13 +1114,21 @@ class IgnoresClose:
         self._inner.close()
 
 
-def test_a_handshake_completing_inside_the_grace_is_used_not_discarded():
-    """Narrow but free: on this backend the timeout expires, the close does not
-    release the reader, and the peer then answers inside the one-second grace.
-    Discarding that success would cost a reconnect and a displacement on the far
-    end, because on this side the timeout is the retry trigger."""
+def test_a_late_handshake_after_the_close_is_discarded_on_purpose():
+    """Even on a backend that ignores close(), a handshake completing after the
+    timeout is reported as a timeout rather than used.
+
+    Salvaging it was tried and reverted. The window in which a worker completes
+    after the close is microseconds on a socket but wide on loopback, which
+    drains buffered bytes before reporting closed -- and returning that result
+    made connect_session start a Session on a connection already closed, a
+    phantom counted in `connected` and `reconnects`. The case salvaging helped
+    only arises on a backend violating the close contract, which is counted and
+    reported anyway.
+    """
     from transport.client import _handshake_with_timeout
     from transport.clock import now_mono_ns, now_wall_ns
+    from transport.handshake import HandshakeError
 
     client_end, server_end = loopback_pair()
     wrapped = IgnoresClose(client_end)
@@ -1133,16 +1141,56 @@ def test_a_handshake_completing_inside_the_grace_is_used_not_discarded():
 
     threading.Timer(0.2, answer_late).start()
     try:
-        result = _handshake_with_timeout(
-            wrapped,
-            PHONE,
-            timeout_s=0.05,
-            mono_clock=now_mono_ns,
-            wall_clock=now_wall_ns,
-        )
-        assert result.remote.device_id == JETSON.device_id
+        with pytest.raises(HandshakeError, match="no hello"):
+            _handshake_with_timeout(
+                wrapped,
+                PHONE,
+                timeout_s=0.05,
+                mono_clock=now_mono_ns,
+                wall_clock=now_wall_ns,
+            )
     finally:
         wrapped.release()
+
+
+def test_no_session_is_built_on_a_connection_the_timeout_closed():
+    """The phantom this guards against: a worker still parsing when the join
+    gives up, on loopback, which serves buffered bytes after a close. A returned
+    result there had connect_session start a Session on a closed connection and
+    the client count it as a real connection and a reconnect."""
+
+    class BufferedThenClosed:
+        peer = "buffered-then-closed"
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def send_all(self, data):
+            self._inner.send_all(data)
+
+        def recv_exact(self, n):
+            time.sleep(0.08)  # still parsing when the join gives up
+            return self._inner.recv_exact(n)
+
+        def close(self):
+            self._inner.close()
+
+    client_end, server_end = loopback_pair()
+    threading.Thread(
+        target=lambda: perform_handshake(server_end, JETSON), daemon=True
+    ).start()
+    time.sleep(0.05)
+    with pytest.raises(Exception) as caught:
+        connect_session(
+            "jetson",
+            1,
+            local_hello=PHONE,
+            heartbeat_s=None,
+            stall_timeout_s=None,
+            handshake_timeout_s=0.05,
+            dial_fn=lambda host, port, timeout=None: BufferedThenClosed(client_end),
+        )
+    assert "no hello" in str(caught.value), caught.value
 
 
 def test_a_compliant_backend_reports_the_timeout_rather_than_a_late_success():

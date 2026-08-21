@@ -207,3 +207,32 @@ def test_close_unblocks_a_waiting_accept():
     acceptor.close()
     waiter.join(timeout=2.0)
     assert len(error) == 1
+
+
+def test_close_wakes_a_waiting_accept_rather_than_letting_it_poll():
+    """Loopback's own bound, tight enough to require the notify.
+
+    The shared Acceptor contract can only assert a generous bound, because TCP
+    releases by an internal poll and loopback by a notify. This is the half that
+    holds loopback to its mechanism: without notify_all in close(), the waiting
+    accept would be released by its own 50 ms condition wait instead.
+    """
+    acceptor = LoopbackAcceptor()
+    released = threading.Event()
+
+    def wait_to_accept():
+        try:
+            acceptor.accept(timeout=5.0)
+        except BaseException:
+            pass
+        released.set()
+
+    waiter = threading.Thread(target=wait_to_accept, daemon=True)
+    waiter.start()
+    time.sleep(0.1)
+    assert not released.is_set()
+    started = time.monotonic()
+    acceptor.close()
+    assert released.wait(timeout=5.0)
+    elapsed = time.monotonic() - started
+    assert elapsed < 0.02, f"released after {elapsed * 1000:.0f} ms: polled, not woken"

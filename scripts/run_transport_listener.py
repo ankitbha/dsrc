@@ -71,6 +71,7 @@ def main() -> int:
     parser.add_argument("--device-id", default="jetson-orin")
     parser.add_argument("--heartbeat", type=float, default=DEFAULT_HEARTBEAT_S)
     parser.add_argument("--stall-timeout", type=float, default=DEFAULT_STALL_TIMEOUT_S)
+    parser.add_argument("--handshake-timeout", type=float, default=DEFAULT_STALL_TIMEOUT_S)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
 
@@ -80,10 +81,22 @@ def main() -> int:
         Hello(device_id=args.device_id, role=Role.JETSON),
         heartbeat_s=args.heartbeat,
         stall_timeout_s=args.stall_timeout,
+        handshake_timeout_s=args.handshake_timeout,
         accept_poll_s=0.2,
     ).start()
 
-    log: dict = {"bound": list(acceptor.address), "events": [], "sessions": []}
+    log: dict = {
+        "bound": list(acceptor.address),
+        "started_wall": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "config": {
+            "heartbeat_s": args.heartbeat,
+            "stall_timeout_s": args.stall_timeout,
+            "handshake_timeout_s": args.handshake_timeout,
+            "duration_s": args.duration,
+        },
+        "events": [],
+        "sessions": [],
+    }
     stop = threading.Event()
     responders: list[threading.Thread] = []
     print(f"listening on {acceptor.host}:{acceptor.port} for {args.duration}s", flush=True)
@@ -140,7 +153,18 @@ def main() -> int:
     log["handshake_workers_leaked"] = listener.handshake_workers_leaked
     # The acceptor's own record. Without it, a listener that is alive and
     # accepting nothing produces a report indistinguishable from a clean run.
-    log["acceptor"] = acceptor.stats()
+    acceptor_record = acceptor.stats()
+    # Dropped: a monotonic value from an arbitrary per-process epoch, sitting
+    # beside remote_mono_ns, invites exactly the cross-device comparison
+    # specs/transport_protocol.md forbids. The span carries the content.
+    acceptor_record.pop("first_accept_error_mono_ns", None)
+    acceptor_record.pop("last_accept_error_mono_ns", None)
+    acceptor_record["max_consecutive_accept_errors_note"] = (
+        "per accept() call, so it reads as the poll interval divided by the "
+        "retry pause; use transient_accept_errors and accept_error_span_s for "
+        "severity"
+    )
+    log["acceptor"] = acceptor_record
     text = json.dumps(log, indent=2)
     if args.out:
         args.out.write_text(text + "\n")

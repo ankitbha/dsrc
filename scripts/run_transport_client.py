@@ -45,6 +45,25 @@ SENSOR_PLAN = {
 }
 
 
+def config_record(args) -> dict:
+    """Every parameter that shapes the numbers in this report."""
+    backoff = Backoff()
+    return {
+        "heartbeat_s": args.heartbeat,
+        "stall_timeout_s": args.stall_timeout,
+        "handshake_timeout_s": args.handshake_timeout,
+        "backoff": {
+            "initial_s": backoff.initial_s,
+            "multiplier": backoff.multiplier,
+            "cap_s": backoff.cap_s,
+            "jitter": backoff.jitter,
+        },
+        "sensor_plan": {
+            channel.value: dict(plan) for channel, plan in SENSOR_PLAN.items()
+        },
+    }
+
+
 def maybe_round(value, digits=3):
     """retry_in_s is None whenever no retry will happen, so the report has to
     tolerate that. It did not: round(None) raised and destroyed the entire run
@@ -73,8 +92,15 @@ def main() -> int:
     parser.add_argument("--device-id", default="mac-standing-in-for-phone")
     parser.add_argument("--heartbeat", type=float, default=DEFAULT_HEARTBEAT_S)
     parser.add_argument("--stall-timeout", type=float, default=DEFAULT_STALL_TIMEOUT_S)
+    parser.add_argument(
+        "--handshake-timeout",
+        type=float,
+        default=DEFAULT_STALL_TIMEOUT_S,
+        help="the hard cliff on the hello exchange; worth measuring against the real path",
+    )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
+    started_wall = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
     client = SessionClient(
         args.host,
@@ -83,6 +109,7 @@ def main() -> int:
         backoff=Backoff(),
         heartbeat_s=args.heartbeat,
         stall_timeout_s=args.stall_timeout,
+        handshake_timeout_s=args.handshake_timeout,
     ).start()
 
     stop = threading.Event()
@@ -147,7 +174,9 @@ def main() -> int:
             "host": args.host,
             "port": args.port,
             "duration_s": args.duration,
+            "started_wall": started_wall,
             "connected": False,
+            "config": config_record(args),
             "waited_s": connect_deadline,
             "failed_attempts": client.failed_attempts,
             "handshake_workers_leaked": client.handshake_workers_leaked,
@@ -193,7 +222,12 @@ def main() -> int:
         "host": args.host,
         "port": args.port,
         "duration_s": args.duration,
+        "started_wall": started_wall,
         "connected": True,
+        # The parameters that produced the numbers. Without them a run cannot
+        # answer whether the handshake timeout clears this path, and every
+        # retry_in_s is uninterpretable.
+        "config": config_record(args),
         "round_trip_ms": percentiles(round_trips),
         "round_trip_samples": len(round_trips),
         "advisories_received": counters["advisories"],
@@ -205,7 +239,15 @@ def main() -> int:
         "handshake_workers_leaked": client.handshake_workers_leaked,
         "applied_socket_options": applied_options,
         "sessions_started": [
-            {"session_id": e.session.session_id, "attempt": e.attempt} for e in sessions
+            {
+                "session_id": e.session.session_id,
+                "attempt": e.attempt,
+                # The client is the side that will measure the tailnet round
+                # trip, and it was dropping the only copy it holds.
+                "handshake_round_trip_ns": e.handshake.clock.round_trip_ns,
+                "remote_device_id": e.handshake.remote.device_id,
+            }
+            for e in sessions
         ],
         "sessions_ended": [
             {

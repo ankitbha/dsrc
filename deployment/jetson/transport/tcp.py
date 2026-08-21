@@ -74,6 +74,13 @@ ACCEPT_TRANSIENT_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, 
 # ECONNABORTED spins accept() at over two million calls a second -- the same
 # pathology this file's docstring describes for the reader, on a different
 # errno, on a device with six cores and other work to do.
+# Cap on the socket timeout for a single accept attempt, so a close() is
+# noticed within one of these however long the caller asked to wait. A blocking
+# accept is interrupted by close on this platform, but a *timed* one is not --
+# CPython waits in select() under a timeout, and closing the fd does not break
+# that wait -- so an uncapped accept(timeout=5) ignored close for five seconds.
+INTERNAL_ACCEPT_POLL_S = 0.05
+
 ACCEPT_RETRY_PAUSE_S = 0.001
 ACCEPT_TRANSIENT_PAUSE_S = 0.05
 
@@ -317,15 +324,27 @@ class TcpAcceptor:
                     # connection, and two backends behind one Acceptor protocol
                     # must not disagree about that.
                     remaining = 0.0
+            # Set before the attempt, not between the two calls inside it: a
+            # retryable errno raised by settimeout otherwise never sets it, and
+            # with an expired deadline the loop then has no exit at all --
+            # measured at 2.5 million iterations a second.
+            if remaining is None:
+                socket_timeout: float = INTERNAL_ACCEPT_POLL_S
+            elif remaining == 0.0:
+                socket_timeout = 0.0
+            else:
+                socket_timeout = min(remaining, INTERNAL_ACCEPT_POLL_S)
+            attempted = True
             try:
                 # settimeout is inside the guard so that a close() landing here
                 # is classified like any other socket failure rather than
                 # escaping as an unhandled OSError.
-                self._server.settimeout(remaining)
-                attempted = True
+                self._server.settimeout(socket_timeout)
                 sock, address = self._server.accept()
             except TimeoutError:
-                return None
+                # An internal poll expiring is not the caller's timeout; the
+                # loop top re-checks both the closed flag and the deadline.
+                continue
             except BlockingIOError:
                 # settimeout(0) makes accept non-blocking; nothing waiting.
                 return None
