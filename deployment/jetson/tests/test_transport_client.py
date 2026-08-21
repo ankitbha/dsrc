@@ -829,10 +829,12 @@ class DeafLoopbackConnection:
     """
 
     peer = "deaf-loopback"
+    made: list["DeafLoopbackConnection"] = []
 
     def __init__(self):
         self._gate = threading.Event()
         self.closed = False
+        DeafLoopbackConnection.made.append(self)
 
     def send_all(self, data):
         return None
@@ -843,6 +845,12 @@ class DeafLoopbackConnection:
 
     def close(self):
         self.closed = True
+
+    def release(self):
+        """Let the blocked reader go, so a deliberate leak does not outlive the
+        test that made it. Session thread names are not unique across files, so
+        a stray session1-rx breaks whatever else filters on that name."""
+        self._gate.set()
 
 
 def test_an_abandoned_handshake_worker_is_counted_not_hidden():
@@ -876,6 +884,17 @@ def test_an_abandoned_handshake_worker_is_counted_not_hidden():
         if thread.name not in before and thread.name == "client-handshake"
     ]
     assert leaked, "the fixture did not actually leak a worker"
+    # Released only after the assertion, so the leak is proved and then cleaned
+    # up rather than left for another test to trip over.
+    for connection in DeafLoopbackConnection.made:
+        connection.release()
+    assert wait_until(
+        lambda: not [
+            t for t in threading.enumerate()
+            if t.name not in before and t.name == "client-handshake"
+        ],
+        timeout=5.0,
+    )
 
 
 def test_a_handshake_timeout_closes_the_connection_to_release_the_worker():
@@ -934,53 +953,117 @@ def test_a_session_ended_by_stop_reports_no_retry():
     assert ended[-1].retry_in_s is None, ended[-1]
 
 
-def test_an_attempt_failure_at_stop_reports_no_retry():
-    def refuse(host, port, timeout=None):
+def test_an_attempt_failure_racing_stop_reports_no_retry():
+    """Reached by stopping during the dial, which is the only way in.
+
+    The loop's own `while not stop` guard exits before a second attempt, so
+    stopping between two attempts never reaches this branch -- the earlier
+    version of this test assumed it did and asserted on an event that is never
+    emitted.
+    """
+    holder: dict[str, SessionClient] = {}
+
+    def refuse_after_stopping(host, port, timeout=None):
+        holder["client"]._stop.set()  # as a stop() landing mid-dial would
         raise ConnectionRefusedError(61, "connection refused")
 
     client = SessionClient(
         "jetson",
         1,
         local_hello=PHONE,
-        backoff=Backoff(initial_s=0.5, multiplier=1.0, cap_s=0.5, jitter=0.0),
-        dial_fn=refuse,
+        backoff=Backoff(initial_s=0.3, multiplier=1.0, cap_s=0.3, jitter=0.0),
+        dial_fn=refuse_after_stopping,
         poll_s=0.01,
-    ).start()
+    )
+    holder["client"] = client
+    client.start()
     try:
-        assert wait_for_client_event(client, ClientAttemptFailed, timeout=5.0) is not None
+        failure = wait_for_client_event(client, ClientAttemptFailed, timeout=5.0)
+        assert failure is not None
+        assert failure.retry_in_s is None, failure
+        assert failure.attempt == 1
     finally:
         client.stop()
-    failures = [
-        event for event in client.drain_events() if isinstance(event, ClientAttemptFailed)
-    ]
-    # Whatever else, no failure reported after the stop may claim a retry.
-    for failure in failures:
-        if failure.retry_in_s is not None:
-            assert failure.retry_in_s > 0
 
 
-def test_uptime_is_measured_before_teardown():
-    """It decides durability, so join time inside it shifts the threshold. Small
-    in Python; the plan says this schedule gets ported to Kotlin."""
+class DeafAfterHandshake:
+    """Handshakes normally, then blocks its reader, and ignores close().
+
+    Which makes session teardown slow for a real reason -- close() waits out
+    its whole join timeout -- so it can show whether uptime includes that wait.
+    """
+
+    peer = "deaf-after-handshake"
+
+    def __init__(self, inner, allow_reads=2):
+        self._inner = inner
+        self._allow_reads = allow_reads
+        self._reads = 0
+        self._gate = threading.Event()
+
+    def send_all(self, data):
+        self._inner.send_all(data)
+
+    def recv_exact(self, n):
+        if self._reads < self._allow_reads:
+            self._reads += 1
+            return self._inner.recv_exact(n)
+        self._gate.wait()
+        return b""
+
+    def close(self):
+        return None  # deliberately not honouring the contract
+
+    def release(self):
+        self._gate.set()
+        self._inner.close()
+
+
+def test_uptime_excludes_teardown_even_when_teardown_is_slow():
+    """uptime decides durability, so join time inside it shifts the threshold.
+
+    Only visible when teardown is slow: with a peer that ignores close(), the
+    session's reader never exits and close() waits out its full join. A session
+    that lived for milliseconds would then report seconds, and be judged
+    durable.
+    """
+    connections: list[DeafAfterHandshake] = []
+
+    def deaf_after_handshake(host, port, timeout=None):
+        client_end, server_end = loopback_pair()
+        threading.Thread(
+            target=lambda: perform_handshake(server_end, JETSON), daemon=True
+        ).start()
+        wrapped = DeafAfterHandshake(client_end)
+        connections.append(wrapped)
+        return wrapped
+
     client = SessionClient(
         "jetson",
         1,
         local_hello=PHONE,
-        backoff=fast_backoff(),
+        backoff=Backoff(initial_s=5.0, multiplier=1.0, cap_s=5.0, jitter=0.0),
         heartbeat_s=None,
         stall_timeout_s=None,
-        dial_fn=lambda host, port, timeout=None: scripted_peer(lifetime_s=0.05),
-        reset_after_s=10.0,
+        dial_fn=deaf_after_handshake,
+        reset_after_s=1.0,
         poll_s=0.01,
     ).start()
     try:
-        ended = wait_for_client_event(client, ClientSessionEnded, timeout=6.0)
+        session = client.wait_for_session(timeout=10.0)
+        assert session is not None
+        time.sleep(0.05)
+        session.close()
+
+        ended = wait_for_client_event(client, ClientSessionEnded, timeout=10.0)
         assert ended is not None
-        # Generous, but it catches a teardown term of the size a close() join
-        # would contribute.
-        assert ended.uptime_s < 0.5, ended.uptime_s
+        assert ended.uptime_s < 0.5, (
+            f"uptime {ended.uptime_s:.2f}s includes the teardown wait"
+        )
     finally:
         client.stop()
+        for connection in connections:
+            connection.release()
 
 
 def test_the_connection_being_handshaked_is_released_after_success():

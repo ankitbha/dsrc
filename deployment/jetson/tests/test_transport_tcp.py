@@ -589,18 +589,32 @@ def test_retries_are_counted_per_errno_and_consecutively(acceptor):
 
 
 def test_a_successful_accept_resets_the_consecutive_count(acceptor):
+    """Two runs of two, so the high water mark is 2 rather than 4 -- a single
+    run cannot tell a counter that resets from one that does not."""
     import errno as errno_module
 
-    acceptor._server = FlakyServerSocket(
-        acceptor._server, OSError(errno_module.ECONNABORTED, "injected"), failures=2
-    )
-    client = dial("127.0.0.1", acceptor.port)
+    error = OSError(errno_module.ECONNABORTED, "injected")
+    accepted = []
+    for _ in range(2):
+        acceptor._server = FlakyServerSocket(acceptor._server, error, failures=2)
+        client = dial("127.0.0.1", acceptor.port)
+        try:
+            connection = acceptor.accept(timeout=5.0)
+            assert connection is not None
+            accepted.append(connection)
+        finally:
+            client.close()
+        # Unwrap for the next round, so each run starts from a clean socket.
+        acceptor._server = acceptor._server._inner
     try:
-        assert acceptor.accept(timeout=5.0) is not None
-        assert acceptor.max_consecutive_accept_errors == 2
-        assert acceptor.stats()["accept_errors_by_errno"] == {"ECONNABORTED": 2}
+        assert acceptor.transient_accept_errors == 4
+        assert acceptor.max_consecutive_accept_errors == 2, (
+            "the consecutive count did not reset on a successful accept"
+        )
+        assert acceptor.stats()["accept_errors_by_errno"] == {"ECONNABORTED": 4}
     finally:
-        client.close()
+        for connection in accepted:
+            connection.close()
 
 
 def test_a_close_during_a_retry_ends_the_accept_cleanly(acceptor):
@@ -626,3 +640,34 @@ def test_a_close_during_a_retry_ends_the_accept_cleanly(acceptor):
     worker.join(timeout=5.0)
     assert not worker.is_alive()
     assert outcome == ["ConnectionClosed"], outcome
+
+
+def test_a_settimeout_failure_is_classified_like_any_other(acceptor):
+    """settimeout used to sit outside the guard, so a close() landing there
+    escaped the errno classification the whole retry fix is about."""
+
+    class FailingSettimeout(RecordingServerSocket):
+        def settimeout(self, timeout):
+            raise OSError(9, "bad file descriptor")
+
+        def accept(self):  # pragma: no cover - never reached
+            raise AssertionError("accept should not be reached")
+
+    acceptor._server = FailingSettimeout()
+    acceptor._closed = True  # as a concurrent close() would have left it
+    with pytest.raises(ConnectionClosed):
+        acceptor.accept(timeout=1.0)
+
+
+def test_a_settimeout_failure_while_open_propagates_as_an_oserror(acceptor):
+    class FailingSettimeout(RecordingServerSocket):
+        def settimeout(self, timeout):
+            raise OSError(22, "invalid argument")
+
+        def accept(self):  # pragma: no cover
+            raise AssertionError("accept should not be reached")
+
+    acceptor._server = FailingSettimeout()
+    with pytest.raises(OSError) as caught:
+        acceptor.accept(timeout=1.0)
+    assert not isinstance(caught.value, ConnectionClosed)
