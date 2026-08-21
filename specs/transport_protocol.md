@@ -374,11 +374,16 @@ rather than an extensible list.
 | a missing key in a nested object | message dropped, counted |
 | an extra head in `action` | message dropped, counted |
 | a non-integer value in `dropped` | message dropped, counted |
+| a count outside `[0, 2^63-1]` | message dropped, counted |
+| `null` where a value is required | message dropped, counted |
+| a non-finite number on the wire | message dropped, counted |
 
 The session stays open, and the drop is counted per channel and per reason. The
 reasons are a closed vocabulary: `missing_field`, `wrong_type`,
 `null_not_allowed`, `non_finite`, `out_of_range`, `unknown_value`,
-`unexpected_payload`, `reserved_key`, `no_typed_message`. One number cannot
+`unexpected_payload`, `reserved_key`, `no_typed_message` -- and every one of
+them has a row above, so an implementation can derive when to emit each rather
+than guess. One number cannot
 answer whether four thousand drops were one bad field or four, which is the
 point of counting them at all.
 

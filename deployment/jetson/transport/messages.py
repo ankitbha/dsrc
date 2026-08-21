@@ -31,11 +31,11 @@ in the opaque layer imports this one, and a test asserts it. That is what keeps
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Mapping
 
 from transport.channels import Channel
+from transport.clock import now_mono_ns
 from transport.frames import RESERVED_EXTENSIONS
 
 CAPTURE_KEY = "t_capture_mono_ns"
@@ -64,6 +64,12 @@ DROP_KEYS: tuple[str, ...] = ("camera", "gps", "imu", "here")
 # A commanded rate above this is a bug, not a request: the camera is the fastest
 # sensor in the plan at 10 Hz and the IMU at 50 Hz.
 MAX_RATE_HZ = 1000.0
+
+# Counts. Non-negative because a negative one makes a summary under-count with
+# no error anywhere, and bounded so a Kotlin Long can hold it -- the frame layer
+# deliberately permits header integers past 2**53, but that permission is for
+# timestamps, not for tallies.
+MAX_COUNT = 2**63 - 1
 
 
 # The reason vocabulary. A single drop count cannot answer "were these four
@@ -99,7 +105,13 @@ class MessageError(ValueError):
     byte stream is still aligned, so one bad record costs one record.
     """
 
-    def __init__(self, message: str, reason: str = REASON_WRONG_TYPE) -> None:
+    def __init__(self, message: str, reason: str) -> None:
+        # Required, not defaulted: a default absorbed two untagged raise sites
+        # and filed an out-of-schema action value as a type error. Validated,
+        # because the spec calls the vocabulary closed, and a typo would split
+        # one reason into two buckets no reader could reconcile.
+        if reason not in REASONS:
+            raise AssertionError(f"{reason!r} is not one of the documented reasons")
         super().__init__(message)
         self.reason = reason
 
@@ -215,21 +227,31 @@ def require_mapping_of_numbers(
     return {key: require_number(value, key) for key in keys}
 
 
+def check_count(value: Any, field: str) -> int:
+    """A count: integral, non-negative, and inside a signed 64-bit range.
+
+    Used on both sides. The encoder used to coerce with int(), which destroyed
+    the evidence before the decoder could refuse it -- so a fractional count
+    crossed the wire looking legitimate while the decoder was documented as
+    refusing one.
+    """
+    if value is None:
+        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)
+    # bool before int: True is an int of value 1.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MessageError(
+            f"{field} is {type(value).__name__}, expected int", REASON_WRONG_TYPE
+        )
+    if not 0 <= value <= MAX_COUNT:
+        raise MessageError(f"{field} is {value}, outside [0, {MAX_COUNT}]", REASON_OUT_OF_RANGE)
+    return value
+
+
 def require_mapping_of_ints(
     extensions: Mapping[str, Any], field: str, keys: tuple[str, ...]
 ) -> dict[str, int]:
-    """Counts, so integral. A fractional drop count is a bug in the sender, and
-    silently truncating it would make the round trip not field-for-field."""
     value = _nested_object(extensions, field, keys)
-    counts: dict[str, int] = {}
-    for key in keys:
-        number = value[key]
-        if isinstance(number, bool) or not isinstance(number, int):
-            raise MessageError(
-                f"{field}.{key} is {type(number).__name__}, expected int", REASON_WRONG_TYPE
-            )
-        counts[key] = number
-    return counts
+    return {key: check_count(value[key], f"{field}.{key}") for key in keys}
 
 
 def check_no_payload(payload: bytes, channel: Channel) -> None:
@@ -440,7 +462,8 @@ class HereResponse:
         content_type = require(extensions, "content_type")
         if content_type is not None and not isinstance(content_type, str):
             raise MessageError(
-                f"content_type is {type(content_type).__name__}, expected str or null"
+                f"content_type is {type(content_type).__name__}, expected str or null",
+                REASON_WRONG_TYPE,
             )
         return cls(
             t_capture_mono_ns=require_capture(extensions),
@@ -475,9 +498,11 @@ class PhoneTelemetry:
                 "thermal_status": self.thermal_status,
                 "thermal_headroom": to_wire_number(self.thermal_headroom),
                 "achieved": {key: to_wire_number(self.achieved[key]) for key in RATE_KEYS},
-                "dropped": {key: int(self.dropped[key]) for key in DROP_KEYS},
-                "here_calls": int(self.here_calls),
-                "here_errors": int(self.here_errors),
+                "dropped": {
+                    key: check_count(self.dropped[key], f"dropped.{key}") for key in DROP_KEYS
+                },
+                "here_calls": check_count(self.here_calls, "here_calls"),
+                "here_errors": check_count(self.here_errors, "here_errors"),
             },
             b"",
         )
@@ -491,8 +516,8 @@ class PhoneTelemetry:
             thermal_headroom=optional_number(extensions, "thermal_headroom"),
             achieved=require_mapping_of_numbers(extensions, "achieved", RATE_KEYS),
             dropped=require_mapping_of_ints(extensions, "dropped", DROP_KEYS),
-            here_calls=require_int(extensions, "here_calls"),
-            here_errors=require_int(extensions, "here_errors"),
+            here_calls=check_count(require(extensions, "here_calls"), "here_calls"),
+            here_errors=check_count(require(extensions, "here_errors"), "here_errors"),
         )
 
 
@@ -556,7 +581,11 @@ class AdvisoryMessage:
             value = action[head]
             if value not in ACTION_VALUES[head]:
                 raise MessageError(
-                    f"action.{head} is {value!r}, not one of {ACTION_VALUES[head]}"
+                    f"action.{head} is {value!r}, not one of {ACTION_VALUES[head]}",
+                    # A value outside a closed set, exactly like `units`, which
+                    # the spec gives an adjacent refusal row. Filed as a type
+                    # error, it was wrong in the case the counter exists for.
+                    REASON_UNKNOWN_VALUE,
                 )
         return cls(
             t_capture_mono_ns=require_capture(extensions),
@@ -724,8 +753,13 @@ class MessageRouter:
     MessageError itself.
     """
 
-    def __init__(self, session: Any) -> None:
+    def __init__(self, session: Any, *, mono_clock: Any = now_mono_ns) -> None:
         self._session = session
+        # The package's own monotonic source, the same one Session takes and
+        # defaults to. Using time.monotonic() here put two clocks on one
+        # deadline, so a test injecting a fake clock would have measured the
+        # router against real time.
+        self._mono = mono_clock
         self._stats = {channel: ChannelMessageStats(channel) for channel in Channel}
 
     @property
@@ -745,17 +779,21 @@ class MessageRouter:
         every skip made a stream of malformed messages block for an unbounded
         multiple of what was asked: measured 6.9x on a 50 Hz channel with one
         broken field, which is the shape a single bad phone build produces. The
-        remaining budget is tracked instead.
+        remaining budget is tracked instead -- clamped at zero, so an expired
+        budget still polls the queue once rather than skipping it.
         """
         stats = self._stats[channel]
-        deadline = None if timeout is None else time.monotonic() + timeout
+        deadline = None if timeout is None else self._mono() + int(timeout * 1e9)
         while True:
             if deadline is None:
                 remaining: float | None = None
             else:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None
+                # Never negative. Returning early on an expired budget skipped
+                # the queue entirely, so the default timeout=0.0 -- the poll
+                # idiom a control loop uses -- delivered nothing while messages
+                # sat waiting. Session.recv checks its queue before its
+                # deadline, and this has to agree.
+                remaining = max(deadline - self._mono(), 0) / 1e9
             received = self._session.recv(channel, timeout=remaining)
             if received is None:
                 return None

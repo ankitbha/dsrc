@@ -541,13 +541,29 @@ def test_the_action_vocabulary_matches_the_action_schema_spec(head):
     assert spec_allowed_values(head) == set(ACTION_VALUES[head])
 
 
-def test_a_value_under_the_wrong_head_would_be_caught():
-    """The window really is narrow: no head's block contains another's values."""
+# `normal` is legitimately shared: it is a headway bin and a merge mode.
+LEGITIMATELY_SHARED_VALUES = {"normal"}
+
+
+def test_the_spec_blocks_are_pairwise_disjoint_apart_from_the_shared_value():
+    """Independent of the code, which the previous version of this was not.
+
+    It compared each block against ACTION_VALUES, and its sibling already
+    asserts those are equal -- so it was empty by construction and passed even
+    when the window was widened and the code widened to match. This asserts a
+    property of the spec text alone: a value appears under one head, except
+    `normal`, which really is both a headway bin and a merge mode.
+    """
     blocks = {head: spec_allowed_values(head) for head in ACTION_HEADS}
-    for head, values in blocks.items():
-        others = set().union(*(v for h, v in blocks.items() if h != head))
-        leaked = values & (others - set(ACTION_VALUES[head]))
-        assert leaked == set(), f"{head}'s block leaks {sorted(leaked)}"
+    for left in ACTION_HEADS:
+        for right in ACTION_HEADS:
+            if left >= right:
+                continue
+            shared = blocks[left] & blocks[right]
+            assert shared <= LEGITIMATELY_SHARED_VALUES, (
+                f"{left} and {right} both list {sorted(shared - LEGITIMATELY_SHARED_VALUES)}"
+            )
+    assert blocks["desired_headway_bin"] & blocks["merge_mode"] == {"normal"}
 
 
 SAMPLE_FOR_CHANNEL = {
@@ -777,11 +793,16 @@ def test_the_message_layer_imports_nothing_outside_the_standard_library():
     including a Jetson with no model loaded and no pynmea2 in reach."""
     text = (REPO / "deployment" / "jetson" / "transport" / "messages.py").read_text()
     imports = re.findall(r"^\s*(?:from|import)\s+([\w.]+)", text, re.M)
-    # Deliberately enumerated: a new import has to be added here on purpose,
-    # which is how this test caught `time` being introduced for the recv budget.
-    allowed = {"__future__", "math", "time", "dataclasses", "typing",
-               "transport.channels", "transport.frames"}
+    # Deliberately enumerated, and split so the two kinds of addition read
+    # differently. This test caught `time` being added for the recv budget; the
+    # right answer was not to allow it but to use transport.clock, which is the
+    # package's own monotonic source and what Session already defaults to. A
+    # widened stdlib allow-list would have been the weaker outcome.
+    stdlib = {"__future__", "math", "dataclasses", "typing"}
+    transport_internal = {"transport.channels", "transport.frames", "transport.clock"}
+    allowed = stdlib | transport_internal
     assert set(imports) <= allowed, f"unexpected imports: {sorted(set(imports) - allowed)}"
+    assert "time" not in imports, "use transport.clock, the package's own monotonic source"
 
 
 # -- the branches mutation showed were unpinned -------------------------------
@@ -826,6 +847,67 @@ def test_a_nested_object_ignores_an_unknown_key_but_requires_the_known_ones():
     extensions["rates"]["camra_hz"] = extensions["rates"].pop("camera_hz")
     with pytest.raises(MessageError, match="camera_hz"):
         decode_message(Channel.RATE_CMD, extensions, payload)
+
+
+@pytest.mark.parametrize("field", ["dropped.camera", "here_calls"])
+def test_a_boolean_is_not_accepted_where_a_count_is_required(field):
+    """True is an int of value 1. This guard was added on the number path with a
+    test and on the count path without -- the same shape, one function over."""
+    extensions, payload = a_telemetry().to_wire()
+    if field == "here_calls":
+        extensions["here_calls"] = True
+    else:
+        extensions["dropped"]["camera"] = True
+    with pytest.raises(MessageError, match="expected int"):
+        decode_message(Channel.TELEMETRY, extensions, payload)
+
+
+@pytest.mark.parametrize("bad", [-1, -5, 2**63, 2**70])
+def test_a_count_outside_its_range_is_refused(bad):
+    """A negative count makes a summary under-count with no error anywhere, and
+    an unbounded one overflows a Kotlin Long."""
+    extensions, payload = a_telemetry().to_wire()
+    extensions["dropped"]["camera"] = bad
+    with pytest.raises(MessageError, match="outside"):
+        decode_message(Channel.TELEMETRY, extensions, payload)
+
+
+def test_a_count_at_its_bounds_is_accepted():
+    from transport.messages import MAX_COUNT
+
+    message = a_telemetry(dropped={"camera": 0, "gps": MAX_COUNT, "imu": 1, "here": 0})
+    assert roundtrip(message) == message
+
+
+def test_a_null_count_reports_a_null_reason_not_a_type_error():
+    """The same wire condition landed in two buckets depending on which nested
+    object it was in, so a summary showed nulls under rates and not dropped."""
+    extensions, payload = a_telemetry().to_wire()
+    extensions["dropped"]["camera"] = None
+    with pytest.raises(MessageError) as caught:
+        decode_message(Channel.TELEMETRY, extensions, payload)
+    assert caught.value.reason == "null_not_allowed"
+
+    extensions, payload = a_rate_command().to_wire()
+    extensions["rates"]["camera_hz"] = None
+    with pytest.raises(MessageError) as other:
+        decode_message(Channel.RATE_CMD, extensions, payload)
+    assert other.value.reason == "null_not_allowed"
+
+
+def test_the_encoder_refuses_a_fractional_count_rather_than_truncating_it():
+    """It used to coerce with int(), destroying the evidence before the decoder
+    could refuse it -- so a fractional count crossed the wire looking
+    legitimate while the decoder was documented as refusing one."""
+    message = a_telemetry(dropped={"camera": 2.7, "gps": 0, "imu": 0, "here": 0})
+    with pytest.raises(MessageError, match="expected int"):
+        message.to_wire()
+
+
+def test_the_encoder_refuses_a_negative_count():
+    message = a_telemetry(here_calls=-3)
+    with pytest.raises(MessageError, match="outside"):
+        message.to_wire()
 
 
 def test_a_fractional_drop_count_is_refused():
@@ -900,6 +982,96 @@ def test_drops_are_counted_by_reason():
         receiver.close()
 
 
+def malformed_for(reason):
+    """A (channel, extensions, payload) triple that must produce `reason`."""
+    if reason == "missing_field":
+        extensions, payload = an_imu_sample().to_wire()
+        del extensions["az"]
+        return Channel.IMU, extensions, payload
+    if reason == "wrong_type":
+        extensions, payload = an_imu_sample().to_wire()
+        extensions["ax"] = "not a number"
+        return Channel.IMU, extensions, payload
+    if reason == "null_not_allowed":
+        extensions, payload = an_imu_sample().to_wire()
+        extensions["ax"] = None
+        return Channel.IMU, extensions, payload
+    if reason == "non_finite":
+        extensions, payload = an_imu_sample().to_wire()
+        extensions["ax"] = float("inf")
+        return Channel.IMU, extensions, payload
+    if reason == "out_of_range":
+        extensions, payload = a_gps_record(lat=91.0).to_wire()
+        return Channel.GPS, extensions, payload
+    if reason == "unknown_value":
+        extensions, payload = an_advisory().to_wire()
+        extensions["units"] = "furlongs"
+        return Channel.ADVISORY, extensions, payload
+    if reason == "unexpected_payload":
+        extensions, _payload = a_gps_record().to_wire()
+        return Channel.GPS, extensions, b"unexpected"
+    if reason == "no_typed_message":
+        return Channel.CONTROL, {CAPTURE_KEY: 1}, b""
+    raise AssertionError(f"no fixture for {reason}")
+
+
+@pytest.mark.parametrize(
+    "reason",
+    ["missing_field", "wrong_type", "null_not_allowed", "non_finite", "out_of_range",
+     "unknown_value", "unexpected_payload", "no_typed_message"],
+)
+def test_each_reason_is_produced_by_the_condition_it_names(reason):
+    """Three of nine were pinned, which is round-one coverage on brand-new code.
+    `reserved_key` is covered separately, on the send path."""
+    channel, extensions, payload = malformed_for(reason)
+    with pytest.raises(MessageError) as caught:
+        decode_message(channel, extensions, payload)
+    assert caught.value.reason == reason, f"got {caught.value.reason!r}"
+
+
+def test_an_out_of_schema_action_value_is_an_unknown_value_not_a_type_error():
+    """Adjacent to `units` in the spec's refusal table, and it was filed under
+    wrong_type -- wrong in the one case the counter exists for, since this is
+    where the phone and the sim contract can disagree."""
+    extensions, payload = an_advisory().to_wire()
+    extensions["action"]["merge_mode"] = "sideways"
+    with pytest.raises(MessageError) as caught:
+        decode_message(Channel.ADVISORY, extensions, payload)
+    assert caught.value.reason == "unknown_value"
+
+
+def test_the_reason_vocabulary_is_closed():
+    """The spec calls it closed, so a typo must not reach a summary and split one
+    reason into two buckets no reader can reconcile."""
+    from transport.messages import REASONS
+
+    with pytest.raises(AssertionError):
+        MessageError("x", "nul_not_alowed")
+    for reason in REASONS:
+        assert MessageError("x", reason).reason == reason
+
+
+def test_every_reason_the_code_can_emit_is_in_the_vocabulary():
+    """The reverse direction of the spec check, which only walked REASONS."""
+    import ast
+    from transport.messages import REASONS
+
+    source = (REPO / "deployment" / "jetson" / "transport" / "messages.py").read_text()
+    emitted = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            if getattr(node.exc.func, "id", None) != "MessageError":
+                continue
+            assert len(node.exc.args) == 2, (
+                f"a MessageError at line {node.lineno} has no explicit reason"
+            )
+            name = node.exc.args[1]
+            assert isinstance(name, ast.Name), f"line {node.lineno}: reason is not a constant"
+            emitted.add(name.id)
+    resolved = {getattr(__import__("transport.messages", fromlist=["x"]), n) for n in emitted}
+    assert resolved <= set(REASONS), f"outside the vocabulary: {resolved - set(REASONS)}"
+
+
 def test_every_reason_in_the_vocabulary_is_documented_in_the_spec():
     from transport.messages import REASONS
 
@@ -940,6 +1112,91 @@ def test_recv_honours_its_budget_across_skipped_messages():
         receiver.close()
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [{}, {"timeout": 0.0}, {"timeout": -1.0}, {"timeout": 1e-9}, {"timeout": 5.0},
+     {"timeout": None}],
+    ids=["default", "zero", "negative", "tiny", "generous", "none"],
+)
+def test_recv_polls_a_queued_message_across_the_whole_argument_domain(kwargs):
+    """The domain enumerated rather than sampled, because the default was the
+    broken one: an expired budget returned before the queue was looked at, so
+    router.recv(channel) -- the poll idiom a control loop uses -- delivered
+    nothing while messages sat waiting, with delivered=0 and decode_errors=0 as
+    the only evidence."""
+    sender, receiver = quiet_pair()
+    router = MessageRouter(receiver)
+    try:
+        MessageRouter(sender).send(an_imu_sample(accuracy=2))
+        assert wait_until(lambda: receiver.pending(Channel.IMU) == 1, timeout=5.0)
+        message = router.recv(Channel.IMU, **kwargs)
+        assert message is not None, f"a queued message was not delivered for {kwargs}"
+        assert message.accuracy == 2
+        assert router.stats()[Channel.IMU].delivered == 1
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_recv_skips_a_bad_message_to_reach_a_good_one_on_an_exhausted_budget():
+    """Both already queued, and a budget too small to survive a skip. The
+    message must not be lost just because the clock ran out mid-skip."""
+    sender, receiver = quiet_pair()
+    router = MessageRouter(receiver)
+    try:
+        bad, payload = an_imu_sample().to_wire()
+        del bad["az"]
+        sender.send(Channel.IMU, payload, bad)
+        MessageRouter(sender).send(an_imu_sample(accuracy=7))
+        assert wait_until(lambda: receiver.pending(Channel.IMU) == 2, timeout=5.0)
+        message = router.recv(Channel.IMU, timeout=1e-9)
+        assert message is not None, "the good message was lost to an expired budget"
+        assert message.accuracy == 7
+        assert router.stats()[Channel.IMU].decode_errors == 1
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_recv_returns_none_on_an_empty_queue_without_blocking():
+    sender, receiver = quiet_pair()
+    router = MessageRouter(receiver)
+    import time as clock
+
+    try:
+        started = clock.monotonic()
+        assert router.recv(Channel.IMU) is None
+        assert clock.monotonic() - started < 0.5
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_the_router_uses_the_injected_clock_for_its_budget():
+    """One deadline, one clock. Using time.monotonic() while Session took an
+    injectable one put the router's budget on real time and the session's on the
+    fake, so a test injecting a clock would have measured nothing."""
+    sender, receiver = quiet_pair()
+    ticks = {"now": 0}
+
+    def frozen_clock():
+        return ticks["now"]
+
+    router = MessageRouter(receiver, mono_clock=frozen_clock)
+    try:
+        # The clock never advances, so the budget never expires -- but the queue
+        # is empty, so the session's own timeout returns None. What this pins is
+        # that the router consults the injected clock at all.
+        assert router.recv(Channel.IMU, timeout=0.05) is None
+        MessageRouter(sender).send(an_imu_sample(accuracy=4))
+        assert wait_until(lambda: receiver.pending(Channel.IMU) == 1, timeout=5.0)
+        message = router.recv(Channel.IMU, timeout=0.05)
+        assert message is not None and message.accuracy == 4
+    finally:
+        sender.close()
+        receiver.close()
+
+
 def test_recv_with_no_timeout_still_returns_a_message_after_skips():
     sender, receiver = quiet_pair()
     router = MessageRouter(receiver)
@@ -948,8 +1205,18 @@ def test_recv_with_no_timeout_still_returns_a_message_after_skips():
         del bad["az"]
         sender.send(Channel.IMU, payload, bad)
         MessageRouter(sender).send(an_imu_sample(accuracy=1))
-        message = router.recv(Channel.IMU, timeout=None)
-        assert message is not None and message.accuracy == 1
+        # Bounded on a worker: timeout=None blocks until a decodable message
+        # arrives, so a regression here would hang the suite rather than fail
+        # it, and there is no pytest-timeout installed to catch that.
+        result: list[object] = []
+        worker = threading.Thread(
+            target=lambda: result.append(router.recv(Channel.IMU, timeout=None)),
+            daemon=True,
+        )
+        worker.start()
+        worker.join(timeout=5.0)
+        assert not worker.is_alive(), "recv(timeout=None) never returned"
+        assert result and result[0] is not None and result[0].accuracy == 1
         assert router.stats()[Channel.IMU].decode_errors == 1
     finally:
         sender.close()
