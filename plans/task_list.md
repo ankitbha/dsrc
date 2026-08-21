@@ -324,8 +324,119 @@ tunnels over USB and is unaffected.
     deliberately no liveness query, and the contract suite pins both that every
     member is present and that no undeclared surface appears — so a backend's
     extras are a deliberate act. Task 40 implements four, not five.
-14. Wire protocol: sensor messages upstream, advisory and rate commands
-    downstream, each carrying its own timestamps.
+14. ~~Wire protocol: sensor messages upstream, advisory and rate commands
+    downstream, each carrying its own timestamps.~~
+    **DONE** — `transport/messages.py`, stdlib only, 639 transport tests (157 on
+    this layer). Plan: `scratchpad/plan_task_14_wire_messages.md`; the contract
+    Kotlin implements is the Messages section of `specs/transport_protocol.md`.
+
+    Seven types over the eight channels, and **the channel is the discriminator**
+    — there is no `kind` field to consult, so a message cannot claim to be
+    something its channel is not. Sensor fields ride the JSON header and only
+    opaque bytes ride the payload, which is what lets a camera frame and an IMU
+    sample share one codec.
+
+    **Unavailable is `null`, present.** Never absent, never a sentinel: absent
+    cannot be told from a sender that forgot the field, and a sentinel is a real
+    number that a consumer will average. NaN cannot cross at all — the encoder
+    refuses non-finite rather than emitting invalid JSON — so a missing field is
+    the *only* way to say "no value", and the observation builder sees one shape.
+
+    **The three nested objects are additive and `action` is strict.** Rates,
+    achieved rates and drop counts must carry every known key and *ignore*
+    unknown ones, because the sensor set will grow and refusing an unknown key
+    breaks a rolling deploy in both directions at once. The four action heads are
+    a closed set from `specs/action_schema.md`, so an extra head is refused.
+
+    **A malformed message is not a malformed stream.** Fifteen refusal
+    conditions across a nine-reason closed vocabulary, each with its own row in
+    the spec so the Kotlin side reads off which to emit; the message is dropped
+    and counted per channel *and per reason*, and the session stays open. That
+    differs from a framing error, which ends the session, and the difference is
+    recoverability: framing succeeding proves the byte stream is still aligned,
+    so one bad record costs one record.
+
+    **The same table binds the sender.** A receiver rule alone leaves a sender
+    free to emit garbage and learn about it as someone else's drop counter, so
+    `send` refuses anything its own decoder would reject. A zero in `rates` is
+    the case that shows why: it is read as a period, so the field that should
+    say "10 Hz" says "never", 12 ms away from the code that could have caught
+    it. It raises `InvalidMessage`, deliberately **not** a `MessageError` — that
+    type means the peer sent something bad and its whole idiom is
+    drop-and-count, so a consumer wrapping its own sends in it would silently
+    swallow its own bug. The two counters stay apart for the same reason.
+
+    **Measured on the Jetson** (aarch64, Python 3.10.12): **696 pass, 1 skip**
+    (the skip needs the sim repo), including the golden-vector regeneration
+    check — the cross-language contract is now proved byte-identical on a second
+    architecture and a second Python, which is the entire reason those vectors
+    are frozen.
+
+    Header budget, the one hard limit this layer can breach: the widest encoded
+    header per channel is **110–393 B against the 8192 B cap**, so 1.3–4.8% of
+    it, advisory being the widest. Per message, encode costs 10–18 µs at the
+    median and the send-side validation adds **6–19 µs** — it roughly doubles
+    per-message CPU, and at the planned rates that whole guarantee costs under
+    0.1% of one core. An empty-queue `recv`, the call a control loop makes most
+    often, costs **4 µs** at the median and 22 µs at the worst of 3000.
+
+    **240 s over loopback at the planned sensor rates**: every channel on
+    cadence (camera 10.01/10.0, IMU 50.02/50.0), 15,971 messages up and 2,872
+    down, **zero decode errors, zero invalid sends, and the account closes with
+    no gaps**. Capture-to-read p50 1.0–1.6 ms, p99 1.9–2.4 ms, max 4.6 ms, and
+    **zero negative samples in 18,843** — reported as a distribution because a
+    sign check would have passed on a broken clock.
+
+    **180 s with every 20th message deliberately corrupted**, rotated through
+    three kinds so the breakdown has to distinguish causes rather than just
+    count: **598 injected, 598 counted, and every per-reason bucket matches
+    exactly** (camera 90 → 60 `wrong_type` + 30 `missing_field`, IMU 450 → 300 +
+    150, and so on). Both corruptions of a *type* — a field and the capture
+    stamp — correctly land in one bucket. Advisory and rate_cmd kept flowing
+    with zero errors throughout, which is the point of dropping a record rather
+    than a session.
+
+    **Typed messages both ways over the real Tailscale link**, Mac standing in
+    for the phone, 170 s: camera 1699 frames at 9.99 Hz, IMU 8496 at 49.98 Hz,
+    **zero decode errors and zero invalid sends on either side**, and the
+    Jetson's own per-channel account closes against what the phone sent. Round
+    trip p50 **12.2 ms** / p95 21.2 ms / p99 134 ms / max 333 ms, measured on the
+    phone's clock alone — the Jetson answers each frame with a typed advisory
+    carrying the frame id back, so nothing is subtracted across two machines.
+    Relating those clocks is task 15's job and the protocol forbids doing it by
+    hand.
+
+    **One anomaly, unresolved and recorded as such.** The first link run offered
+    ~40% of its commanded cadence on every channel at once. Nothing was lost —
+    the Jetson received every message sent — so it was the sender falling behind,
+    not the transport. It did not reproduce in three later runs at the same and
+    shorter durations, all of which held full cadence with zero iterations behind
+    schedule. It cannot be attributed now because nothing recorded which path
+    the link took, and a DERP-relayed link and a LAN link are different
+    experiments; the harness now records that, so task 15 will not have this
+    hole.
+
+    **Validation: three rounds, 28 findings.** The recv budget was the one that
+    mattered: passing the caller's original timeout on every skipped record made
+    a stream of malformed messages block for an unbounded multiple of what was
+    asked (**6.9x measured** on a 50 Hz channel with one broken field, the shape
+    a single bad phone build produces). The fix regressed into something worse —
+    checking the deadline before the queue, so the default `timeout=0.0`, the
+    poll idiom a control loop uses, returned nothing while messages sat waiting.
+    That survived because all nine call sites passed an explicit timeout, so the
+    default was never once exercised; the test now enumerates the whole argument
+    domain.
+
+    Round 3 closed on a different lesson: **a test that pins nothing looks
+    exactly like a test that passes.** The injected-clock test used a *frozen*
+    clock, which is indistinguishable from a real one because neither expires a
+    budget, so it passed with the injection ignored entirely. And the refusal
+    table had no test at all — both of its numeric bounds could be silently
+    halved, which for a cross-language contract means the other implementation
+    reads the wrong number and its messages are dropped here. Every round-3 fix
+    was then mutation-tested against the test that names it (15/15), which found
+    that the first version of the new spec-bound assertion was satisfied by a
+    second copy of the number elsewhere in the document.
 15. Shared timebase with clock-offset estimation and drift tracking, so
     phone-side and Jetson-side events are comparable.
 16. Loopback test with synthetic sensor frames and synthetic advisories;
