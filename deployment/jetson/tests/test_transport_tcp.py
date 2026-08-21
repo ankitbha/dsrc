@@ -589,8 +589,13 @@ def test_retries_are_counted_per_errno_and_consecutively(acceptor):
 
 
 def test_a_successful_accept_resets_the_consecutive_count(acceptor):
-    """Two runs of two, so the high water mark is 2 rather than 4 -- a single
-    run cannot tell a counter that resets from one that does not."""
+    """The high water mark is per accept() call, not cumulative.
+
+    Two separate calls of two failures each give 2, not 4. Written first as a
+    test for a reset that does not exist: `consecutive` is a local, so it is
+    re-initialised every call and no reset before the return could ever be
+    observed. That line was dead and is gone.
+    """
     import errno as errno_module
 
     error = OSError(errno_module.ECONNABORTED, "injected")
@@ -609,7 +614,7 @@ def test_a_successful_accept_resets_the_consecutive_count(acceptor):
     try:
         assert acceptor.transient_accept_errors == 4
         assert acceptor.max_consecutive_accept_errors == 2, (
-            "the consecutive count did not reset on a successful accept"
+            "the high water mark accumulated across accept() calls"
         )
         assert acceptor.stats()["accept_errors_by_errno"] == {"ECONNABORTED": 4}
     finally:
@@ -646,15 +651,24 @@ def test_a_settimeout_failure_is_classified_like_any_other(acceptor):
     """settimeout used to sit outside the guard, so a close() landing there
     escaped the errno classification the whole retry fix is about."""
 
-    class FailingSettimeout(RecordingServerSocket):
+    class ClosingSettimeout(RecordingServerSocket):
+        """Fails the way a concurrent close() does: the flag flips and the call
+        raises. Setting the flag before calling accept() instead would trip the
+        check at the top of the method and never reach settimeout at all --
+        which is what the first version of this test did."""
+
+        def __init__(self, owner):
+            super().__init__()
+            self._owner = owner
+
         def settimeout(self, timeout):
+            self._owner._closed = True
             raise OSError(9, "bad file descriptor")
 
         def accept(self):  # pragma: no cover - never reached
             raise AssertionError("accept should not be reached")
 
-    acceptor._server = FailingSettimeout()
-    acceptor._closed = True  # as a concurrent close() would have left it
+    acceptor._server = ClosingSettimeout(acceptor)
     with pytest.raises(ConnectionClosed):
         acceptor.accept(timeout=1.0)
 

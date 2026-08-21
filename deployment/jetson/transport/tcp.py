@@ -279,6 +279,9 @@ class TcpAcceptor:
         if self._closed:
             raise ConnectionClosed("acceptor is closed")
         deadline = None if timeout is None else time.monotonic() + timeout
+        # Per call: the high water mark below therefore means "worst run of
+        # failures inside one accept()", which is the useful reading and the
+        # only one a local can carry.
         consecutive = 0
         while True:
             if self._closed:
@@ -317,7 +320,6 @@ class TcpAcceptor:
                 if pause > 0:
                     time.sleep(pause)
                 continue
-            consecutive = 0
             return TcpConnection(
                 sock,
                 peer=f"{address[0]}:{address[1]}",
