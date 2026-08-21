@@ -346,7 +346,7 @@ values are the ones in `specs/action_schema.md`:
 `here_hz`, with values in `(0, 1000]` Hz for `rates`. `dropped` is keyed
 `camera`, `gps`, `imu`, `here`, and its values are **integers** -- they are
 counts, and a fractional one is a bug in the sender rather than something to
-truncate. `units` is one of `mph`, `kmh`, `mps`. `shadow` is a boolean: whether
+truncate. `here_calls` and `here_errors` are counts on the same terms. `units` is one of `mph`, `kmh`, `mps`. `shadow` is a boolean: whether
 the command was gated for real or only recorded.
 
 **These three nested objects are additive.** Every listed key must be present,
@@ -362,30 +362,44 @@ rather than an extensible list.
 
 ### A malformed message is not a malformed stream
 
-| condition | outcome |
-|---|---|
-| a required field absent | message dropped, counted |
-| a field of the wrong JSON type | message dropped, counted |
-| an action value outside the schema | message dropped, counted |
-| `units` not one of the three | message dropped, counted |
-| a rate outside `(0, 1000]` Hz | message dropped, counted |
-| `lat`/`lon` out of range while `valid` | message dropped, counted |
-| a payload on a channel whose message carries none | message dropped, counted |
-| a missing key in a nested object | message dropped, counted |
-| an extra head in `action` | message dropped, counted |
-| a non-integer value in `dropped` | message dropped, counted |
-| a count outside `[0, 2^63-1]` | message dropped, counted |
-| `null` where a value is required | message dropped, counted |
-| a non-finite number on the wire | message dropped, counted |
+| condition | reason | outcome |
+|---|---|---|
+| a required field absent | `missing_field` | message dropped, counted |
+| a missing key in a nested object | `missing_field` | message dropped, counted |
+| a field of the wrong JSON type | `wrong_type` | message dropped, counted |
+| a non-integer value in `dropped` | `wrong_type` | message dropped, counted |
+| `null` where a value is required | `null_not_allowed` | message dropped, counted |
+| a non-finite number on the wire | `non_finite` | message dropped, counted |
+| a rate outside `(0, 1000]` Hz | `out_of_range` | message dropped, counted |
+| a count outside `[0, 9223372036854775807]` (`2^63-1`) | `out_of_range` | message dropped, counted |
+| `lat`/`lon` out of range while `valid` | `out_of_range` | message dropped, counted |
+| an action value outside the schema | `unknown_value` | message dropped, counted |
+| an extra head in `action` | `unknown_value` | message dropped, counted |
+| `units` not one of the three | `unknown_value` | message dropped, counted |
+| a payload on a channel whose message carries none | `unexpected_payload` | message dropped, counted |
+| an extension key reserved for the transport | `reserved_key` | message dropped, counted |
+| a typed decode on a channel that has no message type | `no_typed_message` | message dropped, counted |
 
 The session stays open, and the drop is counted per channel and per reason. The
-reasons are a closed vocabulary: `missing_field`, `wrong_type`,
-`null_not_allowed`, `non_finite`, `out_of_range`, `unknown_value`,
-`unexpected_payload`, `reserved_key`, `no_typed_message` -- and every one of
-them has a row above, so an implementation can derive when to emit each rather
-than guess. One number cannot
+reasons are a closed vocabulary -- exactly the second column above, so an
+implementation reads off which to emit rather than guessing. One number cannot
 answer whether four thousand drops were one bad field or four, which is the
 point of counting them at all.
+
+### A sender must not emit what its own decoder would refuse
+
+Every condition in that table is a receiver rule, and a receiver rule alone
+leaves the sender free to emit garbage and learn about it as someone else's
+drop counter. So it is also a sender rule: before a message goes out, it must
+satisfy the same table. A zero in `rates` is the case that shows why -- it is
+read as a period, so the field that should have said "10 Hz" instead says
+"never", and the failure surfaces on the far side of the link.
+
+Both sides count their own refusals, and the two counters stay apart: one is a
+bug here and one is a bug there, and a total that added them would hide both.
+An invalid send is also a distinct error from an invalid receive, because a
+receiver's whole handling idiom is drop-and-count, and a sender wrapping its own
+outgoing messages in that idiom would silently swallow its own bug.
 
 This is deliberately unlike a framing error, which ends the session. The
 difference is recoverability: a framing error means the byte stream has

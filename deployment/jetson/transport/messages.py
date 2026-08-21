@@ -98,6 +98,20 @@ REASONS: tuple[str, ...] = (
 )
 
 
+class InvalidMessage(ValueError):
+    """A message this side built that its own decoder would refuse.
+
+    Deliberately *not* a MessageError. That type means "the peer sent something
+    invalid" and its whole handling idiom is drop-and-count; a consumer wrapping
+    send in the same idiom would swallow its own bug. This one is the caller's
+    fault and is meant to be loud, like FramingError from an oversize payload.
+    """
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class MessageError(ValueError):
     """A frame that framed correctly but is not a valid message of its type.
 
@@ -498,11 +512,15 @@ class PhoneTelemetry:
                 "thermal_status": self.thermal_status,
                 "thermal_headroom": to_wire_number(self.thermal_headroom),
                 "achieved": {key: to_wire_number(self.achieved[key]) for key in RATE_KEYS},
-                "dropped": {
-                    key: check_count(self.dropped[key], f"dropped.{key}") for key in DROP_KEYS
-                },
-                "here_calls": check_count(self.here_calls, "here_calls"),
-                "here_errors": check_count(self.here_errors, "here_errors"),
+                # Passed through, not coerced and not validated here. Coercing
+                # with int() destroyed the evidence before the decoder could
+                # refuse it; validating only here made telemetry the one message
+                # whose encoder checked anything. Validation is centralised in
+                # MessageRouter.send, which holds every message to the same
+                # thirteen refusal conditions its own decoder applies.
+                "dropped": {key: self.dropped[key] for key in DROP_KEYS},
+                "here_calls": self.here_calls,
+                "here_errors": self.here_errors,
             },
             b"",
         )
@@ -734,6 +752,10 @@ class ChannelMessageStats:
     # Per reason, because one number cannot answer "were these four thousand
     # drops one bad field or four" -- which is the whole point of counting them.
     errors_by_reason: dict[str, int] = field(default_factory=dict)
+    # Our own invalid sends, kept separate from the peer's: one is a bug here
+    # and one is a bug there, and a summary that added them would hide both.
+    send_rejected: int = 0
+    rejected_by_reason: dict[str, int] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -741,6 +763,8 @@ class ChannelMessageStats:
             "delivered": self.delivered,
             "decode_errors": self.decode_errors,
             "errors_by_reason": dict(sorted(self.errors_by_reason.items())),
+            "send_rejected": self.send_rejected,
+            "rejected_by_reason": dict(sorted(self.rejected_by_reason.items())),
             "last_error": self.last_error,
         }
 
@@ -767,8 +791,32 @@ class MessageRouter:
         return self._session
 
     def send(self, message: Message) -> bool:
+        """Encode and send, refusing anything our own decoder would reject.
+
+        One rule, applied to every message rather than to the one type whose
+        encoder happened to validate: a sender could otherwise construct and
+        send a zero rate -- which the code comment beside the check calls
+        "applied as a period" -- an out-of-schema action, or an out-of-range
+        coordinate, and learn about it as a silent drop at the far end.
+
+        Raises InvalidMessage, not MessageError, so a consumer cannot swallow
+        its own bug with the drop-and-count idiom meant for the peer's.
+        """
         extensions, payload = message.to_wire()
-        check_reserved(extensions)
+        stats = self._stats[message.CHANNEL]
+        try:
+            # Inside the guard, not before it: a reserved key is our own bug on
+            # exactly the same terms as an out-of-range rate, and letting one of
+            # the two escape as MessageError left a caller two exception types
+            # to handle for one mistake.
+            check_reserved(extensions)
+            decode_message(message.CHANNEL, extensions, payload)
+        except MessageError as exc:
+            stats.send_rejected += 1
+            stats.rejected_by_reason[exc.reason] = (
+                stats.rejected_by_reason.get(exc.reason, 0) + 1
+            )
+            raise InvalidMessage(str(exc), exc.reason) from None
         return self._session.send(message.CHANNEL, payload, extensions)
 
     def recv(self, channel: Channel, timeout: float | None = 0.0) -> Message | None:
@@ -814,6 +862,7 @@ class MessageRouter:
         for channel, stats in self._stats.items():
             fields = dict(vars(stats))
             fields["errors_by_reason"] = dict(fields["errors_by_reason"])
+            fields["rejected_by_reason"] = dict(fields["rejected_by_reason"])
             snapshot[channel] = ChannelMessageStats(**fields)
         return snapshot
 

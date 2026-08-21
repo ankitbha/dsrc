@@ -895,19 +895,141 @@ def test_a_null_count_reports_a_null_reason_not_a_type_error():
     assert other.value.reason == "null_not_allowed"
 
 
-def test_the_encoder_refuses_a_fractional_count_rather_than_truncating_it():
-    """It used to coerce with int(), destroying the evidence before the decoder
-    could refuse it -- so a fractional count crossed the wire looking
-    legitimate while the decoder was documented as refusing one."""
-    message = a_telemetry(dropped={"camera": 2.7, "gps": 0, "imu": 0, "here": 0})
-    with pytest.raises(MessageError, match="expected int"):
-        message.to_wire()
+def test_to_wire_never_raises_so_a_caller_can_predict_it():
+    """A pure projection. It used to coerce counts with int(), and then to
+    validate them -- which made telemetry the one message whose encoder checked
+    anything, so a sender could still emit five messages its own decoder
+    refuses."""
+    for message in [
+        a_telemetry(dropped={"camera": 2.7, "gps": 0, "imu": 0, "here": 0}),
+        a_telemetry(here_calls=-3),
+        a_rate_command(rates={"camera_hz": 0.0, "gps_hz": 1.0, "imu_hz": 1.0, "here_hz": 1.0}),
+        an_advisory(units="furlongs"),
+        a_gps_record(lat=91.0),
+    ]:
+        extensions, payload = message.to_wire()
+        assert isinstance(extensions, dict)
+        # And no truncation on the way out: the value is carried as given, so
+        # the receiver refuses it rather than seeing a rounded one.
+    fractional = a_telemetry(dropped={"camera": 2.7, "gps": 0, "imu": 0, "here": 0})
+    assert fractional.to_wire()[0]["dropped"]["camera"] == 2.7
 
 
-def test_the_encoder_refuses_a_negative_count():
-    message = a_telemetry(here_calls=-3)
-    with pytest.raises(MessageError, match="outside"):
-        message.to_wire()
+SEND_REFUSALS = [
+    ("fractional count",
+     lambda: a_telemetry(dropped={"camera": 2.7, "gps": 0, "imu": 0, "here": 0}),
+     "wrong_type"),
+    ("negative count", lambda: a_telemetry(here_calls=-3), "out_of_range"),
+    ("zero rate",
+     lambda: a_rate_command(rates={"camera_hz": 0.0, "gps_hz": 1.0, "imu_hz": 1.0,
+                                   "here_hz": 1.0}),
+     "out_of_range"),
+    ("negative rate",
+     lambda: a_rate_command(rates={"camera_hz": -5.0, "gps_hz": 1.0, "imu_hz": 1.0,
+                                   "here_hz": 1.0}),
+     "out_of_range"),
+    ("rate above the ceiling",
+     lambda: a_rate_command(rates={"camera_hz": 5000.0, "gps_hz": 1.0, "imu_hz": 1.0,
+                                   "here_hz": 1.0}),
+     "out_of_range"),
+    ("bad units", lambda: an_advisory(units="furlongs"), "unknown_value"),
+    ("out-of-schema action",
+     lambda: an_advisory(action={"desired_speed_bin": "nominal",
+                                 "desired_headway_bin": "normal",
+                                 "lane_preference": "keep",
+                                 "merge_mode": "sideways"}),
+     "unknown_value"),
+    ("coordinate out of range on a valid fix", lambda: a_gps_record(lat=91.0),
+     "out_of_range"),
+]
+
+
+@pytest.mark.parametrize(
+    "label,build_bad,reason", SEND_REFUSALS, ids=[case[0] for case in SEND_REFUSALS]
+)
+def test_send_refuses_what_our_own_decoder_would_refuse(label, build_bad, reason):
+    """One rule for every message, not for the one whose encoder happened to
+    validate. A zero rate is the sharp case: the check beside it calls it
+    "applied as a period", and a sender used to learn about it as a silent drop
+    at the far end."""
+    from transport.messages import InvalidMessage
+
+    sender, receiver = quiet_pair()
+    router = MessageRouter(sender)
+    try:
+        with pytest.raises(InvalidMessage) as caught:
+            router.send(build_bad())
+        assert caught.value.reason == reason, f"{label}: got {caught.value.reason!r}"
+        stats = router.stats()[build_bad().CHANNEL]
+        assert stats.send_rejected == 1
+        assert stats.rejected_by_reason == {reason: 1}
+        # Nothing reached the wire.
+        assert receiver.stats().channels[build_bad().CHANNEL].received == 0
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_an_invalid_send_is_not_a_message_error():
+    """MessageError means the peer sent something bad and its idiom is
+    drop-and-count. A consumer wrapping send in that idiom would swallow its own
+    bug, so this is a separate type."""
+    from transport.messages import InvalidMessage
+
+    assert not issubclass(InvalidMessage, MessageError)
+    sender, receiver = quiet_pair()
+    try:
+        with pytest.raises(InvalidMessage):
+            MessageRouter(sender).send(a_telemetry(here_calls=-1))
+        try:
+            MessageRouter(sender).send(a_telemetry(here_calls=-1))
+        except MessageError:  # pragma: no cover - would mean the types merged
+            pytest.fail("InvalidMessage was caught as MessageError")
+        except InvalidMessage:
+            pass
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_our_own_rejections_are_counted_apart_from_the_peers():
+    """One is a bug here and one is a bug there; a summary adding them hides
+    both."""
+    from transport.messages import InvalidMessage
+
+    sender, receiver = quiet_pair()
+    out, back = MessageRouter(sender), MessageRouter(receiver)
+    try:
+        with pytest.raises(InvalidMessage):
+            out.send(a_telemetry(here_calls=-1))
+        bad, payload = an_imu_sample().to_wire()
+        del bad["az"]
+        sender.send(Channel.IMU, payload, bad)
+        assert wait_until(
+            lambda: back.recv(Channel.IMU, timeout=0.05) is None
+            and back.stats()[Channel.IMU].decode_errors == 1,
+            timeout=5.0,
+        )
+        assert out.stats()[Channel.TELEMETRY].send_rejected == 1
+        assert out.stats()[Channel.TELEMETRY].decode_errors == 0
+        assert back.stats()[Channel.IMU].decode_errors == 1
+        assert back.stats()[Channel.IMU].send_rejected == 0
+        json.dumps(out.to_record(), allow_nan=False)
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_a_valid_message_still_sends():
+    sender, receiver = quiet_pair()
+    out, back = MessageRouter(sender), MessageRouter(receiver)
+    try:
+        assert out.send(a_telemetry()) is True
+        assert back.recv(Channel.TELEMETRY, timeout=5.0) == a_telemetry()
+        assert out.stats()[Channel.TELEMETRY].send_rejected == 0
+    finally:
+        sender.close()
+        receiver.close()
 
 
 def test_a_fractional_drop_count_is_refused():
@@ -921,7 +1043,13 @@ def test_a_fractional_drop_count_is_refused():
 def test_the_router_refuses_a_reserved_key_when_sending():
     """The earlier test called check_reserved directly, so it passed whether or
     not send called it -- a test named "before sending" that did not test
-    sending."""
+    sending.
+
+    InvalidMessage, not MessageError: a reserved key is our own bug on the same
+    terms as an out-of-range rate, and two exception types for one mistake left
+    a caller to catch both.
+    """
+    from transport.messages import InvalidMessage
 
     class RogueMessage:
         CHANNEL = Channel.GPS
@@ -932,8 +1060,11 @@ def test_the_router_refuses_a_reserved_key_when_sending():
     left, _right = loopback_pair()
     session = Session(left, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
     try:
-        with pytest.raises(MessageError, match="reserved"):
-            MessageRouter(session).send(RogueMessage())
+        router = MessageRouter(session)
+        with pytest.raises(InvalidMessage, match="reserved") as caught:
+            router.send(RogueMessage())
+        assert caught.value.reason == "reserved_key"
+        assert router.stats()[Channel.GPS].rejected_by_reason == {"reserved_key": 1}
     finally:
         session.close()
 
@@ -1052,32 +1183,95 @@ def test_the_reason_vocabulary_is_closed():
 
 
 def test_every_reason_the_code_can_emit_is_in_the_vocabulary():
-    """The reverse direction of the spec check, which only walked REASONS."""
+    """The reverse direction of the spec check, which only walked REASONS.
+
+    Walks every construction site rather than only `raise MessageError(...)`:
+    binding it first and raising on the next line is the same defect and was
+    invisible, and `reason=` as a keyword is correct style that the positional
+    count rejected.
+    """
     import ast
+    import transport.messages as module
     from transport.messages import REASONS
 
     source = (REPO / "deployment" / "jetson" / "transport" / "messages.py").read_text()
     emitted = set()
+    sites = 0
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
-            if getattr(node.exc.func, "id", None) != "MessageError":
-                continue
-            assert len(node.exc.args) == 2, (
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "id", None) not in {"MessageError", "InvalidMessage"}:
+            continue
+        sites += 1
+        if len(node.args) >= 2:
+            given = node.args[1]
+        else:
+            keywords = {kw.arg: kw.value for kw in node.keywords}
+            assert "reason" in keywords, (
                 f"a MessageError at line {node.lineno} has no explicit reason"
             )
-            name = node.exc.args[1]
-            assert isinstance(name, ast.Name), f"line {node.lineno}: reason is not a constant"
-            emitted.add(name.id)
-    resolved = {getattr(__import__("transport.messages", fromlist=["x"]), n) for n in emitted}
+            given = keywords["reason"]
+        if isinstance(given, ast.Name):
+            emitted.add(given.id)
+        elif isinstance(given, ast.Attribute):  # exc.reason, re-raising another
+            continue
+        else:
+            raise AssertionError(f"line {node.lineno}: reason is not a named constant")
+    assert sites >= 10, f"only {sites} construction sites found; the walk stopped seeing them"
+    resolved = {getattr(module, name) for name in emitted}
     assert resolved <= set(REASONS), f"outside the vocabulary: {resolved - set(REASONS)}"
 
 
-def test_every_reason_in_the_vocabulary_is_documented_in_the_spec():
+def test_the_ast_walk_would_catch_a_reason_bound_before_it_is_raised():
+    """The test above is only worth its runtime if it sees the shape the old one
+    missed, so this hands it that shape directly."""
+    import ast
+
+    for source in [
+        "err = MessageError('x', 'typo_not_in_vocabulary')\nraise err",
+        "raise MessageError('x', reason='typo_not_in_vocabulary')",
+        "raise MessageError('x')",
+    ]:
+        found = [
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "MessageError"
+        ]
+        assert len(found) == 1, source
+
+
+def test_every_reason_in_the_vocabulary_has_a_row_in_the_refusal_table():
+    """Mentioned somewhere in the prose was the old bar, and two reasons had no
+    row at all under a sentence claiming every one did. A row is what a Kotlin
+    implementer reads to decide which reason to emit, so a row is the bar."""
     from transport.messages import REASONS
 
-    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    rows = [
+        line
+        for line in (REPO / "specs" / "transport_protocol.md").read_text().splitlines()
+        if line.startswith("|") and "dropped, counted" in line
+    ]
     for reason in REASONS:
-        assert f"`{reason}`" in text, reason
+        assert any(f"`{reason}`" in row for row in rows), f"{reason} has no refusal row"
+
+
+def test_the_spec_carries_the_numeric_bounds_the_code_enforces():
+    """Both could be halved in the spec with every test still green, which for a
+    cross-language contract means the other implementation reads the wrong
+    number and its messages are dropped here."""
+    from transport.messages import MAX_COUNT, MAX_RATE_HZ
+
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    assert f"(0, {MAX_RATE_HZ:g}]" in text, f"the rate ceiling {MAX_RATE_HZ:g} is not in the spec"
+    assert f"[0, {MAX_COUNT}]" in text, f"the count ceiling {MAX_COUNT} is not in the spec"
+
+
+def test_the_refusal_table_covers_every_documented_channel_object():
+    """The three nested objects and the strict action head are the parts a
+    reader is most likely to implement additively by accident."""
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    for phrase in ["nested object", "action", "reserved for the transport"]:
+        assert phrase in text, phrase
 
 
 def test_recv_honours_its_budget_across_skipped_messages():
@@ -1166,7 +1360,9 @@ def test_recv_returns_none_on_an_empty_queue_without_blocking():
     try:
         started = clock.monotonic()
         assert router.recv(Channel.IMU) is None
-        assert clock.monotonic() - started < 0.5
+        # Tight on purpose: at 0.5 s this passed with a 400 ms floor in
+        # place, which is not what "without blocking" means.
+        assert clock.monotonic() - started < 0.05
     finally:
         sender.close()
         receiver.close()
@@ -1175,22 +1371,36 @@ def test_recv_returns_none_on_an_empty_queue_without_blocking():
 def test_the_router_uses_the_injected_clock_for_its_budget():
     """One deadline, one clock. Using time.monotonic() while Session took an
     injectable one put the router's budget on real time and the session's on the
-    fake, so a test injecting a clock would have measured nothing."""
+    fake, so a test injecting a clock would have measured nothing.
+
+    A *frozen* clock cannot show that: the budget never expires under either
+    one, so the assertion held with mono_clock ignored. This clock jumps a
+    minute per call, which separates them by the whole timeout.
+    """
+    import time as clock
+
     sender, receiver = quiet_pair()
-    ticks = {"now": 0}
+    calls = {"n": 0}
 
-    def frozen_clock():
-        return ticks["now"]
+    def jumping_clock():
+        calls["n"] += 1
+        return calls["n"] * 60_000_000_000
 
-    router = MessageRouter(receiver, mono_clock=frozen_clock)
+    router = MessageRouter(receiver, mono_clock=jumping_clock)
     try:
-        # The clock never advances, so the budget never expires -- but the queue
-        # is empty, so the session's own timeout returns None. What this pins is
-        # that the router consults the injected clock at all.
-        assert router.recv(Channel.IMU, timeout=0.05) is None
+        # A generous budget on a clock that has already blown through it. The
+        # router must return at once; on time.monotonic() this call waits the
+        # full twenty seconds, so the bound below is not a timing guess.
+        started = clock.monotonic()
+        assert router.recv(Channel.IMU, timeout=20.0) is None
+        assert clock.monotonic() - started < 1.0, "the budget was measured on the wrong clock"
+        assert calls["n"] >= 2, "the injected clock was never consulted"
+
+        # And an expired budget still polls the queue once, so a message that is
+        # already waiting comes back rather than being skipped.
         MessageRouter(sender).send(an_imu_sample(accuracy=4))
         assert wait_until(lambda: receiver.pending(Channel.IMU) == 1, timeout=5.0)
-        message = router.recv(Channel.IMU, timeout=0.05)
+        message = router.recv(Channel.IMU, timeout=20.0)
         assert message is not None and message.accuracy == 4
     finally:
         sender.close()
