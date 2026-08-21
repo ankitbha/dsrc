@@ -1,7 +1,7 @@
 {
   "protocol_version": 1,
   "frozen": true,
-  "note": "Frozen cross-language encodings. Every implementation must encode each case to exactly these bytes and decode them back to these fields. Changing a byte here is a protocol change and needs a version bump.",
+  "note": "Frozen cross-language encodings, at two layers: frame cases pin the framing, message cases pin the typed field names and types. Every implementation must encode each case to exactly these bytes and decode them back to these fields. Changing a recorded byte is a protocol change and needs a version bump; ADDING a case is not, since it constrains nothing already agreed -- but because regeneration rewrites the whole file, a test checks every pre-existing case is byte-identical.",
   "payload_generator": "payload[i] = (i * 37 + 11) % 256",
   "byte_order": "big-endian",
   "header_encoding": "UTF-8 JSON object, keys sorted recursively, separators ',' and ':', no non-ASCII escaping, NaN and Infinity rejected",
@@ -198,6 +198,262 @@
       "header_len": 103,
       "frame_len": 109,
       "frame_sha256": "02725b320ae2259554385dbe3b6506f3f5aef20fbf8c174a87a2d10ba6672c48"
+    },
+    {
+      "name": "message_camera",
+      "why": "a camera frame: metadata in the header, JPEG untouched in the payload",
+      "frame": {
+        "ch": "camera",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000000,
+          "frame_id": 1841,
+          "width": 1280,
+          "height": 720,
+          "format": "jpeg",
+          "quality": 85
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 4096
+      },
+      "prefix_hex": "0000100000bd",
+      "header_hex": "7b226368223a2263616d657261222c22666f726d6174223a226a706567222c226672616d655f6964223a313834312c22686569676874223a3732302c226e223a343039362c227175616c697479223a38352c22736571223a312c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030302c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c227769647468223a313238307d",
+      "header_len": 189,
+      "frame_len": 4291,
+      "frame_sha256": "18de8a50af230a2d6021aab0c187ecb38b4998c480f0465b5f4d830479c57fc0"
+    },
+    {
+      "name": "message_gps_full",
+      "why": "a GPS fix with every field available",
+      "frame": {
+        "ch": "gps",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000001,
+          "valid": true,
+          "fix_quality": 1,
+          "num_sats": 9,
+          "lat": 51.5074,
+          "lon": -0.1278,
+          "speed_mps": 13.4,
+          "heading_deg": 91.2,
+          "hdop": 0.9,
+          "altitude_m": 35.0,
+          "utc_epoch_ns": 1755648000000000000
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "00000000011a",
+      "header_hex": "7b22616c7469747564655f6d223a33352e302c226368223a22677073222c226669785f7175616c697479223a312c2268646f70223a302e392c2268656164696e675f646567223a39312e322c226c6174223a35312e353037342c226c6f6e223a2d302e313237382c226e223a302c226e756d5f73617473223a392c22736571223a312c2273706565645f6d7073223a31332e342c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030312c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c227574635f65706f63685f6e73223a313735353634383030303030303030303030302c2276616c6964223a747275657d",
+      "header_len": 282,
+      "frame_len": 288,
+      "frame_sha256": "c808b323a252b2d62f54a192d9ec616890bd92e9d6995aab240a7c6dcbd7de47"
+    },
+    {
+      "name": "message_gps_all_null",
+      "why": "the null convention: every optional field unavailable, none absent",
+      "frame": {
+        "ch": "gps",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000002,
+          "valid": false,
+          "fix_quality": 0,
+          "num_sats": 0,
+          "lat": null,
+          "lon": null,
+          "speed_mps": null,
+          "heading_deg": null,
+          "hdop": null,
+          "altitude_m": null,
+          "utc_epoch_ns": null
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "000000000107",
+      "header_hex": "7b22616c7469747564655f6d223a6e756c6c2c226368223a22677073222c226669785f7175616c697479223a302c2268646f70223a6e756c6c2c2268656164696e675f646567223a6e756c6c2c226c6174223a6e756c6c2c226c6f6e223a6e756c6c2c226e223a302c226e756d5f73617473223a302c22736571223a312c2273706565645f6d7073223a6e756c6c2c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030322c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c227574635f65706f63685f6e73223a6e756c6c2c2276616c6964223a66616c73657d",
+      "header_len": 263,
+      "frame_len": 269,
+      "frame_sha256": "42f3fcbe6549d6fcb9b9a5c69c33488f3d07e6b935b0d52057914ba93eb694e0"
+    },
+    {
+      "name": "message_imu",
+      "why": "an IMU sample, the highest-rate message",
+      "frame": {
+        "ch": "imu",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000003,
+          "ax": 0.1,
+          "ay": -0.2,
+          "az": 9.79,
+          "gx": 0.01,
+          "gy": 0.0,
+          "gz": -0.02,
+          "accuracy": 3
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "0000000000b8",
+      "header_hex": "7b226163637572616379223a332c226178223a302e312c226179223a2d302e322c22617a223a392e37392c226368223a22696d75222c226778223a302e30312c226779223a302e302c22677a223a2d302e30322c226e223a302c22736571223a312c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030332c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030307d",
+      "header_len": 184,
+      "frame_len": 190,
+      "frame_sha256": "17c17b9358bf6cbbc9d0a9df518faa3c62711f0793e3871a747bdfb73e6cbcc5"
+    },
+    {
+      "name": "message_here",
+      "why": "a HERE response: our metadata in the header, their body opaque",
+      "frame": {
+        "ch": "here",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000004,
+          "request_url": "https://data.traffic.hereapi.com/v7/flow?in=circle:51.5,-0.12;r=1500",
+          "status": 200,
+          "content_type": "application/json",
+          "query_lat": 51.5,
+          "query_lon": -0.1278,
+          "query_radius_m": 1500.0,
+          "t_request_mono_ns": 999000000,
+          "t_response_mono_ns": 1000000004
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 512
+      },
+      "prefix_hex": "000002000172",
+      "header_hex": "7b226368223a2268657265222c22636f6e74656e745f74797065223a226170706c69636174696f6e2f6a736f6e222c226e223a3531322c2271756572795f6c6174223a35312e352c2271756572795f6c6f6e223a2d302e313237382c2271756572795f7261646975735f6d223a313530302e302c22726571756573745f75726c223a2268747470733a2f2f646174612e747261666669632e686572656170692e636f6d2f76372f666c6f773f696e3d636972636c653a35312e352c2d302e31323b723d31353030222c22736571223a312c22737461747573223a3230302c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030342c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f726571756573745f6d6f6e6f5f6e73223a3939393030303030302c22745f726573706f6e73655f6d6f6e6f5f6e73223a313030303030303030342c22745f77616c6c5f6e73223a313735353634383030303030303030303030307d",
+      "header_len": 370,
+      "frame_len": 888,
+      "frame_sha256": "cbd319cacd123ca8305e563bc196c67ff9f64dfb39e14545aeeb111f6dda4942"
+    },
+    {
+      "name": "message_advisory",
+      "why": "the advisory as the driver sees it, plus the machine-readable action",
+      "frame": {
+        "ch": "advisory",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000005,
+          "rec_speed_mps": 11.176,
+          "rec_speed_display": 25.0,
+          "current_speed_display": 27.5,
+          "units": "mph",
+          "headway_target_s": 1.6,
+          "lane_text": "Keep lane",
+          "merge_text": "Normal driving",
+          "traffic_text": "Moderate",
+          "confidence": 0.87,
+          "confidence_label": "high",
+          "action": {
+            "desired_speed_bin": "nominal",
+            "desired_headway_bin": "normal",
+            "lane_preference": "keep",
+            "merge_mode": "normal"
+          }
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "0000000001da",
+      "header_hex": "7b22616374696f6e223a7b22646573697265645f686561647761795f62696e223a226e6f726d616c222c22646573697265645f73706565645f62696e223a226e6f6d696e616c222c226c616e655f707265666572656e6365223a226b656570222c226d657267655f6d6f6465223a226e6f726d616c227d2c226368223a2261647669736f7279222c22636f6e666964656e6365223a302e38372c22636f6e666964656e63655f6c6162656c223a2268696768222c2263757272656e745f73706565645f646973706c6179223a32372e352c22686561647761795f7461726765745f73223a312e362c226c616e655f74657874223a224b656570206c616e65222c226d657267655f74657874223a224e6f726d616c2064726976696e67222c226e223a302c227265635f73706565645f646973706c6179223a32352e302c227265635f73706565645f6d7073223a31312e3137362c22736571223a312c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030352c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c22747261666669635f74657874223a224d6f646572617465222c22756e697473223a226d7068227d",
+      "header_len": 474,
+      "frame_len": 480,
+      "frame_sha256": "88056e2d9752919ba21636fc646d1de81d9a2cb6e26144debe8ae5cb9d33efb6"
+    },
+    {
+      "name": "message_rate_cmd",
+      "why": "a rate command, with the trigger that produced it and the shadow flag",
+      "frame": {
+        "ch": "rate_cmd",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000006,
+          "rates": {
+            "camera_hz": 5.0,
+            "gps_hz": 5.0,
+            "imu_hz": 50.0,
+            "here_hz": 0.5
+          },
+          "trigger": "advisory_bin_boundary",
+          "shadow": true
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "0000000000e8",
+      "header_hex": "7b226368223a22726174655f636d64222c226e223a302c227261746573223a7b2263616d6572615f687a223a352e302c226770735f687a223a352e302c22686572655f687a223a302e352c22696d755f687a223a35302e307d2c22736571223a312c22736861646f77223a747275652c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030362c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c2274726967676572223a2261647669736f72795f62696e5f626f756e64617279227d",
+      "header_len": 232,
+      "frame_len": 238,
+      "frame_sha256": "fc215c9a5202c0dde73e34213e24f40dcf418f982c4d986c088ff9b307d627fc"
+    },
+    {
+      "name": "message_telemetry",
+      "why": "phone telemetry: thermal is a constraint, energy is deliberately not",
+      "frame": {
+        "ch": "telemetry",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000007,
+          "thermal_status": "nominal",
+          "thermal_headroom": 0.42,
+          "achieved": {
+            "camera_hz": 9.9,
+            "gps_hz": 5.0,
+            "imu_hz": 49.8,
+            "here_hz": 0.5
+          },
+          "dropped": {
+            "camera": 3,
+            "gps": 0,
+            "imu": 0,
+            "here": 1
+          },
+          "here_calls": 30,
+          "here_errors": 1
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "00000000013f",
+      "header_hex": "7b226163686965766564223a7b2263616d6572615f687a223a392e392c226770735f687a223a352e302c22686572655f687a223a302e352c22696d755f687a223a34392e387d2c226368223a2274656c656d65747279222c2264726f70706564223a7b2263616d657261223a332c22677073223a302c2268657265223a312c22696d75223a307d2c22686572655f63616c6c73223a33302c22686572655f6572726f7273223a312c226e223a302c22736571223a312c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030372c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c22746865726d616c5f68656164726f6f6d223a302e34322c22746865726d616c5f737461747573223a226e6f6d696e616c227d",
+      "header_len": 319,
+      "frame_len": 325,
+      "frame_sha256": "827e57ef1904472c3ab9a823b38d290cf3e41ea9bf99750f5fb4011205b1b278"
     }
   ]
 }

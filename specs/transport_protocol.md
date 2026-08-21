@@ -270,6 +270,104 @@ frame delimiter to hunt for, so a desynchronized reader cannot find its place
 again; ending the session and letting the phone reconnect is the only correct
 response.
 
+## Messages
+
+Everything above moves bytes and assigns them no meaning. This section is the
+meaning: one message type per channel, which is why no message carries a `kind`
+field -- `ch` already says what it is.
+
+Two rules decide where a message's data goes:
+
+- **Small structured records ride in the header** as extension keys. That is
+  what an additive JSON header is for, and encoding a hundred-byte GPS fix twice
+  would be waste.
+- **Blobs ride in the payload**, untouched. A camera JPEG obviously; and HERE's
+  response body, which alone would exceed `MAX_HEADER_BYTES`.
+
+### Timestamps
+
+Every message carries `t_capture_mono_ns`: when its content came into being on
+the sending device -- shutter time for a frame, fix time for a GPS record,
+decision time for an advisory. It is the **same monotonic clock** as the
+header's `t_mono_ns`, which is enqueue time on that same device, so
+
+```text
+queueing latency = t_mono_ns - t_capture_mono_ns
+```
+
+is a valid subtraction. It is the only latency this protocol lets you compute
+without the offset estimate, and it is per-device: comparing a phone capture
+stamp with a Jetson one remains forbidden.
+
+### Unavailable values are `null`
+
+A field whose value is unknown is **present and `null`**. Never absent, and
+never a sentinel.
+
+Absent would conflate "the sensor said nothing" with "the sender is an older
+build that never had this field", and the phone app and Jetson runtime are
+deployed separately. A sentinel that is a legitimate value in some other unit is
+a silent-corruption source.
+
+**NaN and Infinity must never reach the wire.** `MAX_HEADER_BYTES`-level framing
+refuses them (see Frame Layout), because Python writes a bare `NaN` token that a
+strict parser elsewhere rejects. An encoder converts a non-finite value to
+`null` before framing; a decoder may map `null` back to NaN for an in-process
+type that uses it, and the round trip must be lossless in both directions.
+
+### The message set
+
+`t_capture_mono_ns` is required on all of them and omitted below.
+
+| channel | header fields | payload |
+|---|---|---|
+| `camera` | `frame_id`, `width`, `height`, `format`, `quality` | JPEG bytes |
+| `gps` | `valid`, `lat`, `lon`, `speed_mps`, `heading_deg`, `fix_quality`, `num_sats`, `hdop`, `altitude_m`, `utc_epoch_ns` | empty |
+| `imu` | `ax`, `ay`, `az`, `gx`, `gy`, `gz`, `accuracy` | empty |
+| `here` | `request_url`, `status`, `content_type`, `query_lat`, `query_lon`, `query_radius_m`, `t_request_mono_ns`, `t_response_mono_ns` | response body bytes |
+| `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `headway_target_s`, `lane_text`, `merge_text`, `traffic_text`, `confidence`, `confidence_label`, `action` | empty |
+| `rate_cmd` | `rates`, `trigger`, `shadow` | empty |
+| `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors` | empty |
+| `control` | owned by the transport: `hello`, `heartbeat` | empty |
+
+Nullable fields: every numeric field of `gps` except `valid`, `fix_quality` and
+`num_sats`; `quality` on `camera`; `accuracy` on `imu`; `thermal_headroom` on
+`telemetry`; `content_type` on `here`.
+
+`action` is an object with exactly the four v2 action heads, and their allowed
+values are the ones in `specs/action_schema.md`:
+
+```json
+{"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
+ "lane_preference": "keep", "merge_mode": "normal"}
+```
+
+`rates` and `achieved` are objects keyed `camera_hz`, `gps_hz`, `imu_hz`,
+`here_hz`. `dropped` is keyed `camera`, `gps`, `imu`, `here`. `units` is one of
+`mph`, `kmh`, `mps`. `shadow` is a boolean: whether the command was gated for
+real or only recorded.
+
+### A malformed message is not a malformed stream
+
+| condition | outcome |
+|---|---|
+| a required field absent | message dropped, counted |
+| a field of the wrong JSON type | message dropped, counted |
+| an action value outside the schema | message dropped, counted |
+| `units` not one of the three | message dropped, counted |
+| a rate `<= 0` or above its ceiling | message dropped, counted |
+| `lat`/`lon` out of range while `valid` | message dropped, counted |
+| a payload on a channel whose message carries none | message dropped, counted |
+
+The session stays open, and the drop is counted per channel and per reason.
+
+This is deliberately unlike a framing error, which ends the session. The
+difference is recoverability: a framing error means the byte stream has
+desynchronised and there is no delimiter to hunt for, so the reader can never
+find its place again. A message that framed correctly proves the stream is
+fine -- one bad record costs one record, and reconnecting the phone over a
+single malformed IMU sample at 50 Hz would be far worse than dropping it.
+
 ## Golden Vectors
 
 `specs/transport_golden_frames.json` holds the frozen encoding of a set of
@@ -278,7 +376,10 @@ and decode those bytes back to the recorded fields.
 
 The file is frozen. Changing any recorded byte is a protocol change and
 requires a `PROTOCOL_VERSION` bump, because an existing peer already agrees
-with the old bytes.
+with the old bytes. **Adding a case is not** -- it constrains nothing that was
+already agreed. Since the generator rewrites the whole file, a regeneration must
+be checked to have left every pre-existing case byte-identical, and a test does
+that rather than a habit.
 
 Cases cover: an empty payload; a typical JPEG-sized payload; a payload at
 `MAX_PAYLOAD_BYTES`; non-ASCII text in a header extension; an integer at the

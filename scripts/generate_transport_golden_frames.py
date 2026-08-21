@@ -24,6 +24,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "deployment" / "jetson"))
 
 from transport.channels import Channel  # noqa: E402
+from transport.messages import (  # noqa: E402
+    AdvisoryMessage,
+    CameraFrame,
+    GpsRecord,
+    HereResponse,
+    ImuSample,
+    PhoneTelemetry,
+    RateCommand,
+)
 from transport.frames import (  # noqa: E402
     HEARTBEAT_KEY,
     HELLO_KEY,
@@ -137,10 +146,118 @@ CASES = [
 ]
 
 
+# One case per typed message, so Kotlin is held to the same field names and
+# types as well as the same framing. Every one uses fixed values -- no clocks,
+# no randomness -- so the bytes are reproducible.
+MESSAGES = [
+    (
+        "message_camera",
+        "a camera frame: metadata in the header, JPEG untouched in the payload",
+        CameraFrame(
+            t_capture_mono_ns=1_000_000_000, frame_id=1841, width=1280, height=720,
+            format="jpeg", quality=85, jpeg=pattern_payload(4096),
+        ),
+    ),
+    (
+        "message_gps_full",
+        "a GPS fix with every field available",
+        GpsRecord(
+            t_capture_mono_ns=1_000_000_001, valid=True, fix_quality=1, num_sats=9,
+            lat=51.5074, lon=-0.1278, speed_mps=13.4, heading_deg=91.2, hdop=0.9,
+            altitude_m=35.0, utc_epoch_ns=1_755_648_000_000_000_000,
+        ),
+    ),
+    (
+        "message_gps_all_null",
+        "the null convention: every optional field unavailable, none absent",
+        GpsRecord(
+            t_capture_mono_ns=1_000_000_002, valid=False, fix_quality=0, num_sats=0,
+        ),
+    ),
+    (
+        "message_imu",
+        "an IMU sample, the highest-rate message",
+        ImuSample(
+            t_capture_mono_ns=1_000_000_003, ax=0.1, ay=-0.2, az=9.79,
+            gx=0.01, gy=0.0, gz=-0.02, accuracy=3,
+        ),
+    ),
+    (
+        "message_here",
+        "a HERE response: our metadata in the header, their body opaque",
+        HereResponse(
+            t_capture_mono_ns=1_000_000_004,
+            request_url="https://data.traffic.hereapi.com/v7/flow?in=circle:51.5,-0.12;r=1500",
+            status=200, content_type="application/json", query_lat=51.5,
+            query_lon=-0.1278, query_radius_m=1500.0,
+            t_request_mono_ns=999_000_000, t_response_mono_ns=1_000_000_004,
+            body=pattern_payload(512),
+        ),
+    ),
+    (
+        "message_advisory",
+        "the advisory as the driver sees it, plus the machine-readable action",
+        AdvisoryMessage(
+            t_capture_mono_ns=1_000_000_005, rec_speed_mps=11.176,
+            rec_speed_display=25.0, current_speed_display=27.5, units="mph",
+            headway_target_s=1.6, lane_text="Keep lane", merge_text="Normal driving",
+            traffic_text="Moderate", confidence=0.87, confidence_label="high",
+            action={
+                "desired_speed_bin": "nominal", "desired_headway_bin": "normal",
+                "lane_preference": "keep", "merge_mode": "normal",
+            },
+        ),
+    ),
+    (
+        "message_rate_cmd",
+        "a rate command, with the trigger that produced it and the shadow flag",
+        RateCommand(
+            t_capture_mono_ns=1_000_000_006,
+            rates={"camera_hz": 5.0, "gps_hz": 5.0, "imu_hz": 50.0, "here_hz": 0.5},
+            trigger="advisory_bin_boundary", shadow=True,
+        ),
+    ),
+    (
+        "message_telemetry",
+        "phone telemetry: thermal is a constraint, energy is deliberately not",
+        PhoneTelemetry(
+            t_capture_mono_ns=1_000_000_007, thermal_status="nominal",
+            thermal_headroom=0.42,
+            achieved={"camera_hz": 9.9, "gps_hz": 5.0, "imu_hz": 49.8, "here_hz": 0.5},
+            dropped={"camera": 3, "gps": 0, "imu": 0, "here": 1},
+            here_calls=30, here_errors=1,
+        ),
+    ),
+]
+
+
+def message_cases() -> list[dict]:
+    """Frames built from typed messages, appended to the frame-level cases."""
+    built = []
+    for name, why, message in MESSAGES:
+        extensions, payload = message.to_wire()
+        built.append(
+            {
+                "name": name,
+                "why": why,
+                "channel": message.CHANNEL,
+                "seq": 1,
+                "t_mono_ns": 1_100_000_000,
+                "t_wall_ns": 1_755_648_000_000_000_000,
+                "length": len(payload),
+                "extensions": extensions,
+                "payload_bytes": payload,
+            }
+        )
+    return built
+
+
 def build() -> dict:
     cases = []
-    for spec in CASES:
-        payload = pattern_payload(spec["length"])
+    for spec in CASES + message_cases():
+        payload = spec.get("payload_bytes")
+        if payload is None:
+            payload = pattern_payload(spec["length"])
         frame = Frame(
             channel=spec["channel"],
             seq=spec["seq"],
@@ -174,9 +291,13 @@ def build() -> dict:
         "protocol_version": PROTOCOL_VERSION,
         "frozen": True,
         "note": (
-            "Frozen cross-language encodings. Every implementation must encode each "
-            "case to exactly these bytes and decode them back to these fields. "
-            "Changing a byte here is a protocol change and needs a version bump."
+            "Frozen cross-language encodings, at two layers: frame cases pin the "
+            "framing, message cases pin the typed field names and types. Every "
+            "implementation must encode each case to exactly these bytes and decode "
+            "them back to these fields. Changing a recorded byte is a protocol change "
+            "and needs a version bump; ADDING a case is not, since it constrains "
+            "nothing already agreed -- but because regeneration rewrites the whole "
+            "file, a test checks every pre-existing case is byte-identical."
         ),
         "payload_generator": PATTERN_DESCRIPTION,
         "byte_order": "big-endian",
