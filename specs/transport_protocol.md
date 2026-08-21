@@ -343,9 +343,22 @@ values are the ones in `specs/action_schema.md`:
 ```
 
 `rates` and `achieved` are objects keyed `camera_hz`, `gps_hz`, `imu_hz`,
-`here_hz`. `dropped` is keyed `camera`, `gps`, `imu`, `here`. `units` is one of
-`mph`, `kmh`, `mps`. `shadow` is a boolean: whether the command was gated for
-real or only recorded.
+`here_hz`, with values in `(0, 1000]` Hz for `rates`. `dropped` is keyed
+`camera`, `gps`, `imu`, `here`, and its values are **integers** -- they are
+counts, and a fractional one is a bug in the sender rather than something to
+truncate. `units` is one of `mph`, `kmh`, `mps`. `shadow` is a boolean: whether
+the command was gated for real or only recorded.
+
+**These three nested objects are additive.** Every listed key must be present,
+and an unrecognised key is **ignored, not refused**. The sensor set will grow,
+and refusing an unknown key would break a rolling deploy in both directions at
+once -- a new sender's every command dropped by an old receiver, and an old
+sender's by a new one. Ignoring unknown keys is safe precisely because the known
+ones are required, so a misspelled key still surfaces as a missing key.
+
+`action` is the exception and is **strict**: exactly the four heads, no more and
+no fewer, because they are a closed set defined by `specs/action_schema.md`
+rather than an extensible list.
 
 ### A malformed message is not a malformed stream
 
@@ -355,11 +368,19 @@ real or only recorded.
 | a field of the wrong JSON type | message dropped, counted |
 | an action value outside the schema | message dropped, counted |
 | `units` not one of the three | message dropped, counted |
-| a rate `<= 0` or above its ceiling | message dropped, counted |
+| a rate outside `(0, 1000]` Hz | message dropped, counted |
 | `lat`/`lon` out of range while `valid` | message dropped, counted |
 | a payload on a channel whose message carries none | message dropped, counted |
+| a missing key in a nested object | message dropped, counted |
+| an extra head in `action` | message dropped, counted |
+| a non-integer value in `dropped` | message dropped, counted |
 
-The session stays open, and the drop is counted per channel and per reason.
+The session stays open, and the drop is counted per channel and per reason. The
+reasons are a closed vocabulary: `missing_field`, `wrong_type`,
+`null_not_allowed`, `non_finite`, `out_of_range`, `unknown_value`,
+`unexpected_payload`, `reserved_key`, `no_typed_message`. One number cannot
+answer whether four thousand drops were one bad field or four, which is the
+point of counting them at all.
 
 This is deliberately unlike a framing error, which ends the session. The
 difference is recoverability: a framing error means the byte stream has

@@ -31,7 +31,8 @@ in the opaque layer imports this one, and a test asserts it. That is what keeps
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Mapping
 
 from transport.channels import Channel
@@ -65,12 +66,42 @@ DROP_KEYS: tuple[str, ...] = ("camera", "gps", "imu", "here")
 MAX_RATE_HZ = 1000.0
 
 
+# The reason vocabulary. A single drop count cannot answer "were these four
+# thousand drops one bad field or four", which is the whole point of counting by
+# reason, so every refusal carries one of these.
+REASON_MISSING_FIELD = "missing_field"
+REASON_WRONG_TYPE = "wrong_type"
+REASON_NULL_NOT_ALLOWED = "null_not_allowed"
+REASON_NON_FINITE = "non_finite"
+REASON_OUT_OF_RANGE = "out_of_range"
+REASON_UNKNOWN_VALUE = "unknown_value"
+REASON_UNEXPECTED_PAYLOAD = "unexpected_payload"
+REASON_RESERVED_KEY = "reserved_key"
+REASON_NO_TYPED_MESSAGE = "no_typed_message"
+
+REASONS: tuple[str, ...] = (
+    REASON_MISSING_FIELD,
+    REASON_WRONG_TYPE,
+    REASON_NULL_NOT_ALLOWED,
+    REASON_NON_FINITE,
+    REASON_OUT_OF_RANGE,
+    REASON_UNKNOWN_VALUE,
+    REASON_UNEXPECTED_PAYLOAD,
+    REASON_RESERVED_KEY,
+    REASON_NO_TYPED_MESSAGE,
+)
+
+
 class MessageError(ValueError):
     """A frame that framed correctly but is not a valid message of its type.
 
     Not fatal to the session, unlike FramingError: framing succeeding proves the
     byte stream is still aligned, so one bad record costs one record.
     """
+
+    def __init__(self, message: str, reason: str = REASON_WRONG_TYPE) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 # -- the null convention -----------------------------------------------------
@@ -87,11 +118,18 @@ def to_wire_number(value: float | None) -> float | None:
 def from_wire_number(value: object, field: str) -> float | None:
     if value is None:
         return None
+    # bool before int: True is an int in Python, so {"speed_mps": true} would
+    # otherwise decode to 1.0 m/s.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise MessageError(f"{field} is {type(value).__name__}, expected a number or null")
+        raise MessageError(
+            f"{field} is {type(value).__name__}, expected a number or null",
+            REASON_WRONG_TYPE,
+        )
     number = float(value)
     if not math.isfinite(number):
-        raise MessageError(f"{field} is {number}, which must have been sent as null")
+        raise MessageError(
+            f"{field} is {number}, which must have been sent as null", REASON_NON_FINITE
+        )
     return number
 
 
@@ -105,35 +143,35 @@ def as_nan(value: float | None) -> float:
 
 def require(extensions: Mapping[str, Any], field: str) -> Any:
     if field not in extensions:
-        raise MessageError(f"missing {field}")
+        raise MessageError(f"missing {field}", REASON_MISSING_FIELD)
     return extensions[field]
 
 
 def require_int(extensions: Mapping[str, Any], field: str) -> int:
     value = require(extensions, field)
     if isinstance(value, bool) or not isinstance(value, int):
-        raise MessageError(f"{field} is {type(value).__name__}, expected int")
+        raise MessageError(f"{field} is {type(value).__name__}, expected int", REASON_WRONG_TYPE)
     return value
 
 
 def require_number(extensions: Mapping[str, Any], field: str) -> float:
     value = from_wire_number(require(extensions, field), field)
     if value is None:
-        raise MessageError(f"{field} must not be null")
+        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)
     return value
 
 
 def require_str(extensions: Mapping[str, Any], field: str) -> str:
     value = require(extensions, field)
     if not isinstance(value, str):
-        raise MessageError(f"{field} is {type(value).__name__}, expected str")
+        raise MessageError(f"{field} is {type(value).__name__}, expected str", REASON_WRONG_TYPE)
     return value
 
 
 def require_bool(extensions: Mapping[str, Any], field: str) -> bool:
     value = require(extensions, field)
     if not isinstance(value, bool):
-        raise MessageError(f"{field} is {type(value).__name__}, expected bool")
+        raise MessageError(f"{field} is {type(value).__name__}, expected bool", REASON_WRONG_TYPE)
     return value
 
 
@@ -145,30 +183,69 @@ def require_capture(extensions: Mapping[str, Any]) -> int:
     return require_int(extensions, CAPTURE_KEY)
 
 
+def _nested_object(extensions: Mapping[str, Any], field: str, keys: tuple[str, ...]) -> Mapping:
+    """A nested object with every known key present. Unknown keys are ignored.
+
+    Additive on purpose. `rates`, `achieved` and `dropped` describe a sensor set
+    that will grow -- the plan expects `telemetry` and `rate_cmd` to move -- and
+    refusing an unknown key would break a rolling deploy in both directions at
+    once: a new sender's every command dropped by an old receiver, and an old
+    sender's every command dropped by a new one. Ignoring unknown keys is safe
+    precisely because the known ones are required, so a typo still surfaces as a
+    missing key rather than passing silently.
+
+    `action` is different and stays strict: its heads are a closed set defined by
+    specs/action_schema.md, not an extensible list.
+    """
+    value = require(extensions, field)
+    if not isinstance(value, Mapping):
+        raise MessageError(
+            f"{field} is {type(value).__name__}, expected object", REASON_WRONG_TYPE
+        )
+    missing = [key for key in keys if key not in value]
+    if missing:
+        raise MessageError(f"{field} missing {', '.join(missing)}", REASON_MISSING_FIELD)
+    return value
+
+
 def require_mapping_of_numbers(
     extensions: Mapping[str, Any], field: str, keys: tuple[str, ...]
 ) -> dict[str, float]:
-    value = require(extensions, field)
-    if not isinstance(value, Mapping):
-        raise MessageError(f"{field} is {type(value).__name__}, expected object")
-    missing = [key for key in keys if key not in value]
-    if missing:
-        raise MessageError(f"{field} missing {', '.join(missing)}")
-    unexpected = [key for key in value if key not in keys]
-    if unexpected:
-        raise MessageError(f"{field} has unexpected {', '.join(sorted(unexpected))}")
+    value = _nested_object(extensions, field, keys)
     return {key: require_number(value, key) for key in keys}
+
+
+def require_mapping_of_ints(
+    extensions: Mapping[str, Any], field: str, keys: tuple[str, ...]
+) -> dict[str, int]:
+    """Counts, so integral. A fractional drop count is a bug in the sender, and
+    silently truncating it would make the round trip not field-for-field."""
+    value = _nested_object(extensions, field, keys)
+    counts: dict[str, int] = {}
+    for key in keys:
+        number = value[key]
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise MessageError(
+                f"{field}.{key} is {type(number).__name__}, expected int", REASON_WRONG_TYPE
+            )
+        counts[key] = number
+    return counts
 
 
 def check_no_payload(payload: bytes, channel: Channel) -> None:
     if payload:
-        raise MessageError(f"{channel.value} carries no payload, got {len(payload)} bytes")
+        raise MessageError(
+            f"{channel.value} carries no payload, got {len(payload)} bytes",
+            REASON_UNEXPECTED_PAYLOAD,
+        )
 
 
 def check_reserved(extensions: Mapping[str, Any]) -> None:
     clash = [key for key in extensions if key in RESERVED_EXTENSIONS]
     if clash:
-        raise MessageError(f"{', '.join(sorted(clash))} are reserved for the transport")
+        raise MessageError(
+            f"{', '.join(sorted(clash))} are reserved for the transport", REASON_RESERVED_KEY
+        )
 
 
 # -- the messages ------------------------------------------------------------
@@ -203,7 +280,9 @@ class CameraFrame:
     def from_wire(cls, extensions: Mapping[str, Any], payload: bytes) -> "CameraFrame":
         quality = require(extensions, "quality")
         if quality is not None and (isinstance(quality, bool) or not isinstance(quality, int)):
-            raise MessageError(f"quality is {type(quality).__name__}, expected int or null")
+            raise MessageError(
+                f"quality is {type(quality).__name__}, expected int or null", REASON_WRONG_TYPE
+            )
         return cls(
             t_capture_mono_ns=require_capture(extensions),
             frame_id=require_int(extensions, "frame_id"),
@@ -259,12 +338,14 @@ class GpsRecord:
         # allowed to carry whatever the receiver had, including nothing.
         if valid:
             if lat is None or not -90.0 <= lat <= 90.0:
-                raise MessageError(f"lat {lat} out of range on a valid fix")
+                raise MessageError(f"lat {lat} out of range on a valid fix", REASON_OUT_OF_RANGE)
             if lon is None or not -180.0 <= lon <= 180.0:
-                raise MessageError(f"lon {lon} out of range on a valid fix")
+                raise MessageError(f"lon {lon} out of range on a valid fix", REASON_OUT_OF_RANGE)
         utc = require(extensions, "utc_epoch_ns")
         if utc is not None and (isinstance(utc, bool) or not isinstance(utc, int)):
-            raise MessageError(f"utc_epoch_ns is {type(utc).__name__}, expected int or null")
+            raise MessageError(
+                f"utc_epoch_ns is {type(utc).__name__}, expected int or null", REASON_WRONG_TYPE
+            )
         return cls(
             t_capture_mono_ns=require_capture(extensions),
             valid=valid,
@@ -315,7 +396,10 @@ class ImuSample:
         if accuracy is not None and (
             isinstance(accuracy, bool) or not isinstance(accuracy, int)
         ):
-            raise MessageError(f"accuracy is {type(accuracy).__name__}, expected int or null")
+            raise MessageError(
+                f"accuracy is {type(accuracy).__name__}, expected int or null",
+                REASON_WRONG_TYPE,
+            )
         axes = {name: require_number(extensions, name) for name in ("ax", "ay", "az", "gx", "gy", "gz")}
         return cls(t_capture_mono_ns=require_capture(extensions), accuracy=accuracy, **axes)
 
@@ -377,7 +461,7 @@ class PhoneTelemetry:
     t_capture_mono_ns: int
     thermal_status: str
     achieved: dict[str, float]
-    dropped: dict[str, float]
+    dropped: dict[str, int]
     here_calls: int
     here_errors: int
     thermal_headroom: float | None = None
@@ -406,7 +490,7 @@ class PhoneTelemetry:
             thermal_status=require_str(extensions, "thermal_status"),
             thermal_headroom=optional_number(extensions, "thermal_headroom"),
             achieved=require_mapping_of_numbers(extensions, "achieved", RATE_KEYS),
-            dropped=require_mapping_of_numbers(extensions, "dropped", DROP_KEYS),
+            dropped=require_mapping_of_ints(extensions, "dropped", DROP_KEYS),
             here_calls=require_int(extensions, "here_calls"),
             here_errors=require_int(extensions, "here_errors"),
         )
@@ -453,16 +537,21 @@ class AdvisoryMessage:
         check_no_payload(payload, Channel.ADVISORY)
         units = require_str(extensions, "units")
         if units not in DISPLAY_UNITS:
-            raise MessageError(f"units {units!r} not one of {DISPLAY_UNITS}")
+            raise MessageError(f"units {units!r} not one of {DISPLAY_UNITS}", REASON_UNKNOWN_VALUE)
         action = require(extensions, "action")
         if not isinstance(action, Mapping):
-            raise MessageError(f"action is {type(action).__name__}, expected object")
+            raise MessageError(
+                f"action is {type(action).__name__}, expected object", REASON_WRONG_TYPE
+            )
         missing = [head for head in ACTION_HEADS if head not in action]
         if missing:
-            raise MessageError(f"action missing {', '.join(missing)}")
+            raise MessageError(f"action missing {', '.join(missing)}", REASON_MISSING_FIELD)
         unexpected = [head for head in action if head not in ACTION_HEADS]
         if unexpected:
-            raise MessageError(f"action has unexpected {', '.join(sorted(unexpected))}")
+            raise MessageError(
+                f"action has unexpected {', '.join(sorted(unexpected))}",
+                REASON_UNKNOWN_VALUE,
+            )
         for head in ACTION_HEADS:
             value = action[head]
             if value not in ACTION_VALUES[head]:
@@ -513,7 +602,9 @@ class RateCommand:
             # A non-positive rate would be applied as a period; an absurd one
             # would be a bug rather than a request.
             if not 0.0 < value <= MAX_RATE_HZ:
-                raise MessageError(f"rates.{key} is {value}, outside (0, {MAX_RATE_HZ}]")
+                raise MessageError(
+                    f"rates.{key} is {value}, outside (0, {MAX_RATE_HZ}]", REASON_OUT_OF_RANGE
+                )
         return cls(
             t_capture_mono_ns=require_capture(extensions),
             rates=rates,
@@ -547,7 +638,7 @@ def decode_message(channel: Channel, extensions: Mapping[str, Any], payload: byt
     """The channel is the discriminator; there is no `kind` field to consult."""
     message_type = MESSAGE_FOR_CHANNEL.get(channel)
     if message_type is None:
-        raise MessageError(f"{channel.value} carries no typed message")
+        raise MessageError(f"{channel.value} carries no typed message", REASON_NO_TYPED_MESSAGE)
     return message_type.from_wire(extensions, payload)
 
 
@@ -611,12 +702,16 @@ class ChannelMessageStats:
     delivered: int = 0
     decode_errors: int = 0
     last_error: str | None = None
+    # Per reason, because one number cannot answer "were these four thousand
+    # drops one bad field or four" -- which is the whole point of counting them.
+    errors_by_reason: dict[str, int] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
             "channel": self.channel.value,
             "delivered": self.delivered,
             "decode_errors": self.decode_errors,
+            "errors_by_reason": dict(sorted(self.errors_by_reason.items())),
             "last_error": self.last_error,
         }
 
@@ -645,27 +740,44 @@ class MessageRouter:
     def recv(self, channel: Channel, timeout: float | None = 0.0) -> Message | None:
         """The next decodable message, skipping and counting any that are not.
 
-        A bad record costs one record: the transport already proved the byte
-        stream is aligned by framing it, so there is nothing to resynchronise.
+        A bad record costs one record -- and one record's worth of the caller's
+        time budget, not a fresh copy of it. Passing the original timeout on
+        every skip made a stream of malformed messages block for an unbounded
+        multiple of what was asked: measured 6.9x on a 50 Hz channel with one
+        broken field, which is the shape a single bad phone build produces. The
+        remaining budget is tracked instead.
         """
         stats = self._stats[channel]
+        deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            received = self._session.recv(channel, timeout=timeout)
+            if deadline is None:
+                remaining: float | None = None
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+            received = self._session.recv(channel, timeout=remaining)
             if received is None:
                 return None
             try:
                 message = decode_message(channel, received.extensions, received.payload)
             except MessageError as exc:
                 stats.decode_errors += 1
+                stats.errors_by_reason[exc.reason] = (
+                    stats.errors_by_reason.get(exc.reason, 0) + 1
+                )
                 stats.last_error = str(exc)
                 continue
             stats.delivered += 1
             return message
 
     def stats(self) -> dict[Channel, ChannelMessageStats]:
-        return {
-            channel: ChannelMessageStats(**vars(stats)) for channel, stats in self._stats.items()
-        }
+        snapshot = {}
+        for channel, stats in self._stats.items():
+            fields = dict(vars(stats))
+            fields["errors_by_reason"] = dict(fields["errors_by_reason"])
+            snapshot[channel] = ChannelMessageStats(**fields)
+        return snapshot
 
     def to_record(self) -> dict[str, Any]:
         return {channel.value: stats.to_record() for channel, stats in self._stats.items()}

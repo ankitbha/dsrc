@@ -21,6 +21,7 @@ from transport.frames import FramingError, encode
 from transport.loopback import loopback_pair
 from transport.messages import (
     ACTION_HEADS,
+    RATE_KEYS,
     ACTION_VALUES,
     CAPTURE_KEY,
     DISPLAY_UNITS,
@@ -184,6 +185,51 @@ def test_every_optional_field_round_trips_as_null():
         assert roundtrip(message) == message, field
 
 
+def test_a_legitimate_zero_is_not_mistaken_for_absent():
+    """The other half of the null convention, and the half that had no test.
+
+    0, 0.0 and False are all falsy and all meaningful here: accuracy 0 is
+    Android's SENSOR_STATUS_UNRELIABLE, speed 0.0 is a stationary vehicle, and
+    shadow False is a command that actually gates. Any `if value:` where
+    `if value is None:` belongs turns each of them into "the phone said
+    nothing" -- exactly the conflation the null convention exists to prevent.
+    """
+    cases = [
+        (a_camera_frame(quality=0), "quality", 0),
+        (an_imu_sample(accuracy=0), "accuracy", 0),
+        (a_gps_record(valid=False, utc_epoch_ns=0), "utc_epoch_ns", 0),
+        (a_gps_record(valid=False, speed_mps=0.0), "speed_mps", 0.0),
+        (a_gps_record(valid=False, altitude_m=0.0), "altitude_m", 0.0),
+        (a_gps_record(valid=False, hdop=0.0), "hdop", 0.0),
+        (a_gps_record(valid=True, lat=0.0, lon=0.0), "lat", 0.0),
+        (a_telemetry(thermal_headroom=0.0), "thermal_headroom", 0.0),
+        (a_rate_command(shadow=False), "shadow", False),
+    ]
+    for message, field, expected in cases:
+        extensions, _payload = message.to_wire()
+        assert extensions[field] == expected, f"{field} was mangled on the way out"
+        assert extensions[field] is not None, f"{field} became null"
+        assert roundtrip(message) == message, field
+
+
+def test_a_zero_drop_count_survives():
+    message = a_telemetry(dropped={"camera": 0, "gps": 0, "imu": 0, "here": 0})
+    extensions, _ = message.to_wire()
+    assert extensions["dropped"] == {"camera": 0, "gps": 0, "imu": 0, "here": 0}
+    assert roundtrip(message) == message
+
+
+def test_as_nan_maps_only_none():
+    """as_nan(0.0) becoming NaN would turn a stationary vehicle into a GPS
+    outage for any consumer mapping a record back to a GpsFix."""
+    from transport.messages import as_nan
+
+    assert as_nan(0.0) == 0.0
+    assert as_nan(-0.0) == 0.0
+    assert math.isnan(as_nan(None))
+    assert as_nan(12.5) == 12.5
+
+
 def test_a_non_finite_value_becomes_null_rather_than_reaching_the_wire():
     """Framing refuses NaN deliberately -- Python writes a bare NaN token that a
     strict parser elsewhere rejects -- so the conversion has to happen here."""
@@ -313,6 +359,18 @@ def test_units_outside_the_three_are_refused():
         decode_message(Channel.ADVISORY, extensions, payload)
 
 
+@pytest.mark.parametrize("shadow", [True, False])
+def test_both_shadow_states_round_trip(shadow):
+    """The flag that distinguishes a command that gates from one that is merely
+    recorded. Pinned in one state only, a mutation encoding False as null would
+    drop every real command while every shadow one sailed through -- and task
+    30's comparison would then see only the shadow arm and read as clean."""
+    message = a_rate_command(shadow=shadow)
+    extensions, _ = message.to_wire()
+    assert extensions["shadow"] is shadow
+    assert roundtrip(message).shadow is shadow
+
+
 @pytest.mark.parametrize("units", DISPLAY_UNITS)
 def test_each_allowed_unit_is_accepted(units):
     assert roundtrip(an_advisory(units=units)).units == units
@@ -424,6 +482,10 @@ def test_the_bridge_works_against_the_real_gps_fix():
 
 
 def test_the_advisory_bridge_works_against_the_real_advisory():
+    # policy.advisory arrives by way of the actor runtime, which pulls numpy and
+    # torch. Guarded for the same reason the bridges are duck-typed: this suite
+    # has to run where those are absent, which is the whole argument.
+    pytest.importorskip("torch")
     from policy.advisory import Advisory
 
     advisory = Advisory(
@@ -447,42 +509,90 @@ def test_the_action_vocabulary_matches_the_vendored_sim_contract():
     """messages.py keeps its own copy so the transport stays stdlib-only and
     does not import policy. Three copies now exist -- src/, the vendored
     sim_contract, and this -- so equality is asserted rather than assumed."""
+    pytest.importorskip("numpy")
     from policy import sim_contract
 
     assert ACTION_VALUES == sim_contract.ACTION_VALUES
     assert ACTION_HEADS == sim_contract.ACTION_HEADS
 
 
-def test_the_action_vocabulary_matches_the_action_schema_spec():
+def spec_allowed_values(head: str) -> set[str]:
+    """The values under one head's `allowed values:` block, and no further.
+
+    Anchored to the block rather than to the next head: a window running to the
+    next head swept up three other heads' values, so the check passed with a
+    value listed under the wrong head -- which is precisely the drift it exists
+    to catch, since ACTION_VALUES is what the decoder validates against.
+    """
     text = (REPO / "specs" / "action_schema.md").read_text()
-    for head, values in ACTION_VALUES.items():
-        section = text.split(f"`{head}`", 1)
-        assert len(section) == 2, f"{head} is not documented"
-        body = section[1].split("`desired", 1)[0].split("## ", 1)[0]
-        for value in values:
-            assert f"`{value}`" in body, f"{head}: {value} missing from the spec"
+    after_head = text.split(f"`{head}`", 1)
+    assert len(after_head) == 2, f"{head} is not documented"
+    after_allowed = after_head[1].split("- allowed values:", 1)
+    assert len(after_allowed) == 2, f"{head} has no allowed-values block"
+    block = after_allowed[1].split("- meaning:", 1)[0]
+    return set(re.findall(r"^\s*-\s+`([\w_]+)`\s*$", block, re.M))
 
 
-def test_the_message_table_matches_the_protocol_spec():
-    """The spec is what Kotlin implements, so code and prose drifting apart is a
-    real failure -- the same check the channel table already gets."""
+@pytest.mark.parametrize("head", ACTION_HEADS)
+def test_the_action_vocabulary_matches_the_action_schema_spec(head):
+    """Set equality, both directions: a value in the code and not the spec would
+    accept an out-of-schema action, and one in the spec and not the code would
+    silently drop a legitimate one."""
+    assert spec_allowed_values(head) == set(ACTION_VALUES[head])
+
+
+def test_a_value_under_the_wrong_head_would_be_caught():
+    """The window really is narrow: no head's block contains another's values."""
+    blocks = {head: spec_allowed_values(head) for head in ACTION_HEADS}
+    for head, values in blocks.items():
+        others = set().union(*(v for h, v in blocks.items() if h != head))
+        leaked = values & (others - set(ACTION_VALUES[head]))
+        assert leaked == set(), f"{head}'s block leaks {sorted(leaked)}"
+
+
+SAMPLE_FOR_CHANNEL = {
+    Channel.CAMERA: a_camera_frame, Channel.GPS: a_gps_record,
+    Channel.IMU: an_imu_sample, Channel.HERE: a_here_response,
+    Channel.TELEMETRY: a_telemetry, Channel.ADVISORY: an_advisory,
+    Channel.RATE_CMD: a_rate_command,
+}
+
+
+def message_table_rows() -> dict[str, str]:
+    """The message table only. The channel-policy table earlier in the same file
+    matches the same row pattern, and a whole-file findall is last-wins, so the
+    section is sliced out first rather than relied on to come second."""
     text = (REPO / "specs" / "transport_protocol.md").read_text()
-    rows = dict(re.findall(r"^\| `(\w+)` \| (.+?) \|", text, re.M))
-    for channel, message_type in MESSAGE_FOR_CHANNEL.items():
-        assert channel.value in rows, f"{channel.value} has no message row"
-        documented = rows[channel.value]
-        # Every field the encoder emits, except the capture stamp, must appear.
-        sample = {
-            Channel.CAMERA: a_camera_frame, Channel.GPS: a_gps_record,
-            Channel.IMU: an_imu_sample, Channel.HERE: a_here_response,
-            Channel.TELEMETRY: a_telemetry, Channel.ADVISORY: an_advisory,
-            Channel.RATE_CMD: a_rate_command,
-        }[channel]()
-        extensions, _payload = sample.to_wire()
-        for field in extensions:
-            if field == CAPTURE_KEY:
-                continue
-            assert f"`{field}`" in documented, f"{channel.value}: {field} undocumented"
+    section = text.split("### The message set", 1)
+    assert len(section) == 2, "the message set section is missing"
+    body = section[1].split("### ", 1)[0]
+    return dict(re.findall(r"^\| `(\w+)` \| (.+?) \| .+ \|$", body, re.M))
+
+
+@pytest.mark.parametrize("channel", sorted(MESSAGE_FOR_CHANNEL, key=lambda c: c.value),
+                         ids=lambda c: c.value)
+def test_the_message_table_matches_the_encoder_in_both_directions(channel):
+    """Set equality. One-directional was blind to the spec listing a field the
+    code never sends, which is the direction that breaks Kotlin: absent is a
+    refusal condition here, so a documented-but-unsent field would have the
+    phone drop every message of that type."""
+    rows = message_table_rows()
+    assert channel.value in rows, f"{channel.value} has no message row"
+    documented = set(re.findall(r"`([\w_]+)`", rows[channel.value]))
+    extensions, _payload = SAMPLE_FOR_CHANNEL[channel]().to_wire()
+    emitted = {field for field in extensions if field != CAPTURE_KEY}
+    assert documented == emitted, (
+        f"{channel.value}: spec-only {sorted(documented - emitted)}, "
+        f"code-only {sorted(emitted - documented)}"
+    )
+
+
+def test_the_message_table_covers_every_typed_channel():
+    rows = message_table_rows()
+    assert {c.value for c in MESSAGE_FOR_CHANNEL} <= set(rows)
+
+
+
 
 
 # -- routing: a bad message is not a bad stream ------------------------------
@@ -573,7 +683,14 @@ def test_a_drop_on_one_channel_does_not_touch_another():
         extensions, payload = an_imu_sample().to_wire()
         del extensions["az"]
         sender.send(Channel.IMU, payload, extensions)
-        assert wait_until(lambda: router.recv(Channel.IMU, timeout=0.2) is None)
+        # Waits for the drop to be counted, not for "nothing arrived" -- which
+        # was also what the next assertion checks, so slow delivery failed the
+        # test rather than waiting for it.
+        assert wait_until(
+            lambda: (router.recv(Channel.IMU, timeout=0.05) is None)
+            and router.stats()[Channel.IMU].decode_errors == 1,
+            timeout=5.0,
+        )
         assert router.stats()[Channel.IMU].decode_errors == 1
         for channel in Channel:
             if channel is not Channel.IMU:
@@ -660,6 +777,180 @@ def test_the_message_layer_imports_nothing_outside_the_standard_library():
     including a Jetson with no model loaded and no pynmea2 in reach."""
     text = (REPO / "deployment" / "jetson" / "transport" / "messages.py").read_text()
     imports = re.findall(r"^\s*(?:from|import)\s+([\w.]+)", text, re.M)
-    allowed = {"__future__", "math", "dataclasses", "typing", "transport.channels",
-               "transport.frames"}
+    # Deliberately enumerated: a new import has to be added here on purpose,
+    # which is how this test caught `time` being introduced for the recv budget.
+    allowed = {"__future__", "math", "time", "dataclasses", "typing",
+               "transport.channels", "transport.frames"}
     assert set(imports) <= allowed, f"unexpected imports: {sorted(set(imports) - allowed)}"
+
+
+# -- the branches mutation showed were unpinned -------------------------------
+
+
+def test_a_boolean_is_not_accepted_where_a_number_is_required():
+    """True is an int, so {"speed_mps": true} would decode to 1.0 m/s. The int
+    path was guarded and tested; the number path was guarded and not."""
+    extensions, payload = a_gps_record(valid=False).to_wire()
+    extensions["speed_mps"] = True
+    with pytest.raises(MessageError, match="speed_mps"):
+        decode_message(Channel.GPS, extensions, payload)
+
+
+def test_the_capture_stamp_must_be_an_integer():
+    """The one field decision 8 makes mandatory on every message."""
+    for build in ALL_BUILDERS:
+        message = build()
+        extensions, payload = message.to_wire()
+        extensions[CAPTURE_KEY] = 1.5
+        with pytest.raises(MessageError, match=CAPTURE_KEY):
+            decode_message(message.CHANNEL, extensions, payload)
+
+
+@pytest.mark.parametrize("lat,lon", [(90.0, 180.0), (-90.0, -180.0), (90.0, -180.0)])
+def test_the_coordinate_bounds_are_inclusive(lat, lon):
+    """The poles and the antimeridian are real places."""
+    record = a_gps_record(lat=lat, lon=lon)
+    assert roundtrip(record) == record
+
+
+def test_a_nested_object_ignores_an_unknown_key_but_requires_the_known_ones():
+    """Additive on purpose: refusing an unknown key would break a rolling deploy
+    in both directions. Safe because the known keys are still required, so a
+    misspelling surfaces as a missing key."""
+    extensions, payload = a_rate_command().to_wire()
+    extensions["rates"]["lidar_hz"] = 20.0
+    decoded = decode_message(Channel.RATE_CMD, extensions, payload)
+    assert set(decoded.rates) == set(RATE_KEYS)
+
+    extensions, payload = a_rate_command().to_wire()
+    extensions["rates"]["camra_hz"] = extensions["rates"].pop("camera_hz")
+    with pytest.raises(MessageError, match="camera_hz"):
+        decode_message(Channel.RATE_CMD, extensions, payload)
+
+
+def test_a_fractional_drop_count_is_refused():
+    """A count, so integral; truncating it would make the round trip lie."""
+    extensions, payload = a_telemetry().to_wire()
+    extensions["dropped"]["camera"] = 2.7
+    with pytest.raises(MessageError, match="dropped.camera"):
+        decode_message(Channel.TELEMETRY, extensions, payload)
+
+
+def test_the_router_refuses_a_reserved_key_when_sending():
+    """The earlier test called check_reserved directly, so it passed whether or
+    not send called it -- a test named "before sending" that did not test
+    sending."""
+
+    class RogueMessage:
+        CHANNEL = Channel.GPS
+
+        def to_wire(self):
+            return {CAPTURE_KEY: 1, "heartbeat": True}, b""
+
+    left, _right = loopback_pair()
+    session = Session(left, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+    try:
+        with pytest.raises(MessageError, match="reserved"):
+            MessageRouter(session).send(RogueMessage())
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize(
+    "message",
+    [a_camera_frame(jpeg=b""), a_here_response(body=b"")],
+    ids=["camera", "here"],
+)
+def test_a_blob_channel_accepts_an_empty_payload(message):
+    """Acceptance criterion 1 asks for both an empty and a full payload."""
+    assert roundtrip(message) == message
+
+
+def test_drops_are_counted_by_reason():
+    """One number cannot answer whether four thousand drops were one bad field
+    or four."""
+    sender, receiver = quiet_pair()
+    router = MessageRouter(receiver)
+    try:
+        missing, payload = an_imu_sample().to_wire()
+        del missing["az"]
+        sender.send(Channel.IMU, payload, missing)
+
+        wrong_type, payload = an_imu_sample().to_wire()
+        wrong_type["ax"] = "not a number"
+        sender.send(Channel.IMU, payload, wrong_type)
+
+        out_of_range, payload = a_gps_record(lat=91.0).to_wire()
+        sender.send(Channel.GPS, payload, out_of_range)
+
+        assert wait_until(
+            lambda: router.recv(Channel.IMU, timeout=0.05) is None
+            and router.recv(Channel.GPS, timeout=0.05) is None
+            and router.stats()[Channel.IMU].decode_errors == 2
+            and router.stats()[Channel.GPS].decode_errors == 1,
+            timeout=5.0,
+        )
+        imu = router.stats()[Channel.IMU]
+        assert imu.errors_by_reason == {"missing_field": 1, "wrong_type": 1}
+        assert router.stats()[Channel.GPS].errors_by_reason == {"out_of_range": 1}
+        assert sum(imu.errors_by_reason.values()) == imu.decode_errors
+        json.dumps(router.to_record(), allow_nan=False)
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_every_reason_in_the_vocabulary_is_documented_in_the_spec():
+    from transport.messages import REASONS
+
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    for reason in REASONS:
+        assert f"`{reason}`" in text, reason
+
+
+def test_recv_honours_its_budget_across_skipped_messages():
+    """A bad record costs one record, and one record's worth of the caller's
+    time budget -- not a fresh copy of it. Malformed messages arriving slower
+    than the timeout used to restart it on every skip: 6.9x measured."""
+    import time as clock
+
+    sender, receiver = quiet_pair()
+    router = MessageRouter(receiver)
+    stop = threading.Event()
+
+    def dribble():
+        while not stop.is_set():
+            extensions, payload = an_imu_sample().to_wire()
+            del extensions["az"]
+            sender.send(Channel.IMU, payload, extensions)
+            stop.wait(0.02)
+
+    dribbler = threading.Thread(target=dribble, daemon=True)
+    dribbler.start()
+    try:
+        started = clock.monotonic()
+        assert router.recv(Channel.IMU, timeout=0.25) is None
+        elapsed = clock.monotonic() - started
+        assert elapsed < 0.75, f"a 0.25s budget took {elapsed:.2f}s"
+        assert router.stats()[Channel.IMU].decode_errors > 0
+    finally:
+        stop.set()
+        dribbler.join(timeout=3.0)
+        sender.close()
+        receiver.close()
+
+
+def test_recv_with_no_timeout_still_returns_a_message_after_skips():
+    sender, receiver = quiet_pair()
+    router = MessageRouter(receiver)
+    try:
+        bad, payload = an_imu_sample().to_wire()
+        del bad["az"]
+        sender.send(Channel.IMU, payload, bad)
+        MessageRouter(sender).send(an_imu_sample(accuracy=1))
+        message = router.recv(Channel.IMU, timeout=None)
+        assert message is not None and message.accuracy == 1
+        assert router.stats()[Channel.IMU].decode_errors == 1
+    finally:
+        sender.close()
+        receiver.close()

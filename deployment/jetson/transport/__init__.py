@@ -70,6 +70,7 @@ from transport.client import (
 from transport.loopback import LoopbackAcceptor, LoopbackConnection, loopback_pair
 from transport.messages import (
     ACTION_HEADS,
+    REASONS,
     ACTION_VALUES,
     CAPTURE_KEY,
     DISPLAY_UNITS,
@@ -112,6 +113,7 @@ from transport.session import (
 )
 
 __all__ = [
+    "REASONS",
     "gps_record_from_fix",
     "decode_message",
     "advisory_message_from_advisory",
