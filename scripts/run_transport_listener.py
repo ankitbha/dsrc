@@ -116,7 +116,15 @@ def main() -> int:
                     "applied_socket_options": getattr(
                         event.session._connection, "applied_options", None
                     ),
-                    "handshake_round_trip_ns": event.handshake.clock.round_trip_ns,
+                    # NOT the link round trip. Both sides stamp send-then-read,
+                    # but the dialler's read waits a full network round trip
+                    # while our hello arrives after theirs is already queued, so
+                    # this span is essentially local -- measured 0.3 ms here
+                    # against the client's 101.9 ms on the same session. The
+                    # client's figure is the one to use for link latency.
+                    "handshake_round_trip_ns_local_span": (
+                        event.handshake.clock.round_trip_ns
+                    ),
                     "remote_mono_ns": event.handshake.clock.t_remote_mono_ns,
                     "remote_wall_ns": event.handshake.clock.t_remote_wall_ns,
                 }

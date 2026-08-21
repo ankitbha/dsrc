@@ -168,8 +168,12 @@ def main() -> int:
     # still saw attempt failures worth having.
     connect_deadline = max(20.0, min(args.duration, 60.0))
     if client.wait_for_session(timeout=connect_deadline) is None:
-        failures = [e for e in client.drain_events() if isinstance(e, ClientAttemptFailed)]
+        # Stop first, then drain: an attempt failing between the drain and the
+        # stop was lost, so failed_attempts and the recorded list disagreed.
+        # The same ordering bug as the success path had, in the branch that was
+        # never exercised by a live run.
         client.stop()
+        failures = [e for e in client.drain_events() if isinstance(e, ClientAttemptFailed)]
         report = {
             "host": args.host,
             "port": args.port,
