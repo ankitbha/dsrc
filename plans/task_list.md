@@ -329,6 +329,9 @@ tunnels over USB and is unaffected.
     **DONE** — `transport/messages.py`, stdlib only, 639 transport tests (157 on
     this layer). Plan: `scratchpad/plan_task_14_wire_messages.md`; the contract
     Kotlin implements is the Messages section of `specs/transport_protocol.md`.
+    The two measurement harnesses ship as `scripts/run_message_exercise.py`
+    (loopback, header and validation audit) and `scripts/run_message_link.py`
+    (both roles over a real socket), so every number below can be re-run.
 
     Seven types over the eight channels, and **the channel is the discriminator**
     — there is no `kind` field to consult, so a message cannot claim to be
