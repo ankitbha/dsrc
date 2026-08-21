@@ -244,7 +244,82 @@ tunnels over USB and is unaffected.
     a read already in progress from another thread, or the handshake timeout
     leaks a thread per attempt (counted in `handshake_workers_leaked`, not
     prevented); and a write failure must surface as `OSError`.
-13. Network backend over Tailscale, for development with devices apart.
+13. ~~Network backend over Tailscale, for development with devices apart.~~
+    **DONE** — `transport/tcp.py` and `transport/client.py`, plus
+    `scripts/run_transport_listener.py` and `scripts/run_transport_client.py`
+    which replace the scratchpad tools task 12's experiment ran from. Plan:
+    `scratchpad/plan_task_13_network_backend.md`. 431 transport tests.
+
+    Both ends: the Jetson accepts, the phone dials, and a `SessionClient`
+    composes dial + handshake + `Session` with reconnection that never gives up.
+    Backoff 0.25 s doubling to a 5 s cap with ±25% jitter; the schedule resets
+    only after a session lasting `max(cap, stall × 2)`, derived so it cannot
+    coincide with the stall timeout — at the shipped 5 s it would have, and the
+    escalation would then never have engaged for the commonest failure in a car.
+
+    **Both seams now have conformance suites**, run against every backend, so
+    task 40's USB work inherits them: `ByteConnection` (13 checks × 2) and
+    `Acceptor` (9 × 2, added after the two implementations disagreed about what
+    `accept(timeout=0)` means). An accepted connection is also run through the
+    `ByteConnection` checks, because the two suites were disjoint and a USB
+    acceptor handing back a non-compliant connection would have passed
+    everything.
+
+    **Measured on the Jetson** (Linux 5.15.148-tegra aarch64, Python 3.10.12):
+    **431/431 pass**, identical to the Mac. That is the point of running it
+    there — two requirements were only ever verified as *call order* on macOS,
+    which releases a blocked `recv` on `close()` alone. On Linux:
+
+    ```text
+    blocking recv, close() only        never released (still blocked at 6 s)
+    blocking recv, shutdown()+close()  released in 0.001 s
+    ```
+
+    So `shutdown()` before `close()` is essential there, not belt-and-braces:
+    without it a session shutdown leaves its reader blocked forever. The
+    platforms disagree the *other* way on `accept`: macOS releases a blocking
+    accept but not a timed one, which ran its caller's full 5 s; Linux releases
+    both at once. The internal accept poll is what macOS needs and Linux does
+    not.
+
+    **Over the real Tailscale link**, Mac standing in for the phone, 60 s at
+    **428 KB/s (3.4 Mbps)**: every channel at its commanded rate, **zero drops,
+    zero sequence gaps**, round trip p50 27.8 ms / p95 71.7 ms / p99 280 ms,
+    and the client process flat at 27 fds and 11 threads sampled through the run
+    — the two per-attempt leaks validation found would have shown as a slope.
+    All four failure modes provoked and confirmed in the listener's own record:
+    version mismatch refused, `displaced`, `framing_error`, and `stalled` at
+    5.0 s. A **genuine half-open** — the client process frozen with SIGSTOP, so
+    the socket stays open with no FIN, no RST and no application data — was
+    reaped as `stalled`. That is the case the timer exists for and no unit test
+    can produce.
+
+    **The handshake-timeout question is settled: 5.0 s has roughly 50× margin.**
+    Client-side handshake round trip measured 21.5–101.9 ms across runs. Note
+    the *listener's* `handshake_round_trip_ns` is **not** the link round trip —
+    both sides stamp send-then-read, but the dialler's read waits a full round
+    trip while the listener's hello arrives after the client's is already
+    queued, so it read 0.3 ms against the client's 101.9 ms on the same session.
+    Renamed in the report accordingly.
+
+    **Validation: four rounds, 32 findings**, and the transferable part is that
+    the fix was right every time while *what trailed it moved outward each
+    round* — round 1 the evidence trailed the code, round 2 the observability
+    trailed the evidence, round 3 the consumers trailed the library, round 4 the
+    report trailed the question it was built to answer. Worth reading before
+    task 40: one silent peer could wedge the accept loop for a whole drive; a
+    retryable accept error killed the listener permanently while claiming it was
+    closed; a retry with no pause spun at 2.2 M calls/s; a nullable field
+    crashed the run report in exactly the interesting case; and a salvage I
+    added in round 3 created phantom sessions that inflated `connected` and
+    `reconnects`, so I reverted it.
+
+    **Still open, and a decision for later:** `ByteConnection` is one property
+    short. Twice this task wanted to ask a connection "are you still usable" —
+    once to avoid `recv_exact` masking a local close, once to avoid the phantom
+    session — and there is no way to. Adding `is_closed` to the protocol means
+    touching `connection.py` and `loopback.py`, which task 12 closed, so it is
+    raised rather than done.
 14. Wire protocol: sensor messages upstream, advisory and rate commands
     downstream, each carrying its own timestamps.
 15. Shared timebase with clock-offset estimation and drift tracking, so
