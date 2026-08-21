@@ -45,6 +45,14 @@ SENSOR_PLAN = {
 }
 
 
+def maybe_round(value, digits=3):
+    """retry_in_s is None whenever no retry will happen, so the report has to
+    tolerate that. It did not: round(None) raised and destroyed the entire run
+    report -- stdout empty, --out never written -- in exactly the case worth
+    recording, a client reconnecting when the clock ran out."""
+    return None if value is None else round(value, digits)
+
+
 def percentiles(values, points=(50, 95, 99)):
     if not values:
         return {f"p{point}": None for point in points}
@@ -144,7 +152,7 @@ def main() -> int:
             "failed_attempts": client.failed_attempts,
             "handshake_workers_leaked": client.handshake_workers_leaked,
             "attempt_failures": [
-                {"attempt": e.attempt, "error": e.error, "retry_in_s": round(e.retry_in_s, 3)}
+                {"attempt": e.attempt, "error": e.error, "retry_in_s": maybe_round(e.retry_in_s)}
                 for e in failures
             ],
         }
@@ -200,11 +208,16 @@ def main() -> int:
             {"session_id": e.session.session_id, "attempt": e.attempt} for e in sessions
         ],
         "sessions_ended": [
-            {"session_id": e.session_id, "reason": e.reason.value, "uptime_s": round(e.uptime_s, 2)}
+            {
+                "session_id": e.session_id,
+                "reason": e.reason.value,
+                "uptime_s": round(e.uptime_s, 2),
+                "retry_in_s": maybe_round(e.retry_in_s),
+            }
             for e in ended
         ],
         "attempt_failures": [
-            {"attempt": e.attempt, "error": e.error, "retry_in_s": round(e.retry_in_s, 3)}
+            {"attempt": e.attempt, "error": e.error, "retry_in_s": maybe_round(e.retry_in_s)}
             for e in failures
         ],
         "final_session": stats.to_record() if stats is not None else None,

@@ -829,12 +829,12 @@ class DeafLoopbackConnection:
     """
 
     peer = "deaf-loopback"
-    made: list["DeafLoopbackConnection"] = []
 
-    def __init__(self):
+    def __init__(self, registry=None):
         self._gate = threading.Event()
         self.closed = False
-        DeafLoopbackConnection.made.append(self)
+        if registry is not None:
+            registry.append(self)
 
     def send_all(self, data):
         return None
@@ -860,13 +860,14 @@ def test_an_abandoned_handshake_worker_is_counted_not_hidden():
     ten seconds: several hundred over a drive, with failed_attempts climbing
     normally the whole time."""
     before = {thread.name for thread in threading.enumerate()}
+    made: list[DeafLoopbackConnection] = []
     client = SessionClient(
         "jetson",
         1,
         local_hello=PHONE,
         backoff=Backoff(initial_s=0.01, multiplier=1.0, cap_s=0.01, jitter=0.0),
         handshake_timeout_s=0.1,
-        dial_fn=lambda host, port, timeout=None: DeafLoopbackConnection(),
+        dial_fn=lambda host, port, timeout=None: DeafLoopbackConnection(made),
         poll_s=0.01,
     ).start()
     try:
@@ -886,7 +887,7 @@ def test_an_abandoned_handshake_worker_is_counted_not_hidden():
     assert leaked, "the fixture did not actually leak a worker"
     # Released only after the assertion, so the leak is proved and then cleaned
     # up rather than left for another test to trip over.
-    for connection in DeafLoopbackConnection.made:
+    for connection in made:
         connection.release()
     assert wait_until(
         lambda: not [
@@ -1085,3 +1086,83 @@ def test_the_connection_being_handshaked_is_released_after_success():
         assert client._connecting is None, "the handshake reference was never cleared"
     finally:
         client.stop()
+
+
+class IgnoresClose:
+    """Honours the API and ignores close(), so a read outlives the timeout.
+
+    The only shape in which a completed handshake exists to be salvaged: with a
+    compliant backend the close ends the read and the late hello never arrives,
+    so there is nothing to discard and the timeout is simply correct.
+    """
+
+    peer = "ignores-close"
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def send_all(self, data):
+        self._inner.send_all(data)
+
+    def recv_exact(self, n):
+        return self._inner.recv_exact(n)
+
+    def close(self):
+        return None
+
+    def release(self):
+        self._inner.close()
+
+
+def test_a_handshake_completing_inside_the_grace_is_used_not_discarded():
+    """Narrow but free: on this backend the timeout expires, the close does not
+    release the reader, and the peer then answers inside the one-second grace.
+    Discarding that success would cost a reconnect and a displacement on the far
+    end, because on this side the timeout is the retry trigger."""
+    from transport.client import _handshake_with_timeout
+    from transport.clock import now_mono_ns, now_wall_ns
+
+    client_end, server_end = loopback_pair()
+    wrapped = IgnoresClose(client_end)
+
+    def answer_late():
+        try:
+            perform_handshake(server_end, JETSON)
+        except Exception:
+            pass
+
+    threading.Timer(0.2, answer_late).start()
+    try:
+        result = _handshake_with_timeout(
+            wrapped,
+            PHONE,
+            timeout_s=0.05,
+            mono_clock=now_mono_ns,
+            wall_clock=now_wall_ns,
+        )
+        assert result.remote.device_id == JETSON.device_id
+    finally:
+        wrapped.release()
+
+
+def test_a_compliant_backend_reports_the_timeout_rather_than_a_late_success():
+    """The counterpart, and the reason the finding that prompted the salvage
+    overstated itself: when close() is honoured, the read ends at the timeout
+    and the late hello never arrives. There is no discarded success."""
+    from transport.client import _handshake_with_timeout
+    from transport.clock import now_mono_ns, now_wall_ns
+    from transport.handshake import HandshakeError
+
+    client_end, server_end = loopback_pair()
+
+    def answer_late():
+        try:
+            perform_handshake(server_end, JETSON)
+        except Exception:
+            pass  # our side closed at the timeout; that is the point
+
+    threading.Timer(0.3, answer_late).start()
+    with pytest.raises(HandshakeError, match="no hello"):
+        _handshake_with_timeout(
+            client_end, PHONE, timeout_s=0.05, mono_clock=now_mono_ns, wall_clock=now_wall_ns
+        )

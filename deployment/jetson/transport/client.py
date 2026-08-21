@@ -152,9 +152,23 @@ def _handshake_with_timeout(
         # Closing is what releases the worker's blocked read.
         try:
             connection.close()
-        except Exception:
+        except BaseException:
             pass
         worker.join(1.0)
+        # A handshake that finished during the grace is a success, not a
+        # timeout. Discarding it was worse here than on the listener: there the
+        # timeout refuses one connection, but here the timeout IS the retry
+        # trigger, so a discarded success costs a reconnect and a displacement
+        # on the far end -- and on a path whose hello round trip sits near the
+        # timeout, every attempt succeeds, every one is thrown away, and the log
+        # says "no hello" for all of them.
+        if "result" in outcome:
+            return outcome["result"]  # type: ignore[return-value]
+        # Only a result is salvaged, never an error. Reaching this point means
+        # the worker was still blocked when we closed the connection, so any
+        # error it reports afterwards is our own close and not the peer's
+        # fault -- reporting it would replace the real cause, the timeout,
+        # with an artefact of handling it.
         if worker.is_alive():
             # A backend that does not honour the close-unblocks-read
             # requirement leaks a thread and a socket per attempt. The

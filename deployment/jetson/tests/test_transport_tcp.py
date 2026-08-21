@@ -623,8 +623,15 @@ def test_a_successful_accept_resets_the_consecutive_count(acceptor):
 
 
 def test_a_close_during_a_retry_ends_the_accept_cleanly(acceptor):
-    """The in-loop closed check: without it, a close() landing mid-retry
-    surfaces as an unclassified OSError rather than ConnectionClosed."""
+    """A close() landing mid-retry ends the accept as ConnectionClosed.
+
+    The outcome is delivered by the exception handler's own closed check, not by
+    the check at the top of the loop -- that one became redundant when
+    settimeout moved inside the guard, and no test can distinguish them. It is
+    kept as defence in depth, because the redundancy rests on CPython raising
+    EBADF from settimeout on a closed socket, which is an implementation detail
+    rather than a documented guarantee.
+    """
     import errno as errno_module
 
     acceptor._server = AlwaysFailingServer(OSError(errno_module.EMFILE, "injected"))
@@ -685,3 +692,72 @@ def test_a_settimeout_failure_while_open_propagates_as_an_oserror(acceptor):
     with pytest.raises(OSError) as caught:
         acceptor.accept(timeout=1.0)
     assert not isinstance(caught.value, ConnectionClosed)
+
+
+class SlowFailingServer(RecordingServerSocket):
+    """Burns most of the accept window, then fails -- which is what a real
+    accept that waits and then gets ECONNABORTED does."""
+
+    def __init__(self, delay, error, address=("127.0.0.1", 1)):
+        super().__init__(address)
+        self.delay = delay
+        self.error = error
+
+    def accept(self):
+        time.sleep(self.delay)
+        raise self.error
+
+
+@pytest.mark.parametrize("timeout,delay", [(0.05, 0.045), (0.10, 0.095)])
+def test_a_late_arriving_failure_still_respects_the_deadline(acceptor, timeout, delay):
+    """The pause was bounded against a `remaining` computed before accept()
+    blocked, so a failure arriving late in the window still overshot by a whole
+    pause -- 130% over a 50 ms deadline. The always-fails fixture cannot see
+    this, because it raises instantly and the stale clock is still fresh."""
+    import errno as errno_module
+
+    acceptor._server = SlowFailingServer(delay, OSError(errno_module.EMFILE, "injected"))
+    started = time.monotonic()
+    assert acceptor.accept(timeout=timeout) is None
+    overshoot = time.monotonic() - started - timeout
+    assert overshoot < 0.02, f"overshot a {timeout}s deadline by {overshoot:.3f}s"
+
+
+def test_the_error_span_is_recorded_not_just_the_high_water_mark(acceptor):
+    """The high water mark is per accept() call, so it reads as the caller's
+    poll interval divided by the pause -- the same number whether a storm
+    lasted 200 ms or four hours. The span carries the duration."""
+    import errno as errno_module
+
+    acceptor._server = AlwaysFailingServer(OSError(errno_module.EMFILE, "injected"))
+    acceptor.accept(timeout=0.2)
+    stats = acceptor.stats()
+    assert stats["first_accept_error_mono_ns"] is not None
+    assert stats["last_accept_error_mono_ns"] >= stats["first_accept_error_mono_ns"]
+    assert stats["accept_error_span_s"] >= 0.0
+    assert stats["accept_error_span_s"] < 1.0
+
+
+def test_stats_is_a_snapshot_and_does_not_race_the_accept_thread(acceptor):
+    """sorted() over the live dict raises if a key is inserted mid-iteration,
+    and a diagnostic that raises is worse than useless."""
+    import errno as errno_module
+
+    acceptor._server = AlwaysFailingServer(OSError(errno_module.EMFILE, "injected"))
+    stop = threading.Event()
+
+    def keep_failing():
+        while not stop.is_set():
+            try:
+                acceptor.accept(timeout=0.05)
+            except BaseException:
+                return
+
+    worker = threading.Thread(target=keep_failing, daemon=True)
+    worker.start()
+    try:
+        for _ in range(200):
+            acceptor.stats()  # must never raise
+    finally:
+        stop.set()
+        worker.join(timeout=3.0)

@@ -227,6 +227,9 @@ class TcpAcceptor:
         self.transient_accept_errors = 0
         self.accept_errors_by_errno: dict[int, int] = {}
         self.max_consecutive_accept_errors = 0
+        # A high water mark cannot carry duration; these can.
+        self.first_accept_error_mono_ns: int | None = None
+        self.last_accept_error_mono_ns: int | None = None
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -252,13 +255,29 @@ class TcpAcceptor:
         These numbers existed and nothing read them, which is how a listener
         that is alive and accepting nothing came to report perfect health.
         """
+        # Snapshotted before sorting: the accept thread can insert a key
+        # mid-iteration, and a diagnostic that raises is worse than useless.
+        by_errno = dict(self.accept_errors_by_errno)
         return {
             "address": list(self.address),
             "transient_accept_errors": self.transient_accept_errors,
+            # Per accept() call, so it reads as the caller's poll interval
+            # divided by the pause -- 4 at a 0.2 s poll whether the storm
+            # lasted 200 ms or four hours. Not a severity signal; the
+            # cumulative count and the timestamps below answer that.
             "max_consecutive_accept_errors": self.max_consecutive_accept_errors,
+            "first_accept_error_mono_ns": self.first_accept_error_mono_ns,
+            "last_accept_error_mono_ns": self.last_accept_error_mono_ns,
+            "accept_error_span_s": (
+                None
+                if self.first_accept_error_mono_ns is None
+                else round(
+                    (self.last_accept_error_mono_ns - self.first_accept_error_mono_ns) / 1e9, 3
+                )
+            ),
             "accept_errors_by_errno": {
                 errno.errorcode.get(code, str(code)): count
-                for code, count in sorted(self.accept_errors_by_errno.items())
+                for code, count in sorted(by_errno.items())
             },
         }
 
@@ -283,6 +302,7 @@ class TcpAcceptor:
         # failures inside one accept()", which is the useful reading and the
         # only one a local can carry.
         consecutive = 0
+        attempted = False
         while True:
             if self._closed:
                 raise ConnectionClosed("acceptor is closed")
@@ -290,14 +310,24 @@ class TcpAcceptor:
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return None
+                    if attempted:
+                        return None
+                    # timeout=0 means "poll now", not "do nothing":
+                    # LoopbackAcceptor checks its queue and returns a waiting
+                    # connection, and two backends behind one Acceptor protocol
+                    # must not disagree about that.
+                    remaining = 0.0
             try:
                 # settimeout is inside the guard so that a close() landing here
                 # is classified like any other socket failure rather than
                 # escaping as an unhandled OSError.
                 self._server.settimeout(remaining)
+                attempted = True
                 sock, address = self._server.accept()
             except TimeoutError:
+                return None
+            except BlockingIOError:
+                # settimeout(0) makes accept non-blocking; nothing waiting.
                 return None
             except OSError as exc:
                 if self._closed:
@@ -314,9 +344,17 @@ class TcpAcceptor:
                 self.max_consecutive_accept_errors = max(
                     self.max_consecutive_accept_errors, consecutive
                 )
+                now_ns = time.monotonic_ns()
+                if self.first_accept_error_mono_ns is None:
+                    self.first_accept_error_mono_ns = now_ns
+                self.last_accept_error_mono_ns = now_ns
                 pause = ACCEPT_TRANSIENT_PAUSE_S if transient else ACCEPT_RETRY_PAUSE_S
-                if remaining is not None:
-                    pause = min(pause, max(0.0, remaining))
+                if deadline is not None:
+                    # Against the clock now, not against the `remaining`
+                    # computed before accept() blocked: a failure arriving late
+                    # in the window otherwise still overshoots by a whole pause,
+                    # which measured 130% over a 50 ms deadline.
+                    pause = min(pause, max(0.0, deadline - time.monotonic()))
                 if pause > 0:
                     time.sleep(pause)
                 continue
