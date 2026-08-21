@@ -33,6 +33,7 @@ from __future__ import annotations
 import errno
 import socket
 import threading
+import time
 
 from transport.connection import ConnectionClosed
 
@@ -56,6 +57,20 @@ PEER_GONE_ERRNOS = frozenset(
         errno.ESHUTDOWN,
     }
 )
+
+
+# accept() failures that say nothing about the listening socket. ECONNABORTED is
+# what a client resetting between SYN and accept produces -- which is exactly
+# what an unbounded reconnect loop on a flaky link generates -- so treating it
+# as fatal would stop the Jetson accepting for the rest of a drive.
+ACCEPT_RETRY_ERRNOS = frozenset({errno.ECONNABORTED, errno.EINTR})
+
+# Local resource exhaustion. Also not fatal, but retrying flat out would spin,
+# so these pause first. They may clear on their own; the listening socket is
+# fine either way.
+ACCEPT_TRANSIENT_ERRNOS = frozenset({errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM})
+
+ACCEPT_TRANSIENT_PAUSE_S = 0.05
 
 
 def _translate(exc: OSError, context: str) -> BaseException:
@@ -200,6 +215,9 @@ class TcpAcceptor:
     ) -> None:
         self._recv_chunk_bytes = recv_chunk_bytes
         self._closed = False
+        # Retryable accept failures, counted so they are visible rather than
+        # silently absorbed.
+        self.transient_accept_errors = 0
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -220,25 +238,59 @@ class TcpAcceptor:
         return self.address[1]
 
     def accept(self, timeout: float | None = None) -> TcpConnection | None:
+        """A new connection, None on timeout, ConnectionClosed once closed.
+
+        Retryable failures are retried here rather than reported, because the
+        only caller is an accept loop that treats any error as terminal -- and
+        it lives in a module this task must not change. Converting every
+        OSError into ConnectionClosed was worse than useless: it claimed the
+        acceptor was closed when it was still listening, and one aborted
+        connection stopped the Jetson accepting for the rest of the drive.
+        """
         if self._closed:
             raise ConnectionClosed("acceptor is closed")
-        self._server.settimeout(timeout)
-        try:
-            sock, address = self._server.accept()
-        except TimeoutError:
-            return None
-        except OSError as exc:
-            raise ConnectionClosed(f"acceptor closed: {exc}") from None
-        return TcpConnection(
-            sock,
-            peer=f"{address[0]}:{address[1]}",
-            recv_chunk_bytes=self._recv_chunk_bytes,
-        )
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self._closed:
+                raise ConnectionClosed("acceptor is closed")
+            remaining = None
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+            self._server.settimeout(remaining)
+            try:
+                sock, address = self._server.accept()
+            except TimeoutError:
+                return None
+            except OSError as exc:
+                if self._closed:
+                    raise ConnectionClosed(f"acceptor closed: {exc}") from None
+                if exc.errno in ACCEPT_RETRY_ERRNOS:
+                    self.transient_accept_errors += 1
+                    continue
+                if exc.errno in ACCEPT_TRANSIENT_ERRNOS:
+                    self.transient_accept_errors += 1
+                    time.sleep(ACCEPT_TRANSIENT_PAUSE_S)
+                    continue
+                raise
+            return TcpConnection(
+                sock,
+                peer=f"{address[0]}:{address[1]}",
+                recv_chunk_bytes=self._recv_chunk_bytes,
+            )
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        # shutdown before close, for the same reason TcpConnection does it: on
+        # Linux, closing a socket does not release a thread already blocked on
+        # it, and LoopbackAcceptor does release a waiting accept.
+        try:
+            self._server.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self._server.close()
         except OSError:

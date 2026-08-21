@@ -30,7 +30,12 @@ from typing import Callable
 
 from transport.clock import MonoClock, WallClock, now_mono_ns, now_wall_ns
 from transport.connection import ByteConnection
-from transport.handshake import HandshakeResult, Hello, perform_handshake
+from transport.handshake import (
+    HandshakeError,
+    HandshakeResult,
+    Hello,
+    perform_handshake,
+)
 from transport.session import (
     DEFAULT_HEARTBEAT_S,
     DEFAULT_STALL_TIMEOUT_S,
@@ -102,6 +107,55 @@ class ClientGaveUp:
 ClientEvent = ClientSessionStarted | ClientSessionEnded | ClientAttemptFailed | ClientGaveUp
 
 
+def _handshake_with_timeout(
+    connection: ByteConnection,
+    local_hello: Hello,
+    *,
+    timeout_s: float | None,
+    mono_clock: MonoClock,
+    wall_clock: WallClock,
+) -> HandshakeResult:
+    """Handshake, but not forever.
+
+    dial's timeout covers only the TCP connect; the hello read that follows has
+    no clock behind it. A peer that accepts and then says nothing -- which is
+    exactly what a listener whose accept loop has died looks like -- would
+    otherwise wedge this thread permanently: never retrying, never counting an
+    attempt, never emitting an event, and holding stop() open. The listener
+    guards the mirror image of this case for the same stated reason.
+    """
+    if timeout_s is None:
+        return perform_handshake(
+            connection, local_hello, mono_clock=mono_clock, wall_clock=wall_clock
+        )
+
+    outcome: dict[str, object] = {}
+
+    def attempt() -> None:
+        try:
+            outcome["result"] = perform_handshake(
+                connection, local_hello, mono_clock=mono_clock, wall_clock=wall_clock
+            )
+        except BaseException as exc:
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=attempt, name="client-handshake", daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    if worker.is_alive():
+        # Closing is what releases the worker's blocked read.
+        try:
+            connection.close()
+        except Exception:
+            pass
+        worker.join(1.0)
+        raise HandshakeError(f"no hello from {connection.peer} within {timeout_s}s")
+    error = outcome.get("error")
+    if error is not None:
+        raise error
+    return outcome["result"]  # type: ignore[return-value]
+
+
 def connect_session(
     host: str,
     port: int = DEFAULT_PORT,
@@ -111,10 +165,12 @@ def connect_session(
     heartbeat_s: float | None = DEFAULT_HEARTBEAT_S,
     stall_timeout_s: float | None = DEFAULT_STALL_TIMEOUT_S,
     connect_timeout_s: float = CONNECT_TIMEOUT_S,
+    handshake_timeout_s: float | None = DEFAULT_STALL_TIMEOUT_S,
     mono_clock: MonoClock = now_mono_ns,
     wall_clock: WallClock = now_wall_ns,
     on_end: Callable[[Session, SessionEndReason], None] | None = None,
     dial_fn: Callable[..., ByteConnection] = dial,
+    on_connection: Callable[[ByteConnection | None], None] | None = None,
 ) -> tuple[Session, HandshakeResult]:
     """Dial, handshake, and return a started session.
 
@@ -123,29 +179,40 @@ def connect_session(
     what it opened rather than leaving a socket behind.
     """
     connection = dial_fn(host, port, timeout=connect_timeout_s)
+    # Handed over as soon as it exists, so a caller that wants to interrupt a
+    # handshake in progress has something to close. Cleared on the way out.
+    if on_connection is not None:
+        on_connection(connection)
+    session: Session | None = None
     try:
-        handshake = perform_handshake(
-            connection, local_hello, mono_clock=mono_clock, wall_clock=wall_clock
+        handshake = _handshake_with_timeout(
+            connection,
+            local_hello,
+            timeout_s=handshake_timeout_s,
+            mono_clock=mono_clock,
+            wall_clock=wall_clock,
         )
-    except BaseException:
-        connection.close()
-        raise
-
-    session = Session(
-        connection,
-        session_id=session_id,
-        heartbeat_s=heartbeat_s,
-        stall_timeout_s=stall_timeout_s,
-        mono_clock=mono_clock,
-        wall_clock=wall_clock,
-        on_end=on_end,
-    )
-    try:
+        # Constructed inside the guard, not between the two: a failure here
+        # left the socket open, and a guard around start() alone covered the
+        # call rather than the step.
+        session = Session(
+            connection,
+            session_id=session_id,
+            heartbeat_s=heartbeat_s,
+            stall_timeout_s=stall_timeout_s,
+            mono_clock=mono_clock,
+            wall_clock=wall_clock,
+            on_end=on_end,
+        )
         session.start()
     except BaseException:
-        session.close()
+        if session is not None:
+            session.close()
         connection.close()
         raise
+    finally:
+        if on_connection is not None:
+            on_connection(None)
     return session, handshake
 
 
@@ -168,6 +235,7 @@ class SessionClient:
         heartbeat_s: float | None = DEFAULT_HEARTBEAT_S,
         stall_timeout_s: float | None = DEFAULT_STALL_TIMEOUT_S,
         connect_timeout_s: float = CONNECT_TIMEOUT_S,
+        handshake_timeout_s: float | None = DEFAULT_STALL_TIMEOUT_S,
         mono_clock: MonoClock = now_mono_ns,
         wall_clock: WallClock = now_wall_ns,
         dial_fn: Callable[..., ByteConnection] = dial,
@@ -183,21 +251,32 @@ class SessionClient:
         self._heartbeat_s = heartbeat_s
         self._stall_timeout_s = stall_timeout_s
         self._connect_timeout_s = connect_timeout_s
+        self._handshake_timeout_s = handshake_timeout_s
         self._mono = mono_clock
         self._wall = wall_clock
         self._dial = dial_fn
         self._random_unit = random_unit
         self._max_attempts = max_attempts
         # A session has to last this long to count as durable enough to reset
-        # the schedule. Defaults to the cap, so a link that dies faster than
-        # the longest backoff keeps escalating instead of hammering.
-        self._reset_after_s = backoff.cap_s if reset_after_s is None else reset_after_s
+        # the schedule, so a link that dies quickly keeps escalating instead of
+        # hammering. Derived from the stall timeout rather than fixed at the
+        # backoff cap: those two were both 5.0 s, and a stalled session lasts
+        # exactly the stall timeout, so the modal failure in a car landed on
+        # the resetting side of a >= test and the escalation never engaged for
+        # it. Deriving means they cannot coincide again if either changes.
+        if reset_after_s is not None:
+            self._reset_after_s = reset_after_s
+        elif stall_timeout_s is None:
+            self._reset_after_s = backoff.cap_s
+        else:
+            self._reset_after_s = max(backoff.cap_s, stall_timeout_s * 2.0)
         self._poll_s = poll_s
 
         self._session_ids = itertools.count(1)
         self._events: Queue[ClientEvent] = Queue()
         self._lock = threading.Lock()
         self._current: Session | None = None
+        self._connecting: ByteConnection | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.connected = 0
@@ -215,8 +294,18 @@ class SessionClient:
         self._stop.set()
         with self._lock:
             session = self._current
+            connecting = self._connecting
         if session is not None:
             session.close(SessionEndReason.CLOSED_LOCAL)
+        # A handshake in progress is not interruptible by the flag: its worker
+        # is blocked on a read. Closing the connection is what releases it, and
+        # without this stop() returns while that thread is still waiting out
+        # the handshake timeout.
+        if connecting is not None:
+            try:
+                connecting.close()
+            except Exception:
+                pass
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=timeout)
 
@@ -254,6 +343,10 @@ class SessionClient:
                 return events
             events.append(event)
 
+    def _note_connecting(self, connection: ByteConnection | None) -> None:
+        with self._lock:
+            self._connecting = connection
+
     # -- the loop --------------------------------------------------------
 
     def _maintain(self) -> None:
@@ -262,6 +355,7 @@ class SessionClient:
             attempt += 1
             if self._max_attempts is not None and attempt > self._max_attempts:
                 self._events.put(ClientGaveUp(attempts=attempt - 1))
+                self._stop.set()
                 return
             try:
                 session, handshake = connect_session(
@@ -272,9 +366,11 @@ class SessionClient:
                     heartbeat_s=self._heartbeat_s,
                     stall_timeout_s=self._stall_timeout_s,
                     connect_timeout_s=self._connect_timeout_s,
+                    handshake_timeout_s=self._handshake_timeout_s,
                     mono_clock=self._mono,
                     wall_clock=self._wall,
                     dial_fn=self._dial,
+                    on_connection=self._note_connecting,
                 )
             except Exception as exc:
                 delay = self._backoff.delay_for(attempt, self._random_unit())

@@ -203,3 +203,64 @@ def test_writing_after_a_local_close_raises_connection_closed(pair):
     pair.a.close()
     with pytest.raises(ConnectionClosed):
         pair.a.send_all(b"x")
+
+
+# -- requirement 2, by mechanism rather than by outcome ---------------------
+
+
+class RecordingSocket:
+    """Records the order of shutdown and close calls."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def settimeout(self, timeout):
+        return None
+
+    def setsockopt(self, *args):
+        return None
+
+    def shutdown(self, how):
+        self.calls.append("shutdown")
+
+    def close(self):
+        self.calls.append("close")
+
+    def recv(self, n):  # pragma: no cover - not exercised here
+        raise AssertionError("not expected")
+
+    def sendall(self, data):  # pragma: no cover
+        raise AssertionError("not expected")
+
+
+def test_close_shuts_the_socket_down_before_closing_it():
+    """Asserted as a mechanism, because the outcome cannot discriminate here.
+
+    macOS and BSD wake a blocked recv when the fd is closed; Linux does not.
+    So on this machine a close() that skipped shutdown() would still release
+    the reader -- down a different path, with a different exception -- and an
+    outcome test would pass while the Jetson abandoned a thread per handshake
+    timeout. The Linux evidence comes from running this suite on the Jetson.
+    """
+    from transport.tcp import TcpConnection
+
+    recorder = RecordingSocket()
+    connection = TcpConnection(recorder, peer="recorded", set_options=False)
+    connection.close()
+    assert recorder.calls == ["shutdown", "close"], recorder.calls
+
+
+def test_close_still_closes_when_shutdown_is_refused():
+    """A socket already torn down by the peer refuses shutdown; the fd still
+    has to be released."""
+    from transport.tcp import TcpConnection
+
+    class RefusingShutdown(RecordingSocket):
+        def shutdown(self, how):
+            self.calls.append("shutdown-failed")
+            raise OSError(57, "socket is not connected")
+
+    recorder = RefusingShutdown()
+    connection = TcpConnection(recorder, peer="recorded", set_options=False)
+    connection.close()
+    assert recorder.calls == ["shutdown-failed", "close"], recorder.calls

@@ -21,6 +21,8 @@ from transport.endpoint import SessionEnded, SessionStarted, TransportListener
 from transport.handshake import Hello, Role, perform_handshake
 from transport.session import Session, SessionEndReason
 from transport.tcp import (
+    ACCEPT_RETRY_ERRNOS,
+    ACCEPT_TRANSIENT_ERRNOS,
     DEFAULT_PORT,
     PEER_GONE_ERRNOS,
     TcpAcceptor,
@@ -28,6 +30,7 @@ from transport.tcp import (
     apply_socket_options,
     dial,
 )
+from transport.tcp import _translate
 
 JETSON = Hello(device_id="jetson-orin", role=Role.JETSON)
 PHONE = Hello(device_id="mac-standing-in-for-phone", role=Role.PHONE)
@@ -77,8 +80,17 @@ def test_the_default_port_is_distinct_from_the_v2v_beacon():
 
 
 def test_accept_returns_none_on_timeout(acceptor):
+    """Bounded on a worker: a regression here would otherwise block forever and
+    a hung suite names no test."""
+    outcome: list[object] = []
     started = time.monotonic()
-    assert acceptor.accept(timeout=0.2) is None
+    worker = threading.Thread(
+        target=lambda: outcome.append(acceptor.accept(timeout=0.2)), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=5.0)
+    assert not worker.is_alive(), "accept did not return within 5s of a 0.2s timeout"
+    assert outcome == [None]
     assert time.monotonic() - started >= 0.15
 
 
@@ -157,6 +169,23 @@ def test_nodelay_is_actually_set_on_a_dialled_connection(acceptor):
         server.close()
 
 
+def test_a_dialled_socket_has_no_read_deadline():
+    """create_connection leaves the connect timeout on the socket. Without the
+    reset, every session inherits a read deadline equal to the connect timeout:
+    an idle link dies as transport_error instead of stalled, and sendall can
+    fail mid-write."""
+    acceptor = TcpAcceptor("127.0.0.1", 0)
+    client = dial("127.0.0.1", acceptor.port, timeout=0.3)
+    server = acceptor.accept(timeout=5.0)
+    try:
+        assert client._sock.gettimeout() is None
+        assert server._sock.gettimeout() is None
+    finally:
+        client.close()
+        server.close()
+        acceptor.close()
+
+
 def test_options_can_be_skipped():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     connection = TcpConnection(sock, peer="unset", set_options=False)
@@ -204,14 +233,127 @@ def test_a_reset_ends_a_session_as_peer_closed(acceptor):
         session.close()
 
 
-def test_every_mapped_errno_is_a_peer_gone_condition():
+def test_the_mapped_errno_set_is_exactly_the_confirmed_list():
+    """A signed-off parameter, so the whole set is pinned. Three of the five
+    could previously be deleted with the suite green, because only the two with
+    behavioural tests were named here."""
     import errno as errno_module
 
-    assert errno_module.ECONNRESET in PEER_GONE_ERRNOS
-    assert errno_module.EPIPE in PEER_GONE_ERRNOS
-    # A local resource failure must not be mistaken for the peer leaving.
-    assert errno_module.ENOBUFS not in PEER_GONE_ERRNOS
-    assert errno_module.EHOSTUNREACH not in PEER_GONE_ERRNOS
+    assert PEER_GONE_ERRNOS == frozenset(
+        {
+            errno_module.ECONNRESET,
+            errno_module.EPIPE,
+            errno_module.ECONNABORTED,
+            errno_module.ENOTCONN,
+            errno_module.ESHUTDOWN,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["ECONNRESET", "EPIPE", "ECONNABORTED", "ENOTCONN", "ESHUTDOWN"],
+)
+def test_a_peer_gone_errno_becomes_connection_closed(code):
+    import errno as errno_module
+
+    number = getattr(errno_module, code)
+    translated = _translate(OSError(number, "injected"), "recv")
+    assert isinstance(translated, ConnectionClosed), (code, translated)
+
+
+@pytest.mark.parametrize("code", ["ENOBUFS", "EHOSTUNREACH", "ENOMEM", "EACCES"])
+def test_a_local_failure_stays_an_oserror(code):
+    """Otherwise a Jetson out of buffers would look exactly like the phone
+    hanging up, and transport_error would stop meaning anything."""
+    import errno as errno_module
+
+    number = getattr(errno_module, code)
+    translated = _translate(OSError(number, "injected"), "send")
+    assert not isinstance(translated, ConnectionClosed)
+    assert isinstance(translated, OSError)
+
+
+def test_retryable_accept_errnos_are_disjoint_from_fatal_ones():
+    import errno as errno_module
+
+    assert errno_module.ECONNABORTED in ACCEPT_RETRY_ERRNOS
+    assert errno_module.EINTR in ACCEPT_RETRY_ERRNOS
+    assert errno_module.EMFILE in ACCEPT_TRANSIENT_ERRNOS
+    assert not (ACCEPT_RETRY_ERRNOS & ACCEPT_TRANSIENT_ERRNOS)
+
+
+class FlakyServerSocket:
+    """Wraps the listening socket and fails the first `failures` accepts."""
+
+    def __init__(self, inner, error, failures=1):
+        self._inner = inner
+        self._error = error
+        self.remaining = failures
+
+    def accept(self):
+        if self.remaining > 0:
+            self.remaining -= 1
+            raise self._error
+        return self._inner.accept()
+
+    def settimeout(self, timeout):
+        self._inner.settimeout(timeout)
+
+    def shutdown(self, how):
+        self._inner.shutdown(how)
+
+    def close(self):
+        self._inner.close()
+
+    def getsockname(self):
+        return self._inner.getsockname()
+
+
+@pytest.mark.parametrize(
+    "code", ["ECONNABORTED", "EINTR", "EMFILE"], ids=["ECONNABORTED", "EINTR", "EMFILE"]
+)
+def test_a_retryable_accept_failure_does_not_kill_the_acceptor(acceptor, code):
+    """The only caller is an accept loop that treats any error as terminal, and
+    it lives in a module this task must not change. ECONNABORTED is what a
+    client resetting between SYN and accept produces -- the traffic an
+    unbounded reconnect loop on a flaky link generates -- so one occurrence
+    used to stop the Jetson accepting for the rest of the drive."""
+    import errno as errno_module
+
+    acceptor._server = FlakyServerSocket(
+        acceptor._server, OSError(getattr(errno_module, code), "injected")
+    )
+    client = dial("127.0.0.1", acceptor.port)
+    try:
+        accepted = acceptor.accept(timeout=5.0)
+        assert accepted is not None, "a retryable failure was treated as fatal"
+        assert acceptor.transient_accept_errors == 1
+        client.send_all(b"ping")
+        assert accepted.recv_exact(4) == b"ping"
+        accepted.close()
+    finally:
+        client.close()
+
+
+def test_a_fatal_accept_failure_still_propagates_as_an_oserror(acceptor):
+    """Retrying everything would hide a real fault behind an infinite loop."""
+    acceptor._server = FlakyServerSocket(acceptor._server, OSError(9, "bad file descriptor"))
+    with pytest.raises(OSError) as caught:
+        acceptor.accept(timeout=1.0)
+    assert not isinstance(caught.value, ConnectionClosed)
+
+
+def test_a_retry_respects_the_accept_deadline(acceptor):
+    """The retry loop must not outlive the timeout it was given."""
+    import errno as errno_module
+
+    acceptor._server = FlakyServerSocket(
+        acceptor._server, OSError(errno_module.ECONNABORTED, "injected"), failures=10_000
+    )
+    started = time.monotonic()
+    assert acceptor.accept(timeout=0.3) is None
+    assert time.monotonic() - started < 3.0
 
 
 # -- the whole transport over a real socket ----------------------------------
