@@ -34,6 +34,35 @@ PHONE = Hello(device_id="mac-standing-in-for-phone", role=Role.PHONE)
 JETSON = Hello(device_id="jetson-orin", role=Role.JETSON)
 
 
+def assert_closed(connection, timeout=3.0):
+    """Bounded: `pytest.raises` around a blocking read hangs rather than fails
+    if the connection is still open, and a hung suite names no test."""
+    outcome: list[str] = []
+
+    def probe():
+        try:
+            connection.recv_exact(1)
+            outcome.append("open")
+        except ConnectionClosed:
+            outcome.append("closed")
+
+    worker = threading.Thread(target=probe, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    assert outcome == ["closed"], f"connection not closed ({outcome or 'read still blocked'})"
+
+
+def open_descriptor_count():
+    import os
+
+    for path in ("/proc/self/fd", "/dev/fd"):
+        try:
+            return len(os.listdir(path))
+        except OSError:
+            continue
+    return None
+
+
 def wait_until(predicate, timeout=5.0, interval=0.01):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -160,8 +189,7 @@ def test_a_handshake_failure_closes_the_connection_it_opened():
     with pytest.raises(VersionMismatch):
         connect_session("jetson", 1, local_hello=PHONE, dial_fn=dialer)
     assert len(dialer.connections) == 1
-    with pytest.raises(ConnectionClosed):
-        dialer.connections[0].recv_exact(1)
+    assert_closed(dialer.connections[0])
 
 
 def test_a_session_start_failure_closes_the_connection_it_opened(monkeypatch):
@@ -177,8 +205,7 @@ def test_a_session_start_failure_closes_the_connection_it_opened(monkeypatch):
         connect_session(
             "jetson", 1, local_hello=PHONE, heartbeat_s=None, stall_timeout_s=None, dial_fn=dialer
         )
-    with pytest.raises(ConnectionClosed):
-        dialer.connections[0].recv_exact(1)
+    assert_closed(dialer.connections[0])
 
 
 # -- reconnection ------------------------------------------------------------
@@ -438,3 +465,228 @@ def test_the_client_reconnects_when_the_listener_displaces_it():
     finally:
         client.stop()
         listener.stop()
+
+
+# -- the guards the round-1 audit found unpinned ----------------------------
+
+
+def test_a_session_constructor_failure_closes_the_connection(monkeypatch):
+    """The constructor used to sit between the two guarded blocks, so a failure
+    there leaked the socket. Guarding start() alone covered the call, not the
+    step."""
+    import transport.client as client_module
+
+    class UnconstructableSession(client_module.Session):
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("constructor blew up")
+
+    monkeypatch.setattr(client_module, "Session", UnconstructableSession)
+    dialer = RecordingDialer(lambda host, port: scripted_peer())
+    with pytest.raises(RuntimeError):
+        connect_session(
+            "jetson", 1, local_hello=PHONE, heartbeat_s=None, stall_timeout_s=None, dial_fn=dialer
+        )
+    assert_closed(dialer.connections[0])
+
+
+def test_a_peer_that_never_sends_a_hello_is_given_up_on_and_retried():
+    """A listener whose accept loop has died looks exactly like this: the TCP
+    connection completes and nothing follows. dial's timeout covers only the
+    connect, so without a handshake timeout the client wedges here forever --
+    no retry, no attempt counted, no event."""
+
+    def mute_peer(host, port, timeout=None):
+        client_end, _server_end = loopback_pair()
+        return client_end  # nobody ever handshakes on the far end
+
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=fast_backoff(),
+        handshake_timeout_s=0.3,
+        dial_fn=mute_peer,
+        poll_s=0.01,
+    ).start()
+    try:
+        first = wait_for_client_event(client, ClientAttemptFailed, timeout=5.0)
+        assert first is not None
+        assert "hello" in first.error
+        assert wait_until(lambda: client.failed_attempts >= 2, timeout=6.0)
+    finally:
+        client.stop()
+
+
+def test_stop_returns_with_no_live_session_and_no_thread():
+    before = {thread.name for thread in threading.enumerate()}
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=fast_backoff(),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(),
+        poll_s=0.01,
+    ).start()
+    session = client.wait_for_session(timeout=5.0)
+    assert session is not None
+    client.stop()
+    assert session.is_closed
+    assert session.end_reason is SessionEndReason.CLOSED_LOCAL
+    assert client.current_session is None
+    assert [
+        thread.name for thread in threading.enumerate() if thread.name not in before
+    ] == []
+
+
+def test_stop_interrupts_a_handshake_in_progress():
+    """The handshake worker is blocked on a read, so the stop flag alone cannot
+    reach it; closing the connection is what releases it."""
+    before = {thread.name for thread in threading.enumerate()}
+
+    def mute_peer(host, port, timeout=None):
+        client_end, _server_end = loopback_pair()
+        return client_end
+
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=fast_backoff(),
+        handshake_timeout_s=30.0,  # far longer than the test will wait
+        dial_fn=mute_peer,
+        poll_s=0.01,
+    ).start()
+    time.sleep(0.3)  # let it get into the handshake
+    started = time.monotonic()
+    client.stop(timeout=5.0)
+    assert time.monotonic() - started < 5.0
+    assert wait_until(
+        lambda: not [
+            thread
+            for thread in threading.enumerate()
+            if thread.name not in before and thread.name in {"client", "client-handshake"}
+        ],
+        timeout=5.0,
+    )
+
+
+def test_current_session_never_hands_back_a_closed_session():
+    """The class docstring says the event design exists so a consumer is not
+    handed a silently-replaced object; handing back a dead one is the same
+    failure."""
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=Backoff(initial_s=0.005, multiplier=1.0, cap_s=0.005, jitter=0.0),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(lifetime_s=0.03),
+        reset_after_s=0.0,
+        poll_s=0.005,
+    ).start()
+    try:
+        deadline = time.monotonic() + 3.0
+        seen_closed = 0
+        while time.monotonic() < deadline:
+            session = client.current_session
+            if session is not None and session.is_closed:
+                seen_closed += 1
+            time.sleep(0.001)
+        assert client.connected >= 3, client.connected
+        assert seen_closed == 0, f"handed back a closed session {seen_closed} times"
+    finally:
+        client.stop()
+
+
+def test_the_connection_counters_are_exact():
+    """`reconnects` is a headline number in the experiment's report, and every
+    other assertion on it is >=, so an off-by-one would go unnoticed."""
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=Backoff(initial_s=0.005, multiplier=1.0, cap_s=0.005, jitter=0.0),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        dial_fn=lambda host, port, timeout=None: scripted_peer(lifetime_s=0.02),
+        reset_after_s=0.0,
+        poll_s=0.005,
+    ).start()
+    try:
+        assert wait_until(lambda: client.connected >= 4, timeout=10.0)
+    finally:
+        client.stop()
+    assert client.reconnects == client.connected - 1, (client.connected, client.reconnects)
+    assert client.failed_attempts == 0
+
+
+def test_the_default_reset_threshold_cannot_coincide_with_the_stall_timeout():
+    """A stalled session lasts exactly the stall timeout. With the threshold at
+    the backoff cap -- also 5.0 -- the commonest failure in a car landed on the
+    resetting side of a >= test, so the escalation never engaged for it."""
+    from transport.session import DEFAULT_STALL_TIMEOUT_S
+
+    client = SessionClient("jetson", 1, local_hello=PHONE)
+    assert client._reset_after_s > DEFAULT_STALL_TIMEOUT_S
+    assert client._reset_after_s == max(Backoff().cap_s, DEFAULT_STALL_TIMEOUT_S * 2.0)
+
+    without_stall = SessionClient("jetson", 1, local_hello=PHONE, stall_timeout_s=None)
+    assert without_stall._reset_after_s == Backoff().cap_s
+
+
+def test_giving_up_stops_the_client_rather_than_leaving_it_idle():
+    def refuse(host, port, timeout=None):
+        raise ConnectionRefusedError(61, "connection refused")
+
+    client = SessionClient(
+        "jetson",
+        1,
+        local_hello=PHONE,
+        backoff=Backoff(initial_s=0.005, multiplier=1.0, cap_s=0.005, jitter=0.0),
+        dial_fn=refuse,
+        max_attempts=2,
+        poll_s=0.005,
+    ).start()
+    try:
+        assert wait_for_client_event(client, ClientGaveUp, timeout=5.0) is not None
+        started = time.monotonic()
+        assert client.wait_for_session(timeout=5.0) is None
+        assert time.monotonic() - started < 1.0, "wait_for_session burned its whole timeout"
+    finally:
+        client.stop()
+
+
+def test_twenty_reconnects_over_real_sockets_leak_no_descriptors():
+    """The thread-only version of this ran against loopback, which has no file
+    descriptors, so the fd half of the criterion was untested."""
+    acceptor = TcpAcceptor("127.0.0.1", 0)
+    listener = TransportListener(
+        acceptor, JETSON, heartbeat_s=None, stall_timeout_s=None, accept_poll_s=0.01
+    ).start()
+    before_fds = open_descriptor_count()
+    client = SessionClient(
+        "127.0.0.1",
+        acceptor.port,
+        local_hello=PHONE,
+        backoff=Backoff(initial_s=0.005, multiplier=1.0, cap_s=0.005, jitter=0.0),
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        reset_after_s=0.0,
+        poll_s=0.005,
+    ).start()
+    try:
+        for _ in range(20):
+            session = client.wait_for_session(timeout=10.0)
+            assert session is not None
+            session.close()
+        assert client.connected >= 20, client.connected
+    finally:
+        client.stop()
+        listener.stop()
+    if before_fds is not None:
+        assert wait_until(
+            lambda: open_descriptor_count() <= before_fds + 3, timeout=5.0
+        ), f"descriptors grew from {before_fds} to {open_descriptor_count()}"

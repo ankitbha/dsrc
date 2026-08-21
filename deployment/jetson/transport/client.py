@@ -311,8 +311,19 @@ class SessionClient:
 
     @property
     def current_session(self) -> Session | None:
+        """A session a caller can use, or None.
+
+        Filtered as well as cleared. `_maintain` clears the reference when it
+        notices the session ended, but "notices" is a poll, and between the
+        session closing and the poll firing this used to hand back a dead
+        session -- which is the same failure the event design exists to prevent,
+        one step in.
+        """
         with self._lock:
-            return self._current
+            session = self._current
+        if session is None or session.is_closed:
+            return None
+        return session
 
     def wait_for_session(self, timeout: float = 10.0) -> Session | None:
         deadline = self._mono() + int(timeout * 1e9)
@@ -347,6 +358,12 @@ class SessionClient:
         with self._lock:
             self._connecting = connection
 
+    def _note_session_end(self, session: Session, reason: SessionEndReason) -> None:
+        """Called from the session's own thread the instant it ends."""
+        with self._lock:
+            if self._current is session:
+                self._current = None
+
     # -- the loop --------------------------------------------------------
 
     def _maintain(self) -> None:
@@ -371,6 +388,7 @@ class SessionClient:
                     wall_clock=self._wall,
                     dial_fn=self._dial,
                     on_connection=self._note_connecting,
+                    on_end=self._note_session_end,
                 )
             except Exception as exc:
                 delay = self._backoff.delay_for(attempt, self._random_unit())

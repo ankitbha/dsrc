@@ -83,6 +83,8 @@ def main() -> int:
     lock = threading.Lock()
     round_trips: list[int] = []
     counters = {"advisories": 0, "sends_refused": 0}
+    # Five sensor threads increment these, and the report publishes them.
+    counter_lock = threading.Lock()
 
     def sensor(channel, hz, size):
         payload = bytes(size)
@@ -98,7 +100,8 @@ def main() -> int:
                         sent_at[probe] = now_mono_ns()
                     extensions["probe"] = probe
                 if not session.send(channel, payload, extensions):
-                    counters["sends_refused"] += 1
+                    with counter_lock:
+                        counters["sends_refused"] += 1
             next_at += period
             delay = next_at - time.monotonic()
             if delay > 0:
@@ -115,7 +118,8 @@ def main() -> int:
             message = session.recv(Channel.ADVISORY, timeout=0.25)
             if message is None:
                 continue
-            counters["advisories"] += 1
+            with counter_lock:
+                counters["advisories"] += 1
             probe = message.extensions.get("echo_probe")
             if probe is None:
                 continue
@@ -124,9 +128,28 @@ def main() -> int:
             if started is not None:
                 round_trips.append(message.t_recv_mono_ns - started)
 
-    if client.wait_for_session(timeout=20.0) is None:
+    # Scaled to the run rather than hardcoded, and it leaves a machine-readable
+    # record: a run that never connects still saw attempt failures worth having.
+    connect_deadline = max(20.0, min(args.duration, 60.0))
+    if client.wait_for_session(timeout=connect_deadline) is None:
+        failures = [e for e in client.drain_events() if isinstance(e, ClientAttemptFailed)]
         client.stop()
-        print("never established a session", flush=True)
+        report = {
+            "host": args.host,
+            "port": args.port,
+            "duration_s": args.duration,
+            "connected": False,
+            "waited_s": connect_deadline,
+            "failed_attempts": client.failed_attempts,
+            "attempt_failures": [
+                {"attempt": e.attempt, "error": e.error, "retry_in_s": round(e.retry_in_s, 3)}
+                for e in failures
+            ],
+        }
+        text = json.dumps(report, indent=2)
+        print(text)
+        if args.out:
+            args.out.write_text(text + "\n")
         return 1
 
     threads = [threading.Thread(target=advisory_reader, daemon=True)]
@@ -154,6 +177,7 @@ def main() -> int:
         "host": args.host,
         "port": args.port,
         "duration_s": args.duration,
+        "connected": True,
         "round_trip_ms": percentiles(round_trips),
         "round_trip_samples": len(round_trips),
         "advisories_received": counters["advisories"],
