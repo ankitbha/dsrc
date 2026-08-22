@@ -57,6 +57,12 @@ MAX_ACCEPTABLE_RTT_NS = 200_000_000
 # Skew is withheld until it can be resolved. A fit over too short a baseline
 # returns a value near zero whose uncertainty is many times its own size, and
 # publishing that invites a consumer to apply it as a measurement.
+# The requirement is leverage in time, and the bucket width times the minimum
+# count already guarantees it: 20 buckets 10 s apart span at least 190 s. So the
+# runtime baseline check below has no live path today. It is kept because it
+# states the actual requirement -- a future change to either constant could drop
+# the implied span under it -- and a test pins the arithmetic so that change gets
+# noticed rather than silently loosening the gate.
 MIN_SKEW_BASELINE_S = 120.0
 MIN_SKEW_SAMPLES = 20
 # The fit runs over one representative per bucket -- the least-delayed sample in
@@ -312,6 +318,14 @@ class TimebaseEstimator:
     # -- reading -----------------------------------------------------------
 
     @property
+    def retained_samples(self) -> int:
+        """How many samples survive pruning. Exposed because `offset_samples`
+        is filtered again by the 30 s horizon, so it cannot show whether the
+        skew window is being pruned at all."""
+        with self._lock:
+            return len(self._samples)
+
+    @property
     def estimate(self) -> TimebaseEstimate | None:
         with self._lock:
             return self._current
@@ -378,6 +392,7 @@ class TimebaseEstimator:
             "samples_refused": refused_total,
             "refused_by_reason": refused,
             "estimates_published": published,
+            "retained_samples": self.retained_samples,
             "usable": self.usable,
             "why_not_usable": self.why_not_usable(),
             "current": None if current is None else current.to_record(),

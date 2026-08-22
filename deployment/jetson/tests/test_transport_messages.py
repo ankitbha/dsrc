@@ -20,6 +20,7 @@ from transport.channels import Channel
 from transport.frames import WIRE_STAMP_KEY, FramingError, encode
 from transport.loopback import loopback_pair
 from transport.messages import (
+    check_reserved,
     TimeSyncMessage,
     ACTION_HEADS,
     RATE_KEYS,
@@ -1509,3 +1510,86 @@ def test_recv_with_no_timeout_still_returns_a_message_after_skips():
     finally:
         sender.close()
         receiver.close()
+
+
+# -- the time-sync message ---------------------------------------------------
+
+
+PEER_FIELDS = ("t_peer_recv_mono_ns", "t_peer_recv_wall_ns", "t_peer_wire_mono_ns")
+
+
+@pytest.mark.parametrize("nulled", PEER_FIELDS)
+def test_the_peer_fields_are_all_or_nothing(nulled):
+    """A pong missing any one of the three loses a term of the offset
+    arithmetic, and the estimator would then compute a plausible number from an
+    incomplete exchange -- worse than refusing, because nothing downstream can
+    tell. Verified for each field: this had no test at all, and mutation found
+    the whole check could be removed with the suite still green.
+    """
+    extensions, payload = a_time_sync_pong().to_wire()
+    extensions[nulled] = None
+    with pytest.raises(MessageError) as caught:
+        decode_message(Channel.CONTROL, extensions, payload)
+    assert caught.value.reason == "null_not_allowed"
+    assert nulled in str(caught.value)
+
+
+@pytest.mark.parametrize("kept", PEER_FIELDS)
+def test_only_one_peer_field_present_is_also_refused(kept):
+    """The other direction of partial: one set, two null."""
+    extensions, payload = a_time_sync_pong().to_wire()
+    for field in PEER_FIELDS:
+        if field != kept:
+            extensions[field] = None
+    with pytest.raises(MessageError) as caught:
+        decode_message(Channel.CONTROL, extensions, payload)
+    assert caught.value.reason == "null_not_allowed"
+
+
+def test_all_three_peer_fields_null_is_a_ping_not_an_error():
+    """The ping case, so the check above cannot be satisfied by refusing
+    everything."""
+    ping = a_time_sync_ping()
+    assert ping.is_ping
+    assert decode_message(Channel.CONTROL, *ping.to_wire()) == ping
+
+
+def test_allowing_one_reserved_key_does_not_allow_the_others():
+    """`RESERVED_ALLOWED` names exact keys. Mutation replaced the per-key test
+    with a truthiness test on the allow-list, which let a message carrying
+    `hello` through as long as it was allowed anything at all -- and that key is
+    consumed by the peer's transport, so the message would vanish with no drop
+    counted and no sequence gap."""
+    for smuggled in ("hello", "heartbeat"):
+        extensions, _payload = a_time_sync_ping().to_wire()
+        extensions[smuggled] = True
+        with pytest.raises(MessageError) as caught:
+            check_reserved(extensions, TimeSyncMessage.RESERVED_ALLOWED)
+        assert caught.value.reason == "reserved_key"
+        assert smuggled in str(caught.value)
+
+    # And the one it does allow still passes, so the test above is not just
+    # asserting that everything is refused.
+    allowed, _payload = a_time_sync_ping().to_wire()
+    assert WIRE_STAMP_KEY in allowed
+    check_reserved(allowed, TimeSyncMessage.RESERVED_ALLOWED)
+
+
+def test_a_session_send_allowing_one_reserved_key_still_refuses_the_others():
+    """The same rule one layer down, where the refusal is a FramingError."""
+    from transport.frames import FramingError
+
+    left, right = loopback_pair()
+    session = Session(left, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+    try:
+        with pytest.raises(FramingError, match="reserved"):
+            session.send(
+                Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0, "hello": True},
+                allow_reserved=(WIRE_STAMP_KEY,),
+            )
+        assert session.send(
+            Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0}, allow_reserved=(WIRE_STAMP_KEY,)
+        ) is True
+    finally:
+        session.close()
+        right.close()

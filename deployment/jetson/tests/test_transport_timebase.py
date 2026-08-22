@@ -182,8 +182,19 @@ def test_the_estimator_recovers_a_planted_offset_within_its_own_bound():
 
 @pytest.mark.parametrize("seed", list(range(12)))
 def test_the_bound_holds_across_seeds(seed):
-    """A bound that holds usually is not a bound. Every seed, not a sample."""
-    link = Link(offset_ns=-3_000_000_000, skew_ppm=0.0, seed=seed)
+    """A bound that holds usually is not a bound. Every seed, not a sample.
+
+    Floors are randomised per seed and deliberately unequal. With symmetric
+    floors the error is near zero and the bound holds by a mile, so the test
+    passed with the bound quartered rather than halved -- it was not measuring
+    the bound at all.
+    """
+    rng = random.Random(1000 + seed)
+    link = Link(
+        offset_ns=-3_000_000_000, skew_ppm=0.0, seed=seed,
+        up_floor_ns=rng.randint(1_000_000, 40_000_000),
+        down_floor_ns=rng.randint(1_000_000, 40_000_000),
+    )
     clock = SteppedClock()
     estimator = TimebaseEstimator(mono_clock=clock)
     feed(estimator, link, clock, count=40, period_ns=250_000_000)
@@ -193,18 +204,33 @@ def test_the_bound_holds_across_seeds(seed):
 
 
 def test_the_minimum_filter_beats_an_average_on_this_delay_shape():
-    """The design decision, tested rather than asserted. If an average were as
-    good, the extra machinery would not be worth its risk -- and this test would
-    be the thing that said so.
+    """The design decision, tested rather than asserted, on the traffic where it
+    matters.
+
+    Under a *light* tail the minimum and the median tie exactly: most samples sit
+    on the floor, so the median is itself a floor sample and there is nothing to
+    win. The minimum earns its place when the link is busy enough that the median
+    is no longer on the floor -- which the measurement says is the real
+    condition, since the observed p50 of 12.2 ms sits above the 10.1 ms
+    minimum. So this runs a congested link, and the tie under light load is
+    pinned separately below.
     """
-    link = Link(offset_ns=1_000_000_000, seed=99)
+    link = Link(offset_ns=1_000_000_000, seed=99, tail_probability=0.8)
     clock = SteppedClock()
     estimator = TimebaseEstimator(mono_clock=clock)
     samples = feed(estimator, link, clock, count=60, period_ns=250_000_000)
 
-    truth_at = lambda s: link.true_offset_at(s.t_local_mid_ns)  # noqa: E731
+    middle = samples[len(samples) // 2]
+    reference_truth = link.true_offset_at(middle.t_local_mid_ns)
+
     mean_offset = sum(s.offset_ns for s in samples) / len(samples)
-    mean_error = abs(mean_offset - truth_at(samples[len(samples) // 2]))
+    mean_error = abs(mean_offset - reference_truth)
+    # The median too, not just the mean. A median is a much better estimator on
+    # this shape than a mean, so beating only the mean is a weak claim -- and
+    # measured, swapping the minimum for a median left the suite green.
+    ordered_offsets = sorted(s.offset_ns for s in samples)
+    median_offset = ordered_offsets[len(ordered_offsets) // 2]
+    median_error = abs(median_offset - reference_truth)
 
     estimate = estimator.estimate
     assert estimate is not None
@@ -213,6 +239,29 @@ def test_the_minimum_filter_beats_an_average_on_this_delay_shape():
         f"the minimum ({min_error} ns) did not beat the mean ({mean_error:.0f} ns); "
         "the design decision to min-filter is not paying for itself"
     )
+    assert min_error < median_error, (
+        f"the minimum ({min_error} ns) did not beat the median ({median_error} ns), "
+        "which is the cheaper filter it has to justify itself against"
+    )
+
+
+def test_under_a_light_tail_the_minimum_and_the_median_tie():
+    """The honest other half. Most samples are on the floor, so a median is a
+    floor sample and the extra machinery wins nothing -- worth pinning, because a
+    reader who saw only the test above would think the filter always pays."""
+    link = Link(offset_ns=1_000_000_000, seed=99, tail_probability=0.05)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    samples = feed(estimator, link, clock, count=60, period_ns=250_000_000)
+
+    middle = samples[len(samples) // 2]
+    truth = link.true_offset_at(middle.t_local_mid_ns)
+    ordered = sorted(s.offset_ns for s in samples)
+    median_error = abs(ordered[len(ordered) // 2] - truth)
+    estimate = estimator.estimate
+    assert estimate is not None
+    min_error = abs(estimate.offset_ns - link.true_offset_at(estimate.t_reference_ns))
+    assert min_error == median_error == 0, (min_error, median_error)
 
 
 def test_a_one_way_asymmetry_biases_the_estimate_but_cannot_escape_the_bound():
@@ -332,6 +381,40 @@ def test_fit_skew_refuses_too_few_samples_and_too_short_a_baseline():
         for i in range(MIN_SKEW_SAMPLES - 1)
     ]
     assert fit_skew(sparse) is None, "too few samples were fitted"
+
+
+def test_the_baseline_guard_has_no_live_path_and_the_arithmetic_says_why():
+    """`MIN_SKEW_SAMPLES` buckets `SKEW_BUCKET_S` apart already span more than
+    `MIN_SKEW_BASELINE_S`, so the baseline check cannot fire on real input.
+
+    Kept rather than deleted because it states the actual requirement -- the
+    count is a proxy for it -- and pinned here so that lowering either constant
+    trips this test instead of quietly loosening the gate. Same treatment as
+    `no_typed_message`, which is also a guard with no live channel.
+    """
+    from transport import timebase
+
+    implied_span_s = (MIN_SKEW_SAMPLES - 1) * timebase.SKEW_BUCKET_S
+    assert implied_span_s >= MIN_SKEW_BASELINE_S, (
+        f"{MIN_SKEW_SAMPLES} buckets of {timebase.SKEW_BUCKET_S}s span "
+        f"{implied_span_s}s, under the {MIN_SKEW_BASELINE_S}s baseline -- the "
+        "guard is now live and needs a test that reaches it through real input"
+    )
+
+    # Reached the only way left: by making the count stop dominating.
+    link = Link(skew_ppm=20.0, seed=101)
+    packed = [link.exchange(i, BASE_NS + i * NS_PER_S) for i in range(60)]  # 60 s
+    saved = timebase.MIN_SKEW_SAMPLES
+    timebase.MIN_SKEW_SAMPLES = 3
+    try:
+        assert fit_skew(packed) is None, "a 60 s baseline was fitted"
+        long_enough = [
+            link.exchange(i, BASE_NS + i * NS_PER_S) for i in range(200)
+        ]
+        assert fit_skew(long_enough) is not None, "the guard now rejects everything"
+    finally:
+        timebase.MIN_SKEW_SAMPLES = saved
+    assert timebase.MIN_SKEW_SAMPLES == saved
 
 
 def test_the_fit_survives_raw_monotonic_magnitudes():
@@ -561,15 +644,23 @@ def test_the_record_is_json_serialisable_and_says_why_it_is_unusable():
 
 
 def test_a_sample_older_than_the_skew_window_is_dropped_entirely():
+    """Asserted on what pruning governs -- the retained set -- not on
+    `offset_samples`, which the 30 s offset horizon already filters. Checking the
+    latter passed with pruning removed entirely: two filters in series, and the
+    test was watching the wrong one.
+    """
     link = Link(seed=79)
     clock = SteppedClock()
     estimator = TimebaseEstimator(mono_clock=clock)
     feed(estimator, link, clock, count=10, period_ns=100_000_000)
     feed(estimator, link, clock, count=10, period_ns=100_000_000,
          start_ns=BASE_NS + 400 * NS_PER_S)
+
+    retained = estimator.retained_samples
+    assert retained == 10, f"{retained} samples retained; the old ten were not pruned"
     estimate = estimator.estimate
     assert estimate is not None
-    assert estimate.offset_samples == 10, "the pruned window still counted old samples"
+    assert estimate.offset_samples == 10
 
 
 def test_the_skew_fit_spans_more_time_than_the_offset_window():
