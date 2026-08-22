@@ -479,9 +479,28 @@ offset = ((t2 - t1) + (t3 - t4)) / 2      responder_clock - initiator_clock
 ```
 
 `rtt` subtracts the responder's own service time, so a responder that answers
-slowly inflates neither the round trip nor the bound derived from it. A negative
-`rtt` is impossible and means a clock went backwards or a field was
-misattributed; it is refused as `out_of_range` rather than fed to the estimator.
+slowly inflates neither the round trip nor the bound derived from it.
+
+**Three conformance requirements on a sample, and all three must be checked.**
+
+```text
+t3 >= t2     the responder's departure cannot precede its own receipt
+t4 >= t1     the pong cannot arrive before the ping left
+rtt >= 0     the service interval cannot exceed the whole round trip
+```
+
+**`rtt >= 0` is not sufficient on its own**: it is satisfiable with either
+ordering violated. That matters because the bound below is half the round trip,
+so a service interval reported *longer* than really elapsed shrinks the round
+trip below the true one and shrinks the bound with it, under an error that has
+not moved -- a corruption that reads as an improvement.
+
+Nothing on the wire can detect a responder that reports a plausible but wrong
+service interval, so one more requirement is stated rather than checked: **t2
+and t3 must come from the same clock**, which means the receipt stamp must be
+the one the responder's own transport took on arrival, not a fresh reading at
+handling time. Two unrelated clocks there make `t3 - t2` arbitrary in both
+magnitude and sign.
 
 ### The estimate
 
@@ -519,14 +538,29 @@ publishing that invites a consumer to apply it as though it were a measurement.
 | skew window | 300 s | enough baseline to resolve ~1 ppm |
 | skew bucket | 10 s | one representative per bucket, least-delayed |
 | minimum offset samples | 5 | below this the minimum is not yet a floor |
-| minimum skew buckets | 20 | 200 s of buckets before a slope is published |
+| minimum skew buckets | 20 | guarantees a 180 s baseline before a slope is published |
 | maximum sample age | 5.0 s | five missed samples at the steady rate |
 | maximum acceptable min-rtt | 200 ms | above this the bound is too wide to mean anything |
 | assumed skew when unknown | 50 ppm | the top of the ordinary crystal range |
 
 ### The bound, and the gate
 
-A converted instant is `value +/- bound`, and the bound is
+A converted instant is `value +/- bound`. The value is
+
+```text
+value = t_local + offset + skew_ppm * (t_local - t_reference) / 1e6
+```
+
+with the skew term **applied when `skew_ppm` is present and omitted when null**. Without this written down an implementation reading only the bound
+formula below builds `t_local + offset`, and the two disagree by `skew * dt` --
+at the 20 ppm cited above, ~12 ms over a ten minute drive, which is larger than
+the bound they both report.
+
+A conversion is also refused when `|t_local - t_reference|` exceeds the span the
+samples support, because past that the drift term is extrapolation with no
+evidence behind it.
+
+The bound is
 
 ```text
 bound = rtt_min / 2  +  skew_uncertainty * |t - t_reference|

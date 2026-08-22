@@ -310,7 +310,10 @@ def test_a_samples_error_never_exceeds_half_its_own_round_trip(seed):
                     down_floor_ns=down, tail_probability=0.0, seed=seed)
         sample = link.exchange(1, BASE_NS)
         truth = link.true_offset_at(sample.t1_local_send_ns + up)
-        assert abs(sample.offset_ns - truth) <= sample.rtt_ns // 2 + 1, (
+        # No "+ 1" allowance: the bound now uses ceiling division, so it really
+        # does cover the error for an odd round trip. The slack this test used to
+        # grant itself was the finding.
+        assert abs(sample.offset_ns - truth) <= -(-sample.rtt_ns // 2), (
             f"up={up} down={down}: error exceeded half the round trip"
         )
 
@@ -394,7 +397,13 @@ def test_the_baseline_guard_has_no_live_path_and_the_arithmetic_says_why():
     """
     from transport import timebase
 
-    implied_span_s = (MIN_SKEW_SAMPLES - 1) * timebase.SKEW_BUCKET_S
+    # Two buckets, not one. Buckets are absolute-aligned, so the first sample
+    # can sit at the end of its bucket and the last at the start of its own --
+    # the guaranteed span is (n - 2) widths, not (n - 1). At 20 buckets of 10 s
+    # that is 180 s, and the comment, the spec row and this assertion all said
+    # 190 or 200. Raising the baseline into (180, 190] would have kept the old
+    # inequality true while making the "dead" guard live.
+    implied_span_s = (MIN_SKEW_SAMPLES - 2) * timebase.SKEW_BUCKET_S
     assert implied_span_s >= MIN_SKEW_BASELINE_S, (
         f"{MIN_SKEW_SAMPLES} buckets of {timebase.SKEW_BUCKET_S}s span "
         f"{implied_span_s}s, under the {MIN_SKEW_BASELINE_S}s baseline -- the "
@@ -567,8 +576,14 @@ def test_an_unmeasured_skew_is_charged_at_the_assumed_rate_not_at_zero():
 
 
 def test_there_is_no_way_to_get_a_converted_instant_without_its_bound():
-    """The whole discipline of this module in one assertion: a cross-device
-    timestamp must not be able to look as measured as a same-device one."""
+    """The whole discipline of this module in one test: a cross-device timestamp
+    must not be able to look as measured as a same-device one.
+
+    The first version enumerated public callables but evaluated everything except
+    `to_remote` to `None`, so the list was empty by construction -- adding a
+    `to_remote_ns` returning a bare int left the suite green. This calls every
+    public one-argument method for real.
+    """
     link = Link(seed=61)
     clock = SteppedClock()
     estimator = TimebaseEstimator(mono_clock=clock)
@@ -577,16 +592,49 @@ def test_there_is_no_way_to_get_a_converted_instant_without_its_bound():
     converted = estimator.to_remote(clock.now_ns)
     assert isinstance(converted, ConvertedInstant)
     assert not isinstance(converted, int)
-    returning_int = [
-        name
-        for name in dir(estimator)
-        if not name.startswith("_")
-        and callable(getattr(estimator, name))
-        and name.startswith("to_") and name != "to_record"
-        and isinstance(getattr(estimator, name)(clock.now_ns) if name == "to_remote" else None,
-                       int)
-    ]
-    assert not returning_int, f"a conversion returns a bare int: {returning_int}"
+
+    offenders = []
+    for name in dir(estimator):
+        if name.startswith("_"):
+            continue
+        attribute = getattr(estimator, name)
+        if not callable(attribute):
+            continue
+        try:
+            result = attribute(clock.now_ns)
+        except (TypeError, AttributeError):
+            continue  # does not take a single instant, so not a conversion
+        except TimebaseNotReady:
+            continue
+        if isinstance(result, int) and not isinstance(result, bool):
+            offenders.append(name)
+    assert not offenders, f"these return a bare converted number: {offenders}"
+
+
+def test_reading_the_estimate_directly_is_the_documented_escape_hatch():
+    """`estimate` publishes `offset_ns`, so a caller who wants to bypass the
+    bound can. That is deliberate and required: the spec promises an offline
+    reader can re-derive a conversion exactly, which needs the offset, the
+    reference and the skew. What is guaranteed is that no *conversion* hands back
+    a bare number -- not that the estimate is unreadable.
+
+    Pinned so the guarantee is not overstated later.
+    """
+    link = Link(seed=62)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=20, period_ns=100_000_000)
+    estimate = estimator.estimate
+    assert estimate is not None
+    assert isinstance(estimate.offset_ns, int)
+
+    # And it stays readable once the gate closes, which is what makes offline
+    # re-derivation possible for a run that ended badly.
+    clock.now_ns += int((MAX_SAMPLE_AGE_S + 60) * NS_PER_S)
+    assert not estimator.usable
+    assert estimator.estimate is not None
+    with pytest.raises(TimebaseNotReady):
+        estimator.to_remote(clock.now_ns)
 
 
 # -- provenance --------------------------------------------------------------
@@ -604,13 +652,45 @@ def test_a_converted_value_does_not_change_when_the_estimate_improves():
          start_ns=at + 100_000_000)
     later = estimator.to_remote(at)
 
-    assert first.t_remote_mono_ns == first.t_remote_mono_ns  # the value we hold is ours
     assert first.estimate_id != later.estimate_id, "the estimate never improved"
     # Forward-only: `first` is still exactly what it was, and says which
     # estimate produced it, so an offline reader can redo it against `later`.
     replayed = next(e for e in estimator.history() if e.estimate_id == first.estimate_id)
-    assert at + replayed.offset_ns == first.t_remote_mono_ns
+    assert rederive(at, replayed) == first.t_remote_mono_ns
     assert replayed.bound_ns_at(at) == first.bound_ns
+
+
+def rederive(t_local_ns, estimate):
+    """The spec's conversion formula, written out independently of the module.
+
+    Deliberately not calling the module's own arithmetic: a re-derivation test
+    that reuses the implementation proves only that it is deterministic. This is
+    what a Kotlin implementer reading the spec would write.
+    """
+    drift = 0.0
+    if estimate.skew_ppm is not None:
+        drift = (t_local_ns - estimate.t_reference_ns) * estimate.skew_ppm / 1e6
+    return t_local_ns + estimate.offset_ns + int(round(drift))
+
+
+def test_an_offline_reader_can_re_derive_a_conversion_that_needed_the_skew_term():
+    """The provenance claim was only pinned where `skew_ppm is None`, i.e. where
+    conversion is arithmetic-free. That is the easy half; this is the half that
+    needs the reference instant and the slope."""
+    link = Link(skew_ppm=25.0, seed=91)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=300, period_ns=NS_PER_S)
+
+    estimate = estimator.estimate
+    assert estimate is not None
+    assert estimate.skew_ppm is not None, "this test needs the skew branch to be live"
+
+    at = clock.now_ns
+    converted = estimator.to_remote(at)
+    replayed = next(e for e in estimator.history() if e.estimate_id == converted.estimate_id)
+    assert rederive(at, replayed) == converted.t_remote_mono_ns
+    assert replayed.bound_ns_at(at) == converted.bound_ns
 
 
 def test_the_history_records_every_published_estimate_in_order():
@@ -681,7 +761,7 @@ def test_the_skew_fit_spans_more_time_than_the_offset_window():
     assert estimate is not None
     assert estimate.offset_samples < 200, "the offset window held the whole run"
     assert estimate.skew_ppm is not None
-    skew_span_s = estimate.skew_samples * SKEW_BUCKET_S
+    skew_span_s = (estimate.skew_samples - 1) * SKEW_BUCKET_S
     assert skew_span_s > OFFSET_WINDOW_S, (
         f"the skew fit spans {skew_span_s}s, no more than the {OFFSET_WINDOW_S}s "
         "offset window, so the second window is buying nothing"
@@ -804,3 +884,93 @@ def test_the_exchange_completes_over_a_real_session_and_produces_an_estimate():
     finally:
         phone.close()
         jetson.close()
+
+
+# -- the spec is the cross-language contract ---------------------------------
+
+
+REPO = __import__("pathlib").Path(__file__).resolve().parents[3]
+
+
+def constants_table() -> dict[str, str]:
+    """The Shared Timebase constants table, sliced out rather than found by a
+    whole-file scan: other tables in this document match the same row pattern."""
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    start = text.index("## Shared Timebase")
+    section = text[start:text.index("## Golden Vectors", start)]
+    rows = {}
+    for line in section.splitlines():
+        if not line.startswith("| ") or line.startswith("| constant") or set(line) <= set("|- "):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if len(cells) == 3:
+            # Value and reason both: the off-by-one this catches lives in the
+            # reason cell, and a slicer that kept only the value could not see it.
+            rows[cells[0]] = (cells[1], cells[2])
+    return rows
+
+
+def test_every_timebase_constant_in_the_spec_matches_the_code():
+    """The plan promised this check and the commit message claimed it, and it did
+    not exist -- all ten rows were unchecked. It is the check that caught a
+    falsified bound in task 14, and F11's off-by-one in this task is exactly the
+    class of drift it exists to catch.
+    """
+    from transport import timebase
+
+    rows = constants_table()
+    expected = {
+        "sampling, first 10 s": f"{timebase.SYNC_FAST_HZ:g} Hz",
+        "sampling, thereafter": f"{timebase.SYNC_STEADY_HZ:g} Hz",
+        "offset window": f"{timebase.OFFSET_WINDOW_S:g} s",
+        "skew window": f"{timebase.SKEW_WINDOW_S:g} s",
+        "skew bucket": f"{timebase.SKEW_BUCKET_S:g} s",
+        "minimum offset samples": f"{timebase.MIN_OFFSET_SAMPLES:g}",
+        "minimum skew buckets": f"{timebase.MIN_SKEW_SAMPLES:g}",
+        "maximum sample age": f"{timebase.MAX_SAMPLE_AGE_S:.1f} s",
+        "maximum acceptable min-rtt": f"{timebase.MAX_ACCEPTABLE_RTT_NS // 1_000_000:g} ms",
+        "assumed skew when unknown": f"{timebase.ASSUMED_SKEW_PPM:g} ppm",
+    }
+    missing = sorted(set(expected) - set(rows))
+    assert not missing, f"the spec table has no row for: {missing}"
+    for label, value in expected.items():
+        assert rows[label][0].startswith(value), (
+            f"{label}: spec says {rows[label][0]!r}, code says {value!r}"
+        )
+
+
+def test_the_spec_documents_the_baseline_the_bucket_count_guarantees():
+    """F11's off-by-one: the comment, the spec row and the test all claimed a
+    span one bucket wider than absolute-aligned buckets guarantee."""
+    from transport import timebase
+
+    guaranteed_s = (timebase.MIN_SKEW_SAMPLES - 2) * timebase.SKEW_BUCKET_S
+    assert f"{guaranteed_s:g} s baseline" in constants_table()["minimum skew buckets"][1], (
+        f"the spec row does not state the {guaranteed_s:g}s the constants guarantee"
+    )
+
+
+def test_the_spec_states_the_conversion_formula_and_the_extrapolation_refusal():
+    """A Kotlin implementer reading only the bound formula builds
+    `t_local + offset` and disagrees with this side by skew x dt -- larger than
+    the bound they both report."""
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    section = text[text.index("## Shared Timebase"):text.index("## Golden Vectors")]
+    flat = " ".join(section.split())
+    assert "value = t_local + offset + skew_ppm" in flat
+    assert "omitted when null" in flat
+    assert "refused" in section and "extrapolation" in section
+
+
+def test_the_spec_records_both_ordering_requirements():
+    """`rtt >= 0` is one inequality standing in for two, and the spec used to
+    record only the rtt refusal as the whole of the validation."""
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    section = text[text.index("## Shared Timebase"):text.index("## Golden Vectors")]
+    flat = " ".join(section.split())
+    assert "t3 >= t2" in flat, "the service-interval ordering is not a stated requirement"
+    assert "t4 >= t1" in flat, "the local ordering is not a stated requirement"
+    assert "not sufficient on its own" in flat, (
+        "the spec does not say why rtt >= 0 alone is inadequate"
+    )
+    assert "same clock" in flat, "the clock-provenance requirement is not stated"

@@ -678,15 +678,6 @@ class RateCommand:
         )
 
 
-Message = (
-    CameraFrame
-    | GpsRecord
-    | ImuSample
-    | HereResponse
-    | PhoneTelemetry
-    | AdvisoryMessage
-    | RateCommand
-)
 
 @dataclass(frozen=True)
 class TimeSyncMessage:
@@ -776,6 +767,18 @@ class TimeSyncMessage:
             t_peer_recv_wall_ns=peer["t_peer_recv_wall_ns"],
             t_peer_wire_mono_ns=peer["t_peer_wire_mono_ns"],
         )
+
+
+Message = (
+    CameraFrame
+    | GpsRecord
+    | ImuSample
+    | HereResponse
+    | PhoneTelemetry
+    | AdvisoryMessage
+    | RateCommand
+    | TimeSyncMessage
+)
 
 
 MESSAGE_FOR_CHANNEL: dict[Channel, type] = {

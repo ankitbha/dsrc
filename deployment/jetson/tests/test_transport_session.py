@@ -19,6 +19,8 @@ from transport.channels import Channel, policy_for
 from transport.connection import ConnectionClosed
 from transport.frames import (
     HEARTBEAT_KEY,
+    MAX_HEADER_BYTES,
+    encode_header,
     WIRE_STAMP_KEY,
     MAX_PAYLOAD_BYTES,
     Frame,
@@ -26,6 +28,7 @@ from transport.frames import (
     encode,
     read_frame,
 )
+from transport.clock import now_mono_ns
 from transport.loopback import loopback_pair
 from transport.session import (
     DEFAULT_HEARTBEAT_S,
@@ -1538,38 +1541,170 @@ def test_messages_never_collected_are_counted_as_abandoned():
 # -- the write-time stamp ----------------------------------------------------
 
 
-def test_the_writer_stamps_the_wire_key_and_leaves_t_mono_ns_alone():
+class _StallingConnection:
+    """Delegates, but blocks inside `send_all` for large frames.
+
+    A queued big frame is not enough to make a control frame wait: `control` is
+    HIGH priority and `_next_outbound` serves the highest non-empty tier first,
+    so it *jumps ahead of* anything queued behind it. The only wait it can ever
+    observe is the in-flight quantum of a frame the writer already picked up --
+    so a test that queues a camera frame and expects the control frame to wait
+    behind it has a premise that never activates, and can only assert `>=`.
+
+    This makes that quantum real and known.
+    """
+
+    def __init__(self, inner, stall_s: float, threshold_bytes: int) -> None:
+        self._inner = inner
+        self._stall_s = stall_s
+        self._threshold = threshold_bytes
+        self.peer = inner.peer
+        self.in_send_all = threading.Event()
+
+    def send_all(self, data: bytes) -> None:
+        if len(data) >= self._threshold:
+            self.in_send_all.set()
+            time.sleep(self._stall_s)
+        self._inner.send_all(data)
+
+    def recv_exact(self, n: int) -> bytes:
+        return self._inner.recv_exact(n)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_the_writer_stamps_the_wire_key_at_departure_not_at_enqueue():
     """`t_mono_ns` is an enqueue stamp, so it carries however long the frame
     then waited. For a timebase estimate that wait is the dominant error --
     larger than the network -- so a frame can ask for a second stamp taken
     immediately before its bytes leave.
 
-    Both keys must survive with different meanings. Redefining `t_mono_ns` to
-    departure time would silently change what every latency figure in tasks
+    The gap has to be asserted as a *quantity*. Written as `wire >= t_mono_ns`
+    this passed on equality, and the whole of task 15.2 could be reverted --
+    stamping the wire key with `item.frame.t_mono_ns` -- with 404 tests green.
+
+    Both keys must also survive with different meanings: redefining `t_mono_ns`
+    to departure time would silently change what every latency figure in tasks
     12-14 measures without changing a single test.
     """
+    stall_s = 0.4
     near, far = loopback_pair()
-    sender = quiet_session(near)
+    stalling = _StallingConnection(near, stall_s=stall_s, threshold_bytes=64 * 1024)
+    sender = quiet_session(stalling)
     reader = quiet_session(far)
     try:
-        # A large frame first, so the small one behind it has a real wait.
         sender.send(Channel.CAMERA, b"z" * (256 * 1024), {})
-        sender.send(Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0}, allow_reserved=(WIRE_STAMP_KEY,))
+        assert stalling.in_send_all.wait(timeout=10.0), "the writer never entered send_all"
+
+        # The writer is now provably inside send_all and cannot pick anything up
+        # until it returns, so this frame's wait is real regardless of priority.
+        enqueued_at = now_mono_ns()
+        sender.send(
+            Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0}, allow_reserved=(WIRE_STAMP_KEY,)
+        )
         received = None
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline and received is None:
-            candidate = reader.recv(Channel.CONTROL, timeout=0.25)
-            if candidate is not None:
-                received = candidate
+            received = reader.recv(Channel.CONTROL, timeout=0.25)
         assert received is not None, "the control frame never arrived"
+
         wire = received.frame.extensions[WIRE_STAMP_KEY]
-        assert isinstance(wire, int) and wire > 0, "the placeholder was never replaced"
-        assert wire >= received.frame.t_mono_ns, (
-            "the wire stamp predates the enqueue stamp, so it was not taken at write time"
+        enqueue = received.frame.t_mono_ns
+        assert isinstance(wire, int)
+        waited_ns = wire - enqueue
+        assert enqueue >= enqueued_at, "the enqueue stamp predates the send call"
+        # Most of the stall had to elapse between enqueue and departure. Half of
+        # it is the margin; equality, or any stamp taken at enqueue, fails here.
+        assert waited_ns > int(stall_s * 0.5 * 1e9), (
+            f"the wire stamp is only {waited_ns} ns after the enqueue stamp, "
+            f"far under the {stall_s}s stall the writer was held in -- so it is "
+            "not being taken at departure"
         )
     finally:
         sender.close()
         reader.close()
+
+
+def test_the_enqueue_stamp_still_means_enqueue_on_other_channels():
+    """The other half of the pair: `t_mono_ns` must not have quietly become a
+    departure stamp for everyone."""
+    stall_s = 0.4
+    near, far = loopback_pair()
+    stalling = _StallingConnection(near, stall_s=stall_s, threshold_bytes=64 * 1024)
+    sender = quiet_session(stalling)
+    reader = quiet_session(far)
+    try:
+        sender.send(Channel.CAMERA, b"z" * (256 * 1024), {})
+        assert stalling.in_send_all.wait(timeout=10.0)
+        before = now_mono_ns()
+        sender.send(Channel.IMU, b"", {"ax": 1.0})
+        after = now_mono_ns()
+
+        received = None
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and received is None:
+            received = reader.recv(Channel.IMU, timeout=0.25)
+        assert received is not None
+        assert before <= received.frame.t_mono_ns <= after, (
+            "t_mono_ns is outside the send() call that produced it, so it is no "
+            "longer an enqueue stamp"
+        )
+    finally:
+        sender.close()
+        reader.close()
+
+
+def test_the_reserved_placeholder_is_the_widest_a_stamp_can_be():
+    """So the caller's own encode is the verdict on the widest header this frame
+    can produce. With a one-digit placeholder, a header that fit at enqueue
+    could fail on a fifteen-digit stamp -- in the writer thread, after send()
+    had already told the caller it was accepted."""
+    from transport.frames import WIRE_STAMP_RESERVE, decode
+
+    near, far = loopback_pair()
+    sender = quiet_session(near)
+    try:
+        sender.send(
+            Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0}, allow_reserved=(WIRE_STAMP_KEY,)
+        )
+        # Read the bytes off the wire and confirm the stamp fits where the
+        # reserve did: the reserve is 2**63-1, wider than any real reading.
+        assert WIRE_STAMP_RESERVE == 2**63 - 1
+        assert len(str(WIRE_STAMP_RESERVE)) >= len(str(now_mono_ns()))
+    finally:
+        sender.close()
+        far.close()
+
+
+def test_a_header_that_only_fits_with_the_placeholder_is_refused_in_the_callers_thread():
+    """The critical finding: this used to be accepted, then kill the writer
+    thread with the session still reporting itself healthy."""
+    near, far = loopback_pair()
+    sender = quiet_session(near)
+    try:
+        # Sized so it fits with a one-digit placeholder and not with a real
+        # stamp, which is exactly the window that killed the writer.
+        probe = {WIRE_STAMP_KEY: 0}
+        filler = MAX_HEADER_BYTES - len(encode_header({**probe, "ch": "control",
+                                                      "seq": 0, "t_mono_ns": 0,
+                                                      "t_wall_ns": 0, "n": 0, "pad": ""})) - 2
+        with pytest.raises(FramingError, match="exceeds"):
+            sender.send(
+                Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0, "pad": "x" * filler},
+                allow_reserved=(WIRE_STAMP_KEY,),
+            )
+        # And the session is still alive and still transmitting.
+        assert not sender.is_closed
+        assert sender.send(Channel.IMU, b"", {"ax": 1.0}) is True
+        for thread in threading.enumerate():
+            pass
+        assert any(t.name.endswith("-tx") and t.is_alive() for t in threading.enumerate()), (
+            "the writer thread died"
+        )
+    finally:
+        sender.close()
+        far.close()
 
 
 def test_a_frame_that_does_not_ask_for_the_wire_stamp_does_not_get_one():

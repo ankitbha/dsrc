@@ -67,7 +67,10 @@ MAX_SAMPLE_RTT_NS = 2_000_000_000
 # returns a value near zero whose uncertainty is many times its own size, and
 # publishing that invites a consumer to apply it as a measurement.
 # The requirement is leverage in time, and the bucket width times the minimum
-# count already guarantees it: 20 buckets 10 s apart span at least 190 s. So the
+# count already guarantees it: buckets are absolute-aligned, so 20 of them
+# guarantee (20 - 2) x 10 = 180 s, not 190 -- the first sample can sit at the end
+# of its bucket and the last at the start of its own. 180 s still clears the
+# baseline below, so the
 # runtime baseline check below has no live path today. It is kept because it
 # states the actual requirement -- a future change to either constant could drop
 # the implied span under it -- and a test pins the arithmetic so that change gets
