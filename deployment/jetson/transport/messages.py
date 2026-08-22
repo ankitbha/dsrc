@@ -969,6 +969,37 @@ class MessageRouter:
             stats.delivered += 1
             return message
 
+    def recv_with_receipt(
+        self, channel: Channel, timeout: float | None = 0.0
+    ) -> tuple[Message, int] | None:
+        """The message and the instant the transport stamped its arrival.
+
+        The plain `recv` discards that stamp, which is fine for a sensor reading
+        and wrong for a timestamp exchange: taking the arrival time after `recv`
+        returns folds the inbound queue wait and the decode into it. That is the
+        receive-side twin of the enqueue-versus-departure error the wire stamp
+        exists to remove, and at a 1 Hz poll it is up to a whole period.
+
+        It also fixes the clock the stamp comes from. The session's reader takes
+        it with the session's own monotonic clock -- the same one the writer uses
+        for the departure stamp -- so a difference between the two is meaningful.
+        A caller stamping it itself can be on an unrelated clock, and the
+        difference is then arbitrary with no way to notice.
+        """
+        received = self._session.recv(channel, timeout=timeout)
+        if received is None:
+            return None
+        stats = self._stats[channel]
+        try:
+            message = decode_message(channel, received.extensions, received.payload)
+        except MessageError as exc:
+            stats.decode_errors += 1
+            stats.errors_by_reason[exc.reason] = stats.errors_by_reason.get(exc.reason, 0) + 1
+            stats.last_error = str(exc)
+            return None
+        stats.delivered += 1
+        return message, received.t_recv_mono_ns
+
     def stats(self) -> dict[Channel, ChannelMessageStats]:
         snapshot = {}
         for channel, stats in self._stats.items():

@@ -44,6 +44,7 @@ from transport.clock import MonoClock, WallClock, now_mono_ns, now_wall_ns
 from transport.connection import ByteConnection, ConnectionClosed
 from transport.frames import (
     WIRE_STAMP_KEY,
+    WIRE_STAMP_RESERVE,
     HEARTBEAT_KEY,
     RESERVED_EXTENSIONS,
     Frame,
@@ -368,13 +369,22 @@ class Session:
         if self.is_closed:
             return False
         policy = policy_for(channel)
+        prepared = dict(extensions or {})
+        if WIRE_STAMP_KEY in prepared:
+            # Reserve the widest stamp now, so the encode below is the caller's
+            # verdict on the widest header this frame can produce. The writer
+            # then only ever makes it shorter, and send()'s documented promise
+            # -- that the codec's refusal arrives in the caller's thread -- stays
+            # true instead of being re-taken in another thread after the caller
+            # has already been told the frame was accepted.
+            prepared[WIRE_STAMP_KEY] = WIRE_STAMP_RESERVE
         frame = Frame(
             channel=channel,
             seq=next(self._seq[channel]),
             t_mono_ns=self._mono(),
             t_wall_ns=self._wall(),
             payload=payload,
-            extensions=dict(extensions or {}),
+            extensions=prepared,
         )
         encoded = encode(frame)  # raises FramingError in the caller's thread
 
@@ -439,8 +449,15 @@ class Session:
                         break
                     self._out_cond.wait(self._tick_s)
             stats = self._stats[item.frame.channel]
-            item = self._stamped_at_wire(item)
             try:
+                # Inside the guard. Outside it, a raise here killed this thread
+                # with the session still reporting itself healthy -- send() kept
+                # returning True, queues filled, and no SessionEnded was ever
+                # emitted. That is the exact failure the except-BaseException
+                # below exists to prevent, and the re-stamp sat one line above
+                # it. The reserve above should make a raise impossible; this is
+                # what happens if it ever is not.
+                item = self._stamped_at_wire(item)
                 self._connection.send_all(item.encoded)
             except ConnectionClosed:
                 stats.abandoned_outbound += 1

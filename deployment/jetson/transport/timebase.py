@@ -54,6 +54,15 @@ MIN_OFFSET_SAMPLES = 5
 MAX_SAMPLE_AGE_S = 5.0
 MAX_ACCEPTABLE_RTT_NS = 200_000_000
 
+# Admission, which is a different question from the gate. The gate above asks
+# "is this link good enough to inform anything"; this asks "is this sample real
+# data at all". Using one constant for both made the gate's own clause
+# unreachable -- a sample it would have rejected never got in. A 400 ms round
+# trip is a poor link and belongs in the window; a 600 s one is a pong the link
+# had forgotten, and it would sit in the skew window as the sole representative
+# of its bucket where the 30 s gate can never see it.
+MAX_SAMPLE_RTT_NS = 2_000_000_000
+
 # Skew is withheld until it can be resolved. A fit over too short a baseline
 # returns a value near zero whose uncertainty is many times its own size, and
 # publishing that invites a consumer to apply it as a measurement.
@@ -72,10 +81,32 @@ MIN_SKEW_SAMPLES = 20
 # wrong sign. Min-filtering first is what makes the signal visible.
 SKEW_BUCKET_S = 10.0
 
-# What we charge for skew we have not measured. An unmeasured skew is not a zero
-# skew: assuming zero would understate the bound exactly when it is least
-# trustworthy, so the bound grows at the top of the ordinary crystal range.
+# The drift charge, and it is a FLOOR rather than a fallback. Clock skew and a
+# linearly-drifting one-way path asymmetry are observationally identical from
+# four timestamps -- both make the min-filtered offset move at a constant rate --
+# so a fitted slope can be entirely asymmetry and the fit cannot tell. Its
+# standard error is no help: it measures scatter about the line, and a smoothly
+# drifting asymmetry produces a near-perfect line, so the fit is at its most
+# precise exactly when it is most wrong. Measured, that put a 60 ms error under a
+# 17.5 ms bound. So the charge is the worst of the three: the ordinary crystal
+# range, the fitted slope's own magnitude, and its scatter.
 ASSUMED_SKEW_PPM = 50.0
+
+# How far outside the reference instant a conversion may reach. Beyond this the
+# fit is being extended into a region no sample supports, and the drift term
+# grows without any evidence behind it.
+MAX_EXTRAPOLATION_S = SKEW_WINDOW_S
+
+# How long an unanswered exchange stays matchable. Generous against the round
+# trip, short against the drive: a pong later than this is not a slow answer, it
+# is an answer to a question the link has forgotten.
+PENDING_TIMEOUT_S = 10.0
+
+# The published history is bounded. One estimate per accepted sample is ~28,800
+# over an eight-hour session, and this runs on a Jetson; a reader needs the
+# recent ones to re-derive recent conversions, and what was dropped is counted so
+# a re-derivation that finds no matching estimate can tell why.
+MAX_HISTORY = 4096
 
 NS_PER_S = 1_000_000_000
 
@@ -140,21 +171,30 @@ class TimebaseEstimate:
 
     @property
     def skew_uncertainty_ppm(self) -> float:
-        """What to charge per second of extrapolation.
+        """What to charge per second of extrapolation: the worst of three.
 
-        The fitted standard error once skew is known, and the assumed crystal
-        range while it is not -- never zero, because "not measured" and "zero"
-        are different claims and only one of them is true here.
+        The assumed crystal range is a floor even once skew is fitted, because
+        the fit cannot separate real skew from a drifting path asymmetry and so
+        applying it is itself a risk of its own magnitude. The scatter term only
+        matters when the fit is noisy enough to exceed both.
+
+        Never zero, because "not measured" and "zero" are different claims and
+        only one of them is true here.
         """
         if self.skew_ppm is None or self.skew_stderr_ppm is None:
             return ASSUMED_SKEW_PPM
-        return max(self.skew_stderr_ppm, 0.0)
+        return max(ASSUMED_SKEW_PPM, abs(self.skew_ppm), self.skew_stderr_ppm)
 
     def bound_ns_at(self, t_local_ns: int) -> int:
         """Half the least asymmetry we cannot rule out, plus what drift accrues
         over the extrapolation from the reference instant."""
         drift = abs(t_local_ns - self.t_reference_ns) * self.skew_uncertainty_ppm / 1e6
-        return self.rtt_min_ns // 2 + int(math.ceil(drift))
+        # Ceiling, not floor. For an odd round trip the error reaches
+        # (rtt + 1) // 2 while floor division bounds it at (rtt - 1) // 2, so the
+        # unconditional claim was off by exactly one nanosecond -- and the test
+        # that proved the inequality had written itself a "+ 1" allowance the
+        # code did not have.
+        return -(-self.rtt_min_ns // 2) + int(math.ceil(drift))
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -262,6 +302,7 @@ class TimebaseEstimator:
         self._current: TimebaseEstimate | None = None
         self.samples_accepted = 0
         self.samples_refused = 0
+        self.estimates_evicted = 0
         self.refused_by_reason: dict[str, int] = {}
 
     # -- feeding -----------------------------------------------------------
@@ -275,8 +316,23 @@ class TimebaseEstimator:
         real floor and make the bound arbitrarily small -- the one failure that
         would look like an improvement.
         """
+        # The guarantee that a sample's error cannot exceed half its round trip
+        # needs BOTH orderings. `rtt_ns >= 0` is satisfiable with either one
+        # violated: a responder reporting a longer service interval than really
+        # elapsed shrinks rtt below up+down while leaving the offset error
+        # intact, which shrinks the bound under a real error -- the one failure
+        # that looks like an improvement.
+        if sample.t3_remote_send_ns < sample.t2_remote_recv_ns:
+            self._refuse("remote_send_before_remote_recv")
+            return False
+        if sample.t4_local_recv_ns < sample.t1_local_send_ns:
+            self._refuse("local_recv_before_local_send")
+            return False
         if sample.rtt_ns < 0:
             self._refuse("out_of_range")
+            return False
+        if sample.rtt_ns > MAX_SAMPLE_RTT_NS:
+            self._refuse("rtt_above_admission_ceiling")
             return False
         with self._lock:
             self._samples.append(sample)
@@ -314,6 +370,9 @@ class TimebaseEstimator:
         )
         self._current = estimate
         self._published.append(estimate)
+        while len(self._published) > MAX_HISTORY:
+            self._published.pop(0)
+            self.estimates_evicted += 1
 
     # -- reading -----------------------------------------------------------
 
@@ -330,6 +389,38 @@ class TimebaseEstimator:
         with self._lock:
             return self._current
 
+    def _gate_locked(self) -> tuple[str | None, TimebaseEstimate | None]:
+        """The gate and the estimate it passed, from one snapshot.
+
+        Returned together because they have to be the same estimate. Reading the
+        verdict and then the estimate took two lock acquisitions, and a sample
+        arriving in between published a new one -- so a conversion could proceed
+        on an estimate that never passed the gate, with a bound twice the
+        ceiling. Measured: a 400 ms bound handed out against a 200 ms limit.
+
+        Likewise `usable` and `why_not_usable` are two views of one answer. When
+        they each recomputed the gate, crossing MAX_SAMPLE_AGE_S between the two
+        calls was enough for a record to publish `usable: true` beside a reason
+        it was not -- and that record is what an offline reader attributes the
+        run from.
+        """
+        current = self._current
+        now = self._mono()
+        if current is None:
+            return "no samples", None
+        if current.offset_samples < MIN_OFFSET_SAMPLES:
+            return f"only {current.offset_samples} samples in the offset window", current
+        newest = max((s.t_local_mid_ns for s in self._samples), default=None)
+        if newest is None or now - newest > int(MAX_SAMPLE_AGE_S * NS_PER_S):
+            age_s = "never" if newest is None else f"{(now - newest) / NS_PER_S:.1f}s"
+            return f"newest sample is {age_s} old", current
+        if current.rtt_min_ns > MAX_ACCEPTABLE_RTT_NS:
+            return (
+                f"min rtt {current.rtt_min_ns / 1e6:.1f}ms exceeds the acceptable bound",
+                current,
+            )
+        return None, current
+
     def why_not_usable(self) -> str | None:
         """The single gate, and the reason it failed. None means usable.
 
@@ -338,18 +429,7 @@ class TimebaseEstimator:
         responses from an operator.
         """
         with self._lock:
-            current = self._current
-            newest = max((s.t_local_mid_ns for s in self._samples), default=None)
-        if current is None:
-            return "no samples"
-        if current.offset_samples < MIN_OFFSET_SAMPLES:
-            return f"only {current.offset_samples} samples in the offset window"
-        if newest is None or self._mono() - newest > int(MAX_SAMPLE_AGE_S * NS_PER_S):
-            age_s = "never" if newest is None else f"{(self._mono() - newest) / NS_PER_S:.1f}s"
-            return f"newest sample is {age_s} old"
-        if current.rtt_min_ns > MAX_ACCEPTABLE_RTT_NS:
-            return f"min rtt {current.rtt_min_ns / 1e6:.1f}ms exceeds the acceptable bound"
-        return None
+            return self._gate_locked()[0]
 
     @property
     def usable(self) -> bool:
@@ -363,11 +443,22 @@ class TimebaseEstimator:
         live consumer never sees a number move under it while an offline reader
         can still re-derive it against a better later estimate.
         """
-        reason = self.why_not_usable()
+        with self._lock:
+            reason, estimate = self._gate_locked()
         if reason is not None:
             raise TimebaseNotReady(f"cannot convert: {reason}", reason)
-        estimate = self.estimate
-        assert estimate is not None  # why_not_usable() just proved it
+        assert estimate is not None  # the gate returning None proves it
+        # Refuse to extend the fit into a region no sample supports. The gate
+        # only asks that the newest sample be fresh; without this, an instant
+        # half an hour from the reference still got an answer, with a drift term
+        # extrapolated that whole way on evidence that spans five minutes.
+        reach_ns = abs(t_local_mono_ns - estimate.t_reference_ns)
+        if reach_ns > int(MAX_EXTRAPOLATION_S * NS_PER_S):
+            raise TimebaseNotReady(
+                f"instant is {reach_ns / NS_PER_S:.1f}s from the reference, beyond the "
+                f"{MAX_EXTRAPOLATION_S:.0f}s the samples support",
+                "beyond extrapolation limit",
+            )
         drift_ns = 0.0
         if estimate.skew_ppm is not None:
             drift_ns = (t_local_mono_ns - estimate.t_reference_ns) * estimate.skew_ppm / 1e6
@@ -382,21 +473,22 @@ class TimebaseEstimator:
             return list(self._published)
 
     def to_record(self) -> dict[str, Any]:
-        current = self.estimate
+        """One lock, one snapshot. This is the artifact a run is attributed
+        from, and it used to be able to say `usable: true` beside the reason it
+        was not."""
         with self._lock:
-            refused = dict(sorted(self.refused_by_reason.items()))
-            accepted, refused_total = self.samples_accepted, self.samples_refused
-            published = len(self._published)
-        return {
-            "samples_accepted": accepted,
-            "samples_refused": refused_total,
-            "refused_by_reason": refused,
-            "estimates_published": published,
-            "retained_samples": self.retained_samples,
-            "usable": self.usable,
-            "why_not_usable": self.why_not_usable(),
-            "current": None if current is None else current.to_record(),
-        }
+            reason, current = self._gate_locked()
+            return {
+                "samples_accepted": self.samples_accepted,
+                "samples_refused": self.samples_refused,
+                "refused_by_reason": dict(sorted(self.refused_by_reason.items())),
+                "estimates_published": len(self._published),
+                "estimates_evicted": self.estimates_evicted,
+                "retained_samples": len(self._samples),
+                "usable": reason is None,
+                "why_not_usable": reason,
+                "current": None if current is None else current.to_record(),
+            }
 
 
 def answer_ping(
@@ -410,6 +502,16 @@ def answer_ping(
 
     `t_wire_mono_ns` goes out as the placeholder; the writer replaces it with the
     departure time, which is what makes t3 a departure rather than an enqueue.
+
+    **`t_recv_mono_ns` must be the session's own receive stamp** -- take it from
+    `MessageRouter.recv_with_receipt`, not from a fresh clock reading at handling
+    time. The initiator computes the responder's service interval as
+    `t3 - t2`, and t3 is stamped by this session's writer clock. A t2 from any
+    other clock makes that difference arbitrary, and it enters the round trip
+    with a minus sign: an interval reported longer than really elapsed shrinks
+    the round trip below the true one and shrinks the bound with it, under an
+    error that has not moved. Nothing on the wire can detect it, which is why it
+    is a requirement here rather than a check downstream.
     """
     if not ping.is_ping:
         raise MessageError(
@@ -461,6 +563,8 @@ class TimeSyncInitiator:
         self.pongs_unmatched = 0
         self.wrong_direction = 0
         self.unstamped_echoes = 0
+        self.pings_refused = 0
+        self.pongs_timed_out = 0
 
     @property
     def period_s(self) -> float:
@@ -475,10 +579,34 @@ class TimeSyncInitiator:
         # against. t1 proper is this side's writer stamp, which comes back on
         # the pong -- a pre-send stamp would carry the queueing delay the wire
         # stamp exists to remove.
-        self._pending[exchange_id] = _Pending(exchange_id, self._mono())
-        self._router.send(TimeSyncMessage(t_capture_mono_ns=self._mono(), exchange_id=exchange_id))
+        self._expire_pending()
+        sent_at = self._mono()
+        queued = self._router.send(
+            TimeSyncMessage(t_capture_mono_ns=sent_at, exchange_id=exchange_id)
+        )
+        if not queued:
+            # A closed session returns False. Counting it anyway made a dead link
+            # indistinguishable from total pong loss in the record, and left a
+            # pending entry that could never be matched.
+            self.pings_refused += 1
+            return exchange_id
+        self._pending[exchange_id] = _Pending(exchange_id, sent_at)
         self.pings_sent += 1
         return exchange_id
+
+    def _expire_pending(self) -> None:
+        """Drop exchanges too old to be answered, and count them.
+
+        Without this the table grows for the whole drive -- one entry per lost
+        pong -- and an arbitrarily late pong is still matched, entering the skew
+        window with a round trip of however long it was gone.
+        """
+        horizon = self._mono() - int(PENDING_TIMEOUT_S * NS_PER_S)
+        stale = [key for key, pending in self._pending.items()
+                 if pending.t_sent_mono_ns < horizon]
+        for key in stale:
+            del self._pending[key]
+            self.pongs_timed_out += 1
 
     def on_pong(self, pong: TimeSyncMessage, t_recv_mono_ns: int) -> TimeSyncSample | None:
         """Match a pong to its ping and feed the sample. None if unusable.
@@ -516,11 +644,19 @@ class TimeSyncInitiator:
         return sample
 
     def pump(self, timeout: float = 0.0) -> TimeSyncSample | None:
-        """Drain one pong from the router, if there is one."""
-        received = self._router.recv(Channel.CONTROL, timeout=timeout)
+        """Drain one pong from the router, if there is one.
+
+        t4 is the transport's arrival stamp, not a reading taken here. Stamping
+        it after recv returns folds the inbound queue wait and the decode into
+        the round trip -- at the 1 Hz steady cadence, up to a whole period -- and
+        that is the one term of the four measured locally, so it was the one
+        still carrying the error the wire stamp removed from the other three.
+        """
+        received = self._router.recv_with_receipt(Channel.CONTROL, timeout=timeout)
         if received is None:
             return None
-        return self.on_pong(received, self._mono())
+        pong, t_recv_mono_ns = received
+        return self.on_pong(pong, t_recv_mono_ns)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -529,6 +665,8 @@ class TimeSyncInitiator:
             "pongs_unmatched": self.pongs_unmatched,
             "wrong_direction": self.wrong_direction,
             "unstamped_echoes": self.unstamped_echoes,
+            "pings_refused": self.pings_refused,
+            "pongs_timed_out": self.pongs_timed_out,
             "awaiting_reply": len(self._pending),
             "estimator": self.estimator.to_record(),
         }

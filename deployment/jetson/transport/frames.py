@@ -57,6 +57,14 @@ HEARTBEAT_KEY = "heartbeat"
 # different things -- redefining `t_mono_ns` to departure time would have
 # changed what every existing latency figure measures without changing a test.
 WIRE_STAMP_KEY = "t_wire_mono_ns"
+# The placeholder the transport substitutes at enqueue: the widest value a real
+# stamp can ever be (2**63-1 ns is ~292 years of uptime). The enqueue-time
+# encode therefore validates the widest header this frame can possibly produce,
+# so the writer's re-encode can only ever be shorter and can never be the thing
+# that pushes a header past MAX_HEADER_BYTES. Without this, a header that fit
+# with a one-digit placeholder could fail on a sixteen-digit stamp -- in the
+# writer thread, long after send() told the caller it was accepted.
+WIRE_STAMP_RESERVE = 2**63 - 1
 RESERVED_EXTENSIONS = (HELLO_KEY, HEARTBEAT_KEY, WIRE_STAMP_KEY)
 
 
