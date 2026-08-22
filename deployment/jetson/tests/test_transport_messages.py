@@ -127,6 +127,7 @@ def a_time_sync_pong(**over):
     fields = dict(
         t_capture_mono_ns=999, exchange_id=4, t_wire_mono_ns=1_000,
         t_peer_recv_mono_ns=950, t_peer_recv_wall_ns=1_755_648_000_000_000_000,
+        t_peer_wire_mono_ns=900,
     )
     fields.update(over)
     return TimeSyncMessage(**fields)

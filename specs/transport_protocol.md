@@ -341,7 +341,7 @@ by the sender's transport rather than by the message.
 | `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `headway_target_s`, `lane_text`, `merge_text`, `traffic_text`, `confidence`, `confidence_label`, `action` | empty |
 | `rate_cmd` | `rates`, `trigger`, `shadow` | empty |
 | `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors` | empty |
-| `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns` | empty |
+| `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns`, `t_peer_wire_mono_ns` | empty |
 
 Nullable fields: every numeric field of `gps` except `valid`, `fix_quality` and
 `num_sats`; `quality` on `camera`; `accuracy` on `imu`; `thermal_headroom` on
@@ -442,7 +442,18 @@ TimeSyncMessage   t_capture_mono_ns     when the sender built it
                   t_wire_mono_ns        writer-stamped (reserved extension)
                   t_peer_recv_mono_ns   null on a ping, set on a pong
                   t_peer_recv_wall_ns   null on a ping, set on a pong
+                  t_peer_wire_mono_ns   the ping's wire stamp, echoed back
 ```
+
+All three `t_peer_*` fields are null together or set together. A pong missing
+one loses a term of the arithmetic below, and the estimate computed from it
+would be a plausible number that nothing downstream could tell was wrong.
+
+The echo exists because **an initiator cannot read its own wire stamp**: its
+writer applies it after the caller has let go of the frame. Without the echo the
+only t1 available would be a pre-send stamp carrying the queueing delay -- so
+the wire stamp would have been removed from one side of a symmetric calculation
+and left on the other.
 
 A message whose `t_peer_recv_mono_ns` is `null` is a **ping** and must be
 answered on the same `exchange_id`; one whose value is set is the **pong** for
@@ -458,7 +469,7 @@ silently producing an offset with the sign inverted.
 Four timestamps, and **every subtraction is between two readings of one clock**:
 
 ```text
-t1  ping departure   initiator's clock   ping.t_wire_mono_ns
+t1  ping departure   initiator's clock   pong.t_peer_wire_mono_ns (echoed)
 t2  ping arrival     responder's clock   pong.t_peer_recv_mono_ns
 t3  pong departure   responder's clock   pong.t_wire_mono_ns
 t4  pong arrival     initiator's clock   measured locally on receipt
@@ -480,8 +491,12 @@ measured over a real link, round trip p50 12.2 ms against a max of 333 ms -- and
 the least-delayed sample is the one least distorted by asymmetry. Averaging
 draws the tail in; the minimum discards it.
 
-Skew comes from a least-squares fit over the min-filtered sequence across a
-longer window, because the two quantities need different baselines:
+Skew comes from a least-squares fit across a longer window, and it fits **one
+representative per 10 s bucket -- the least-delayed sample in it** rather than
+every sample. Fitting raw samples puts the whole delay tail into the residuals:
+at 1 Hz with the measured tail that noise is tens of milliseconds against a few
+milliseconds of real signal, and the recovered slope comes out with the wrong
+sign. The two quantities also need different baselines:
 
 ```text
 20 ppm over  10 s  ->  0.2 ms     below the noise floor: unmeasurable
@@ -502,7 +517,9 @@ publishing that invites a consumer to apply it as though it were a measurement.
 | sampling, thereafter | 1 Hz | two ~200 B frames/s, about 0.1% of the camera stream |
 | offset window | 30 s | recent enough that drift has not moved it |
 | skew window | 300 s | enough baseline to resolve ~1 ppm |
+| skew bucket | 10 s | one representative per bucket, least-delayed |
 | minimum offset samples | 5 | below this the minimum is not yet a floor |
+| minimum skew buckets | 20 | 200 s of buckets before a slope is published |
 | maximum sample age | 5.0 s | five missed samples at the steady rate |
 | maximum acceptable min-rtt | 200 ms | above this the bound is too wide to mean anything |
 | assumed skew when unknown | 50 ppm | the top of the ordinary crystal range |
@@ -520,6 +537,13 @@ out. The second is what accrues while no fresh sample has arrived: the standard
 error of the fitted skew once skew is known, and the **assumed 50 ppm** while it
 is not -- because an unmeasured skew is not a zero skew, and treating it as one
 would understate the bound exactly when it is least trustworthy.
+
+**The first term is a guarantee, not an assumption.** A sample's offset error is
+`|up - down| / 2` and its round trip is `up + down`, so with non-negative delays
+the error can never exceed `rtt / 2`. A persistent one-way asymmetry therefore
+biases the point estimate -- undetectably, by half the difference -- while still
+lying inside the bound. Accurate and bounded are different properties, and this
+protocol promises the second.
 
 Conversion is gated on all three of:
 

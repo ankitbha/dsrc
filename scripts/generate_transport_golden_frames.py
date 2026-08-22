@@ -167,6 +167,7 @@ MESSAGES = [
             t_wire_mono_ns=1_000_000_100,
             t_peer_recv_mono_ns=2_000_000_050,
             t_peer_recv_wall_ns=1_755_648_000_123_456_789,
+            t_peer_wire_mono_ns=1_000_000_020,
         ),
     ),
     (

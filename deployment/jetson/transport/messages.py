@@ -702,6 +702,14 @@ class TimeSyncMessage:
     `t_wire_mono_ns` is transport-owned. It leaves here as the placeholder 0 and
     the writer replaces it immediately before the bytes go out, so what the peer
     reads is a departure time rather than an enqueue time.
+
+    A pong also echoes back the ping's wire stamp in `t_peer_wire_mono_ns`. The
+    initiator cannot read its own: the writer stamps the frame after the caller
+    has let go of it, so without the echo the only t1 available would be a
+    pre-send stamp carrying the queueing delay -- which is the error the wire
+    stamp exists to remove. Removing it from the responder's departure and
+    leaving it on the initiator's would have fixed one half of a symmetric
+    calculation.
     """
 
     t_capture_mono_ns: int
@@ -709,6 +717,7 @@ class TimeSyncMessage:
     t_wire_mono_ns: int = 0
     t_peer_recv_mono_ns: int | None = None
     t_peer_recv_wall_ns: int | None = None
+    t_peer_wire_mono_ns: int | None = None
 
     CHANNEL: ClassVar[Channel] = Channel.CONTROL
     RESERVED_ALLOWED: ClassVar[tuple[str, ...]] = (WIRE_STAMP_KEY,)
@@ -729,6 +738,9 @@ class TimeSyncMessage:
                 "t_peer_recv_wall_ns": (
                     None if self.t_peer_recv_wall_ns is None else int(self.t_peer_recv_wall_ns)
                 ),
+                "t_peer_wire_mono_ns": (
+                    None if self.t_peer_wire_mono_ns is None else int(self.t_peer_wire_mono_ns)
+                ),
             },
             b"",
         )
@@ -736,29 +748,33 @@ class TimeSyncMessage:
     @classmethod
     def from_wire(cls, extensions: Mapping[str, Any], payload: bytes) -> "TimeSyncMessage":
         check_no_payload(payload, Channel.CONTROL)
-        mono = optional_int(extensions, "t_peer_recv_mono_ns")
-        wall = optional_int(extensions, "t_peer_recv_wall_ns")
-        # Both or neither. A pong carrying only one of the two would silently
-        # lose a term of the offset arithmetic, and the estimator would compute
-        # a plausible number from an incomplete exchange.
-        if (mono is None) != (wall is None):
-            present, absent = (
-                ("t_peer_recv_mono_ns", "t_peer_recv_wall_ns")
-                if wall is None
-                else ("t_peer_recv_wall_ns", "t_peer_recv_mono_ns")
-            )
+        # Required fields first, cross-field consistency after. The other order
+        # reports a subtle inconsistency while a basic field is simply missing,
+        # which sends a reader looking in the wrong place.
+        capture = require_capture(extensions)
+        exchange_id = check_count(require_int(extensions, "exchange_id"), "exchange_id")
+        wire = check_count(require_int(extensions, WIRE_STAMP_KEY), WIRE_STAMP_KEY)
+
+        # All three peer fields, or none of them. A pong missing any one loses a
+        # term of the offset arithmetic, and the estimator would then compute a
+        # plausible number from an incomplete exchange -- which is worse than
+        # refusing, because nothing downstream can tell.
+        peer_fields = ("t_peer_recv_mono_ns", "t_peer_recv_wall_ns", "t_peer_wire_mono_ns")
+        peer = {name: optional_int(extensions, name) for name in peer_fields}
+        absent = sorted(name for name, value in peer.items() if value is None)
+        if absent and len(absent) != len(peer_fields):
+            present = sorted(set(peer_fields) - set(absent))
             raise MessageError(
-                f"{absent} must not be null when {present} is set",
+                f"{', '.join(absent)} must not be null when {', '.join(present)} is set",
                 REASON_NULL_NOT_ALLOWED,
             )
         return cls(
-            t_capture_mono_ns=require_capture(extensions),
-            exchange_id=check_count(require_int(extensions, "exchange_id"), "exchange_id"),
-            t_wire_mono_ns=check_count(
-                require_int(extensions, WIRE_STAMP_KEY), WIRE_STAMP_KEY
-            ),
-            t_peer_recv_mono_ns=mono,
-            t_peer_recv_wall_ns=wall,
+            t_capture_mono_ns=capture,
+            exchange_id=exchange_id,
+            t_wire_mono_ns=wire,
+            t_peer_recv_mono_ns=peer["t_peer_recv_mono_ns"],
+            t_peer_recv_wall_ns=peer["t_peer_recv_wall_ns"],
+            t_peer_wire_mono_ns=peer["t_peer_wire_mono_ns"],
         )
 
 
