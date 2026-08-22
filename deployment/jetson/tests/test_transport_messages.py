@@ -17,9 +17,10 @@ from pathlib import Path
 import pytest
 
 from transport.channels import Channel
-from transport.frames import FramingError, encode
+from transport.frames import WIRE_STAMP_KEY, FramingError, encode
 from transport.loopback import loopback_pair
 from transport.messages import (
+    TimeSyncMessage,
     ACTION_HEADS,
     RATE_KEYS,
     ACTION_VALUES,
@@ -116,9 +117,24 @@ def a_rate_command(**over):
     return RateCommand(**fields)
 
 
+def a_time_sync_ping(**over):
+    fields = dict(t_capture_mono_ns=888, exchange_id=4)
+    fields.update(over)
+    return TimeSyncMessage(**fields)
+
+
+def a_time_sync_pong(**over):
+    fields = dict(
+        t_capture_mono_ns=999, exchange_id=4, t_wire_mono_ns=1_000,
+        t_peer_recv_mono_ns=950, t_peer_recv_wall_ns=1_755_648_000_000_000_000,
+    )
+    fields.update(over)
+    return TimeSyncMessage(**fields)
+
+
 ALL_BUILDERS = [
     a_camera_frame, a_gps_record, an_imu_sample, a_here_response,
-    a_telemetry, an_advisory, a_rate_command,
+    a_telemetry, an_advisory, a_rate_command, a_time_sync_ping, a_time_sync_pong,
 ]
 
 
@@ -157,10 +173,38 @@ def test_every_channel_with_a_message_is_covered_by_a_builder():
     assert covered == set(MESSAGE_FOR_CHANNEL)
 
 
-def test_control_carries_no_typed_message():
-    """It is the transport's own channel: hello and heartbeat."""
-    with pytest.raises(MessageError, match="no typed message"):
-        decode_message(Channel.CONTROL, {CAPTURE_KEY: 1}, b"")
+def test_control_now_carries_the_time_sync_message():
+    """It used to carry none -- it was the transport's own channel, hello and
+    heartbeat -- and that is why `no_typed_message` exists. Task 15 gives it
+    one, and the hello still spends control seq 0 alongside."""
+    message = a_time_sync_ping()
+    extensions, payload = message.to_wire()
+    assert decode_message(Channel.CONTROL, extensions, payload) == message
+
+
+def test_no_typed_message_is_now_a_guard_with_no_live_channel():
+    """Every channel has a type, so nothing on the wire can produce this reason
+    any more. The guard stays because `Channel` will grow -- adding a channel
+    and forgetting its message type is exactly the mistake it catches -- but a
+    reason no test can reach is a reason that rots, so this reaches it the only
+    way left: by taking an entry back out.
+
+    Deliberately not deleted from the vocabulary. `channels.py` already refuses
+    to have a default for an unknown channel for the same reason.
+    """
+    import transport.messages as module
+
+    assert set(module.MESSAGE_FOR_CHANNEL) == set(Channel), (
+        "a channel has no typed message; this test's premise has changed"
+    )
+    saved = module.MESSAGE_FOR_CHANNEL.pop(Channel.CONTROL)
+    try:
+        with pytest.raises(MessageError, match="no typed message") as caught:
+            decode_message(Channel.CONTROL, {CAPTURE_KEY: 1}, b"")
+        assert caught.value.reason == "no_typed_message"
+    finally:
+        module.MESSAGE_FOR_CHANNEL[Channel.CONTROL] = saved
+    assert set(module.MESSAGE_FOR_CHANNEL) == set(Channel), "the table was not restored"
 
 
 # -- the null convention -----------------------------------------------------
@@ -570,7 +614,7 @@ SAMPLE_FOR_CHANNEL = {
     Channel.CAMERA: a_camera_frame, Channel.GPS: a_gps_record,
     Channel.IMU: an_imu_sample, Channel.HERE: a_here_response,
     Channel.TELEMETRY: a_telemetry, Channel.ADVISORY: an_advisory,
-    Channel.RATE_CMD: a_rate_command,
+    Channel.RATE_CMD: a_rate_command, Channel.CONTROL: a_time_sync_ping,
 }
 
 
@@ -634,12 +678,28 @@ def wait_until(predicate, timeout=5.0):
 
 @pytest.mark.parametrize("build", ALL_BUILDERS, ids=lambda b: b.__name__)
 def test_a_message_crosses_a_real_session_intact(build):
+    """Field for field, except the one field the transport owns.
+
+    A time-sync message leaves with `t_wire_mono_ns` as the placeholder 0 and
+    arrives with a real departure stamp, so plain equality would fail on the
+    message whose whole point is that the transport rewrites it. Asserting the
+    rest is unchanged *and* that this one changed is the stronger statement.
+    """
+    from dataclasses import replace as replace_fields
+
     sender, receiver = quiet_pair()
     out_router, in_router = MessageRouter(sender), MessageRouter(receiver)
     try:
         message = build()
         assert out_router.send(message) is True
-        assert in_router.recv(message.CHANNEL, timeout=5.0) == message
+        arrived = in_router.recv(message.CHANNEL, timeout=5.0)
+        assert arrived is not None
+        if WIRE_STAMP_KEY in getattr(message, "RESERVED_ALLOWED", ()):
+            assert arrived.t_wire_mono_ns > 0, "the writer never stamped it"
+            assert arrived.t_wire_mono_ns != message.t_wire_mono_ns
+            assert replace_fields(arrived, t_wire_mono_ns=message.t_wire_mono_ns) == message
+        else:
+            assert arrived == message
         assert in_router.stats()[message.CHANNEL].delivered == 1
         assert in_router.stats()[message.CHANNEL].decode_errors == 0
     finally:
@@ -1142,18 +1202,22 @@ def malformed_for(reason):
         extensions, _payload = a_gps_record().to_wire()
         return Channel.GPS, extensions, b"unexpected"
     if reason == "no_typed_message":
-        return Channel.CONTROL, {CAPTURE_KEY: 1}, b""
+        # Covered by its own test now: every channel has a typed message, so
+        # this reason is unreachable without removing one from the table.
+        raise AssertionError("no_typed_message has no live channel; see its own test")
     raise AssertionError(f"no fixture for {reason}")
 
 
 @pytest.mark.parametrize(
     "reason",
     ["missing_field", "wrong_type", "null_not_allowed", "non_finite", "out_of_range",
-     "unknown_value", "unexpected_payload", "no_typed_message"],
+     "unknown_value", "unexpected_payload"],
 )
 def test_each_reason_is_produced_by_the_condition_it_names(reason):
     """Three of nine were pinned, which is round-one coverage on brand-new code.
-    `reserved_key` is covered separately, on the send path."""
+    `reserved_key` is covered separately on the send path, and
+    `no_typed_message` in its own test -- it has no live channel since task 15
+    gave `control` a type."""
     channel, extensions, payload = malformed_for(reason)
     with pytest.raises(MessageError) as caught:
         decode_message(channel, extensions, payload)

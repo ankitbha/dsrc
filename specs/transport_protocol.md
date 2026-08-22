@@ -327,6 +327,11 @@ type that uses it, and the round trip must be lossless in both directions.
 
 `t_capture_mono_ns` is required on all of them and omitted below.
 
+`control` also carries the transport's own `hello` and `heartbeat` frames, which
+are consumed by the transport rather than delivered; its typed message is the
+time-sync exchange under Shared Timebase, and `t_wire_mono_ns` on it is written
+by the sender's transport rather than by the message.
+
 | channel | header fields | payload |
 |---|---|---|
 | `camera` | `frame_id`, `width`, `height`, `format`, `quality` | JPEG bytes |
@@ -336,7 +341,7 @@ type that uses it, and the round trip must be lossless in both directions.
 | `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `headway_target_s`, `lane_text`, `merge_text`, `traffic_text`, `confidence`, `confidence_label`, `action` | empty |
 | `rate_cmd` | `rates`, `trigger`, `shadow` | empty |
 | `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors` | empty |
-| `control` | owned by the transport: `hello`, `heartbeat` | empty |
+| `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns` | empty |
 
 Nullable fields: every numeric field of `gps` except `valid`, `fix_quality` and
 `num_sats`; `quality` on `camera`; `accuracy` on `imu`; `thermal_headroom` on

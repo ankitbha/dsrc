@@ -36,7 +36,7 @@ from typing import Any, ClassVar, Mapping
 
 from transport.channels import Channel
 from transport.clock import now_mono_ns
-from transport.frames import RESERVED_EXTENSIONS
+from transport.frames import RESERVED_EXTENSIONS, WIRE_STAMP_KEY
 
 CAPTURE_KEY = "t_capture_mono_ns"
 
@@ -201,6 +201,19 @@ def require_bool(extensions: Mapping[str, Any], field: str) -> bool:
     return value
 
 
+def optional_int(extensions: Mapping[str, Any], field: str) -> int | None:
+    """An int or an explicit null. Bool is refused: it is an int in Python and
+    would sail through as 0 or 1, which for a timestamp is a silent zero."""
+    value = require(extensions, field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MessageError(
+            f"{field} is {type(value).__name__}, expected int or null", REASON_WRONG_TYPE
+        )
+    return value
+
+
 def optional_number(extensions: Mapping[str, Any], field: str) -> float | None:
     return from_wire_number(require(extensions, field), field)
 
@@ -276,8 +289,13 @@ def check_no_payload(payload: bytes, channel: Channel) -> None:
         )
 
 
-def check_reserved(extensions: Mapping[str, Any]) -> None:
-    clash = [key for key in extensions if key in RESERVED_EXTENSIONS]
+def check_reserved(extensions: Mapping[str, Any], allow: tuple[str, ...] = ()) -> None:
+    """Reserved keys belong to the transport. `allow` names the exceptions.
+
+    Per-message and by exact name, so the one message that legitimately carries
+    a transport-owned key does not open the other two for everything else.
+    """
+    clash = [key for key in extensions if key in RESERVED_EXTENSIONS and key not in allow]
     if clash:
         raise MessageError(
             f"{', '.join(sorted(clash))} are reserved for the transport", REASON_RESERVED_KEY
@@ -670,7 +688,82 @@ Message = (
     | RateCommand
 )
 
+@dataclass(frozen=True)
+class TimeSyncMessage:
+    """One type for both halves of the exchange, ping and pong.
+
+    The channel is the discriminator for every other message, so a ping type and
+    a pong type on `control` would need a `kind` field to tell them apart --
+    which is what this protocol refuses. The null convention carries it instead:
+    a message whose `t_peer_recv_mono_ns` is null is a ping, and one whose value
+    is set is the pong for that `exchange_id`. Since the phone always initiates,
+    the receiver's role settles which it is without a field claiming it.
+
+    `t_wire_mono_ns` is transport-owned. It leaves here as the placeholder 0 and
+    the writer replaces it immediately before the bytes go out, so what the peer
+    reads is a departure time rather than an enqueue time.
+    """
+
+    t_capture_mono_ns: int
+    exchange_id: int
+    t_wire_mono_ns: int = 0
+    t_peer_recv_mono_ns: int | None = None
+    t_peer_recv_wall_ns: int | None = None
+
+    CHANNEL: ClassVar[Channel] = Channel.CONTROL
+    RESERVED_ALLOWED: ClassVar[tuple[str, ...]] = (WIRE_STAMP_KEY,)
+
+    @property
+    def is_ping(self) -> bool:
+        return self.t_peer_recv_mono_ns is None
+
+    def to_wire(self) -> tuple[dict[str, Any], bytes]:
+        return (
+            {
+                CAPTURE_KEY: int(self.t_capture_mono_ns),
+                "exchange_id": self.exchange_id,
+                WIRE_STAMP_KEY: int(self.t_wire_mono_ns),
+                "t_peer_recv_mono_ns": (
+                    None if self.t_peer_recv_mono_ns is None else int(self.t_peer_recv_mono_ns)
+                ),
+                "t_peer_recv_wall_ns": (
+                    None if self.t_peer_recv_wall_ns is None else int(self.t_peer_recv_wall_ns)
+                ),
+            },
+            b"",
+        )
+
+    @classmethod
+    def from_wire(cls, extensions: Mapping[str, Any], payload: bytes) -> "TimeSyncMessage":
+        check_no_payload(payload, Channel.CONTROL)
+        mono = optional_int(extensions, "t_peer_recv_mono_ns")
+        wall = optional_int(extensions, "t_peer_recv_wall_ns")
+        # Both or neither. A pong carrying only one of the two would silently
+        # lose a term of the offset arithmetic, and the estimator would compute
+        # a plausible number from an incomplete exchange.
+        if (mono is None) != (wall is None):
+            present, absent = (
+                ("t_peer_recv_mono_ns", "t_peer_recv_wall_ns")
+                if wall is None
+                else ("t_peer_recv_wall_ns", "t_peer_recv_mono_ns")
+            )
+            raise MessageError(
+                f"{absent} must not be null when {present} is set",
+                REASON_NULL_NOT_ALLOWED,
+            )
+        return cls(
+            t_capture_mono_ns=require_capture(extensions),
+            exchange_id=check_count(require_int(extensions, "exchange_id"), "exchange_id"),
+            t_wire_mono_ns=check_count(
+                require_int(extensions, WIRE_STAMP_KEY), WIRE_STAMP_KEY
+            ),
+            t_peer_recv_mono_ns=mono,
+            t_peer_recv_wall_ns=wall,
+        )
+
+
 MESSAGE_FOR_CHANNEL: dict[Channel, type] = {
+    Channel.CONTROL: TimeSyncMessage,
     Channel.CAMERA: CameraFrame,
     Channel.GPS: GpsRecord,
     Channel.IMU: ImuSample,
@@ -803,13 +896,14 @@ class MessageRouter:
         its own bug with the drop-and-count idiom meant for the peer's.
         """
         extensions, payload = message.to_wire()
+        allowed: tuple[str, ...] = getattr(message, "RESERVED_ALLOWED", ())
         stats = self._stats[message.CHANNEL]
         try:
             # Inside the guard, not before it: a reserved key is our own bug on
             # exactly the same terms as an out-of-range rate, and letting one of
             # the two escape as MessageError left a caller two exception types
             # to handle for one mistake.
-            check_reserved(extensions)
+            check_reserved(extensions, allowed)
             decode_message(message.CHANNEL, extensions, payload)
         except MessageError as exc:
             stats.send_rejected += 1
@@ -817,7 +911,9 @@ class MessageRouter:
                 stats.rejected_by_reason.get(exc.reason, 0) + 1
             )
             raise InvalidMessage(str(exc), exc.reason) from None
-        return self._session.send(message.CHANNEL, payload, extensions)
+        return self._session.send(
+            message.CHANNEL, payload, extensions, allow_reserved=allowed
+        )
 
     def recv(self, channel: Channel, timeout: float | None = 0.0) -> Message | None:
         """The next decodable message, skipping and counting any that are not.

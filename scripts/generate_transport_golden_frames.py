@@ -32,6 +32,7 @@ from transport.messages import (  # noqa: E402
     ImuSample,
     PhoneTelemetry,
     RateCommand,
+    TimeSyncMessage,
 )
 from transport.frames import (  # noqa: E402
     HEARTBEAT_KEY,
@@ -150,6 +151,24 @@ CASES = [
 # types as well as the same framing. Every one uses fixed values -- no clocks,
 # no randomness -- so the bytes are reproducible.
 MESSAGES = [
+    (
+        "message_time_sync_ping",
+        "a time-sync ping: the two peer-receipt fields null, and the wire stamp "
+        "still the placeholder the sender's transport will overwrite",
+        TimeSyncMessage(t_capture_mono_ns=1_000_000_008, exchange_id=17),
+    ),
+    (
+        "message_time_sync_pong",
+        "a time-sync pong: peer receipt in both clocks, and a wire stamp as the "
+        "writer leaves it -- a wall value past 2**53, which is the case an "
+        "implementation routing it through a double gets wrong",
+        TimeSyncMessage(
+            t_capture_mono_ns=1_000_000_009, exchange_id=17,
+            t_wire_mono_ns=1_000_000_100,
+            t_peer_recv_mono_ns=2_000_000_050,
+            t_peer_recv_wall_ns=1_755_648_000_123_456_789,
+        ),
+    ),
     (
         "message_camera",
         "a camera frame: metadata in the header, JPEG untouched in the payload",
