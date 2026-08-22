@@ -50,7 +50,14 @@ _REQUIRED_KEYS = ("ch", "seq", "t_mono_ns", "t_wall_ns", "n")
 # handshake and its own keepalive. Message-level extensions must not use them.
 HELLO_KEY = "hello"
 HEARTBEAT_KEY = "heartbeat"
-RESERVED_EXTENSIONS = (HELLO_KEY, HEARTBEAT_KEY)
+# Stamped by the writer immediately before the bytes leave, on frames that ask
+# for it. `t_mono_ns` is an enqueue stamp and so carries however long the frame
+# then waited behind others; for a cross-device timebase that wait is the
+# dominant error, larger than the network. Both keys ride such a frame and mean
+# different things -- redefining `t_mono_ns` to departure time would have
+# changed what every existing latency figure measures without changing a test.
+WIRE_STAMP_KEY = "t_wire_mono_ns"
+RESERVED_EXTENSIONS = (HELLO_KEY, HEARTBEAT_KEY, WIRE_STAMP_KEY)
 
 
 class FramingError(ValueError):

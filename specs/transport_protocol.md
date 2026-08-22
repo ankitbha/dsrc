@@ -86,9 +86,17 @@ no sequence gap to show it, so invisible in the session summary as well.
 Two clocks, following the discipline in `deployment/jetson/sensors/time_sync.py`:
 
 - `t_mono_ns` is monotonic and meaningful **only on the device that produced
-  it**. Never compare a phone monotonic value with a Jetson monotonic value.
-  Cross-device comparison requires the offset estimate built on top of the
-  handshake samples, which this protocol does not itself compute.
+  it**. Never compare a phone monotonic value with a Jetson monotonic value
+  directly. Convert through the shared timebase below, which returns the value
+  with the uncertainty it carries; there is deliberately no way to obtain a
+  converted instant as a bare number.
+- `t_wire_mono_ns` is a **reserved extension**, present only on frames that ask
+  for it, and stamped by the writer immediately before the bytes leave rather
+  than at enqueue. It exists because `t_mono_ns` is an enqueue stamp and so
+  includes however long the frame then waited behind others -- which for a
+  timebase estimate is the dominant error, larger than the network. Both keys
+  appear on such a frame and they mean different things; neither replaces the
+  other.
 - `t_wall_ns` is UTC epoch nanoseconds, for log correlation. It can step.
 
 ### Sequence numbers
@@ -407,6 +415,127 @@ desynchronised and there is no delimiter to hunt for, so the reader can never
 find its place again. A message that framed correctly proves the stream is
 fine -- one bad record costs one record, and reconnecting the phone over a
 single malformed IMU sample at 50 Hz would be far worse than dropping it.
+
+## Shared Timebase
+
+Two devices, two monotonic clocks, and no way to compare an event on one with an
+event on the other -- which is what makes end-to-end latency unmeasurable and
+leaves a phone sensor sample unattributable to the Jetson-side step that
+consumed it. This section is the sanctioned way across, and its whole discipline
+is that a converted instant carries a bound.
+
+### The exchange
+
+One typed message on `control`, in both directions. **One**, not a ping type and
+a pong type: the channel is the discriminator for every other message, and a
+second type on one channel would need a `kind` field to tell them apart, which
+is exactly what this protocol refuses. Instead the null convention carries it.
+
+```text
+TimeSyncMessage   t_capture_mono_ns     when the sender built it
+                  exchange_id           matches a pong to its ping
+                  t_wire_mono_ns        writer-stamped (reserved extension)
+                  t_peer_recv_mono_ns   null on a ping, set on a pong
+                  t_peer_recv_wall_ns   null on a ping, set on a pong
+```
+
+A message whose `t_peer_recv_mono_ns` is `null` is a **ping** and must be
+answered on the same `exchange_id`; one whose value is set is the **pong** for
+that exchange. The receiver's role settles which it is, so no field has to claim
+it. **The phone initiates and the Jetson only ever answers** -- following the
+same direction rule as everything else here. A Jetson receiving a pong, or a
+phone receiving a ping, is a protocol error: the message is dropped and counted
+as `unknown_value`, because the alternative is treating one as the other and
+silently producing an offset with the sign inverted.
+
+### The arithmetic
+
+Four timestamps, and **every subtraction is between two readings of one clock**:
+
+```text
+t1  ping departure   initiator's clock   ping.t_wire_mono_ns
+t2  ping arrival     responder's clock   pong.t_peer_recv_mono_ns
+t3  pong departure   responder's clock   pong.t_wire_mono_ns
+t4  pong arrival     initiator's clock   measured locally on receipt
+
+rtt    = (t4 - t1) - (t3 - t2)
+offset = ((t2 - t1) + (t3 - t4)) / 2      responder_clock - initiator_clock
+```
+
+`rtt` subtracts the responder's own service time, so a responder that answers
+slowly inflates neither the round trip nor the bound derived from it. A negative
+`rtt` is impossible and means a clock went backwards or a field was
+misattributed; it is refused as `out_of_range` rather than fed to the estimator.
+
+### The estimate
+
+The offset comes from the **minimum-`rtt` sample** in a sliding window, not from
+an average. The path delay is one-sided with a hard floor and a long tail --
+measured over a real link, round trip p50 12.2 ms against a max of 333 ms -- and
+the least-delayed sample is the one least distorted by asymmetry. Averaging
+draws the tail in; the minimum discards it.
+
+Skew comes from a least-squares fit over the min-filtered sequence across a
+longer window, because the two quantities need different baselines:
+
+```text
+20 ppm over  10 s  ->  0.2 ms     below the noise floor: unmeasurable
+20 ppm over 300 s  ->  6.0 ms     measurable, and worth correcting
+```
+
+Two independent crystals typically differ by 10-50 ppm, so a 10 minute drive
+accumulates more error than the offset bound itself. A window short enough to
+keep the offset fresh cannot see skew at all, which is why there are two.
+
+**Skew is reported as absent until it is measurable.** A fit with too short a
+baseline yields a number near zero with an uncertainty many times its own size;
+publishing that invites a consumer to apply it as though it were a measurement.
+
+| constant | value | why |
+|---|---|---|
+| sampling, first 10 s | 4 Hz | the first advisory should be alignable in seconds |
+| sampling, thereafter | 1 Hz | two ~200 B frames/s, about 0.1% of the camera stream |
+| offset window | 30 s | recent enough that drift has not moved it |
+| skew window | 300 s | enough baseline to resolve ~1 ppm |
+| minimum offset samples | 5 | below this the minimum is not yet a floor |
+| maximum sample age | 5.0 s | five missed samples at the steady rate |
+| maximum acceptable min-rtt | 200 ms | above this the bound is too wide to mean anything |
+| assumed skew when unknown | 50 ppm | the top of the ordinary crystal range |
+
+### The bound, and the gate
+
+A converted instant is `value +/- bound`, and the bound is
+
+```text
+bound = rtt_min / 2  +  skew_uncertainty * |t - t_reference|
+```
+
+The first term is the instantaneous asymmetry the minimum sample cannot rule
+out. The second is what accrues while no fresh sample has arrived: the standard
+error of the fitted skew once skew is known, and the **assumed 50 ppm** while it
+is not -- because an unmeasured skew is not a zero skew, and treating it as one
+would understate the bound exactly when it is least trustworthy.
+
+Conversion is gated on all three of:
+
+```text
+offset samples in the window  >=  5
+age of the newest sample      <=  5.0 s
+rtt_min                       <=  200 ms
+```
+
+**Failing any of them, conversion refuses.** It does not answer with a widened
+bound: a wide bound is easy to ignore, and a caller that cannot handle a refusal
+should log the raw same-device stamp and say which it logged. An implementation
+that returns its best guess here is not conforming.
+
+### Provenance
+
+Conversion is **forward-only**. Each converted instant carries the id of the
+estimate that produced it, and an implementation publishes its estimate history,
+so an offline reader can re-derive any conversion against a better later
+estimate and get an exact answer. A value already converted never changes, and
+nothing already acted upon has to be recalled.
 
 ## Golden Vectors
 

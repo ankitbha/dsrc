@@ -31,7 +31,7 @@ import itertools
 import logging
 import threading
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Callable, Mapping
 
@@ -43,6 +43,7 @@ from transport.channels import (
 from transport.clock import MonoClock, WallClock, now_mono_ns, now_wall_ns
 from transport.connection import ByteConnection, ConnectionClosed
 from transport.frames import (
+    WIRE_STAMP_KEY,
     HEARTBEAT_KEY,
     RESERVED_EXTENSIONS,
     Frame,
@@ -332,6 +333,7 @@ class Session:
         channel: Channel,
         payload: bytes = b"",
         extensions: Mapping[str, Any] | None = None,
+        allow_reserved: tuple[str, ...] = (),
     ) -> bool:
         """Queue a message. False means the session has already ended.
 
@@ -341,7 +343,15 @@ class Session:
         would be consumed as transport traffic and silently never delivered.
         """
         if extensions:
-            clash = [key for key in extensions if key in RESERVED_EXTENSIONS]
+            # `allow_reserved` is per-call and names the exact keys, so opting
+            # into one reserved key does not open the rest. The wire stamp is
+            # the only current use: the one message that legitimately carries a
+            # transport-owned key has to be able to say so.
+            clash = [
+                key
+                for key in extensions
+                if key in RESERVED_EXTENSIONS and key not in allow_reserved
+            ]
             if clash:
                 raise FramingError(
                     f"extension(s) {', '.join(sorted(clash))} are reserved for the transport"
@@ -385,6 +395,25 @@ class Session:
             self._out_cond.notify_all()
         return True
 
+    def _stamped_at_wire(self, item: _Outbound) -> _Outbound:
+        """Re-stamp a frame that asked for it, microseconds before it leaves.
+
+        Re-encodes rather than patching the bytes: the header is canonical JSON
+        with sorted keys, so a stamp with more digits than the placeholder moves
+        every byte after it and changes `header_len`. A splice would
+        desynchronise the stream on the first real stamp.
+
+        Only frames carrying the key pay for this, and the key is reserved, so
+        the only way in is a caller naming it in `allow_reserved`.
+        """
+        if WIRE_STAMP_KEY not in item.frame.extensions:
+            return item
+        frame = replace(
+            item.frame,
+            extensions={**item.frame.extensions, WIRE_STAMP_KEY: self._mono()},
+        )
+        return _Outbound(frame=frame, encoded=encode(frame))
+
     def _next_outbound(self) -> _Outbound | None:
         """Highest non-empty priority tier, round-robin within the tier."""
         for priority, channels in self._tiers:
@@ -410,6 +439,7 @@ class Session:
                         break
                     self._out_cond.wait(self._tick_s)
             stats = self._stats[item.frame.channel]
+            item = self._stamped_at_wire(item)
             try:
                 self._connection.send_all(item.encoded)
             except ConnectionClosed:

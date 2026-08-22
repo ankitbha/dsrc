@@ -19,6 +19,7 @@ from transport.channels import Channel, policy_for
 from transport.connection import ConnectionClosed
 from transport.frames import (
     HEARTBEAT_KEY,
+    WIRE_STAMP_KEY,
     MAX_PAYLOAD_BYTES,
     Frame,
     FramingError,
@@ -635,7 +636,7 @@ def test_heartbeat_frames_carry_the_reserved_extension():
 # -- reserved extensions belong to the transport ----------------------------
 
 
-@pytest.mark.parametrize("key", ["hello", "heartbeat"])
+@pytest.mark.parametrize("key", ["hello", "heartbeat", "t_wire_mono_ns"])
 def test_send_refuses_a_reserved_extension(key):
     """A caller message carrying one of these would be read as transport
     traffic by the peer and consumed instead of delivered -- lost with no drop
@@ -1532,3 +1533,89 @@ def test_messages_never_collected_are_counted_as_abandoned():
     assert stats.delivered == 0
     assert stats.received == stats.delivered + stats.dropped_inbound + stats.abandoned_inbound
     assert "abandoned_inbound" in stats.to_record()
+
+
+# -- the write-time stamp ----------------------------------------------------
+
+
+def test_the_writer_stamps_the_wire_key_and_leaves_t_mono_ns_alone():
+    """`t_mono_ns` is an enqueue stamp, so it carries however long the frame
+    then waited. For a timebase estimate that wait is the dominant error --
+    larger than the network -- so a frame can ask for a second stamp taken
+    immediately before its bytes leave.
+
+    Both keys must survive with different meanings. Redefining `t_mono_ns` to
+    departure time would silently change what every latency figure in tasks
+    12-14 measures without changing a single test.
+    """
+    near, far = loopback_pair()
+    sender = quiet_session(near)
+    reader = quiet_session(far)
+    try:
+        # A large frame first, so the small one behind it has a real wait.
+        sender.send(Channel.CAMERA, b"z" * (256 * 1024), {})
+        sender.send(Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0}, allow_reserved=(WIRE_STAMP_KEY,))
+        received = None
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and received is None:
+            candidate = reader.recv(Channel.CONTROL, timeout=0.25)
+            if candidate is not None:
+                received = candidate
+        assert received is not None, "the control frame never arrived"
+        wire = received.frame.extensions[WIRE_STAMP_KEY]
+        assert isinstance(wire, int) and wire > 0, "the placeholder was never replaced"
+        assert wire >= received.frame.t_mono_ns, (
+            "the wire stamp predates the enqueue stamp, so it was not taken at write time"
+        )
+    finally:
+        sender.close()
+        reader.close()
+
+
+def test_a_frame_that_does_not_ask_for_the_wire_stamp_does_not_get_one():
+    """Otherwise every channel pays the re-encode, and the key would appear on
+    messages whose decoders have never heard of it."""
+    near, far = loopback_pair()
+    sender = quiet_session(near)
+    reader = quiet_session(far)
+    try:
+        sender.send(Channel.IMU, b"", {"ax": 1.0})
+        received = None
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and received is None:
+            received = reader.recv(Channel.IMU, timeout=0.25)
+        assert received is not None
+        assert WIRE_STAMP_KEY not in received.frame.extensions
+    finally:
+        sender.close()
+        reader.close()
+
+
+def test_the_re_stamp_re_encodes_rather_than_splicing_the_header():
+    """The header is canonical JSON with sorted keys, so a longer integer moves
+    every byte after it and changes `header_len`. A splice would desynchronise
+    the stream at the first stamp whose digit count differed from the
+    placeholder's -- which is every real stamp."""
+    near, far = loopback_pair()
+    sender = quiet_session(near)
+    reader = quiet_session(far)
+    try:
+        # Several in a row: if the length prefix were ever wrong, the next read
+        # lands mid-frame and the session dies with a framing error.
+        for index in range(8):
+            sender.send(
+                Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0, "exchange_id": index},
+                allow_reserved=(WIRE_STAMP_KEY,),
+            )
+        seen = []
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and len(seen) < 8:
+            candidate = reader.recv(Channel.CONTROL, timeout=0.25)
+            if candidate is not None:
+                seen.append(candidate)
+        assert len(seen) == 8, f"only {len(seen)} of 8 survived the stream"
+        assert [frame.frame.extensions["exchange_id"] for frame in seen] == list(range(8))
+        assert not reader.is_closed and not sender.is_closed
+    finally:
+        sender.close()
+        reader.close()
