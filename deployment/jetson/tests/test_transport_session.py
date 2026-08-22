@@ -1655,6 +1655,1114 @@ def test_the_enqueue_stamp_still_means_enqueue_on_other_channels():
         reader.close()
 
 
+def test_a_header_that_fits_the_placeholder_but_not_a_real_stamp_is_refused_at_enqueue():
+    """The critical finding, pinned at the width that distinguishes the fix.
+
+    Sized to fit with a one-digit placeholder and to fail with a real stamp --
+    which is exactly the window that killed the writer thread while the session
+    went on reporting itself healthy. The reserve makes the caller's own encode
+    the verdict on the widest header the frame can produce, so the refusal
+    arrives where `send` documents it: in the caller's thread.
+    """
+    from transport.frames import WIRE_STAMP_RESERVE
+
+    near, far = loopback_pair()
+    sender = quiet_session(near)
+    try:
+        fixed = {"ch": "control", "seq": 0, "t_mono_ns": 0, "t_wall_ns": 0, "n": 0}
+        narrow = len(encode_header({**fixed, WIRE_STAMP_KEY: 0, "pad": ""}))
+        widest = len(encode_header({**fixed, WIRE_STAMP_KEY: WIRE_STAMP_RESERVE, "pad": ""}))
+        assert widest > narrow, "the reserve is no wider than the placeholder"
+
+        # Fits with the narrow placeholder, overflows with the reserve.
+        pad = "x" * (MAX_HEADER_BYTES - narrow - 1)
+        assert len(encode_header({**fixed, WIRE_STAMP_KEY: 0, "pad": pad})) <= MAX_HEADER_BYTES
+        assert len(
+            encode_header({**fixed, WIRE_STAMP_KEY: WIRE_STAMP_RESERVE, "pad": pad})
+        ) > MAX_HEADER_BYTES
+
+        with pytest.raises(FramingError, match="exceeds"):
+            sender.send(
+                Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0, "pad": pad},
+                allow_reserved=(WIRE_STAMP_KEY,),
+            )
+        # The session survived the refusal and still transmits.
+        assert not sender.is_closed
+        assert sender.send(Channel.IMU, b"", {"ax": 1.0}) is True
+        assert any(
+            t.name.endswith("-tx") and t.is_alive() for t in threading.enumerate()
+        ), "the writer thread died"
+    finally:
+        sender.close()
+        far.close()
+
+
+def test_the_reserve_is_wider_than_any_stamp_a_clock_can_produce():
+    """If it were not, the enqueue encode would not be validating the worst
+    case and the writer could still overflow a header."""
+    from transport.frames import WIRE_STAMP_RESERVE
+
+    assert WIRE_STAMP_RESERVE == 2**63 - 1
+    assert len(str(WIRE_STAMP_RESERVE)) >= len(str(now_mono_ns()))
+    # 2**63 ns is ~292 years of uptime, so no monotonic reading reaches it.
+    assert WIRE_STAMP_RESERVE > 200 * 365 * 24 * 3600 * 1_000_000_000
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_raise_inside_the_re_stamp_ends_the_session_instead_of_stranding_it():
+    """Defence in depth for the finding itself.
+
+    The reserve should make a re-stamp failure impossible, so this is the only
+    way to reach the guard: force the raise. Outside the `try` this left the
+    writer dead with `is_closed` False, `end_reason` None and `send()` still
+    returning True -- the session claiming health while transmitting nothing.
+    """
+    near, far = loopback_pair()
+    sender = quiet_session(near)
+    try:
+        def explode(item):
+            raise FramingError("forced, to reach the guard")
+
+        # The guard shuts the session down and then re-raises, deliberately, so
+        # the traceback is not swallowed -- hence the expected thread-exception
+        # warning declared above. What is under test is that the shutdown happens
+        # first, so nothing is left claiming health.
+        sender._stamped_at_wire = explode  # noqa: SLF001 - reaching a guard on purpose
+        sender.send(
+            Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0}, allow_reserved=(WIRE_STAMP_KEY,)
+        )
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not sender.is_closed:
+            time.sleep(0.02)
+        assert sender.is_closed, "the session did not end; the writer died stranded"
+        assert sender.end_reason is not None
+        assert sender.send(Channel.IMU, b"", {"ax": 1.0}) is False, (
+            "send still accepts work on a session whose writer is gone"
+        )
+    finally:
+        sender.close()
+        far.close()
+
+
+# -- reserved extensions belong to the transport ----------------------------
+
+
+@pytest.mark.parametrize("key", ["hello", "heartbeat", "t_wire_mono_ns"])
+def test_send_refuses_a_reserved_extension(key):
+    """A caller message carrying one of these would be read as transport
+    traffic by the peer and consumed instead of delivered -- lost with no drop
+    counted and no sequence gap, so invisible in the session summary too. Task
+    14 defines message fields on top of this and could pick either name."""
+    near, _ = loopback_pair()
+    session = quiet_session(near)
+    try:
+        with pytest.raises(FramingError, match="reserved"):
+            session.send(Channel.GPS, b"x", {key: True})
+    finally:
+        session.close()
+
+
+def test_a_data_channel_message_carrying_heartbeat_is_still_delivered():
+    """Belt and braces for the receive side: if a peer ever does send one, it
+    is a caller's message on a data channel and must arrive."""
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        far.send_all(
+            encode(
+                Frame(
+                    channel=Channel.GPS,
+                    seq=0,
+                    t_mono_ns=1,
+                    t_wall_ns=2,
+                    payload=b"realdata",
+                    extensions={HEARTBEAT_KEY: True},
+                )
+            )
+        )
+        message = session.recv(Channel.GPS, timeout=2.0)
+        assert message is not None
+        assert message.payload == b"realdata"
+        stats = session.stats().channels[Channel.GPS]
+        assert (stats.received, stats.delivered, stats.dropped_inbound) == (1, 1, 0)
+        assert session.stats().heartbeats_received == 0
+    finally:
+        session.close()
+
+
+def test_a_control_channel_heartbeat_is_still_consumed():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        far.send_all(
+            encode(
+                Frame(
+                    channel=Channel.CONTROL,
+                    seq=1,
+                    t_mono_ns=1,
+                    t_wall_ns=2,
+                    extensions={HEARTBEAT_KEY: True},
+                )
+            )
+        )
+        assert wait_until(lambda: session.stats().heartbeats_received == 1)
+        assert session.pending(Channel.CONTROL) == 0
+    finally:
+        session.close()
+
+
+# -- receive order and inbound overflow at depth > 1 ------------------------
+
+
+def test_recv_returns_the_oldest_queued_message():
+    """Every other test drains after one message per channel, where FIFO and
+    LIFO are the same thing."""
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for seq in range(5):
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.GPS,
+                        seq=seq,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=f"fix{seq}".encode(),
+                    )
+                )
+            )
+        assert wait_until(lambda: session.pending(Channel.GPS) == 5)
+        drained = [session.recv(Channel.GPS).payload for _ in range(5)]
+        assert drained == [b"fix0", b"fix1", b"fix2", b"fix3", b"fix4"]
+    finally:
+        session.close()
+
+
+def test_a_reliable_inbound_queue_drops_the_oldest_at_its_bound():
+    depth = policy_for(Channel.GPS).depth
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for seq in range(depth + 3):
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.GPS,
+                        seq=seq,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=f"{seq}".encode(),
+                    )
+                )
+            )
+        assert wait_until(
+            lambda: session.stats().channels[Channel.GPS].received == depth + 3, timeout=5.0
+        )
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.dropped_inbound == 3
+        assert session.pending(Channel.GPS) == depth
+        # The three oldest went, so the queue starts at 3 and ends at the newest.
+        first = session.recv(Channel.GPS).payload
+        assert first == b"3"
+        remaining = [session.recv(Channel.GPS).payload for _ in range(depth - 1)]
+        assert remaining[-1] == f"{depth + 2}".encode()
+    finally:
+        session.close()
+
+
+def test_inbound_high_water_is_the_peak_not_the_current_depth():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for seq in range(5):
+            far.send_all(
+                encode(Frame(channel=Channel.GPS, seq=seq, t_mono_ns=1, t_wall_ns=2, payload=b"f"))
+            )
+        assert wait_until(lambda: session.pending(Channel.GPS) == 5)
+        for _ in range(5):
+            session.recv(Channel.GPS)
+        far.send_all(
+            encode(Frame(channel=Channel.GPS, seq=5, t_mono_ns=1, t_wall_ns=2, payload=b"f"))
+        )
+        assert wait_until(lambda: session.stats().channels[Channel.GPS].received == 6)
+        assert session.stats().channels[Channel.GPS].inbound_high_water == 5
+    finally:
+        session.close()
+
+
+def test_outbound_high_water_is_the_peak_not_the_current_depth():
+    session, far = stalled_writer_session()
+    try:
+        for _ in range(5):
+            session.send(Channel.HERE, b"x")
+        assert session.stats().channels[Channel.HERE].outbound_high_water == 5
+        drain_channels(far, 6)  # the blocking camera frame plus the five
+        assert wait_until(lambda: session.outbound_pending(Channel.HERE) == 0)
+        session.send(Channel.HERE, b"x")
+        assert session.stats().channels[Channel.HERE].outbound_high_water == 5
+    finally:
+        session.close()
+
+
+def test_a_repeated_or_reordered_sequence_number_is_not_counted_as_a_gap():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for seq in (0, 1, 1, 0, 2):
+            far.send_all(
+                encode(Frame(channel=Channel.GPS, seq=seq, t_mono_ns=1, t_wall_ns=2, payload=b"f"))
+            )
+        assert wait_until(lambda: session.stats().channels[Channel.GPS].received == 5)
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.seq_gaps == 0
+        assert stats.missing_seqs == 0
+    finally:
+        session.close()
+
+
+# -- counters -------------------------------------------------------------
+
+
+def test_bytes_sent_counts_whole_frames_not_payloads():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        for _ in range(4):
+            session.send(Channel.GPS, b"fix")
+        frames = drain_channels(far, 4)
+        on_the_wire = sum(len(encode(frame)) for frame in frames)
+        assert wait_until(lambda: session.stats().channels[Channel.GPS].sent == 4)
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.bytes_sent == on_the_wire
+        assert stats.bytes_sent > 4 * len(b"fix")
+    finally:
+        session.close()
+
+
+def test_everything_queued_is_sent_dropped_or_abandoned():
+    """The identity has to close from the counters alone. Recovering a loss as
+    queued - sent - dropped is derivation by subtraction, which is how a
+    counting bug hides."""
+    session, _far = stalled_writer_session()
+    for index in range(10):
+        session.send(Channel.HERE, f"{index}".encode())
+    session.close()
+
+    for channel, stats in session.stats().channels.items():
+        assert stats.queued == (
+            stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+        ), f"{channel.value}: {stats.to_record()}"
+        assert session.outbound_pending(channel) == 0
+
+    here = session.stats().channels[Channel.HERE]
+    assert here.abandoned_outbound > 0
+    assert "abandoned_outbound" in here.to_record()
+    # The frame the writer had already taken is a camera frame in this fixture.
+    # Asserting only on HERE left that half of the accounting free.
+    camera = session.stats().channels[Channel.CAMERA]
+    assert camera.queued == 1
+    assert camera.sent + camera.abandoned_outbound == 1
+
+
+def test_a_clean_run_abandons_nothing():
+    left, right = loopback_pair()
+    sender = quiet_session(left, session_id=1)
+    receiver = quiet_session(right, session_id=2)
+    try:
+        for _ in range(10):
+            sender.send(Channel.GPS, b"fix")
+        assert wait_until(lambda: receiver.stats().channels[Channel.GPS].received == 10)
+    finally:
+        sender.close()
+        receiver.close()
+    stats = sender.stats().channels[Channel.GPS]
+    assert (stats.queued, stats.sent, stats.abandoned_outbound) == (10, 10, 0)
+
+
+# -- what the stall timer actually watches ----------------------------------
+
+
+def test_the_stall_timer_watches_arrivals_not_our_own_transmissions():
+    """The case the timer exists for: half-open, we transmit fine, nothing
+    comes back. Every other timer test either disables our heartbeat or has
+    both sides beating, so both clocks move together and the two are
+    indistinguishable."""
+    near, far = loopback_pair()
+    drain = threading.Event()
+
+    def keep_reading():
+        while not drain.is_set():
+            try:
+                far.recv_exact(1)
+            except Exception:
+                return
+
+    reader = threading.Thread(target=keep_reading, daemon=True)
+    reader.start()
+    session = Session(near, session_id=1, heartbeat_s=0.05, stall_timeout_s=0.3).start()
+    try:
+        assert wait_until(lambda: session.is_closed, timeout=3.0)
+        assert session.end_reason is SessionEndReason.STALLED
+        assert session.stats().heartbeats_sent > 0  # we were talking the whole time
+    finally:
+        drain.set()
+        session.close()
+
+
+def test_a_slow_but_continuous_frame_is_not_declared_stalled():
+    """A frame larger than the link can deliver inside the timeout must not
+    kill the session -- it would reconnect, re-send, and never recover."""
+    near, far = loopback_pair()
+    session = Session(
+        near, session_id=1, heartbeat_s=None, stall_timeout_s=0.4, rx_chunk_bytes=512
+    ).start()
+    payload = bytes(range(256)) * 80  # 20 KiB at 4 KB/s: five times the timeout
+    blob = encode(Frame(channel=Channel.CAMERA, seq=0, t_mono_ns=1, t_wall_ns=2, payload=payload))
+
+    def dribble():
+        for offset in range(0, len(blob), 200):
+            if session.is_closed:
+                return
+            try:
+                far.send_all(blob[offset : offset + 200])
+            except Exception:
+                return
+            time.sleep(0.05)
+
+    threading.Thread(target=dribble, daemon=True).start()
+    try:
+        message = session.recv(Channel.CAMERA, timeout=20.0)
+        assert message is not None, f"session died: {session.end_reason}"
+        assert message.payload == payload
+        assert not session.is_closed
+    finally:
+        session.close()
+
+
+def test_a_chunk_slower_than_the_timeout_still_stalls():
+    """The floor is real: progress has to arrive at some rate."""
+    near, far = loopback_pair()
+    session = Session(
+        near, session_id=1, heartbeat_s=None, stall_timeout_s=0.3, rx_chunk_bytes=8192
+    ).start()
+    blob = encode(
+        Frame(channel=Channel.CAMERA, seq=0, t_mono_ns=1, t_wall_ns=2, payload=b"\x5a" * 60_000)
+    )
+
+    def dribble():
+        for offset in range(0, len(blob), 200):
+            if session.is_closed:
+                return
+            try:
+                far.send_all(blob[offset : offset + 200])
+            except Exception:
+                return
+            time.sleep(0.05)
+
+    threading.Thread(target=dribble, daemon=True).start()
+    try:
+        assert wait_until(lambda: session.is_closed, timeout=5.0)
+        assert session.end_reason is SessionEndReason.STALLED
+    finally:
+        session.close()
+
+
+# -- the confirmed timing parameters ----------------------------------------
+
+
+def test_the_shipped_timing_defaults_match_the_spec():
+    """Both numbers are in the cross-language contract, and the channel table
+    gets a spec cross-check while these got nothing."""
+    spec = (Path(__file__).resolve().parents[3] / "specs" / "transport_protocol.md").read_text()
+    assert f"**{DEFAULT_HEARTBEAT_S:.1f} s**" in spec
+    assert f"**{DEFAULT_STALL_TIMEOUT_S:.1f} s**" in spec
+    assert DEFAULT_HEARTBEAT_S == 1.0
+    assert DEFAULT_STALL_TIMEOUT_S == 5.0
+
+
+def test_keepalives_go_out_at_the_interval_not_once_per_tick():
+    """The timer wakes several times per interval. Sending on every wake would
+    quietly multiply the keepalive rate on a metered link."""
+    near, far = loopback_pair()
+    drain = threading.Event()
+
+    def keep_reading():
+        while not drain.is_set():
+            try:
+                far.recv_exact(1)
+            except Exception:
+                return
+
+    threading.Thread(target=keep_reading, daemon=True).start()
+    session = Session(near, session_id=1, heartbeat_s=0.3, stall_timeout_s=None).start()
+    try:
+        time.sleep(1.05)
+        sent = session.stats().heartbeats_sent
+        assert 2 <= sent <= 6, f"{sent} keepalives in 1.05s at a 0.3s interval"
+    finally:
+        drain.set()
+        session.close()
+
+
+# -- signalling, not polling ------------------------------------------------
+
+
+def test_a_message_is_delivered_far_faster_than_the_polling_tick():
+    """Every wait in the session has a timeout, so a lost wakeup degrades to
+    latency instead of a hang and no functional assertion can see it. This
+    pins the signalling by measuring."""
+    left, right = loopback_pair()
+    sender = Session(left, session_id=1, heartbeat_s=1.0, stall_timeout_s=5.0).start()
+    receiver = Session(right, session_id=2, heartbeat_s=1.0, stall_timeout_s=5.0).start()
+    try:
+        worst = 0.0
+        for index in range(20):
+            started = time.monotonic()
+            sender.send(Channel.GPS, f"{index}".encode())
+            message = receiver.recv(Channel.GPS, timeout=2.0)
+            assert message is not None
+            worst = max(worst, time.monotonic() - started)
+        # The tick is 0.25s at these settings; a dropped notify would show up
+        # as roughly a tick per hop.
+        assert worst < 0.1, f"worst one-way delivery {worst * 1000:.0f} ms"
+    finally:
+        sender.close()
+        receiver.close()
+
+
+def test_no_session_thread_is_alive_the_moment_close_returns():
+    """The acceptance criterion is that no thread outlives close(), which is
+    stronger than eventually."""
+    near, _ = loopback_pair()
+    session = quiet_session(near, session_id=91)
+    session.close()
+    alive = [thread.name for thread in threading.enumerate() if "session91" in thread.name]
+    assert alive == []
+
+
+# -- who accounts for the frame in flight -----------------------------------
+
+
+class HookedConnection:
+    """Wraps a connection and runs a hook once, after a write completes.
+
+    Turns a race into a schedule: the hook stands in for a shutdown landing in
+    the window between send_all returning and the writer recording the
+    outcome, which is what the timer does on a stall and the reader on a
+    hangup.
+    """
+
+    def __init__(self, inner, hook) -> None:
+        self._inner = inner
+        self._hook = hook
+        self._fired = False
+
+    @property
+    def peer(self) -> str:
+        return self._inner.peer
+
+    def send_all(self, data: bytes) -> None:
+        self._inner.send_all(data)
+        if not self._fired:
+            self._fired = True
+            self._hook()
+
+    def recv_exact(self, n: int) -> bytes:
+        return self._inner.recv_exact(n)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_a_frame_the_peer_received_is_counted_sent_not_abandoned():
+    """The in-flight frame belongs to the writer, because it is the only thread
+    that knows whether the write completed. Splitting that decision with
+    shutdown and reconciling afterwards reported delivered frames as losses."""
+    near, far = loopback_pair()
+    holder: dict[str, Session] = {}
+
+    def hook():
+        closer = threading.Thread(
+            target=lambda: holder["session"].close(SessionEndReason.STALLED), daemon=True
+        )
+        closer.start()
+        closer.join(timeout=3.0)
+
+    session = Session(
+        HookedConnection(near, hook), session_id=1, heartbeat_s=None, stall_timeout_s=None
+    )
+    holder["session"] = session
+    session.start()
+    session.send(Channel.GPS, b"this-frame-reached-the-peer")
+    assert drain_channels(far, 1)[0].payload == b"this-frame-reached-the-peer"
+
+    def recorded():
+        stats = session.stats().channels[Channel.GPS]
+        return stats.sent + stats.abandoned_outbound >= 1
+
+    assert wait_until(recorded, timeout=8.0)
+    stats = session.stats().channels[Channel.GPS]
+    assert stats.sent == 1, stats.to_record()
+    assert stats.abandoned_outbound == 0, stats.to_record()
+    assert stats.bytes_sent > 0
+    assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+
+
+def test_sending_while_closing_never_orphans_a_message():
+    """The deployment shape: sensor threads keep calling send() while the
+    reader notices the phone hung up. A closed check outside the queue lock
+    lets a message land after shutdown drained -- counted in `queued`, in
+    nothing else, and never sent."""
+    for _ in range(8):
+        near, _far = loopback_pair(max_buffer_bytes=4096)
+        session = quiet_session(near)
+        stop = threading.Event()
+
+        def spam(target=session):
+            while not stop.is_set():
+                try:
+                    if not target.send(Channel.HERE, b"\x00" * 8192):
+                        return
+                except Exception:
+                    return
+
+        writer = threading.Thread(target=spam, daemon=True)
+        writer.start()
+        time.sleep(0.05)
+        session.close()
+        stop.set()
+        writer.join(timeout=3.0)
+
+        stats = session.stats().channels[Channel.HERE]
+        assert stats.queued == (
+            stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+        ), stats.to_record()
+        assert session.outbound_pending(Channel.HERE) == 0
+
+
+def test_a_backend_that_returns_empty_at_eof_ends_the_session():
+    """recv_exact must raise, but returning b"" at EOF is the likeliest way to
+    get it wrong -- it is what socket.recv does, and tasks 13 and 40 each write
+    one. Treating an empty chunk as progress spun the reader forever while
+    refreshing the very clock meant to notice."""
+
+    class EmptyAtEof:
+        peer = "empty-at-eof"
+
+        def __init__(self, inner):
+            self._inner = inner
+            self.calls = 0
+
+        def send_all(self, data):
+            self._inner.send_all(data)
+
+        def recv_exact(self, n):
+            self.calls += 1
+            try:
+                return self._inner.recv_exact(n)
+            except ConnectionClosed:
+                return b""
+
+        def close(self):
+            self._inner.close()
+
+    for payload_len in (1024, RX_CHUNK_BYTES * 4):
+        near, far = loopback_pair()
+        connection = EmptyAtEof(near)
+        session = Session(connection, session_id=1, heartbeat_s=None, stall_timeout_s=0.3).start()
+        try:
+            blob = encode(
+                Frame(
+                    channel=Channel.CAMERA,
+                    seq=0,
+                    t_mono_ns=1,
+                    t_wall_ns=2,
+                    payload=b"\x5a" * payload_len,
+                )
+            )
+            far.send_all(blob[:200])
+            far.close()
+            assert wait_until(lambda: session.is_closed, timeout=4.0), (
+                f"payload {payload_len}: never ended after {connection.calls} calls"
+            )
+            assert connection.calls < 500, f"spun: {connection.calls} calls"
+        finally:
+            session.close()
+
+
+def test_recv_wakes_promptly_when_the_session_ends():
+    """A blocked reader is woken by shutdown rather than waiting out its tick."""
+    near, _far = loopback_pair()
+    session = Session(near, session_id=1, heartbeat_s=1.0, stall_timeout_s=5.0).start()
+    woke: list[float] = []
+
+    def wait_for_a_message():
+        started = time.monotonic()
+        session.recv(Channel.GPS, timeout=None)
+        woke.append(time.monotonic() - started)
+
+    waiter = threading.Thread(target=wait_for_a_message, daemon=True)
+    waiter.start()
+    time.sleep(0.1)
+    session.close()
+    waiter.join(timeout=3.0)
+    assert woke, "recv never returned"
+    assert woke[0] < 0.15, f"took {woke[0] * 1000:.0f} ms; the tick is 250 ms"
+
+
+def test_a_peer_sending_one_small_frame_per_timeout_holds_the_session():
+    """The floor the code actually enforces, rather than a bytes-per-second
+    figure. The stamp lands per completed read and a frame needs at least two,
+    so very little traffic keeps a session alive. That trade is accepted --
+    displacement lets a healthy phone take the slot back -- but the spec has to
+    state this floor and not a chunk-sized one."""
+    near, far = loopback_pair()
+    stall_s = 0.4
+    session = Session(near, session_id=1, heartbeat_s=None, stall_timeout_s=stall_s).start()
+    try:
+        delivered = 0
+        for index in range(6):
+            time.sleep(stall_s * 0.8)
+            if session.is_closed:
+                break
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.TELEMETRY,
+                        seq=index,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=b"hi",
+                    )
+                )
+            )
+            delivered += 1
+        assert not session.is_closed, f"closed after {delivered} frames"
+        assert delivered == 6
+    finally:
+        session.close()
+
+
+def test_start_declines_to_run_threads_on_an_already_closed_session():
+    """A consumer can close a session the moment it is announced, which on the
+    accept path is before start(). Starting anyway leaves threads behind a
+    close() that already returned."""
+    near, _ = loopback_pair()
+    session = Session(near, session_id=93, heartbeat_s=None, stall_timeout_s=None)
+    session.close()
+    session.start()
+    # Asserted on the thread list itself, not on threading.enumerate(): threads
+    # started on a closed session exit within a tick on their own, so an
+    # enumerate() check races their exit and passes either way.
+    assert session._threads == []
+    assert [t.name for t in threading.enumerate() if "session93" in t.name] == []
+    assert session.end_reason is SessionEndReason.CLOSED_LOCAL
+
+
+# -- a thread that dies must take the session with it -----------------------
+
+
+class FailingWriteConnection:
+    """A connection whose writes raise whatever it is handed."""
+
+    peer = "failing-write"
+
+    def __init__(self, inner, error) -> None:
+        self._inner = inner
+        self._error = error
+        self.writes = 0
+
+    def send_all(self, data: bytes) -> None:
+        self.writes += 1
+        raise self._error
+
+    def recv_exact(self, n: int) -> bytes:
+        return self._inner.recv_exact(n)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("a wrapper bug"), MemoryError()],
+    ids=["RuntimeError", "MemoryError"],
+)
+def test_an_unexpected_write_failure_ends_the_session(error):
+    """Without a catch-all the writer thread dies and the session goes on
+    claiming to be healthy: send() keeps returning True, the queues fill and
+    begin counting drops for messages nobody ever attempted, and no
+    SessionEnded is emitted, so the summary shows a session that transmitted
+    nothing. A MemoryError on a 4 MiB write is the plausible route."""
+    near, _far = loopback_pair()
+    connection = FailingWriteConnection(near, error)
+    session = Session(connection, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+    try:
+        with captured_thread_exceptions() as escaped:
+            session.send(Channel.GPS, b"payload")
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+            # Waited on the exception, not just the flag: _shutdown runs before
+            # the raise propagates, so the block can exit first and the
+            # traceback then lands outside the capture.
+            assert wait_until(lambda: bool(escaped), timeout=3.0)
+        assert [type(exc) for exc in escaped] == [type(error)], escaped
+        assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.abandoned_outbound == 1, stats.to_record()
+        assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+        assert session.send(Channel.GPS, b"more") is False
+    finally:
+        session.close()
+
+
+def test_a_reset_connection_is_accounted_for():
+    """The OSError branch, which is how a real TCP write fails and which the
+    loopback backend can never reach on its own."""
+    near, _far = loopback_pair()
+    connection = FailingWriteConnection(near, ConnectionResetError(104, "reset by peer"))
+    session = Session(connection, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+    try:
+        with captured_thread_exceptions() as escaped:
+            session.send(Channel.HERE, b"response")
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+        # A reset is an OSError, so it is an expected failure with its own
+        # handler: the session ends and the frame is accounted for, and no
+        # traceback escapes. Only the unforeseen kinds re-raise.
+        assert escaped == [], escaped
+        assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+        stats = session.stats().channels[Channel.HERE]
+        assert stats.abandoned_outbound == 1, stats.to_record()
+        assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+    finally:
+        session.close()
+
+
+def test_start_is_idempotent():
+    """The session is announced to consumers before its threads exist, so a
+    consumer may reasonably call start() on one that is not running. A second
+    set of threads puts two readers on one byte stream, and they split each
+    other's frames -- reported as a framing error, indistinguishable from a
+    corrupt link or a bad encoder on the phone."""
+    near, far = loopback_pair()
+    session = Session(near, session_id=900, heartbeat_s=None, stall_timeout_s=None)
+    try:
+        session.start()
+        session.start()
+        session.start()
+        assert len(session._threads) == 3
+        names = sorted(thread.name for thread in threading.enumerate() if "session900" in thread.name)
+        assert names == ["session900-rx", "session900-timer", "session900-tx"], names
+
+        # And one reader still parses the stream correctly.
+        for seq in range(6):
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.TELEMETRY,
+                        seq=seq,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=b"payload-bytes",
+                    )
+                )
+            )
+        assert wait_until(
+            lambda: session.stats().channels[Channel.TELEMETRY].received == 6, timeout=3.0
+        )
+        assert not session.is_closed
+    finally:
+        session.close()
+
+
+class FailingReadConnection:
+    """A connection whose reads raise something the reader does not expect."""
+
+    peer = "failing-read"
+
+    def __init__(self, inner, error) -> None:
+        self._inner = inner
+        self._error = error
+
+    def send_all(self, data: bytes) -> None:
+        self._inner.send_all(data)
+
+    def recv_exact(self, n: int) -> bytes:
+        raise self._error
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_an_unexpected_read_failure_ends_the_session():
+    """A dead reader would eventually be noticed by the peer's own stall timer,
+    but only after the peer gives up on us -- a whole timeout of a drive spent
+    recording nothing. End it here instead."""
+    near, _far = loopback_pair()
+    session = Session(
+        FailingReadConnection(near, RuntimeError("a decoder wrapper bug")),
+        session_id=1,
+        heartbeat_s=None,
+        stall_timeout_s=None,
+    )
+    try:
+        with captured_thread_exceptions() as escaped:
+            session.start()
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+            assert wait_until(lambda: bool(escaped), timeout=3.0)
+        assert [type(exc) for exc in escaped] == [RuntimeError], escaped
+        assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+    finally:
+        session.close()
+
+
+def test_an_unexpected_timer_failure_ends_the_session():
+    """The timer carries the keepalive and the stall watchdog together, so
+    losing it silently removes the very thing that would have noticed."""
+    near, _far = loopback_pair()
+
+    def clock_that_fails_only_in_the_timer():
+        if "timer" in threading.current_thread().name:
+            raise RuntimeError("clock unavailable")
+        return time.monotonic_ns()
+
+    session = Session(
+        near,
+        session_id=1,
+        heartbeat_s=0.05,
+        stall_timeout_s=5.0,
+        mono_clock=clock_that_fails_only_in_the_timer,
+    )
+    try:
+        with captured_thread_exceptions() as escaped:
+            session.start()
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+            assert wait_until(lambda: bool(escaped), timeout=3.0)
+        assert [type(exc) for exc in escaped] == [RuntimeError], escaped
+        assert session.end_reason is SessionEndReason.TRANSPORT_ERROR
+    finally:
+        session.close()
+
+
+def test_a_consumer_callback_that_raises_does_not_decide_the_session_s_fate():
+    """A raising on_end used to break two things at once: close() propagated
+    before reaching join(), so threads outlived a close() that had already
+    unwound, and inside a loop's catch-all the callback's exception replaced
+    the one that actually killed the thread."""
+    near, _far = loopback_pair()
+
+    def raising_on_end(session, reason):
+        raise RuntimeError("consumer bug in on_end")
+
+    session = Session(
+        near, session_id=41, heartbeat_s=None, stall_timeout_s=None, on_end=raising_on_end
+    )
+    session.start()
+    session.close()
+    assert session.end_reason is SessionEndReason.CLOSED_LOCAL
+    assert session.on_end_failures == 1
+    assert [t.name for t in threading.enumerate() if "session41" in t.name] == []
+
+
+def test_a_raising_callback_does_not_mask_the_real_failure():
+    near, _far = loopback_pair()
+
+    def raising_on_end(session, reason):
+        raise RuntimeError("consumer bug in on_end")
+
+    session = Session(
+        FailingWriteConnection(near, MemoryError()),
+        session_id=42,
+        heartbeat_s=None,
+        stall_timeout_s=None,
+        on_end=raising_on_end,
+    )
+    try:
+        with captured_thread_exceptions() as escaped:
+            session.start()
+            session.send(Channel.GPS, b"payload")
+            assert wait_until(lambda: session.is_closed, timeout=3.0)
+            assert wait_until(lambda: bool(escaped), timeout=3.0)
+        assert [type(exc) for exc in escaped] == [MemoryError], escaped
+        assert session.on_end_failures == 1
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.queued == stats.sent + stats.dropped_outbound + stats.abandoned_outbound
+    finally:
+        session.close()
+
+
+def test_the_inbound_account_closes_under_overflow():
+    """Every frame read off the wire is delivered to a caller, dropped by
+    policy, or abandoned at shutdown. Found by the loopback experiment: with a
+    consumer slower than the offered rate, `received` was 301 while `delivered`
+    was also 301 and 241 were dropped -- messages counted twice, and no way to
+    tell how many a caller actually got."""
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    try:
+        depth = policy_for(Channel.GPS).depth
+        total = depth + 25
+        for seq in range(total):
+            far.send_all(
+                encode(
+                    Frame(
+                        channel=Channel.GPS,
+                        seq=seq,
+                        t_mono_ns=1,
+                        t_wall_ns=2,
+                        payload=f"{seq}".encode(),
+                    )
+                )
+            )
+        assert wait_until(
+            lambda: session.stats().channels[Channel.GPS].received == total, timeout=5.0
+        )
+        collected = 0
+        while session.recv(Channel.GPS) is not None:
+            collected += 1
+        stats = session.stats().channels[Channel.GPS]
+        assert stats.dropped_inbound == 25
+        assert stats.delivered == collected == depth
+        assert stats.received == stats.delivered + stats.dropped_inbound + stats.abandoned_inbound
+    finally:
+        session.close()
+
+
+def test_messages_never_collected_are_counted_as_abandoned():
+    near, far = loopback_pair()
+    session = quiet_session(near)
+    for seq in range(4):
+        far.send_all(
+            encode(
+                Frame(channel=Channel.GPS, seq=seq, t_mono_ns=1, t_wall_ns=2, payload=b"fix")
+            )
+        )
+    assert wait_until(lambda: session.pending(Channel.GPS) == 4)
+    session.close()
+    stats = session.stats().channels[Channel.GPS]
+    assert stats.abandoned_inbound == 4
+    assert stats.delivered == 0
+    assert stats.received == stats.delivered + stats.dropped_inbound + stats.abandoned_inbound
+    assert "abandoned_inbound" in stats.to_record()
+
+
+# -- the write-time stamp ----------------------------------------------------
+
+
+class _StallingConnection:
+    """Delegates, but blocks inside `send_all` for large frames.
+
+    A queued big frame is not enough to make a control frame wait: `control` is
+    HIGH priority and `_next_outbound` serves the highest non-empty tier first,
+    so it *jumps ahead of* anything queued behind it. The only wait it can ever
+    observe is the in-flight quantum of a frame the writer already picked up --
+    so a test that queues a camera frame and expects the control frame to wait
+    behind it has a premise that never activates, and can only assert `>=`.
+
+    This makes that quantum real and known.
+    """
+
+    def __init__(self, inner, stall_s: float, threshold_bytes: int) -> None:
+        self._inner = inner
+        self._stall_s = stall_s
+        self._threshold = threshold_bytes
+        self.peer = inner.peer
+        self.in_send_all = threading.Event()
+
+    def send_all(self, data: bytes) -> None:
+        if len(data) >= self._threshold:
+            self.in_send_all.set()
+            time.sleep(self._stall_s)
+        self._inner.send_all(data)
+
+    def recv_exact(self, n: int) -> bytes:
+        return self._inner.recv_exact(n)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def test_the_writer_stamps_the_wire_key_at_departure_not_at_enqueue():
+    """`t_mono_ns` is an enqueue stamp, so it carries however long the frame
+    then waited. For a timebase estimate that wait is the dominant error --
+    larger than the network -- so a frame can ask for a second stamp taken
+    immediately before its bytes leave.
+
+    The gap has to be asserted as a *quantity*. Written as `wire >= t_mono_ns`
+    this passed on equality, and the whole of task 15.2 could be reverted --
+    stamping the wire key with `item.frame.t_mono_ns` -- with 404 tests green.
+
+    Both keys must also survive with different meanings: redefining `t_mono_ns`
+    to departure time would silently change what every latency figure in tasks
+    12-14 measures without changing a single test.
+    """
+    stall_s = 0.4
+    near, far = loopback_pair()
+    stalling = _StallingConnection(near, stall_s=stall_s, threshold_bytes=64 * 1024)
+    sender = quiet_session(stalling)
+    reader = quiet_session(far)
+    try:
+        sender.send(Channel.CAMERA, b"z" * (256 * 1024), {})
+        assert stalling.in_send_all.wait(timeout=10.0), "the writer never entered send_all"
+
+        # The writer is now provably inside send_all and cannot pick anything up
+        # until it returns, so this frame's wait is real regardless of priority.
+        enqueued_at = now_mono_ns()
+        sender.send(
+            Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0}, allow_reserved=(WIRE_STAMP_KEY,)
+        )
+        received = None
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and received is None:
+            received = reader.recv(Channel.CONTROL, timeout=0.25)
+        assert received is not None, "the control frame never arrived"
+
+        wire = received.frame.extensions[WIRE_STAMP_KEY]
+        enqueue = received.frame.t_mono_ns
+        assert isinstance(wire, int)
+        waited_ns = wire - enqueue
+        assert enqueue >= enqueued_at, "the enqueue stamp predates the send call"
+        # Most of the stall had to elapse between enqueue and departure. Half of
+        # it is the margin; equality, or any stamp taken at enqueue, fails here.
+        assert waited_ns > int(stall_s * 0.5 * 1e9), (
+            f"the wire stamp is only {waited_ns} ns after the enqueue stamp, "
+            f"far under the {stall_s}s stall the writer was held in -- so it is "
+            "not being taken at departure"
+        )
+    finally:
+        sender.close()
+        reader.close()
+
+
+def test_the_enqueue_stamp_still_means_enqueue_on_other_channels():
+    """The other half of the pair: `t_mono_ns` must not have quietly become a
+    departure stamp for everyone."""
+    stall_s = 0.4
+    near, far = loopback_pair()
+    stalling = _StallingConnection(near, stall_s=stall_s, threshold_bytes=64 * 1024)
+    sender = quiet_session(stalling)
+    reader = quiet_session(far)
+    try:
+        sender.send(Channel.CAMERA, b"z" * (256 * 1024), {})
+        assert stalling.in_send_all.wait(timeout=10.0)
+        before = now_mono_ns()
+        sender.send(Channel.IMU, b"", {"ax": 1.0})
+        after = now_mono_ns()
+
+        received = None
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline and received is None:
+            received = reader.recv(Channel.IMU, timeout=0.25)
+        assert received is not None
+        assert before <= received.frame.t_mono_ns <= after, (
+            "t_mono_ns is outside the send() call that produced it, so it is no "
+            "longer an enqueue stamp"
+        )
+    finally:
+        sender.close()
+        reader.close()
+
+
 def test_the_reserved_placeholder_is_the_widest_a_stamp_can_be():
     """So the caller's own encode is the verdict on the widest header this frame
     can produce. With a one-digit placeholder, a header that fit at enqueue

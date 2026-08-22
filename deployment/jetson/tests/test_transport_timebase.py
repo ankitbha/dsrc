@@ -35,6 +35,7 @@ from transport.timebase import (
     SYNC_FAST_HZ,
     SYNC_STEADY_HZ,
     ConvertedInstant,
+    TimebaseEstimate,
     TimebaseEstimator,
     TimebaseNotReady,
     TimeSyncInitiator,
@@ -386,7 +387,7 @@ def test_fit_skew_refuses_too_few_samples_and_too_short_a_baseline():
     assert fit_skew(sparse) is None, "too few samples were fitted"
 
 
-def test_the_baseline_guard_has_no_live_path_and_the_arithmetic_says_why():
+def test_the_baseline_guard_has_no_live_path_and_the_arithmetic_says_why(monkeypatch):
     """`MIN_SKEW_SAMPLES` buckets `SKEW_BUCKET_S` apart already span more than
     `MIN_SKEW_BASELINE_S`, so the baseline check cannot fire on real input.
 
@@ -413,17 +414,13 @@ def test_the_baseline_guard_has_no_live_path_and_the_arithmetic_says_why():
     # Reached the only way left: by making the count stop dominating.
     link = Link(skew_ppm=20.0, seed=101)
     packed = [link.exchange(i, BASE_NS + i * NS_PER_S) for i in range(60)]  # 60 s
-    saved = timebase.MIN_SKEW_SAMPLES
-    timebase.MIN_SKEW_SAMPLES = 3
-    try:
-        assert fit_skew(packed) is None, "a 60 s baseline was fitted"
-        long_enough = [
-            link.exchange(i, BASE_NS + i * NS_PER_S) for i in range(200)
-        ]
-        assert fit_skew(long_enough) is not None, "the guard now rejects everything"
-    finally:
-        timebase.MIN_SKEW_SAMPLES = saved
-    assert timebase.MIN_SKEW_SAMPLES == saved
+    # monkeypatch, not a hand-rolled try/finally: an assertion failure inside
+    # the block would otherwise leave the module patched for whatever test the
+    # random ordering runs next, and the failure would surface somewhere else.
+    monkeypatch.setattr(timebase, "MIN_SKEW_SAMPLES", 3)
+    assert fit_skew(packed) is None, "a 60 s baseline was fitted"
+    long_enough = [link.exchange(i, BASE_NS + i * NS_PER_S) for i in range(200)]
+    assert fit_skew(long_enough) is not None, "the guard now rejects everything"
 
 
 def test_the_fit_survives_raw_monotonic_magnitudes():
@@ -974,3 +971,306 @@ def test_the_spec_records_both_ordering_requirements():
         "the spec does not say why rtt >= 0 alone is inadequate"
     )
     assert "same clock" in flat, "the clock-provenance requirement is not stated"
+
+
+# -- the round-1 fixes, each pinned ------------------------------------------
+#
+# Every fix above was new code, and a mutation pass found that sixteen of
+# nineteen reverts left the suite green. A fix nothing tests is a fix that can be
+# undone by the next person to touch the file.
+
+
+def a_sample(t1, t2, t3, t4, exchange_id=1):
+    return TimeSyncSample(
+        exchange_id=exchange_id, t1_local_send_ns=t1, t2_remote_recv_ns=t2,
+        t3_remote_send_ns=t3, t4_local_recv_ns=t4,
+    )
+
+
+def test_a_remote_departure_before_its_own_receipt_is_refused():
+    """`rtt >= 0` is satisfiable with this ordering violated, and violating it
+    shrinks the round trip below the true one -- shrinking the bound under an
+    error that has not moved."""
+    estimator = TimebaseEstimator(mono_clock=SteppedClock())
+    backwards = a_sample(BASE_NS, BASE_NS + 5_000_000, BASE_NS + 4_000_000,
+                         BASE_NS + 30_000_000)
+    assert backwards.rtt_ns >= 0, "this sample must pass the rtt check to be a test"
+    assert estimator.add(backwards) is False
+    assert estimator.refused_by_reason == {"remote_send_before_remote_recv": 1}
+    assert estimator.estimate is None
+
+
+def test_a_local_arrival_before_its_own_departure_is_refused():
+    estimator = TimebaseEstimator(mono_clock=SteppedClock())
+    impossible = a_sample(BASE_NS + 30_000_000, BASE_NS, BASE_NS, BASE_NS)
+    assert estimator.add(impossible) is False
+    assert "local_recv_before_local_send" in estimator.refused_by_reason
+
+
+def test_a_round_trip_past_the_admission_ceiling_is_refused():
+    """A pong the link had forgotten. It would otherwise sit in the skew window
+    as the sole representative of its bucket, where the 30 s gate cannot see it."""
+    from transport.timebase import MAX_SAMPLE_RTT_NS
+
+    estimator = TimebaseEstimator(mono_clock=SteppedClock())
+    far_too_slow = a_sample(BASE_NS, BASE_NS + 1_000, BASE_NS + 2_000,
+                            BASE_NS + MAX_SAMPLE_RTT_NS + 1_000_000)
+    assert estimator.add(far_too_slow) is False
+    assert "rtt_above_admission_ceiling" in estimator.refused_by_reason
+
+
+def test_the_admission_ceiling_and_the_gate_ceiling_are_both_reachable():
+    """One constant for both made the gate's own clause unreachable. A round trip
+    between the two must be admitted as real data and still refuse conversion."""
+    from transport.timebase import MAX_SAMPLE_RTT_NS
+
+    assert MAX_SAMPLE_RTT_NS > MAX_ACCEPTABLE_RTT_NS
+    between = (MAX_ACCEPTABLE_RTT_NS + MAX_SAMPLE_RTT_NS) // 2
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    for index in range(MIN_OFFSET_SAMPLES + 3):
+        start = BASE_NS + index * 1_000_000_000
+        clock.now_ns = start + between
+        assert estimator.add(
+            a_sample(start, start + between // 2, start + between // 2, start + between,
+                     exchange_id=index)
+        ) is True, "a poor-but-real link was refused admission"
+    assert estimator.samples_refused == 0
+    assert "exceeds the acceptable bound" in (estimator.why_not_usable() or "")
+    with pytest.raises(TimebaseNotReady):
+        estimator.to_remote(clock.now_ns)
+
+
+def test_the_drift_charge_covers_a_fit_that_is_entirely_asymmetry():
+    """Clock skew and a drifting one-way asymmetry are indistinguishable from
+    four timestamps, and the fit is most *precise* exactly when it is most
+    wrong -- a smooth ramp gives a near-perfect line. So the charge is the worst
+    of the crystal range, the slope's own magnitude, and its scatter.
+
+    Constructed with the round trip held constant and only its direction split
+    moving, which is a path degrading from direct toward relayed. Planted skew is
+    zero; every nanosecond of apparent slope is asymmetry.
+    """
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    total = 35_000_000
+    for index in range(300):
+        start = BASE_NS + index * NS_PER_S
+        up = 30_000_000 - int(25_000_000 * index / 299)
+        down = total - up
+        t2 = start + up
+        t3 = t2
+        t4 = start + up + down
+        clock.now_ns = t4
+        estimator.add(a_sample(start, t2, t3, t4, exchange_id=index))
+
+    estimate = estimator.estimate
+    assert estimate is not None and estimate.skew_ppm is not None
+    assert abs(estimate.skew_ppm) > 20.0, "the construction did not fool the fit"
+    assert estimate.skew_stderr_ppm is not None and estimate.skew_stderr_ppm < 1.0, (
+        "the fit was not precise, so this does not test the precision-vs-accuracy gap"
+    )
+    # The charge must follow the slope, not its scatter.
+    assert estimate.skew_uncertainty_ppm >= abs(estimate.skew_ppm)
+
+    # And the bound must cover the error it produces, out to the reach limit.
+    truth_offset = 0
+    for ahead_s in (0, 30, 120, 250):
+        at = estimate.t_reference_ns + ahead_s * NS_PER_S
+        converted = estimator.to_remote(at)
+        error = abs(converted.t_remote_mono_ns - (at + truth_offset))
+        assert error <= converted.bound_ns, (
+            f"+{ahead_s}s: error {error} exceeds bound {converted.bound_ns}"
+        )
+
+
+def test_an_unmeasured_skew_is_charged_the_crystal_range_as_a_floor():
+    """The floor applies once skew is fitted too, not only before. Charging the
+    fit's scatter alone put a 60 ms error under a 17.5 ms bound."""
+    estimate = TimebaseEstimate(
+        estimate_id=1, offset_ns=0, t_reference_ns=BASE_NS, rtt_min_ns=10_000_000,
+        offset_samples=30, skew_ppm=2.0, skew_stderr_ppm=0.001, skew_samples=30,
+    )
+    assert estimate.skew_uncertainty_ppm == ASSUMED_SKEW_PPM
+    loud = TimebaseEstimate(
+        estimate_id=2, offset_ns=0, t_reference_ns=BASE_NS, rtt_min_ns=10_000_000,
+        offset_samples=30, skew_ppm=-90.0, skew_stderr_ppm=0.001, skew_samples=30,
+    )
+    assert loud.skew_uncertainty_ppm == 90.0, "the slope's own magnitude is not charged"
+
+
+def test_conversion_refuses_to_reach_beyond_what_the_samples_support():
+    """The gate only asks that the newest sample be fresh. Without this an
+    instant half an hour away still got an answer, with the drift term
+    extrapolated that whole way on five minutes of evidence."""
+    from transport.timebase import MAX_EXTRAPOLATION_S
+
+    link = Link(seed=131)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=20, period_ns=100_000_000)
+    estimate = estimator.estimate
+    assert estimate is not None
+
+    inside = estimate.t_reference_ns + int(MAX_EXTRAPOLATION_S * 0.5 * NS_PER_S)
+    estimator.to_remote(inside)  # must not raise
+
+    for direction in (1, -1):
+        far = estimate.t_reference_ns + direction * int(
+            (MAX_EXTRAPOLATION_S + 60) * NS_PER_S
+        )
+        with pytest.raises(TimebaseNotReady, match="beyond"):
+            estimator.to_remote(far)
+
+
+def test_the_bound_covers_an_odd_round_trip():
+    """Floor division left the bound one nanosecond under the error for an odd
+    round trip, and the property test had granted itself a "+ 1" allowance that
+    hid it."""
+    estimate = TimebaseEstimate(
+        estimate_id=1, offset_ns=0, t_reference_ns=BASE_NS, rtt_min_ns=9,
+        offset_samples=30, skew_ppm=None, skew_stderr_ppm=None,
+    )
+    assert estimate.bound_ns_at(BASE_NS) == 5, "the bound is not the ceiling of rtt/2"
+
+
+def test_t4_is_the_transports_arrival_stamp_not_a_later_reading():
+    """Stamping t4 after recv returns folds the inbound queue wait and the decode
+    into the round trip -- the receive-side twin of the error the wire stamp
+    removed from the other three terms."""
+    stamped_at = {"value": None}
+
+    class _SlowPollRouter:
+        """Holds the pong, then hands it over with an arrival stamp from before
+        the delay -- exactly what the transport does."""
+
+        def __init__(self):
+            self.pending = None
+
+        def send(self, message):
+            arrival = BASE_NS + 10_000_000
+            stamped_at["value"] = arrival
+            self.pending = (
+                TimeSyncMessage(
+                    t_capture_mono_ns=arrival, exchange_id=message.exchange_id,
+                    t_wire_mono_ns=arrival, t_peer_recv_mono_ns=arrival,
+                    t_peer_recv_wall_ns=1_755_000_000_000_000_000,
+                    t_peer_wire_mono_ns=BASE_NS + 1,
+                ),
+                arrival,
+            )
+            return True
+
+        def recv_with_receipt(self, channel, timeout=0.0):
+            held, self.pending = self.pending, None
+            return held
+
+        def recv(self, channel, timeout=0.0):  # pragma: no cover - must not be used
+            raise AssertionError("pump must use the receipt-bearing read")
+
+    clock = SteppedClock()
+    router = _SlowPollRouter()
+    initiator = TimeSyncInitiator(router, mono_clock=clock)
+    initiator.send_ping()
+
+    # A whole poll period passes before the pong is collected.
+    clock.now_ns = BASE_NS + 2 * NS_PER_S
+    sample = initiator.pump()
+    assert sample is not None
+    assert sample.t4_local_recv_ns == stamped_at["value"], (
+        "t4 came from the clock at collection time, not from the transport's "
+        "arrival stamp, so it carries the whole poll period"
+    )
+    assert sample.rtt_ns < 100_000_000, f"rtt inflated to {sample.rtt_ns} ns by the poll delay"
+
+
+def test_a_ping_the_router_refused_is_not_counted_as_sent():
+    """A closed session returns False. Counting it anyway made a dead link
+    indistinguishable from total pong loss."""
+
+    class _RefusingRouter:
+        def send(self, message):
+            return False
+
+        def recv_with_receipt(self, channel, timeout=0.0):
+            return None
+
+    initiator = TimeSyncInitiator(_RefusingRouter(), mono_clock=SteppedClock())
+    for _ in range(20):
+        initiator.send_ping()
+    assert initiator.pings_sent == 0
+    assert initiator.pings_refused == 20
+    record = initiator.to_record()
+    assert record["awaiting_reply"] == 0, "a refused ping left a pending entry"
+    json.dumps(record, allow_nan=False)
+
+
+def test_an_unanswered_exchange_expires_instead_of_leaking():
+    """Without expiry the table grows for the whole drive, and an arbitrarily
+    late pong is still matched -- entering the skew window with a round trip of
+    however long it was gone."""
+    from transport.timebase import PENDING_TIMEOUT_S
+
+    clock = SteppedClock()
+    initiator = TimeSyncInitiator(_NullRouter(), mono_clock=clock)
+    first = initiator.send_ping()
+    assert initiator.to_record()["awaiting_reply"] == 1
+
+    clock.now_ns += int((PENDING_TIMEOUT_S + 1) * NS_PER_S)
+    initiator.send_ping()
+    assert initiator.pongs_timed_out == 1
+    assert initiator.to_record()["awaiting_reply"] == 1, "the stale entry was not dropped"
+
+    late = TimeSyncMessage(
+        t_capture_mono_ns=1, exchange_id=first, t_wire_mono_ns=clock.now_ns,
+        t_peer_recv_mono_ns=clock.now_ns - 1_000,
+        t_peer_recv_wall_ns=1_755_000_000_000_000_000,
+        t_peer_wire_mono_ns=BASE_NS + 1,
+    )
+    assert initiator.on_pong(late, clock.now_ns) is None
+    assert initiator.pongs_unmatched == 1
+    assert initiator.estimator.samples_accepted == 0
+
+
+def test_the_history_is_bounded_and_says_what_it_dropped():
+    """One estimate per accepted sample is ~28,800 over an eight-hour session,
+    and this runs on a Jetson. What was dropped is counted so a re-derivation
+    that finds no matching estimate can tell why."""
+    from transport.timebase import MAX_HISTORY
+
+    link = Link(seed=137)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=MAX_HISTORY + 50, period_ns=1_000_000)
+
+    history = estimator.history()
+    assert len(history) == MAX_HISTORY, f"history grew to {len(history)}"
+    assert estimator.estimates_evicted == 50
+    record = estimator.to_record()
+    assert record["estimates_evicted"] == 50
+    assert record["estimates_published"] == MAX_HISTORY
+    # The newest are the ones kept, since those are what recent conversions cite.
+    assert history[-1].estimate_id == MAX_HISTORY + 50
+
+
+def test_the_gate_and_the_estimate_come_from_one_snapshot():
+    """Read separately, a sample arriving between the two let a conversion
+    proceed on an estimate that never passed -- handing out a 400 ms bound
+    against a 200 ms ceiling.
+
+    Driven by making the clock move only when the estimator reads it, so an
+    interleaving that used to be a race is deterministic here.
+    """
+    link = Link(seed=139)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=20, period_ns=100_000_000)
+    assert estimator.usable
+
+    converted = estimator.to_remote(clock.now_ns)
+    cited = next(e for e in estimator.history() if e.estimate_id == converted.estimate_id)
+    assert cited.rtt_min_ns <= MAX_ACCEPTABLE_RTT_NS, (
+        "the estimate a conversion cited would not itself have passed the gate"
+    )
+    assert cited.offset_samples >= MIN_OFFSET_SAMPLES
+    assert converted.bound_ns == cited.bound_ns_at(clock.now_ns)

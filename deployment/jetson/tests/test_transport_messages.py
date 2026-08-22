@@ -184,7 +184,7 @@ def test_control_now_carries_the_time_sync_message():
     assert decode_message(Channel.CONTROL, extensions, payload) == message
 
 
-def test_no_typed_message_is_now_a_guard_with_no_live_channel():
+def test_no_typed_message_is_now_a_guard_with_no_live_channel(monkeypatch):
     """Every channel has a type, so nothing on the wire can produce this reason
     any more. The guard stays because `Channel` will grow -- adding a channel
     and forgetting its message type is exactly the mistake it catches -- but a
@@ -199,14 +199,17 @@ def test_no_typed_message_is_now_a_guard_with_no_live_channel():
     assert set(module.MESSAGE_FOR_CHANNEL) == set(Channel), (
         "a channel has no typed message; this test's premise has changed"
     )
-    saved = module.MESSAGE_FOR_CHANNEL.pop(Channel.CONTROL)
-    try:
-        with pytest.raises(MessageError, match="no typed message") as caught:
-            decode_message(Channel.CONTROL, {CAPTURE_KEY: 1}, b"")
-        assert caught.value.reason == "no_typed_message"
-    finally:
-        module.MESSAGE_FOR_CHANNEL[Channel.CONTROL] = saved
-    assert set(module.MESSAGE_FOR_CHANNEL) == set(Channel), "the table was not restored"
+    # monkeypatch, so a failure inside cannot leave the table short for whatever
+    # the random ordering runs next.
+    without_control = {
+        channel: message
+        for channel, message in module.MESSAGE_FOR_CHANNEL.items()
+        if channel is not Channel.CONTROL
+    }
+    monkeypatch.setattr(module, "MESSAGE_FOR_CHANNEL", without_control)
+    with pytest.raises(MessageError, match="no typed message") as caught:
+        decode_message(Channel.CONTROL, {CAPTURE_KEY: 1}, b"")
+    assert caught.value.reason == "no_typed_message"
 
 
 # -- the null convention -----------------------------------------------------
