@@ -963,16 +963,25 @@ def test_a_zero_tick_run_can_still_print_its_summary():
     which is why it was free to happen."""
     from pipeline import PipelineStats
 
+    from run_demo import summary_line
+
     snapshot = PipelineStats().snapshot()
     assert snapshot["jetson_ms"] is None
-    absent = dict.fromkeys(("mean", "p50", "p95"), float("nan"))
-    stats = snapshot["jetson_ms"] or absent
-    # The exact format run_demo uses. A missing key raises here as it did there.
-    rendered = (
-        f"jetson mean {stats['mean']:.1f} ms, p50 {stats['p50']:.1f} ms, "
-        f"p95 {stats['p95']:.1f} ms"
-    )
+
+    # run_demo's own function, not a copy of it. The first version of this test
+    # reimplemented the format string, so mutating run_demo could not fail it --
+    # a test that reimplements the code cannot catch a change to the code.
+    rendered = summary_line({"ticks": 0, "stats": snapshot}, dropped_frames=0)
     assert "nan" in rendered
+    assert "p50" in rendered and "p95" in rendered
+
+    # And a populated series renders real numbers through the same path.
+    populated = summary_line(
+        {"ticks": 10, "stats": {"jetson_ms": {"n": 10, "mean": 1.5, "p50": 1.4,
+                                              "p95": 2.0}}},
+        dropped_frames=3,
+    )
+    assert "mean 1.5 ms" in populated and "dropped frames 3" in populated
 
     # And the dashboard's guard: get(k, default) does not apply the default for a
     # present-but-None key.

@@ -358,16 +358,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             telemetry.close()
         if window is not None:
             window.close()
-        # Every key the line below reads. The first version of this fallback
-        # carried only `mean`, so a zero-tick run raised KeyError inside the
-        # shutdown path and lost its summary -- a crash introduced by making an
-        # empty series report absence rather than zeros.
-        absent = dict.fromkeys(("mean", "p50", "p95"), float("nan"))
-        e2e = summary["stats"]["jetson_ms"] or absent
-        print(
-            f"[run] {summary['ticks']} ticks | jetson mean {e2e['mean']:.1f} ms, "
-            f"p50 {e2e['p50']:.1f} ms, p95 {e2e['p95']:.1f} ms | dropped frames {camera.dropped_frames}"
-        )
+        print(summary_line(summary, camera.dropped_frames))
     return 0
 
 
@@ -471,6 +462,25 @@ def selfcheck(config: dict, args: argparse.Namespace) -> int:
 
     print(f"\nselfcheck: {'PASS' if failures == 0 else f'{failures} failure(s)'}")
     return 1 if failures else 0
+
+
+def summary_line(summary: dict, dropped_frames: int) -> str:
+    """The end-of-run line, extracted so it can be tested.
+
+    It could not be before, and that mattered: an empty latency series now
+    reports absence rather than zeros, and the first fallback here carried only
+    `mean` while the format string reads `p50` and `p95` too -- so a zero-tick
+    run raised KeyError inside the shutdown path and lost its summary. Nothing
+    covered `run_demo` at all, so a test had to reimplement this line, and a
+    test that reimplements the code cannot catch a change to it.
+    """
+    absent = dict.fromkeys(("mean", "p50", "p95"), float("nan"))
+    latency = summary["stats"].get("jetson_ms") or absent
+    return (
+        f"[run] {summary['ticks']} ticks | jetson mean {latency['mean']:.1f} ms, "
+        f"p50 {latency['p50']:.1f} ms, p95 {latency['p95']:.1f} ms | "
+        f"dropped frames {dropped_frames}"
+    )
 
 
 def main() -> int:
