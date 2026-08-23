@@ -422,11 +422,22 @@ def test_intermittent_fallback_after_convergence_fails_at_the_stated_threshold()
     assert report["usable"] is False
 
 
-def test_the_fraction_counts_only_the_post_convergence_population():
-    """Both earlier fraction tests gave the same answer whichever numerator was
-    used, so counting the whole run survived. This separates them: 11 proxied
-    then 40 converted is 40/40 after convergence and 40/51 over the run."""
+def test_the_denominator_excludes_the_convergence_prefix():
+    """Only the denominator is separable, and that is worth knowing.
+
+    `first_converted_at` is by definition the instant of the first converted
+    tick, so no converted tick can precede it: counting the numerator over the
+    whole run and over the post-convergence population give the same number for
+    any self-consistent run. Verified over 2000 random runs. So a mutation
+    swapping the numerator is an equivalent mutant, not a gap -- a test could
+    only separate them by feeding a `first_converted_at` that contradicts its own
+    trace, which nothing does.
+
+    The denominator is the half that matters, and this pins it: 11 proxied then
+    40 converted is 40/40 after convergence and 40/51 over the whole run.
+    """
     report = prefixed_run(prefix_ticks=11, converged_at=1.1)
     assert report["gate_detail"]["converted_fraction_after_convergence"] == 1.0, (
-        "the numerator or denominator is counting the convergence prefix"
+        "the denominator is counting the convergence prefix"
     )
+    assert report["gate_detail"]["ticks_before_convergence"] == 11
