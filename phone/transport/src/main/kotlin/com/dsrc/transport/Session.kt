@@ -388,16 +388,6 @@ class Session(
         const val WIRE_STAMP = "t_wire_mono_ns"
 
         /**
-         * Substituted at validation time so the caller's own encoder sizes the header
-         * against the widest stamp it could ever carry.
-         *
-         * The Python side hit exactly this: a header sized for a placeholder overflowed
-         * `MAX_HEADER_BYTES` once a 19-digit stamp replaced it, which killed the writer
-         * thread while `send()` still returned true and nothing was transmitted.
-         */
-        const val WIRE_STAMP_RESERVE = Long.MAX_VALUE
-
-        /**
          * The widest decimal a `Long` field can occupy, used for every transport-owned
          * field in the size probe.
          *

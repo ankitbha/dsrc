@@ -190,6 +190,11 @@ object OutboundValidation {
      * Named explicitly rather than left as a silent gap: `imu`, `here` and `telemetry`
      * land with tasks 20, 21 and 24, and `advisory` and `rate_cmd` are inbound on the
      * phone. The generic checks below still apply to all of them.
+     *
+     * `camera` was in this set and should not have been. It is the highest-volume channel
+     * on the link, so it was the one place where an unchecked field would travel
+     * thousands of times before anyone noticed, and the sender rule that round 1 added
+     * did not reach it.
      */
     val WITHOUT_A_TYPED_DECODER = setOf(
         Channels.IMU,
@@ -197,7 +202,6 @@ object OutboundValidation {
         Channels.TELEMETRY,
         Channels.ADVISORY,
         Channels.RATE_CMD,
-        Channels.CAMERA,
     )
 
     /** Channels whose message carries no payload, from the spec's message table. */
@@ -233,6 +237,7 @@ object OutboundValidation {
         // refusal table.
         when (channel) {
             Channels.GPS -> GpsRecord.fromWire(extensions, payload)
+            Channels.CAMERA -> CameraFrameMessage.fromWire(extensions, payload)
             Channels.CONTROL ->
                 // The hello and heartbeat are transport traffic, not timebase messages.
                 if (Session.HELLO !in extensions && Session.HEARTBEAT !in extensions) {

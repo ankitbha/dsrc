@@ -10,10 +10,22 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
+import com.dsrc.phone.config.LinkConfig
 import com.dsrc.phone.config.SensingConfig
+import com.dsrc.phone.net.SessionHolder
 import com.dsrc.phone.sensors.CameraPipeline
 import com.dsrc.phone.sensors.CameraXSource
+import com.dsrc.phone.sensors.CameraFrameSender
+import com.dsrc.phone.sensors.GpsLocationSource
+import com.dsrc.phone.sensors.GpsPipeline
+import com.dsrc.phone.sensors.GpsReading
+import com.dsrc.phone.sensors.GpsSource
+import com.dsrc.transport.Channels
+import com.dsrc.transport.Frame
+import java.time.Instant
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -24,8 +36,9 @@ import java.util.concurrent.Executors
  * running" -- four services would mean four lifecycles to keep in agreement, and a
  * partial failure with no name for it.
  *
- * Task 17 stands this up empty: it starts, holds the foreground notification, and
- * stops. Capture arrives in tasks 18-21 and hangs off [onSensingUp] / [onSensingDown].
+ * One link, too, for the same reason: camera and GPS share a single session, so the
+ * peer sees one connection whose per-channel counters add up, rather than two whose
+ * relative timing it would have to reconstruct.
  */
 class SensingService : LifecycleService() {
 
@@ -37,6 +50,10 @@ class SensingService : LifecycleService() {
     private var pipeline: CameraPipeline? = null
     private var cameraSource: CameraXSource? = null
     private var encodeExecutor: ExecutorService? = null
+    private var link: SessionHolder? = null
+    private var frameSender: CameraFrameSender? = null
+    private var gpsPipeline: GpsPipeline? = null
+    private var gpsSource: GpsSource? = null
 
     override fun onBind(intent: Intent): IBinder? {
         // LifecycleService dispatches lifecycle events from its overrides, so every one
@@ -189,6 +206,20 @@ class SensingService : LifecycleService() {
 
     private fun onSensingUp() {
         val config = SensingConfig()
+
+        // The link first, so both modalities have somewhere to send to before either can
+        // produce anything. It is up before it is connected -- send() refuses until the
+        // handshake completes, counted where it happens.
+        val holder = SessionHolder(
+            config = LinkConfig(),
+            deviceId = deviceId(),
+            monoClock = SystemClock::elapsedRealtimeNanos,
+            wallClock = ::wallClockNanos,
+            onFrame = ::onInboundFrame,
+        )
+        link = holder
+        holder.start()
+
         // One thread, because two would let frames finish compressing out of order and
         // make the monotonic frame_id a lie.
         val encoder = Executors.newSingleThreadExecutor()
@@ -202,25 +233,112 @@ class SensingService : LifecycleService() {
         cameraSource = source
         encodeExecutor = encoder
 
+        val sender = CameraFrameSender(
+            drain = pipe::drain,
+            send = { channel, extensions, payload -> holder.send(channel, extensions, payload) },
+        )
+        frameSender = sender
+        sender.start()
+
+        val gps = GpsPipeline(config) { reading ->
+            holder.send(Channels.GPS, reading.record.toExtensions())
+        }
+        gpsPipeline = gps
+        val locations = GpsLocationSource(this, config)
+        gpsSource = locations
+
         source.start(pipe)
-        Log.i(TAG, "camera capture starting at ${config.cameraHz} Hz")
+        locations.start { reading ->
+            recordReceipt(reading)
+            gps.offer(reading)
+        }
+        Log.i(
+            TAG,
+            "capture starting: camera ${config.cameraHz} Hz, gps ${config.gpsHz} Hz, " +
+                "link ${LinkConfig().host}:${LinkConfig().port}",
+        )
+    }
+
+    /**
+     * Both GPS clocks, which is the half of the task the wire cannot carry.
+     *
+     * `t_capture_mono_ns` takes the fix time; the frozen contract has no field for
+     * receipt, so it goes here. Logcat is the interim destination -- task 25 gives it a
+     * file -- and the pair is logged together rather than separately because the
+     * difference is the number worth having: it is the location stack's own delivery
+     * latency, and unlike the camera's two stamps both of these come off
+     * `elapsedRealtime`, so subtracting them is legitimate.
+     */
+    private fun recordReceipt(reading: GpsReading) {
+        Log.i(
+            TAG,
+            "gps fix=${reading.fixMonoNs} recv=${reading.receiptMonoNs} " +
+                "latency_ms=${reading.deliveryLatencyNs / 1_000_000} valid=${reading.record.valid} " +
+                "sats=${reading.record.satellites}",
+        )
+    }
+
+    /**
+     * Inbound traffic. Routing it is tasks 22 and 23; being counted is this task's job.
+     *
+     * Logged rather than dropped silently, so an advisory or a rate command arriving
+     * before its handler exists shows up as an unhandled channel instead of as nothing at
+     * all -- which is how a downlink that was never wired up looks identical to a Jetson
+     * that never sent anything.
+     */
+    private fun onInboundFrame(frame: Frame) {
+        Log.i(TAG, "inbound ${frame.channel} seq=${frame.sequence} (no handler yet)")
+    }
+
+    /**
+     * A device identity for the hello.
+     *
+     * `ANDROID_ID` rather than `Build.MODEL`: the fleet is two identical handsets, so the
+     * model name would give both the same id and the Jetson's logs could not tell one
+     * drive from another. It needs no permission and is stable for this app on this
+     * device.
+     */
+    private fun deviceId(): String {
+        val id = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+        return if (id.isNullOrBlank()) "unknown-${Build.MODEL}" else id
+    }
+
+    /** Wall time in nanoseconds, matching `time.time_ns()` on the Jetson. */
+    private fun wallClockNanos(): Long {
+        val now = Instant.now()
+        return now.epochSecond * 1_000_000_000L + now.nano
     }
 
     /** Idempotent: called from the machine's teardown and again from onDestroy. */
     private fun onSensingDown() {
-        // Order matters: stop the source first so no new frame is offered, then the
-        // pipeline so anything already queued drops out, then the executor.
+        // Order matters, and it is the reverse of construction: stop the producers first
+        // so nothing new is offered, then the pipelines so anything queued drops out and
+        // is counted, then the threads that were draining them, and the link last so a
+        // frame already in flight still has somewhere to go.
         cameraSource?.stop()
+        gpsSource?.stop()
         pipeline?.let { Log.i(TAG, "camera stats ${it.stats}") }
+        gpsPipeline?.let { Log.i(TAG, "gps stats ${it.stats}") }
         pipeline?.stop()
+        gpsPipeline?.stop()
+        frameSender?.stop()
         encodeExecutor?.shutdown()
+        link?.let { Log.i(TAG, "link stats ${it.stats()}") }
+        link?.stop()
         cameraSource = null
+        gpsSource = null
         pipeline = null
+        gpsPipeline = null
+        frameSender = null
         encodeExecutor = null
+        link = null
     }
 
-    /** The frame source, while sensing is up. Task 19 attaches the transport to it. */
+    /** The frame source, while sensing is up. */
     val frames: CameraPipeline? get() = pipeline
+
+    /** The link, while sensing is up, for a test or a status reader. */
+    val session: SessionHolder? get() = link
 
     /**
      * Entering the foreground, with a seam so its failure can be tested.
