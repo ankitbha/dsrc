@@ -203,12 +203,41 @@ recording:
 **120 transport tests, 0 failed, stable over five runs.** (Two commit messages undercount
 by one; the counts here are right.)
 
-### Task 19 remaining (4 of 11 steps)
+**Step 8 done — and this is the one that matters most. Kotlin now talks to the live
+Python transport.** The peer is `scripts/interop_jetson_peer.py` running the real
+`deployment/jetson/transport` Session, not a mock — a mock would agree with whatever the
+Kotlin side happens to do.
+
+Measured across the wire, Kotlin sending and Python receiving:
+
+- 40 GPS records arrive, sequence numbers 0–39, monotonic, none dropped at depth 64
+- a 40,960-byte camera payload crosses
+- keepalives flow in both directions
+- an advisory from Python is delivered to us and decodes to the fields the spec names —
+  the downlink direction nothing else exercises
+
+The sharpest of these separates **arrival from acceptance.** Python's counters keep
+`received` apart from `delivered`, so a frame that arrives intact and is *then* rejected
+by the far side's message layer shows up as such. Ours are 10 of 10 delivered with zero
+dropped inbound — the first evidence the Kotlin encoder produces what the Python decoder
+actually wants, not merely what the framing allows.
+
+Both the script and the Python transport package are declared Gradle inputs, so a change
+to either re-runs the one test that can catch the two implementations drifting apart.
+
+Two harness bugs, both the same shape — failure and success looking alike. The Python
+drain thread died on a non-existent attribute and the summary reported `frames_received:
+0` while the session's own counters showed five arrivals; a crashed drain was
+indistinguishable from a quiet link. And my JSON reader returned the *string* `"null"`
+for a JSON null, so every healthy run failed an `assertNull` — the tests were red while
+the interop worked perfectly.
+
+**126 transport tests, 0 failed, stable over three runs.**
+
+### Task 19 remaining (3 of 11 steps)
 
 - the time-sync responder — small, since the phone runs no estimator (task 16 established
   the converting side must be the initiating side, and the Jetson converts);
-- the Kotlin↔Python interop test, which is the half of the acceptance criterion the
-  golden vectors cannot cover;
 - GPS capture itself, with the FusedLocation adapter and both clocks;
 - wiring the session into `SensingService` so camera and GPS share one connection.
 
