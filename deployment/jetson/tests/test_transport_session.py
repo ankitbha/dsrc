@@ -1669,7 +1669,14 @@ def test_a_header_that_fits_the_placeholder_but_not_a_real_stamp_is_refused_at_e
     near, far = loopback_pair()
     sender = quiet_session(near)
     try:
-        fixed = {"ch": "control", "seq": 0, "t_mono_ns": 0, "t_wall_ns": 0, "n": 0}
+        # Sized against a header with real magnitudes. Computing it from
+        # zero-valued timestamps made `narrow` far too small, so the real header
+        # overflowed with either placeholder and the test could not tell the
+        # reserve from a one-digit stand-in.
+        fixed = {
+            "ch": Channel.CONTROL.value, "seq": 1,
+            "t_mono_ns": now_mono_ns(), "t_wall_ns": 1_755_648_000_123_456_789, "n": 0,
+        }
         narrow = len(encode_header({**fixed, WIRE_STAMP_KEY: 0, "pad": ""}))
         widest = len(encode_header({**fixed, WIRE_STAMP_KEY: WIRE_STAMP_RESERVE, "pad": ""}))
         assert widest > narrow, "the reserve is no wider than the placeholder"

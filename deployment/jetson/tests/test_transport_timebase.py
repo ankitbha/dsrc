@@ -1253,14 +1253,52 @@ def test_the_history_is_bounded_and_says_what_it_dropped():
     assert history[-1].estimate_id == MAX_HISTORY + 50
 
 
-def test_the_gate_and_the_estimate_come_from_one_snapshot():
+def test_the_gate_and_the_estimate_come_from_one_lock_acquisition():
     """Read separately, a sample arriving between the two let a conversion
     proceed on an estimate that never passed -- handing out a 400 ms bound
     against a 200 ms ceiling.
 
-    Driven by making the clock move only when the estimator reads it, so an
-    interleaving that used to be a race is deterministic here.
+    Asserted structurally, by counting acquisitions, because the window is a few
+    bytecodes wide: a two-thread version of this reported zero hits in six
+    seconds, so it would pass on the broken code most of the time. Counting is
+    deterministic and it is the property that actually matters.
     """
+    link = Link(seed=151)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=20, period_ns=100_000_000)
+
+    class _CountingLock:
+        def __init__(self, inner):
+            self._inner = inner
+            self.acquisitions = 0
+
+        def __enter__(self):
+            self.acquisitions += 1
+            return self._inner.__enter__()
+
+        def __exit__(self, *exc):
+            return self._inner.__exit__(*exc)
+
+    counting = _CountingLock(estimator._lock)  # noqa: SLF001
+    estimator._lock = counting  # noqa: SLF001
+    estimator.to_remote(clock.now_ns)
+    assert counting.acquisitions == 1, (
+        f"to_remote took the lock {counting.acquisitions} times, so the gate and "
+        "the estimate it approved are not one snapshot"
+    )
+
+    counting.acquisitions = 0
+    estimator.to_record()
+    assert counting.acquisitions == 1, (
+        f"to_record took the lock {counting.acquisitions} times; usable and "
+        "why_not_usable can disagree across separate reads"
+    )
+
+
+def test_a_conversion_cites_an_estimate_that_would_itself_have_passed_the_gate():
+    """The consequence of the property above, stated in the terms a reader of the
+    record cares about."""
     link = Link(seed=139)
     clock = SteppedClock()
     estimator = TimebaseEstimator(mono_clock=clock)
@@ -1274,3 +1312,23 @@ def test_the_gate_and_the_estimate_come_from_one_snapshot():
     )
     assert cited.offset_samples >= MIN_OFFSET_SAMPLES
     assert converted.bound_ns == cited.bound_ns_at(clock.now_ns)
+
+
+def test_every_typed_message_is_a_member_of_the_message_union():
+    """`Message` closed one type before the one task 15 added, so the router was
+    annotated to reject it. There is no type checker in this repo, so the union
+    is checked at runtime instead of not at all -- and a future exhaustive match
+    over `Message` would otherwise omit `control` silently.
+    """
+    import typing
+
+    from transport.messages import MESSAGE_FOR_CHANNEL, Message
+
+    members = set(typing.get_args(Message))
+    assert members, "Message is not a union any more; this test needs rewriting"
+    missing = {
+        channel.value: message_type.__name__
+        for channel, message_type in MESSAGE_FOR_CHANNEL.items()
+        if message_type not in members
+    }
+    assert not missing, f"typed messages absent from the Message union: {missing}"
