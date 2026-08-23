@@ -21,6 +21,47 @@ Nothing here blocks progress — each is a call I made and recorded rather than 
 
 ---
 
+## The watcher
+
+`../.pipeline/` holds a stall detector, because the failure mode of this run has
+been stopping after a report rather than continuing to the next task. A cron job
+in the Claude session runs `watch.py` every 11 minutes while the REPL is idle.
+
+Idle is not the same as stalled, which is why it answers with one of seven
+verdicts instead of a boolean. `HOLD` covers a stop that is deliberate — the
+state file names something only the user can decide — and `WORKING` covers the
+six minutes after any commit or uncommitted edit, so a nudge cannot land in the
+middle of an implementation step. Only `CONTINUE` resumes anything.
+
+`ESCALATE` is the part worth keeping. Four consecutive nudges that change nothing
+in the repository stop the nudging and report instead: a watcher emitting
+`CONTINUE` forever against a wedged run generates a stream of activity with no
+progress in it, which reads like it is working.
+
+The counters live in `pings.json` rather than `state.json`. Folding them together
+makes the position file's mtime partly the watcher's own footprint, so "how long
+since anything happened" ends up measuring the instrument instead of the work.
+
+All seven verdicts were exercised before arming it, plus two paths that carry the
+logic: progress resets the idle counter, and an uncommitted edit registers as
+activity. The cron job dies with the session, so it covers "stopped but alive"
+and not "the session died" — `state.json` is the cold-restart path for that,
+naming the next action in full.
+
+### Sign-off, precisely
+
+There has been **no validator sign-off on any task in this section.** Each ended
+with me fixing the last round's findings and moving on, so the final round's
+fixes went in unaudited: task 17 after round 3, task 18 after round 2, task 19
+after round 1. That is not a formality. Round 3 on task 17 found that round 2's
+try/catch ran correctly and the process died anyway, and it caught a `stopSelf`
+pin that had regressed to surviving. Round 2 on task 18 found three defects in
+round 1's fixes. Every round so far has found something in the previous round's
+fixes, which is the reason the run does not get to stop when the fixes feel
+finished.
+
+---
+
 ## Done and pushed
 
 ### Task 17 — Android project skeleton
