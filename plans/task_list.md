@@ -698,8 +698,35 @@ tunnels over USB and is unaffected.
     the transition table — and one instrumented race let a queued stop land inside the
     next test. Known gaps recorded in the plan: `MainActivity`'s wiring is unpinned
     pending the task-23 UI harness, and two test seams ship in the APK.
-18. Camera capture at the commanded rate, JPEG encode, per-frame monotonic
-    timestamps from `elapsedRealtimeNanos`.
+18. ~~Camera capture at the commanded rate, JPEG encode, per-frame monotonic
+    timestamps from `elapsedRealtimeNanos`.~~
+    **Done.** 178 JVM tests + 37 instrumented on the AVD, 0 failed. Achieved rate
+    5.00 Hz at a commanded 5 and 15.00 at 15 against a ~28.4 fps source; 0.90 at a
+    commanded 1, within one frame. Sustained 30 s at 10 Hz: 299 accepted, 9.97 Hz,
+    no encode failures, no stall. Slow drain: 151 accepted, 20 drained, 131 dropped,
+    accounting balanced. JPEG p50 25.7 KB at 1280x720 quality 85 on a synthetic scene.
+    The rate gate carried the task's real content and took four attempts, each
+    failure found by a test. Scheduling slots from *now* undershoots (a 30 Hz source
+    into a 10 Hz target gives 7.5 Hz); scheduling from the previous slot is exact but
+    pays a stall back as a burst; below ~1.1e-10 Hz -- inside the wire's legal range --
+    the period saturates and adding it wrapped negative, so a command meaning "almost
+    never" produced *full-rate* capture; and re-sending an unchanged rate silently cost
+    a quarter of the frame rate, because re-anchoring converts the exact schedule back
+    into the undershooting one.
+    Three counters reported failure as success: a `pack()` throw left a frame with no
+    outcome so total failure read as an encoder backlog; frames discarded at shutdown
+    were counted nowhere, making the balance identity false after every stop; and a
+    frame refused because sensing had stopped was reported as rate limiting. A fourth
+    identity could not fail at all -- `gated` was derived from the other terms, so
+    `seen == accepted + gated + refused` reduced to `seen == seen`.
+    `ResolutionSelector` silently ignores the requested size unless the aspect ratio is
+    stated: it defaults to 4:3, so a 16:9 request is filtered out before any resolution
+    rule runs. The emulator lists 1280x720 as supported and returned 640x480 anyway,
+    and 1856x1392 under a prefer-higher rule -- both looking like device limitations.
+    The chroma row stride was completely unpinned, and the emulator cannot pin it: its
+    virtual camera reports `rowStride == width` and planar chroma, so the padded and
+    semi-planar paths are inert there. `onDestroy` leaked both worker threads on every
+    platform teardown, since it never called `onSensingDown`.
 19. GPS capture and forwarding, logging both fix time and receipt time.
 20. IMU capture and forwarding.
 21. HERE client: query the road ahead at the commanded rate and in the commanded

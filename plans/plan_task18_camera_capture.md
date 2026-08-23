@@ -178,18 +178,34 @@ sizes are not representative of a road.
   `pixelStride == 1` planar, so both stride padding and the semi-planar chroma path are
   inert on it. That is exactly where `YuvPacker`'s bugs live, which is why they are
   pinned by pure tests rather than by the device.
-- **The configured resolution is a request, not a guarantee.** A device need not offer
-  the requested size. Measured: asking the emulator for 1280x720 with a
-  prefer-higher fallback returned 1856x1392 — nearly four times the pixels, and four
-  times the encode cost and payload. The fallback now prefers lower, which the emulator
-  answers with 640x480. `CapturedFrame` reports the frame's own dimensions rather than
-  the config's, so what goes on the wire is always what arrived.
+- **`ResolutionSelector` needs the aspect ratio stated, or the resolution is silently
+  ignored.** It defaults to 4:3, and a 16:9 request is excluded from the candidate set
+  *before* any resolution rule is consulted. Measured on the emulator, which lists
+  1280x720 among its supported sizes: no selector gave 640x480, prefer-lower also gave
+  640x480, prefer-higher gave 1856x1392 — and with the ratio supplied, all three rules
+  give exactly 1280x720. So a size that looked unsupported was being filtered by ratio,
+  and either fallback direction looked like a device limitation. The selector now
+  derives the ratio from the configured size.
+- **The configured resolution is still a request, not a guarantee.** A device need not
+  offer the requested size, and the fallback prefers lower — going under costs detail,
+  going over costs encode time and payload on a link that carries every frame.
+  `CapturedFrame` reports the frame's own dimensions rather than the config's, so what
+  goes on the wire is always what arrived.
 - **`ImageProxy` accounting is silent when wrong.** A leak stalls the stream with no
-  exception; the 30 s test is the only thing that would notice.
+  exception. `KEEP_ONLY_LATEST` makes the pool effectively depth-one, so a single leak
+  stops the stream on the *first* frame and four of the five camera tests fail — a
+  wider net than the sustained run alone.
 - **O1 means `t_capture_mono_ns` is an arrival-ish stamp, not the shutter.** It is
-  taken in the analyzer callback, so it includes however long the frame spent in the
-  pipeline. That is a known bias, it is on the same clock as everything else, and the
-  more accurate alternative is a different clock.
+  taken in the analyzer callback, so it carries the pipeline's own latency. That is a
+  known bias on the same clock as everything else, and the more accurate alternative is
+  a different clock.
+  **Its magnitude is unquantified, and cannot be measured from these two stamps.**
+  Differencing the arrival and sensor stamps returns offset *plus* latency
+  inseparably — measured negative, which is impossible for two stamps sharing a base
+  and is itself the evidence that they do not. Only the offset-free part is available:
+  the *spread* of that difference, 7.0 ms peak-to-peak on the emulator, since a constant
+  offset cancels in the variation. The absolute bias needs the transport's enqueue stamp
+  as a second operand, which arrives with task 19.
 
 ---
 

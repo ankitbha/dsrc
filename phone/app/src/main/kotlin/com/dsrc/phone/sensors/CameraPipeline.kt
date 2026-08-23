@@ -35,6 +35,8 @@ class CameraPipeline(
     private val encodeFailures = AtomicLong(0)
     private val packFailures = AtomicLong(0)
     private val refusedStopped = AtomicLong(0)
+    private val gatedCount = AtomicLong(0)
+    private val abandoned = AtomicLong(0)
 
     /**
      * Offer a frame.
@@ -59,7 +61,14 @@ class CameraPipeline(
             refusedStopped.incrementAndGet()
             return false
         }
-        if (!gate.accept(timestampNs)) return false
+        if (!gate.accept(timestampNs)) {
+            // Counted rather than derived. Deriving it as seen - accepted - refused made
+            // the balance identity read `seen == seen`, so it held for every input --
+            // including seen=5 with accepted=100 -- and the test asserting it passed
+            // vacuously.
+            gatedCount.incrementAndGet()
+            return false
+        }
 
         // The id counts frames the gate kept, not frames the sensor produced, so a gap
         // means "lost after acceptance" -- something worth acting on -- rather than
@@ -81,7 +90,13 @@ class CameraPipeline(
             // Re-checked inside the task: stop() can land between submission and
             // execution, and a frame encoded after teardown would arrive in a buffer
             // nobody is draining.
-            if (!running) return@execute
+            if (!running) {
+                // Same shape as the pack early-return: without a counter this frame
+                // leaves `accepted` incremented and no outcome recorded, so `inFlight`
+                // never returns to zero and a teardown reads as an encoder backlog.
+                abandoned.incrementAndGet()
+                return@execute
+            }
             try {
                 val jpeg = compress(packed, width, height, quality)
                 buffer.offer(
@@ -134,6 +149,8 @@ class CameraPipeline(
             encodeFailures = encodeFailures.get(),
             packFailures = packFailures.get(),
             refusedStopped = refusedStopped.get(),
+            gated = gatedCount.get(),
+            abandoned = abandoned.get(),
             buffer = buffer.stats,
         )
 
@@ -144,15 +161,22 @@ class CameraPipeline(
         val encodeFailures: Long,
         val packFailures: Long,
         val refusedStopped: Long,
+        /** Frames the gate rejected: the normal cost of a commanded rate below the sensor's. */
+        val gated: Long,
+        /** Frames dropped because sensing stopped between submission and encoding. */
+        val abandoned: Long,
         val buffer: FrameBuffer.Stats,
     ) {
-        /** Frames the gate rejected: the normal cost of a commanded rate below the sensor's. */
-        val gated: Long get() = seen - accepted - refusedStopped
-
         /** Accepted frames whose outcome is not yet known. */
-        val inFlight: Long get() = accepted - encoded - encodeFailures - packFailures
+        val inFlight: Long
+            get() = accepted - encoded - encodeFailures - packFailures - abandoned
 
-        /** Every frame the camera delivered is accounted for under exactly one heading. */
+        /**
+         * Every frame the camera delivered is accounted for under exactly one heading.
+         *
+         * Each term is counted where it happens, not derived from the others -- a
+         * derived term makes this an identity that cannot fail.
+         */
         val balances: Boolean get() = seen == accepted + gated + refusedStopped
     }
 }

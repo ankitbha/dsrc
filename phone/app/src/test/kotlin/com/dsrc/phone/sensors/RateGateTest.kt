@@ -193,6 +193,20 @@ class RateGateTest {
     }
 
     @Test
+    fun `a rate change is visible to another thread`() {
+        // The other half of the synchronization: without it the fields are plain and
+        // non-volatile, so a change made on one thread can stay invisible to the
+        // analyzer indefinitely.
+        val gate = RateGate(1.0)
+        gate.accept(0)
+        val setter = Thread { gate.setRate(1000.0) }
+        setter.start()
+        setter.join()
+        assertEquals(1_000_000L, gate.periodNanos)
+        assertTrue("the new rate must apply on this thread too", gate.accept(1_000_000L))
+    }
+
+    @Test
     fun `re-sending the same rate does not disturb the schedule`() {
         // Re-anchoring unconditionally turns "schedule from the previous slot" into
         // "schedule from now", which is the 25% undershoot the class exists to avoid.
@@ -222,10 +236,46 @@ class RateGateTest {
     }
 
     @Test
+    fun `the reset boundary admits no extra frame`() {
+        // `advanced <= nowNs` rather than `<`. At the boundary the strict version arms a
+        // slot at nowNs itself, which the very next call satisfies.
+        val gate = RateGate(10.0)
+        assertTrue(gate.accept(0))
+        // Exactly one period late: `advanced` equals `nowNs`, so the reset branch applies.
+        assertTrue(gate.accept(200 * ms))
+        assertFalse("the slot must be a full period out, not at now", gate.accept(200 * ms))
+        assertFalse(gate.accept(299 * ms))
+        assertTrue(gate.accept(300 * ms))
+    }
+
+    @Test
+    fun `a negative first timestamp is treated as a real stamp`() {
+        // The sentinel this replaced was Long.MIN_VALUE, which is a legal value in the
+        // domain; the rewrite's justification went untested.
+        val gate = RateGate(10.0)
+        assertTrue("the first frame is due whatever the clock reads", gate.accept(Long.MIN_VALUE))
+        assertFalse(gate.accept(Long.MIN_VALUE + 50 * ms))
+        assertTrue(gate.accept(Long.MIN_VALUE + 100 * ms))
+    }
+
+    @Test
+    fun `a rate change after a negative first stamp re-anchors to it`() {
+        val gate = RateGate(1.0)
+        assertTrue(gate.accept(Long.MIN_VALUE))
+        gate.setRate(10.0)
+        assertFalse(gate.accept(Long.MIN_VALUE + 99 * ms))
+        assertTrue("re-anchored to the real stamp, not to a sentinel", gate.accept(Long.MIN_VALUE + 100 * ms))
+    }
+
+    @Test
     fun `concurrent callers cannot both be admitted in one slot`() {
         // One analyzer thread today, but setRate is public and reachable from any
         // thread, and unsynchronised non-volatile fields make a change invisible.
-        repeat(20) {
+        //
+        // 2000 rounds, not 20: at 20 the race is too rare to observe, and a version of
+        // this test with 20 rounds failed to notice `synchronized` being removed across
+        // 240 consecutive rounds -- an assurance with no detection power.
+        repeat(2_000) {
             val gate = RateGate(1.0)
             val admitted = java.util.concurrent.atomic.AtomicInteger()
             val start = java.util.concurrent.CountDownLatch(1)

@@ -187,15 +187,25 @@ class YuvPackerTest {
             width = w, height = h, yRowStride = w, uvRowStride = w / 2, uvPixelStride = 1,
         )
         for (which in listOf("y", "u", "v")) {
-            val threw = runCatching {
+            val error = runCatching {
                 YuvPacker.toNv21(
                     y = ByteArray(if (which == "y") w * h - 1 else w * h),
                     u = ByteArray(if (which == "u") uvNeeded - 1 else uvNeeded),
                     v = ByteArray(if (which == "v") uvNeeded - 1 else uvNeeded),
                     width = w, height = h, yRowStride = w, uvRowStride = w / 2, uvPixelStride = 1,
                 )
-            }.isFailure
-            assertTrue("$which one byte short must be refused", threw)
+            }.exceptionOrNull()
+            // The type matters: isFailure alone cannot tell a named refusal from an
+            // ArrayIndexOutOfBounds thrown later by the copy, so dropping the bound
+            // check looked like it changed nothing.
+            assertTrue(
+                "$which one byte short must be refused by name, got $error",
+                error is IllegalArgumentException,
+            )
+            assertTrue(
+                "the message should name the plane: ${error?.message}",
+                error?.message?.contains("$which plane") == true,
+            )
         }
     }
 

@@ -5,9 +5,11 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Size
 import android.util.Log
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -82,6 +84,16 @@ class CameraXSource(
         }, ContextCompat.getMainExecutor(context))
     }
 
+    private fun aspectRatioStrategyFor(config: SensingConfig): AspectRatioStrategy {
+        val ratio = when (AspectRatios.nearest(config.cameraWidth, config.cameraHeight)) {
+            AspectRatios.RATIO_16_9 -> AspectRatio.RATIO_16_9
+            else -> AspectRatio.RATIO_4_3
+        }
+        // FALLBACK_RULE_AUTO so a device offering only the other ratio still gets a
+        // camera rather than nothing at all.
+        return AspectRatioStrategy(ratio, AspectRatioStrategy.FALLBACK_RULE_AUTO)
+    }
+
     private fun bind(
         cameraProvider: ProcessCameraProvider,
         analysis: ExecutorService,
@@ -94,17 +106,24 @@ class CameraXSource(
             // Without this the configured resolution is dead: the camera picks its own
             // default and the width/height in SensingConfig describe nothing.
             //
-            // The fallback prefers *lower*. A device need not offer the requested size,
-            // and preferring higher overshoots without limit -- asking the emulator for
-            // 1280x720 got 1856x1392, nearly four times the pixels, which is four times
-            // the encode cost and the payload on a link that has to carry it. Going
-            // under is the safe direction for a phone; going over is not.
+            // The aspect ratio must be stated, and that is the part that is easy to
+            // miss. ResolutionSelector defaults to RATIO_4_3_FALLBACK_AUTO, so a 16:9
+            // request is excluded from the preferred candidates before any resolution
+            // rule is consulted -- asking for 1280x720 on a device that offers it
+            // exactly returned 640x480, and a prefer-higher rule returned 1856x1392.
+            // Neither is the requested size, and both look like a device limitation.
+            // With the ratio supplied, all three fallback rules return 1280x720.
             //
-            // Either way the configured size is a *request*. What arrives is whatever
-            // the device chose, which is why CapturedFrame reports the ImageProxy's own
+            // The fallback still prefers lower, for the case where the exact size is
+            // genuinely unavailable: going under costs detail, going over costs encode
+            // time and payload on a link that has to carry every frame.
+            //
+            // The configured size remains a *request*. What arrives is whatever the
+            // device chose, which is why CapturedFrame reports the ImageProxy's own
             // dimensions rather than the config's.
             .setResolutionSelector(
                 ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(aspectRatioStrategyFor(config))
                     .setResolutionStrategy(
                         ResolutionStrategy(
                             Size(config.cameraWidth, config.cameraHeight),

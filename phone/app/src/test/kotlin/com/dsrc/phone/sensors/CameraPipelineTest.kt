@@ -239,6 +239,43 @@ class CameraPipelineTest {
     }
 
     @Test
+    fun `the balance identity can actually fail`() {
+        // The anti-vacuity control. While `gated` was derived from the other counters the
+        // identity reduced to `seen == seen`, so it held for every input -- including
+        // seen=5 with accepted=100 -- and every test asserting it passed for nothing.
+        val consistent = CameraPipeline.Stats(
+            seen = 10, accepted = 4, encoded = 4, encodeFailures = 0, packFailures = 0,
+            refusedStopped = 2, gated = 4, abandoned = 0,
+            buffer = FrameBuffer.Stats(4, 3, 1, 0, false),
+        )
+        assertTrue(consistent.balances)
+
+        val inconsistent = consistent.copy(seen = 11)
+        assertFalse("an unaccounted frame must show up", inconsistent.balances)
+        assertFalse("as must a miscounted one", consistent.copy(gated = 3).balances)
+        assertFalse(consistent.copy(accepted = 100).balances)
+    }
+
+    @Test
+    fun `a frame abandoned after a stop is counted, not left in flight`() {
+        // Same shape as the pack early-return: without a counter the frame leaves
+        // `accepted` incremented and no outcome recorded, so `inFlight` never returns to
+        // zero and a teardown reads as an encoder backlog. onSensingDown logs the stats
+        // before stopping, so that is exactly when it would be read.
+        val queued = mutableListOf<Runnable>()
+        val p = pipeline(hz = 1000.0, executor = Executor { queued.add(it) })
+        repeat(3) { offer(p, (it + 1) * ms) }
+        p.stop()
+        queued.forEach { it.run() }
+
+        val stats = p.stats
+        assertEquals(3, stats.accepted)
+        assertEquals(3, stats.abandoned)
+        assertEquals(0, stats.encoded)
+        assertEquals("nothing may be left in flight after a teardown", 0, stats.inFlight)
+    }
+
+    @Test
     fun `every frame the camera delivered is accounted for under exactly one heading`() {
         val p = pipeline(hz = 5.0)
         val sourcePeriod = 1_000_000_000L / 30
