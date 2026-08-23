@@ -27,6 +27,9 @@ data class SessionStats(
     val heartbeatsSent: Long,
     val heartbeatsReceived: Long,
     /** Messages the peer sent that we refused: a bug there. */
+    /** Frames the application's own handler threw on. Not a link failure. */
+    val deliveryFailures: Long,
+    val lastDeliveryFailure: String?,
     val inboundRefusals: Map<String, Long>,
     /** Messages we refused to send: a bug here. */
     val outboundRefusals: Map<String, Long>,
@@ -68,6 +71,11 @@ class Session(
     private val framesReceived = AtomicLong(0)
     private val heartbeatsSent = AtomicLong(0)
     private val heartbeatsReceived = AtomicLong(0)
+    private val deliveryFailures = AtomicLong(0)
+
+    @Volatile
+    private var lastDeliveryFailure: String? = null
+
     private val inboundRefusals = mutableMapOf<String, Long>()
     private val outboundRefusals = mutableMapOf<String, Long>()
     private val refusalLock = Any()
@@ -226,13 +234,21 @@ class Session(
         var lastHeartbeatNs = monoClock()
         try {
             while (running.get()) {
+                // Checked every pass, not only when the queue is empty. The spec says
+                // each side sends a keepalive every 1.0 s and Python's timer thread does
+                // so unconditionally; keeping it in the idle branch meant a phone under
+                // sustained camera traffic sent none at all. The consequence was masked --
+                // data frames are read progress, so nothing stalled -- but the two
+                // implementations disagreed, and the moment the camera pauses mid-drive
+                // the peer's clock estimate has a hole with no keepalive to bridge it.
+                val now = monoClock()
+                if (now - lastHeartbeatNs >= (Protocol.KEEPALIVE_INTERVAL_S * 1e9).toLong()) {
+                    sendHeartbeat()
+                    lastHeartbeatNs = now
+                }
+
                 val message = queues.poll()
                 if (message == null) {
-                    val now = monoClock()
-                    if (now - lastHeartbeatNs >= (Protocol.KEEPALIVE_INTERVAL_S * 1e9).toLong()) {
-                        sendHeartbeat()
-                        lastHeartbeatNs = now
-                    }
                     Thread.sleep(WRITER_IDLE_MS)
                     continue
                 }
@@ -349,6 +365,17 @@ class Session(
                     // Drop and count. The session stays open: one bad record costs one
                     // record.
                     countInboundRefusal(e.reason.wire)
+                } catch (t: Throwable) {
+                    // A bug in the application's router, not in the link. It must not tear
+                    // the session down -- a NullPointerException in an advisory handler is
+                    // no reason to stop collecting GPS -- but it must not vanish either.
+                    // With no clause here it killed the reader thread while `running`
+                    // stayed true, so `isRunning` lied, `send()` kept returning true, and
+                    // every later inbound frame was consumed by nobody with no counter
+                    // moving. The session then ended as STALLED with a null cause,
+                    // blaming the network for an application fault.
+                    deliveryFailures.incrementAndGet()
+                    lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"
                 }
             }
         } catch (e: EOFException) {
@@ -357,6 +384,12 @@ class Session(
             finish(SessionEnd.FRAMING_ERROR, e)
         } catch (e: IOException) {
             finish(if (running.get()) SessionEnd.TRANSPORT_ERROR else SessionEnd.CLOSED_LOCAL, e)
+        } catch (t: Throwable) {
+            // Everything else the read path can raise: a StackOverflowError out of deeply
+            // nested JSON, an OutOfMemoryError inside a read, a bug in this class. Without
+            // it the thread died with `ended` still false -- the same shape the writer had
+            // before round 1, a session reporting itself healthy while nothing arrives.
+            finish(SessionEnd.TRANSPORT_ERROR, t)
         }
     }
 
@@ -387,6 +420,8 @@ class Session(
             framesReceived = framesReceived.get(),
             heartbeatsSent = heartbeatsSent.get(),
             heartbeatsReceived = heartbeatsReceived.get(),
+            deliveryFailures = deliveryFailures.get(),
+            lastDeliveryFailure = lastDeliveryFailure,
             inboundRefusals = inboundRefusals.toMap(),
             outboundRefusals = outboundRefusals.toMap(),
             channels = queues.counters(),

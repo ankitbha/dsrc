@@ -49,6 +49,31 @@ class SessionTest {
      * one a stamp came from. The handshake happens before the gate is armed, so the hello
      * is not held.
      */
+    /**
+     * Records what was true *at the moment* each frame was written.
+     *
+     * Sampling after the fact does not work for a claim about the writer's state: a
+     * producer thread refills the queue between the write and the observation, so
+     * "pending was non-zero when I looked" is a race rather than a proof. The hook runs on
+     * the writer thread, inside the write, where the question is decidable.
+     */
+    private class ObservingOutputStream(
+        private val inner: java.io.OutputStream,
+        private val onFrame: (ByteArray) -> Unit,
+        /** Slows the writer so a producer can keep the queue saturated. */
+        private val perFrameDelayMs: Long = 0,
+    ) : java.io.OutputStream() {
+        override fun write(b: Int) = inner.write(b)
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            onFrame(b.copyOfRange(off, off + len))
+            if (perFrameDelayMs > 0) Thread.sleep(perFrameDelayMs)
+            inner.write(b, off, len)
+        }
+
+        override fun flush() = inner.flush()
+    }
+
     private class GatedOutputStream(
         private val inner: java.io.OutputStream,
         private val gate: CountDownLatch,
@@ -74,6 +99,9 @@ class SessionTest {
         clock: () -> Long = { System.nanoTime() },
         onPhoneFrame: ((Frame) -> Unit)? = null,
         phoneOutputGate: CountDownLatch? = null,
+        onPhoneWrite: ((ByteArray) -> Unit)? = null,
+        phoneWriteDelayMs: Long = 0,
+        phoneInput: ((java.io.InputStream) -> java.io.InputStream)? = null,
     ): Pair<Peer, Peer> {
         val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).also { servers.add(it) }
         val clientSocket = Socket(InetAddress.getLoopbackAddress(), server.localPort).also { sockets.add(it) }
@@ -85,13 +113,20 @@ class SessionTest {
             val received = mutableListOf<Frame>()
             val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
             var latch = CountDownLatch(1)
-            val output = if (role == "phone" && phoneOutputGate != null) {
-                GatedOutputStream(socket.getOutputStream(), phoneOutputGate).also { gates.add(it) }
+            var output: java.io.OutputStream = socket.getOutputStream()
+            if (role == "phone" && phoneOutputGate != null) {
+                output = GatedOutputStream(output, phoneOutputGate).also { gates.add(it) }
+            }
+            if (role == "phone" && onPhoneWrite != null) {
+                output = ObservingOutputStream(output, onPhoneWrite, phoneWriteDelayMs)
+            }
+            val input = if (role == "phone" && phoneInput != null) {
+                phoneInput(socket.getInputStream())
             } else {
-                socket.getOutputStream()
+                socket.getInputStream()
             }
             val session = Session(
-                input = socket.getInputStream(),
+                input = input,
                 output = output,
                 deviceId = "test-$role",
                 role = role,
@@ -888,6 +923,155 @@ class SessionTest {
 
     private companion object {
         const val ENQUEUE_NS = 1_000_000_000L
+    }
+
+
+    // -- the reader thread, and the keepalive under load ---------------------
+
+    @Test
+    fun `a handler that throws costs one frame, not the session`() {
+        // The reader had no guard for this. A non-MessageError out of the application's
+        // router killed the reader thread with `ended` still false, so `isRunning`
+        // reported true, `send()` kept returning true, later inbound frames were consumed
+        // by nobody with no counter moving, and the session finally ended as STALLED with
+        // a null cause -- blaming the network for an application fault.
+        val (phone, jetson) = pair(onPhoneFrame = { throw IllegalStateException("a router bug") })
+
+        repeat(3) { index ->
+            assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(index.toLong()).toExtensions()))
+        }
+        assertTrue(awaitCondition { phone.session.stats().deliveryFailures >= 3 },
+            "delivery failures were not counted: ${phone.session.stats()}")
+
+        assertTrue(phone.session.isRunning, "an application bug ended the session")
+        assertEquals(3, phone.session.stats().deliveryFailures)
+        assertTrue(
+            phone.session.stats().lastDeliveryFailure!!.contains("IllegalStateException"),
+            "the cause was not recorded: ${phone.session.stats().lastDeliveryFailure}",
+        )
+        // Counted apart from an inbound refusal: one is a bug here, the other is a bad
+        // record from the peer, and a total that added them would hide both.
+        assertTrue(phone.session.stats().inboundRefusals.isEmpty(), "counted as a refusal")
+
+        // And the link still carries traffic the other way.
+        val before = jetson.received.size
+        assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(9).toExtensions()))
+        assertTrue(awaitFrames(jetson, before + 1), "the session stopped carrying traffic")
+    }
+
+    @Test
+    fun `a keepalive is sent while the queue is busy, not only when it is idle`() {
+        // The spec: each side sends a keepalive every 1.0 s. It used to live in the
+        // writer's idle branch, so a phone under sustained camera traffic sent none -- and
+        // the pre-existing test only ever exercised an idle link, as its name conceded.
+        //
+        // Getting this test to actually detect that took three wrong attempts, all of the
+        // same shape: a *race* dressed up as a property.
+        //
+        //   1. Sample `outboundPending()` after the heartbeat arrives -- the producer
+        //      refills between the write and the observation.
+        //   2. Sample it inside the write, on the writer thread -- better, but the idle
+        //      branch decides `poll() == null` and only *then* writes, and the producer
+        //      refills in that gap too.
+        //
+        // What works is making the premise true by construction: the writer is slowed to
+        // 5 ms a frame, so the producer keeps the queue permanently saturated and `poll()`
+        // never returns null at all. Under the old code the idle branch is unreachable, so
+        // no keepalive is written and the first assertion fails.
+        val clock = AtomicLong(0)
+        val heartbeats = java.util.concurrent.atomic.AtomicLong(0)
+        val backlogWhenWritten = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+        val sessionHolder = arrayOfNulls<Session>(1)
+
+        val (phone, _) = pair(
+            clock = { clock.get() },
+            onPhoneWrite = { bytes ->
+                if (String(bytes, Charsets.UTF_8).contains(Session.HEARTBEAT)) {
+                    heartbeats.incrementAndGet()
+                    backlogWhenWritten.add(sessionHolder[0]?.outboundPending() ?: -1L)
+                }
+            },
+            phoneWriteDelayMs = 5,
+        )
+        sessionHolder[0] = phone.session
+
+        val producing = java.util.concurrent.atomic.AtomicBoolean(true)
+        val producer = Thread {
+            var n = 0L
+            while (producing.get()) {
+                phone.session.send(Channels.GPS, GpsRecord.noFix(n++).toExtensions())
+            }
+        }
+        producer.isDaemon = true
+        producer.start()
+        try {
+            // Let the producer saturate the depth-64 queue before the clock moves, so the
+            // writer has never once seen it empty.
+            assertTrue(
+                awaitCondition { phone.session.outboundPending() > 0 },
+                "the producer never got ahead of the writer",
+            )
+            clock.set(2_000_000_000L)   // past the 1 s interval
+
+            assertTrue(
+                awaitCondition { heartbeats.get() >= 1 },
+                "a saturated writer sent no keepalive at all",
+            )
+            assertTrue(
+                backlogWhenWritten.first() > 0,
+                "the queue was empty when it fired, so this proves nothing: ${backlogWhenWritten.first()}",
+            )
+        } finally {
+            producing.set(false)
+            producer.join(2_000)
+        }
+    }
+
+    @Test
+    fun `an input stream that throws something unexpected ends the session with the cause`() {
+        // readLoop caught EOFException, FramingError and IOException. Anything else -- a
+        // StackOverflowError out of deeply nested JSON, an OutOfMemoryError inside a read,
+        // a bug in this class -- killed the thread with `ended` still false, leaving a
+        // session that reported itself healthy while nothing arrived. A stream that throws
+        // a RuntimeException stands in for the whole family.
+        //
+        // Armed only after the handshake. Counting reads instead put the throw inside
+        // readPeerHello, which has its own correct handler, so the test passed for the
+        // wrong reason and pinned a path that was never broken.
+        val thrown = IllegalStateException("a stream implementation bug")
+        val armed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val (phone, jetson) = pair(phoneInput = { real ->
+            object : java.io.InputStream() {
+                override fun read(): Int = real.read()
+                override fun read(b: ByteArray, off: Int, len: Int): Int {
+                    if (armed.get()) throw thrown
+                    return real.read(b, off, len)
+                }
+            }
+        })
+
+        armed.set(true)
+        // The reader is parked in a read that was issued before the flag flipped, so it
+        // needs a byte to wake on before it can reach the poisoned call.
+        assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()))
+
+        assertTrue(
+            awaitCondition { !phone.session.isRunning },
+            "the session still reports itself running",
+        )
+        val end = phone.ends.firstOrNull()
+        assertEquals(SessionEnd.TRANSPORT_ERROR, end?.first, "ended as ${end?.first}")
+        assertEquals(thrown, end?.second, "the cause was discarded")
+    }
+
+    /** Poll a condition with a deadline, so a failure is a failure and not a hang. */
+    private fun awaitCondition(timeoutMs: Long = 5_000, condition: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return true
+            Thread.sleep(5)
+        }
+        return false
     }
 
 }
