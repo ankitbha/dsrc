@@ -1503,11 +1503,20 @@ def test_recv_with_receipt_skips_a_malformed_record_like_recv_does():
         phone.send(Channel.CONTROL, payload, broken, allow_reserved=(WIRE_STAMP_KEY,))
         up.send(good)
 
-        received = None
+        # Wait for both to arrive, then read ONCE. Looping until non-None was
+        # the flaw in the first version of this test: a call that returns None on
+        # the bad record and leaves the good one queued looks identical to "not
+        # here yet", so the retry hid exactly the defect being named.
         deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline and received is None:
-            received = down.recv_with_receipt(Channel.CONTROL, timeout=0.5)
-        assert received is not None, "the good record was never reached"
+        while time.monotonic() < deadline and jetson.pending(Channel.CONTROL) < 2:
+            time.sleep(0.01)
+        assert jetson.pending(Channel.CONTROL) == 2, "both records did not arrive"
+
+        received = down.recv_with_receipt(Channel.CONTROL, timeout=5.0)
+        assert received is not None, (
+            "one call returned nothing with a good record queued behind a bad "
+            "one, so the bad record was not skipped"
+        )
         message, t_recv = received
         assert message.exchange_id == 7
         assert t_recv > 0
@@ -1565,9 +1574,64 @@ def test_the_spec_states_the_admission_rule_and_the_extrapolation_number():
     assert f"rtt <= {timebase.MAX_SAMPLE_RTT_NS // 1_000_000}ms" in flat, (
         "the admission ceiling is not in the conformance block"
     )
+    assert "not data and enters no window" in flat, (
+        "the admission rule has a number but no statement of what it does"
+    )
+    assert "makes the gate's own clause unreachable" in flat, (
+        "the spec does not say why admission and the gate are separate constants"
+    )
     assert f"**{timebase.MAX_EXTRAPOLATION_S:.0f} s**" in flat, (
         "the extrapolation limit has no number in the spec"
     )
     assert f"**{timebase.MAX_HISTORY}**" in flat, (
         "the retention floor is not stated, so the provenance promise is unbounded"
     )
+
+
+def test_the_expiry_sweep_tolerates_an_entry_vanishing_under_it():
+    """`on_pong` pops from the same dict on another thread, and the natural
+    production arrangement is exactly two threads. A `del` that lost the race
+    raised KeyError out of `send_ping` and killed the cadence thread.
+
+    Driven deterministically rather than raced: the dict drops a key while the
+    sweep is iterating, which is the interleaving without the timing.
+    """
+    from transport.timebase import PENDING_TIMEOUT_S
+
+    class _VanishingDict(dict):
+        def items(self):
+            snapshot = list(super().items())
+            # Whatever the sweep is about to act on is gone by the time it acts.
+            for key in list(super().keys()):
+                super().pop(key, None)
+            return snapshot
+
+    clock = SteppedClock()
+    initiator = TimeSyncInitiator(_NullRouter(), mono_clock=clock)
+    initiator.send_ping()
+    initiator.send_ping()
+    stale = _VanishingDict(initiator._pending)  # noqa: SLF001
+    initiator._pending = stale  # noqa: SLF001
+
+    clock.now_ns += int((PENDING_TIMEOUT_S + 1) * NS_PER_S)
+    initiator._expire_pending()  # noqa: SLF001 - must not raise
+    # Nothing was double-counted for entries that had already gone.
+    assert initiator.pongs_timed_out == 0
+
+
+def test_the_spec_states_the_drift_charge_in_its_additive_form():
+    """The contract carried the stderr-only charge for a whole round after the
+    code stopped using it, so a conforming Kotlin implementation would have
+    reproduced the bound violation verbatim."""
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    section = text[text.index("## Shared Timebase"):text.index("## Golden Vectors")]
+    flat = " ".join(section.split())
+    assert "max(50 + |skew_ppm|, skew_stderr_ppm)" in flat, (
+        "the spec does not state the additive charge"
+    )
+    assert "Additive, not the larger of the two" in flat
+    assert "|fit - true| <= |fit| + |true|" in flat, (
+        "the spec states the formula without the algebra that makes it necessary"
+    )
+    # And it must not still be describing the charge it replaced.
+    assert "the standard error of the fitted skew once skew is known" not in flat
