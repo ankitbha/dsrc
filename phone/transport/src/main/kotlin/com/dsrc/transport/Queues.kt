@@ -1,0 +1,155 @@
+package com.dsrc.transport
+
+/** A message waiting for the writer. */
+class Outbound(
+    val channel: String,
+    val sequence: Long,
+    val extensions: Map<String, JsonValue>,
+    val payload: ByteArray,
+    /** Whether the writer should stamp `t_wire_mono_ns` just before the bytes leave. */
+    val wantsWireStamp: Boolean = false,
+    /** Reserved keys this message is allowed to carry, by exact name. */
+    val allowReserved: Set<String> = emptySet(),
+)
+
+/** Per-channel counters. Nothing is dropped silently. */
+data class ChannelCounters(
+    val enqueued: Long = 0,
+    val dropped: Long = 0,
+    val sent: Long = 0,
+) {
+    val pending: Long get() = enqueued - dropped - sent
+}
+
+/**
+ * The outbound side: one queue per channel, with the table's priority and overflow.
+ *
+ * Two rules from `specs/transport_protocol.md` decide almost everything here.
+ *
+ * `seq` is assigned **at enqueue, before any overflow decision**, which is what makes a
+ * gap in received sequence numbers the peer's evidence that the sender dropped
+ * something. Assigning it at send time instead would renumber the survivors and hide
+ * every drop.
+ *
+ * And the hello spends `control` sequence 0, so a session's own control traffic
+ * continues from 1. A peer that restarted control at 0 would duplicate the hello's
+ * number, and the gap rule detects nothing — it only fires on a sequence *greater* than
+ * expected — so the divergence would be silent and would offset every control-channel
+ * gap statistic for the life of the session.
+ */
+class OutboundQueues {
+
+    private val lock = Any()
+
+    private val queues: Map<String, ArrayDeque<Outbound>> =
+        Channels.ALL.associate { it.id to ArrayDeque<Outbound>() }
+
+    private val nextSequence: MutableMap<String, Long> =
+        Channels.ALL.associate { it.id to 0L }.toMutableMap()
+
+    private val counters: MutableMap<String, ChannelCounters> =
+        Channels.ALL.associate { it.id to ChannelCounters() }.toMutableMap()
+
+    /** Round-robin cursor per priority tier, so no channel starves an equal peer. */
+    private val cursor: MutableMap<Priority, Int> =
+        Priority.entries.associateWith { 0 }.toMutableMap()
+
+    /**
+     * Enqueue a message, assigning its sequence number.
+     *
+     * @return the sequence assigned, and the message displaced by overflow if any.
+     */
+    fun enqueue(
+        channel: String,
+        extensions: Map<String, JsonValue>,
+        payload: ByteArray,
+        wantsWireStamp: Boolean = false,
+        allowReserved: Set<String> = emptySet(),
+    ): Enqueued = synchronized(lock) {
+        val policy = Channels.policy(channel)
+        val queue = queues.getValue(channel)
+
+        // Before the overflow decision, deliberately.
+        val sequence = nextSequence.getValue(channel)
+        nextSequence[channel] = sequence + 1
+        val message = Outbound(channel, sequence, extensions, payload, wantsWireStamp, allowReserved)
+
+        var displaced: Outbound? = null
+        when (policy.overflow) {
+            Overflow.RELIABLE ->
+                if (queue.size >= policy.depth) {
+                    // Oldest out: for every reliable channel here a newer message is
+                    // worth more than an older one.
+                    displaced = queue.removeFirst()
+                }
+            Overflow.LATEST_WINS ->
+                while (queue.size >= policy.depth) {
+                    displaced = queue.removeFirst()
+                }
+        }
+        queue.addLast(message)
+
+        val previous = counters.getValue(channel)
+        counters[channel] = previous.copy(
+            enqueued = previous.enqueued + 1,
+            dropped = previous.dropped + if (displaced != null) 1 else 0,
+        )
+        return Enqueued(sequence, displaced)
+    }
+
+    data class Enqueued(val sequence: Long, val displaced: Outbound?)
+
+    /**
+     * The next message to write, or null when everything is empty.
+     *
+     * Strict priority across tiers, round-robin within one. A saturated high or normal
+     * tier can starve bulk indefinitely and that is accepted: in this system the high
+     * and normal tiers carry heartbeats, commands and small sensor records, and cannot
+     * saturate a link that is carrying camera frames at all.
+     */
+    fun poll(): Outbound? = synchronized(lock) {
+        for (tier in Priority.entries) {
+            val tierChannels = Channels.ALL.filter { it.priority == tier }
+            if (tierChannels.isEmpty()) continue
+            val start = cursor.getValue(tier)
+            for (offset in tierChannels.indices) {
+                val index = (start + offset) % tierChannels.size
+                val queue = queues.getValue(tierChannels[index].id)
+                if (queue.isNotEmpty()) {
+                    // Advance past the channel just served, so the next poll at this
+                    // tier starts with its neighbour.
+                    cursor[tier] = (index + 1) % tierChannels.size
+                    val message = queue.removeFirst()
+                    val previous = counters.getValue(message.channel)
+                    counters[message.channel] = previous.copy(sent = previous.sent + 1)
+                    return message
+                }
+            }
+        }
+        return null
+    }
+
+    /**
+     * Reserve `control` sequence 0 for the hello.
+     *
+     * Called by the session as it sends the hello, so ordinary control traffic starts
+     * at 1 without the caller having to know why.
+     */
+    fun reserveHelloSequence(): Long = synchronized(lock) {
+        val sequence = nextSequence.getValue(Channels.CONTROL)
+        nextSequence[Channels.CONTROL] = sequence + 1
+        val previous = counters.getValue(Channels.CONTROL)
+        counters[Channels.CONTROL] = previous.copy(
+            enqueued = previous.enqueued + 1,
+            sent = previous.sent + 1,
+        )
+        return sequence
+    }
+
+    fun counters(): Map<String, ChannelCounters> = synchronized(lock) { counters.toMap() }
+
+    /** Messages enqueued and not yet handed to the writer. */
+    fun pending(): Long = synchronized(lock) { queues.values.sumOf { it.size.toLong() } }
+
+    fun isEmpty(): Boolean = pending() == 0L
+}

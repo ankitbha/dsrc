@@ -63,6 +63,35 @@ class ProtocolSpecTest {
         assertEquals(ratio, Math.floor(ratio))
     }
 
+    @Test
+    fun `the channel table matches the spec's table row for row`() {
+        // Eight channels, each with a direction, priority, overflow policy and depth. A
+        // table that drifted from the spec would put the two implementations' queues out
+        // of step in a way no single-sided test could see.
+        for (policy in Channels.ALL) {
+            val pattern = Regex("""\|\s*`""" + policy.id + """`\s*\|([^\n]*)""")
+            val row = pattern.find(spec)?.groupValues?.get(1)
+                ?: error("spec has no row for channel '" + policy.id + "'")
+            val cells = row.split('|').map { it.trim() }
+            assertEquals(policy.direction.name.lowercase(), cells[0], policy.id + " direction")
+            assertEquals(policy.priority.name.lowercase(), cells[1], policy.id + " priority")
+            assertEquals(policy.overflow.name.lowercase(), cells[2], policy.id + " overflow")
+            assertEquals(policy.depth.toString(), cells[3], policy.id + " depth")
+        }
+    }
+
+    @Test
+    fun `the spec names no channel the table is missing`() {
+        // The other direction: a channel added to the spec and not here would be a
+        // protocol error on every frame that used it.
+        val rows = Regex("""\n\|\s*`([a-z_]+)`\s*\|\s*(?:up|down|both)\s*\|""")
+            .findAll(spec)
+            .map { it.groupValues[1] }
+            .toSet()
+        assertEquals(Channels.ALL.map { it.id }.toSet(), rows)
+        assertEquals(8, rows.size)
+    }
+
     private fun fmt(value: Double): String =
         if (value == Math.floor(value)) "%.1f".format(value) else value.toString()
 
