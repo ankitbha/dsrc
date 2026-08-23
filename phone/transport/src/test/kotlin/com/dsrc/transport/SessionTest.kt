@@ -41,22 +41,58 @@ class SessionTest {
         val frameLatch: () -> CountDownLatch,
     )
 
+    /**
+     * An output stream that holds the writer until a latch opens.
+     *
+     * The only way to make "at enqueue" and "at write" distinguishable: without parking
+     * the writer, the two instants are microseconds apart and a test cannot tell which
+     * one a stamp came from. The handshake happens before the gate is armed, so the hello
+     * is not held.
+     */
+    private class GatedOutputStream(
+        private val inner: java.io.OutputStream,
+        private val gate: CountDownLatch,
+    ) : java.io.OutputStream() {
+        @Volatile
+        var armed = false
+
+        override fun write(b: Int) {
+            if (armed) gate.await()
+            inner.write(b)
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (armed) gate.await()
+            inner.write(b, off, len)
+        }
+
+        override fun flush() = inner.flush()
+    }
+
     /** A connected pair, each side already through the handshake. */
     private fun pair(
         clock: () -> Long = { System.nanoTime() },
         onPhoneFrame: ((Frame) -> Unit)? = null,
+        phoneOutputGate: CountDownLatch? = null,
     ): Pair<Peer, Peer> {
         val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).also { servers.add(it) }
         val clientSocket = Socket(InetAddress.getLoopbackAddress(), server.localPort).also { sockets.add(it) }
         val serverSocket = server.accept().also { sockets.add(it) }
 
+        val gates = mutableListOf<GatedOutputStream>()
+
         fun build(socket: Socket, role: String, onFrame: (Frame) -> Unit): Peer {
             val received = mutableListOf<Frame>()
             val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
             var latch = CountDownLatch(1)
+            val output = if (role == "phone" && phoneOutputGate != null) {
+                GatedOutputStream(socket.getOutputStream(), phoneOutputGate).also { gates.add(it) }
+            } else {
+                socket.getOutputStream()
+            }
             val session = Session(
                 input = socket.getInputStream(),
-                output = socket.getOutputStream(),
+                output = output,
                 deviceId = "test-$role",
                 role = role,
                 monoClock = clock,
@@ -80,6 +116,8 @@ class SessionTest {
         val jetsonStart = Thread { jetson.session.start() }
         phoneStart.start(); jetsonStart.start()
         phoneStart.join(5_000); jetsonStart.join(5_000)
+        // Armed only after the handshake, so the hello is never held.
+        gates.forEach { it.armed = true }
         return phone to jetson
     }
 
@@ -730,4 +768,126 @@ class SessionTest {
             "counters must balance: $camera",
         )
     }
+
+    // -- the two enqueue stamps ---------------------------------------------
+
+    @Test
+    fun `t_mono_ns is the clock at enqueue, not the clock at write`() {
+        // The spec's header table defines both clocks as the sender's values *at enqueue*,
+        // and names `t_mono_ns - t_capture_mono_ns` as the queueing latency. Reading them
+        // on the writer thread instead folded the queueing delay into the field defined as
+        // excluding it, so that subtraction measured capture-to-write: the queue's own
+        // depth, reported as if it were the sensor's.
+        //
+        // Three frames are enqueued while the clock reads ENQUEUE_NS, then the clock jumps
+        // before the writer is allowed to run. A write-time stamp shows the jumped value.
+        val clock = AtomicLong(ENQUEUE_NS)
+        val release = CountDownLatch(1)
+        val (phone, jetson) = pair(clock = { clock.get() }, phoneOutputGate = release)
+
+        repeat(3) {
+            assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(ENQUEUE_NS - 1_000).toExtensions()))
+        }
+        clock.set(ENQUEUE_NS + 2_000_000_000L)
+        release.countDown()
+
+        assertTrue(awaitFrames(jetson, 3), "frames never arrived")
+        val stamps = jetson.received.filter { it.channel == Channels.GPS }
+            .map { (it.header.entries.getValue(Framing.KEY_MONO) as JsonValue.Num).value }
+        assertEquals(listOf(ENQUEUE_NS, ENQUEUE_NS, ENQUEUE_NS), stamps, "stamped at write, not at enqueue")
+    }
+
+    @Test
+    fun `the wire stamp is never earlier than the enqueue stamp`() {
+        // The wire stamp exists to be the later of the two -- the spec makes it the
+        // instant before the bytes leave, and the difference between them is the queueing
+        // delay a timebase estimate has to remove. It used to be built before the header's
+        // own clock call, so it was deterministically *earlier* and the delay it exposed
+        // came out negative on every stamped frame.
+        val clock = AtomicLong(0)
+        val (phone, jetson) = pair(clock = { clock.addAndGet(1_000) })
+
+        repeat(8) { exchange ->
+            assertTrue(phone.session.send(
+                Channels.CONTROL,
+                ping(exchangeId = exchange.toLong()),
+                wantsWireStamp = true,
+            ))
+        }
+        assertTrue(awaitFrames(jetson, 8), "timebase frames never arrived")
+
+        val pairs = jetson.received
+            .filter { it.header.entries.containsKey(Session.WIRE_STAMP) }
+            .map {
+                val mono = (it.header.entries.getValue(Framing.KEY_MONO) as JsonValue.Num).value
+                val wire = (it.header.entries.getValue(Session.WIRE_STAMP) as JsonValue.Num).value
+                wire - mono
+            }
+        assertEquals(8, pairs.size, "no stamped frames arrived")
+        assertTrue(pairs.all { it >= 0 }, "wire stamp precedes the enqueue stamp: $pairs")
+    }
+
+    @Test
+    fun `a header accepted by send always survives the write`() {
+        // The invariant, stated so it can fail. The size check runs before the sequence
+        // number exists and before the writer adds the wire stamp, so both are substituted
+        // at their widest; anything `send` accepts must therefore still fit once the real
+        // values arrive.
+        //
+        // An earlier version of this test searched for the largest accepted padding and
+        // asserted that one more byte was refused. That passes for *any* threshold,
+        // including a wrong one -- setting the substitution back to 0 left it green,
+        // because the search simply found the new boundary. It proved a boundary existed,
+        // not that it was in the right place.
+        //
+        // A wire-stamped message is what exposes the difference: a probe reserving one
+        // digit for a stamp that arrives with nineteen is short by eighteen bytes, so the
+        // message passes the check and then throws on the writer thread.
+        val clock = AtomicLong(1_000_000_000_000_000_000L)
+        val (phone, jetson) = pair(clock = { clock.get() })
+
+        val fits = longestPaddingAccepted(phone.session)
+        assertTrue(fits > 0, "no padding fits at all")
+
+        val before = jetson.received.size
+        assertTrue(
+            phone.session.send(Channels.CONTROL, paddedPing(fits), wantsWireStamp = true),
+            "the largest fitting header was refused",
+        )
+        assertTrue(
+            awaitFrames(jetson, before + 1),
+            "a header that send() accepted never arrived: it grew past the limit at write time",
+        )
+        assertTrue(phone.session.isRunning, "the session died writing a header send() had accepted")
+
+        // And one byte more is refused here, where the caller can see it, rather than on
+        // the writer thread where it cannot.
+        assertFalse(
+            phone.session.send(Channels.CONTROL, paddedPing(fits + 1), wantsWireStamp = true),
+            "a header one byte over the limit was accepted",
+        )
+        assertTrue(phone.session.stats().outboundRefusals.isNotEmpty(), "the refusal was not counted")
+    }
+
+    /** The largest padding length this session accepts on a wire-stamped control message. */
+    private fun longestPaddingAccepted(session: Session): Int {
+        var low = 0
+        var high = Protocol.MAX_HEADER_BYTES
+        // Binary search on a monotone predicate: one more byte of padding is one more byte
+        // of header, so acceptance is monotone in the length.
+        while (low < high) {
+            val mid = (low + high + 1) / 2
+            if (session.send(Channels.CONTROL, paddedPing(mid), wantsWireStamp = true)) low = mid else high = mid - 1
+        }
+        return low
+    }
+
+    /** A valid ping plus padding: extensions are additive, so an extra key is legal. */
+    private fun paddedPing(length: Int): Map<String, JsonValue> =
+        ping() + ("pad" to JsonValue.Text("x".repeat(length)))
+
+    private companion object {
+        const val ENQUEUE_NS = 1_000_000_000L
+    }
+
 }

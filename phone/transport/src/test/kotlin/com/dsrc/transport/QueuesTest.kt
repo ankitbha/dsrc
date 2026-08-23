@@ -10,7 +10,7 @@ class QueuesTest {
     private fun queues() = OutboundQueues()
 
     private fun OutboundQueues.put(channel: String, marker: Int = 0) =
-        enqueue(channel, mapOf("k" to JsonValue.Num(marker.toLong())), ByteArray(0))
+        enqueue(channel, mapOf("k" to JsonValue.Num(marker.toLong())), ByteArray(0), monoNs = 0, wallNs = 0)
 
     private fun Outbound.marker() = (extensions.getValue("k") as JsonValue.Num).value
 
@@ -213,14 +213,54 @@ class QueuesTest {
     fun `concurrent enqueues assign distinct sequence numbers`() {
         // The sensors run on their own threads; two of them sharing a sequence number
         // would make the peer's gap arithmetic meaningless.
+        //
+        // This test used to assert only that 1,000 messages were counted, which is
+        // exactly what its name does not say: pinning every IMU message to sequence 0
+        // left it green. The sequences themselves are collected now.
         val q = queues()
+        val assigned = java.util.concurrent.ConcurrentLinkedQueue<Long>()
         val threads = (1..4).map {
-            Thread { repeat(250) { q.enqueue(Channels.IMU, emptyMap(), ByteArray(0)) } }
+            Thread {
+                repeat(250) {
+                    assigned.add(q.enqueue(Channels.IMU, emptyMap(), ByteArray(0), 0, 0).sequence)
+                }
+            }
         }
         threads.forEach { it.start() }
         threads.forEach { it.join() }
+
+        assertEquals(1000, assigned.size)
+        assertEquals(1000, assigned.toSet().size, "a sequence number was issued twice")
+        // Contiguous from zero, not merely distinct: a gap is the peer's evidence that
+        // the sender dropped something, so an unexplained one here would be a lie.
+        assertEquals((0L until 1000L).toSet(), assigned.toSet())
+
         val counters = q.counters().getValue(Channels.IMU)
         assertEquals(1000, counters.enqueued)
-        assertTrue(counters.enqueued == counters.dropped + counters.sent + counters.pending, "$counters")
+        // Checked against the real queue depth. Comparing it against the other counters
+        // is a tautology, because `pending` is computed from them.
+        assertEquals(q.depth(Channels.IMU), counters.pending, "derived pending disagrees with the queue")
+    }
+
+    @Test
+    fun `a drawn sequence number leaves the derived backlog equal to the real one`() {
+        // The two paths that draw a sequence without queueing -- the hello and every
+        // keepalive -- must move `sent` as well as `enqueued`, or the derived backlog
+        // grows by one per keepalive: about 600 after a ten-minute drive, on a channel
+        // whose queue is empty. Both mutations survived the whole suite before this.
+        val q = queues()
+        q.reserveHelloSequence()
+        assertEquals(q.depth(Channels.CONTROL), q.counters().getValue(Channels.CONTROL).pending)
+
+        repeat(50) { q.nextSequenceFor(Channels.CONTROL) }
+        assertEquals(q.depth(Channels.CONTROL), q.counters().getValue(Channels.CONTROL).pending)
+        assertEquals(0, q.counters().getValue(Channels.CONTROL).pending)
+
+        // And with real traffic mixed in, so the identity is not just 0 == 0.
+        q.put(Channels.CONTROL)
+        q.put(Channels.CONTROL)
+        q.nextSequenceFor(Channels.CONTROL)
+        assertEquals(2, q.depth(Channels.CONTROL))
+        assertEquals(q.depth(Channels.CONTROL), q.counters().getValue(Channels.CONTROL).pending)
     }
 }

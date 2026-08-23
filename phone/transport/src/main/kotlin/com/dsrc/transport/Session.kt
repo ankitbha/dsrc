@@ -176,6 +176,11 @@ class Session(
     ): Boolean {
         if (!running.get()) return false
         val allowed = if (wantsWireStamp) setOf(WIRE_STAMP) else emptySet()
+        // Read once, here, because this is enqueue: the spec's header table defines both
+        // as the sender's clocks at enqueue, and the writer thread may not run for
+        // milliseconds.
+        val monoNs = monoClock()
+        val wallNs = wallClock()
         try {
             // Every rule a receiver would apply, including the typed decoder. Checking
             // only reserved keys and the channel name left six of the nine refusal
@@ -183,16 +188,20 @@ class Session(
             // went out and came back as the peer's drop counter.
             OutboundValidation.check(channel, extensions, payload, allowed)
 
-            // Then the size, with every transport-owned field at its widest. Reserving
-            // only the wire stamp was not enough: `seq`, `t_mono_ns` and `t_wall_ns` are
-            // all re-derived at write time, so a header that fit at sequence 0 and a
-            // short clock could overflow MAX_HEADER_BYTES once the real values arrived --
-            // and that throw happened on the writer thread, past any caller's reach.
+            // Then the size. Only two fields are still unknown here: the sequence
+            // number, which `enqueue` assigns under its own lock a moment from now, and
+            // the wire stamp, which the writer adds last. Both are substituted at their
+            // widest so a header that fits this check cannot grow past
+            // MAX_HEADER_BYTES later -- that throw would land on the writer thread, past
+            // any caller's reach.
+            //
+            // The clocks are no longer substituted, because they are no longer guessed:
+            // stamping them at enqueue is what made the real header knowable here.
             val probe = Framing.header(
                 channel = channel,
                 sequence = WIDEST_LONG,
-                monoNs = WIDEST_LONG,
-                wallNs = WIDEST_LONG,
+                monoNs = monoNs,
+                wallNs = wallNs,
                 extensions = if (wantsWireStamp) extensions + (WIRE_STAMP to JsonValue.Num(WIDEST_LONG)) else extensions,
                 allowReserved = allowed,
             )
@@ -209,7 +218,7 @@ class Session(
             countOutboundRefusal(RefusalReason.NON_FINITE.wire)
             return false
         }
-        queues.enqueue(channel, extensions, payload, wantsWireStamp)
+        queues.enqueue(channel, extensions, payload, monoNs, wallNs, wantsWireStamp, allowed)
         return true
     }
 
@@ -269,10 +278,15 @@ class Session(
 
     private fun writeMessage(message: Outbound) {
         val extensions = if (message.wantsWireStamp) {
-            // Stamped immediately before the bytes leave, not at enqueue: `t_mono_ns` is
-            // an enqueue stamp and so includes however long the frame waited behind
-            // others, which for a timebase estimate is the dominant error, larger than
-            // the network.
+            // Stamped immediately before the bytes leave, which is the whole point of the
+            // field: `t_mono_ns` is the enqueue stamp and so excludes the time the frame
+            // waited behind others, and the difference between the two *is* the queueing
+            // delay a timebase estimate has to remove.
+            //
+            // Necessarily read after the enqueue stamps, which were taken in `send`, so
+            // the wire stamp cannot precede them. It used to: the stamped extension map
+            // was built before the header's own clock call, so every stamped frame
+            // reported a negative queueing delay.
             message.extensions + (WIRE_STAMP to JsonValue.Num(monoClock()))
         } else {
             message.extensions
@@ -280,10 +294,10 @@ class Session(
         val header = Framing.header(
             channel = message.channel,
             sequence = message.sequence,
-            monoNs = monoClock(),
-            wallNs = wallClock(),
+            monoNs = message.monoNs,
+            wallNs = message.wallNs,
             extensions = extensions,
-            allowReserved = message.allowReserved + if (message.wantsWireStamp) setOf(WIRE_STAMP) else emptySet(),
+            allowReserved = message.allowReserved,
         )
         synchronized(output) {
             Framing.write(header, message.payload, output)

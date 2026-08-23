@@ -6,6 +6,18 @@ class Outbound(
     val sequence: Long,
     val extensions: Map<String, JsonValue>,
     val payload: ByteArray,
+    /**
+     * The sender's monotonic clock **at enqueue**, per the spec's header table.
+     *
+     * Carried on the message rather than read by the writer. Reading it at write time
+     * instead folded the queueing delay into the field the spec defines as excluding it,
+     * so `t_mono_ns - t_capture_mono_ns` -- which the spec names as a valid subtraction
+     * for queueing latency -- measured capture-to-write and came out as the queue's own
+     * depth. It also collapsed the distinction from `t_wire_mono_ns`, which exists
+     * precisely to be the later of the two.
+     */
+    val monoNs: Long,
+    val wallNs: Long,
     /** Whether the writer should stamp `t_wire_mono_ns` just before the bytes leave. */
     val wantsWireStamp: Boolean = false,
     /** Reserved keys this message is allowed to carry, by exact name. */
@@ -63,6 +75,8 @@ class OutboundQueues {
         channel: String,
         extensions: Map<String, JsonValue>,
         payload: ByteArray,
+        monoNs: Long,
+        wallNs: Long,
         wantsWireStamp: Boolean = false,
         allowReserved: Set<String> = emptySet(),
     ): Enqueued = synchronized(lock) {
@@ -72,7 +86,9 @@ class OutboundQueues {
         // Before the overflow decision, deliberately.
         val sequence = nextSequence.getValue(channel)
         nextSequence[channel] = sequence + 1
-        val message = Outbound(channel, sequence, extensions, payload, wantsWireStamp, allowReserved)
+        val message = Outbound(
+            channel, sequence, extensions, payload, monoNs, wallNs, wantsWireStamp, allowReserved,
+        )
 
         var displaced: Outbound? = null
         when (policy.overflow) {
@@ -167,6 +183,20 @@ class OutboundQueues {
 
     /** Messages enqueued and not yet handed to the writer. */
     fun pending(): Long = synchronized(lock) { queues.values.sumOf { it.size.toLong() } }
+
+    /**
+     * The real depth of one channel's queue.
+     *
+     * Exists so [ChannelCounters.pending] can be checked against something. That value is
+     * *derived* -- `enqueued - dropped - sent` -- which made the identity
+     * `enqueued == dropped + sent + pending` expand to `enqueued == enqueued`: true for
+     * every input, including inputs where the counters disagree with the queue. Two
+     * mutations survived the whole suite behind it, both of which inflate `control`'s
+     * apparent backlog by one per keepalive.
+     */
+    fun depth(channel: String): Long = synchronized(lock) {
+        queues.getValue(channel).size.toLong()
+    }
 
     fun isEmpty(): Boolean = pending() == 0L
 }
