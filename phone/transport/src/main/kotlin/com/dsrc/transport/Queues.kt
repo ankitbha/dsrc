@@ -146,6 +146,23 @@ class OutboundQueues {
         return sequence
     }
 
+    /**
+     * Draw a sequence number without queueing anything.
+     *
+     * For a frame the transport writes directly -- a keepalive -- which still consumes a
+     * sequence number like any other. Enqueueing and immediately polling looks equivalent
+     * and is not: `enqueue` appends and `poll` takes the head, so it returns whatever was
+     * already waiting.
+     */
+    fun nextSequenceFor(channel: String): Long = synchronized(lock) {
+        Channels.policy(channel)   // refuse an unknown channel here, not later
+        val sequence = nextSequence.getValue(channel)
+        nextSequence[channel] = sequence + 1
+        val previous = counters.getValue(channel)
+        counters[channel] = previous.copy(enqueued = previous.enqueued + 1, sent = previous.sent + 1)
+        return sequence
+    }
+
     fun counters(): Map<String, ChannelCounters> = synchronized(lock) { counters.toMap() }
 
     /** Messages enqueued and not yet handed to the writer. */

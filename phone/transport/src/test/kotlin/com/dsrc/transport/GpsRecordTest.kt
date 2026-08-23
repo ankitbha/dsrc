@@ -120,6 +120,18 @@ class GpsRecordTest {
     }
 
     @Test
+    fun `a valid fix with a null coordinate is refused, matching python`() {
+        // The spec is silent on the combination, so this was an unreconciled divergence
+        // rather than a defect on either side -- but two implementations of one contract
+        // disagreeing about whether a record is acceptable is worse than either answer.
+        for (key in listOf("lat", "lon")) {
+            val nulled = wire(full) + (key to JsonValue.Null)
+            val error = assertFailsWith<MessageError>("null $key on a valid fix") { decode(nulled) }
+            assertEquals(RefusalReason.OUT_OF_RANGE, error.reason)
+        }
+    }
+
+    @Test
     fun `the coordinate bounds themselves are accepted`() {
         for (ok in listOf("lat" to 90.0, "lat" to -90.0, "lon" to 180.0, "lon" to -180.0)) {
             decode(wire(full) + (ok.first to JsonValue.Real(ok.second)))

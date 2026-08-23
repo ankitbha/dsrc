@@ -80,11 +80,16 @@ data class GpsRecord(
             // says: an invalid record carries nulls, and a stale coordinate on an
             // invalid record is not the receiver's problem to police.
             if (valid) {
-                if (latitude != null && (latitude < -90.0 || latitude > 90.0)) {
-                    throw MessageError(RefusalReason.OUT_OF_RANGE, "lat $latitude outside [-90, 90]")
+                // A null coordinate on a *valid* fix is refused, matching Python. The
+                // spec is silent on the combination, so this was an unreconciled
+                // divergence rather than a defect on either side -- but two
+                // implementations of one contract disagreeing about whether a record is
+                // acceptable is worse than either answer.
+                if (latitude == null || latitude < -90.0 || latitude > 90.0) {
+                    throw MessageError(RefusalReason.OUT_OF_RANGE, "lat $latitude on a valid fix")
                 }
-                if (longitude != null && (longitude < -180.0 || longitude > 180.0)) {
-                    throw MessageError(RefusalReason.OUT_OF_RANGE, "lon $longitude outside [-180, 180]")
+                if (longitude == null || longitude < -180.0 || longitude > 180.0) {
+                    throw MessageError(RefusalReason.OUT_OF_RANGE, "lon $longitude on a valid fix")
                 }
             }
 

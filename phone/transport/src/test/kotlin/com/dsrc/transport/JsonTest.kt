@@ -215,6 +215,86 @@ class JsonTest {
         assertFailsWith<JsonError> { Json.decodeBytes(byteArrayOf(0x7B, 0xFF.toByte(), 0x7D)) }
     }
 
+
+    // -- as strict as CPython ------------------------------------------------
+
+    @Test
+    fun `a signed hex escape is refused, not truncated into another character`() {
+        // `toIntOrNull(16)` accepts a leading sign, so "\u-041" parsed as -0x41 and
+        // toChar() truncated it to U+FFBF -- a different character, silently.
+        for (bad in listOf("\"\\u-041\"", "\"\\u+041\"", "\"\\u 041\"", "\"\\uZZZZ\"")) {
+            assertFailsWith<JsonError>("should refuse: $bad") { Json.decode(bad) }
+        }
+    }
+
+    @Test
+    fun `a valid hex escape still works`() {
+        assertEquals("A", (Json.decode("\"\\u0041\"") as JsonValue.Text).value)
+        assertEquals("\u00e9", (Json.decode("\"\\u00e9\"") as JsonValue.Text).value)
+    }
+
+    @Test
+    fun `an unescaped control character in a string is refused`() {
+        // Python's strict parser refuses these, and a raw tab or newline inside a header
+        // string is far more likely to be a framing desync than an intended value.
+        for (bad in listOf("\"a\tb\"", "\"a\nb\"", "\"a\u0000b\"", "\"a\rb\"")) {
+            assertFailsWith<JsonError>("should refuse a raw control char") { Json.decode(bad) }
+        }
+    }
+
+    @Test
+    fun `the escaped forms of those characters are accepted`() {
+        assertEquals("a\tb", (Json.decode("\"a\\tb\"") as JsonValue.Text).value)
+        assertEquals("a\nb", (Json.decode("\"a\\nb\"") as JsonValue.Text).value)
+    }
+
+    @Test
+    fun `a leading zero is refused`() {
+        // Invalid JSON, and Python enforces it. Accepting it meant the two
+        // implementations disagreed about whether a header was even well-formed.
+        for (bad in listOf("01", "-01", "00", "007")) {
+            assertFailsWith<JsonError>("should refuse $bad") { Json.decode(bad) }
+        }
+    }
+
+    @Test
+    fun `zero itself is fine`() {
+        assertEquals(0L, (Json.decode("0") as JsonValue.Num).value)
+        assertEquals(0L, (Json.decode("-0") as JsonValue.Num).value)
+        assertEquals(0.5, (Json.decode("0.5") as JsonValue.Real).value)
+    }
+
+    @Test
+    fun `a number with no digits where digits are required is refused`() {
+        for (bad in listOf("1.", "-1.", ".5", "1e", "1e+", "1E-")) {
+            assertFailsWith<JsonError>("should refuse $bad") { Json.decode(bad) }
+        }
+    }
+
+    @Test
+    fun `an unpaired surrogate cannot be encoded`() {
+        // It has no UTF-8 encoding. Left alone it became '?' on the way to bytes, so a
+        // header round-tripped to *different* bytes with no error -- where Python raises
+        // UnicodeEncodeError.
+        assertFailsWith<JsonError> { Json.encode(JsonValue.Text("\uD800")) }
+        assertFailsWith<JsonError> { Json.encode(JsonValue.Text("\uDC00")) }
+        assertFailsWith<JsonError> { Json.encode(JsonValue.Text("a\uD800b")) }
+    }
+
+    @Test
+    fun `a properly paired surrogate still encodes`() {
+        val thermometer = "\uD83C\uDF21"
+        assertEquals("\"$thermometer\"", Json.encode(JsonValue.Text(thermometer)))
+    }
+
+    @Test
+    fun `an unpaired surrogate arriving as an escape cannot be re-encoded`() {
+        // The full wire path: decoding "\ud800" yields a lone surrogate, and re-encoding it
+        // must fail rather than quietly produce different bytes.
+        val decoded = Json.decode("\"\\ud800\"")
+        assertFailsWith<JsonError> { Json.encode(decoded) }
+    }
+
     // -- the golden header ---------------------------------------------------
 
     @Test

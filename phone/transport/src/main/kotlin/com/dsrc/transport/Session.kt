@@ -81,6 +81,7 @@ class Session(
 
     private var readerThread: Thread? = null
     private var writerThread: Thread? = null
+    private var watchdogThread: Thread? = null
 
     val isRunning: Boolean get() = running.get()
 
@@ -116,6 +117,17 @@ class Session(
         lastReadProgressNs.set(monoClock())
         readerThread = Thread({ readLoop() }, "dsrc-reader").also { it.isDaemon = true; it.start() }
         writerThread = Thread({ writeLoop() }, "dsrc-writer").also { it.isDaemon = true; it.start() }
+        // A third thread, and it has to be one. Both the reader and the writer spend
+        // their time blocked -- the reader in a read, the writer in a write once the
+        // peer's receive window closes -- so neither can be trusted to notice that
+        // nothing has arrived. Checking on the writer looked sufficient and covered
+        // exactly the case that does not matter: an idle link. A wedged peer, which is
+        // what the timeout is for, blocks the writer inside output.write() and the check
+        // never runs again.
+        watchdogThread = Thread({ watchdogLoop() }, "dsrc-watchdog").also {
+            it.isDaemon = true
+            it.start()
+        }
     }
 
     private fun readPeerHello() {
@@ -163,20 +175,26 @@ class Session(
         wantsWireStamp: Boolean = false,
     ): Boolean {
         if (!running.get()) return false
+        val allowed = if (wantsWireStamp) setOf(WIRE_STAMP) else emptySet()
         try {
-            Fields.checkReserved(extensions)
-            if (!Channels.isKnown(channel)) {
-                throw MessageError(RefusalReason.NO_TYPED_MESSAGE, "unknown channel '$channel'")
-            }
-            // Encoded here, with the widest possible wire stamp substituted, so the
-            // caller's own encoder proves the header fits before it is ever queued.
+            // Every rule a receiver would apply, including the typed decoder. Checking
+            // only reserved keys and the channel name left six of the nine refusal
+            // reasons unreachable outbound, so a message our own decoder would refuse
+            // went out and came back as the peer's drop counter.
+            OutboundValidation.check(channel, extensions, payload, allowed)
+
+            // Then the size, with every transport-owned field at its widest. Reserving
+            // only the wire stamp was not enough: `seq`, `t_mono_ns` and `t_wall_ns` are
+            // all re-derived at write time, so a header that fit at sequence 0 and a
+            // short clock could overflow MAX_HEADER_BYTES once the real values arrived --
+            // and that throw happened on the writer thread, past any caller's reach.
             val probe = Framing.header(
                 channel = channel,
-                sequence = 0,
-                monoNs = monoClock(),
-                wallNs = wallClock(),
-                extensions = if (wantsWireStamp) extensions + (WIRE_STAMP to JsonValue.Num(WIRE_STAMP_RESERVE)) else extensions,
-                allowReserved = if (wantsWireStamp) setOf(WIRE_STAMP) else emptySet(),
+                sequence = WIDEST_LONG,
+                monoNs = WIDEST_LONG,
+                wallNs = WIDEST_LONG,
+                extensions = if (wantsWireStamp) extensions + (WIRE_STAMP to JsonValue.Num(WIDEST_LONG)) else extensions,
+                allowReserved = allowed,
             )
             Framing.encode(probe, payload)
         } catch (e: MessageError) {
@@ -184,6 +202,11 @@ class Session(
             return false
         } catch (e: FramingError) {
             countOutboundRefusal("framing")
+            return false
+        } catch (e: IllegalArgumentException) {
+            // The JSON encoder's own refusals -- a non-finite value that slipped the
+            // check above. Counted rather than thrown at a sensor callback.
+            countOutboundRefusal(RefusalReason.NON_FINITE.wire)
             return false
         }
         queues.enqueue(channel, extensions, payload, wantsWireStamp)
@@ -201,13 +224,6 @@ class Session(
                         sendHeartbeat()
                         lastHeartbeatNs = now
                     }
-                    // Checked here rather than on the reader, so a reader blocked in a
-                    // read cannot delay noticing that nothing has arrived.
-                    val since = now - lastReadProgressNs.get()
-                    if (since >= (Protocol.STALL_TIMEOUT_S * 1e9).toLong()) {
-                        finish(SessionEnd.STALLED, null)
-                        return
-                    }
                     Thread.sleep(WRITER_IDLE_MS)
                     continue
                 }
@@ -217,6 +233,37 @@ class Session(
             // Closing interrupts the writer; not an error.
         } catch (e: IOException) {
             finish(SessionEnd.TRANSPORT_ERROR, e)
+        } catch (t: Throwable) {
+            // Anything else -- a FramingError from a header that grew past the limit at
+            // write time, or a bug in this class -- used to kill the thread without
+            // ending the session. `isRunning` stayed true, `send()` kept returning true,
+            // the stall check died with the writer, and every subsequent message was
+            // silently discarded for the rest of the drive. A session that cannot write
+            // is over.
+            finish(SessionEnd.TRANSPORT_ERROR, t)
+        }
+    }
+
+    private fun hasStalled(): Boolean =
+        monoClock() - lastReadProgressNs.get() >= (Protocol.STALL_TIMEOUT_S * 1e9).toLong()
+
+    /**
+     * Watches for a peer that has stopped reading progress, from outside both IO threads.
+     *
+     * Ending the session closes the streams, which is what unblocks a writer parked in a
+     * write and a reader parked in a read.
+     */
+    private fun watchdogLoop() {
+        try {
+            while (running.get()) {
+                if (hasStalled()) {
+                    finish(SessionEnd.STALLED, null)
+                    return
+                }
+                Thread.sleep(WATCHDOG_INTERVAL_MS)
+            }
+        } catch (e: InterruptedException) {
+            // Closing interrupts it; not an error.
         }
     }
 
@@ -245,12 +292,13 @@ class Session(
     }
 
     private fun sendHeartbeat() {
-        val sequence = queues.enqueue(
-            Channels.CONTROL,
-            mapOf(HEARTBEAT to JsonValue.Bool(true)),
-            ByteArray(0),
-            allowReserved = setOf(HEARTBEAT),
-        ).sequence
+        // A sequence number drawn directly, not by enqueueing and immediately polling.
+        // `enqueue` appends to the tail and `poll` takes the head, so that round trip
+        // returned whatever was already queued -- destroying an application's control
+        // message with `dropped` still zero, and then writing the heartbeat twice with a
+        // duplicate sequence number. Reachable by any send(control, ...) landing between
+        // the writer finding the queue empty and this call.
+        val sequence = queues.nextSequenceFor(Channels.CONTROL)
         val header = Framing.header(
             channel = Channels.CONTROL,
             sequence = sequence,
@@ -259,9 +307,6 @@ class Session(
             extensions = mapOf(HEARTBEAT to JsonValue.Bool(true)),
             allowReserved = setOf(HEARTBEAT),
         )
-        // Taken straight back off the queue: it was enqueued only to draw a sequence
-        // number, since a keepalive consumes one like any other frame.
-        queues.poll()
         synchronized(output) {
             Framing.write(header, ByteArray(0), output)
         }
@@ -310,6 +355,7 @@ class Session(
         runCatching { input.close() }
         runCatching { output.close() }
         writerThread?.interrupt()
+        watchdogThread?.interrupt()
         onEnd(reason, cause)
     }
 
@@ -351,6 +397,23 @@ class Session(
          */
         const val WIRE_STAMP_RESERVE = Long.MAX_VALUE
 
+        /**
+         * The widest decimal a `Long` field can occupy, used for every transport-owned
+         * field in the size probe.
+         *
+         * `Long.MIN_VALUE` rather than MAX: it is one character longer, because of the
+         * sign.
+         */
+        const val WIDEST_LONG = Long.MIN_VALUE
+
         private const val WRITER_IDLE_MS = 2L
+
+        /**
+         * How often the watchdog looks.
+         *
+         * Well under the stall timeout, so the detection delay is a small fraction of it
+         * rather than a second timeout in disguise.
+         */
+        private const val WATCHDOG_INTERVAL_MS = 100L
     }
 }

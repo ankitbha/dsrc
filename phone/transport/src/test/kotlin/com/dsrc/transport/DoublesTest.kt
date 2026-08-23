@@ -69,6 +69,63 @@ class DoublesTest {
         }
     }
 
+    private val dyadicCases: List<Case> by lazy {
+        val text = javaClass.getResourceAsStream("/python_double_repr_dyadic.json")
+            ?.bufferedReader()?.readText()
+            ?: error("python_double_repr_dyadic.json is missing from the test resources")
+        Regex("""\{\s*"bits":\s*(-?\d+),\s*"json":\s*"([^"]*)"\s*}""")
+            .findAll(text)
+            .map { Case(it.groupValues[1].toLong(), it.groupValues[2]) }
+            .toList()
+    }
+
+    @Test
+    fun `the dyadic reference table is present and substantial`() {
+        assertTrue(dyadicCases.size > 10_000, "only ${dyadicCases.size} dyadic cases")
+    }
+
+    @Test
+    fun `every power of two and widened float formats exactly as python does`() {
+        // The family the first reference set missed. A double's rounding interval is
+        // asymmetric at every exact power of two -- half a gap below, a whole gap above --
+        // so the *nearest* k-digit decimal can fall outside it while its neighbour falls
+        // inside. Searching only the nearest emitted 17 significant digits where Python
+        // emits 16, on 46 of 2,098 powers of two. Every Float widened to a Double is a
+        // dyadic rational, which is the same family.
+        val failures = mutableListOf<String>()
+        for (case in dyadicCases) {
+            val value = Double.fromBits(case.bits)
+            val actual = Doubles.format(value)
+            if (actual != case.expected) {
+                failures.add("bits=${case.bits} expected=${case.expected} actual=$actual")
+            }
+        }
+        assertTrue(
+            failures.isEmpty(),
+            "diverged on ${failures.size} of ${dyadicCases.size} dyadic cases:\n" +
+                failures.take(15).joinToString("\n"),
+        )
+    }
+
+    @Test
+    fun `two to the minus twenty-four is the sixteen-digit form python prints`() {
+        // The specific case, kept by name because the mechanism is easy to reintroduce.
+        assertEquals("5.960464477539063e-08", Doubles.format(Math.pow(2.0, -24.0)))
+        assertEquals("-5.960464477539063e-08", Doubles.format(-Math.pow(2.0, -24.0)))
+    }
+
+    @Test
+    fun `every dyadic case round-trips to the same double`() {
+        for (case in dyadicCases) {
+            val value = Double.fromBits(case.bits)
+            assertEquals(
+                value.toRawBits(),
+                Doubles.format(value).toDouble().toRawBits(),
+                "round trip of ${Doubles.format(value)}",
+            )
+        }
+    }
+
     @Test
     fun `the four layout boundaries are where python puts them`() {
         // 1e-4 is fixed and 1e-5 is scientific; 1e15 is fixed and 1e16 is scientific.

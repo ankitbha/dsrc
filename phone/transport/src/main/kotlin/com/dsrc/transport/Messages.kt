@@ -173,3 +173,90 @@ object Fields {
     fun toWire(value: String?): JsonValue =
         if (value == null) JsonValue.Null else JsonValue.Text(value)
 }
+
+/**
+ * Applies a receiver's rules to an outbound message.
+ *
+ * The spec makes every refusal a *sender* rule as well: "before a message goes out, it
+ * must satisfy the same table." A receiver rule alone leaves the sender free to emit
+ * garbage and learn about it as someone else's drop counter, and the Python side runs its
+ * typed decoder on every outbound message for exactly this reason.
+ */
+object OutboundValidation {
+
+    /**
+     * Channels whose typed message has no producer yet, so no decoder exists to run.
+     *
+     * Named explicitly rather than left as a silent gap: `imu`, `here` and `telemetry`
+     * land with tasks 20, 21 and 24, and `advisory` and `rate_cmd` are inbound on the
+     * phone. The generic checks below still apply to all of them.
+     */
+    val WITHOUT_A_TYPED_DECODER = setOf(
+        Channels.IMU,
+        Channels.HERE,
+        Channels.TELEMETRY,
+        Channels.ADVISORY,
+        Channels.RATE_CMD,
+        Channels.CAMERA,
+    )
+
+    /** Channels whose message carries no payload, from the spec's message table. */
+    private val PAYLOAD_BEARING = setOf(Channels.CAMERA, Channels.HERE)
+
+    /**
+     * Throws [MessageError] with the reason a receiver would give.
+     *
+     * @param allowReserved reserved keys this message legitimately carries — the hello and
+     *   heartbeat the transport sends itself, and the wire stamp on a timebase message.
+     */
+    fun check(
+        channel: String,
+        extensions: Map<String, JsonValue>,
+        payload: ByteArray,
+        allowReserved: Set<String> = emptySet(),
+    ) {
+        if (!Channels.isKnown(channel)) {
+            throw MessageError(RefusalReason.NO_TYPED_MESSAGE, "unknown channel '$channel'")
+        }
+        Fields.checkReserved(extensions, allowReserved)
+
+        if (channel !in PAYLOAD_BEARING) Fields.checkNoPayload(payload, channel)
+
+        // Non-finite values are caught here rather than surfacing from the JSON encoder.
+        // Doubles.format raises IllegalArgumentException, which is neither MessageError nor
+        // FramingError, so it propagated out of send() into the caller -- on the phone,
+        // into a sensor callback.
+        checkAllFinite(extensions)
+
+        // Then the typed decoder, where one exists: it is the only thing that applies the
+        // per-field rules -- ranges, counts, null handling -- and those are most of the
+        // refusal table.
+        when (channel) {
+            Channels.GPS -> GpsRecord.fromWire(extensions, payload)
+            Channels.CONTROL ->
+                // The hello and heartbeat are transport traffic, not timebase messages.
+                if (Session.HELLO !in extensions && Session.HEARTBEAT !in extensions) {
+                    TimeSyncMessage.fromWire(extensions, payload)
+                }
+            else -> Unit
+        }
+    }
+
+    private fun checkAllFinite(value: Any?) {
+        when (value) {
+            is Map<*, *> -> value.forEach { (key, entry) ->
+                if (entry is JsonValue.Real && (entry.value.isNaN() || entry.value.isInfinite())) {
+                    throw MessageError(RefusalReason.NON_FINITE, "'$key' is ${entry.value}")
+                }
+                checkAllFinite(entry)
+            }
+            is JsonValue.Obj -> checkAllFinite(value.entries)
+            is JsonValue.Arr -> value.items.forEach { checkAllFinite(it) }
+            is JsonValue.Real ->
+                if (value.value.isNaN() || value.value.isInfinite()) {
+                    throw MessageError(RefusalReason.NON_FINITE, "${value.value} on the wire")
+                }
+            else -> Unit
+        }
+    }
+}

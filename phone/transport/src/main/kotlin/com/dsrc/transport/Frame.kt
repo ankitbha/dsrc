@@ -52,8 +52,17 @@ object Framing {
 
     const val PREFIX_BYTES = 6
 
-    /** Reserved for the transport on every channel. */
-    val RESERVED_KEYS = listOf("hello", "heartbeat")
+    /**
+     * Reserved for the transport on every channel.
+     *
+     * Three, matching Python's `RESERVED_EXTENSIONS`. `t_wire_mono_ns` belongs here and
+     * was missing: a caller could set it, the frame would go out carrying a
+     * caller-controlled value in the field the peer's timebase reads as our departure
+     * stamp, and no stamping would have happened. The spec names two under the MUST NOT
+     * at one point and calls the wire stamp "a reserved extension" at another; Python
+     * implements three and the plan says three.
+     */
+    val RESERVED_KEYS = listOf("hello", "heartbeat", "t_wire_mono_ns")
 
     /**
      * Build a header from the transport's own fields plus a message's extensions.

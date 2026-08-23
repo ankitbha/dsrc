@@ -75,6 +75,22 @@ object Json {
         }
     }
 
+    private fun checkNoLoneSurrogate(value: String) {
+        var i = 0
+        while (i < value.length) {
+            val c = value[i]
+            if (c.isHighSurrogate()) {
+                if (i + 1 >= value.length || !value[i + 1].isLowSurrogate()) {
+                    throw JsonError("unpaired high surrogate at index $i")
+                }
+                i += 2
+            } else {
+                if (c.isLowSurrogate()) throw JsonError("unpaired low surrogate at index $i")
+                i++
+            }
+        }
+    }
+
     /** Python's `sort_keys` order: by Unicode code point. */
     internal fun compareByCodePoint(left: String, right: String): Int {
         var i = 0
@@ -90,6 +106,10 @@ object Json {
     }
 
     private fun writeString(value: String, out: StringBuilder) {
+        // An unpaired surrogate has no UTF-8 encoding. Left alone it became '?' on the way
+        // to bytes, so a header round-tripped to *different* bytes with no error at all --
+        // where Python raises UnicodeEncodeError. Refused here instead.
+        checkNoLoneSurrogate(value)
         out.append('"')
         for (char in value) {
             when {
@@ -240,17 +260,30 @@ object Json {
                             'u' -> {
                                 if (offset + 4 >= text.length) throw JsonError("truncated \\u escape")
                                 val hex = text.substring(offset + 1, offset + 5)
-                                out.append(
-                                    hex.toIntOrNull(16)?.toChar()
-                                        ?: throw JsonError("bad \\u escape '$hex'")
-                                )
+                                // Four hex digits, checked digit by digit.
+                                // `toIntOrNull(16)` accepts a leading sign, so "\u-041"
+                                // parsed as -0x41 and `toChar()` truncated it to U+FFBF --
+                                // a different character, with no error anywhere.
+                                if (hex.length != 4 || !hex.all { it.isHexDigit() }) {
+                                    throw JsonError("bad \\u escape '$hex'")
+                                }
+                                out.append(hex.toInt(16).toChar())
                                 offset += 4
                             }
                             else -> throw JsonError("unknown escape '\\$esc'")
                         }
                         offset++
                     }
-                    else -> { out.append(c); offset++ }
+                    else -> {
+                        // Python's strict parser refuses an unescaped control character
+                        // inside a string, and a raw tab or newline in a header is far
+                        // more likely to be a framing desync than an intended value.
+                        if (c < ' ') {
+                            throw JsonError("unescaped control character U+%04X in a string".format(c.code))
+                        }
+                        out.append(c)
+                        offset++
+                    }
                 }
             }
         }
@@ -273,6 +306,7 @@ object Json {
             }
             val token = text.substring(start, offset)
             if (token.isEmpty() || token == "-") throw JsonError("bad number at offset $start")
+            checkNumberGrammar(token, start)
 
             // The integer/float split is decided by the token's *shape*, exactly as
             // Python decides it, not by whether the value happens to be integral. So
@@ -292,5 +326,36 @@ object Json {
         }
 
         private fun Char.isJsonWhitespace() = this == ' ' || this == '\t' || this == '\n' || this == '\r'
+
+        private fun Char.isHexDigit() = this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
+
+        /**
+         * JSON's number grammar, which Python enforces and this parser did not.
+         *
+         * A leading zero (`01`, `-01`, `00`) and a bare trailing point (`1.`) are both
+         * invalid JSON. Accepting them meant the two implementations disagreed about
+         * whether a header was even well-formed, which is a worse kind of divergence than
+         * disagreeing about a value.
+         */
+        private fun checkNumberGrammar(token: String, at: Int) {
+            val body = token.removePrefix("-")
+            if (body.isEmpty()) throw JsonError("bad number '$token' at offset $at")
+            if (body.length > 1 && body[0] == '0' && body[1].isDigit()) {
+                throw JsonError("leading zero in '$token' at offset $at")
+            }
+            val mantissa = body.takeWhile { it != 'e' && it != 'E' }
+            if (mantissa.endsWith('.')) {
+                throw JsonError("no digits after the point in '$token' at offset $at")
+            }
+            if (mantissa.startsWith('.')) {
+                throw JsonError("no digits before the point in '$token' at offset $at")
+            }
+            val exponent = body.substringAfter('e', body.substringAfter('E', ""))
+            if ((body.contains('e') || body.contains('E')) &&
+                exponent.removePrefix("+").removePrefix("-").isEmpty()
+            ) {
+                throw JsonError("no digits in the exponent of '$token' at offset $at")
+            }
+        }
     }
 }

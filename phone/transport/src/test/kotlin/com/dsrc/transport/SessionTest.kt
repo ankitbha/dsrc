@@ -119,12 +119,93 @@ class SessionTest {
         assertEquals(0, synchronized(phone.received) { phone.received.size })
     }
 
+    /** A valid time-sync ping, which is what `control` actually carries. */
+    private fun ping(exchangeId: Long = 1) = TimeSyncMessage(
+        captureMonoNs = 1_000,
+        exchangeId = exchangeId,
+        wireMonoNs = 0,
+        peerRecvMonoNs = null,
+        peerRecvWallNs = null,
+        peerWireMonoNs = null,
+    ).toExtensions()
+
     @Test
     fun `control traffic starts at sequence one because the hello spent zero`() {
         val (phone, jetson) = pair()
-        assertTrue(phone.session.send(Channels.CONTROL, mapOf("probe" to JsonValue.Num(1))))
+        // A real ping, not an arbitrary payload: the sender rule now runs the typed
+        // decoder, and `control`'s typed message is the time-sync exchange.
+        assertTrue(phone.session.send(Channels.CONTROL, ping(), wantsWireStamp = true))
         assertTrue(awaitFrames(jetson, 1), "the control frame never arrived")
         assertEquals(1L, synchronized(jetson.received) { jetson.received.first().sequence })
+    }
+
+    @Test
+    fun `an arbitrary control message is refused before it goes out`() {
+        // The sender rule in action: control carries the time-sync exchange and nothing
+        // else, so a made-up payload is our bug to catch rather than the peer's.
+        val (phone, _) = pair()
+        assertFalse(phone.session.send(Channels.CONTROL, mapOf("probe" to JsonValue.Num(1))))
+        assertTrue(
+            phone.session.stats().outboundRefusals.isNotEmpty(),
+            "the refusal must be counted: ${phone.session.stats().outboundRefusals}",
+        )
+    }
+
+    @Test
+    fun `a message our own decoder would refuse never reaches the wire`() {
+        // Six of the nine refusal reasons were unreachable outbound before the sender rule
+        // ran the typed decoder, so a bad record went out and came back as the peer's drop
+        // counter.
+        val (phone, jetson) = pair()
+        val valid = GpsRecord(
+            captureMonoNs = 1, valid = true, latitude = 51.5074, longitude = -0.1278,
+            speedMps = 13.4, headingDeg = 91.2, fixQuality = 1, satellites = 9,
+            hdop = 0.9, altitudeM = 35.0, utcEpochNs = 1,
+        ).toExtensions()
+
+        val cases = mapOf(
+            "out_of_range (lat)" to valid + ("lat" to JsonValue.Real(200.0)),
+            "out_of_range (count)" to valid + ("num_sats" to JsonValue.Num(-1)),
+            "wrong_type" to valid + ("valid" to JsonValue.Text("yes")),
+            "null_not_allowed" to valid + ("num_sats" to JsonValue.Null),
+            "missing_field" to valid - "lat",
+            "non_finite" to valid + ("speed_mps" to JsonValue.Real(Double.NaN)),
+        )
+        for ((name, extensions) in cases) {
+            assertFalse(phone.session.send(Channels.GPS, extensions), "$name was sent")
+        }
+        assertEquals(
+            cases.size,
+            phone.session.stats().outboundRefusals.values.sum().toInt(),
+            "every refusal must be counted: ${phone.session.stats().outboundRefusals}",
+        )
+        Thread.sleep(300)
+        assertEquals(0, synchronized(jetson.received) { jetson.received.size }, "nothing may arrive")
+    }
+
+    @Test
+    fun `a non-finite value is counted, not thrown at the caller`() {
+        // Doubles.format raises IllegalArgumentException, which is neither MessageError nor
+        // FramingError, so it used to propagate out of send() -- on the phone, into a
+        // sensor callback.
+        val (phone, _) = pair()
+        val refused = runCatching {
+            phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions() + ("extra" to JsonValue.Real(Double.POSITIVE_INFINITY)))
+        }
+        assertTrue(refused.isSuccess, "send threw ${refused.exceptionOrNull()}")
+        assertEquals(false, refused.getOrNull())
+        assertEquals(1, phone.session.stats().outboundRefusals["non_finite"])
+    }
+
+    @Test
+    fun `a caller cannot set the wire stamp itself`() {
+        // Reserved on the Python side and not here, so a caller could put a value in the
+        // field the peer's timebase reads as our departure stamp, with no stamping done.
+        val (phone, _) = pair()
+        assertFalse(
+            phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions() + ("t_wire_mono_ns" to JsonValue.Num(7))),
+        )
+        assertEquals(1, phone.session.stats().outboundRefusals["reserved_key"])
     }
 
     @Test
@@ -486,6 +567,124 @@ class SessionTest {
             end == SessionEnd.FRAMING_ERROR || end == SessionEnd.TRANSPORT_ERROR,
             "expected the session to end, got $end",
         )
+    }
+
+    @Test
+    fun `a write-time framing error ends the session instead of killing the writer`() {
+        // The worst failure the validator found. A header that fit at the size probe could
+        // grow past MAX_HEADER_BYTES once the real sequence and clocks were substituted,
+        // and that throw escaped the writer's catch: the thread died, isRunning stayed
+        // true, send() kept returning true, the stall check died with the writer, and
+        // every later message was discarded for the rest of the drive.
+        val (phone, jetson) = pair()
+
+        // A header padded to sit just under the limit, so the widest real values push it
+        // over. The size probe should refuse this outright now.
+        val padding = "x".repeat(Protocol.MAX_HEADER_BYTES - 220)
+        val accepted = phone.session.send(
+            Channels.TELEMETRY,
+            mapOf(
+                Fields.CAPTURE_KEY to JsonValue.Num(1),
+                "pad" to JsonValue.Text(padding),
+            ),
+        )
+        if (!accepted) {
+            // Refused at the probe, which is the intended outcome.
+            assertTrue(
+                phone.session.stats().outboundRefusals.isNotEmpty(),
+                "a refusal must be counted",
+            )
+            assertTrue(phone.session.isRunning, "refusing one message must not end the session")
+            // And the session still works.
+            assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(2).toExtensions()))
+            assertTrue(awaitFrames(jetson, 1), "the session stopped working after a refusal")
+            return
+        }
+        // If it was accepted, the writer must still not die silently: either the frame
+        // goes out, or the session ends with a reason.
+        Thread.sleep(1_000)
+        assertTrue(
+            !phone.session.isRunning || synchronized(jetson.received) { jetson.received.isNotEmpty() },
+            "the writer accepted a frame it could not write and said nothing",
+        )
+    }
+
+    @Test
+    fun `a wedged peer is detected as stalled even with work queued`() {
+        // The stall check used to live in the writer's idle branch, so it never ran while
+        // there was work queued -- and never at all when the writer was blocked in
+        // output.write() because the peer had stopped reading, which is the exact case the
+        // timeout exists for.
+        val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).also { servers.add(it) }
+        val client = Socket(InetAddress.getLoopbackAddress(), server.localPort).also { sockets.add(it) }
+        val wedged = server.accept().also { sockets.add(it) }
+        Framing.write(
+            Framing.header(
+                Channels.CONTROL, 0, 1, 2,
+                mapOf(Session.HELLO to JsonValue.Obj(mapOf(
+                    "protocol_version" to JsonValue.Num(Protocol.VERSION.toLong()),
+                    "device_id" to JsonValue.Text("wedged"),
+                    "role" to JsonValue.Text("jetson"),
+                ))),
+                allowReserved = setOf(Session.HELLO),
+            ),
+            ByteArray(0), wedged.getOutputStream(),
+        )
+
+        val now = AtomicLong(0)
+        val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
+        val session = Session(
+            client.getInputStream(), client.getOutputStream(), "phone", "phone",
+            monoClock = { now.get() }, wallClock = { 0 }, onFrame = {},
+            onEnd = { reason, cause -> synchronized(ends) { ends.add(reason to cause) } },
+        ).also { sessions.add(it) }
+        session.start()
+
+        // Keep the queue full so the idle branch is never reached.
+        repeat(300) {
+            session.send(
+                Channels.CAMERA,
+                mapOf(
+                    Fields.CAPTURE_KEY to JsonValue.Num(it.toLong()),
+                    "frame_id" to JsonValue.Num(it.toLong()),
+                    "width" to JsonValue.Num(64), "height" to JsonValue.Num(64),
+                    "format" to JsonValue.Text("jpeg"), "quality" to JsonValue.Num(85),
+                ),
+                ByteArray(256 * 1024),
+            )
+        }
+        now.addAndGet(((Protocol.STALL_TIMEOUT_S + 5) * 1e9).toLong())
+
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline && synchronized(ends) { ends.isEmpty() }) {
+            Thread.sleep(20)
+        }
+        assertEquals(
+            SessionEnd.STALLED,
+            synchronized(ends) { ends.firstOrNull()?.first },
+            "a wedged peer must be detected even with work queued",
+        )
+    }
+
+    @Test
+    fun `a heartbeat does not steal a queued control message`() {
+        // enqueue-then-poll returned whatever was already at the head, destroying an
+        // application control message with `dropped` still zero, then writing the
+        // heartbeat twice with a duplicate sequence number.
+        val (phone, jetson) = pair()
+        assertTrue(phone.session.send(Channels.CONTROL, ping(exchangeId = 99), wantsWireStamp = true))
+        // Long enough for at least one keepalive to fire alongside it.
+        Thread.sleep(((Protocol.KEEPALIVE_INTERVAL_S * 2 + 1) * 1000).toLong())
+
+        assertTrue(awaitFrames(jetson, 1), "the control message was destroyed by a heartbeat")
+        val exchanges = synchronized(jetson.received) {
+            jetson.received.filter { it.channel == Channels.CONTROL }
+                .map { (it.header.entries["exchange_id"] as? JsonValue.Num)?.value }
+        }
+        assertTrue(99L in exchanges, "our ping never arrived; got $exchanges")
+
+        val sequences = synchronized(jetson.received) { jetson.received.map { it.sequence } }
+        assertEquals(sequences.size, sequences.distinct().size, "a sequence number was reused: $sequences")
     }
 
     // -- backpressure --------------------------------------------------------

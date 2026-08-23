@@ -112,15 +112,31 @@ object Doubles {
                 val exact = java.math.BigDecimal(magnitude)
                 var shortest: java.math.BigDecimal = exact
                 for (precision in 1..MAX_SIGNIFICANT_DIGITS) {
-                    // HALF_EVEN, not MathContext(int)'s default of HALF_UP. Where two
-                    // equally short decimals both round-trip, Python takes the one
-                    // nearer the exact binary value, and HALF_UP breaks that tie the
-                    // other way: -1054347931188540.25 spells as ...40.3 under HALF_UP
-                    // and ...40.2 under HALF_EVEN, which is what Python emits.
-                    val candidate = exact.round(
-                        java.math.MathContext(precision, java.math.RoundingMode.HALF_EVEN)
-                    )
-                    if (candidate.toDouble() == magnitude) {
+                    // Both neighbours at this precision, not just the nearest one.
+                    //
+                    // Rounding to nearest and testing that is the obvious approach and it
+                    // is wrong, because the shortest round-tripping decimal is not always
+                    // the nearest k-digit decimal. A double's rounding interval is
+                    // asymmetric at every exact power of two -- half a gap below, a whole
+                    // gap above -- so the nearest candidate can fall outside the interval
+                    // while its neighbour falls inside. 2^-24 is exactly
+                    // 5.9604644775390625e-08: at 16 digits that is a tie, nearest-even
+                    // picks ...062, which does not round-trip, and only ...063 does.
+                    // Python prints the 16-digit form; trying only the nearest forced 17.
+                    // 46 of 2,098 powers of two were wrong this way, and every Float
+                    // widened to a Double is in that family.
+                    val down = exact.round(java.math.MathContext(precision, java.math.RoundingMode.FLOOR))
+                    val up = exact.round(java.math.MathContext(precision, java.math.RoundingMode.CEILING))
+                    val downFits = down.toDouble() == magnitude
+                    val upFits = up.toDouble() == magnitude
+                    val candidate = when {
+                        // Both work: Python takes the nearer, and the even one on a tie.
+                        downFits && upFits -> nearer(exact, down, up)
+                        downFits -> down
+                        upFits -> up
+                        else -> null
+                    }
+                    if (candidate != null) {
                         shortest = candidate
                         break
                     }
@@ -133,6 +149,23 @@ object Doubles {
                 // precision - scale - 1 is the decimal exponent of the leading digit.
                 val exponent = stripped.precision() - stripped.scale() - 1
                 return Decimal(digits, exponent)
+            }
+
+            /** Whichever of two bracketing candidates is nearer, even-digit on a tie. */
+            private fun nearer(
+                exact: java.math.BigDecimal,
+                down: java.math.BigDecimal,
+                up: java.math.BigDecimal,
+            ): java.math.BigDecimal {
+                val toDown = exact.subtract(down).abs()
+                val toUp = up.subtract(exact).abs()
+                val comparison = toDown.compareTo(toUp)
+                if (comparison < 0) return down
+                if (comparison > 0) return up
+                // An exact tie, which is the case HALF_EVEN is named for: take the
+                // candidate whose last digit is even. Verified against CPython on all 94
+                // of 400,000 random doubles where the two rounding modes disagree.
+                return if (!down.unscaledValue().testBit(0)) down else up
             }
         }
     }
