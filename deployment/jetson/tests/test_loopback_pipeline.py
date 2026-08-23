@@ -22,6 +22,7 @@ SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from run_loopback_pipeline import (  # noqa: E402
+    CONVERGENCE_BUDGET_S,
     LINK_BOUND_MULTIPLE,
     LINK_FLOOR_MS,
     MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE,
@@ -322,3 +323,110 @@ def test_records_still_in_the_inbound_queue_do_not_break_the_identity():
         decode_errors=dict.fromkeys(CHANNELS, 0),
     )
     assert account["reconciled"] is True, account["reconciliation"]
+
+
+def prefixed_run(prefix_ticks: int, converged_at: float, *, spacing: float = 0.1) -> dict:
+    """A run that proxies for `prefix_ticks` and then converts for the rest."""
+    ticks = []
+    for index in range(prefix_ticks):
+        tick = a_tick(index, 0.0, converted=False)
+        tick["t_s"] = round(index * spacing, 3)
+        ticks.append(tick)
+    for index in range(prefix_ticks, prefix_ticks + 40):
+        tick = a_tick(index, 0.3)
+        tick["t_s"] = round(converged_at + (index - prefix_ticks) * spacing, 3)
+        ticks.append(tick)
+    return report_for(ticks, first_converted_at=converged_at)
+
+
+def test_a_long_proxy_prefix_fails_even_if_everything_after_it_converted():
+    """The hole my own short-run fix opened.
+
+    Measuring the fraction only after the first conversion stopped a healthy 2 s
+    run failing -- and made the prefix free at ANY length. Measured on real code
+    with a 0.25 Hz sync cadence: convergence at 16.1 s, 67% of the run's
+    ego-speed decisions on the arrival proxy, and the gate said usable. The
+    whole-run fraction it replaced would have caught that, so the fix has to be
+    two clauses rather than one replacing the other.
+    """
+    late = prefixed_run(prefix_ticks=161, converged_at=16.1)
+    assert late["usable"] is False, late["gate_detail"]
+    assert late["gate_detail"]["first_converted_tick_at_s"] > CONVERGENCE_BUDGET_S
+    # And the post-convergence fraction is perfect, which is the point: that
+    # clause cannot see this failure.
+    assert late["gate_detail"]["converted_fraction_after_convergence"] == 1.0
+
+
+def test_a_short_proxy_prefix_still_passes():
+    """The case the prefix bound must not break: convergence takes ~1.1 s and
+    every tick before it is expected, not a fault."""
+    prompt = prefixed_run(prefix_ticks=11, converged_at=1.1)
+    assert prompt["usable"] is True, prompt["gate_detail"]
+    assert prompt["gate_detail"]["ticks_before_convergence"] == 11
+
+
+def test_one_converted_tick_at_the_very_end_fails():
+    """The route MIN_CONVERTED_FRACTION was introduced to close, which the
+    post-convergence form re-opened: 299 proxied ticks then one conversion gives
+    a post-convergence fraction of 1.0."""
+    ticks = []
+    for index in range(299):
+        tick = a_tick(index, 0.0, converted=False)
+        tick["t_s"] = round(index * 0.1, 3)
+        ticks.append(tick)
+    last = a_tick(299, 0.3)
+    last["t_s"] = 29.9
+    ticks.append(last)
+    report = report_for(ticks, first_converted_at=29.9)
+    assert report["usable"] is False
+
+
+def test_the_convergence_boundary_is_compared_on_equal_rounding():
+    """`t_s` is stored rounded to 3 dp and was compared against an unrounded
+    threshold, so the first converted tick fell out of the post-convergence
+    population -- harmless to the fraction, but it made
+    `ticks_before_convergence` wrong by one in every run and turned a one-tick
+    run's verdict into a rounding coin flip."""
+    ticks = [a_tick(i, 0.0, converted=False) for i in range(3)]
+    for index, tick in enumerate(ticks):
+        tick["t_s"] = round(index * 0.1, 3)
+    converged = a_tick(3, 0.3)
+    converged["t_s"] = 0.3  # what the trace stores
+    ticks.append(converged)
+    # An unrounded threshold a hair above the stored value, as the real run gives.
+    report = report_for(ticks, first_converted_at=0.30000000000000004)
+    assert report["gate_detail"]["ticks_before_convergence"] == 3, (
+        "the converted tick was counted as part of the prefix"
+    )
+    assert report["gate_detail"]["converted_fraction_after_convergence"] == 1.0
+
+
+def test_intermittent_fallback_after_convergence_fails_at_the_stated_threshold():
+    """The threshold's magnitude was unpinned: anything from ~0.012 to 0.9
+    passed, because the only fell-back case had a fraction of 1/91. This pins a
+    fraction just under it."""
+    total = 100
+    fell_back = 12  # 88% converted, under the 0.9 threshold
+    ticks = []
+    for index in range(total):
+        converted = index >= fell_back
+        tick = a_tick(index, 0.3 if converted else 0.0, converted=converted)
+        tick["t_s"] = round(index * 0.1, 3)
+        ticks.append(tick)
+    # Converged on the first tick, then fell back for twelve.
+    ticks[0] = a_tick(0, 0.3)
+    ticks[0]["t_s"] = 0.0
+    report = report_for(ticks, first_converted_at=0.0)
+    fraction = report["gate_detail"]["converted_fraction_after_convergence"]
+    assert 0.85 < fraction < MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE, fraction
+    assert report["usable"] is False
+
+
+def test_the_fraction_counts_only_the_post_convergence_population():
+    """Both earlier fraction tests gave the same answer whichever numerator was
+    used, so counting the whole run survived. This separates them: 11 proxied
+    then 40 converted is 40/40 after convergence and 40/51 over the run."""
+    report = prefixed_run(prefix_ticks=11, converged_at=1.1)
+    assert report["gate_detail"]["converted_fraction_after_convergence"] == 1.0, (
+        "the numerator or denominator is counting the convergence prefix"
+    )

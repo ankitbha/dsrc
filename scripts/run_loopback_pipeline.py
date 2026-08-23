@@ -94,6 +94,19 @@ LINK_BOUND_MULTIPLE = 10.0
 # that fails a healthy rig is a false claim about the run.
 MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE = 0.9
 
+# How long the proxy may be in use before the timebase converges. Two clauses,
+# not one replacing the other: measuring the fraction only after the first
+# conversion fixed a healthy short run failing, but it made the prefix free at
+# ANY length. Measured, a 0.25 Hz sync cadence converged at 16.1 s and 67% of the
+# run's ego-speed decisions rested on the arrival proxy -- reported usable, and
+# the whole-run fraction it replaced would have caught it.
+#
+# Convergence is 1.11 s measured at the default 4 Hz (MIN_OFFSET_SAMPLES = 5 at
+# 4 Hz is 1.25 s), so this is generous by 4x. It is also the quantity plan
+# section 8.4 exists to characterise, which makes the gated number the headline
+# number rather than a second thing to reconcile.
+CONVERGENCE_BUDGET_S = 5.0
+
 
 class _FakeDetector:
     """The pipeline never calls this when detections are supplied, but the
@@ -362,8 +375,13 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
     )
     # Only the ticks from the first conversion onwards can be charged: before it
     # the estimator had no answer to give, which is expected rather than a fault.
-    after = [t for t in ticks if first_converted_at is not None
-             and t["t_s"] >= first_converted_at]
+    # Rounded on both sides. `t_s` is stored rounded to 3 dp and was compared
+    # against an unrounded threshold, so the first converted tick fell out of
+    # `after` -- harmless to the fraction, since it left numerator and
+    # denominator together, but it made `ticks_before_convergence` wrong by one
+    # in every run and turned a one-tick run's verdict into a rounding coin flip.
+    converged_at = None if first_converted_at is None else round(first_converted_at, 3)
+    after = [t for t in ticks if converged_at is not None and t["t_s"] >= converged_at]
     converted_after = [t for t in after if t["timebase"] and t["timebase"]["converted"]]
     converted_fraction = (len(converted_after) / len(after)) if after else 0.0
     return {
@@ -431,6 +449,9 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
             and link_min_ms is not None
             and link_min_ms >= -(bound_p95_ms or 0.0)
             and first_converted_at is not None
+            # And it converged promptly. Without this the prefix is unbounded and
+            # a run that spent most of itself proxying passes.
+            and first_converted_at <= CONVERGENCE_BUDGET_S
         ),
         "gate_detail": {
             "converted_ticks": len(converted),
@@ -440,6 +461,7 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
                 MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE
             ),
             "ticks_before_convergence": len(ticks) - len(after),
+            "convergence_budget_s": CONVERGENCE_BUDGET_S,
             "link_max_ms": link_max_ms,
             "link_min_ms": link_min_ms,
             "bound_p95_ms": bound_p95_ms,
