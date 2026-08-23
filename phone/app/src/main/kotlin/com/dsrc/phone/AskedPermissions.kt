@@ -19,21 +19,40 @@ class AskedPermissions(private val store: Store) {
     interface Store {
         fun contains(key: String): Boolean
         fun put(keys: Set<String>)
+        fun remove(keys: Set<String>)
     }
 
     constructor(prefs: SharedPreferences) : this(SharedPrefsStore(prefs))
 
     fun hasAsked(permission: String): Boolean = store.contains(permission)
 
-    fun markAsked(permissions: Collection<String>) {
+    /** Record permissions the user was prompted for and refused. */
+    fun markRefused(permissions: Collection<String>) {
         if (permissions.isEmpty()) return
         store.put(permissions.toSet())
+    }
+
+    /**
+     * Forget that a permission was ever refused.
+     *
+     * Called when it is granted. Without this the record only ever grows, so a
+     * permission granted and later revoked -- in Settings, or by Android's automatic
+     * reset for unused apps -- reads as permanently denied for the rest of the
+     * install, and the app offers a Settings trip where the platform would happily
+     * have shown a prompt.
+     */
+    fun clearRefused(permissions: Collection<String>) {
+        if (permissions.isEmpty()) return
+        store.remove(permissions.toSet())
     }
 
     private class SharedPrefsStore(private val prefs: SharedPreferences) : Store {
         override fun contains(key: String): Boolean = prefs.getBoolean(key, false)
         override fun put(keys: Set<String>) {
             prefs.edit().apply { keys.forEach { putBoolean(it, true) } }.apply()
+        }
+        override fun remove(keys: Set<String>) {
+            prefs.edit().apply { keys.forEach { remove(it) } }.apply()
         }
     }
 }

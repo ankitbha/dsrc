@@ -14,13 +14,14 @@ import kotlin.test.assertTrue
 class ProtocolSpecTest {
 
     private val spec: String by lazy {
-        var dir: File? = File(".").absoluteFile
-        while (dir != null) {
-            val candidate = File(dir, "specs/transport_protocol.md")
-            if (candidate.isFile) return@lazy candidate.readText()
-            dir = dir.parentFile
-        }
-        error("could not find specs/transport_protocol.md above ${File(".").absolutePath}")
+        // Supplied by the build, which also declares it as a task input so an edit to
+        // the spec alone re-runs these tests. A directory walk from the working
+        // directory would find the file but leave the task UP-TO-DATE.
+        val path = System.getProperty("dsrc.protocolSpec")
+            ?: error("dsrc.protocolSpec is not set; the build must pass the spec path")
+        val file = File(path)
+        require(file.isFile) { "spec not found at $path" }
+        file.readText()
     }
 
     @Test

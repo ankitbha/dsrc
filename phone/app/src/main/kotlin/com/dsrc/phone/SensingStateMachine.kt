@@ -94,9 +94,15 @@ class SensingStateMachine(initial: SensingState = SensingState.IDLE) {
 
         SensingEvent.Started -> if (from == SensingState.STARTING) SensingState.RUNNING else null
 
-        // Stop is accepted from anything that is up or coming up, and is a no-op
-        // everywhere else.
-        SensingEvent.Stop -> if (from.isActive) SensingState.STOPPING else null
+        // Stop is accepted from anything that is up or coming up. From a terminal
+        // stopped state it clears straight to IDLE rather than being ignored: there is
+        // nothing left to tear down, and without this the Stop button cannot clear a
+        // failure, so the app sits on STOPPED_ERROR with no way back.
+        SensingEvent.Stop -> when (from) {
+            SensingState.STARTING, SensingState.RUNNING -> SensingState.STOPPING
+            SensingState.STOPPED_ERROR, SensingState.STOPPED_PERMISSION_REVOKED -> SensingState.IDLE
+            SensingState.IDLE, SensingState.STOPPING -> null
+        }
 
         SensingEvent.Stopped -> if (from == SensingState.STOPPING) SensingState.IDLE else null
 

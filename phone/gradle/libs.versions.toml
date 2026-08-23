@@ -8,6 +8,8 @@ androidxActivity = "1.9.3"
 lifecycle = "2.8.7"
 androidxTestJunit = "1.2.1"
 espresso = "3.6.1"
+androidxTestRules = "1.6.1"
+androidxTestCore = "1.6.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
@@ -19,6 +21,8 @@ camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", versi
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-test-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestJunit" }
 espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
+androidx-test-rules = { group = "androidx.test", name = "rules", version.ref = "androidxTestRules" }
+androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidxTestCore" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

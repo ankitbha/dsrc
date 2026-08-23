@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -26,9 +27,33 @@ class SensingService : Service() {
     private val machine = SensingStateMachine()
     private val status = SensingStatus.shared
 
+    private var lastStartId = 0
+
     override fun onBind(intent: Intent?): IBinder? = null
 
+    override fun onCreate() {
+        super.onCreate()
+        // The machine is per-instance while SensingStatus is process-global, so a new
+        // instance must publish its own state or the UI keeps showing whatever the
+        // previous instance last said. Any intent creates an instance, so this runs
+        // before the first event is handled.
+        status.set(machine.state)
+    }
+
+    override fun onDestroy() {
+        // Reached without passing through the machine when the platform tears the
+        // service down -- task removed, or a stop that skipped our path. Sensing is
+        // definitively not running once the service is gone, and leaving the UI on
+        // RUNNING would show a live session with an inert Stop button.
+        if (machine.state.requiresService) {
+            Log.w(TAG, "destroyed while ${machine.state}; publishing IDLE")
+            status.set(SensingState.IDLE)
+        }
+        super.onDestroy()
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
         when (intent?.action) {
             ACTION_START -> handle(SensingEvent.Start)
             ACTION_STOP -> handle(SensingEvent.Stop)
@@ -65,6 +90,18 @@ class SensingService : Service() {
     private fun react(state: SensingState) {
         when (state) {
             SensingState.STARTING -> {
+                val missing = PermissionGate.missing(
+                    PermissionModel.required(Build.VERSION.SDK_INT),
+                ) { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+                if (missing.isNotEmpty()) {
+                    // Revoked between the Activity's check and now. Not a failure --
+                    // the remedy is a grant, not a retry -- and going to the foreground
+                    // with a camera type and no camera permission gets the service
+                    // killed by the platform rather than started.
+                    Log.w(TAG, "cannot start, missing $missing")
+                    handle(SensingEvent.PermissionRevoked)
+                    return
+                }
                 try {
                     enterForeground()
                     onSensingUp()
@@ -112,16 +149,14 @@ class SensingService : Service() {
     /** Leave the foreground and let the service go. Safe to call more than once. */
     private fun release() {
         stopForegroundCompat()
-        stopSelf()
+        // The startId overload, so a start that arrived after this one was queued is
+        // not discarded along with the stop.
+        stopSelf(lastStartId)
     }
 
     private fun stopForegroundCompat() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
-        }
+        // No version branch: STOP_FOREGROUND_REMOVE exists from API 24 and minSdk is 29.
+        stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
     private fun createChannel() {

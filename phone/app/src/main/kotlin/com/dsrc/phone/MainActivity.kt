@@ -29,16 +29,27 @@ class MainActivity : ComponentActivity() {
     private lateinit var stateLabel: TextView
     private lateinit var asked: AskedPermissions
 
-    private val listener = SensingStatus.Listener { state ->
-        runOnUiThread { stateLabel.text = getString(R.string.app_name) + ": " + state.name }
+    /** Set when the user pressed Start but permissions had to be requested first. */
+    private var startRequested = false
+
+    private val listener = SensingStatus.Listener {
+        runOnUiThread { refresh() }
     }
 
     private val requestPermissions =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-            // Record every permission we actually asked about. Without this the app
-            // cannot tell "never asked" from "denied for good" -- the platform reports
-            // both the same way.
-            asked.markAsked(result.keys)
+            // Only refusals are recorded, and a grant clears any earlier refusal.
+            // Recording grants too would make a later revoke look permanent forever,
+            // since the record never shrank.
+            asked.markRefused(result.filterValues { !it }.keys)
+            asked.clearRefused(result.filterValues { it }.keys)
+            // Continue the Start the user actually asked for. Without this, granting
+            // returns to an idle screen and the user has to press Start again with no
+            // indication that anything happened.
+            if (startRequested && PermissionModel.next(currentStates()) is PermissionAction.Proceed) {
+                startRequested = false
+                SensingService.start(this)
+            }
             refresh()
         }
 
@@ -59,7 +70,7 @@ class MainActivity : ComponentActivity() {
         })
         root.addView(Button(this).apply {
             text = "Stop sensing"
-            setOnClickListener { SensingService.stop(this@MainActivity) }
+            setOnClickListener { onStopClicked() }
         })
         setContentView(root)
     }
@@ -76,8 +87,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun onStartClicked() {
+        startRequested = true
         when (val action = PermissionModel.next(currentStates())) {
-            is PermissionAction.Proceed -> SensingService.start(this)
+            is PermissionAction.Proceed -> {
+                startRequested = false
+                SensingService.start(this)
+            }
             is PermissionAction.Request -> requestPermissions.launch(action.permissions.toTypedArray())
             // Rationale and a fresh request are the same gesture here; a real
             // explanation screen is UI work that belongs with task 23.
@@ -86,11 +101,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun onStopClicked() {
+        // A stop cancels a start the user is midway through granting for, or the
+        // permission dialog's result would start sensing they just asked to end.
+        startRequested = false
+        SensingService.stop(this)
+    }
+
     private fun refresh() {
         stateLabel.text = buildString {
+            append(getString(R.string.app_name))
+            append(": ")
             append(SensingStatus.shared.state.name)
             val action = PermissionModel.next(currentStates())
-            if (action !is PermissionAction.Proceed) append("  (permissions: $action)")
+            if (action !is PermissionAction.Proceed) {
+                append("\n(permissions: ")
+                append(action::class.simpleName)
+                append(")")
+            }
         }
     }
 

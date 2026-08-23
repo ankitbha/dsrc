@@ -42,6 +42,11 @@ android {
     }
 
     testOptions {
+        // Lets a unit test touch an Android stub without throwing. Nothing currently
+        // relies on it -- removing it leaves every unit test green -- but it is a trap
+        // worth knowing: under it Build.VERSION.SDK_INT reads 0, so any version-gated
+        // branch silently takes the legacy path. Version-dependent behaviour belongs in
+        // androidTest, where the platform is real.
         unitTests.isReturnDefaultValues = true
     }
 }
@@ -61,6 +66,8 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.junit)
     androidTestImplementation(libs.espresso.core)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.test.core)
 }
 
 // Read the intended manifest facts back out of the *merged* manifest rather than
@@ -68,8 +75,9 @@ dependencies {
 // build file proves nothing; this fails if the merge produced something else, which
 // is the only way the number can actually go wrong.
 //
-// Wired into `check` and declared as an input on the manifest task, so it cannot
-// pass by running before the manifest exists.
+// Matching is on the full attribute including its closing quote. A `contains` on the
+// bare class name passes for `.MainActivityX`, which is a ClassNotFoundException at
+// launch -- exactly what reading the artifact back is supposed to catch.
 val verifyMergedManifest by tasks.registering {
     val manifestDir = layout.buildDirectory.dir("intermediates/merged_manifest/debug")
     inputs.dir(manifestDir).withPropertyName("mergedManifest")
@@ -81,21 +89,53 @@ val verifyMergedManifest by tasks.registering {
             ?: error("merged manifest not found under ${manifestDir.get().asFile}")
         val text = manifest.readText()
 
-        val expected = mapOf(
-            "android:minSdkVersion=\"29\"" to "minSdk",
-            "android:targetSdkVersion=\"35\"" to "targetSdk",
-            "android:foregroundServiceType=\"camera|location\"" to "foreground-service type",
-            "android.permission.FOREGROUND_SERVICE_CAMERA" to "camera FGS permission",
-            "android.permission.FOREGROUND_SERVICE_LOCATION" to "location FGS permission",
-            "android.permission.POST_NOTIFICATIONS" to "notification permission",
-            "com.dsrc.phone.SensingService" to "sensing service",
-            "com.dsrc.phone.MainActivity" to "launcher activity",
+        // Every permission the app cannot run without. FOREGROUND_SERVICE is the one
+        // that bites hardest if it goes missing: startForeground() throws
+        // SecurityException without it on every device at minSdk 29.
+        val permissions = listOf(
+            "android.permission.CAMERA",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_COARSE_LOCATION",
+            "android.permission.INTERNET",
+            "android.permission.FOREGROUND_SERVICE",
+            "android.permission.FOREGROUND_SERVICE_CAMERA",
+            "android.permission.FOREGROUND_SERVICE_LOCATION",
+            "android.permission.POST_NOTIFICATIONS",
         )
-        val missing = expected.filterKeys { !text.contains(it) }
+
+        val expected = buildMap {
+            put("android:minSdkVersion=\"29\"", "minSdk 29")
+            put("android:targetSdkVersion=\"35\"", "targetSdk 35")
+            put("android:foregroundServiceType=\"camera|location\"", "foreground-service type")
+            put("android:name=\"com.dsrc.phone.SensingService\"", "sensing service")
+            put("android:name=\"com.dsrc.phone.MainActivity\"", "launcher activity")
+
+            permissions.forEach { put("android:name=\"$it\"", it.substringAfterLast('.')) }
+        }
+
+        val missing = expected.filterKeys { !text.contains(it) }.toMutableMap()
+
+        // Attributes that must hold on one specific element are checked inside that
+        // element. Searching the whole file for android:exported="false" passes on any
+        // AGP-injected component that happens to carry it, while the service itself is
+        // exported -- which would let any app on the phone start sensing.
+        val serviceElement = Regex("""<service\b[^>]*com\.dsrc\.phone\.SensingService[^>]*>""")
+            .find(text)?.value
+        if (serviceElement == null) {
+            missing["<service> element"] = "sensing service element"
+        } else {
+            if (!serviceElement.contains("android:exported=\"false\"")) {
+                missing["service exported"] = "service exported=false"
+            }
+            if (!serviceElement.contains("android:foregroundServiceType=\"camera|location\"")) {
+                missing["service fgs type"] = "service foregroundServiceType"
+            }
+        }
+
         if (missing.isNotEmpty()) {
             error("merged manifest is missing: ${missing.values.joinToString(", ")}\n  ${manifest.path}")
         }
-        logger.lifecycle("merged manifest verified: ${expected.size} facts, ${manifest.path}")
+        logger.lifecycle("merged manifest verified: ${expected.size + 2} facts, ${manifest.path}")
     }
 }
 
@@ -105,4 +145,14 @@ val verifyMergedManifest by tasks.registering {
 afterEvaluate {
     verifyMergedManifest.configure { dependsOn("processDebugMainManifest") }
     tasks.named("check") { dependsOn(verifyMergedManifest) }
+}
+
+// The source manifest is an input to the unit tests too: ManifestPermissionsTest ties
+// PermissionModel's constants to the strings actually declared. Same lesson as the
+// protocol spec -- without declaring it, editing only the manifest leaves the test
+// task UP-TO-DATE and the tie unchecked.
+tasks.withType<Test>().configureEach {
+    val sourceManifest = layout.projectDirectory.file("src/main/AndroidManifest.xml")
+    inputs.file(sourceManifest).withPropertyName("sourceManifest")
+    systemProperty("dsrc.manifest", sourceManifest.asFile.absolutePath)
 }

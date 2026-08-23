@@ -209,30 +209,35 @@ class SensingStateMachineTest {
     }
 
     @Test
-    fun `an ignored event leaves a state that does not require the service`() {
-        // The zombie-service case: an intent the machine ignores still creates the
-        // service, so if the resulting state claimed residency nothing would ever
-        // stop it. Every ignorable event arriving at rest must leave the machine in a
-        // state that releases.
-        val atRest = listOf(
-            SensingState.IDLE,
-            SensingState.STOPPED_PERMISSION_REVOKED,
-            SensingState.STOPPED_ERROR,
-        )
+    fun `an ignored event never leaves the service needing to stay resident`() {
+        // The zombie-service invariant. Any intent creates the service, including one
+        // the machine ignores, so if an ignored event could leave a state that claims
+        // residency nothing would ever stop it.
+        //
+        // Which events are ignored is deliberately not hardcoded here -- that belongs
+        // to the transition-table test. This asserts the consequence, so it keeps
+        // holding when the table changes.
         val events = listOf(
+            SensingEvent.Start,
+            SensingEvent.Started,
             SensingEvent.Stop,
             SensingEvent.Stopped,
-            SensingEvent.Started,
             SensingEvent.PermissionRevoked,
             SensingEvent.Failed("x"),
         )
-        for (state in atRest) {
+        var ignoredSeen = 0
+        for (state in SensingState.entries.filterNot { it.requiresService }) {
             for (event in events) {
                 val m = machine(state)
-                assertTrue("$state + $event should be ignored", m.offer(event) is Transition.Ignored)
-                assertFalse("$state + $event must not require the service", m.state.requiresService)
+                if (m.offer(event) is Transition.Ignored) {
+                    ignoredSeen++
+                    assertFalse("$state + $event must not require the service", m.state.requiresService)
+                }
             }
         }
+        // Guard against the assertion never running: if a table change made every
+        // event acceptable everywhere, the loop above would pass while checking nothing.
+        assertTrue("no ignored event was exercised", ignoredSeen > 0)
     }
 
     @Test
@@ -250,51 +255,120 @@ class SensingStateMachineTest {
         }
     }
 
+    // -- the whole transition table, pinned explicitly ------------------------
+
     @Test
-    fun `no event from any state ever produces an undefined result`() {
-        // Exhaustive sweep: every state crossed with every event either transitions or
-        // is ignored, and the state afterwards is always a declared one.
-        val events = listOf(
-            SensingEvent.Start,
-            SensingEvent.Started,
-            SensingEvent.Stop,
-            SensingEvent.Stopped,
-            SensingEvent.PermissionRevoked,
-            SensingEvent.Failed("x"),
+    fun `every state and event pair produces exactly the intended result`() {
+        // The table is written out rather than derived, so a change to the production
+        // `when` has to be reflected here deliberately. Two sweeps over structural
+        // invariants used to stand in for this and pinned almost none of it: they
+        // asserted that an ignored event does not move the state and that Accepted.from
+        // matches, both of which hold for any table at all.
+        //
+        // null means "ignored".
+        val I = SensingState.IDLE
+        val ST = SensingState.STARTING
+        val R = SensingState.RUNNING
+        val SP = SensingState.STOPPING
+        val REV = SensingState.STOPPED_PERMISSION_REVOKED
+        val ERR = SensingState.STOPPED_ERROR
+
+        val table: Map<Pair<SensingState, String>, SensingState?> = mapOf(
+            (I to "Start") to ST,
+            (I to "Started") to null,
+            (I to "Stop") to null,
+            (I to "Stopped") to null,
+            (I to "PermissionRevoked") to null,
+            (I to "Failed") to null,
+
+            (ST to "Start") to null,
+            (ST to "Started") to R,
+            (ST to "Stop") to SP,
+            (ST to "Stopped") to null,
+            (ST to "PermissionRevoked") to REV,
+            (ST to "Failed") to ERR,
+
+            (R to "Start") to null,
+            (R to "Started") to null,
+            (R to "Stop") to SP,
+            (R to "Stopped") to null,
+            (R to "PermissionRevoked") to REV,
+            (R to "Failed") to ERR,
+
+            (SP to "Start") to null,
+            (SP to "Started") to null,
+            (SP to "Stop") to null,
+            (SP to "Stopped") to I,
+            (SP to "PermissionRevoked") to null,
+            (SP to "Failed") to ERR,
+
+            (REV to "Start") to ST,
+            (REV to "Started") to null,
+            (REV to "Stop") to I,
+            (REV to "Stopped") to null,
+            (REV to "PermissionRevoked") to null,
+            (REV to "Failed") to null,
+
+            (ERR to "Start") to ST,
+            (ERR to "Started") to null,
+            (ERR to "Stop") to I,
+            (ERR to "Stopped") to null,
+            (ERR to "PermissionRevoked") to null,
+            (ERR to "Failed") to null,
         )
+
+        val events = mapOf(
+            "Start" to SensingEvent.Start,
+            "Started" to SensingEvent.Started,
+            "Stop" to SensingEvent.Stop,
+            "Stopped" to SensingEvent.Stopped,
+            "PermissionRevoked" to SensingEvent.PermissionRevoked,
+            "Failed" to SensingEvent.Failed("probe"),
+        )
+
+        // The table must cover the whole cross product, or a missing row would quietly
+        // exempt a pair from being checked at all.
+        assertEquals(SensingState.entries.size * events.size, table.size)
+
         for (state in SensingState.entries) {
-            for (event in events) {
+            for ((name, event) in events) {
+                val expected = table.getValue(state to name)
                 val m = machine(state)
                 val transition = m.offer(event)
-                assertTrue(SensingState.entries.contains(m.state))
-                when (transition) {
-                    is Transition.Ignored -> assertEquals(
-                        "$state + $event was ignored but the state moved", state, m.state,
-                    )
-                    is Transition.Accepted -> {
-                        assertEquals(state, transition.from)
-                        assertEquals(m.state, transition.to)
-                    }
+                if (expected == null) {
+                    assertTrue("$state + $name should be ignored, got $transition", transition is Transition.Ignored)
+                    assertEquals("$state + $name must not move", state, m.state)
+                } else {
+                    assertTrue("$state + $name should be accepted, got $transition", transition is Transition.Accepted)
+                    assertEquals("$state + $name", expected, m.state)
                 }
             }
         }
     }
 
     @Test
-    fun `an ignored event never changes the state and is always counted`() {
-        val events = listOf(
-            SensingEvent.Start, SensingEvent.Started, SensingEvent.Stop,
-            SensingEvent.Stopped, SensingEvent.PermissionRevoked, SensingEvent.Failed("x"),
-        )
-        for (state in SensingState.entries) {
-            for (event in events) {
-                val m = machine(state)
-                val before = m.ignoredEvents
-                if (m.offer(event) is Transition.Ignored) {
-                    assertEquals(state, m.state)
-                    assertEquals(before + 1, m.ignoredEvents)
-                }
-            }
-        }
+    fun `ignoredEvents counts every ignored event, not just the first`() {
+        // Asserting only 0 or 1 left an `ignoredEvents = 1` mutant alive, so the
+        // "counted so a duplicate stays visible" claim was not pinned as a count.
+        val m = machine()
+        repeat(5) { m.offer(SensingEvent.Stop) }
+        assertEquals(5, m.ignoredEvents)
+
+        m.offer(SensingEvent.Start)
+        assertEquals(5, m.ignoredEvents)
+        repeat(3) { m.offer(SensingEvent.Start) }
+        assertEquals(8, m.ignoredEvents)
+    }
+
+    @Test
+    fun `a revoke does not overwrite a recorded failure`() {
+        // Under a `from != IDLE` guard a revoke arriving in STOPPED_ERROR replaced it,
+        // discarding why the app actually stopped.
+        val m = machine(SensingState.RUNNING)
+        m.offer(SensingEvent.Failed("camera busy"))
+        assertEquals(SensingState.STOPPED_ERROR, m.state)
+        assertTrue(m.offer(SensingEvent.PermissionRevoked) is Transition.Ignored)
+        assertEquals(SensingState.STOPPED_ERROR, m.state)
+        assertEquals("camera busy", m.lastFailure)
     }
 }

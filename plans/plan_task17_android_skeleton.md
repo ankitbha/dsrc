@@ -149,8 +149,12 @@ Taken by recommendation under `plan_dsrc_rec`. **None is user sign-off.**
   permanent denial, and the resulting next action.
 - `SensingService` state machine: legal transitions, illegal ones refused, and
   `stop` from every state landing in `IDLE`.
-- Build configuration: `minSdk`/`compileSdk` are the intended numbers, asserted from
-  the merged manifest rather than restated in a test.
+- Build configuration: `minSdk` and `targetSdk` are the intended numbers, asserted
+  from the merged manifest rather than restated in a test. `compileSdk` never appears
+  in a merged manifest, so it is read from the APK's badging instead.
+- Every runtime permission `PermissionModel.required()` names is declared in the
+  manifest. Without this the permission constants assert against themselves, and a
+  typo'd string is permanently denied at runtime with no dialog shown.
 
 **Sanity — behaviour**
 - Starting twice does not start two sessions and is not an error.
@@ -162,6 +166,10 @@ Taken by recommendation under `plan_dsrc_rec`. **None is user sign-off.**
 
 **Instrumented (emulator)**
 - App installs, launches, starts the service, and the notification appears.
+- The real service reaches `RUNNING` in the foreground and returns to `IDLE`.
+- A duplicate stop and an unknown action each leave no resident service. These have no
+  JVM equivalent: a plain unit test can construct the service, but every platform call
+  returns a default, so it would exercise branches the phone never takes.
 
 ---
 
@@ -170,7 +178,9 @@ Taken by recommendation under `plan_dsrc_rec`. **None is user sign-off.**
 What this task can measure. It is a build task, so the measurements are about the
 build.
 
-1. `./gradlew :transport:test :app:testDebugUnitTest` — test count and wall time.
+1. `./gradlew :transport:test :app:check` — test count and wall time. `:app:check`
+   rather than `:app:testDebugUnitTest`, because the manifest gate hangs off `check`
+   and the narrower task skips it.
 2. `./gradlew :app:assembleDebug` — APK produced, its size, and cold vs warm build
    time. Cold build time matters because it is paid once per task after this.
 3. `aapt2 badging` on the APK — the declared permissions, `minSdk`, `targetSdk`
