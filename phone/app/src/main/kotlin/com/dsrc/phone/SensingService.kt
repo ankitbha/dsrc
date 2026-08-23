@@ -24,7 +24,7 @@ import android.util.Log
  */
 class SensingService : Service() {
 
-    private val machine = SensingStateMachine()
+    private var machine = SensingStateMachine()
     private val status = SensingStatus.shared
 
     private var lastStartId = 0
@@ -34,10 +34,23 @@ class SensingService : Service() {
     override fun onCreate() {
         super.onCreate()
         // The machine is per-instance while SensingStatus is process-global, so a new
-        // instance must publish its own state or the UI keeps showing whatever the
-        // previous instance last said. Any intent creates an instance, so this runs
-        // before the first event is handled.
-        status.set(machine.state)
+        // instance and the published state have to be reconciled. Which way depends on
+        // what was published:
+        //
+        //  - an active state is provably stale, because a brand-new instance means
+        //    nothing is capturing; publish the truth instead;
+        //  - a terminal stopped state is a fact the previous instance recorded, and
+        //    overwriting it would erase the only place the failure was visible. Adopt
+        //    it, so Stop can still clear it -- a Stop intent always arrives at a new
+        //    instance, and a machine that started at IDLE would ignore it.
+        val published = status.state
+        if (published.requiresService) {
+            Log.w(TAG, "published state $published cannot be true for a new instance")
+            status.set(SensingState.IDLE)
+        } else {
+            machine = SensingStateMachine(published)
+            Log.i(TAG, "created; adopted published state $published")
+        }
     }
 
     override fun onDestroy() {
@@ -45,6 +58,7 @@ class SensingService : Service() {
         // service down -- task removed, or a stop that skipped our path. Sensing is
         // definitively not running once the service is gone, and leaving the UI on
         // RUNNING would show a live session with an inert Stop button.
+        Log.i(TAG, "destroying at ${machine.state}")
         if (machine.state.requiresService) {
             Log.w(TAG, "destroyed while ${machine.state}; publishing IDLE")
             status.set(SensingState.IDLE)
@@ -90,20 +104,25 @@ class SensingService : Service() {
     private fun react(state: SensingState) {
         when (state) {
             SensingState.STARTING -> {
-                val missing = PermissionGate.missing(
-                    PermissionModel.required(Build.VERSION.SDK_INT),
-                ) { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
-                if (missing.isNotEmpty()) {
-                    // Revoked between the Activity's check and now. Not a failure --
-                    // the remedy is a grant, not a retry -- and going to the foreground
-                    // with a camera type and no camera permission gets the service
-                    // killed by the platform rather than started.
-                    Log.w(TAG, "cannot start, missing $missing")
-                    handle(SensingEvent.PermissionRevoked)
-                    return
-                }
                 try {
+                    // The foreground call comes first, unconditionally. We were started
+                    // with startForegroundService(), which is a promise to the platform
+                    // to call startForeground() within a few seconds; returning before
+                    // that -- as a permission refusal used to -- earns a
+                    // ForegroundServiceDidNotStartInTimeException and kills the process.
+                    // Refusing after entering the foreground costs a notification that
+                    // is removed a moment later by release().
                     enterForeground()
+
+                    val missing = missingPermissions()
+                    if (missing.isNotEmpty()) {
+                        // Revoked between the Activity's check and now. Not a failure:
+                        // the remedy is a grant, not a retry.
+                        Log.w(TAG, "cannot start, missing $missing")
+                        handle(SensingEvent.PermissionRevoked)
+                        return
+                    }
+
                     onSensingUp()
                     handle(SensingEvent.Started)
                 } catch (t: Throwable) {
@@ -114,8 +133,16 @@ class SensingService : Service() {
                 }
             }
             SensingState.STOPPING -> {
-                onSensingDown()
-                handle(SensingEvent.Stopped)
+                try {
+                    onSensingDown()
+                    handle(SensingEvent.Stopped)
+                } catch (t: Throwable) {
+                    // The machine models a failure during shutdown; until now nothing
+                    // could produce one, and the exception escaped to onStartCommand
+                    // and killed the process instead.
+                    Log.e(TAG, "sensing failed to stop cleanly", t)
+                    handle(SensingEvent.Failed(t.toString()))
+                }
             }
             SensingState.IDLE,
             SensingState.STOPPED_ERROR,
@@ -124,6 +151,20 @@ class SensingService : Service() {
             SensingState.RUNNING -> Unit
         }
     }
+
+    /**
+     * Required permissions that are not granted right now.
+     *
+     * Routed through an overridable hook because the refusal branch is otherwise
+     * unreachable under test: the instrumentation grant rule satisfies every
+     * requirement, so `missing` was always empty and the whole gate never ran.
+     * Revoking a live permission instead would restart the process mid-test.
+     */
+    private fun missingPermissions(): List<String> =
+        permissionOverride?.invoke()
+            ?: PermissionGate.missing(PermissionModel.required(Build.VERSION.SDK_INT)) {
+                checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+            }
 
     /** Capture starts here from task 18 on. */
     private fun onSensingUp() = Unit
@@ -154,8 +195,18 @@ class SensingService : Service() {
         stopSelf(lastStartId)
     }
 
+    /**
+     * Leave the foreground explicitly.
+     *
+     * Deliberately not covered by a test: destroying the service also drops it out of
+     * the foreground, so deleting this line passes the whole suite. It matters only on
+     * the path where `stopSelf(lastStartId)` declines to destroy the service because a
+     * newer start arrived, and that race is not something a test can construct
+     * reliably. Kept as the explicit statement of intent.
+     *
+     * No version branch: STOP_FOREGROUND_REMOVE exists from API 24 and minSdk is 29.
+     */
     private fun stopForegroundCompat() {
-        // No version branch: STOP_FOREGROUND_REMOVE exists from API 24 and minSdk is 29.
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
@@ -183,6 +234,13 @@ class SensingService : Service() {
         const val ACTION_START = "com.dsrc.phone.action.START"
         const val ACTION_STOP = "com.dsrc.phone.action.STOP"
         private const val CHANNEL_ID = "sensing"
+
+        /**
+         * Test seam for the permission gate. Null in production, where the real check
+         * runs. Set by an instrumented test to drive the refusal path.
+         */
+        @Volatile
+        internal var permissionOverride: (() -> List<String>)? = null
         private const val NOTIFICATION_ID = 1
 
         fun start(context: Context) = context.startForegroundService(

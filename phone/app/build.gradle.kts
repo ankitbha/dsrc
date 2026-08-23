@@ -119,7 +119,10 @@ val verifyMergedManifest by tasks.registering {
         // element. Searching the whole file for android:exported="false" passes on any
         // AGP-injected component that happens to carry it, while the service itself is
         // exported -- which would let any app on the phone start sensing.
-        val serviceElement = Regex("""<service\b[^>]*com\.dsrc\.phone\.SensingService[^>]*>""")
+        // Anchored on the closing quote, like the `expected` map. Without it a
+        // <service android:name=".SensingServiceHelper"> matches first and the real
+        // service's attributes go unchecked.
+        val serviceElement = Regex("""<service\b[^>]*android:name="com\.dsrc\.phone\.SensingService"[^>]*>""")
             .find(text)?.value
         if (serviceElement == null) {
             missing["<service> element"] = "sensing service element"
@@ -127,15 +130,18 @@ val verifyMergedManifest by tasks.registering {
             if (!serviceElement.contains("android:exported=\"false\"")) {
                 missing["service exported"] = "service exported=false"
             }
+            // The type is already required by `expected`; here it is confirmed to sit
+            // on this element rather than merely somewhere in the file.
             if (!serviceElement.contains("android:foregroundServiceType=\"camera|location\"")) {
-                missing["service fgs type"] = "service foregroundServiceType"
+                missing["service fgs type"] = "service foregroundServiceType on the service"
             }
         }
 
         if (missing.isNotEmpty()) {
             error("merged manifest is missing: ${missing.values.joinToString(", ")}\n  ${manifest.path}")
         }
-        logger.lifecycle("merged manifest verified: ${expected.size + 2} facts, ${manifest.path}")
+        // expected.size file-wide facts, plus the two element-scoped ones.
+        logger.lifecycle("merged manifest verified: ${expected.size} file facts + 2 on the service element, ${manifest.path}")
     }
 }
 

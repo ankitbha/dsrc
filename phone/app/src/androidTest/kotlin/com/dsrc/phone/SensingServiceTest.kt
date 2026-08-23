@@ -2,11 +2,14 @@ package com.dsrc.phone
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.os.Build
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.rule.GrantPermissionRule
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -18,40 +21,64 @@ import org.junit.runner.RunWith
  *
  * The lifecycle logic is unit-tested through [SensingStateMachine], but the parts that
  * only exist against Android -- going to the foreground, releasing on an ignored
- * intent, reconciling a stale status on a new instance -- have no JVM equivalent. A
- * plain JVM test can construct the service, but every platform call returns a default
- * (SDK_INT reads 0), so it would exercise branches the phone never takes.
+ * intent, reconciling a stale published state -- have no JVM equivalent. A plain JVM
+ * test can construct the service, but every platform call returns a default (SDK_INT
+ * reads 0), so it would exercise branches the phone never takes.
  */
 @RunWith(AndroidJUnit4::class)
 class SensingServiceTest {
 
+    // Tied to the model rather than a hardcoded pair, so the suite does not silently
+    // pin itself to API <= 32: on API 33+ the model also requires POST_NOTIFICATIONS,
+    // and without granting it the permission gate refuses every start.
     @get:Rule
     val permissions: GrantPermissionRule = GrantPermissionRule.grant(
-        PermissionModel.CAMERA,
-        PermissionModel.FINE_LOCATION,
+        *PermissionModel.required(Build.VERSION.SDK_INT).toTypedArray()
     )
 
     private val context: Context get() = ApplicationProvider.getApplicationContext()
 
     @Before
-    fun resetStatus() {
-        SensingService.stop(context)
-        await(SensingState.IDLE)
+    fun reset() {
+        SensingService.permissionOverride = null
+        quiesce()
     }
 
     @After
-    fun stopSensing() {
+    fun tearDown() {
+        SensingService.permissionOverride = null
+        quiesce()
+    }
+
+    /**
+     * Stop sensing and wait until the service is actually gone.
+     *
+     * Waiting on the published state alone is not enough: `stop()` sends an intent
+     * asynchronously, and if the state already reads IDLE the wait returns immediately
+     * while the intent is still queued. It then lands in the middle of the next test --
+     * which is how a stale stop arrived after a test had set up its own state and
+     * cleared it.
+     */
+    private fun quiesce() {
         SensingService.stop(context)
-        await(SensingState.IDLE)
+        pollUntil(5_000) { !serviceIsResident() && SensingStatus.shared.state == SensingState.IDLE }
+        assertFalse("service still resident after quiesce", serviceIsResident())
+        assertEquals(SensingState.IDLE, SensingStatus.shared.state)
     }
 
     private fun await(state: SensingState, timeoutMs: Long = 5_000) {
+        pollUntil(timeoutMs) { SensingStatus.shared.state == state }
+        assertEquals("timed out waiting for $state", state, SensingStatus.shared.state)
+    }
+
+    /** Polls rather than sleeping a fixed margin, so the wait is a deadline not a guess. */
+    private fun pollUntil(timeoutMs: Long, condition: () -> Boolean): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            if (SensingStatus.shared.state == state) return
+            if (condition()) return true
             Thread.sleep(50)
         }
-        assertEquals("timed out waiting for $state", state, SensingStatus.shared.state)
+        return condition()
     }
 
     private fun serviceIsResident(): Boolean {
@@ -62,53 +89,91 @@ class SensingServiceTest {
         }
     }
 
+    /**
+     * Whether the service is actually in the foreground.
+     *
+     * Residency and foreground-ness are different facts: a merely-created service is
+     * resident, so checking only residency passed for a service that never called
+     * startForeground at all.
+     *
+     * Read from the service record rather than by looking for our notification. The
+     * platform rate-limits repeated posts of the same notification id, so across a
+     * suite that starts and stops sensing a dozen times the notification check starts
+     * failing on a service that is genuinely in the foreground.
+     */
+    private fun serviceIsForeground(): Boolean {
+        val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        @Suppress("DEPRECATION")
+        return manager.getRunningServices(64).any {
+            it.service.className == SensingService::class.java.name && it.foreground
+        }
+    }
+
     @Test
     fun startReachesRunningInTheForeground() {
         SensingService.start(context)
         await(SensingState.RUNNING)
         assertTrue("service should be resident while running", serviceIsResident())
+        assertTrue(
+            "the service should be in the foreground while running",
+            pollUntil(3_000) { serviceIsForeground() },
+        )
     }
 
     @Test
-    fun stopReturnsToIdle() {
+    fun stoppingLeavesTheForeground() {
         SensingService.start(context)
         await(SensingState.RUNNING)
+        assertTrue(pollUntil(3_000) { serviceIsForeground() })
+
         SensingService.stop(context)
         await(SensingState.IDLE)
+        assertTrue(
+            "the service should leave the foreground on stop",
+            pollUntil(3_000) { !serviceIsForeground() },
+        )
     }
 
     @Test
-    fun startingTwiceDoesNotStartTwice() {
+    fun aSecondStartDoesNotDisturbARunningSession() {
+        // Named for what it checks. Idempotence of the transition itself is pinned by
+        // SensingStateMachineTest; here the point is that the running session survives
+        // a duplicate intent rather than being torn down and rebuilt.
         SensingService.start(context)
         await(SensingState.RUNNING)
         SensingService.start(context)
-        Thread.sleep(500)
-        assertEquals(SensingState.RUNNING, SensingStatus.shared.state)
+        assertFalse(
+            "state should not leave RUNNING on a duplicate start",
+            pollUntil(1_000) { SensingStatus.shared.state != SensingState.RUNNING },
+        )
+        assertTrue("the running session should still be in the foreground", serviceIsForeground())
     }
 
     @Test
     fun aDuplicateStopLeavesNoResidentService() {
-        // The zombie case: startService creates the service to deliver an intent even
-        // when the state machine ignores it, so an ignored stop must still release.
+        // startService creates the service to deliver an intent even when the state
+        // machine ignores it, so an ignored stop must still release.
         SensingService.start(context)
         await(SensingState.RUNNING)
         SensingService.stop(context)
         await(SensingState.IDLE)
 
         SensingService.stop(context)
-        Thread.sleep(1_000)
+        assertTrue(
+            "a duplicate stop left the service resident",
+            pollUntil(5_000) { !serviceIsResident() },
+        )
         assertEquals(SensingState.IDLE, SensingStatus.shared.state)
-        assertTrue("a duplicate stop left the service resident", !serviceIsResident())
     }
 
     @Test
     fun anUnknownActionLeavesNoResidentService() {
-        context.startService(
-            android.content.Intent(context, SensingService::class.java).setAction("com.dsrc.phone.NONSENSE")
+        context.startService(Intent(context, SensingService::class.java).setAction("com.dsrc.phone.NONSENSE"))
+        assertTrue(
+            "an unknown action left the service resident",
+            pollUntil(5_000) { !serviceIsResident() },
         )
-        Thread.sleep(1_000)
         assertEquals(SensingState.IDLE, SensingStatus.shared.state)
-        assertTrue("an unknown action left the service resident", !serviceIsResident())
     }
 
     @Test
@@ -119,5 +184,66 @@ class SensingServiceTest {
             SensingService.stop(context)
             await(SensingState.IDLE)
         }
+    }
+
+    // -- reconciling the published state with a new instance ---------------------
+
+    @Test
+    fun aStaleActiveStateIsCorrectedByANewInstance() {
+        // The published state is process-global while the machine is per-instance. An
+        // active state cannot be true for a brand-new instance, and leaving it would
+        // show a live session with an inert Stop button.
+        SensingStatus.shared.set(SensingState.RUNNING)
+        SensingService.stop(context)
+        await(SensingState.IDLE)
+    }
+
+    @Test
+    fun aRecordedFailureSurvivesUntilItIsCleared() {
+        // The other direction: a terminal state is a fact the previous instance
+        // recorded, and it is the only place the failure is visible. An unrelated
+        // intent must not erase it.
+        SensingStatus.shared.set(SensingState.STOPPED_ERROR)
+        context.startService(Intent(context, SensingService::class.java).setAction("com.dsrc.phone.NONSENSE"))
+        Thread.sleep(750)
+        assertEquals(SensingState.STOPPED_ERROR, SensingStatus.shared.state)
+        assertTrue(pollUntil(5_000) { !serviceIsResident() })
+    }
+
+    @Test
+    fun stopClearsARecordedFailure() {
+        // And Stop does clear it. This is the user-visible path for the machine's
+        // terminal-Stop rows: the intent always lands on a new instance, so the machine
+        // has to adopt the published terminal state for Stop to mean anything.
+        SensingStatus.shared.set(SensingState.STOPPED_ERROR)
+        SensingService.stop(context)
+        await(SensingState.IDLE)
+    }
+
+    // -- the permission gate ----------------------------------------------------
+
+    @Test
+    fun aMissingPermissionRefusesTheStart() {
+        // The grant rule satisfies every real requirement, so the refusal branch has no
+        // active premise without this seam -- the whole gate never ran under test.
+        SensingService.permissionOverride = { listOf(PermissionModel.CAMERA) }
+        SensingService.start(context)
+        await(SensingState.STOPPED_PERMISSION_REVOKED)
+        assertTrue(
+            "a refused start must not leave the service in the foreground",
+            pollUntil(5_000) { !serviceIsForeground() },
+        )
+        assertTrue(pollUntil(5_000) { !serviceIsResident() })
+    }
+
+    @Test
+    fun sensingStartsOnceThePermissionIsBack() {
+        SensingService.permissionOverride = { listOf(PermissionModel.CAMERA) }
+        SensingService.start(context)
+        await(SensingState.STOPPED_PERMISSION_REVOKED)
+
+        SensingService.permissionOverride = null
+        SensingService.start(context)
+        await(SensingState.RUNNING)
     }
 }

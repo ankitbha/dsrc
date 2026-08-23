@@ -74,6 +74,10 @@ class SensingStateMachine(initial: SensingState = SensingState.IDLE) {
             return Transition.Ignored(from, event)
         }
         if (event is SensingEvent.Failed) lastFailure = event.reason
+        // A reason must not outlive the state it explains: once cleared back to IDLE a
+        // stale message would read as a live error to anything that shows it when
+        // non-null.
+        if (to == SensingState.IDLE) lastFailure = null
         state = to
         return Transition.Accepted(from, to)
     }

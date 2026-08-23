@@ -41,8 +41,9 @@ class MainActivity : ComponentActivity() {
             // Only refusals are recorded, and a grant clears any earlier refusal.
             // Recording grants too would make a later revoke look permanent forever,
             // since the record never shrank.
-            asked.markRefused(result.filterValues { !it }.keys)
-            asked.clearRefused(result.filterValues { it }.keys)
+            val split = PermissionResult.split(result)
+            asked.markRefused(split.refused)
+            asked.clearRefused(split.granted)
             // Continue the Start the user actually asked for. Without this, granting
             // returns to an idle screen and the user has to press Start again with no
             // indication that anything happened.
@@ -56,6 +57,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         asked = AskedPermissions(getSharedPreferences(PREFS, Context.MODE_PRIVATE))
+        // The pending-result dispatch happens on the *new* instance after a rotation or
+        // a process death mid-dialog, so a plain field would be false exactly when it
+        // was needed.
+        startRequested = savedInstanceState?.getBoolean(KEY_START_REQUESTED, false) ?: false
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -101,6 +106,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_START_REQUESTED, startRequested)
+    }
+
     private fun onStopClicked() {
         // A stop cancels a start the user is midway through granting for, or the
         // permission dialog's result would start sensing they just asked to end.
@@ -122,11 +132,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun currentStates(): Map<String, PermissionState> =
+    private fun currentStates(): Map<String, PermissionState> {
+        // A permission granted in Settings never reaches the dialog callback, so the
+        // refusal record has to be reconciled against reality wherever it is read.
+        // Without this, granting outside the app leaves the record set, and the next
+        // revoke reads as permanently denied for the rest of the install.
+        val granted = PermissionModel.required(Build.VERSION.SDK_INT).filter {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+        }
+        asked.clearRefused(granted)
+        return statesFor(granted)
+    }
+
+    private fun statesFor(granted: List<String>): Map<String, PermissionState> =
         PermissionModel.required(Build.VERSION.SDK_INT).associateWith { permission ->
             PermissionModel.classify(
-                granted = ContextCompat.checkSelfPermission(this, permission) ==
-                    PackageManager.PERMISSION_GRANTED,
+                granted = permission in granted,
                 shouldShowRationale = shouldShowRequestPermissionRationale(permission),
                 hasAsked = asked.hasAsked(permission),
             )
@@ -141,6 +162,7 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val PREFS = "permissions"
+        const val KEY_START_REQUESTED = "startRequested"
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     }
 }

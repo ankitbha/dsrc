@@ -131,12 +131,12 @@ Taken by recommendation under `plan_dsrc_rec`. **None is user sign-off.**
 
 | # | step | done when |
 |---|---|---|
-| 1 | `phone/` skeleton: `settings.gradle.kts`, wrapper, `gradle.properties` pinning JDK 17 and the SDK path | `./gradlew projects` lists `:transport` and `:app` |
+| 1 | `phone/` skeleton: `settings.gradle.kts`, wrapper, `gradle.properties` pinning JDK 17; the SDK path lives in `local.properties`, which is machine-specific and untracked | `./gradlew projects` lists `:transport` and `:app` |
 | 2 | `:transport` module, JVM-only, empty but compiling with a test source set | `./gradlew :transport:test` succeeds |
 | 3 | `:app` module, AGP configured, CameraX dependencies declared | `./gradlew :app:assembleDebug` produces an APK |
 | 4 | Manifest: permissions, foreground-service type, launcher activity | `aapt2`/`badging` shows the expected permissions and service |
 | 5 | `PermissionModel` — pure logic over required/granted/denied/rationale | unit tests cover every transition including permanent denial |
-| 6 | `SensingService` — foreground service, notification, state enum, start/stop | unit tests over the state machine with a fake platform |
+| 6 | `SensingService` — foreground service, notification, state enum, start/stop | the state machine is unit-tested; the service itself is covered by instrumented tests, since every platform call in a JVM test returns a default |
 | 7 | `MainActivity` — requests permissions, starts/stops the service, shows state | installs and launches on the AVD |
 | 8 | Emulator check: boot `dsrc_test`, install, launch, start service, stop | logcat shows the service reaching `RUNNING` and returning to `IDLE` |
 
@@ -147,8 +147,9 @@ Taken by recommendation under `plan_dsrc_rec`. **None is user sign-off.**
 **Unit — input/output**
 - `PermissionModel`: every combination of required vs granted, first denial versus
   permanent denial, and the resulting next action.
-- `SensingService` state machine: legal transitions, illegal ones refused, and
-  `stop` from every state landing in `IDLE`.
+- `SensingService` state machine: the whole state x event table, written out
+  explicitly rather than derived. `Stop` reaches `IDLE` from every state except
+  `STOPPING`, where a teardown is already in flight.
 - Build configuration: `minSdk` and `targetSdk` are the intended numbers, asserted
   from the merged manifest rather than restated in a test. `compileSdk` never appears
   in a merged manifest, so it is read from the APK's badging instead.
@@ -159,10 +160,13 @@ Taken by recommendation under `plan_dsrc_rec`. **None is user sign-off.**
 **Sanity — behaviour**
 - Starting twice does not start two sessions and is not an error.
 - Stopping when not running is a no-op, not a crash.
-- A permission revoked while running drives the service to a named stopped state
-  rather than leaving it half-running.
-- The service survives an Activity going away — the point of a foreground service —
-  checked with the fake platform, since the emulator cannot assert it cheaply.
+- A required permission missing when sensing starts drives the service to a named
+  stopped state rather than leaving it half-running. Revocation *while already
+  running* has no producer yet — the gate is checked at start only, and closing that
+  gap belongs with the capture tasks that have something to tear down.
+- The service survives an Activity going away — the point of a foreground service.
+  Not currently asserted: it needs an Activity harness, and nothing yet launches
+  `MainActivity` in a test.
 
 **Instrumented (emulator)**
 - App installs, launches, starts the service, and the notification appears.
