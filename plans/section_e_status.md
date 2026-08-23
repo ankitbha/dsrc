@@ -179,12 +179,41 @@ message-level conformance on the Kotlin side. Four spec subtleties pinned:
 `MessageError` is deliberately not a `FramingError`: a bad message costs one message, a
 bad frame ends the session, and the difference is recoverability.
 
-**94 transport tests, 0 failed.** (One commit message says 93 — the count is 94.)
+**Step 7 done — the session.** Two sessions run against each other over a real loopback
+socket pair, because the behaviours worth testing only appear with a genuine peer:
+handshake ordering, keepalive cadence, stall detection on completed reads, and what a
+framing error does to a live session. Piped streams deadlock in exactly those cases.
 
-Remaining for task 19: the session with handshake, keepalive and stall detection; the
-time-sync responder; the Kotlin↔Python interop test; the remaining message types
-(`imu`, `here`, `telemetry` land with tasks 20, 21 and 24 — their producers); and GPS
-capture itself with the FusedLocation adapter.
+**Two of my own tests claimed more than the protocol promises**, and both are worth
+recording:
+
+- One asserted that 200 messages all arrive. But `gps` is depth 64 and reliable, so
+  bursting past a writer that can't keep up *should* drop some — lossless delivery is the
+  wrong claim for that channel. Replaced by the right properties: every message accounted
+  for under exactly one heading, and a drop leaving a **gap in the sequence numbers the
+  peer sees**, which is the whole reason sequences are assigned before the overflow
+  decision.
+- The other was **flaky — green, red, red**. The stall test gave both peers the same
+  injected clock, so advancing time to trigger the timeout also fired the *peer's*
+  keepalive, which arrives as read progress and resets the very timer under test. The
+  peer is now a raw socket that goes silent after its hello, and the mechanism that
+  caused the flake is asserted deliberately: a keepalive *is* read progress and defers a
+  stall. Five consecutive runs green.
+
+**120 transport tests, 0 failed, stable over five runs.** (Two commit messages undercount
+by one; the counts here are right.)
+
+### Task 19 remaining (4 of 11 steps)
+
+- the time-sync responder — small, since the phone runs no estimator (task 16 established
+  the converting side must be the initiating side, and the Jetson converts);
+- the Kotlin↔Python interop test, which is the half of the acceptance criterion the
+  golden vectors cannot cover;
+- GPS capture itself, with the FusedLocation adapter and both clocks;
+- wiring the session into `SensingService` so camera and GPS share one connection.
+
+`imu`, `here` and `telemetry` messages land with tasks 20, 21 and 24 — their producers.
+The golden vectors pin framing, not message decode, so they pass without them.
 
 ---
 
