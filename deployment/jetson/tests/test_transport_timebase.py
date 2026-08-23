@@ -1714,8 +1714,16 @@ def test_answer_ping_cannot_be_given_a_locally_read_stamp():
     ping = TimeSyncMessage(t_capture_mono_ns=1, exchange_id=2, t_wire_mono_ns=3)
     with pytest.raises(TypeError):
         answer_ping(ping, now_mono_ns())  # the old, error-prone shape
+
+    # And a bare message on its own must not be tolerated either. Accepting it
+    # with a default stamp is the same defect wearing one argument: t2 would be
+    # whatever the default is, and t3 - t2 arbitrary.
+    with pytest.raises(TypeError):
+        answer_ping(ping)
+
     pong = answer_ping((ping, 4_000))
     assert pong.t_peer_recv_mono_ns == 4_000
+    assert pong.t_peer_wire_mono_ns == 3, "the ping's wire stamp was not echoed"
 
 
 def test_the_record_publishes_the_bound_as_it_stands():
