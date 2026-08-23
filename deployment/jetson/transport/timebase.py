@@ -159,6 +159,19 @@ class TimeSyncSample:
     t2_remote_recv_ns: int
     t3_remote_send_ns: int
     t4_local_recv_ns: int
+    # The responder's WALL clock at receipt, carried through because the same
+    # midpoint arithmetic on the two wall clocks is an independent estimate of
+    # the same offset -- and both ends run NTP, so that pair does not drift while
+    # the monotonic pair does. The difference of the two slopes is the true
+    # monotonic skew, which is the quantity ASSUMED_SKEW_PPM stands in for and
+    # the only thing that can say whether that premise holds. Optional because a
+    # peer may not supply it; a consumer must treat None as "no cross-check",
+    # never as zero.
+    t2_remote_recv_wall_ns: int | None = None
+    # And this side's arrival wall stamp, from our own reader at the same instant
+    # as t4. With both ends' wall stamps taken at arrival rather than at handling,
+    # the wall pair refers to the same two instants the monotonic pair does.
+    t4_local_recv_wall_ns: int | None = None
 
     @property
     def rtt_ns(self) -> int:
@@ -544,7 +557,6 @@ def answer_ping(
     received: tuple[TimeSyncMessage, int],
     *,
     mono_clock: MonoClock = now_mono_ns,
-    wall_clock: WallClock = now_wall_ns,
 ) -> TimeSyncMessage:
     """The responder's whole job: echo the exchange with receipt stamped.
 
@@ -561,10 +573,12 @@ def answer_ping(
     wire can detect it. Prose was guarding the one hazard with no wire-side
     check, so the signature guards it instead: a bare `now_mono_ns()` will not fit.
 
-    The wall stamp is read here and is for log correlation only -- it appears in
-    no part of the arithmetic.
+    Both of the peer-receipt stamps come from that receipt for the same reason:
+    taken at one instant they describe one instant, and the wall pair built from
+    them is then a genuine independent estimate of the same offset rather than
+    one displaced by this responder's handling delay.
     """
-    ping, t_recv_mono_ns = received
+    ping, receipt = received
     if not ping.is_ping:
         raise MessageError(
             f"exchange {ping.exchange_id} is a pong; a responder must not receive one",
@@ -573,8 +587,13 @@ def answer_ping(
     return TimeSyncMessage(
         t_capture_mono_ns=mono_clock(),
         exchange_id=ping.exchange_id,
-        t_peer_recv_mono_ns=t_recv_mono_ns,
-        t_peer_recv_wall_ns=wall_clock(),
+        t_peer_recv_mono_ns=receipt.t_recv_mono_ns,
+        # The reader's wall stamp, not a reading taken here. Both halves of the
+        # peer's receipt must be one instant, or a cross-clock pair built from
+        # them is displaced by however long this responder took to get to it --
+        # and a handling delay that drifts across a run is indistinguishable from
+        # clock skew, which is the one thing the pair exists to separate.
+        t_peer_recv_wall_ns=receipt.t_recv_wall_ns,
         # Echoed, because the initiator cannot read its own: its writer stamped
         # the frame after the caller let go of it.
         t_peer_wire_mono_ns=ping.t_wire_mono_ns,
@@ -607,7 +626,7 @@ class TimeSyncInitiator:
         self._mono = mono_clock
         self._wall = wall_clock
         self.estimator = estimator or TimebaseEstimator(mono_clock=mono_clock)
-        self._ids = itertools.count(1)
+        self._next_id = 1
         self._pending: dict[int, _Pending] = {}
         self._started_ns = self._mono()
         self.pings_sent = 0
@@ -634,8 +653,20 @@ class TimeSyncInitiator:
         hz = SYNC_FAST_HZ if elapsed_s < SYNC_FAST_DURATION_S else SYNC_STEADY_HZ
         return 1.0 / hz
 
+    def next_exchange_id(self) -> int:
+        """The id the next `send_ping` will use, without consuming it.
+
+        A caller that stamps its own clock alongside an exchange needs to key
+        that stamp by the same id, and pairing by arrival order instead is wrong:
+        `pump` returns the oldest queued pong, which can belong to an earlier
+        exchange. Measured, that mispairing manufactured a 51 ppm slope on a
+        loopback link with no skew at all.
+        """
+        return self._next_id
+
     def send_ping(self) -> int:
-        exchange_id = next(self._ids)
+        exchange_id = self._next_id
+        self._next_id += 1
         # A pre-send stamp, kept only as a floor to sanity-check the echo
         # against. t1 proper is this side's writer stamp, which comes back on
         # the pong -- a pre-send stamp would carry the queueing delay the wire
@@ -683,7 +714,12 @@ class TimeSyncInitiator:
             self.pongs_timed_out += 1
             self._timed_out_ids[key] = self._mono()
 
-    def on_pong(self, pong: TimeSyncMessage, t_recv_mono_ns: int) -> TimeSyncSample | None:
+    def on_pong(
+        self,
+        pong: TimeSyncMessage,
+        t_recv_mono_ns: int,
+        t_recv_wall_ns: int | None = None,
+    ) -> TimeSyncSample | None:
         """Match a pong to its ping and feed the sample. None if unusable.
 
         A ping arriving here is a protocol error, not a pong to interpret: the
@@ -720,6 +756,8 @@ class TimeSyncInitiator:
             t2_remote_recv_ns=pong.t_peer_recv_mono_ns or 0,
             t3_remote_send_ns=pong.t_wire_mono_ns,
             t4_local_recv_ns=t_recv_mono_ns,
+            t2_remote_recv_wall_ns=pong.t_peer_recv_wall_ns,
+            t4_local_recv_wall_ns=t_recv_wall_ns,
         )
         if not self.estimator.add(sample):
             # Counted here as well as in the estimator's own reasons: without
@@ -743,8 +781,8 @@ class TimeSyncInitiator:
         received = self._router.recv_with_receipt(Channel.CONTROL, timeout=timeout)
         if received is None:
             return None
-        pong, t_recv_mono_ns = received
-        return self.on_pong(pong, t_recv_mono_ns)
+        pong, receipt = received
+        return self.on_pong(pong, receipt.t_recv_mono_ns, receipt.t_recv_wall_ns)
 
     def to_record(self) -> dict[str, Any]:
         return {

@@ -21,10 +21,10 @@ import pytest
 
 from transport.channels import Channel
 from transport.clock import now_mono_ns
-from transport.frames import WIRE_STAMP_KEY
+from transport.frames import WIRE_STAMP_KEY, Frame
 from transport.loopback import loopback_pair
 from transport.messages import MessageError, MessageRouter, TimeSyncMessage
-from transport.session import Session
+from transport.session import ReceivedMessage, Session
 from transport.timebase import (
     ASSUMED_SKEW_PPM,
     MAX_ACCEPTABLE_RTT_NS,
@@ -779,7 +779,7 @@ def test_the_skew_fit_spans_more_time_than_the_offset_window():
 
 def test_the_responder_echoes_receipt_and_the_pings_wire_stamp():
     ping = TimeSyncMessage(t_capture_mono_ns=10, exchange_id=88, t_wire_mono_ns=1_000)
-    pong = answer_ping((ping, 5_000), wall_clock=lambda: 1_755_000_000_000_000_000)
+    pong = answer_ping((ping, a_receipt(5_000, 1_755_000_000_000_000_000)))
     assert not pong.is_ping
     assert pong.exchange_id == 88
     assert pong.t_peer_recv_mono_ns == 5_000
@@ -796,7 +796,7 @@ def test_a_responder_refuses_a_pong():
         t_peer_recv_mono_ns=4, t_peer_recv_wall_ns=5, t_peer_wire_mono_ns=6,
     )
     with pytest.raises(MessageError) as caught:
-        answer_ping((pong, 9))
+        answer_ping((pong, a_receipt(9, 9)))
     assert caught.value.reason == "unknown_value"
 
 
@@ -1002,6 +1002,15 @@ def test_the_spec_records_both_ordering_requirements():
 # Every fix above was new code, and a mutation pass found that sixteen of
 # nineteen reverts left the suite green. A fix nothing tests is a fix that can be
 # undone by the next person to touch the file.
+
+
+def a_receipt(mono, wall):
+    """A transport receipt with both stamps, as the reader produces it."""
+    return ReceivedMessage(
+        frame=Frame(channel=Channel.CONTROL, seq=1, t_mono_ns=mono, t_wall_ns=wall),
+        t_recv_mono_ns=mono,
+        t_recv_wall_ns=wall,
+    )
 
 
 def a_sample(t1, t2, t3, t4, exchange_id=1):
@@ -1249,7 +1258,7 @@ def test_t4_is_the_transports_arrival_stamp_not_a_later_reading():
                     t_peer_recv_wall_ns=1_755_000_000_000_000_000,
                     t_peer_wire_mono_ns=BASE_NS + 1,
                 ),
-                arrival,
+                a_receipt(arrival, 1_755_000_000_000_000_000),
             )
             return True
 
@@ -1531,9 +1540,10 @@ def test_recv_with_receipt_skips_a_malformed_record_like_recv_does():
             "one call returned nothing with a good record queued behind a bad "
             "one, so the bad record was not skipped"
         )
-        message, t_recv = received
+        message, receipt = received
         assert message.exchange_id == 7
-        assert t_recv > 0
+        assert receipt.t_recv_mono_ns > 0
+        assert receipt.t_recv_wall_ns > 0, "the reader did not stamp the wall clock"
         assert down.stats()[Channel.CONTROL].decode_errors == 1
         assert down.stats()[Channel.CONTROL].delivered == 1
     finally:
@@ -1721,9 +1731,29 @@ def test_answer_ping_cannot_be_given_a_locally_read_stamp():
     with pytest.raises(TypeError):
         answer_ping(ping)
 
-    pong = answer_ping((ping, 4_000))
+    # Nor a bare integer, which is the shape that let the wall half be read at
+    # handling time while the monotonic half came from the reader.
+    with pytest.raises((TypeError, AttributeError)):
+        answer_ping((ping, 4_000))
+
+    pong = answer_ping((ping, a_receipt(4_000, 1_755_000_000_000_000_000)))
     assert pong.t_peer_recv_mono_ns == 4_000
+    assert pong.t_peer_recv_wall_ns == 1_755_000_000_000_000_000, (
+        "the wall half did not come from the receipt, so the two halves of a "
+        "cross-clock pair refer to different instants"
+    )
     assert pong.t_peer_wire_mono_ns == 3, "the ping's wire stamp was not echoed"
+
+
+def test_both_halves_of_the_peer_receipt_come_from_one_instant():
+    """A handling delay that drifts across a run is indistinguishable from clock
+    skew, which is the one thing the wall pair exists to separate. Reading the
+    wall clock inside the responder put the two halves at different instants."""
+    ping = TimeSyncMessage(t_capture_mono_ns=1, exchange_id=5, t_wire_mono_ns=2)
+    receipt = a_receipt(mono=111_000, wall=1_755_000_000_000_000_777)
+    pong = answer_ping((ping, receipt))
+    assert pong.t_peer_recv_mono_ns == receipt.t_recv_mono_ns
+    assert pong.t_peer_recv_wall_ns == receipt.t_recv_wall_ns
 
 
 def test_the_record_publishes_the_bound_as_it_stands():

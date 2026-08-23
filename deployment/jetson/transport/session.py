@@ -74,6 +74,12 @@ class SessionEndReason(str, Enum):
 class ReceivedMessage:
     frame: Frame
     t_recv_mono_ns: int
+    # The wall clock at the same instant, taken by the reader rather than by
+    # whoever eventually handles the message. Both stamps have to come from one
+    # instant or a pair built from them refers to two: a handling delay that
+    # drifts across a run shows up as spurious clock skew, and the signal it
+    # would corrupt is ~6 ms over 300 s.
+    t_recv_wall_ns: int = 0
 
     @property
     def channel(self) -> Channel:
@@ -568,7 +574,11 @@ class Session:
             while len(queue) >= policy.depth:
                 queue.popleft()
                 stats.dropped_inbound += 1
-            queue.append(ReceivedMessage(frame=frame, t_recv_mono_ns=t_recv))
+            queue.append(
+                ReceivedMessage(
+                    frame=frame, t_recv_mono_ns=t_recv, t_recv_wall_ns=self._wall()
+                )
+            )
             stats.inbound_high_water = max(stats.inbound_high_water, len(queue))
             self._in_cond.notify_all()
 

@@ -947,8 +947,12 @@ class MessageRouter:
 
     def recv_with_receipt(
         self, channel: Channel, timeout: float | None = 0.0
-    ) -> tuple[Message, int] | None:
+    ) -> tuple[Message, Any] | None:
         """The next decodable message and the instant the transport stamped it.
+
+        Returns the transport's own `ReceivedMessage` alongside the decoded
+        message, so its monotonic and wall stamps -- both taken by the reader at
+        the same instant -- travel together.
 
         The arrival stamp matters for a timestamp exchange in a way it does not
         for a sensor reading: taking the time after this returns folds the
@@ -991,7 +995,9 @@ class MessageRouter:
                 stats.last_error = str(exc)
                 continue
             stats.delivered += 1
-            return message, received.t_recv_mono_ns
+            # The whole receipt, not just the monotonic stamp: a caller building
+            # a cross-clock pair needs both halves taken at one instant.
+            return message, received
 
     def stats(self) -> dict[Channel, ChannelMessageStats]:
         snapshot = {}
