@@ -234,10 +234,36 @@ the interop worked perfectly.
 
 **126 transport tests, 0 failed, stable over three runs.**
 
-### Task 19 remaining (3 of 11 steps)
+**Step 9 done — the time-sync responder, and with it the whole transport half of task
+19.** One message type in both directions, told apart by nulls, because the channel is
+the discriminator for everything else and a second type would need a `kind` field. Both
+ping and pong encode byte-identically to the recorded headers.
 
-- the time-sync responder — small, since the phone runs no estimator (task 16 established
-  the converting side must be the initiating side, and the Jetson converts);
+Three things worth keeping:
+
+- **A partial pong is refused.** Accepting one would let a consumer compute an offset
+  from a mixture of set and missing terms — the arithmetic would run and produce a
+  number, which is worse than an error.
+- **The pong echoes the ping's own wire stamp**, not our clock. That was task 15's
+  correction to its own plan: substituting our clock replaces the initiator's t1 with a
+  value from a different device, leaving the offset wrong by the whole link delay.
+- **The phone runs no estimator**, deliberately. My first attempt to pin that used
+  reflection over member names — needs `kotlin-reflect` at runtime and would pass for an
+  estimator called something else. Replaced with the behavioural property: a hundred
+  exchanges in between don't change the answer to an identical ping.
+
+One of my tests was wrong **twice**, instructively. It asserted a drop leaves a gap
+*between* received sequence numbers. Where the gap falls is timing-dependent: if the
+whole burst is enqueued before the writer wakes, drop-oldest leaves the survivors as one
+contiguous run and there is no interior gap at all; if the writer interleaves, the gap
+lands in the middle. Both are correct. What holds either way is the **count** — the
+sequence numbers the peer never saw equals what the sender dropped — and that's also the
+only form a receiver can act on.
+
+**143 transport tests, 0 failed, stable over four runs.**
+
+### Task 19 remaining (2 of 11 steps)
+
 - GPS capture itself, with the FusedLocation adapter and both clocks;
 - wiring the session into `SensingService` so camera and GPS share one connection.
 
