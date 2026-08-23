@@ -262,10 +262,33 @@ only form a receiver can act on.
 
 **143 transport tests, 0 failed, stable over four runs.**
 
-### Task 19 remaining (2 of 11 steps)
+**Step 10 done — GPS capture with both clocks.** Fix time and receipt time are different
+instants and neither substitutes for the other: the difference is the location stack's
+own latency, seconds rather than milliseconds on a cold start. Only the fix time reaches
+the wire, because the frozen contract has no receipt field (needs-you item 1).
 
-- GPS capture itself, with the FusedLocation adapter and both clocks;
-- wiring the session into `SensingService` so camera and GPS share one connection.
+Three deliberate choices:
+
+- **The pipeline reuses `RateGate`** rather than growing a second rate implementation.
+  "At the commanded rate" has to mean the same thing on every modality, and the gate is
+  the piece that took four attempts to get right.
+- **No buffer in front of the transport.** `gps` is reliable at depth 64, so the
+  transport's queue *is* the buffer; a second one would mean two places dropping for
+  different reasons, with only one of them visible to the peer as a sequence gap.
+- **An invalid fix is forwarded and counted, not discarded.** Silence and no-fix are
+  different facts and only one is actionable. An out-of-order fix stamp is counted too,
+  since the receiver's freshness arithmetic assumes they are monotonic.
+
+**333 distinct JVM tests across 24 classes, 0 failed.** Task 19's implementation is
+complete; it is with the independent validator now.
+
+### Task 19 remaining
+
+- validator rounds, then the experiments (golden conformance count, interop counters,
+  loopback throughput, and the first honest read on task 18's O1 bias now that there is
+  an enqueue stamp to pair with the capture stamp);
+- wiring the session into `SensingService` so camera and GPS share one connection —
+  deferred until validation settles, since it is the part most likely to change.
 
 `imu`, `here` and `telemetry` messages land with tasks 20, 21 and 24 — their producers.
 The golden vectors pin framing, not message decode, so they pass without them.
