@@ -34,6 +34,13 @@ class SensingService : Service() {
             ACTION_STOP -> handle(SensingEvent.Stop)
             else -> Log.w(TAG, "ignoring intent with action ${intent?.action}")
         }
+
+        // Every arriving intent creates this service, whether or not the machine acts
+        // on it -- a duplicate stop and an unknown action both do. react() only stops
+        // the service on a transition, so without this an ignored intent leaves it
+        // resident and never in the foreground.
+        if (!machine.state.requiresService) release()
+
         // The app decides when sensing runs. START_NOT_STICKY keeps the platform from
         // resurrecting a capture session nobody asked for after a low-memory kill.
         return START_NOT_STICKY
@@ -76,10 +83,7 @@ class SensingService : Service() {
             SensingState.IDLE,
             SensingState.STOPPED_ERROR,
             SensingState.STOPPED_PERMISSION_REVOKED,
-            -> {
-                stopForegroundCompat()
-                stopSelf()
-            }
+            -> release()
             SensingState.RUNNING -> Unit
         }
     }
@@ -103,6 +107,12 @@ class SensingService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+    }
+
+    /** Leave the foreground and let the service go. Safe to call more than once. */
+    private fun release() {
+        stopForegroundCompat()
+        stopSelf()
     }
 
     private fun stopForegroundCompat() {

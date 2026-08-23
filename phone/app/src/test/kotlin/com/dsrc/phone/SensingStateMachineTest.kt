@@ -1,6 +1,7 @@
 package com.dsrc.phone
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -187,6 +188,59 @@ class SensingStateMachineTest {
     }
 
     // -- invariants ----------------------------------------------------------
+
+    // -- residency ------------------------------------------------------------
+
+    @Test
+    fun `requiresService covers exactly the states that need the service alive`() {
+        // STOPPING is included and isActive is not enough: teardown still needs the
+        // service. Everything else must let it go.
+        val expected = mapOf(
+            SensingState.IDLE to false,
+            SensingState.STARTING to true,
+            SensingState.RUNNING to true,
+            SensingState.STOPPING to true,
+            SensingState.STOPPED_PERMISSION_REVOKED to false,
+            SensingState.STOPPED_ERROR to false,
+        )
+        for (state in SensingState.entries) {
+            assertEquals(state.name, expected.getValue(state), state.requiresService)
+        }
+    }
+
+    @Test
+    fun `an ignored event leaves a state that does not require the service`() {
+        // The zombie-service case: an intent the machine ignores still creates the
+        // service, so if the resulting state claimed residency nothing would ever
+        // stop it. Every ignorable event arriving at rest must leave the machine in a
+        // state that releases.
+        val atRest = listOf(
+            SensingState.IDLE,
+            SensingState.STOPPED_PERMISSION_REVOKED,
+            SensingState.STOPPED_ERROR,
+        )
+        val events = listOf(
+            SensingEvent.Stop,
+            SensingEvent.Stopped,
+            SensingEvent.Started,
+            SensingEvent.PermissionRevoked,
+            SensingEvent.Failed("x"),
+        )
+        for (state in atRest) {
+            for (event in events) {
+                val m = machine(state)
+                assertTrue("$state + $event should be ignored", m.offer(event) is Transition.Ignored)
+                assertFalse("$state + $event must not require the service", m.state.requiresService)
+            }
+        }
+    }
+
+    @Test
+    fun `requiresService is true whenever isActive is`() {
+        for (state in SensingState.entries) {
+            if (state.isActive) assertTrue(state.name, state.requiresService)
+        }
+    }
 
     @Test
     fun `isActive is exactly starting and running`() {

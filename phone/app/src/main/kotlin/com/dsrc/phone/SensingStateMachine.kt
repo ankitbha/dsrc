@@ -12,6 +12,17 @@ enum class SensingState {
 
     /** Whether sensing is meant to be producing data right now. */
     val isActive: Boolean get() = this == STARTING || this == RUNNING
+
+    /**
+     * Whether the service has any reason to stay resident.
+     *
+     * Distinct from [isActive] because a stop in progress still needs the service
+     * alive to finish tearing down. Everything else must let it go: an intent that
+     * the machine ignores still *creates* the service, since `startService` does,
+     * and a service that never calls `stopSelf` on that path sits in the process
+     * table holding priority for the rest of the drive.
+     */
+    val requiresService: Boolean get() = isActive || this == STOPPING
 }
 
 sealed interface SensingEvent {
