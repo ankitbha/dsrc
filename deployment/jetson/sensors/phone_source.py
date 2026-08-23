@@ -1,0 +1,278 @@
+"""Phone-fed sensor backends: the transport's messages behind the local interfaces.
+
+`CameraStream` and `GpsReader` are what the pipeline consumes. These implement the
+same consumer surface over a `MessageRouter`, so `pipeline.py`, `run_demo.py`,
+`replay_demo.py` and `bench_latency.py` drive a phone exactly as they drive a USB
+camera. `SimulatedGps` is the existing precedent for a synthetic backend behind
+that seam.
+
+**This module is the one place a phone clock becomes a Jetson clock.** That
+matters more than it sounds. The pipeline decides whether a reading is fresh by
+comparing it against the Jetson's `time.monotonic()`, and two devices' monotonic
+clocks are not close -- measured on this pair, 67.57 hours apart, because they
+count from their own boot. Unconverted, `gps_age` comes out at -243,264 s against
+a 2.0 s staleness threshold, so `gps_fresh` is False on every tick of every
+drive, ego speed silently falls back to its neutral value, and the loop goes on
+producing advisories that look fine. Converting here, once, is what makes every
+comparison downstream same-clock by construction rather than by review.
+
+Two things are deliberately *not* converted. Frame-to-frame intervals inside the
+phone's own stream -- what the tracker and the distance estimator consume -- are
+better on the phone's own clock, because they carry capture-to-capture spacing
+without the link's jitter in it; converting each stamp preserves those intervals
+exactly, since conversion is affine. And `t_wall` is UTC epoch for log
+correlation: both devices are NTP-locked, measured at 0.00 ppm slew on the Jetson
+and a steady +12.00 ppm on the Mac, so the peer's wall stamp is usable directly.
+It is not usable for latency math -- NTP accuracy is milliseconds and a wall clock
+can step -- and nothing here uses it for that.
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Any
+
+import numpy as np
+
+from sensors.camera_stream import Frame
+from sensors.gps_reader import GpsDiagnostics, GpsFix
+from sensors.time_sync import TimebaseStamp, now_mono
+from transport.channels import Channel
+from transport.timebase import TimebaseNotReady
+
+# Proxying is normal for the first seconds of a drive and abnormal after that, so
+# the reasons are counted separately rather than lumped into one number.
+PROXY_REASON_UNSET = "no estimate yet"
+
+
+class PhoneClockAdapter:
+    """Turns a peer capture stamp into a local one, or says it could not.
+
+    Thread-safe: the camera and GPS backends convert from their own reader
+    threads, and both share one adapter so the record covers the whole session.
+    """
+
+    def __init__(self, estimator: Any, *, mono_clock: Any = now_mono) -> None:
+        self._estimator = estimator
+        self._mono = mono_clock
+        self._lock = threading.Lock()
+        self.converted = 0
+        self.proxied = 0
+        self.proxy_reasons: dict[str, int] = {}
+
+    def stamp(self, t_capture_peer_ns: int, t_arrival_local_s: float) -> TimebaseStamp:
+        """Convert, or fall back to arrival and say so.
+
+        Arrival is a real upper bound on capture on this device's own clock,
+        wrong by exactly the link segment -- 7.9 ms measured -- against staleness
+        thresholds of 2 s. Marking it beats discarding sound perception because
+        of a timing problem in the first seconds of every drive, and it beats
+        refusing to tick, which would leave the advisory dark exactly when the
+        driver has just set off.
+        """
+        try:
+            converted = self._estimator.to_remote(t_capture_peer_ns)
+        except TimebaseNotReady as exc:
+            with self._lock:
+                self.proxied += 1
+                reason = getattr(exc, "reason", PROXY_REASON_UNSET)
+                self.proxy_reasons[reason] = self.proxy_reasons.get(reason, 0) + 1
+            return TimebaseStamp(
+                t_capture_mono=t_arrival_local_s,
+                t_arrival_mono=t_arrival_local_s,
+                bound_s=None,
+                estimate_id=None,
+                proxy=True,
+            )
+        with self._lock:
+            self.converted += 1
+        return TimebaseStamp(
+            t_capture_mono=converted.t_remote_mono_ns / 1e9,
+            t_arrival_mono=t_arrival_local_s,
+            bound_s=converted.bound_ns / 1e9,
+            estimate_id=converted.estimate_id,
+            proxy=False,
+        )
+
+    def to_record(self) -> dict[str, Any]:
+        with self._lock:
+            total = self.converted + self.proxied
+            return {
+                "converted": self.converted,
+                "proxied": self.proxied,
+                "proxy_reasons": dict(sorted(self.proxy_reasons.items())),
+                "proxy_fraction": None if total == 0 else round(self.proxied / total, 4),
+            }
+
+
+class _PhoneSource:
+    """Shared reader-thread machinery for the two backends."""
+
+    def __init__(self, router: Any, adapter: PhoneClockAdapter, channel: Channel,
+                 name: str, poll_s: float = 0.005) -> None:
+        self._router = router
+        self._adapter = adapter
+        self._channel = channel
+        self._name = name
+        self._poll_s = poll_s
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self.messages_received = 0
+
+    def start(self):
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name=self._name, daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            received = self._router.recv_with_receipt(self._channel, timeout=self._poll_s)
+            if received is None:
+                continue
+            message, receipt = received
+            # Arrival from the transport's own reader, not a clock read here: a
+            # stamp taken after recv returns folds the queue wait and the decode
+            # into the link segment, which is the receive-side twin of the error
+            # the wire stamp removes on the way out.
+            arrival_s = receipt.t_recv_mono_ns / 1e9
+            stamp = self._adapter.stamp(message.t_capture_mono_ns, arrival_s)
+            self.messages_received += 1
+            self._accept(message, receipt, stamp)
+
+    def _accept(self, message, receipt, stamp: TimebaseStamp) -> None:  # pragma: no cover
+        raise NotImplementedError
+
+
+class PhoneCameraStream(_PhoneSource):
+    """`CameraStream`'s consumer surface, fed from the camera channel."""
+
+    def __init__(self, router: Any, adapter: PhoneClockAdapter, *,
+                 decode: Any = None, poll_s: float = 0.005) -> None:
+        super().__init__(router, adapter, Channel.CAMERA, "phone-camera", poll_s)
+        self._decode = decode or _decode_jpeg
+        self._cond = threading.Condition()
+        self._latest: Frame | None = None
+        self._last_consumed_id = -1
+        self._drop_counter = 0
+        self.end_of_stream = False
+        self.decode_failures = 0
+
+    def _accept(self, message, receipt, stamp: TimebaseStamp) -> None:
+        try:
+            image = self._decode(message.jpeg)
+        except Exception:
+            # A frame we cannot decode is one frame lost, not a dead stream --
+            # the same recoverability split the transport draws between a
+            # malformed message and a malformed byte stream.
+            self.decode_failures += 1
+            return
+        frame = Frame(
+            image=image,
+            frame_id=message.frame_id,
+            t_mono=stamp.t_capture_mono,
+            t_wall=receipt.frame.t_wall_ns / 1e9,
+            timebase=stamp,
+        )
+        with self._cond:
+            if self._latest is not None and self._latest.frame_id > self._last_consumed_id:
+                self._drop_counter += 1
+            self._latest = frame
+            self._cond.notify_all()
+
+    def wait_for_fresh(self, timeout: float = 1.0) -> Frame | None:
+        deadline = now_mono() + timeout
+        with self._cond:
+            while self._latest is None or self._latest.frame_id <= self._last_consumed_id:
+                remaining = deadline - now_mono()
+                if remaining <= 0 or self.end_of_stream:
+                    return None
+                self._cond.wait(remaining)
+            self._last_consumed_id = self._latest.frame_id
+            return self._latest
+
+    def latest(self) -> Frame | None:
+        with self._cond:
+            return self._latest
+
+    @property
+    def dropped_frames(self) -> int:
+        return self._drop_counter
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "frames_received": self.messages_received,
+            "frames_dropped_unconsumed": self._drop_counter,
+            "decode_failures": self.decode_failures,
+        }
+
+
+class PhoneGpsReader(_PhoneSource):
+    """`GpsReader`'s consumer surface, fed from the gps channel."""
+
+    def __init__(self, router: Any, adapter: PhoneClockAdapter, *,
+                 stale_after_s: float = 2.0, poll_s: float = 0.005) -> None:
+        super().__init__(router, adapter, Channel.GPS, "phone-gps", poll_s)
+        self.stale_after_s = stale_after_s
+        self.diagnostics = GpsDiagnostics(port_open=True, rate_configured=True)
+        self._lock = threading.Lock()
+        self._fix = GpsFix()
+
+    def _accept(self, message, receipt, stamp: TimebaseStamp) -> None:
+        self.diagnostics.sentences_parsed += 1
+        fix = GpsFix(
+            valid=message.valid,
+            lat=_or_nan(message.lat),
+            lon=_or_nan(message.lon),
+            speed_mps=_or_nan(message.speed_mps),
+            heading_deg=_or_nan(message.heading_deg),
+            fix_quality=message.fix_quality,
+            num_sats=message.num_sats,
+            hdop=_or_nan(message.hdop),
+            altitude_m=_or_nan(message.altitude_m),
+            utc_epoch_s=(
+                float("nan") if message.utc_epoch_ns is None
+                else message.utc_epoch_ns / 1e9
+            ),
+            t_mono=stamp.t_capture_mono,
+            t_wall=receipt.frame.t_wall_ns / 1e9,
+            timebase=stamp,
+        )
+        with self._lock:
+            self._fix = fix
+
+    def latest(self) -> GpsFix:
+        with self._lock:
+            return self._fix
+
+    def is_stale(self, t_mono_now: float | None = None) -> bool:
+        return self.latest().age_s(now_mono() if t_mono_now is None else t_mono_now) > (
+            self.stale_after_s
+        )
+
+    def to_record(self) -> dict[str, Any]:
+        return {"fixes_received": self.messages_received}
+
+
+def _or_nan(value: float | None) -> float:
+    """The transport's null becomes the pipeline's NaN.
+
+    Both mean "no value" in their own layer, and the boundary between them is
+    exactly here. The transport refuses to put a non-finite number on the wire,
+    so a null arriving is the only way it can say this.
+    """
+    return float("nan") if value is None else float(value)
+
+
+def _decode_jpeg(payload: bytes) -> np.ndarray:
+    import cv2
+
+    image = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("jpeg payload did not decode")
+    return image

@@ -93,6 +93,21 @@ class _EgoState:
     target_headway_s: float = 1.6
 
 
+def _speed_provenance(gps: GpsFix) -> str:
+    """`measured` for a local fix; for a remote one, how its stamp was obtained.
+
+    Three outcomes rather than two, because "measured" would hide the difference
+    between a reading whose freshness was established exactly and one where it
+    rested on a converted stamp or on an arrival-time proxy.
+    """
+    stamp = getattr(gps, "timebase", None)
+    if stamp is None:
+        return "measured"
+    if stamp.proxy:
+        return "measured_arrival_proxy"
+    return "measured_converted"
+
+
 class ObservationBuilder:
     def __init__(self, config: BuilderConfig) -> None:
         self.config = config
@@ -124,7 +139,13 @@ class ObservationBuilder:
             self._ego.last_speed_mps = ego_speed
             self._ego.ever_had_fix = True
             self._ego.speed_samples.append((t_mono, ego_speed))
-            src["ego_speed"] = "measured"
+            # A fix from another device had its capture stamp converted before
+            # `gps_age` above could mean anything, so the freshness this branch
+            # turns on is only as good as that conversion. Recorded as a distinct
+            # provenance rather than folded into "measured": the value is
+            # measured, the decision to trust it is not, and a reader of the
+            # field-source table is exactly the person who needs to know which.
+            src["ego_speed"] = _speed_provenance(gps)
         else:
             # hold last known speed rather than reporting 0 (= "stopped")
             ego_speed = self._ego.last_speed_mps if self._ego.ever_had_fix else 0.0
@@ -282,6 +303,10 @@ class ObservationBuilder:
             "gps_valid": gps.valid,
             "gps_age_s": round(gps_age, 3) if math.isfinite(gps_age) else None,
             "gps_fresh": gps_fresh,
+            # What the freshness decision rested on. None for a local fix.
+            "gps_timebase": (
+                None if getattr(gps, "timebase", None) is None else gps.timebase.to_record()
+            ),
             "n_tracked": len(vehicles),
             "n_forward_in_range": n_forward,
             "leader_track_id": leader.track_id if leader else None,

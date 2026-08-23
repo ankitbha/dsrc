@@ -55,7 +55,15 @@ class Tick:
     t_capture_mono: float
     t_capture_wall: float
     stage_ms: dict[str, float]
+    # e2e_ms is capture to advisory. When the capture happened on another device
+    # it is the sum of a bounded link segment and an exact on-Jetson one, and the
+    # two are reported apart because they fail differently: a reader cannot tell a
+    # slow link from a slow Jetson in one number, and the deployment claim is
+    # about the Jetson. link_ms is None for a local camera, where there is no link.
     e2e_ms: float
+    # Required, not defaulted: a default of 0.0 would let a Tick built without it
+    # report zero latency as though it had been measured.
+    jetson_ms: float
     fps: float
     n_detections: int
     vehicles: list[TrackedVehicle]
@@ -64,6 +72,9 @@ class Tick:
     advisory: Advisory
     gps: GpsFix
     n_peers: int = 0
+    # None for a local camera, where there is no link and nothing was converted.
+    link_ms: float | None = None
+    timebase: dict[str, Any] | None = None
 
     def to_record(self) -> dict[str, Any]:
         """JSON-able log record (uses Python JSON's Infinity literal for inf)."""
@@ -74,6 +85,9 @@ class Tick:
             "t_wall": self.t_capture_wall,
             "stage_ms": {k: round(v, 2) for k, v in self.stage_ms.items()},
             "e2e_ms": round(self.e2e_ms, 2),
+            "jetson_ms": round(self.jetson_ms, 2),
+            "link_ms": None if self.link_ms is None else round(self.link_ms, 2),
+            "timebase": self.timebase,
             "fps": round(self.fps, 2),
             "n_detections": self.n_detections,
             "vehicles": [
@@ -125,6 +139,8 @@ class Tick:
 @dataclass
 class PipelineStats:
     e2e: RollingStats = field(default_factory=RollingStats)
+    jetson: RollingStats = field(default_factory=RollingStats)
+    link: RollingStats = field(default_factory=RollingStats)
     detect: RollingStats = field(default_factory=RollingStats)
     track: RollingStats = field(default_factory=RollingStats)
     observe: RollingStats = field(default_factory=RollingStats)
@@ -133,6 +149,8 @@ class PipelineStats:
     def snapshot(self) -> dict[str, dict[str, float]]:
         return {
             "e2e_ms": self.e2e.summary(),
+            "jetson_ms": self.jetson.summary(),
+            "link_ms": self.link.summary(),
             "detect_ms": self.detect.summary(),
             "track_ms": self.track.summary(),
             "observe_ms": self.observe.summary(),
@@ -194,7 +212,12 @@ class PerceptionPolicyPipeline:
         self.builder.set_target_headway(advisory.headway_target_s)
         t4 = time.monotonic()
 
+        # Arrival is exact and local; capture may be converted from a peer clock.
+        # With no timebase stamp the frame was captured here, so the two coincide.
+        t_arrival = frame.timebase.t_arrival_mono if frame.timebase else frame.t_mono
         e2e_ms = (t4 - frame.t_mono) * 1000.0
+        jetson_ms = (t4 - t_arrival) * 1000.0
+        link_ms = None if frame.timebase is None else frame.timebase.link_s * 1000.0
         stage_ms = {
             "detect": (t1 - t0) * 1000.0,
             "track_distance": (t2 - t1) * 1000.0,
@@ -203,6 +226,9 @@ class PerceptionPolicyPipeline:
             "capture_to_start": (t0 - frame.t_mono) * 1000.0,
         }
         self.stats.e2e.add(e2e_ms)
+        self.stats.jetson.add(jetson_ms)
+        if link_ms is not None:
+            self.stats.link.add(link_ms)
         self.stats.detect.add(stage_ms["detect"])
         self.stats.track.add(stage_ms["track_distance"])
         self.stats.observe.add(stage_ms["observe"])
@@ -222,6 +248,9 @@ class PerceptionPolicyPipeline:
             t_capture_wall=frame.t_wall,
             stage_ms=stage_ms,
             e2e_ms=e2e_ms,
+            jetson_ms=jetson_ms,
+            link_ms=link_ms,
+            timebase=None if frame.timebase is None else frame.timebase.to_record(),
             fps=self._fps_ema,
             n_detections=len(detections),
             vehicles=vehicles,

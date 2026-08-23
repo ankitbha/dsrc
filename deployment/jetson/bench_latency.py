@@ -120,12 +120,13 @@ def markdown_table(stats: dict[str, dict[str, float]], fps: float, ticks: int) -
         f"| stage | mean (ms) | p50 (ms) | p95 (ms) |",
         f"|---|---|---|---|",
     ]
-    order = ["detect_ms", "track_ms", "observe_ms", "policy_ms", "e2e_ms"]
+    order = ["detect_ms", "track_ms", "observe_ms", "policy_ms", "jetson_ms", "e2e_ms"]
     label = {
         "detect_ms": "detection (TRT FP16, incl. pre/post)",
         "track_ms": "tracking + distance",
         "observe_ms": "observation build + encode",
         "policy_ms": "actor + advisory decode",
+        "jetson_ms": "ON-JETSON (arrival -> advisory)",
         "e2e_ms": "END-TO-END (capture -> advisory)",
     }
     for key in order:

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field, replace
 import pynmea2
 import serial
 
-from sensors.time_sync import GpsUtcOffsetTracker, now_mono, now_wall
+from sensors.time_sync import TimebaseStamp, GpsUtcOffsetTracker, now_mono, now_wall
 
 KNOTS_TO_MPS = 0.514444
 
@@ -43,6 +43,9 @@ class GpsFix:
     utc_epoch_s: float = float("nan")
     t_mono: float = 0.0          # when the sentence was read (monotonic)
     t_wall: float = 0.0
+    # As on Frame: set only when the fix came from another device, in which case
+    # t_mono above is converted or proxied rather than locally observed.
+    timebase: "TimebaseStamp | None" = None
 
     def age_s(self, t_mono_now: float) -> float:
         return t_mono_now - self.t_mono if self.t_mono > 0 else float("inf")

@@ -103,7 +103,7 @@ def test_latency_gate_fails_on_slow_run(tmp_path):
     ticks = [make_tick(i, e2e_ms=250.0) for i in range(60)]
     run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
     result = analyze(run_dir)
-    assert result["gates"]["latency_e2e_p95"]["pass"] is False
+    assert result["gates"]["latency_jetson_p95"]["pass"] is False
     assert not result["overall_pass"]
 
 

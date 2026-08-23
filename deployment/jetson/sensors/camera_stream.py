@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from sensors.time_sync import now_mono, now_wall
+from sensors.time_sync import TimebaseStamp, now_mono, now_wall
 
 
 @dataclass
@@ -32,6 +32,10 @@ class Frame:
     frame_id: int
     t_mono: float      # capture time (monotonic), basis for all latency math
     t_wall: float
+    # Set only when the capture happened on another device and t_mono above is a
+    # converted or proxied value. None means this device captured it and t_mono
+    # is exact, which is the case for every local camera.
+    timebase: "TimebaseStamp | None" = None
 
 
 def reopen_past_failure(capture: cv2.VideoCapture, open_fn) -> cv2.VideoCapture | None:

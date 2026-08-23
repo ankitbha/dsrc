@@ -25,6 +25,46 @@ def now_wall() -> float:
     return time.time()
 
 
+@dataclass(frozen=True)
+class TimebaseStamp:
+    """What a cross-device capture stamp is worth, carried with the reading.
+
+    Attached to the reading rather than looked up beside it. The alternative --
+    a map from id to stamp, or a "last stamp" attribute -- is a pairing problem,
+    and pairing a stamp with the wrong record is a mistake this project has
+    already made once: in the task 15 probe a wall stamp taken before one
+    exchange was paired with whatever reply arrived next, and it manufactured a
+    51 ppm clock skew out of a link that had none.
+
+    `t_capture_mono` is on THIS device's clock, either converted from the peer's
+    or proxied by arrival. `t_arrival_mono` is always exact, so the segment from
+    it onwards never depends on the timebase.
+    """
+
+    t_capture_mono: float
+    t_arrival_mono: float
+    bound_s: float | None
+    estimate_id: int | None
+    proxy: bool
+
+    @property
+    def link_s(self) -> float:
+        """Capture to arrival. Bounded, and can come out negative: the bound
+        permits a converted capture stamp slightly later than the arrival it
+        preceded. Reported as measured rather than clamped, because clamping
+        would hide exactly the case where the bound is being tested."""
+        return self.t_arrival_mono - self.t_capture_mono
+
+    def to_record(self) -> dict:
+        return {
+            "converted": not self.proxy,
+            "proxy": self.proxy,
+            "bound_ms": None if self.bound_s is None else round(self.bound_s * 1000.0, 3),
+            "estimate_id": self.estimate_id,
+            "link_ms": round(self.link_s * 1000.0, 3),
+        }
+
+
 @dataclass
 class Stamp:
     t_mono: float

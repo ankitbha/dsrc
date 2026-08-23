@@ -291,7 +291,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             now = time.monotonic()
             if not display and now - last_print >= args.print_every:
                 last_print = now
-                print(f"[{tick.tick_id:6d}] {tick.advisory.one_line()} | e2e {tick.e2e_ms:5.1f} ms")
+                link = "" if tick.link_ms is None else f" (link {tick.link_ms:5.1f})"
+                print(
+                    f"[{tick.tick_id:6d}] {tick.advisory.one_line()} | "
+                    f"jetson {tick.jetson_ms:5.1f} ms{link}"
+                )
             if args.max_ticks and tick.tick_id + 1 >= args.max_ticks:
                 break
             if deadline and now >= deadline:
@@ -354,9 +358,9 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             telemetry.close()
         if window is not None:
             window.close()
-        e2e = summary["stats"]["e2e_ms"]
+        e2e = summary["stats"]["jetson_ms"]
         print(
-            f"[run] {summary['ticks']} ticks | e2e mean {e2e['mean']:.1f} ms, "
+            f"[run] {summary['ticks']} ticks | jetson mean {e2e['mean']:.1f} ms, "
             f"p50 {e2e['p50']:.1f} ms, p95 {e2e['p95']:.1f} ms | dropped frames {camera.dropped_frames}"
         )
     return 0

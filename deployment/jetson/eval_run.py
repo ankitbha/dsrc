@@ -38,7 +38,13 @@ sys.path.insert(0, str(JETSON_DIR))
 
 import numpy as np  # noqa: E402
 
-GATE_E2E_P95_MS = 200.0
+# The gate is on the ON-JETSON segment, not on end-to-end. The threshold is a
+# claim about what this hardware can do, so charging it for a link the Jetson
+# does not control would make a run fail for the network's behaviour. It would
+# also loosen silently: when the timebase cannot convert a capture stamp the link
+# segment drops out of e2e, so the same gate would quietly get easier exactly
+# when the timing is least trustworthy. For a local camera the two coincide.
+GATE_JETSON_P95_MS = 200.0
 GATE_MIN_RATE_HZ = 25.0
 GATE_GPS_FRESH_FRACTION = 0.95
 GATE_GPS_SPEED_RMSE_MPS = 1.0
@@ -101,6 +107,16 @@ def analyze(run_dir: Path) -> dict[str, Any]:
 
     # --- latency ---------------------------------------------------------
     latency = {"e2e_ms": pctl([t["e2e_ms"] for t in ticks])}
+    # jetson_ms is absent from runs recorded before the split; fall back to e2e,
+    # which is what it meant on a local camera anyway, and say so in the record
+    # rather than reporting a zero.
+    jetson_samples = [t["jetson_ms"] for t in ticks if t.get("jetson_ms") is not None]
+    latency["jetson_ms"] = pctl(jetson_samples or [t["e2e_ms"] for t in ticks])
+    latency["jetson_ms_source"] = (
+        "measured" if jetson_samples else "absent from this run; e2e used"
+    )
+    link_samples = [t["link_ms"] for t in ticks if t.get("link_ms") is not None]
+    latency["link_ms"] = pctl(link_samples) if link_samples else None
     for stage in ticks[0]["stage_ms"]:
         latency[stage + "_ms"] = pctl([t["stage_ms"][stage] for t in ticks])
 
@@ -215,10 +231,10 @@ def analyze(run_dir: Path) -> dict[str, Any]:
         gates[name] = {"value": value, "threshold": threshold, "pass": ok}
 
     gate(
-        "latency_e2e_p95",
-        round(latency["e2e_ms"]["p95"], 1),
-        f"< {GATE_E2E_P95_MS:.0f} ms",
-        latency["e2e_ms"]["p95"] < GATE_E2E_P95_MS,
+        "latency_jetson_p95",
+        round(latency["jetson_ms"]["p95"], 1),
+        f"< {GATE_JETSON_P95_MS:.0f} ms",
+        latency["jetson_ms"]["p95"] < GATE_JETSON_P95_MS,
     )
     gate(
         "throughput_median",
@@ -292,7 +308,7 @@ def render_plots(result: dict[str, Any], run_dir: Path) -> list[str]:
     fig, ax = plt.subplots(figsize=(10, 3.2), dpi=110)
     ax.plot(ts, [t["e2e_ms"] for t in ticks], lw=0.7, label="e2e")
     ax.plot(ts, [t["stage_ms"]["detect"] for t in ticks], lw=0.7, label="detect")
-    ax.axhline(GATE_E2E_P95_MS, color="r", ls="--", lw=0.8, label="200 ms target")
+    ax.axhline(GATE_JETSON_P95_MS, color="r", ls="--", lw=0.8, label="200 ms target")
     ax.set_xlabel("run time (s)"); ax.set_ylabel("latency (ms)")
     ax.set_ylim(0, max(60.0, 1.1 * max(t["e2e_ms"] for t in ticks)))
     ax.legend(loc="upper right", fontsize=8); ax.set_title("Latency timeline")
