@@ -1,0 +1,26 @@
+[versions]
+agp = "8.7.3"
+kotlin = "2.0.21"
+camerax = "1.3.4"
+junit = "4.13.2"
+androidxCore = "1.13.1"
+androidxActivity = "1.9.3"
+lifecycle = "2.8.7"
+androidxTestJunit = "1.2.1"
+espresso = "3.6.1"
+
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "androidxCore" }
+androidx-activity = { group = "androidx.activity", name = "activity-ktx", version.ref = "androidxActivity" }
+androidx-lifecycle-service = { group = "androidx.lifecycle", name = "lifecycle-service", version.ref = "lifecycle" }
+camera-core = { group = "androidx.camera", name = "camera-core", version.ref = "camerax" }
+camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "camerax" }
+camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "camerax" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+androidx-test-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestJunit" }
+espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espresso" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

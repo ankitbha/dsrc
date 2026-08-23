@@ -9,3 +9,10 @@ texmf-config/
 texmf-var/
 .venv/
 
+
+# Android phone app (section E)
+phone/.gradle/
+phone/build/
+phone/*/build/
+phone/local.properties
+phone/.kotlin/
