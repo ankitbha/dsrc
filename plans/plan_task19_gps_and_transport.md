@@ -136,7 +136,7 @@ Taken by recommendation under `plan_dsrc_rec`. **None is user sign-off.**
 | D6 | Golden vectors as a data-driven test over the JSON file, not transcribed cases | Transcribing invites a typo that agrees with the bug; and a regenerated file must fail loudly rather than be silently re-approved | hand-written cases; drift-prone |
 | D7 | Interop test spawns the real Python session as a subprocess | The only thing that catches behavioural drift between two implementations of one protocol | mock peer; would agree with whatever Kotlin does |
 | D8 | GPS receipt time goes to a local log, not a new wire field | O1 — the contract has no field for it, and inventing one is a cross-language change that is not this task's to make | add `t_receipt_mono_ns`; needs Python, Kotlin and vector changes together |
-| D9 | `GpsSource` behind an interface, FusedLocation adapter plus fake | Same reason as the camera: the policy is pure and the adapter is thin | call the platform directly; untestable off-device |
+| D9 | `GpsSource` behind an interface, **`LocationManager`** adapter plus fake | Same reason as the camera: the policy is pure and the adapter is thin | call the platform directly; untestable off-device |
 
 ---
 
@@ -177,7 +177,7 @@ local commit.
 | 7 | `Session` + `TimeSync` | handshake, control seq from 1, keepalive at 1.0 s, stall at 5.0 s, framing error ends the session |
 | 8 | Interop | Kotlin against the live Python session: 1000 frames, deliberate overflow, deliberate malformed message, deliberate framing error; counters agree |
 | 9 | `GpsSource` + fake | fix time and receipt time both recorded and distinct; no-fix maps to all-null |
-| 10 | FusedLocation adapter | real fixes on the emulator via a mock provider |
+| 10 | `LocationManager` adapter | real fixes on the emulator via a mock provider |
 | 11 | Wire into `SensingService` | camera and GPS both flow over one session |
 
 ---
@@ -234,6 +234,60 @@ per-channel and per-reason counters compared field by field.
   handling; it says nothing about real fix quality, HDOP or satellite counts.
 
 ---
+
+## D9 revised: `LocationManager`, not the fused provider
+
+D9 originally named `FusedLocationProviderClient`. It cannot satisfy the frozen wire
+contract, and that only became visible once the message table was fixed.
+
+`num_sats` is required and non-nullable. The fused provider has no satellite count:
+it is not a field on `Location`, and `GnssStatus` callbacks are a `LocationManager`
+facility. Every fused fix would therefore go out as a *valid* fix carrying
+`num_sats: 0`, and there is no null in that field to mean "unknown", so a receiver
+reads it as a contradiction rather than as missing information. The only way to fill
+the field honestly is the API that reports it.
+
+Independently: fused positions are blended across GNSS, wifi and cell, and
+interpolated. This phone exists to record what the road did, and a smoothed track is
+the wrong ground truth to compare a traffic model against.
+
+`hdop` stays null on every record. No Android API exposes it. `Location.accuracy`
+is a metre radius and HDOP is dimensionless satellite geometry, with no conversion
+between them, so deriving one from the other would place an invented number on the
+wire next to measured ones.
+
+The satellite count is attached from the most recent `GnssStatus`, not from one
+measured at the instant of the fix -- the two callbacks are separate and do not
+arrive together. It is off by at most one status interval. Counted as *used in fix*
+rather than visible, following the GGA convention, because a visible-but-unused
+satellite contributes nothing to the position.
+
+## An open gap: this adapter can never send `valid: false`
+
+`GpsRecord.noFix()` and the whole `valid: false` shape are unreachable from
+`GpsLocationSource`. `LocationManager` only delivers a `Location`, and a `Location`
+always carries a position, so a real phone produces valid records or produces
+nothing. The no-fix record is reachable only from the fake source in tests.
+
+The consequence is on the Jetson: it cannot distinguish "the phone has no fix" from
+"the phone stopped sending", because both look like an absence of `gps` messages.
+The signal exists on the platform -- `onProviderDisabled`, and provider availability
+-- and is not wired to anything. Left open rather than guessed at, because whether an
+explicit no-fix record or a `telemetry` field is the right carrier is a question for
+task 24, where the phone's other health reporting lands.
+
+## A cost worth naming: the camera drops in two places
+
+`FrameBuffer` is depth-1 latest-wins and so is the `camera` channel queue, so a frame
+can be dropped in either. `GpsPipeline` deliberately has no buffer for exactly this
+reason -- its own docstring argues against two droppers -- and the camera has one
+because task 18 needed somewhere to put a frame between the encoder and a consumer
+that did not exist yet.
+
+Both counts are visible: `FrameBuffer.Stats.dropped` and the channel's own counters.
+What is *not* visible from the far side is the first kind, because a drop before the
+sequence number is assigned leaves no gap for the peer to see. A receiver reading
+only sequence gaps undercounts camera loss.
 
 ## 8. Needs sign-off
 
