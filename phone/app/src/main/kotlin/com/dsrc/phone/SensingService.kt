@@ -3,7 +3,7 @@ package com.dsrc.phone
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
-import android.app.Service
+import androidx.lifecycle.LifecycleService
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -11,6 +11,11 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import com.dsrc.phone.config.SensingConfig
+import com.dsrc.phone.sensors.CameraPipeline
+import com.dsrc.phone.sensors.CameraXSource
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * Foreground service owning the whole sensing lifecycle.
@@ -22,14 +27,23 @@ import android.util.Log
  * Task 17 stands this up empty: it starts, holds the foreground notification, and
  * stops. Capture arrives in tasks 18-21 and hangs off [onSensingUp] / [onSensingDown].
  */
-class SensingService : Service() {
+class SensingService : LifecycleService() {
 
     private var machine = SensingStateMachine()
     private val status = SensingStatus.shared
 
     private var lastStartId = 0
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    private var pipeline: CameraPipeline? = null
+    private var cameraSource: CameraXSource? = null
+    private var encodeExecutor: ExecutorService? = null
+
+    override fun onBind(intent: Intent): IBinder? {
+        // LifecycleService dispatches lifecycle events from its overrides, so every one
+        // of them has to call through even where the result is discarded.
+        super.onBind(intent)
+        return null
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -67,6 +81,7 @@ class SensingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        super.onStartCommand(intent, flags, startId)
         lastStartId = startId
         when (intent?.action) {
             ACTION_START -> handle(SensingEvent.Start)
@@ -166,11 +181,34 @@ class SensingService : Service() {
                 checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
             }
 
-    /** Capture starts here from task 18 on. */
-    private fun onSensingUp() = Unit
+    private fun onSensingUp() {
+        val config = SensingConfig()
+        // One thread, because two would let frames finish compressing out of order and
+        // make the monotonic frame_id a lie.
+        val encoder = Executors.newSingleThreadExecutor()
+        val pipe = CameraPipeline(config, encoder)
+        val source = CameraXSource(this, this, config)
+        source.start(pipe)
+        pipeline = pipe
+        cameraSource = source
+        encodeExecutor = encoder
+        Log.i(TAG, "camera capture starting at ${config.cameraHz} Hz")
+    }
 
-    /** And is torn down here. */
-    private fun onSensingDown() = Unit
+    private fun onSensingDown() {
+        // Order matters: stop the source first so no new frame is offered, then the
+        // pipeline so anything already queued drops out, then the executor.
+        cameraSource?.stop()
+        pipeline?.let { Log.i(TAG, "camera stats ${it.stats}") }
+        pipeline?.stop()
+        encodeExecutor?.shutdown()
+        cameraSource = null
+        pipeline = null
+        encodeExecutor = null
+    }
+
+    /** The frame source, while sensing is up. Task 19 attaches the transport to it. */
+    val frames: CameraPipeline? get() = pipeline
 
     /**
      * Entering the foreground, with a seam so its failure can be tested.

@@ -1,0 +1,216 @@
+package com.dsrc.phone.sensors
+
+import com.dsrc.phone.config.SensingConfig
+import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicInteger
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class CameraPipelineTest {
+
+    /** Runs encode work inline, so a test observes the finished state without waiting. */
+    private val inline = Executor { it.run() }
+
+    private val ms = 1_000_000L
+
+    private fun pipeline(hz: Double = 5.0, executor: Executor = inline) =
+        CameraPipeline(SensingConfig(cameraHz = hz), executor)
+
+    private fun offer(
+        p: CameraPipeline,
+        tsNs: Long,
+        packs: AtomicInteger? = null,
+        compresses: AtomicInteger? = null,
+        compress: ((ByteArray, Int, Int, Int) -> ByteArray)? = null,
+    ) = p.offer(
+        timestampNs = tsNs,
+        width = 4,
+        height = 4,
+        pack = { packs?.incrementAndGet(); ByteArray(24) },
+        compress = compress ?: { bytes, _, _, _ -> compresses?.incrementAndGet(); bytes },
+    )
+
+    // -- rate ----------------------------------------------------------------
+
+    @Test
+    fun `a commanded rate is honoured over a simulated minute`() {
+        val p = pipeline(hz = 5.0)
+        val sourcePeriod = 1_000_000_000L / 30
+        for (i in 0 until 30 * 60) offer(p, i * sourcePeriod)
+        val stats = p.stats
+        assertEquals(30 * 60L, stats.seen)
+        assertTrue("expected ~300 accepted at 5 Hz, got ${stats.accepted}", stats.accepted in 299..301)
+        assertEquals("the rest were gated", stats.seen - stats.accepted, stats.gated)
+    }
+
+    @Test
+    fun `a rejected frame costs no pixel copy`() {
+        // The reason the gate runs before packing: at 30 Hz into a 5 Hz target, five in
+        // six frames must cost nothing at all.
+        val packs = AtomicInteger()
+        val p = pipeline(hz = 5.0)
+        val sourcePeriod = 1_000_000_000L / 30
+        for (i in 0 until 60) offer(p, i * sourcePeriod, packs = packs)
+        assertEquals("pack must run only for accepted frames", p.stats.accepted.toInt(), packs.get())
+        assertTrue(packs.get() < 15)
+    }
+
+    @Test
+    fun `a rejected frame costs no compression`() {
+        val compresses = AtomicInteger()
+        val p = pipeline(hz = 5.0)
+        val sourcePeriod = 1_000_000_000L / 30
+        for (i in 0 until 60) offer(p, i * sourcePeriod, compresses = compresses)
+        assertEquals(p.stats.accepted.toInt(), compresses.get())
+    }
+
+    @Test
+    fun `a rate change is honoured mid-stream`() {
+        val p = pipeline(hz = 1.0)
+        offer(p, 0)
+        assertEquals(1, p.stats.accepted)
+        p.setRate(10.0)
+        assertEquals(10.0, p.rateHz, 0.0)
+        assertTrue(offer(p, 100 * ms))
+        assertEquals(2, p.stats.accepted)
+    }
+
+    // -- frame ids -----------------------------------------------------------
+
+    @Test
+    fun `frame ids are consecutive over the accepted frames`() {
+        val p = pipeline(hz = 1000.0)
+        val ids = mutableListOf<Long>()
+        for (i in 1..50) {
+            offer(p, i * ms)
+            p.drain()?.let { ids.add(it.frameId) }
+        }
+        assertEquals("every accepted frame should have been drained", 50, ids.size)
+        assertEquals((1L..50L).toList(), ids)
+    }
+
+    @Test
+    fun `frame ids count accepted frames, not frames the sensor produced`() {
+        // So a gap means "lost after acceptance", which is actionable, rather than "the
+        // camera runs faster than the commanded rate", which is normal.
+        val p = pipeline(hz = 5.0)
+        val sourcePeriod = 1_000_000_000L / 30
+        var first: Long? = null
+        var last: Long? = null
+        for (i in 0 until 60) {
+            if (offer(p, i * sourcePeriod)) {
+                val frame = p.drain()!!
+                if (first == null) first = frame.frameId
+                last = frame.frameId
+            }
+        }
+        assertEquals(1L, first)
+        assertEquals("ids must not skip the gated frames", p.stats.accepted, last)
+    }
+
+    // -- timestamps ----------------------------------------------------------
+
+    @Test
+    fun `capture stamps are non-decreasing and are the ones offered`() {
+        val p = pipeline(hz = 1000.0)
+        var previous = Long.MIN_VALUE
+        for (i in 1..30) {
+            val ts = i * 2 * ms
+            offer(p, ts)
+            val frame = p.drain()!!
+            assertEquals("the stamp must be carried through unchanged", ts, frame.captureMonoNs)
+            assertTrue(frame.captureMonoNs >= previous)
+            previous = frame.captureMonoNs
+        }
+    }
+
+    // -- failure -------------------------------------------------------------
+
+    @Test
+    fun `an encode failure costs one frame and the stream continues`() {
+        val p = pipeline(hz = 1000.0)
+        var calls = 0
+        val flaky: (ByteArray, Int, Int, Int) -> ByteArray = { b, _, _, _ ->
+            calls++
+            if (calls == 2) throw IllegalStateException("bad frame") else b
+        }
+        for (i in 1..4) offer(p, i * ms, compress = flaky)
+        val stats = p.stats
+        assertEquals(4, stats.accepted)
+        assertEquals(1, stats.encodeFailures)
+        assertEquals(3, stats.encoded)
+        assertEquals("nothing left in flight with an inline executor", 0, stats.inFlight)
+    }
+
+    @Test
+    fun `an encode failure does not stop later frames arriving`() {
+        val p = pipeline(hz = 1000.0)
+        var first = true
+        offer(p, ms, compress = { b, _, _, _ -> if (first) { first = false; throw RuntimeException("x") } else b })
+        assertNull("the failed frame produced nothing", p.drain())
+        offer(p, 2 * ms)
+        assertTrue("a later frame still arrives", p.drain() != null)
+    }
+
+    // -- stopping ------------------------------------------------------------
+
+    @Test
+    fun `a stopped pipeline accepts nothing`() {
+        val p = pipeline(hz = 1000.0)
+        offer(p, ms)
+        p.stop()
+        assertFalse(offer(p, 100 * ms))
+        assertEquals(1, p.stats.accepted)
+    }
+
+    @Test
+    fun `stopping discards the held frame`() {
+        val p = pipeline(hz = 1000.0)
+        offer(p, ms)
+        p.stop()
+        assertNull(p.drain())
+    }
+
+    @Test
+    fun `a frame queued before a stop is not encoded after it`() {
+        // A frame encoded after teardown would land in a buffer nobody drains, and its
+        // pixels were copied from a camera buffer already handed back.
+        val queued = mutableListOf<Runnable>()
+        val deferred = Executor { queued.add(it) }
+        val p = pipeline(hz = 1000.0, executor = deferred)
+        offer(p, ms)
+        assertEquals(1, queued.size)
+        p.stop()
+        queued.forEach { it.run() }
+        assertEquals("the queued encode must drop out", 0, p.stats.encoded)
+        assertNull(p.drain())
+    }
+
+    // -- accounting ----------------------------------------------------------
+
+    @Test
+    fun `the counters balance over a lossy run`() {
+        val p = pipeline(hz = 1000.0)
+        for (i in 1..200) {
+            offer(p, i * ms)
+            if (i % 4 == 0) p.drain()
+        }
+        val stats = p.stats
+        assertEquals(200, stats.seen)
+        assertEquals(200, stats.accepted)
+        assertEquals(0, stats.inFlight)
+        assertTrue("buffer accounting must balance: ${stats.buffer}", stats.buffer.balances)
+    }
+
+    @Test
+    fun `latest-wins keeps the newest frame when the drain is slow`() {
+        val p = pipeline(hz = 1000.0)
+        for (i in 1..5) offer(p, i * ms)
+        val frame = p.drain()!!
+        assertEquals("the newest accepted frame survives", 5L, frame.frameId)
+        assertEquals("four were displaced", 4, p.stats.buffer.dropped)
+    }
+}
