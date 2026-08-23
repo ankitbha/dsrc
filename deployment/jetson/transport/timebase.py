@@ -487,6 +487,11 @@ class TimebaseEstimator:
     def usable(self) -> bool:
         return self.why_not_usable() is None
 
+    def _gated(self) -> tuple[str | None, TimebaseEstimate | None]:
+        """One acquisition, so both conversions read one snapshot."""
+        with self._lock:
+            return self._gate_locked()
+
     def to_remote(self, t_local_mono_ns: int) -> ConvertedInstant:
         """Convert a local instant to the peer's clock, with its bound.
 
@@ -495,8 +500,7 @@ class TimebaseEstimator:
         live consumer never sees a number move under it while an offline reader
         can still re-derive it against a better later estimate.
         """
-        with self._lock:
-            reason, estimate = self._gate_locked()
+        reason, estimate = self._gated()
         if reason is not None:
             raise TimebaseNotReady(f"cannot convert: {reason}", reason)
         assert estimate is not None  # the gate returning None proves it
@@ -517,6 +521,46 @@ class TimebaseEstimator:
         return ConvertedInstant(
             t_remote_mono_ns=t_local_mono_ns + estimate.offset_ns + int(round(drift_ns)),
             bound_ns=estimate.bound_ns_at(t_local_mono_ns),
+            estimate_id=estimate.estimate_id,
+        )
+
+    def to_local(self, t_remote_mono_ns: int) -> ConvertedInstant:
+        """Convert a PEER instant to this device's clock, with its bound.
+
+        The direction a receiver needs, and the one the estimator did not have.
+        `to_remote` serves a device converting its own stamps for the peer's
+        benefit; a device converting stamps that arrive needs the inverse, and
+        whichever side runs the estimator is the side that can do it.
+
+        Exact inverse rather than a first-order approximation. From
+        `t_remote = t_local + offset + s(t_local - t_ref)` with `s` the skew as a
+        fraction:
+
+            t_local = (t_remote - offset + s * t_ref) / (1 + s)
+
+        Subtracting the offset and then applying the skew correction forwards
+        would leave a second-order error in `s`. It is small -- at 50 ppm over
+        300 s it is well under a microsecond -- but the closed form costs nothing
+        and does not need that argument made for it.
+        """
+        reason, estimate = self._gated()
+        if reason is not None:
+            raise TimebaseNotReady(f"cannot convert: {reason}", reason)
+        assert estimate is not None
+        skew = 0.0 if estimate.skew_ppm is None else estimate.skew_ppm / 1e6
+        numerator = t_remote_mono_ns - estimate.offset_ns + skew * estimate.t_reference_ns
+        t_local = int(round(numerator / (1.0 + skew)))
+
+        reach_ns = abs(t_local - estimate.t_reference_ns)
+        if reach_ns > int(MAX_EXTRAPOLATION_S * NS_PER_S):
+            raise TimebaseNotReady(
+                f"instant is {reach_ns / NS_PER_S:.1f}s from the reference, beyond the "
+                f"{MAX_EXTRAPOLATION_S:.0f}s the samples support",
+                "beyond extrapolation limit",
+            )
+        return ConvertedInstant(
+            t_remote_mono_ns=t_local,
+            bound_ns=estimate.bound_ns_at(t_local),
             estimate_id=estimate.estimate_id,
         )
 

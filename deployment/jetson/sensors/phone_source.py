@@ -71,7 +71,13 @@ class PhoneClockAdapter:
         driver has just set off.
         """
         try:
-            converted = self._estimator.to_remote(t_capture_peer_ns)
+            # to_local, not to_remote: this is a PEER stamp arriving, and the
+            # inverse direction. Getting it wrong is not subtle in its effect but
+            # is invisible in its shape -- with the clocks 67.6 hours apart,
+            # to_remote pushed every capture stamp 135 hours into the past, which
+            # the estimator's extrapolation guard then refused, so every frame
+            # silently took the proxy path and the run still produced advisories.
+            converted = self._estimator.to_local(t_capture_peer_ns)
         except TimebaseNotReady as exc:
             with self._lock:
                 self.proxied += 1
