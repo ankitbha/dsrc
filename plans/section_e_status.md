@@ -279,16 +279,61 @@ Three deliberate choices:
   different facts and only one is actionable. An out-of-order fix stamp is counted too,
   since the receiver's freshness arithmetic assumes they are monotonic.
 
-**333 distinct JVM tests across 24 classes, 0 failed.** Task 19's implementation is
-complete; it is with the independent validator now.
+### Validator round 1 — ten findings, eight closed
 
-### Task 19 remaining
+**359 JVM tests across 25 classes, 0 failed, stable over three runs.**
 
-- validator rounds, then the experiments (golden conformance count, interop counters,
-  loopback throughput, and the first honest read on task 18's O1 bias now that there is
-  an enqueue stamp to pair with the capture stamp);
-- wiring the session into `SensingService` so camera and GPS share one connection —
-  deferred until validation settles, since it is the part most likely to change.
+The worst was **a session that reported healthy forever while discarding everything.** A
+header could pass the size probe and then grow past `MAX_HEADER_BYTES` at write time,
+because the probe used sequence 0 and the real `seq`/`t_mono_ns`/`t_wall_ns` are
+substituted later. The resulting `FramingError` escaped the writer's catch, the thread
+died *without ending the session*, `isRunning` stayed true, `send()` kept returning true —
+and because the stall check lived inside the writer loop, the timeout died with it.
+Verified at four times the timeout with no end reason recorded.
+
+**My first fix for the stall check missed the point.** Moving it to the top of the writer
+loop covers an idle link, which is the case that doesn't matter. A wedged peer blocks the
+writer *inside* `output.write()`, so the top of the loop is never reached again. Both IO
+threads spend their lives blocked, so neither can be trusted to notice silence. There's a
+watchdog thread now.
+
+**The sender rule was not implemented at all.** The spec makes every refusal a sender rule
+too, and Python runs its typed decoder on every outbound message; `send()` checked only
+reserved keys and the channel name, leaving **six of nine refusal reasons unreachable
+outbound**. Worse, a non-finite value made `send()` throw at the caller — on the phone,
+into a sensor callback.
+
+**`sendHeartbeat` destroyed application messages.** It drew its sequence number by
+enqueueing and immediately polling; `enqueue` appends and `poll` takes the head, so it
+returned whatever was already waiting — a control message destroyed with `dropped` still
+zero, then the heartbeat written twice with a duplicate sequence number.
+
+**The double formatter was wrong on 46 exact powers of two**, and the reason is sharper
+than my docstring anticipated: the shortest round-tripping decimal is not always the
+*nearest* k-digit decimal, because a double's rounding interval is asymmetric at a power
+of two. 2^-24 is exactly `5.9604644775390625e-08`; at 16 digits that's a tie,
+nearest-even picks `...062` which doesn't round-trip, and only `...063` does. Both
+neighbours are tried now, against a second reference set of 17,568 dyadic cases generated
+from CPython. Every `Float` widened to a `Double` is in that family.
+
+Also: `t_wire_mono_ns` was reserved on the Python side and not here, so a caller could
+set the field the peer's timebase reads as our departure stamp. The JSON parser accepted
+seven shapes CPython rejects, one of which **corrupted silently** — `toIntOrNull(16)`
+accepts a leading sign, so `\u-041` became U+FFBF. And a valid GPS fix with a null
+coordinate was accepted here and refused by Python.
+
+### Two findings deliberately still open
+
+1. **The FusedLocation adapter and the service wiring are genuinely absent.** The plan's
+   steps 10 and 11 list both; only the interface and a fake exist, and `SensingService`
+   has no session and no GPS. My commit for step 10 overstated what was done — the
+   pipeline and both clocks are real, the platform adapter is not.
+2. **The interop test is far weaker than the plan promised.** Step 8 says 1,000 frames
+   with deliberate overflow, a malformed message and a framing error, and per-reason
+   counters compared field by field. Actual: 40 frames, none of those provoked. The
+   validator's mutation evidence is the damning part — **removing the hello's reservation
+   of control sequence 0 leaves all six interop tests green**, so the leg that exists is
+   thinner than it looks.
 
 `imu`, `here` and `telemetry` messages land with tasks 20, 21 and 24 — their producers.
 The golden vectors pin framing, not message decode, so they pass without them.
