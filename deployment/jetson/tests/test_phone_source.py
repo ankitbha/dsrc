@@ -13,6 +13,8 @@ module prevents a hard failure rather than a small error.
 
 from __future__ import annotations
 
+import pathlib
+
 import numpy as np
 import pytest
 
@@ -484,3 +486,120 @@ def test_a_small_negative_age_is_ordinary_and_a_large_one_is_not():
     assert ObservationBuilder(BuilderConfig()).build(
         [], too_far, now, None
     ).diagnostics["gps_fresh"] is False
+
+
+def test_the_arrival_stamp_comes_from_the_transport_not_from_a_local_read():
+    """Separated by giving the receiving session its own displaced clock, so the
+    transport's arrival stamp and a local `now_mono()` cannot be confused.
+
+    A stamp read after `recv` returns folds the inbound queue wait and the decode
+    into the link segment -- the receive-side twin of the error the wire stamp
+    removes on the way out -- and on a quiet loopback the two are microseconds
+    apart, so nothing but a displaced clock can tell them apart.
+    """
+    jetson_shift_ns = 500_000_000_000  # 500 s, far outside any plausible jitter
+    phone_conn, jetson_conn = loopback_pair()
+    phone = Session(phone_conn, session_id=1, heartbeat_s=None, stall_timeout_s=None,
+                    mono_clock=lambda: now_mono_ns() - PLANTED_OFFSET_NS).start()
+    jetson = Session(jetson_conn, session_id=2, heartbeat_s=None, stall_timeout_s=None,
+                     mono_clock=lambda: now_mono_ns() + jetson_shift_ns).start()
+    up, down = MessageRouter(phone), MessageRouter(jetson)
+    estimator, _ = converged_estimator()
+    camera = PhoneCameraStream(down, PhoneClockAdapter(estimator)).start()
+    try:
+        assert up.send(CameraFrame(
+            t_capture_mono_ns=BASE_NS + PLANTED_OFFSET_NS, frame_id=1, width=16,
+            height=16, format="jpeg", quality=85, jpeg=a_jpeg(),
+        ))
+        frame = camera.wait_for_fresh(timeout=5.0)
+        assert frame is not None and frame.timebase is not None
+        expected = (now_mono_ns() + jetson_shift_ns) / 1e9
+        assert abs(frame.timebase.t_arrival_mono - expected) < 5.0, (
+            f"arrival {frame.timebase.t_arrival_mono} is not on the session's clock "
+            f"(expected near {expected}); it was read locally instead"
+        )
+    finally:
+        camera.stop()
+        phone.close()
+        jetson.close()
+
+
+def test_a_local_frame_reports_no_link_segment():
+    """None, not zero. A local camera has no link, and a zero would read as a
+    measured latency of zero rather than as an absent measurement."""
+    import tempfile
+
+    from pipeline import PerceptionPolicyPipeline
+    from sensors.camera_stream import Frame
+
+    pipeline = _a_pipeline()
+    frame = Frame(image=np.zeros((48, 64, 3), dtype=np.uint8), frame_id=1,
+                  t_mono=_local_now() - 0.01, t_wall=0.0)
+    tick = pipeline.step(frame, GpsFix(), None, detections_override=[])
+    assert tick.link_ms is None
+    assert tick.timebase is None
+    assert tick.to_record()["link_ms"] is None
+    # And with no link, the two segments coincide.
+    assert tick.jetson_ms == pytest.approx(tick.e2e_ms, abs=1e-6)
+
+
+def test_jetson_ms_is_measured_from_arrival_not_from_capture():
+    """The two differ by the link segment, so measuring from capture puts the
+    network inside a number that is supposed to be about this hardware."""
+    from pipeline import PerceptionPolicyPipeline
+    from sensors.camera_stream import Frame
+
+    pipeline = _a_pipeline()
+    now = _local_now()
+    link_s = 0.250  # far larger than any real link, so the two cannot be confused
+    stamp = TimebaseStamp(t_capture_mono=now - link_s, t_arrival_mono=now,
+                          bound_s=0.008, estimate_id=1, proxy=False)
+    frame = Frame(image=np.zeros((48, 64, 3), dtype=np.uint8), frame_id=1,
+                  t_mono=now - link_s, t_wall=0.0, timebase=stamp)
+    tick = pipeline.step(frame, GpsFix(), None, detections_override=[])
+
+    assert tick.link_ms == pytest.approx(link_s * 1000.0, abs=1.0)
+    assert tick.jetson_ms < link_s * 1000.0, (
+        f"jetson_ms {tick.jetson_ms} includes the {link_s * 1000} ms link segment"
+    )
+    assert tick.e2e_ms == pytest.approx(tick.jetson_ms + tick.link_ms, abs=1.0)
+
+
+def _local_now() -> float:
+    import time
+
+    return time.monotonic()
+
+
+def _a_pipeline():
+    """The smoke test's stub pipeline, built once per call."""
+    import tempfile
+
+    from perception.detector import Detection  # noqa: F401
+    from perception.distance import DistanceEstimator
+    from perception.tracker import IouTracker
+    from pipeline import PerceptionPolicyPipeline
+    from policy.actor_runtime import ActorRuntime
+    from policy.advisory import AdvisoryDecoder
+    from policy.export_policy import build_random, export
+
+    class _NoDetector:
+        def infer(self, image):
+            return []
+
+        def warmup(self, iterations: int = 1) -> float:
+            return 0.0
+
+    tmp = tempfile.mkdtemp()
+    prefix = str(pathlib.Path(tmp) / "actor_policy")
+    actor, info = build_random(seed=0)
+    export(actor, info, prefix)
+    return PerceptionPolicyPipeline(
+        detector=_NoDetector(),
+        tracker=IouTracker(min_hits=2),
+        distance=DistanceEstimator(fx_px=800.0, cx_px=640.0, horizon_y_px=360.0,
+                                   camera_height_m=1.25, ema_alpha=0.6),
+        builder=ObservationBuilder(BuilderConfig()),
+        actor=ActorRuntime(prefix),
+        advisory_decoder=AdvisoryDecoder(units="mph"),
+    )

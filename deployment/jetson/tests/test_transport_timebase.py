@@ -1785,3 +1785,61 @@ def test_the_spec_says_the_gate_does_not_limit_the_bound():
     flat = " ".join(section.split())
     assert "The gate does not limit the bound, deliberately" in flat
     assert "link-health floor" in flat
+
+
+def test_to_local_inverts_to_remote_exactly_including_the_skew_term():
+    """The inverse is a division, not a subtraction. Dropping the skew term
+    leaves a second-order error that a zero-skew test cannot see -- and every
+    other test of this pair runs with skew absent."""
+    link = Link(skew_ppm=25.0, seed=211)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=300, period_ns=NS_PER_S)
+    estimate = estimator.estimate
+    assert estimate is not None and estimate.skew_ppm is not None, (
+        "this test needs the skew branch live, or it proves nothing"
+    )
+
+    for offset_s in (-200, -30, 0, 30, 200):
+        at = estimate.t_reference_ns + offset_s * NS_PER_S
+        there = estimator.to_remote(at).t_remote_mono_ns
+        back = estimator.to_local(there).t_remote_mono_ns
+        assert abs(back - at) <= 1, f"round trip at {offset_s}s drifted by {back - at} ns"
+
+
+def test_to_local_refuses_when_the_gate_is_closed():
+    """Same gate as to_remote, and for the same reason: a conversion nobody can
+    stand behind must not be handed out as a number."""
+    estimator = TimebaseEstimator(mono_clock=SteppedClock())
+    with pytest.raises(TimebaseNotReady, match="no samples"):
+        estimator.to_local(BASE_NS)
+
+    link = Link(seed=213)
+    clock = SteppedClock()
+    ready = TimebaseEstimator(mono_clock=clock)
+    feed(ready, link, clock, count=20, period_ns=100_000_000)
+    ready.to_local(clock.now_ns)  # must not raise
+
+    clock.now_ns += int((MAX_SAMPLE_AGE_S + 60) * NS_PER_S)
+    with pytest.raises(TimebaseNotReady, match="old"):
+        ready.to_local(clock.now_ns)
+
+
+def test_to_local_refuses_beyond_the_extrapolation_limit():
+    """The guard that caught a real misuse: converting an arriving peer stamp
+    with to_remote displaced it by twice the offset, and this is what refused
+    it rather than returning a plausible wrong number."""
+    from transport.timebase import MAX_EXTRAPOLATION_S
+
+    link = Link(seed=217)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=20, period_ns=100_000_000)
+    estimate = estimator.estimate
+    assert estimate is not None
+
+    far = estimate.t_reference_ns + estimate.offset_ns + int(
+        (MAX_EXTRAPOLATION_S + 600) * NS_PER_S
+    )
+    with pytest.raises(TimebaseNotReady, match="beyond"):
+        estimator.to_local(far)
