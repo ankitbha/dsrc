@@ -76,10 +76,19 @@ PHONE_CLOCK_OFFSET_NS = 243_264_000_000_000
 FX, CX, HORIZON, CAM_H = 800.0, 640.0, 360.0, 1.25
 CAMERA_HZ, GPS_HZ = 10.0, 5.0
 ADVISORY_ECHO_PREFIX = "frame:"
-# A link segment larger than this is not a measurement, it is a broken
-# conversion. Generous against any real link (task 15 measured 7.9 ms) and tight
-# against the 67.6-hour clock offset a mistaken conversion produces.
-MAX_PLAUSIBLE_LINK_MS = 1_000.0
+# The link segment is charged against the uncertainty the run itself reports,
+# not against a constant. A flat 1000 ms ceiling was 2,600x the segment this link
+# actually produces and 2,300x the bound the same run reports, so every realistic
+# conversion bug -- a stale estimate, one term with the wrong sign, a
+# systematically asymmetric link -- lived inside it. A conversion claiming +-0.4 ms
+# has no business implying a 900 ms flight time.
+LINK_FLOOR_MS = 5.0
+LINK_BOUND_MULTIPLE = 10.0
+
+# A run that converged once and then proxied for the rest of the drive is not a
+# run that exercised the conversion. Plan section 9's stated risk is exactly the
+# proxy being in use for longer than expected.
+MIN_CONVERTED_FRACTION = 0.5
 
 
 class _FakeDetector:
@@ -324,7 +333,18 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
     fresh = [t for t in ticks if t["gps_fresh"]]
     converted_fresh = sum(1 for t in converted if t["gps_fresh"])
     link_summary = percentiles([int(t["link_ms"] * 1e6) for t in converted])
-    link_p95_ms = link_summary.get("p95")
+    # max and min, not p95. At n=91 a p95 leaves four values above it, so a
+    # minority of grossly wrong conversions hid behind it entirely.
+    link_max_ms = max((t["link_ms"] for t in converted), default=None)
+    link_min_ms = min((t["link_ms"] for t in converted), default=None)
+    bounds = [t["timebase"]["bound_ms"] for t in converted
+              if t["timebase"].get("bound_ms") is not None]
+    bound_p95_ms = percentiles([int(b * 1e6) for b in bounds]).get("p95") if bounds else None
+    ceiling_ms = (
+        None if bound_p95_ms is None
+        else max(LINK_FLOOR_MS, LINK_BOUND_MULTIPLE * bound_p95_ms)
+    )
+    converted_fraction = (len(converted) / len(ticks)) if ticks else 0.0
     return {
         "duration_s": duration_s,
         "planted_clock_offset_hours": round(offset_ns / 3.6e12, 3),
@@ -374,19 +394,32 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
             ticks
             and advisories["received"] > 0
             and converted
-            # Every converted tick must be fresh. A conversion that returns a
-            # wrong number shows up here and nowhere else.
+            # Every converted tick must be fresh.
             and converted_fresh == len(converted)
-            # And the segment it implies has to be physically possible.
-            and link_p95_ms is not None
-            and abs(link_p95_ms) <= MAX_PLAUSIBLE_LINK_MS
+            # Enough of the run actually exercised the conversion.
+            and converted_fraction >= MIN_CONVERTED_FRACTION
+            # The worst segment must sit inside what the run's own uncertainty
+            # allows -- not inside a constant that is three orders wider.
+            and ceiling_ms is not None
+            and link_max_ms is not None
+            and link_max_ms <= ceiling_ms
+            # And no further into the impossible direction than the bound
+            # permits. Signed, not abs(): a negative flight time is not merely
+            # large, it is the wrong sign, and abs() accepted -899 ms without
+            # objection while leaving the only real check in another module.
+            and link_min_ms is not None
+            and link_min_ms >= -(bound_p95_ms or 0.0)
             and first_converted_at is not None
         ),
         "gate_detail": {
             "converted_ticks": len(converted),
             "converted_and_fresh": converted_fresh,
-            "link_p95_ms": link_p95_ms,
-            "max_plausible_link_ms": MAX_PLAUSIBLE_LINK_MS,
+            "converted_fraction": round(converted_fraction, 4),
+            "min_converted_fraction": MIN_CONVERTED_FRACTION,
+            "link_max_ms": link_max_ms,
+            "link_min_ms": link_min_ms,
+            "bound_p95_ms": bound_p95_ms,
+            "link_ceiling_ms": ceiling_ms,
             "first_converted_tick_at_s": first_converted_at,
         },
         "trace": ticks,
@@ -401,6 +434,10 @@ def _account(phone_stats, jetson_stats, sent, ticks, advisories) -> dict:
         inn = jetson_stats.channels[channel]
         up[channel.value] = {
             "queued": out.queued,
+            # Sampled after the senders stop but while the writer may still be
+            # draining, so without this term the identity fails for no defect.
+            "in_flight": max(0, out.queued - out.sent - out.dropped_outbound
+                             - out.abandoned_outbound),
             "sent": out.sent,
             "dropped_outbound": out.dropped_outbound,
             "abandoned_outbound": out.abandoned_outbound,
@@ -412,13 +449,37 @@ def _account(phone_stats, jetson_stats, sent, ticks, advisories) -> dict:
         }
     gaps = []
     for channel, row in up.items():
-        if row["queued"] != row["sent"] + row["dropped_outbound"] + row["abandoned_outbound"]:
-            gaps.append(f"{channel}: outbound account does not close")
+        # `dropped_outbound` is a TERM of this identity, so the account closes by
+        # construction exactly when a depth-1 LATEST_WINS channel drops. Closing
+        # is therefore not the same as losing nothing, and the loss is named
+        # separately rather than left for a reader to infer from a true flag.
+        accounted = row["sent"] + row["dropped_outbound"] + row["abandoned_outbound"]
+        if row["queued"] != accounted + row["in_flight"]:
+            gaps.append(
+                f"{channel}: queued {row['queued']} != sent {row['sent']} + dropped "
+                f"{row['dropped_outbound']} + abandoned {row['abandoned_outbound']} "
+                f"+ in flight {row['in_flight']}"
+            )
         if row["sent"] != row["received"]:
             gaps.append(f"{channel}: {row['sent']} sent but {row['received']} received")
-    if advisories["received"] != len(ticks):
-        gaps.append(f"{len(ticks)} ticks but {advisories['received']} advisories returned")
-    return {"upstream": up, "reconciliation": gaps, "reconciled": not gaps}
+        # The clause that would catch a malformed message: a record that arrived
+        # and was never handed to a consumer.
+        if row["received"] != row["delivered"] + row["dropped_inbound"]:
+            gaps.append(
+                f"{channel}: received {row['received']} but delivered "
+                f"{row['delivered']} + dropped inbound {row['dropped_inbound']}"
+            )
+    lost = {c: r["dropped_outbound"] + r["abandoned_outbound"] + r["dropped_inbound"]
+            for c, r in up.items()}
+    return {
+        "upstream": up,
+        "reconciliation": gaps,
+        "reconciled": not gaps,
+        # Stated outright. The account closing says the numbers are consistent,
+        # not that nothing was lost.
+        "lost_by_channel": lost,
+        "lost_total": sum(lost.values()),
+    }
 
 
 def _tally(values) -> dict[str, int]:

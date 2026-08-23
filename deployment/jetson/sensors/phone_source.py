@@ -126,6 +126,11 @@ class _PhoneSource:
 
     def start(self):
         self._stop.clear()
+        # Cleared on restart. Without this a restarted source is permanently
+        # "ended" with a live reader thread, and health() publishes the
+        # contradictory pair reader_alive True beside end_of_stream True.
+        self.failure = None
+        self._on_reader_restarted()
         self._thread = threading.Thread(target=self._loop, name=self._name, daemon=True)
         self._thread.start()
         return self
@@ -171,9 +176,17 @@ class _PhoneSource:
     def _on_reader_ended(self) -> None:
         """Hook for a subclass that has consumers to wake. Default: nothing."""
 
+    def _on_reader_restarted(self) -> None:
+        """The inverse hook. Default: nothing."""
+
     def health(self) -> dict[str, Any]:
         return {
-            "reader_alive": bool(self._thread is not None and self._thread.is_alive()),
+            # A recorded failure counts as not alive even in the window between
+            # the guard recording it and the thread actually unwinding.
+            "reader_alive": bool(
+                self._thread is not None and self._thread.is_alive()
+                and self.failure is None
+            ),
             "failure": self.failure,
         }
 
@@ -203,6 +216,10 @@ class PhoneCameraStream(_PhoneSource):
         with self._cond:
             self.end_of_stream = True
             self._cond.notify_all()
+
+    def _on_reader_restarted(self) -> None:
+        with self._cond:
+            self.end_of_stream = False
 
     def stop(self) -> None:
         super().stop()

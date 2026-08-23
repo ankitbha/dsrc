@@ -69,6 +69,10 @@ class BuilderConfig:
     # when it carries no uncertainty of its own. Covers `now` being sampled just
     # before the reading; anything larger is a clock problem, not sampling order.
     clock_sampling_epsilon_s: float = 0.05
+    # A cross-device stamp whose uncertainty exceeds this share of the staleness
+    # window cannot answer the freshness question, so it is refused rather than
+    # given that much benefit of the doubt.
+    max_bound_fraction: float = 0.5
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "BuilderConfig":
@@ -137,28 +141,34 @@ class ObservationBuilder:
 
         # --- ego motion from GPS -------------------------------------
         gps_age = gps.age_s(t_mono)
-        # Bounded on both sides, and the two sides are not the same size.
-        #
-        # The past side is the staleness window: how old a reading may be and
-        # still describe now. The future side is much tighter, because a reading
-        # from this clock's future is nonsense -- and it is exactly what an
-        # unconverted cross-device stamp produces whenever the peer booted later
-        # than this device. A one-sided `<=` accepted those, so an arbitrarily
-        # old fix read as current: the dangerous direction of the clock-mixing
-        # failure, where the positive direction merely falls back to neutral.
-        #
-        # It is not zero, because two legitimate cases land slightly ahead: `now`
-        # is often sampled just before the reading, and a converted stamp may sit
-        # inside its own bound after the arrival it preceded. So the allowance is
-        # that bound when the stamp carries one, and a small sampling epsilon
-        # otherwise -- rather than the full staleness window, which would have
-        # granted two seconds of future tolerance on the strength of an eight
-        # millisecond uncertainty.
         stamp = getattr(gps, "timebase", None)
-        future_allowance = cfg.clock_sampling_epsilon_s
-        if stamp is not None and stamp.bound_s is not None:
-            future_allowance = max(future_allowance, stamp.bound_s)
-        gps_fresh = gps.valid and -future_allowance <= gps_age <= cfg.gps_stale_after_s
+        bound_s = None if stamp is None else stamp.bound_s
+        # Conservative on both sides, and capped.
+        #
+        # The past side charges the bound: a reading 1.9 s old with a 0.4 s
+        # uncertainty may really be 2.3 s old, and calling that fresh inside a
+        # 2 s window is answering "possibly" as "certainly". The future side
+        # allows the bound, because a converted stamp may legitimately land after
+        # the arrival it preceded -- plus a sampling epsilon, because `now` is
+        # often read just before the reading.
+        #
+        # And a bound wider than half the window means the timebase cannot
+        # resolve the question at all. Granting it that much *future* tolerance
+        # would have been more slack than the whole past window: at a 10 s bound
+        # a stamp nine seconds into this clock's future read as measured. So it
+        # is refused with its own provenance, which says the timebase could not
+        # answer rather than pretending it did.
+        uncertainty_s = 0.0 if bound_s is None else bound_s
+        timebase_unresolved = uncertainty_s > cfg.gps_stale_after_s * cfg.max_bound_fraction
+        future_allowance = min(
+            max(cfg.clock_sampling_epsilon_s, uncertainty_s), cfg.gps_stale_after_s
+        )
+        gps_fresh = (
+            gps.valid
+            and not timebase_unresolved
+            and -future_allowance <= gps_age
+            and gps_age + uncertainty_s <= cfg.gps_stale_after_s
+        )
         if gps_fresh:
             ego_speed = max(0.0, gps.speed_mps) if math.isfinite(gps.speed_mps) else 0.0
             self._ego.last_speed_mps = ego_speed
@@ -328,6 +338,9 @@ class ObservationBuilder:
             "gps_valid": gps.valid,
             "gps_age_s": round(gps_age, 3) if math.isfinite(gps_age) else None,
             "gps_fresh": gps_fresh,
+            # True when the stamp's own uncertainty was too wide to decide
+            # freshness at all -- distinct from a stale fix and from a missing one.
+            "gps_timebase_unresolved": timebase_unresolved,
             # What the freshness decision rested on. None for a local fix.
             "gps_timebase": (
                 None if getattr(gps, "timebase", None) is None else gps.timebase.to_record()

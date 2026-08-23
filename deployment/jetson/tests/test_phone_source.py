@@ -817,3 +817,105 @@ def test_is_stale_refuses_a_fix_from_the_future():
     assert gps.is_stale(now) is False
     gps._fix = GpsFix(valid=True, speed_mps=1.0, t_mono=now - 60.0)
     assert gps.is_stale(now) is True
+
+
+# -- the allowance, at the widths that distinguish the formulas ---------------
+
+
+def _fresh(ahead_s: float, bound_s: float | None, now: float = 884_285.2) -> dict:
+    stamp = None if bound_s is None else TimebaseStamp(
+        t_capture_mono=now + ahead_s, t_arrival_mono=now, bound_s=bound_s,
+        estimate_id=1, proxy=False,
+    )
+    fix = GpsFix(valid=True, speed_mps=27.0, fix_quality=1, num_sats=9,
+                 t_mono=now + ahead_s, t_wall=0.0, timebase=stamp)
+    return ObservationBuilder(BuilderConfig()).build([], fix, now, None).diagnostics
+
+
+def test_the_future_allowance_is_the_stamps_own_bound():
+    """The case that separates the bound from the sampling epsilon.
+
+    Both earlier tests probed where `max(epsilon, bound)` and `epsilon` alone
+    agree -- 0.004 s ahead (under both) and 0.5 s ahead (over both) -- so
+    deleting the bound lookup entirely left the suite green. 80 ms ahead is
+    inside a 106 ms bound and outside a 50 ms epsilon, which is the only kind of
+    case that can tell them apart. A 106 ms bound is what a 200 ms link
+    produces, and 200 ms is exactly the round-trip ceiling the gate admits.
+    """
+    assert _fresh(0.080, 0.106)["gps_fresh"] is True, (
+        "a stamp inside its own 106 ms bound was rejected"
+    )
+    assert _fresh(0.080, 0.008)["gps_fresh"] is False, (
+        "80 ms into the future was accepted on the strength of an 8 ms bound"
+    )
+
+
+def test_a_bound_too_wide_to_decide_is_refused_not_indulged():
+    """`max()` had no cap, so a stamp claiming a 10 s bound was granted 10 s of
+    future tolerance -- more slack than the whole 2 s past window -- and read as
+    measured nine seconds into this clock's future."""
+    wide = _fresh(9.0, 10.0)
+    assert wide["gps_fresh"] is False
+    assert wide["gps_timebase_unresolved"] is True, (
+        "the record does not say the timebase could not answer"
+    )
+    narrow = _fresh(0.0, 0.008)
+    assert narrow["gps_timebase_unresolved"] is False
+
+
+def test_the_bound_is_charged_on_the_past_side_too():
+    """Otherwise the gate answers "possibly fresh" going back and "certainly
+    fresh" going forward: a reading 1.9 s old with a 0.4 s uncertainty may really
+    be 2.3 s old, which is outside a 2 s window."""
+    assert _fresh(-1.9, 0.4)["gps_fresh"] is False
+    assert _fresh(-1.0, 0.4)["gps_fresh"] is True
+    # A local fix has no uncertainty to charge, so the window is the window.
+    assert _fresh(-1.9, None)["gps_fresh"] is True
+
+
+def test_the_camera_can_be_restarted_after_a_stop():
+    """`stop()` marks the stream ended, and `start()` has to clear that or a
+    restarted camera is permanently ended with a live reader thread -- and
+    `health()` publishes the contradictory pair reader_alive True beside
+    end_of_stream True. The local CameraStream has no such state, so this was a
+    divergence in the one direction the docstring claims they are alike."""
+
+    class _Silent:
+        def recv_with_receipt(self, channel, timeout=0.0):
+            return None
+
+    camera = PhoneCameraStream(_Silent(), PhoneClockAdapter(TimebaseEstimator()))
+    camera.start()
+    camera.stop()
+    assert camera.end_of_stream is True
+    camera.start()
+    try:
+        assert camera.end_of_stream is False, "a restarted camera is still ended"
+        assert camera.failure is None
+        record = camera.to_record()
+        assert record["reader_alive"] is True and record["end_of_stream"] is False
+    finally:
+        camera.stop()
+
+
+def test_a_clean_stop_ends_the_stream_so_a_consumer_can_terminate():
+    """`run_demo` breaks on `end_of_stream`. Only the failure path was pinned, so
+    making a clean stop not end the stream left the suite green -- and a clean
+    stop is the ordinary case."""
+
+    class _Silent:
+        def recv_with_receipt(self, channel, timeout=0.0):
+            return None
+
+    camera = PhoneCameraStream(_Silent(), PhoneClockAdapter(TimebaseEstimator())).start()
+    assert camera.end_of_stream is False
+    camera.stop()
+    assert camera.end_of_stream is True, "a stopped stream did not report itself ended"
+    assert camera.wait_for_fresh(timeout=5.0) is None
+
+
+def test_reader_alive_accounts_for_a_recorded_failure():
+    stamp = PhoneCameraStream.__new__(PhoneCameraStream)
+    stamp._thread = None
+    stamp.failure = "RuntimeError: boom"
+    assert stamp.health()["reader_alive"] is False

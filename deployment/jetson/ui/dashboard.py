@@ -105,7 +105,9 @@ def render_dashboard(
     put(f"Leader:  {'%.0f m' % lg if np.isfinite(lg) else '--'}", WHITE, 0.5, 24)
     put(f"Confidence: {adv.confidence_label} ({tick.policy.confidence:.2f})", WHITE, 0.5, 28)
     y += 4
-    e2e = stats.get("e2e_ms", {})
+    # `or {}`, not `get(..., {})`: the key is present and None for an absent
+    # series, so the default never applies. link_ms is None on every local run.
+    e2e = stats.get("e2e_ms") or {}
     put(f"FPS {tick.fps:4.1f}   e2e {tick.e2e_ms:5.1f} ms", GREEN if tick.e2e_ms < 200 else RED, 0.5, 24)
     put(f"e2e p50/p95 {e2e.get('p50', 0):5.1f}/{e2e.get('p95', 0):5.1f} ms", GRAY, 0.45, 22)
     put(f"det {tick.stage_ms['detect']:4.1f}  obs {tick.stage_ms['observe']:4.2f}  pol {tick.stage_ms['policy_advisory']:4.2f} ms", GRAY, 0.45, 26)

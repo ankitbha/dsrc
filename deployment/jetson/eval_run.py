@@ -94,8 +94,18 @@ def pctl(values: list[float]) -> dict[str, float]:
 
 
 def fmt_row(name: str, s: dict[str, float]) -> str:
+    """Includes n, min and the negative count.
+
+    Those were added "so the case where the bound is being tested is not
+    something a reader has to infer" -- and then rendered nowhere, so they sat in
+    report.json while report.md showed mean/p50/p95/max. A field a reader never
+    sees is a field that does not exist.
+    """
+    negative = s.get("negative", 0)
+    flag = f" ({negative} negative)" if negative else ""
     return (
-        f"| {name} | {s['mean']:.1f} | {s['p50']:.1f} | {s['p95']:.1f} | {s['max']:.1f} |"
+        f"| {name} | {s.get('n', 0)} | {s.get('min', 0.0):.1f} | {s['mean']:.1f} | "
+        f"{s['p50']:.1f} | {s['p95']:.1f} | {s['max']:.1f}{flag} |"
     )
 
 
@@ -319,6 +329,16 @@ def render_plots(result: dict[str, Any], run_dir: Path) -> list[str]:
     written = []
 
     fig, ax = plt.subplots(figsize=(10, 3.2), dpi=110)
+    # The gated series belongs on the chart that carries the gate's line. It
+    # plotted only e2e while drawing a threshold for jetson -- a target line for
+    # a series that was not on the figure.
+    jetson = [t.get("jetson_ms") for t in ticks]
+    if all(v is not None for v in jetson):
+        ax.plot(ts, jetson, lw=0.9, label="jetson (gated)")
+    link = [t.get("link_ms") for t in ticks]
+    if any(v is not None for v in link):
+        ax.plot(ts, [v if v is not None else float("nan") for v in link],
+                lw=0.7, ls=":", label="link")
     ax.plot(ts, [t["e2e_ms"] for t in ticks], lw=0.7, label="e2e")
     ax.plot(ts, [t["stage_ms"]["detect"] for t in ticks], lw=0.7, label="detect")
     ax.axhline(GATE_JETSON_P95_MS, color="r", ls="--", lw=0.8, label="200 ms target")
@@ -402,8 +422,8 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         "",
         "## Latency (full run)",
         "",
-        "| stage | mean | p50 | p95 | max |",
-        "|---|---|---|---|---|",
+        "| stage | n | min | mean | p50 | p95 | max |",
+        "|---|---|---|---|---|---|---|",
     ]
     order = ["jetson_ms", "link_ms", "e2e_ms", "capture_to_start_ms", "detect_ms",
              "track_distance_ms",
