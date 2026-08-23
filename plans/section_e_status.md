@@ -18,6 +18,8 @@ Nothing here blocks progress — each is a call I made and recorded rather than 
 | 3 | The 9 km HERE corridor has no legitimate path source. The phone has no route, and picking one is a sensing decision the spec now forbids it. | earlier HERE work | Deferred to task 21. Interim would be a heading projection, which leaves the road on any real curve. The honest fix is widening the downlink. |
 | 4 | `t_capture_mono_ns` is an arrival stamp, not the shutter. | task 18 O1 | Kept on `elapsedRealtimeNanos` because it must share a clock with the header's enqueue stamp. **Its bias is unquantifiable from the two stamps available** — differencing them came out negative, which is impossible for one clock base and is itself the proof they differ. Needs task 19's enqueue stamp. |
 | 5 | Non-rate settings (camera resolution, JPEG quality, GPS accuracy, HERE query shape) are Jetson-owned but `rate_cmd` carries only rates. | task 17 O2, task 18 O2 | Local config stand-in, shaped like the future wire object. |
+| 6 | The GPS adapter can **never send `valid: false`**, so the Jetson cannot tell "no fix" from "the phone stopped sending". | task 19 | Left open. `LocationManager` only delivers a `Location` and a `Location` always carries a position. The platform signal exists (`onProviderDisabled`) and is unwired; whether it belongs on `gps` or `telemetry` is a task 24 question. |
+| 7 | Camera frames can be dropped in **two** places and only one is visible to the receiver. | tasks 18/19 | Accepted and counted. `FrameBuffer` and the channel queue are both depth-1 latest-wins; a drop before the sequence number is assigned leaves no gap, so sequence-gap accounting undercounts camera loss. |
 
 ---
 
@@ -363,18 +365,38 @@ seven shapes CPython rejects, one of which **corrupted silently** — `toIntOrNu
 accepts a leading sign, so `\u-041` became U+FFBF. And a valid GPS fix with a null
 coordinate was accepted here and refused by Python.
 
-### Two findings deliberately still open
+### One of the two open findings is now closed
 
-1. **The FusedLocation adapter and the service wiring are genuinely absent.** The plan's
-   steps 10 and 11 list both; only the interface and a fake exist, and `SensingService`
-   has no session and no GPS. My commit for step 10 overstated what was done — the
-   pipeline and both clocks are real, the platform adapter is not.
-2. **The interop test is far weaker than the plan promised.** Step 8 says 1,000 frames
-   with deliberate overflow, a malformed message and a framing error, and per-reason
-   counters compared field by field. Actual: 40 frames, none of those provoked. The
-   validator's mutation evidence is the damning part — **removing the hello's reservation
-   of control sequence 0 leaves all six interop tests green**, so the leg that exists is
-   thinner than it looks.
+**F8 is closed** (`7c4b632`). The adapter, the link and the service wiring are real:
+`SensingService` owns one session that camera and GPS share, and **393 JVM tests across
+29 classes pass, 0 failed**.
+
+The adapter is `LocationManager`, not the fused provider the plan named. `num_sats` is a
+required, non-nullable field and the fused provider has no satellite count — it is not on
+`Location`, and `GnssStatus` is a `LocationManager` facility — so every fused fix would
+have gone out as a *valid* fix claiming zero satellites, with no null in that field to
+mean "unknown".
+
+Both GPS clocks come off `elapsedRealtime`, so unlike the camera's pair the difference is
+a real delivery latency rather than a latency plus an unknown offset. That is the
+measurement task 18's O1 could not make.
+
+A test found a defect that would have ended a drive. A version mismatch throws
+`FramingError`, which extends `Exception` rather than `IOException` or `RuntimeException`,
+so it escaped both catches and killed the link thread outright — no reconnect, every send
+refused, nothing recording why. It is also the one handshake failure guaranteed to happen
+in the field, after the Jetson is updated and the phone is not.
+
+And `camera` was exempt from the sender rule and should not have been: the
+highest-volume channel was the one place an unchecked field would travel thousands of
+times before anyone looked.
+
+**F9 is still open.** The interop test remains far weaker than the plan's step 8 promises
+— 1,000 frames with deliberate overflow, a malformed message and a framing error, and
+per-reason counters compared field by field; actual is 40 frames with none of those
+provoked. The evidence stands: **removing the hello's reservation of control sequence 0
+leaves all six interop tests green.** Held until validator round 2 reports, because its
+findings name the mutations the interop leg has to detect.
 
 `imu`, `here` and `telemetry` messages land with tasks 20, 21 and 24 — their producers.
 The golden vectors pin framing, not message decode, so they pass without them.
