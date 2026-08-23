@@ -27,10 +27,13 @@ dependencies {
 // direction the test exists for passed silently. Passing the path as a system
 // property also removes a directory walk that depended on the working directory.
 val protocolSpec = rootProject.layout.projectDirectory.file("../specs/transport_protocol.md")
+val goldenFrames = rootProject.layout.projectDirectory.file("../specs/transport_golden_frames.json")
 
 tasks.test {
     inputs.file(protocolSpec).withPropertyName("protocolSpec")
     systemProperty("dsrc.protocolSpec", protocolSpec.asFile.absolutePath)
+    inputs.file(goldenFrames).withPropertyName("goldenFrames")
+    systemProperty("dsrc.goldenFrames", goldenFrames.asFile.absolutePath)
     testLogging {
         events("failed")
     }
