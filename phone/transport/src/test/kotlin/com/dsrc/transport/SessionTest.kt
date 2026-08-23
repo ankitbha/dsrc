@@ -264,12 +264,27 @@ class SessionTest {
         assertTrue(sequences.isNotEmpty(), "nothing arrived")
         assertEquals(sequences, sequences.sorted(), "sequence numbers must arrive in order")
         assertEquals(sequences.size, sequences.distinct().size, "no sequence number may repeat")
+
+        // *Where* the gap falls is timing-dependent, and two earlier versions of this
+        // test each assumed one shape. If the whole burst is enqueued before the writer
+        // wakes, the oldest are dropped and the survivors are one contiguous run at the
+        // end. If the writer interleaves, an early run gets out before the queue fills and
+        // the gap lands in the middle. Both are correct behaviour for drop-oldest.
+        //
+        // What holds either way is the count: the sequence numbers the peer never saw is
+        // exactly what the sender dropped. That is the invariant worth asserting, and it
+        // is the one the receiver can actually act on.
+        assertEquals(0, sender.pending, "the burst should have fully drained: $sender")
+        val highest = sequences.last()
+        val missing = (highest + 1) - sequences.size
+        assertEquals(
+            sender.dropped,
+            missing,
+            "the peer must be able to see every drop as a missing sequence number: " +
+                "highest $highest, received ${sequences.size}, $sender",
+        )
         if (sender.dropped > 0) {
-            val span = sequences.last() - sequences.first() + 1
-            assertTrue(
-                span > sequences.size,
-                "with ${sender.dropped} dropped there must be a gap: span $span over ${sequences.size} frames",
-            )
+            assertTrue(missing > 0, "with ${sender.dropped} dropped there must be a visible gap")
         }
     }
 
