@@ -133,7 +133,18 @@ class ObservationBuilder:
 
         # --- ego motion from GPS -------------------------------------
         gps_age = gps.age_s(t_mono)
-        gps_fresh = gps.valid and gps_age <= cfg.gps_stale_after_s
+        # Symmetric, and that is the point. A one-sided `<=` treats a negative
+        # age as fresh -- and a negative age is exactly what an unconverted
+        # cross-device stamp produces whenever the peer booted later than this
+        # device, so a fix arbitrarily far in the past read as current. That is
+        # the dangerous direction of the clock-mixing failure; the positive
+        # direction merely falls back to neutral.
+        #
+        # The same window bounds both sides, so no new constant. A small negative
+        # age is ordinary: `now` is often sampled just before the reading, and a
+        # converted stamp may legitimately land inside its own bound after the
+        # arrival it preceded. A large one is nonsense in either direction.
+        gps_fresh = gps.valid and abs(gps_age) <= cfg.gps_stale_after_s
         if gps_fresh:
             ego_speed = max(0.0, gps.speed_mps) if math.isfinite(gps.speed_mps) else 0.0
             self._ego.last_speed_mps = ego_speed
