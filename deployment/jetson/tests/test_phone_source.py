@@ -478,7 +478,20 @@ def test_a_small_negative_age_is_ordinary_and_a_large_one_is_not():
         "a conversion inside its own bound was rejected"
     )
 
-    # But not beyond the staleness window.
+    # And the allowance is the BOUND, not the staleness window. This case sits
+    # between the two -- 0.5 s ahead, with an 8 ms bound, inside a 2 s window --
+    # so it is the only kind that can tell them apart. Probing only inside the
+    # bound and outside the window leaves both formulas passing.
+    between = TimebaseStamp(t_capture_mono=now + 0.5, t_arrival_mono=now,
+                            bound_s=bound_s, estimate_id=1, proxy=False)
+    ahead = GpsFix(valid=True, speed_mps=27.0, fix_quality=1, num_sats=9,
+                   t_mono=now + 0.5, t_wall=0.0, timebase=between)
+    assert ObservationBuilder(BuilderConfig()).build(
+        [], ahead, now, None
+    ).diagnostics["gps_fresh"] is False, (
+        "0.5 s into the future was accepted on the strength of an 8 ms bound"
+    )
+
     far = TimebaseStamp(t_capture_mono=now + 5.0, t_arrival_mono=now,
                         bound_s=bound_s, estimate_id=1, proxy=False)
     too_far = GpsFix(valid=True, speed_mps=27.0, fix_quality=1, num_sats=9,
@@ -541,6 +554,12 @@ def test_a_local_frame_reports_no_link_segment():
     assert tick.to_record()["link_ms"] is None
     # And with no link, the two segments coincide.
     assert tick.jetson_ms == pytest.approx(tick.e2e_ms, abs=1e-6)
+    # The aggregate must report absence too. An empty series summarising as
+    # zeros meant every local run published stats.link_ms = 0/0/0 for a segment
+    # that does not exist -- a measured-looking zero.
+    snapshot = pipeline.stats.snapshot()
+    assert snapshot["link_ms"] is None, snapshot["link_ms"]
+    assert snapshot["jetson_ms"] is not None and snapshot["jetson_ms"]["n"] == 1
 
 
 def test_jetson_ms_is_measured_from_arrival_not_from_capture():
