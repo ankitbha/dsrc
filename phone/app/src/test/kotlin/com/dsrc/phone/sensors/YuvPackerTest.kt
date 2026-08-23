@@ -138,6 +138,83 @@ class YuvPackerTest {
     }
 
     @Test
+    fun `chroma padding is stripped on every row, not just the first`() {
+        // The row-stride bug that no test caught: reading chroma at
+        // `row * chromaWidth * pixelStride` instead of `row * uvRowStride` is identical
+        // on row 0 and wrong on every row after it. At real 720p semi-planar geometry
+        // (uvRowStride 1536, chromaWidth x pixelStride 1280) that corrupts the whole
+        // frame below the first chroma row, and the emulator cannot catch it because its
+        // virtual camera reports rowStride == width.
+        val w = 8; val h = 8
+        val uvStride = 16          // wider than chromaWidth (4), i.e. padded
+        val out = YuvPacker.toNv21(
+            y = plane(h, w, stride = w),
+            u = plane(h / 2, w / 2, stride = uvStride, base = 0x40),
+            v = plane(h / 2, w / 2, stride = uvStride, base = 0x50),
+            width = w, height = h, yRowStride = w, uvRowStride = uvStride, uvPixelStride = 1,
+        )
+        val chroma = out.copyOfRange(w * h, out.size)
+        for (row in 0 until h / 2) {
+            for (col in 0 until w / 2) {
+                val at = (row * (w / 2) + col) * 2
+                assertEquals("V at row $row col $col", (0x50 + row * 16 + col).toByte(), chroma[at])
+                assertEquals("U at row $row col $col", (0x40 + row * 16 + col).toByte(), chroma[at + 1])
+            }
+        }
+    }
+
+    @Test
+    fun `a chroma row stride too narrow for the samples is refused`() {
+        // Nothing tested this bound at all.
+        val threw = runCatching {
+            YuvPacker.toNv21(
+                y = ByteArray(64), u = ByteArray(64), v = ByteArray(64),
+                width = 8, height = 8,
+                yRowStride = 8, uvRowStride = 3, uvPixelStride = 2,   // needs 4*2 = 8
+            )
+        }.isFailure
+        assertTrue(threw)
+    }
+
+    @Test
+    fun `a plane one byte short is refused`() {
+        // The existing short-plane test uses ByteArray(1) against a need of 16, which is
+        // far too coarse to catch an off-by-one in the size formula.
+        val w = 8; val h = 8
+        val uvNeeded = (h / 2 - 1) * (w / 2) + (w / 2 - 1) + 1   // = 16 at stride 4, pixelStride 1
+        YuvPacker.toNv21(
+            y = ByteArray(w * h), u = ByteArray(uvNeeded), v = ByteArray(uvNeeded),
+            width = w, height = h, yRowStride = w, uvRowStride = w / 2, uvPixelStride = 1,
+        )
+        for (which in listOf("y", "u", "v")) {
+            val threw = runCatching {
+                YuvPacker.toNv21(
+                    y = ByteArray(if (which == "y") w * h - 1 else w * h),
+                    u = ByteArray(if (which == "u") uvNeeded - 1 else uvNeeded),
+                    v = ByteArray(if (which == "v") uvNeeded - 1 else uvNeeded),
+                    width = w, height = h, yRowStride = w, uvRowStride = w / 2, uvPixelStride = 1,
+                )
+            }.isFailure
+            assertTrue("$which one byte short must be refused", threw)
+        }
+    }
+
+    @Test
+    fun `a short plane is refused by name, not by an index error`() {
+        // runCatching{}.isFailure cannot tell a named IllegalArgumentException from an
+        // IndexOutOfBoundsException out of copyInto, so deleting the bound check looked
+        // like it changed nothing.
+        val error = runCatching {
+            YuvPacker.toNv21(
+                y = ByteArray(4), u = ByteArray(16), v = ByteArray(16),
+                width = 8, height = 8, yRowStride = 8, uvRowStride = 4, uvPixelStride = 1,
+            )
+        }.exceptionOrNull()
+        assertTrue("expected IllegalArgumentException, got $error", error is IllegalArgumentException)
+        assertTrue("the message should name the plane: ${error?.message}", error?.message?.contains("y plane") == true)
+    }
+
+    @Test
     fun `a realistic 720p geometry packs to the right size`() {
         val w = 1280; val h = 720
         val out = YuvPacker.toNv21(

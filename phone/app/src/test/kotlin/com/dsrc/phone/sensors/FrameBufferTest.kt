@@ -77,20 +77,58 @@ class FrameBufferTest {
     }
 
     @Test
-    fun `clearing is not counted as a drop`() {
-        // Shutdown discards the held frame; nothing displaced it and nothing was owed
-        // it, so counting it would make the totals disagree with what was lost in flight.
+    fun `closing discards rather than drops, and the discard is counted`() {
+        // A drop is a frame a newer one displaced -- the channel's ordinary loss. A
+        // discard is a frame abandoned because sensing ended. Keeping them apart stops
+        // shutdown inflating the in-flight loss; counting the discard at all is what
+        // keeps the balance identity true, which an earlier version broke after every
+        // stop, leaving those frames counted nowhere.
         val buffer = FrameBuffer()
         buffer.offer(frame(1))
-        buffer.clear()
-        assertEquals(0, buffer.stats.dropped)
+        buffer.close()
+        assertEquals("not a drop", 0, buffer.stats.dropped)
+        assertEquals("but counted", 1, buffer.stats.discarded)
+        assertTrue("the identity must hold after a stop: ${buffer.stats}", buffer.stats.balances)
         assertNull(buffer.drain())
+    }
+
+    @Test
+    fun `closing an empty buffer discards nothing`() {
+        val buffer = FrameBuffer()
+        buffer.close()
+        assertEquals(0, buffer.stats.discarded)
+        assertTrue(buffer.stats.balances)
+    }
+
+    @Test
+    fun `a frame offered after closing is refused and counted`() {
+        // Compressing a 720p frame takes tens of milliseconds, so an encode that began
+        // before a stop finishes after it. A late arrival must not sit in the buffer
+        // waiting for a session that has ended.
+        val buffer = FrameBuffer()
+        buffer.close()
+        assertNull(buffer.offer(frame(9)))
+        assertNull("nothing may be held after closing", buffer.drain())
+        val stats = buffer.stats
+        assertEquals(1, stats.accepted)
+        assertEquals(1, stats.discarded)
+        assertEquals(0, stats.dropped)
+        assertTrue("the identity must hold: $stats", stats.balances)
+    }
+
+    @Test
+    fun `closing twice discards once`() {
+        val buffer = FrameBuffer()
+        buffer.offer(frame(1))
+        buffer.close()
+        buffer.close()
+        assertEquals(1, buffer.stats.discarded)
     }
 
     @Test
     fun `counters never decrease`() {
         val buffer = FrameBuffer()
-        var last = FrameBuffer.Stats(0, 0, 0, false)
+        var last = FrameBuffer.Stats(0, 0, 0, 0, false)
         repeat(50) { i ->
             buffer.offer(frame(i.toLong()))
             if (i % 2 == 0) buffer.drain()

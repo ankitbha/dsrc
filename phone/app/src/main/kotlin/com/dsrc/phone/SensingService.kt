@@ -77,6 +77,12 @@ class SensingService : LifecycleService() {
             Log.w(TAG, "destroyed while ${machine.state}; publishing IDLE")
             status.set(SensingState.IDLE)
         }
+        // Reached without passing through the machine on any platform teardown -- task
+        // removed, low memory, an external stop -- and those paths never call
+        // onSensingDown, so the camera and encoder threads outlived the service. The
+        // camera itself is released by the service's own lifecycle unbinding CameraX,
+        // which is why leaked threads were the only symptom and nothing noticed.
+        onSensingDown()
         super.onDestroy()
     }
 
@@ -188,13 +194,19 @@ class SensingService : LifecycleService() {
         val encoder = Executors.newSingleThreadExecutor()
         val pipe = CameraPipeline(config, encoder)
         val source = CameraXSource(this, this, config)
-        source.start(pipe)
+
+        // Published before start(), so a throw out of start still leaves the executor
+        // and pipeline reachable for onSensingDown to release. Assigning afterwards
+        // orphaned the encoder thread with nothing holding a reference to it.
         pipeline = pipe
         cameraSource = source
         encodeExecutor = encoder
+
+        source.start(pipe)
         Log.i(TAG, "camera capture starting at ${config.cameraHz} Hz")
     }
 
+    /** Idempotent: called from the machine's teardown and again from onDestroy. */
     private fun onSensingDown() {
         // Order matters: stop the source first so no new frame is offered, then the
         // pipeline so anything already queued drops out, then the executor.

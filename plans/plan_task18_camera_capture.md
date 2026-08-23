@@ -171,9 +171,19 @@ sizes are not representative of a road.
 
 ## 7. Risks
 
-- **The emulator camera is synthetic.** It proves the plumbing, the rate gate and
-  the pool discipline. It says nothing about real exposure, real frame intervals or
-  real JPEG sizes.
+- **The emulator camera is synthetic, and narrower than it looks.** It proves the
+  plumbing, the rate gate and the pool discipline. It says nothing about real exposure,
+  real frame intervals or real JPEG sizes — and, more sharply, **it cannot exercise the
+  packer at all**: the virtual camera reports `rowStride == width` and
+  `pixelStride == 1` planar, so both stride padding and the semi-planar chroma path are
+  inert on it. That is exactly where `YuvPacker`'s bugs live, which is why they are
+  pinned by pure tests rather than by the device.
+- **The configured resolution is a request, not a guarantee.** A device need not offer
+  the requested size. Measured: asking the emulator for 1280x720 with a
+  prefer-higher fallback returned 1856x1392 — nearly four times the pixels, and four
+  times the encode cost and payload. The fallback now prefers lower, which the emulator
+  answers with 640x480. `CapturedFrame` reports the frame's own dimensions rather than
+  the config's, so what goes on the wire is always what arrived.
 - **`ImageProxy` accounting is silent when wrong.** A leak stalls the stream with no
   exception; the 30 s test is the only thing that would notice.
 - **O1 means `t_capture_mono_ns` is an arrival-ish stamp, not the shutter.** It is

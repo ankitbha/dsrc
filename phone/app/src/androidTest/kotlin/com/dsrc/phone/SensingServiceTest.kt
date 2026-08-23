@@ -269,6 +269,37 @@ class SensingServiceTest {
         await(SensingState.IDLE)
     }
 
+    // -- teardown by the platform ------------------------------------------------
+
+    @Test
+    fun aPlatformTeardownReleasesTheWorkerThreads() {
+        // stopService goes straight to onDestroy without passing through the state
+        // machine, so onSensingDown was never called and both worker threads outlived
+        // the service. Every task-removal and low-memory kill leaked two. The camera
+        // itself is released by the lifecycle unbinding, which is why threads were the
+        // only symptom and nothing noticed.
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+        // Wait for the workers to exist: executor threads are created lazily on first
+        // submit, so a control taken too early sees zero either way.
+        assertTrue("no worker threads appeared", pollUntil(10_000) { workerThreads() > 0 })
+        val whileRunning = workerThreads()
+
+        context.stopService(android.content.Intent(context, SensingService::class.java))
+
+        assertTrue(
+            "worker threads outlived the service: $whileRunning still running",
+            pollUntil(10_000) { workerThreads() == 0 },
+        )
+    }
+
+    /** Encoder/analysis pool threads belonging to this process. */
+    private fun workerThreads(): Int {
+        val all = arrayOfNulls<Thread>(Thread.activeCount() * 2)
+        val n = Thread.enumerate(all)
+        return (0 until n).count { all[it]?.name?.startsWith("pool-") == true }
+    }
+
     // -- a failed foreground transition -----------------------------------------
 
     @Test

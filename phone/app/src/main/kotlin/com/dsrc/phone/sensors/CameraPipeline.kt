@@ -33,6 +33,8 @@ class CameraPipeline(
     private val accepted = AtomicLong(0)
     private val encoded = AtomicLong(0)
     private val encodeFailures = AtomicLong(0)
+    private val packFailures = AtomicLong(0)
+    private val refusedStopped = AtomicLong(0)
 
     /**
      * Offer a frame.
@@ -50,7 +52,13 @@ class CameraPipeline(
         compress: (ByteArray, Int, Int, Int) -> ByteArray,
     ): Boolean {
         seen.incrementAndGet()
-        if (!running) return false
+        if (!running) {
+            // Counted apart from the gate's rejections: a frame refused because sensing
+            // stopped is not the ordinary cost of a commanded rate below the sensor's,
+            // and reporting both as `gated` made a teardown look like rate limiting.
+            refusedStopped.incrementAndGet()
+            return false
+        }
         if (!gate.accept(timestampNs)) return false
 
         // The id counts frames the gate kept, not frames the sensor produced, so a gap
@@ -59,7 +67,16 @@ class CameraPipeline(
         val frameId = nextFrameId.incrementAndGet()
         accepted.incrementAndGet()
 
-        val packed = pack()
+        val packed = try {
+            pack()
+        } catch (t: Throwable) {
+            // YuvPacker refuses a geometry it cannot handle, and that call happens here.
+            // Letting it propagate left `accepted` incremented with no matching encode
+            // or failure, so total failure was indistinguishable from an encoder
+            // backlog -- a broken stream reported as a busy one.
+            packFailures.incrementAndGet()
+            return false
+        }
         encodeExecutor.execute {
             // Re-checked inside the task: stop() can land between submission and
             // execution, and a frame encoded after teardown would arrive in a buffer
@@ -103,7 +120,10 @@ class CameraPipeline(
      */
     fun stop() {
         running = false
-        buffer.clear()
+        // Closing rather than clearing: a frame whose compression began before this
+        // point finishes after it, and the buffer has to refuse the late arrival rather
+        // than hold it for a session that has ended.
+        buffer.close()
     }
 
     val stats: Stats
@@ -112,6 +132,8 @@ class CameraPipeline(
             accepted = accepted.get(),
             encoded = encoded.get(),
             encodeFailures = encodeFailures.get(),
+            packFailures = packFailures.get(),
+            refusedStopped = refusedStopped.get(),
             buffer = buffer.stats,
         )
 
@@ -120,12 +142,17 @@ class CameraPipeline(
         val accepted: Long,
         val encoded: Long,
         val encodeFailures: Long,
+        val packFailures: Long,
+        val refusedStopped: Long,
         val buffer: FrameBuffer.Stats,
     ) {
         /** Frames the gate rejected: the normal cost of a commanded rate below the sensor's. */
-        val gated: Long get() = seen - accepted
+        val gated: Long get() = seen - accepted - refusedStopped
 
-        /** Every accepted frame was encoded, failed to encode, or is still in flight. */
-        val inFlight: Long get() = accepted - encoded - encodeFailures
+        /** Accepted frames whose outcome is not yet known. */
+        val inFlight: Long get() = accepted - encoded - encodeFailures - packFailures
+
+        /** Every frame the camera delivered is accounted for under exactly one heading. */
+        val balances: Boolean get() = seen == accepted + gated + refusedStopped
     }
 }

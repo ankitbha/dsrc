@@ -187,9 +187,69 @@ class CameraPipelineTest {
         queued.forEach { it.run() }
         assertEquals("the queued encode must drop out", 0, p.stats.encoded)
         assertNull(p.drain())
+        assertTrue("the accounting must still balance: ${p.stats.buffer}", p.stats.buffer.balances)
     }
 
     // -- accounting ----------------------------------------------------------
+
+    @Test
+    fun `a pack failure is counted, not propagated`() {
+        // YuvPacker refuses a geometry it cannot handle and is called from the pack
+        // lambda, so a bad camera geometry lands exactly here. Letting it out left
+        // `accepted` incremented with no matching outcome, so total failure was
+        // indistinguishable from an encoder backlog.
+        val p = pipeline(hz = 1000.0)
+        repeat(10) { i ->
+            p.offer(
+                timestampNs = (i + 1) * ms,
+                width = 4,
+                height = 4,
+                pack = { throw IllegalArgumentException("bad geometry") },
+                compress = { b, _, _, _ -> b },
+            )
+        }
+        val stats = p.stats
+        assertEquals(10, stats.accepted)
+        assertEquals(10, stats.packFailures)
+        assertEquals(0, stats.encoded)
+        assertEquals("nothing may be left in flight", 0, stats.inFlight)
+    }
+
+    @Test
+    fun `a pack failure does not stop later frames`() {
+        val p = pipeline(hz = 1000.0)
+        var first = true
+        p.offer(ms, 4, 4, { if (first) { first = false; throw RuntimeException("x") } else ByteArray(24) }, { b, _, _, _ -> b })
+        offer(p, 2 * ms)
+        assertTrue("a later frame still arrives", p.drain() != null)
+    }
+
+    @Test
+    fun `a frame refused because the pipeline stopped is not reported as rate limiting`() {
+        // Both were `gated`, which is documented as the normal cost of a commanded rate
+        // below the sensor's -- so a teardown read as rate limiting.
+        val p = pipeline(hz = 1000.0)
+        offer(p, ms)
+        p.stop()
+        repeat(10) { offer(p, (it + 2) * ms) }
+        val stats = p.stats
+        assertEquals(10, stats.refusedStopped)
+        assertEquals("none of those were rate-limited", 0, stats.gated)
+        assertTrue("every delivered frame must be accounted for: $stats", stats.balances)
+    }
+
+    @Test
+    fun `every frame the camera delivered is accounted for under exactly one heading`() {
+        val p = pipeline(hz = 5.0)
+        val sourcePeriod = 1_000_000_000L / 30
+        for (i in 0 until 120) offer(p, i * sourcePeriod)
+        p.stop()
+        for (i in 120 until 150) offer(p, i * sourcePeriod)
+        val stats = p.stats
+        assertEquals(150, stats.seen)
+        assertTrue("$stats", stats.balances)
+        assertEquals(stats.seen, stats.accepted + stats.gated + stats.refusedStopped)
+    }
 
     @Test
     fun `the counters balance over a lossy run`() {

@@ -3,73 +3,91 @@ package com.dsrc.phone.sensors
 /**
  * Decides which frames to keep to hit a target rate.
  *
- * Two failure modes it is built to avoid, which pull in opposite directions:
+ * Three failure modes it is built against, and they pull against each other.
  *
  * Scheduling each slot from *now* undershoots. At a 30 Hz source and a 10 Hz target,
  * accepting at t=0 and then waiting 100 ms means the next candidate is the frame at
- * 133 ms, so the achieved rate is 7.5 Hz -- a quarter low, and low in a way that
- * looks like the camera underperforming rather than the gate miscounting.
+ * 133 ms, so the achieved rate is 7.5 Hz -- a quarter low, and low in a way that looks
+ * like the camera underperforming rather than the gate miscounting.
  *
- * Scheduling each slot from the *previous slot* hits the target exactly, but carries
- * a deficit: after a stall the next slot is far in the past, so every missed slot is
- * paid back at once as a burst. On a thermally throttled phone the stall and the
- * burst arrive in that order, which is the worst possible pairing.
+ * Scheduling each slot from the *previous slot* hits the target exactly, but carries a
+ * deficit: after a stall the next slot is far in the past, so every missed slot is paid
+ * back at once as a burst. On a thermally throttled phone the stall and the burst
+ * arrive in that order, which is the worst possible pairing.
  *
- * So slots advance from the previous slot, and are reset to now whenever they have
- * fallen a whole period behind. Exact rate while keeping up, no catch-up burst after
- * falling behind.
+ * And a slot computed by addition overflows. At the bottom of the wire's legal range a
+ * period is larger than `Long.MAX_VALUE` nanoseconds, so `now + period` wraps negative
+ * and the gate stands permanently open -- a command meaning "almost never" producing
+ * full-rate capture, which is the exact inversion of what a rate limit is for.
+ *
+ * So: slots advance from the previous slot, are reset to now once a whole period has
+ * been missed, and every addition saturates instead of wrapping.
  */
 class RateGate(hz: Double) {
 
-    var hz: Double = hz
-        private set
+    private val lock = Any()
 
     private var periodNs: Long = periodNsFor(hz)
+    private var currentHz: Double = hz
 
-    /** No slot has been issued yet, so the first candidate is always accepted. */
-    private var nextSlotNs: Long = Long.MIN_VALUE
+    /**
+     * Whether any frame has been accepted.
+     *
+     * A boolean rather than a sentinel timestamp: `Long.MIN_VALUE` is a legal value in
+     * the domain, so a sentinel could be indistinguishable from a real stamp.
+     */
+    private var hasAccepted = false
+    private var nextSlotNs: Long = 0
+    private var lastAcceptNs: Long = 0
 
-    /** When the last frame was accepted, so a rate change can be anchored to it. */
-    private var lastAcceptNs: Long = Long.MIN_VALUE
+    val hz: Double get() = synchronized(lock) { currentHz }
 
-    val periodNanos: Long get() = periodNs
+    val periodNanos: Long get() = synchronized(lock) { periodNs }
 
-    fun accept(nowNs: Long): Boolean {
-        if (nowNs < nextSlotNs) return false
-        val advanced = nextSlotNs + periodNs
+    /**
+     * Whether to keep the frame captured at [nowNs].
+     *
+     * Synchronized because the analyzer thread calls this while any thread can call
+     * [setRate]; without it a rate change can stay invisible to the analyzer
+     * indefinitely, and two concurrent callers can both be admitted in one slot.
+     */
+    fun accept(nowNs: Long): Boolean = synchronized(lock) {
+        if (hasAccepted && nowNs < nextSlotNs) return false
+
+        val advanced = addSaturating(nextSlotNs, periodNs)
         // `advanced <= nowNs` means a whole period has already been missed. Advancing
         // again from there would issue one slot per missed period as fast as frames
         // arrive; starting from now drops the backlog instead.
-        nextSlotNs = if (advanced <= nowNs || nextSlotNs == Long.MIN_VALUE) nowNs + periodNs else advanced
+        nextSlotNs = if (!hasAccepted || advanced <= nowNs) addSaturating(nowNs, periodNs) else advanced
         lastAcceptNs = nowNs
+        hasAccepted = true
         return true
     }
 
     /**
      * Change the target rate.
      *
-     * The pending slot is re-anchored to one *new* period after the last accepted
-     * frame, which is the only way to satisfy both of the things a rate change has to
-     * do. Leaving the old slot alone means a rise from 0.2 Hz to 10 Hz waits out the
-     * remaining five seconds of the old period before honouring the new rate --
-     * indistinguishable from the command being ignored. Clearing the slot instead
-     * would let repeated commands emit a frame each, driving the camera faster than
-     * any rate ever asked for.
+     * A change re-anchors the pending slot to one *new* period after the last accepted
+     * frame, which is the only way to satisfy both things a change has to do. Leaving
+     * the old slot means a rise from 0.2 Hz to 10 Hz waits out the remaining five
+     * seconds before honouring the new rate -- indistinguishable from the command being
+     * ignored. Clearing it instead would let repeated commands emit a frame each,
+     * driving the camera faster than any rate ever asked for. Anchoring to the last
+     * acceptance is safe in both directions: the next frame can come sooner than the old
+     * schedule allowed after an increase and is pushed out after a decrease, but never
+     * comes sooner than the new rate permits.
      *
-     * Anchoring to the last acceptance is what makes it safe in both directions: the
-     * next frame can come sooner than the old schedule allowed after an increase, and
-     * is pushed out after a decrease, but never comes sooner than the new rate does.
+     * **An unchanged rate is a no-op**, and that is not a micro-optimisation. Re-anchoring
+     * unconditionally converts "schedule from the previous slot" into "schedule from
+     * now", which is the undershoot above -- so a peer that simply repeats the current
+     * rate would quietly lose a quarter of the frame rate.
      */
-    fun setRate(newHz: Double) {
+    fun setRate(newHz: Double) = synchronized(lock) {
         val newPeriod = periodNsFor(newHz)
-        if (lastAcceptNs != Long.MIN_VALUE) {
-            // Exactly one new period after the last accepted frame, in both directions.
-            // Taking the earlier of the old and new slots honours an increase but
-            // ignores a decrease, which would keep emitting at the old faster rate.
-            nextSlotNs = lastAcceptNs + newPeriod
-        }
+        currentHz = newHz
+        if (newPeriod == periodNs) return
         periodNs = newPeriod
-        hz = newHz
+        if (hasAccepted) nextSlotNs = addSaturating(lastAcceptNs, newPeriod)
     }
 
     companion object {
@@ -77,14 +95,30 @@ class RateGate(hz: Double) {
         const val MIN_HZ_EXCLUSIVE = 0.0
         const val MAX_HZ = 1000.0
 
+        /**
+         * Nanoseconds per frame at [hz].
+         *
+         * Saturates rather than overflowing: the wire admits rates low enough that a
+         * period exceeds `Long.MAX_VALUE` nanoseconds, and a saturated period means
+         * "accept once, then never", which is what such a rate asks for.
+         */
         fun periodNsFor(hz: Double): Long {
+            // NaN fails `> 0` and an infinity fails `<= MAX_HZ`, so this one check
+            // covers the non-finite cases too.
             require(hz > MIN_HZ_EXCLUSIVE && hz <= MAX_HZ) {
-                // A zero is read as a period, so the field that meant "10 Hz" would say
-                // "never" -- the exact case the protocol's sender rule calls out.
-                "rate $hz is outside (${MIN_HZ_EXCLUSIVE}, $MAX_HZ] Hz"
+                // A zero is read as a period, so the field that should say "10 Hz"
+                // instead says "never" -- the case the protocol's sender rule calls out.
+                "rate $hz is outside ($MIN_HZ_EXCLUSIVE, $MAX_HZ] Hz"
             }
-            require(hz.isFinite()) { "rate must be finite, was $hz" }
-            return (1_000_000_000.0 / hz).toLong().coerceAtLeast(1)
+            val period = 1_000_000_000.0 / hz
+            return if (period >= Long.MAX_VALUE.toDouble()) Long.MAX_VALUE else period.toLong()
+        }
+
+        /** `a + b` for non-negative `b`, clamped at [Long.MAX_VALUE] instead of wrapping. */
+        internal fun addSaturating(a: Long, b: Long): Long {
+            val sum = a + b
+            // Overflow with a non-negative addend shows up as a sum below the base.
+            return if (b >= 0 && sum < a) Long.MAX_VALUE else sum
         }
     }
 }

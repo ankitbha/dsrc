@@ -156,10 +156,90 @@ class RateGateTest {
     }
 
     @Test
-    fun `the period never rounds down to zero`() {
-        // A zero period would accept every frame regardless of rate.
-        assertTrue(RateGate.periodNsFor(1000.0) >= 1)
-        assertTrue(RateGate.periodNsFor(999.9) >= 1)
+    fun `the period at the maximum rate is a millisecond, not a rounding artefact`() {
+        // Asserting `>= 1` here proves nothing: the value is 1,000,000.
+        assertEquals(1_000_000L, RateGate.periodNsFor(RateGate.MAX_HZ))
+        assertEquals(1_000_001L, RateGate.periodNsFor(999.999))
+    }
+
+    @Test
+    fun `a rate low enough to overflow a Long period accepts once and then never`() {
+        // 1e-11 Hz is inside the wire's (0, 1000] range and its period exceeds
+        // Long.MAX_VALUE nanoseconds. Adding it to a timestamp wrapped negative, which
+        // stood the gate permanently open -- a command meaning "almost never" produced
+        // full-rate capture, the exact inversion of a rate limit.
+        val gate = RateGate(1e-11)
+        assertEquals(Long.MAX_VALUE, gate.periodNanos)
+        assertTrue("the first frame is still due", gate.accept(1_000_000L))
+        var accepted = 0
+        for (i in 2..1_000) if (gate.accept(i * 1_000_000L)) accepted++
+        assertEquals("nothing further may be accepted", 0, accepted)
+    }
+
+    @Test
+    fun `the slot arithmetic saturates instead of wrapping`() {
+        assertEquals(Long.MAX_VALUE, RateGate.addSaturating(Long.MAX_VALUE, 1))
+        assertEquals(Long.MAX_VALUE, RateGate.addSaturating(Long.MAX_VALUE - 5, 100))
+        assertEquals(Long.MAX_VALUE, RateGate.addSaturating(1, Long.MAX_VALUE))
+        assertEquals(10L, RateGate.addSaturating(4, 6))
+        assertEquals(0L, RateGate.addSaturating(0, 0))
+    }
+
+    @Test
+    fun `a timestamp near the top of the range does not unlock the gate`() {
+        val gate = RateGate(1.0)
+        assertTrue(gate.accept(Long.MAX_VALUE - 2_000_000_000L))
+        assertFalse("the next slot must not have wrapped", gate.accept(Long.MAX_VALUE - 1_900_000_000L))
+    }
+
+    @Test
+    fun `re-sending the same rate does not disturb the schedule`() {
+        // Re-anchoring unconditionally turns "schedule from the previous slot" into
+        // "schedule from now", which is the 25% undershoot the class exists to avoid.
+        // A peer that simply repeats the current rate would silently lose a quarter of
+        // the frame rate, and task 22 makes that peer real.
+        val sourcePeriod = 1_000_000_000L / 30
+        val plain = RateGate(10.0)
+        var withoutCommands = 0
+        for (i in 0 until 300) if (plain.accept(i * sourcePeriod)) withoutCommands++
+
+        val recommanded = RateGate(10.0)
+        var withCommands = 0
+        for (i in 0 until 300) {
+            if (recommanded.accept(i * sourcePeriod)) withCommands++
+            recommanded.setRate(10.0)
+        }
+        assertEquals("re-commanding the same rate must cost nothing", withoutCommands, withCommands)
+        assertEquals(100, withCommands)
+    }
+
+    @Test
+    fun `a repeated rate command still reports the rate`() {
+        val gate = RateGate(10.0)
+        gate.accept(0)
+        gate.setRate(10.0)
+        assertEquals(10.0, gate.hz, 0.0)
+    }
+
+    @Test
+    fun `concurrent callers cannot both be admitted in one slot`() {
+        // One analyzer thread today, but setRate is public and reachable from any
+        // thread, and unsynchronised non-volatile fields make a change invisible.
+        repeat(20) {
+            val gate = RateGate(1.0)
+            val admitted = java.util.concurrent.atomic.AtomicInteger()
+            val start = java.util.concurrent.CountDownLatch(1)
+            val threads = (1..4).map {
+                Thread {
+                    start.await()
+                    if (gate.accept(1_000_000L)) admitted.incrementAndGet()
+                }
+            }
+            threads.forEach { it.start() }
+            start.countDown()
+            threads.forEach { it.join() }
+            assertEquals("exactly one caller may win the slot", 1, admitted.get())
+        }
     }
 
     @Test

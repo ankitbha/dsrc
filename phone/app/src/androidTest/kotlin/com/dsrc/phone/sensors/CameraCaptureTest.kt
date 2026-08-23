@@ -100,9 +100,10 @@ class CameraCaptureTest {
 
         assertEquals("jpeg", f.format)
         assertTrue("a JPEG should not be tiny", f.jpeg.size > 1_000)
-        // Whole-file markers. A stride mistake in the packer yields a JPEG that decodes
-        // to a sheared or green-bottomed image rather than an error, so the dimension
-        // check below is the part that would actually catch it.
+        // Whole-file markers only. Neither these nor the dimension check below can see a
+        // stride mistake or a chroma swap: both preserve the size and both decode
+        // cleanly. JpegEncoderTest is what catches those, by driving a known colour
+        // through the packer and the platform encoder.
         assertEquals("SOI", 0xFF.toByte(), f.jpeg[0])
         assertEquals("SOI", 0xD8.toByte(), f.jpeg[1])
         assertEquals("EOI", 0xFF.toByte(), f.jpeg[f.jpeg.size - 2])

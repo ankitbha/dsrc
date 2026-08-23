@@ -3,10 +3,13 @@ package com.dsrc.phone.sensors
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.util.Size
 import android.util.Log
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -88,6 +91,28 @@ class CameraXSource(
 
         val analyzer = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            // Without this the configured resolution is dead: the camera picks its own
+            // default and the width/height in SensingConfig describe nothing.
+            //
+            // The fallback prefers *lower*. A device need not offer the requested size,
+            // and preferring higher overshoots without limit -- asking the emulator for
+            // 1280x720 got 1856x1392, nearly four times the pixels, which is four times
+            // the encode cost and the payload on a link that has to carry it. Going
+            // under is the safe direction for a phone; going over is not.
+            //
+            // Either way the configured size is a *request*. What arrives is whatever
+            // the device chose, which is why CapturedFrame reports the ImageProxy's own
+            // dimensions rather than the config's.
+            .setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setResolutionStrategy(
+                        ResolutionStrategy(
+                            Size(config.cameraWidth, config.cameraHeight),
+                            ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER,
+                        )
+                    )
+                    .build()
+            )
             .build()
 
         analyzer.setAnalyzer(analysis) { image ->
@@ -113,7 +138,13 @@ class CameraXSource(
             CameraSelector.DEFAULT_BACK_CAMERA,
             analyzer,
         )
-        Log.i(TAG, "camera bound at ${config.cameraHz} Hz target")
+        // Logged because the request and the result can differ, and only the result
+        // matters for the encode cost and the payload size.
+        Log.i(
+            TAG,
+            "camera bound: ${config.cameraHz} Hz target, requested " +
+                "${config.cameraWidth}x${config.cameraHeight}",
+        )
     }
 
     private fun handle(image: ImageProxy, pipeline: CameraPipeline) {
