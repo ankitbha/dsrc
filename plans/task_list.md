@@ -675,7 +675,29 @@ tunnels over USB and is unaffected.
 
 ## E. Phone app — phone is in hand, no Jetson needed
 
-17. Android project skeleton: Kotlin, CameraX, permissions, foreground service.
+17. ~~Android project skeleton: Kotlin, CameraX, permissions, foreground service.~~
+    **Done.** Two Gradle modules: `:transport` (pure Kotlin/JVM, no Android, so the
+    wire contract is testable at laptop speed) and `:app`. 82 JVM tests + 20
+    instrumented on the `dsrc_test` AVD, 0 failed. APK 6.8 MiB; cold build 8 s with
+    no daemon or cache. Manifest facts read back off the merged manifest (15 checks),
+    verified to fail when wrong.
+    Three defects the tests could not have found, all caught on the emulator:
+    an ignored intent left a resident service forever, because `startService` creates
+    one to deliver an intent whether or not the state machine acts on it; a teardown
+    throw escaped an unguarded `react(STOPPING)` and killed the process, which is
+    aimed squarely at task 18 since `onSensingDown()` is where the camera gets
+    released; and `startForegroundService()` is a promise to call `startForeground()`
+    whose breach kills the process **on bring-down, 1 ms later, not on a timeout** —
+    so no `try/catch` could survive it. Fixed by not making the promise: the only
+    caller is a visible Activity, so `startService` suffices.
+    Validation ran 3 rounds. Round 1 found a spec-drift test that could never fire
+    (the spec was not a declared Gradle input), a manifest gate blind to the three
+    permissions the app cannot start without, and permission constants that asserted
+    against themselves. Round 2 found the foreground-promise crash in *my* round-1
+    fix. Two of my tests were vacuous — an "exhaustive sweep" that pinned no row of
+    the transition table — and one instrumented race let a queued stop land inside the
+    next test. Known gaps recorded in the plan: `MainActivity`'s wiring is unpinned
+    pending the task-23 UI harness, and two test seams ship in the APK.
 18. Camera capture at the commanded rate, JPEG encode, per-frame monotonic
     timestamps from `elapsedRealtimeNanos`.
 19. GPS capture and forwarding, logging both fix time and receipt time.

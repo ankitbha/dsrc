@@ -174,6 +174,30 @@ class SensingStateMachineTest {
     }
 
     @Test
+    fun `returning to idle clears the recorded failure`() {
+        // A reason that outlives its state reads as a live error to anything that shows
+        // it when non-null, which is what a task-23 UI would do.
+        val m = machine(SensingState.RUNNING)
+        m.offer(SensingEvent.Failed("camera busy"))
+        assertEquals("camera busy", m.lastFailure)
+        m.offer(SensingEvent.Stop)
+        assertEquals(SensingState.IDLE, m.state)
+        assertNull("a cleared state must not carry a stale reason", m.lastFailure)
+    }
+
+    @Test
+    fun `a full stop cycle clears the recorded failure`() {
+        val m = machine(SensingState.RUNNING)
+        m.offer(SensingEvent.Failed("boom"))
+        m.offer(SensingEvent.Start)
+        m.offer(SensingEvent.Started)
+        assertEquals("a failure survives until the machine returns to IDLE", "boom", m.lastFailure)
+        m.offer(SensingEvent.Stop)
+        m.offer(SensingEvent.Stopped)
+        assertNull(m.lastFailure)
+    }
+
+    @Test
     fun `an idle machine has no failure recorded`() {
         val m = machine()
         m.offer(SensingEvent.Stop)

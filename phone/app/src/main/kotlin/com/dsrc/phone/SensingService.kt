@@ -112,7 +112,7 @@ class SensingService : Service() {
                     // ForegroundServiceDidNotStartInTimeException and kills the process.
                     // Refusing after entering the foreground costs a notification that
                     // is removed a moment later by release().
-                    enterForeground()
+                    enterForegroundOrOverride()
 
                     val missing = missingPermissions()
                     if (missing.isNotEmpty()) {
@@ -172,6 +172,18 @@ class SensingService : Service() {
     /** And is torn down here. */
     private fun onSensingDown() = Unit
 
+    /**
+     * Entering the foreground, with a seam so its failure can be tested.
+     *
+     * The failure is the interesting case and it is unreachable otherwise: on a healthy
+     * emulator `startForeground` always succeeds, so the catch that turns a refusal into
+     * a recorded failure would never run under test.
+     */
+    private fun enterForegroundOrOverride() {
+        val override = enterForegroundOverride
+        if (override != null) override() else enterForeground()
+    }
+
     private fun enterForeground() {
         createChannel()
         val notification = buildNotification()
@@ -199,10 +211,15 @@ class SensingService : Service() {
      * Leave the foreground explicitly.
      *
      * Deliberately not covered by a test: destroying the service also drops it out of
-     * the foreground, so deleting this line passes the whole suite. It matters only on
-     * the path where `stopSelf(lastStartId)` declines to destroy the service because a
-     * newer start arrived, and that race is not something a test can construct
-     * reliably. Kept as the explicit statement of intent.
+     * the foreground, so deleting this line passes the whole suite.
+     *
+     * The reason it cannot be pinned is not that the race is hard to build -- it is
+     * that the outcome is unreachable as a lasting state. `release()` is only ever
+     * called from `onStartCommand`'s call tree, so any later intent that makes
+     * `stopSelf(lastStartId)` decline is itself an `onStartCommand` ending in either a
+     * resident state or another `release()`. That guarantee is what makes this line
+     * redundant today, and it breaks the moment a capture task calls `release()` from a
+     * sensor callback or a coroutine -- at which point this becomes load-bearing.
      *
      * No version branch: STOP_FOREGROUND_REMOVE exists from API 24 and minSdk is 29.
      */
@@ -241,9 +258,36 @@ class SensingService : Service() {
          */
         @Volatile
         internal var permissionOverride: (() -> List<String>)? = null
+
+        /**
+         * Test seam for the foreground transition. Null in production. Set by an
+         * instrumented test to make it fail.
+         */
+        @Volatile
+        internal var enterForegroundOverride: (() -> Unit)? = null
         private const val NOTIFICATION_ID = 1
 
-        fun start(context: Context) = context.startForegroundService(
+        /**
+         * Start sensing.
+         *
+         * Deliberately `startService`, not `startForegroundService`. The latter is a
+         * promise to the platform to call `startForeground()` within moments, and
+         * failing to keep it kills the whole process -- the ActivityManager throws
+         * `ForegroundServiceDidNotStartInTimeException` the instant the service is
+         * brought down with the promise outstanding, which is 1 ms after a failed
+         * start, not after any timeout. No try/catch inside the service can survive
+         * that, because the teardown itself is the trigger.
+         *
+         * The promise only exists to permit a background start, and the only caller is
+         * a visible Activity, so there is nothing to gain by making it. Without it, a
+         * `startForeground()` that throws -- a missing type permission on API 34+, a
+         * start attributed to the background on API 31+ -- becomes a recorded failure
+         * the driver can see instead of a dead process showing nothing.
+         *
+         * A future background trigger would have to make the promise, and would then
+         * need a fallback that satisfies it before giving up.
+         */
+        fun start(context: Context) = context.startService(
             Intent(context, SensingService::class.java).setAction(ACTION_START)
         )
 

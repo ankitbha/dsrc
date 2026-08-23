@@ -41,12 +41,14 @@ class SensingServiceTest {
     @Before
     fun reset() {
         SensingService.permissionOverride = null
+        SensingService.enterForegroundOverride = null
         quiesce()
     }
 
     @After
     fun tearDown() {
         SensingService.permissionOverride = null
+        SensingService.enterForegroundOverride = null
         quiesce()
     }
 
@@ -97,9 +99,12 @@ class SensingServiceTest {
      * startForeground at all.
      *
      * Read from the service record rather than by looking for our notification. The
-     * platform rate-limits repeated posts of the same notification id, so across a
-     * suite that starts and stops sensing a dozen times the notification check starts
-     * failing on a service that is genuinely in the foreground.
+     * notification check is unreliable on the *first* post after install: the channel
+     * is created and the record enqueued asynchronously, so `getActiveNotifications`
+     * can return before it is visible. (It is first-post latency, not the rate limiting
+     * it first looked like -- measured over 14 start/stop cycles, only cycle 0 failed
+     * and all 13 later ones passed, which is the opposite shape to a rate limiter.)
+     * The service record is the stronger fact and never failed across those cycles.
      */
     private fun serviceIsForeground(): Boolean {
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -132,6 +137,50 @@ class SensingServiceTest {
             "the service should leave the foreground on stop",
             pollUntil(3_000) { !serviceIsForeground() },
         )
+    }
+
+    @Test
+    fun stopReturnsToIdle() {
+        // Kept distinct from stoppingLeavesTheForeground: this is the test that
+        // distinguishes stopSelf(lastStartId) from the bare stopSelf(), which is the
+        // line that makes a stop racing a newer start safe.
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+        SensingService.stop(context)
+        await(SensingState.IDLE)
+        assertTrue(pollUntil(5_000) { !serviceIsResident() })
+    }
+
+    @Test
+    fun aStartRacingAStopIsNotDiscarded() {
+        // What stopSelf(lastStartId) is for. The bare overload destroys the service
+        // even when a newer start has already been queued, so the start the user just
+        // asked for is thrown away with the stop.
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+        repeat(10) {
+            SensingService.stop(context)
+            SensingService.start(context)
+        }
+        assertTrue(
+            "a start queued behind a stop must survive it",
+            pollUntil(10_000) { SensingStatus.shared.state == SensingState.RUNNING && serviceIsForeground() },
+        )
+    }
+
+    @Test
+    fun aStaleActiveStateIsNotAdoptedByANewInstance() {
+        // The cell the other reconcile tests miss: published-active plus a *non-Stop*
+        // intent. Adopting an active state here would leave requiresService true, so
+        // the trailing release() never fires -- a service resident forever having never
+        // entered the foreground, under a UI still claiming RUNNING.
+        SensingStatus.shared.set(SensingState.RUNNING)
+        context.startService(Intent(context, SensingService::class.java).setAction("com.dsrc.phone.NONSENSE"))
+        assertTrue(
+            "an active published state must be corrected, not adopted",
+            pollUntil(5_000) { SensingStatus.shared.state == SensingState.IDLE },
+        )
+        assertTrue("the service must not linger", pollUntil(5_000) { !serviceIsResident() })
     }
 
     @Test
@@ -218,6 +267,35 @@ class SensingServiceTest {
         SensingStatus.shared.set(SensingState.STOPPED_ERROR)
         SensingService.stop(context)
         await(SensingState.IDLE)
+    }
+
+    // -- a failed foreground transition -----------------------------------------
+
+    @Test
+    fun aRefusedForegroundTransitionIsRecordedAndDoesNotKillTheProcess() {
+        // This test passing at all is the assertion that matters: if the process died
+        // the whole instrumentation run would abort. It died before, because
+        // startForegroundService() is a promise to call startForeground(), and the
+        // ActivityManager throws the instant the service is brought down with that
+        // promise outstanding -- so the catch below ran, recorded the failure, and then
+        // the teardown killed the app 1 ms later. Not making the promise is the fix.
+        SensingService.enterForegroundOverride = { throw SecurityException("probe: refused") }
+        SensingService.start(context)
+        await(SensingState.STOPPED_ERROR)
+        assertTrue("a failed start must not leave the service resident", pollUntil(5_000) { !serviceIsResident() })
+        assertFalse("a failed start must not be in the foreground", serviceIsForeground())
+    }
+
+    @Test
+    fun sensingStartsOnceTheForegroundTransitionWorksAgain() {
+        SensingService.enterForegroundOverride = { throw SecurityException("probe: refused") }
+        SensingService.start(context)
+        await(SensingState.STOPPED_ERROR)
+
+        SensingService.enterForegroundOverride = null
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+        assertTrue(pollUntil(3_000) { serviceIsForeground() })
     }
 
     // -- the permission gate ----------------------------------------------------

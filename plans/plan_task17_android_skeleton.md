@@ -211,6 +211,34 @@ build.
 
 ---
 
+## 6b. Known gaps, accepted with reasons
+
+Found by validation and deliberately not closed in task 17. Recorded so they are
+choices rather than oversights.
+
+- **`MainActivity`'s wiring is unpinned.** The permission split is a pure, tested
+  function, but the two lines that *call* it are not: reverting them — recording a
+  granted permission as refused, which the split's own comment calls silent and
+  expensive — passes both suites. Closing it needs an Activity harness, and nothing
+  yet launches `MainActivity` in a test. Rolled into task 23, which builds the real
+  UI. The same gap covers the Settings-grant reconcile and the `startRequested`
+  save/restore.
+- **Nothing asserts that the app launches, or that the notification appears.** The
+  emulator install-and-launch check is manual. The notification assertion was
+  replaced by reading `RunningServiceInfo.foreground`, which is the stronger fact but
+  a different one — a service can be in the foreground with the notification
+  suppressed by the user.
+- **Two test seams ship in the release APK.** `permissionOverride` and
+  `enterForegroundOverride` are `internal`, which is public in JVM bytecode, and are
+  not gated on `BuildConfig.DEBUG`. They exist because the paths they unlock —
+  a permission refusal and a failed foreground transition — are unreachable on a
+  healthy emulator, and both are the fix for a real crash. Acceptable for a
+  sideloaded research app; it would not be for a distributed one.
+- **`stopForegroundCompat()` survives deletion.** Destroying the service also drops
+  it out of the foreground. Unreachable as a lasting state today because `release()`
+  is only ever called from `onStartCommand`'s call tree; it becomes load-bearing the
+  moment a capture task calls `release()` from a sensor callback or a coroutine.
+
 ## 7. Needs sign-off
 
 1. **O1** — the real `minSdk` for the phone in hand.
