@@ -937,6 +937,27 @@ class MessageRouter:
     def recv(self, channel: Channel, timeout: float | None = 0.0) -> Message | None:
         """The next decodable message, skipping and counting any that are not.
 
+        A thin wrapper over `recv_with_receipt`, so there is one implementation
+        of skip-and-count and one of the time budget. Two of them had already
+        drifted apart: this one looped and the other returned on the first bad
+        record without spending any of the caller's timeout.
+        """
+        received = self.recv_with_receipt(channel, timeout=timeout)
+        return None if received is None else received[0]
+
+    def recv_with_receipt(
+        self, channel: Channel, timeout: float | None = 0.0
+    ) -> tuple[Message, int] | None:
+        """The next decodable message and the instant the transport stamped it.
+
+        The arrival stamp matters for a timestamp exchange in a way it does not
+        for a sensor reading: taking the time after this returns folds the
+        inbound queue wait and the decode into it, which is the receive-side twin
+        of the enqueue-versus-departure error the wire stamp exists to remove,
+        and at a 1 Hz poll it is up to a whole period. It also fixes which clock
+        the stamp comes from -- the session's own, the same one the writer uses
+        for the departure stamp -- so the difference between them is meaningful.
+
         A bad record costs one record -- and one record's worth of the caller's
         time budget, not a fresh copy of it. Passing the original timeout on
         every skip made a stream of malformed messages block for an unbounded
@@ -970,38 +991,7 @@ class MessageRouter:
                 stats.last_error = str(exc)
                 continue
             stats.delivered += 1
-            return message
-
-    def recv_with_receipt(
-        self, channel: Channel, timeout: float | None = 0.0
-    ) -> tuple[Message, int] | None:
-        """The message and the instant the transport stamped its arrival.
-
-        The plain `recv` discards that stamp, which is fine for a sensor reading
-        and wrong for a timestamp exchange: taking the arrival time after `recv`
-        returns folds the inbound queue wait and the decode into it. That is the
-        receive-side twin of the enqueue-versus-departure error the wire stamp
-        exists to remove, and at a 1 Hz poll it is up to a whole period.
-
-        It also fixes the clock the stamp comes from. The session's reader takes
-        it with the session's own monotonic clock -- the same one the writer uses
-        for the departure stamp -- so a difference between the two is meaningful.
-        A caller stamping it itself can be on an unrelated clock, and the
-        difference is then arbitrary with no way to notice.
-        """
-        received = self._session.recv(channel, timeout=timeout)
-        if received is None:
-            return None
-        stats = self._stats[channel]
-        try:
-            message = decode_message(channel, received.extensions, received.payload)
-        except MessageError as exc:
-            stats.decode_errors += 1
-            stats.errors_by_reason[exc.reason] = stats.errors_by_reason.get(exc.reason, 0) + 1
-            stats.last_error = str(exc)
-            return None
-        stats.delivered += 1
-        return message, received.t_recv_mono_ns
+            return message, received.t_recv_mono_ns
 
     def stats(self) -> dict[Channel, ChannelMessageStats]:
         snapshot = {}

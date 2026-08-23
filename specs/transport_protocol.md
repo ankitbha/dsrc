@@ -484,10 +484,19 @@ slowly inflates neither the round trip nor the bound derived from it.
 **Three conformance requirements on a sample, and all three must be checked.**
 
 ```text
-t3 >= t2     the responder's departure cannot precede its own receipt
-t4 >= t1     the pong cannot arrive before the ping left
-rtt >= 0     the service interval cannot exceed the whole round trip
+t3 >= t2      the responder's departure cannot precede its own receipt
+t4 >= t1      the pong cannot arrive before the ping left
+rtt >= 0      the service interval cannot exceed the whole round trip
+rtt <= 2000ms above this the sample is not data and enters no window
 ```
+
+The fourth is an **admission** rule, and it is deliberately far looser than the
+gate's 200 ms: the gate asks whether the link is good enough to inform anything,
+this asks whether the sample is real at all. A 400 ms round trip is a poor link
+and belongs in the window, so the gate can see it and refuse; a two-second one is
+an answer the link had forgotten, and it would otherwise sit in the skew window
+as the sole representative of its bucket where the 30 s gate can never look. One
+constant for both jobs makes the gate's own clause unreachable.
 
 **`rtt >= 0` is not sufficient on its own**: it is satisfiable with either
 ordering violated. That matters because the bound below is half the round trip,
@@ -541,7 +550,9 @@ publishing that invites a consumer to apply it as though it were a measurement.
 | minimum skew buckets | 20 | guarantees a 180 s baseline before a slope is published |
 | maximum sample age | 5.0 s | five missed samples at the steady rate |
 | maximum acceptable min-rtt | 200 ms | above this the bound is too wide to mean anything |
-| assumed skew when unknown | 50 ppm | the top of the ordinary crystal range |
+| assumed skew | 50 ppm | bounds the unmeasured true skew; a stated premise |
+| admission ceiling | 2000 ms | a round trip past this is not data, and never enters a window |
+| extrapolation limit | 300 s | equal to the skew window: no reach beyond the samples |
 
 ### The bound, and the gate
 
@@ -551,26 +562,47 @@ A converted instant is `value +/- bound`. The value is
 value = t_local + offset + skew_ppm * (t_local - t_reference) / 1e6
 ```
 
-with the skew term **applied when `skew_ppm` is present and omitted when null**. Without this written down an implementation reading only the bound
+with the skew term **applied when `skew_ppm` is present and omitted when null**,
+and the drift term **rounded to nearest with ties to even**. Both roundings are
+part of the contract: floor division on the bound leaves it one nanosecond under
+the error it claims to cover, and an unstated tie rule is a legal one-nanosecond
+disagreement between two conforming implementations. Without this written down an implementation reading only the bound
 formula below builds `t_local + offset`, and the two disagree by `skew * dt` --
 at the 20 ppm cited above, ~12 ms over a ten minute drive, which is larger than
 the bound they both report.
 
-A conversion is also refused when `|t_local - t_reference|` exceeds the span the
-samples support, because past that the drift term is extrapolation with no
-evidence behind it.
+A conversion is also refused when `|t_local - t_reference|` exceeds **300 s**,
+the same span as the skew window: past that the drift term is extrapolation with
+no evidence behind it. The gate constrains only how fresh the newest sample is,
+not which instant is being converted, so without this an instant half an hour
+away still got an answer.
 
 The bound is
 
 ```text
-bound = rtt_min / 2  +  skew_uncertainty * |t - t_reference|
+bound = ceil(rtt_min / 2)  +  ceil(skew_uncertainty_ppm * |t - t_reference| / 1e6)
 ```
 
 The first term is the instantaneous asymmetry the minimum sample cannot rule
-out. The second is what accrues while no fresh sample has arrived: the standard
-error of the fitted skew once skew is known, and the **assumed 50 ppm** while it
-is not -- because an unmeasured skew is not a zero skew, and treating it as one
-would understate the bound exactly when it is least trustworthy.
+out. The second is what accrues while no fresh sample has arrived, and the rate
+charged is
+
+```text
+skew_uncertainty_ppm = max(50 + |skew_ppm|, skew_stderr_ppm)      when skew is known
+                     = 50                                        when it is not
+```
+
+**Additive, not the larger of the two.** Applying a fitted slope costs
+`|fit - true| * dt`, and `|fit - true| <= |fit| + |true|`; nothing measures
+`|true|`, so the assumed 50 ppm bounds it and the fitted magnitude is added on
+top. Charging only the standard error, or only the larger of the two, is unsound:
+the scatter measures how tightly the points sit on the line, and a smoothly
+drifting path asymmetry gives a near-perfect line while being entirely wrong. An
+implementation that charges either is not conforming.
+
+The 50 ppm is a **stated premise**, not a measured quantity: it is the top of the
+ordinary crystal range for initial accuracy, and a device hot enough to exceed it
+breaks the bound rather than widening it.
 
 **The first term is a guarantee, not an assumption.** A sample's offset error is
 `|up - down| / 2` and its round trip is `up + down`, so with non-negative delays
@@ -596,9 +628,16 @@ that returns its best guess here is not conforming.
 
 Conversion is **forward-only**. Each converted instant carries the id of the
 estimate that produced it, and an implementation publishes its estimate history,
-so an offline reader can re-derive any conversion against a better later
-estimate and get an exact answer. A value already converted never changes, and
-nothing already acted upon has to be recalled.
+so an offline reader can re-derive a conversion against a better later estimate
+and get an exact answer. A value already converted never changes, and nothing
+already acted upon has to be recalled.
+
+**The history is bounded, and so is the promise.** An implementation retains at
+least **4096** estimates and counts what it evicted. Past that an `estimate_id`
+no longer resolves -- at the steady 1 Hz that is about 68 minutes, inside a long
+drive -- so a conversion older than the retained window is not re-derivable, and
+the eviction count is what tells a reader that rather than leaving them to guess
+at a missing id.
 
 ## Golden Vectors
 

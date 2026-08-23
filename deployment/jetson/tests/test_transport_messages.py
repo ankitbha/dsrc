@@ -1596,3 +1596,21 @@ def test_a_session_send_allowing_one_reserved_key_still_refuses_the_others():
     finally:
         session.close()
         right.close()
+
+
+def test_the_wire_stamp_reserve_stays_inside_the_count_range():
+    """`WIRE_STAMP_RESERVE` and `MAX_COUNT` are equal today, in two modules that
+    can be edited independently. The reserve never reaches the wire -- the writer
+    always replaces it when the key is present -- but if it ever did, a reserve
+    above MAX_COUNT would be refused by the decoder as out of range."""
+    from transport.frames import MAX_HEADER_BYTES, WIRE_STAMP_RESERVE
+    from transport.messages import MAX_COUNT
+
+    assert WIRE_STAMP_RESERVE <= MAX_COUNT
+
+    # And the reserve narrows the usable header for wire-stamped frames, by the
+    # difference between its width and a real stamp's. Nothing else records that.
+    reserve_digits = len(str(WIRE_STAMP_RESERVE))
+    assert reserve_digits == 19
+    usable = MAX_HEADER_BYTES - reserve_digits
+    assert usable < MAX_HEADER_BYTES

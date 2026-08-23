@@ -1554,17 +1554,21 @@ class _StallingConnection:
     This makes that quantum real and known.
     """
 
-    def __init__(self, inner, stall_s: float, threshold_bytes: int) -> None:
+    def __init__(self, inner, threshold_bytes: int) -> None:
         self._inner = inner
-        self._stall_s = stall_s
         self._threshold = threshold_bytes
         self.peer = inner.peer
         self.in_send_all = threading.Event()
+        # Released by the test once it has enqueued, so the writer is held for
+        # exactly as long as the test needs rather than for a wall-clock sleep.
+        # A sleep with a fractional margin is the one assertion whose truth
+        # depends on machine load, and it does not need to be.
+        self.release = threading.Event()
 
     def send_all(self, data: bytes) -> None:
         if len(data) >= self._threshold:
             self.in_send_all.set()
-            time.sleep(self._stall_s)
+            self.release.wait(timeout=30.0)
         self._inner.send_all(data)
 
     def recv_exact(self, n: int) -> bytes:
@@ -1588,9 +1592,8 @@ def test_the_writer_stamps_the_wire_key_at_departure_not_at_enqueue():
     to departure time would silently change what every latency figure in tasks
     12-14 measures without changing a single test.
     """
-    stall_s = 0.4
     near, far = loopback_pair()
-    stalling = _StallingConnection(near, stall_s=stall_s, threshold_bytes=64 * 1024)
+    stalling = _StallingConnection(near, threshold_bytes=64 * 1024)
     sender = quiet_session(stalling)
     reader = quiet_session(far)
     try:
@@ -1603,6 +1606,10 @@ def test_the_writer_stamps_the_wire_key_at_departure_not_at_enqueue():
         sender.send(
             Channel.CONTROL, b"", {WIRE_STAMP_KEY: 0}, allow_reserved=(WIRE_STAMP_KEY,)
         )
+        # Held until now, so the gap below is bounded by what the test did, not
+        # by how long a sleep happened to be.
+        held_until = now_mono_ns()
+        stalling.release.set()
         received = None
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline and received is None:
@@ -1612,14 +1619,14 @@ def test_the_writer_stamps_the_wire_key_at_departure_not_at_enqueue():
         wire = received.frame.extensions[WIRE_STAMP_KEY]
         enqueue = received.frame.t_mono_ns
         assert isinstance(wire, int)
-        waited_ns = wire - enqueue
         assert enqueue >= enqueued_at, "the enqueue stamp predates the send call"
-        # Most of the stall had to elapse between enqueue and departure. Half of
-        # it is the margin; equality, or any stamp taken at enqueue, fails here.
-        assert waited_ns > int(stall_s * 0.5 * 1e9), (
-            f"the wire stamp is only {waited_ns} ns after the enqueue stamp, "
-            f"far under the {stall_s}s stall the writer was held in -- so it is "
-            "not being taken at departure"
+        # The writer could not have reached this frame until `held_until`, so a
+        # departure stamp must be at or after it while an enqueue stamp is
+        # strictly before. No wall-clock margin, so no dependence on load.
+        assert enqueue < held_until, "the enqueue stamp was taken after the release"
+        assert wire >= held_until, (
+            f"the wire stamp {wire} precedes the moment the writer was released "
+            f"({held_until}), so it was not taken at departure"
         )
     finally:
         sender.close()
@@ -1629,9 +1636,8 @@ def test_the_writer_stamps_the_wire_key_at_departure_not_at_enqueue():
 def test_the_enqueue_stamp_still_means_enqueue_on_other_channels():
     """The other half of the pair: `t_mono_ns` must not have quietly become a
     departure stamp for everyone."""
-    stall_s = 0.4
     near, far = loopback_pair()
-    stalling = _StallingConnection(near, stall_s=stall_s, threshold_bytes=64 * 1024)
+    stalling = _StallingConnection(near, threshold_bytes=64 * 1024)
     sender = quiet_session(stalling)
     reader = quiet_session(far)
     try:
@@ -1640,6 +1646,7 @@ def test_the_enqueue_stamp_still_means_enqueue_on_other_channels():
         before = now_mono_ns()
         sender.send(Channel.IMU, b"", {"ax": 1.0})
         after = now_mono_ns()
+        stalling.release.set()
 
         received = None
         deadline = time.monotonic() + 15.0

@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import json
 import random
+import time
 
 import pytest
 
 from transport.channels import Channel
 from transport.clock import now_mono_ns
+from transport.frames import WIRE_STAMP_KEY
 from transport.loopback import loopback_pair
 from transport.messages import MessageError, MessageRouter, TimeSyncMessage
 from transport.session import Session
@@ -658,11 +660,18 @@ def test_a_converted_value_does_not_change_when_the_estimate_improves():
 
 
 def rederive(t_local_ns, estimate):
-    """The spec's conversion formula, written out independently of the module.
+    """A transcription of the spec's conversion formula.
 
-    Deliberately not calling the module's own arithmetic: a re-derivation test
-    that reuses the implementation proves only that it is deterministic. This is
-    what a Kotlin implementer reading the spec would write.
+    Honest about what this is: character-for-character the arithmetic in
+    `to_remote`, so a shared *misreading* of the spec is invisible to it. What it
+    does prove is that the published estimate is **sufficient** to redo a
+    conversion -- the offset, the reference instant and the slope are all a reader
+    needs -- which is the provenance claim. It also kills a change to `to_remote`
+    that this is not updated to mirror.
+
+    The rounding is the part worth naming: the spec now fixes round-to-nearest
+    with ties to even on the drift term, because an unstated tie rule is a legal
+    one-nanosecond disagreement between two conforming implementations.
     """
     drift = 0.0
     if estimate.skew_ppm is not None:
@@ -926,10 +935,18 @@ def test_every_timebase_constant_in_the_spec_matches_the_code():
         "minimum skew buckets": f"{timebase.MIN_SKEW_SAMPLES:g}",
         "maximum sample age": f"{timebase.MAX_SAMPLE_AGE_S:.1f} s",
         "maximum acceptable min-rtt": f"{timebase.MAX_ACCEPTABLE_RTT_NS // 1_000_000:g} ms",
-        "assumed skew when unknown": f"{timebase.ASSUMED_SKEW_PPM:g} ppm",
+        "assumed skew": f"{timebase.ASSUMED_SKEW_PPM:g} ppm",
+        "admission ceiling": f"{timebase.MAX_SAMPLE_RTT_NS // 1_000_000:g} ms",
+        "extrapolation limit": f"{timebase.MAX_EXTRAPOLATION_S:g} s",
     }
-    missing = sorted(set(expected) - set(rows))
-    assert not missing, f"the spec table has no row for: {missing}"
+    # Both directions. Checking code->spec only meant a table row with no code
+    # constant behind it -- or a constant the table never mentions -- was
+    # invisible, and the admission ceiling and the extrapolation limit were both
+    # in that gap.
+    assert set(rows) == set(expected), (
+        f"spec-only rows: {sorted(set(rows) - set(expected))}; "
+        f"code-only constants: {sorted(set(expected) - set(rows))}"
+    )
     for label, value in expected.items():
         assert rows[label][0].startswith(value), (
             f"{label}: spec says {rows[label][0]!r}, code says {value!r}"
@@ -1070,8 +1087,9 @@ def test_the_drift_charge_covers_a_fit_that_is_entirely_asymmetry():
     assert estimate.skew_stderr_ppm is not None and estimate.skew_stderr_ppm < 1.0, (
         "the fit was not precise, so this does not test the precision-vs-accuracy gap"
     )
-    # The charge must follow the slope, not its scatter.
-    assert estimate.skew_uncertainty_ppm >= abs(estimate.skew_ppm)
+    # The charge must follow the slope, not its scatter -- and additively, since
+    # the true skew it cannot see could be opposed to the fitted one.
+    assert estimate.skew_uncertainty_ppm >= ASSUMED_SKEW_PPM + abs(estimate.skew_ppm)
 
     # And the bound must cover the error it produces, out to the reach limit.
     truth_offset = 0
@@ -1084,19 +1102,86 @@ def test_the_drift_charge_covers_a_fit_that_is_entirely_asymmetry():
         )
 
 
-def test_an_unmeasured_skew_is_charged_the_crystal_range_as_a_floor():
-    """The floor applies once skew is fitted too, not only before. Charging the
-    fit's scatter alone put a 60 ms error under a 17.5 ms bound."""
-    estimate = TimebaseEstimate(
+def test_the_drift_charge_adds_the_fitted_slope_to_the_assumed_range():
+    """Additive, not the larger of the two.
+
+    Applying a fitted slope costs `|fit - true| * dt`, which is bounded by
+    `|fit| + |true|` and not by `max(|fit|, |true|)` -- the two coincide only when
+    the signs agree or one is zero. Nothing measures `|true|`, so the assumed
+    range bounds it and the fitted magnitude is added on top.
+    """
+    quiet = TimebaseEstimate(
         estimate_id=1, offset_ns=0, t_reference_ns=BASE_NS, rtt_min_ns=10_000_000,
         offset_samples=30, skew_ppm=2.0, skew_stderr_ppm=0.001, skew_samples=30,
     )
-    assert estimate.skew_uncertainty_ppm == ASSUMED_SKEW_PPM
+    assert quiet.skew_uncertainty_ppm == ASSUMED_SKEW_PPM + 2.0
     loud = TimebaseEstimate(
         estimate_id=2, offset_ns=0, t_reference_ns=BASE_NS, rtt_min_ns=10_000_000,
         offset_samples=30, skew_ppm=-90.0, skew_stderr_ppm=0.001, skew_samples=30,
     )
-    assert loud.skew_uncertainty_ppm == 90.0, "the slope's own magnitude is not charged"
+    assert loud.skew_uncertainty_ppm == ASSUMED_SKEW_PPM + 90.0, (
+        "the charge is not additive, so it is unsound wherever the fitted and "
+        "true slopes have opposite signs"
+    )
+    # Absent skew still charges the floor alone.
+    unfitted = TimebaseEstimate(
+        estimate_id=3, offset_ns=0, t_reference_ns=BASE_NS, rtt_min_ns=10_000_000,
+        offset_samples=30,
+    )
+    assert unfitted.skew_uncertainty_ppm == ASSUMED_SKEW_PPM
+
+
+def test_the_bound_holds_when_the_fitted_slope_has_the_wrong_sign():
+    """The case `max()` could not cover, and the case a zero-skew construction
+    cannot reach.
+
+    A real +50 ppm crystal error with a drifting asymmetry that drags the fit to
+    a large NEGATIVE slope. The error from applying it is then `|fit| + |true|`
+    per unit time, which is exactly why the charge has to be a sum. The earlier
+    version of this test planted zero skew, so `max` and `sum` agreed at the one
+    point it measured and it passed for the wrong reason.
+    """
+    true_skew_ppm = 50.0
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+
+    def remote_at(t_local):
+        return t_local + int(true_skew_ppm * 1e-6 * (t_local - BASE_NS))
+
+    # 270 s relayed, asymmetry sliding across a constant 200 ms round trip, then
+    # 30 s direct at 10 ms so rtt_min comes from the good stretch.
+    for index in range(300):
+        start = BASE_NS + index * NS_PER_S
+        if index < 270:
+            total = 200_000_000
+            up = 195_000_000 - int(190_000_000 * index / 269)
+        else:
+            total = 10_000_000
+            up = 5_000_000
+        down = total - up
+        t2 = remote_at(start + up)
+        t3 = t2
+        t4 = start + up + down
+        clock.now_ns = t4
+        estimator.add(a_sample(start, t2, t3, t4, exchange_id=index))
+
+    estimate = estimator.estimate
+    assert estimate is not None and estimate.skew_ppm is not None
+    assert estimate.skew_ppm < -50.0, (
+        f"the construction did not drive the fit negative (got {estimate.skew_ppm})"
+    )
+    assert estimate.skew_uncertainty_ppm >= abs(estimate.skew_ppm) + true_skew_ppm, (
+        "the charge is under |fit| + |true|, which is the error applying the "
+        "slope actually introduces"
+    )
+
+    for behind_s in (60, 120, 200, 299):
+        at = estimate.t_reference_ns - behind_s * NS_PER_S
+        converted = estimator.to_remote(at)
+        error = abs(converted.t_remote_mono_ns - remote_at(at))
+        assert error <= converted.bound_ns, (
+            f"-{behind_s}s: error {error} exceeds bound {converted.bound_ns}"
+        )
 
 
 def test_conversion_refuses_to_reach_beyond_what_the_samples_support():
@@ -1228,7 +1313,12 @@ def test_an_unanswered_exchange_expires_instead_of_leaking():
         t_peer_wire_mono_ns=BASE_NS + 1,
     )
     assert initiator.on_pong(late, clock.now_ns) is None
-    assert initiator.pongs_unmatched == 1
+    # Late, not unmatched. Sharing one counter made a single exchange increment
+    # two, and gave an operator one number for two different diagnoses: a stray
+    # pong for an exchange we never sent, and an answer to one we gave up on.
+    assert initiator.pongs_late == 1
+    assert initiator.pongs_unmatched == 0
+    assert initiator.pongs_timed_out == 1
     assert initiator.estimator.samples_accepted == 0
 
 
@@ -1332,3 +1422,152 @@ def test_every_typed_message_is_a_member_of_the_message_union():
         if message_type not in members
     }
     assert not missing, f"typed messages absent from the Message union: {missing}"
+
+
+def test_a_stray_pong_and_a_late_pong_are_counted_apart():
+    """One exchange must not increment two counters, and two different faults
+    must not share one."""
+    from transport.timebase import PENDING_TIMEOUT_S
+
+    clock = SteppedClock()
+    initiator = TimeSyncInitiator(_NullRouter(), mono_clock=clock)
+    abandoned = initiator.send_ping()
+    clock.now_ns += int((PENDING_TIMEOUT_S + 1) * NS_PER_S)
+    initiator.send_ping()  # triggers the expiry sweep
+    assert initiator.pongs_timed_out == 1
+
+    def pong_for(exchange_id):
+        return TimeSyncMessage(
+            t_capture_mono_ns=1, exchange_id=exchange_id, t_wire_mono_ns=clock.now_ns,
+            t_peer_recv_mono_ns=clock.now_ns - 1_000,
+            t_peer_recv_wall_ns=1_755_000_000_000_000_000,
+            t_peer_wire_mono_ns=BASE_NS + 1,
+        )
+
+    initiator.on_pong(pong_for(abandoned), clock.now_ns)
+    initiator.on_pong(pong_for(999_999), clock.now_ns)
+    assert initiator.pongs_late == 1, "an answer to an abandoned exchange is not late"
+    assert initiator.pongs_unmatched == 1, "a pong we never asked for is not a stray"
+    assert initiator.pongs_timed_out == 1, "the expiry was double-counted"
+
+
+def test_a_pong_the_estimator_refuses_is_counted_by_the_initiator_too():
+    """Otherwise a ping's fate exists only in the estimator's record, and the
+    initiator shows one sent with every outcome zero -- recoverable only by
+    joining two records and subtracting."""
+    clock = SteppedClock()
+    initiator = TimeSyncInitiator(_NullRouter(), mono_clock=clock)
+    exchange_id = initiator.send_ping()
+
+    # A round trip past the admission ceiling: matched here, refused there.
+    absurd = TimeSyncMessage(
+        t_capture_mono_ns=1, exchange_id=exchange_id, t_wire_mono_ns=BASE_NS + 2_000,
+        t_peer_recv_mono_ns=BASE_NS + 1_000,
+        t_peer_recv_wall_ns=1_755_000_000_000_000_000,
+        t_peer_wire_mono_ns=BASE_NS + 1,
+    )
+    assert initiator.on_pong(absurd, BASE_NS + 5 * NS_PER_S) is None
+    assert initiator.pongs_refused == 1
+    assert initiator.pongs_matched == 0
+    record = initiator.to_record()
+    accounted = (
+        record["pongs_matched"] + record["pongs_unmatched"] + record["pongs_refused"]
+        + record["pongs_late"] + record["pongs_timed_out"]
+        + record["unstamped_echoes"] + record["wrong_direction"]
+        + record["awaiting_reply"]
+    )
+    assert accounted == record["pings_sent"], (
+        f"{record['pings_sent']} pings sent but {accounted} accounted for: "
+        "a ping's fate is missing from the initiator's own record"
+    )
+    json.dumps(record, allow_nan=False)
+
+
+def test_recv_with_receipt_skips_a_malformed_record_like_recv_does():
+    """The two paths had drifted apart: this one returned None on the first bad
+    record without spending any of the caller's budget, so `pump` could not tell
+    "no pong yet" from "one malformed record" and left the good message queued.
+    """
+    near, far = loopback_pair()
+    phone = Session(near, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+    jetson = Session(far, session_id=2, heartbeat_s=None, stall_timeout_s=None).start()
+    up, down = MessageRouter(phone), MessageRouter(jetson)
+    try:
+        # A malformed control record ahead of a good one.
+        good = TimeSyncMessage(
+            t_capture_mono_ns=1, exchange_id=7, t_wire_mono_ns=2,
+            t_peer_recv_mono_ns=3, t_peer_recv_wall_ns=4, t_peer_wire_mono_ns=5,
+        )
+        broken, payload = good.to_wire()
+        broken["t_peer_wire_mono_ns"] = None
+        phone.send(Channel.CONTROL, payload, broken, allow_reserved=(WIRE_STAMP_KEY,))
+        up.send(good)
+
+        received = None
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and received is None:
+            received = down.recv_with_receipt(Channel.CONTROL, timeout=0.5)
+        assert received is not None, "the good record was never reached"
+        message, t_recv = received
+        assert message.exchange_id == 7
+        assert t_recv > 0
+        assert down.stats()[Channel.CONTROL].decode_errors == 1
+        assert down.stats()[Channel.CONTROL].delivered == 1
+    finally:
+        phone.close()
+        jetson.close()
+
+
+def test_recv_and_recv_with_receipt_are_one_implementation():
+    """Two copies of skip-and-count and two of the budget had already disagreed
+    once; this pins that there is only one of each."""
+    import inspect
+
+    source = inspect.getsource(MessageRouter.recv)
+    assert "recv_with_receipt" in source, "recv no longer delegates"
+    assert "decode_errors" not in source, "recv has its own copy of the counting"
+
+
+def test_the_spec_fixes_both_rounding_rules():
+    """An unstated rounding rule is a legal one-nanosecond disagreement between
+    two conforming implementations, and F12 was exactly a one-nanosecond
+    disagreement mattering."""
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    section = text[text.index("## Shared Timebase"):text.index("## Golden Vectors")]
+    flat = " ".join(section.split())
+    assert "ceil(rtt_min / 2)" in flat, "the bound's rounding direction is unstated"
+    assert "ties to even" in flat, "the drift term's tie rule is unstated"
+
+
+def test_the_drift_term_rounds_ties_to_even_as_the_spec_says():
+    """Pinned against the rule, not against whatever Python happens to do."""
+    estimate = TimebaseEstimate(
+        estimate_id=1, offset_ns=0, t_reference_ns=0, rtt_min_ns=0,
+        offset_samples=30, skew_ppm=0.5, skew_stderr_ppm=0.0, skew_samples=30,
+    )
+    # 0.5 ppm over 1 s is 500 ns exactly; over 3 s, 1500 ns. Ties to even keeps
+    # both on the even nanosecond, which is what round() does and what the spec
+    # now requires of any implementation.
+    assert round(1 * 0.5) == 0
+    assert round(3 * 0.5) == 2
+    assert estimate.skew_uncertainty_ppm == ASSUMED_SKEW_PPM + 0.5
+
+
+def test_the_spec_states_the_admission_rule_and_the_extrapolation_number():
+    """A Kotlin implementer cannot derive 2 s or 300 s from prose, and both
+    decide which samples enter the window -- and therefore the offset, the
+    bound, and every conversion."""
+    from transport import timebase
+
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    section = text[text.index("## Shared Timebase"):text.index("## Golden Vectors")]
+    flat = " ".join(section.split())
+    assert f"rtt <= {timebase.MAX_SAMPLE_RTT_NS // 1_000_000}ms" in flat, (
+        "the admission ceiling is not in the conformance block"
+    )
+    assert f"**{timebase.MAX_EXTRAPOLATION_S:.0f} s**" in flat, (
+        "the extrapolation limit has no number in the spec"
+    )
+    assert f"**{timebase.MAX_HISTORY}**" in flat, (
+        "the retention floor is not stated, so the provenance promise is unbounded"
+    )

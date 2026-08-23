@@ -29,6 +29,7 @@ from __future__ import annotations
 import itertools
 import math
 import threading
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -91,8 +92,15 @@ SKEW_BUCKET_S = 10.0
 # standard error is no help: it measures scatter about the line, and a smoothly
 # drifting asymmetry produces a near-perfect line, so the fit is at its most
 # precise exactly when it is most wrong. Measured, that put a 60 ms error under a
-# 17.5 ms bound. So the charge is the worst of the three: the ordinary crystal
-# range, the fitted slope's own magnitude, and its scatter.
+# 17.5 ms bound.
+#
+# This constant is therefore load-bearing rather than a fallback: after the fix
+# it is the ONLY thing bounding the true skew, and the whole guarantee rests on
+# it. 50 ppm is the top of the ordinary range for initial accuracy at 25 C -- it
+# is NOT the figure over temperature and aging, and a phone in a windscreen mount
+# in the sun is exactly that excursion. A true 100 ppm would leave the bound
+# short by 50 ppm x 300 s = 15 ms, more than rtt_min/2 on any healthy link. It is
+# recorded here as a stated premise of the guarantee, not a measured fact.
 ASSUMED_SKEW_PPM = 50.0
 
 # How far outside the reference instant a conversion may reach. Beyond this the
@@ -105,10 +113,12 @@ MAX_EXTRAPOLATION_S = SKEW_WINDOW_S
 # is an answer to a question the link has forgotten.
 PENDING_TIMEOUT_S = 10.0
 
-# The published history is bounded. One estimate per accepted sample is ~28,800
-# over an eight-hour session, and this runs on a Jetson; a reader needs the
-# recent ones to re-derive recent conversions, and what was dropped is counted so
-# a re-derivation that finds no matching estimate can tell why.
+# The published history is bounded, which bounds the re-derivation promise with
+# it: at the steady 1 Hz this is about 68 minutes, inside a long drive. A
+# ConvertedInstant older than that carries an estimate_id that no longer resolves,
+# so the spec says an implementation retains at least this many rather than
+# promising every conversion is re-derivable forever. Evictions are counted so a
+# reader that finds no matching estimate can tell why instead of guessing.
 MAX_HISTORY = 4096
 
 NS_PER_S = 1_000_000_000
@@ -174,19 +184,31 @@ class TimebaseEstimate:
 
     @property
     def skew_uncertainty_ppm(self) -> float:
-        """What to charge per second of extrapolation: the worst of three.
+        """What to charge per second of extrapolation.
 
-        The assumed crystal range is a floor even once skew is fitted, because
-        the fit cannot separate real skew from a drifting path asymmetry and so
-        applying it is itself a risk of its own magnitude. The scatter term only
-        matters when the fit is noisy enough to exceed both.
+        Applying a fitted slope costs `|fit - true| * dt`, and
+
+            |fit - true| <= |fit| + |true|
+
+        so the charge is a **sum**, not the larger of the two. Nothing here
+        measures `|true|` -- that is the whole difficulty, since a drifting path
+        asymmetry and a real crystal error are indistinguishable from four
+        timestamps -- so `ASSUMED_SKEW_PPM` bounds it, and the fitted magnitude
+        is added on top rather than compared against.
+
+        Taking the maximum instead was unsound wherever `fit` and `true` have
+        opposite signs, which is precisely what a drifting asymmetry larger than
+        the crystal error produces. Measured: a true +50 ppm fitted as -497.9 ppm
+        put a 164 ms error under a 154 ms bound, while the sum lands on 547.9 ppm
+        -- exactly the required `|fit - true|`, which is how you can tell the
+        algebra is tight rather than merely bigger.
 
         Never zero, because "not measured" and "zero" are different claims and
         only one of them is true here.
         """
         if self.skew_ppm is None or self.skew_stderr_ppm is None:
             return ASSUMED_SKEW_PPM
-        return max(ASSUMED_SKEW_PPM, abs(self.skew_ppm), self.skew_stderr_ppm)
+        return max(ASSUMED_SKEW_PPM + abs(self.skew_ppm), self.skew_stderr_ppm)
 
     def bound_ns_at(self, t_local_ns: int) -> int:
         """Half the least asymmetry we cannot rule out, plus what drift accrues
@@ -301,7 +323,7 @@ class TimebaseEstimator:
         self._lock = threading.Lock()
         self._samples: list[TimeSyncSample] = []
         self._ids = itertools.count(1)
-        self._published: list[TimebaseEstimate] = []
+        self._published: deque[TimebaseEstimate] = deque(maxlen=MAX_HISTORY)
         self._current: TimebaseEstimate | None = None
         self.samples_accepted = 0
         self.samples_refused = 0
@@ -372,10 +394,11 @@ class TimebaseEstimator:
             skew_samples=0 if skew is None else skew[2],
         )
         self._current = estimate
-        self._published.append(estimate)
-        while len(self._published) > MAX_HISTORY:
-            self._published.pop(0)
+        # A bounded deque evicts in O(1); popping from the front of a list was
+        # O(n) on every publish once the bound was reached.
+        if len(self._published) == MAX_HISTORY:
             self.estimates_evicted += 1
+        self._published.append(estimate)
 
     # -- reading -----------------------------------------------------------
 
@@ -568,6 +591,11 @@ class TimeSyncInitiator:
         self.unstamped_echoes = 0
         self.pings_refused = 0
         self.pongs_timed_out = 0
+        self.pongs_refused = 0
+        self.pongs_late = 0
+        # Exchange ids we gave up on, so a pong that arrives afterwards is
+        # counted as late rather than as a stray for an exchange we never sent.
+        self._timed_out_ids: set[int] = set()
 
     @property
     def period_s(self) -> float:
@@ -605,11 +633,15 @@ class TimeSyncInitiator:
         window with a round trip of however long it was gone.
         """
         horizon = self._mono() - int(PENDING_TIMEOUT_S * NS_PER_S)
-        stale = [key for key, pending in self._pending.items()
+        stale = [key for key, pending in list(self._pending.items())
                  if pending.t_sent_mono_ns < horizon]
         for key in stale:
-            del self._pending[key]
-            self.pongs_timed_out += 1
+            # pop, not del: on_pong pops from the same dict on another thread,
+            # and a del that lost the race raised KeyError out of send_ping and
+            # killed the cadence thread.
+            if self._pending.pop(key, None) is not None:
+                self.pongs_timed_out += 1
+            self._timed_out_ids.add(key)
 
     def on_pong(self, pong: TimeSyncMessage, t_recv_mono_ns: int) -> TimeSyncSample | None:
         """Match a pong to its ping and feed the sample. None if unusable.
@@ -624,7 +656,15 @@ class TimeSyncInitiator:
             return None
         pending = self._pending.pop(pong.exchange_id, None)
         if pending is None:
-            self.pongs_unmatched += 1
+            # An exchange we already timed out is a late answer, not a stray one.
+            # Sharing `pongs_unmatched` between the two made one exchange
+            # increment two counters and gave an operator one number for two
+            # different diagnoses.
+            if pong.exchange_id in self._timed_out_ids:
+                self._timed_out_ids.discard(pong.exchange_id)
+                self.pongs_late += 1
+            else:
+                self.pongs_unmatched += 1
             return None
         echoed = pong.t_peer_wire_mono_ns
         # A peer that never stamped the ping echoes the placeholder back. Left
@@ -642,6 +682,11 @@ class TimeSyncInitiator:
             t4_local_recv_ns=t_recv_mono_ns,
         )
         if not self.estimator.add(sample):
+            # Counted here as well as in the estimator's own reasons: without
+            # this a ping's fate existed only in the other record, so the
+            # initiator showed one sent and every outcome zero, recoverable only
+            # by joining two records and subtracting.
+            self.pongs_refused += 1
             return None
         self.pongs_matched += 1
         return sample
@@ -670,6 +715,8 @@ class TimeSyncInitiator:
             "unstamped_echoes": self.unstamped_echoes,
             "pings_refused": self.pings_refused,
             "pongs_timed_out": self.pongs_timed_out,
+            "pongs_refused": self.pongs_refused,
+            "pongs_late": self.pongs_late,
             "awaiting_reply": len(self._pending),
             "estimator": self.estimator.to_record(),
         }
