@@ -147,11 +147,44 @@ And the same "agree where it's safe" pattern showed up twice more, both handled:
   puts astral characters last. Only a non-ASCII *key* separates them, and no vector has
   one.
 
-**53 transport tests, 0 failed.**
+**Step 5 done — the channel table and outbound queues.** The table is tied to the spec
+row for row (direction, priority, overflow, depth) in *both* directions, so a channel
+added to the spec and not to the code fails too. Mutation-checked: changing one depth or
+one priority turns the suite red.
 
-Remaining for task 19: channels/queues/stats, the eight messages and the refusal
-vocabulary, the session with handshake and keepalive, the time-sync responder, the
-Kotlin↔Python interop test, then GPS itself.
+Two spec rules drive the queues, and both look like details until they are wrong:
+
+- **A sequence number is assigned at enqueue, before the overflow decision.** That is
+  what makes a gap in received sequence numbers the peer's evidence of a drop. Assigning
+  at send time would renumber the survivors and hide every drop.
+- **The hello spends `control` sequence 0**, so ordinary control traffic starts at 1. A
+  peer restarting control at 0 would duplicate the hello's number, and the gap rule
+  cannot see it — it only fires on a sequence *greater* than expected — so the divergence
+  would be silent and permanent.
+
+**Step 6 done — the refusal vocabulary and the GPS message.** The GPS record encodes
+byte-identically to both recorded headers (full fix and all-null), which is the first
+message-level conformance on the Kotlin side. Four spec subtleties pinned:
+
+- an absent nullable field is refused, not read as null — absent would conflate "the
+  sensor said nothing" with "an older build that never had this field", and the two
+  halves deploy separately;
+- the coordinate range check is **conditional on `valid`**, which is what the table
+  actually says;
+- a fractional count is refused rather than truncated, since truncating hides a sender
+  bug behind a plausible number;
+- an integer is accepted where a float is expected, so acceptance does not depend on how
+  the producer spelled a round value.
+
+`MessageError` is deliberately not a `FramingError`: a bad message costs one message, a
+bad frame ends the session, and the difference is recoverability.
+
+**94 transport tests, 0 failed.** (One commit message says 93 — the count is 94.)
+
+Remaining for task 19: the session with handshake, keepalive and stall detection; the
+time-sync responder; the Kotlin↔Python interop test; the remaining message types
+(`imu`, `here`, `telemetry` land with tasks 20, 21 and 24 — their producers); and GPS
+capture itself with the FusedLocation adapter.
 
 ---
 
