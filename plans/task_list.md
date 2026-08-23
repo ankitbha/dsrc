@@ -680,11 +680,13 @@ tunnels over USB and is unaffected.
     timestamps from `elapsedRealtimeNanos`.
 19. GPS capture and forwarding, logging both fix time and receipt time.
 20. IMU capture and forwarding.
-21. HERE client: query around the current position at the commanded rate, forward
-    the raw response with request and response timestamps, no interpretation on
-    the phone. **Blocked: needs a HERE API key.**
-22. Rate-command handling across all four sensors, applied without restarting
-    capture.
+21. HERE client: query the road ahead at the commanded rate and in the commanded
+    query shape, forward the raw response with request and response timestamps,
+    no interpretation on the phone. The query shape is the Jetson's to choose,
+    not the phone's. **Unblocked:** Nash's HERE key is entitled to Traffic API
+    v7, and NY/NJ is fully covered.
+22. Sensing-configuration handling across all four modalities -- rates and
+    per-modality settings alike -- applied without restarting capture.
 23. Advisory display: the driver-facing UI.
 24. Thermal monitoring reported upstream, plus throttle-safe capture that
     degrades rather than failing.
@@ -698,9 +700,10 @@ tunnels over USB and is unaffected.
 28. Fusion / estimator: per-field source ownership between the wide-lagging feed
     and the narrow-current camera, with a staleness aging term. The sources
     observe different parts of the state and are not substitutable.
-29. Sampling controller producing four independent rates. Inputs: the free
-    always-on IMU/GPS tier as a trigger proxy, advisory bin-boundary proximity,
-    disagreement between sources, and thermal backoff from the phone.
+29. Sensing controller producing four independent rates and the per-modality
+    settings that go down with them. Inputs: the free always-on IMU/GPS tier as
+    a trigger proxy, advisory bin-boundary proximity, disagreement between
+    sources, and thermal backoff from the phone.
 30. Shadow / live mode flag. In shadow mode the controller emits the decisions it
     would make without gating; in live mode it gates for real. Both paths
     implemented, flag flippable at runtime.

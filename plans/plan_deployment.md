@@ -106,6 +106,34 @@ deployment/
 
 ---
 
+## Sensing configuration authority
+
+Every sensing setting is the Jetson's to choose. The phone captures, encodes and
+forwards; it decides nothing about how it senses.
+
+This covers more than sampling rate. Camera resolution and JPEG quality, GPS
+provider and accuracy mode, IMU axis selection and filtering, and the HERE query
+shape -- corridor path length, radius, and location-referencing mode -- are all
+set by the Jetson and pushed down. Where a modality exposes a knob, the knob
+belongs upstream.
+
+The reason is that the phone cannot see what a setting is for. The sampling
+controller's inputs -- advisory bin-boundary proximity, disagreement between
+sources, thermal backoff, HERE quota -- live on the Jetson, and several of them
+are only meaningful after fusion. A phone choosing its own HERE referencing mode
+would be choosing between a 29 KB response and a 147 KB one on the basis of
+nothing it can observe.
+
+It also protects shadow mode, which is only honest if the decisions it records
+are the complete set of decisions. A setting chosen on the phone is a decision
+that never reaches the log.
+
+The consequence for the wire is that the downlink is a configuration channel
+whose fields include rate, not a rate channel. `specs/transport_protocol.md`
+holds the current shape.
+
+---
+
 ## Perception and sensing pipeline
 
 The Jetson prototype should convert raw sensor inputs into the same observation vector used by the actor in simulation.

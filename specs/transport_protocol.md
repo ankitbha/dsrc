@@ -373,6 +373,29 @@ ones are required, so a misspelled key still surfaces as a missing key.
 no fewer, because they are a closed set defined by `specs/action_schema.md`
 rather than an extensible list.
 
+### Configuration flows one way
+
+`rate_cmd` is the phone's whole configuration surface and the Jetson is its only
+writer. The phone applies what arrives and reports what it achieved on
+`telemetry`; it originates no sensing decision of its own. Every knob a modality
+exposes -- sampling rate, camera resolution and quality, GPS accuracy mode, IMU
+axis selection, the HERE query shape and location-referencing mode -- is set
+upstream, because the state that would justify choosing is all on the Jetson.
+Nothing in the frame layer enforces this, any more than it enforces `direction`;
+it is a rule about who sends, like the sender rule above.
+
+The message carries `rates`, so today only the four sampling frequencies are
+expressible. A setting that is not a frequency cannot be smuggled into `rates`,
+whose values are constrained to `(0, 1000]` Hz under the four known keys, so
+carrying one means a sibling object and a new header field.
+
+The additive rule covers the keys inside such an object but not the object
+itself. An unknown header field is ignored, so an old receiver tolerates a new
+sender; but a new receiver `require`s the field and refuses an old sender's
+command for a missing key. The breakage is one-directional, which is enough to
+make widening the downlink a coordinated change across Python, Kotlin and the
+golden vectors -- receiver last, or the field optional from the start.
+
 ### A malformed message is not a malformed stream
 
 | condition | reason | outcome |

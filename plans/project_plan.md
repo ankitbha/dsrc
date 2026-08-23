@@ -49,6 +49,8 @@ dashboard and logs
 no actuation
 ```
 
+Sensing spans two devices, and the split is deliberate: the phone captures and forwards, while the Jetson owns every sensing setting as well as the policy. The phone holds none of the state that would justify a sensing decision.
+
 The prototype is non-actuating. It is edge-feasibility evidence and the deployment argument's proof of existence, not an autonomous driving deployment.
 
 ## 3. Implementation Roadmap
