@@ -120,17 +120,24 @@ def markdown_table(stats: dict[str, dict[str, float]], fps: float, ticks: int) -
         f"| stage | mean (ms) | p50 (ms) | p95 (ms) |",
         f"|---|---|---|---|",
     ]
-    order = ["detect_ms", "track_ms", "observe_ms", "policy_ms", "jetson_ms", "e2e_ms"]
+    order = ["detect_ms", "track_ms", "observe_ms", "policy_ms", "link_ms", "jetson_ms",
+             "e2e_ms"]
     label = {
         "detect_ms": "detection (TRT FP16, incl. pre/post)",
         "track_ms": "tracking + distance",
         "observe_ms": "observation build + encode",
         "policy_ms": "actor + advisory decode",
         "jetson_ms": "ON-JETSON (arrival -> advisory)",
+        "link_ms": "LINK (phone capture -> Jetson arrival)",
         "e2e_ms": "END-TO-END (capture -> advisory)",
     }
     for key in order:
-        s = stats[key]
+        s = stats.get(key)
+        if s is None:
+            # An absent series says so rather than showing zeros. A local run has
+            # no link segment; that is not a latency of zero.
+            lines.append(f"| {label[key]} | - | - | - |")
+            continue
         lines.append(f"| {label[key]} | {s['mean']:.2f} | {s['p50']:.2f} | {s['p95']:.2f} |")
     lines.append(f"\npipeline throughput: **{fps:.1f} FPS** over {ticks} ticks")
     return "\n".join(lines)

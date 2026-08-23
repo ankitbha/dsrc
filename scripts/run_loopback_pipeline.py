@@ -76,6 +76,10 @@ PHONE_CLOCK_OFFSET_NS = 243_264_000_000_000
 FX, CX, HORIZON, CAM_H = 800.0, 640.0, 360.0, 1.25
 CAMERA_HZ, GPS_HZ = 10.0, 5.0
 ADVISORY_ECHO_PREFIX = "frame:"
+# A link segment larger than this is not a measurement, it is a broken
+# conversion. Generous against any real link (task 15 measured 7.9 ms) and tight
+# against the 67.6-hour clock offset a mistaken conversion produces.
+MAX_PLAUSIBLE_LINK_MS = 1_000.0
 
 
 class _FakeDetector:
@@ -159,6 +163,8 @@ def run(duration_s: float, offset_ns: int, sync_hz: float) -> dict:
 
         stop = threading.Event()
         sent = {"frames": 0, "fixes": 0, "pongs": 0, "invalid": 0}
+        # `invalid` is written from three threads and `d[k] += 1` is not atomic.
+        sent_lock = threading.Lock()
         advisories = {"received": 0, "unmatched": 0, "frame_ids": set()}
         jpeg = a_jpeg()
 
@@ -175,7 +181,8 @@ def run(duration_s: float, offset_ns: int, sync_hz: float) -> dict:
                     )):
                         sent["frames"] += 1
                 except InvalidMessage:
-                    sent["invalid"] += 1
+                    with sent_lock:
+                        sent["invalid"] += 1
                 next_at += period
                 delay = next_at - time.monotonic()
                 stop.wait(delay) if delay > 0 else None
@@ -195,7 +202,8 @@ def run(duration_s: float, offset_ns: int, sync_hz: float) -> dict:
                     )):
                         sent["fixes"] += 1
                 except InvalidMessage:
-                    sent["invalid"] += 1
+                    with sent_lock:
+                        sent["invalid"] += 1
                 next_at += period
                 delay = next_at - time.monotonic()
                 stop.wait(delay) if delay > 0 else None
@@ -208,10 +216,18 @@ def run(duration_s: float, offset_ns: int, sync_hz: float) -> dict:
                 arrived = phone_router.recv_with_receipt(Channel.CONTROL, timeout=0.01)
                 if arrived is not None and isinstance(arrived[0], TimeSyncMessage):
                     try:
-                        if phone_router.send(answer_ping(arrived)):
+                        # On the PHONE's clock. answer_ping's default is the
+                        # host clock, which shipped a message with two devices'
+                        # clocks inside it -- 67.57 hours apart. Inert today,
+                        # because on_pong reads the wire and receipt stamps and
+                        # never the pong's own capture stamp, but it falsified
+                        # this harness's claim that every stamp the phone
+                        # produces is on the phone's clock.
+                        if phone_router.send(answer_ping(arrived, mono_clock=phone_mono)):
                             sent["pongs"] += 1
                     except InvalidMessage:
-                        sent["invalid"] += 1
+                        with sent_lock:
+                            sent["invalid"] += 1
                 advisory = phone_router.recv(Channel.ADVISORY, timeout=0.0)
                 if advisory is not None:
                     if advisory.lane_text.startswith(ADVISORY_ECHO_PREFIX):
@@ -276,6 +292,7 @@ def run(duration_s: float, offset_ns: int, sync_hz: float) -> dict:
         report = _report(
             ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps,
             initiator, pipeline, first_converted_at,
+            phone_stats=phone.stats(), jetson_stats=jetson.stats(),
         )
     phone.close()
     jetson.close()
@@ -301,10 +318,13 @@ def _advisory_message(tick):
 
 
 def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps,
-            initiator, pipeline, first_converted_at) -> dict:
+            initiator, pipeline, first_converted_at, phone_stats, jetson_stats) -> dict:
     converted = [t for t in ticks if t["timebase"] and t["timebase"]["converted"]]
     proxied = [t for t in ticks if t["timebase"] and t["timebase"]["proxy"]]
     fresh = [t for t in ticks if t["gps_fresh"]]
+    converted_fresh = sum(1 for t in converted if t["gps_fresh"])
+    link_summary = percentiles([int(t["link_ms"] * 1e6) for t in converted])
+    link_p95_ms = link_summary.get("p95")
     return {
         "duration_s": duration_s,
         "planted_clock_offset_hours": round(offset_ns / 3.6e12, 3),
@@ -315,13 +335,18 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
         # that happen to agree.
         "advisory_frame_ids_matched": len(advisories["frame_ids"] & {t["frame_id"] for t in ticks}),
         "phone_sent": dict(sent),
+        # The transport's own counters, so the account can close. `sent` counts
+        # send() returning True, which is ENQUEUED: camera is LATEST_WINS at
+        # depth 1, so a replacement increments dropped_outbound and the two
+        # numbers diverge with nothing else recording why.
+        "transport": _account(phone_stats, jetson_stats, sent, ticks, advisories),
         "camera": camera.to_record(),
         "gps": gps.to_record(),
         "adapter": adapter.to_record(),
         "timesync": initiator.to_record(),
         "latency": {
             "jetson_ms": percentiles([int(t["jetson_ms"] * 1e6) for t in ticks]),
-            "link_ms": percentiles([int(t["link_ms"] * 1e6) for t in converted]),
+            "link_ms": link_summary,
             "e2e_ms": percentiles([int(t["e2e_ms"] * 1e6) for t in ticks]),
         },
         "pipeline_stats": pipeline.stats.snapshot(),
@@ -336,15 +361,64 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
             "fresh_fraction": None if not ticks else round(len(fresh) / len(ticks), 4),
             "ego_speed_sources": _tally(t["ego_speed_source"] for t in ticks),
         },
-        # One gate, counted from records rather than derived by subtraction.
+        # One gate, and it has to charge the CONVERTED population.
+        #
+        # It used to ask only that some tick had a fresh fix, which the proxied
+        # ticks satisfy by construction -- their capture stamp IS their arrival
+        # stamp, so their age is ~0 whatever the conversion does. Measured
+        # against a to_local replaced by the identity, the old gate returned
+        # usable=true and exit 0 while reporting a 67.6-HOUR link segment and a
+        # fresh fraction of 0.12. A gate that cannot fail on the defect the task
+        # exists to prevent is not a gate.
         "usable": bool(
             ticks
             and advisories["received"] > 0
-            and len(converted) > 0
-            and len(fresh) > 0
+            and converted
+            # Every converted tick must be fresh. A conversion that returns a
+            # wrong number shows up here and nowhere else.
+            and converted_fresh == len(converted)
+            # And the segment it implies has to be physically possible.
+            and link_p95_ms is not None
+            and abs(link_p95_ms) <= MAX_PLAUSIBLE_LINK_MS
+            and first_converted_at is not None
         ),
+        "gate_detail": {
+            "converted_ticks": len(converted),
+            "converted_and_fresh": converted_fresh,
+            "link_p95_ms": link_p95_ms,
+            "max_plausible_link_ms": MAX_PLAUSIBLE_LINK_MS,
+            "first_converted_tick_at_s": first_converted_at,
+        },
         "trace": ticks,
     }
+
+
+def _account(phone_stats, jetson_stats, sent, ticks, advisories) -> dict:
+    """Reconciled from records, never by subtraction."""
+    up = {}
+    for channel in (Channel.CAMERA, Channel.GPS):
+        out = phone_stats.channels[channel]
+        inn = jetson_stats.channels[channel]
+        up[channel.value] = {
+            "queued": out.queued,
+            "sent": out.sent,
+            "dropped_outbound": out.dropped_outbound,
+            "abandoned_outbound": out.abandoned_outbound,
+            "received": inn.received,
+            "dropped_inbound": inn.dropped_inbound,
+            "delivered": inn.delivered,
+            "seq_gaps": inn.seq_gaps,
+            "missing_seqs": inn.missing_seqs,
+        }
+    gaps = []
+    for channel, row in up.items():
+        if row["queued"] != row["sent"] + row["dropped_outbound"] + row["abandoned_outbound"]:
+            gaps.append(f"{channel}: outbound account does not close")
+        if row["sent"] != row["received"]:
+            gaps.append(f"{channel}: {row['sent']} sent but {row['received']} received")
+    if advisories["received"] != len(ticks):
+        gaps.append(f"{len(ticks)} ticks but {advisories['received']} advisories returned")
+    return {"upstream": up, "reconciliation": gaps, "reconciled": not gaps}
 
 
 def _tally(values) -> dict[str, int]:

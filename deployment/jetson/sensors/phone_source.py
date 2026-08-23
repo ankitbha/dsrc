@@ -42,7 +42,6 @@ from transport.timebase import TimebaseNotReady
 
 # Proxying is normal for the first seconds of a drive and abnormal after that, so
 # the reasons are counted separately rather than lumped into one number.
-PROXY_REASON_UNSET = "no estimate yet"
 
 
 class PhoneClockAdapter:
@@ -52,9 +51,8 @@ class PhoneClockAdapter:
     threads, and both share one adapter so the record covers the whole session.
     """
 
-    def __init__(self, estimator: Any, *, mono_clock: Any = now_mono) -> None:
+    def __init__(self, estimator: Any) -> None:
         self._estimator = estimator
-        self._mono = mono_clock
         self._lock = threading.Lock()
         self.converted = 0
         self.proxied = 0
@@ -81,8 +79,7 @@ class PhoneClockAdapter:
         except TimebaseNotReady as exc:
             with self._lock:
                 self.proxied += 1
-                reason = getattr(exc, "reason", PROXY_REASON_UNSET)
-                self.proxy_reasons[reason] = self.proxy_reasons.get(reason, 0) + 1
+                self.proxy_reasons[exc.reason] = self.proxy_reasons.get(exc.reason, 0) + 1
             return TimebaseStamp(
                 t_capture_mono=t_arrival_local_s,
                 t_arrival_mono=t_arrival_local_s,
@@ -124,6 +121,8 @@ class _PhoneSource:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.messages_received = 0
+        # Why the reader stopped, if it stopped for a reason. None while healthy.
+        self.failure: str | None = None
 
     def start(self):
         self._stop.clear()
@@ -137,6 +136,21 @@ class _PhoneSource:
             self._thread.join(timeout=2.0)
 
     def _loop(self) -> None:
+        try:
+            self._read_until_stopped()
+        except BaseException as exc:  # noqa: BLE001 - see below
+            # `transport/session.py` learned this the hard way and says so in
+            # both its loops: a thread that dies outside its expected exception
+            # types leaves the object reporting itself healthy -- here, a reader
+            # with every counter at zero, `end_of_stream` False, and a consumer
+            # blocking on `wait_for_fresh` forever with no way to learn why.
+            # Recorded and surfaced rather than swallowed, and the source is
+            # marked ended so a consumer's termination check actually fires.
+            self.failure = f"{type(exc).__name__}: {exc}"
+            self._on_reader_ended()
+            raise
+
+    def _read_until_stopped(self) -> None:
         while not self._stop.is_set():
             received = self._router.recv_with_receipt(self._channel, timeout=self._poll_s)
             if received is None:
@@ -154,6 +168,15 @@ class _PhoneSource:
     def _accept(self, message, receipt, stamp: TimebaseStamp) -> None:  # pragma: no cover
         raise NotImplementedError
 
+    def _on_reader_ended(self) -> None:
+        """Hook for a subclass that has consumers to wake. Default: nothing."""
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "reader_alive": bool(self._thread is not None and self._thread.is_alive()),
+            "failure": self.failure,
+        }
+
 
 class PhoneCameraStream(_PhoneSource):
     """`CameraStream`'s consumer surface, fed from the camera channel."""
@@ -168,6 +191,25 @@ class PhoneCameraStream(_PhoneSource):
         self._drop_counter = 0
         self.end_of_stream = False
         self.decode_failures = 0
+        # Read by every camera consumer in the tree. `run_demo` reads
+        # `file_recoveries` unconditionally in its summary block, so without it a
+        # phone-fed run raised AttributeError after the work was done and before
+        # the summary was written -- which made the claim that these backends
+        # drive the existing entry points unchanged simply false.
+        self.source = "phone:camera"
+        self.file_recoveries = 0
+
+    def _on_reader_ended(self) -> None:
+        with self._cond:
+            self.end_of_stream = True
+            self._cond.notify_all()
+
+    def stop(self) -> None:
+        super().stop()
+        # A stopped source is an ended source. `run_demo` breaks on this, so
+        # leaving it False turned a dead link into an infinite wait_for_fresh
+        # loop where a file camera exits cleanly.
+        self._on_reader_ended()
 
     def _accept(self, message, receipt, stamp: TimebaseStamp) -> None:
         try:
@@ -215,6 +257,8 @@ class PhoneCameraStream(_PhoneSource):
             "frames_received": self.messages_received,
             "frames_dropped_unconsumed": self._drop_counter,
             "decode_failures": self.decode_failures,
+            "end_of_stream": self.end_of_stream,
+            **self.health(),
         }
 
 
@@ -257,12 +301,20 @@ class PhoneGpsReader(_PhoneSource):
             return self._fix
 
     def is_stale(self, t_mono_now: float | None = None) -> bool:
-        return self.latest().age_s(now_mono() if t_mono_now is None else t_mono_now) > (
-            self.stale_after_s
-        )
+        """Symmetric, for the same reason the observation builder's gate is.
+
+        A fix from this clock's future is not fresh, and a one-sided `>` called it
+        fresh -- the dangerous half of the clock-mixing failure. The two freshness
+        predicates in this codebase must not disagree about that.
+        """
+        age = self.latest().age_s(now_mono() if t_mono_now is None else t_mono_now)
+        return not abs(age) <= self.stale_after_s
+
+    def _on_reader_ended(self) -> None:
+        self.diagnostics.last_error = self.failure or "reader stopped"
 
     def to_record(self) -> dict[str, Any]:
-        return {"fixes_received": self.messages_received}
+        return {"fixes_received": self.messages_received, **self.health()}
 
 
 def _or_nan(value: float | None) -> float:

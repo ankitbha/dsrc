@@ -65,6 +65,10 @@ class BuilderConfig:
     uncongested_density_threshold_veh_per_km: float = 12.0
     low_speed_free_flow_delta_mps: float = 8.0
     gps_stale_after_s: float = 2.0
+    # How far into this clock's future a reading may sit and still be believed,
+    # when it carries no uncertainty of its own. Covers `now` being sampled just
+    # before the reading; anything larger is a clock problem, not sampling order.
+    clock_sampling_epsilon_s: float = 0.05
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "BuilderConfig":
@@ -133,18 +137,28 @@ class ObservationBuilder:
 
         # --- ego motion from GPS -------------------------------------
         gps_age = gps.age_s(t_mono)
-        # Symmetric, and that is the point. A one-sided `<=` treats a negative
-        # age as fresh -- and a negative age is exactly what an unconverted
-        # cross-device stamp produces whenever the peer booted later than this
-        # device, so a fix arbitrarily far in the past read as current. That is
-        # the dangerous direction of the clock-mixing failure; the positive
-        # direction merely falls back to neutral.
+        # Bounded on both sides, and the two sides are not the same size.
         #
-        # The same window bounds both sides, so no new constant. A small negative
-        # age is ordinary: `now` is often sampled just before the reading, and a
-        # converted stamp may legitimately land inside its own bound after the
-        # arrival it preceded. A large one is nonsense in either direction.
-        gps_fresh = gps.valid and abs(gps_age) <= cfg.gps_stale_after_s
+        # The past side is the staleness window: how old a reading may be and
+        # still describe now. The future side is much tighter, because a reading
+        # from this clock's future is nonsense -- and it is exactly what an
+        # unconverted cross-device stamp produces whenever the peer booted later
+        # than this device. A one-sided `<=` accepted those, so an arbitrarily
+        # old fix read as current: the dangerous direction of the clock-mixing
+        # failure, where the positive direction merely falls back to neutral.
+        #
+        # It is not zero, because two legitimate cases land slightly ahead: `now`
+        # is often sampled just before the reading, and a converted stamp may sit
+        # inside its own bound after the arrival it preceded. So the allowance is
+        # that bound when the stamp carries one, and a small sampling epsilon
+        # otherwise -- rather than the full staleness window, which would have
+        # granted two seconds of future tolerance on the strength of an eight
+        # millisecond uncertainty.
+        stamp = getattr(gps, "timebase", None)
+        future_allowance = cfg.clock_sampling_epsilon_s
+        if stamp is not None and stamp.bound_s is not None:
+            future_allowance = max(future_allowance, stamp.bound_s)
+        gps_fresh = gps.valid and -future_allowance <= gps_age <= cfg.gps_stale_after_s
         if gps_fresh:
             ego_speed = max(0.0, gps.speed_mps) if math.isfinite(gps.speed_mps) else 0.0
             self._ego.last_speed_mps = ego_speed

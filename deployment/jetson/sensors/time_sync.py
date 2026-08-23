@@ -48,11 +48,22 @@ class TimebaseStamp:
     proxy: bool
 
     @property
-    def link_s(self) -> float:
-        """Capture to arrival. Bounded, and can come out negative: the bound
-        permits a converted capture stamp slightly later than the arrival it
-        preceded. Reported as measured rather than clamped, because clamping
-        would hide exactly the case where the bound is being tested."""
+    def link_s(self) -> float | None:
+        """Capture to arrival, or None when it was not measured.
+
+        None under the proxy, where capture IS arrival by construction, so the
+        difference is zero for a reason that has nothing to do with the link. It
+        used to return that zero, and the proxy is used precisely when the link
+        is worst -- so those zeros pulled the reported link segment down exactly
+        when it mattered most.
+
+        Bounded, and can come out negative: the bound permits a converted capture
+        stamp slightly later than the arrival it preceded. Reported as measured
+        rather than clamped, because clamping would hide exactly the case where
+        the bound is being tested.
+        """
+        if self.proxy:
+            return None
         return self.t_arrival_mono - self.t_capture_mono
 
     def to_record(self) -> dict:
@@ -61,7 +72,7 @@ class TimebaseStamp:
             "proxy": self.proxy,
             "bound_ms": None if self.bound_s is None else round(self.bound_s * 1000.0, 3),
             "estimate_id": self.estimate_id,
-            "link_ms": round(self.link_s * 1000.0, 3),
+            "link_ms": None if self.link_s is None else round(self.link_s * 1000.0, 3),
         }
 
 

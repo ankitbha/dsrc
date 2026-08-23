@@ -358,7 +358,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             telemetry.close()
         if window is not None:
             window.close()
-        e2e = summary["stats"]["jetson_ms"]
+        e2e = summary["stats"]["jetson_ms"] or {"mean": float("nan")}
         print(
             f"[run] {summary['ticks']} ticks | jetson mean {e2e['mean']:.1f} ms, "
             f"p50 {e2e['p50']:.1f} ms, p95 {e2e['p95']:.1f} ms | dropped frames {camera.dropped_frames}"

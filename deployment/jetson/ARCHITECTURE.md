@@ -95,6 +95,14 @@ Remaining levers, in order of value: 448-px engine (`./export_detector.sh
 yolov8n.pt 448`, roughly halves detection), INT8 calibration, GStreamer
 zero-copy capture (needs system OpenCV). None needed for the 200 ms target.
 
+**The 200 ms target is on `jetson_ms`, not on `e2e_ms`.** With a phone camera the
+capture happens on another device, so end-to-end is the sum of a bounded link
+segment and an exact on-Jetson one. The threshold is a claim about what this
+hardware can do, and charging it for a link the Jetson does not control would
+fail a run for the network's behaviour -- and would loosen silently whenever the
+timebase cannot convert a capture stamp, because the link segment then drops out
+of the sum. `eval_run` gates `latency_jetson_p95`.
+
 ## 5. Simulation ↔ prototype observation mapping
 
 (paper table; provenance is logged per-tick in `field_sources`)
@@ -173,7 +181,9 @@ layout) is likewise mirrored in `export_policy.VendoredActor` and checked by
 ## 9. Evaluation hooks (plan §"Prototype evaluation metrics")
 
 Everything needed for the paper's tables is in `metadata.jsonl`:
-per-tick `stage_ms`/`e2e_ms`/`fps` (system metrics), `vehicles` with
+per-tick `stage_ms`/`jetson_ms`/`link_ms`/`e2e_ms`/`fps` (system metrics, where
+`link_ms` is null for a local camera and null whenever the capture stamp was
+proxied rather than converted), `vehicles` with
 per-track distance/method (perception metrics), `obs` + `field_sources` +
 `obs_diagnostics.missingness` (observation quality), `head_probs`/`confidence`
 (policy), and `type: system` records with power/utilization from jtop.

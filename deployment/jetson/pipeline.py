@@ -37,11 +37,22 @@ class RollingStats:
     def add(self, value: float) -> None:
         self._values.append(value)
 
-    def summary(self) -> dict[str, float]:
+    def summary(self) -> dict[str, float] | None:
+        """None for an empty series, not zeros.
+
+        Zeros read as a measured latency of zero. That is wrong for any series
+        and it became reachable when the link segment arrived: a local-camera run
+        has no link at all, so every such run was publishing
+        `link_ms: 0/0/0` for a segment that does not exist.
+
+        `n` is included because a distribution without its count cannot be
+        weighed against another one.
+        """
         if not self._values:
-            return {"mean": 0.0, "p50": 0.0, "p95": 0.0}
+            return None
         arr = np.asarray(self._values)
         return {
+            "n": len(self._values),
             "mean": float(arr.mean()),
             "p50": float(np.percentile(arr, 50)),
             "p95": float(np.percentile(arr, 95)),
@@ -217,7 +228,12 @@ class PerceptionPolicyPipeline:
         t_arrival = frame.timebase.t_arrival_mono if frame.timebase else frame.t_mono
         e2e_ms = (t4 - frame.t_mono) * 1000.0
         jetson_ms = (t4 - t_arrival) * 1000.0
-        link_ms = None if frame.timebase is None else frame.timebase.link_s * 1000.0
+        # None for a local camera (there is no link) and None under the proxy
+        # (capture IS arrival, so the difference is zero for a reason that has
+        # nothing to do with the link). A zero here therefore always means a
+        # measured zero.
+        link_s = None if frame.timebase is None else frame.timebase.link_s
+        link_ms = None if link_s is None else link_s * 1000.0
         stage_ms = {
             "detect": (t1 - t0) * 1000.0,
             "track_distance": (t2 - t1) * 1000.0,

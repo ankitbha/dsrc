@@ -5,7 +5,7 @@ Post-processes a run directory's metadata.jsonl (live, simulated-drive,
 or replay) into report.md / report.json plus timeline plots, and checks
 a small set of PASS/FAIL gates:
 
-  latency      e2e p95 < 200 ms (plan_deployment.md headline target)
+  latency      jetson p95 < 200 ms (plan_deployment.md headline target)
   throughput   median tick rate >= 25 Hz (file sources are paced at 30)
   gps          >= 95% of ticks with a fresh fix outside scripted dropouts
   gps_speed    ego-speed RMSE vs the scripted profile < 1.0 m/s
@@ -69,14 +69,27 @@ def load_records(metadata_path: Path) -> tuple[list[dict], dict | None]:
 
 
 def pctl(values: list[float]) -> dict[str, float]:
+    """mean/p50/p95/max, plus the count and both extremes.
+
+    `n` and `min` were missing, and for the link segment that mattered: a
+    converted capture stamp may legitimately land after the arrival it preceded,
+    so the segment can be negative -- and with only mean/p50/p95/max reported, a
+    negative merely lowered the p95 and was otherwise invisible. `negative`
+    counts them outright, so the case where the bound is being tested is not
+    something a reader has to infer.
+    """
     if not values:
-        return {"mean": 0.0, "p50": 0.0, "p95": 0.0, "max": 0.0}
+        return {"n": 0, "mean": 0.0, "p50": 0.0, "p95": 0.0, "max": 0.0,
+                "min": 0.0, "negative": 0}
     arr = np.asarray(values, dtype=np.float64)
     return {
+        "n": int(arr.size),
         "mean": float(arr.mean()),
         "p50": float(np.percentile(arr, 50)),
         "p95": float(np.percentile(arr, 95)),
         "max": float(arr.max()),
+        "min": float(arr.min()),
+        "negative": int((arr < 0).sum()),
     }
 
 
@@ -392,10 +405,13 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         "| stage | mean | p50 | p95 | max |",
         "|---|---|---|---|---|",
     ]
-    order = ["e2e_ms", "capture_to_start_ms", "detect_ms", "track_distance_ms",
+    order = ["jetson_ms", "link_ms", "e2e_ms", "capture_to_start_ms", "detect_ms",
+             "track_distance_ms",
              "observe_ms", "policy_advisory_ms"]
     for key in order:
-        if key in r["latency_ms"]:
+        # None means the series was absent -- a local run has no link segment --
+        # and an absent series must not render as zeros.
+        if r["latency_ms"].get(key) is not None:
             lines.append(fmt_row(key.removesuffix("_ms"), r["latency_ms"][key]))
     p = r["perception"]
     lines += [
