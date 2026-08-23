@@ -554,8 +554,124 @@ tunnels over USB and is unaffected.
     recorded this time — `direct` on both — so the relay hypothesis is dead and
     the cause is still unattributed. It is a phone-side scheduling effect, not a
     transport one.
-16. Loopback test with synthetic sensor frames and synthetic advisories;
-    transport latency instrumented from the start.
+16. ~~Loopback test with synthetic sensor frames and synthetic advisories;
+    transport latency instrumented from the start.~~
+    **DONE** — `sensors/phone_source.py` and `scripts/run_loopback_pipeline.py`,
+    **913 tests** (895 on the Jetson; the difference is `test_sim_contract`,
+    which needs the sim repo). Plan:
+    `scratchpad/plan_task_16_loopback_pipeline.md`.
+
+    This joins the two halves of the project. Tasks 12–15 built a transport that
+    carries phone sensor data and returns advisories; `pipeline.py` has run
+    perception → observation → actor → advisory since before any of it existed.
+    They had never been connected.
+
+    **The connection is not wiring, it is a clock.** The pipeline decides whether
+    a reading is fresh by comparing it against the Jetson's `time.monotonic()`,
+    and two devices count from their own boot — measured on this pair, **67.57
+    hours apart**. Unconverted, `gps_age` is −243,264 s against a 2.0 s
+    threshold, so `gps_fresh` is False on every tick of every drive, ego speed
+    silently falls back to neutral, and the loop keeps producing advisories that
+    look fine.
+
+    **And the failure is not symmetric, which is the part the plan got wrong.**
+    Which direction you get depends on which device booted first, and only one is
+    safe:
+
+    ```text
+    Jetson booted later   age +243,265 s   fails the threshold -> neutral fallback
+    phone booted later    age negative     a one-sided `age <= 2.0` ACCEPTS it
+    ```
+
+    The second means the policy acts on arbitrarily stale data believing it
+    current. The freshness gate is now conservative on both sides: the past side
+    charges the stamp's own uncertainty, the future side allows only that
+    uncertainty, and a bound wider than half the window is refused outright with
+    its own diagnostic rather than answered badly.
+
+    `PhoneCameraStream` and `PhoneGpsReader` sit behind the interfaces
+    `CameraStream` and `GpsReader` already expose, converting once on the way in
+    — so every comparison downstream is same-clock by construction rather than by
+    review, and frame-to-frame intervals survive exactly because conversion is
+    affine. The bound travels attached to the reading rather than looked up
+    beside it, because pairing a stamp with the wrong record is a mistake this
+    project has already made.
+
+    **The estimator was on the wrong side, and that needs sign-off.** Task 15 has
+    the phone initiate, so the phone holds the offset — but the Jetson runs the
+    pipeline and converts the incoming stamps, and a responder sees only t2 and
+    t3, so it has no path to the offset at all. The exchange therefore runs
+    Jetson-initiated, which needs no wire change and no code change because both
+    roles are role-symmetric. It contradicts one sentence of
+    `specs/transport_protocol.md`, **which has not been edited**. The wording to
+    approve is *"exactly one side initiates, and it must be the converting
+    side"*, plus an explicit prohibition on both sides initiating at once:
+    `exchange_id` has no side tag, so two initiators would collide in the id
+    space and match a pong to the wrong pending exchange.
+
+    **Latency is two segments now**, because a reader cannot tell a slow link
+    from a slow Jetson in one number and the deployment claim is about the
+    Jetson. That moved a gate: `eval_run` asserted `e2e` p95 < 200 ms, a claim
+    about this hardware that would have failed a run for the network's behaviour
+    — and would have *loosened silently*, since the link segment drops out of the
+    sum whenever the timebase cannot convert. It gates `jetson_ms`.
+
+    **Measured.**
+
+    ```text
+                       ticks  jetson_ms p50   link_ms p50    fresh   converted
+    Mac loopback  60s    601      1.18 ms       0.23 ms       100%     590/601
+    Jetson  60s          601      3.11 ms       0.52 ms       100%     590/601
+    real link 120s      1092      3.22 ms      11.96 ms       100%   1085/1092
+    ```
+
+    On the real link the one-way segment is p50 **11.96 ms** with p95 170 ms and
+    max 320 ms — the same heavy tail task 14 measured (p99 134 ms, max 333 ms),
+    and the reason the two segments are reported apart. The conversion bound
+    tracked at p95 **8.72 ms**, against task 15's 8.0 ms. Every run: account
+    reconciled, zero lost, and **100% of ticks with a fresh GPS fix — the number
+    the task exists for, since unconverted it is zero.**
+
+    **Convergence, three runs**: first conversion at 1.102, 1.108 and 1.110 s;
+    11 ticks proxied; and every one of those ticks still produced an advisory.
+    The proxy's reasons are recorded, not just its count — `no samples` twice,
+    then the estimator's window filling one sample at a time — so a drive that
+    proxies for longer than expected says why.
+
+    **Not run**: the real-detector variant. The TRT engine is gitignored and
+    absent from this tree, so `detect_ms` here is a scripted stand-in and
+    `jetson_ms` above **excludes real detection**. `bench_latency.py` with the
+    engine remains the shipping number; these two must not appear in one column.
+
+    **Validation: six rounds, 27 findings.** The two worth reading: the harness's
+    pass/fail gate could not fail on the defect it exists for — against a
+    conversion replaced by the identity it reported `usable: true` and exit 0
+    while the same report carried a **67.6-hour link segment** — and the phone
+    reader thread died on any exception with every counter reading healthy, which
+    is the exact failure class `transport/session.py` fixed in both its loops and
+    documented against itself, reintroduced one layer up.
+
+    **The transferable lesson is about my own fixes, and it recurred every
+    round.** After round 1, sixteen of nineteen reverts left the suite green: I
+    had fixed fifteen findings and pinned almost none. Then a test that planted
+    *zero* skew, where the two candidate formulas agree. Then one that
+    reimplemented the code it was testing. Then a guard with no live path,
+    introduced in the same round I removed another for being one. Then a fix that
+    *replaced* a guard instead of adding to it, losing what the old one caught —
+    a healthy run reported unusable, and a run that spent 67% of itself on the
+    proxy reported usable. Every one was found by mutating the fixes or by the
+    validator; none by the tests passing.
+
+    **Carried as stated limitations**, none able to produce a wrong value, a lost
+    message, a hang, a crash or a false report: `pipeline_stats.*.n` is
+    window-capped at 300, so quote `latency.*.n`; the rounded record's
+    `e2e == jetson + link` identity is off by 0.01 ms; the GPS backend lacks
+    `sim`/`start_wall`/`start_mono` (task 26); `gps_timebase_unresolved` is a
+    guard for a constants change that **cannot fire today** — the widest bound
+    reachable on a link the gate admits is ~106 ms against a 1 s threshold; the
+    stats sampling race fails safe, reporting a gap that is not there rather than
+    hiding one that is; and the rendering paths are unpinned because nothing
+    asserts rendered output.
 
 ## E. Phone app — phone is in hand, no Jetson needed
 
