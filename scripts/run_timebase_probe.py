@@ -6,21 +6,33 @@ with -- a 10 Hz camera stream at 40 KB a frame is what makes the difference
 between an enqueue stamp and a departure stamp worth having -- and records what
 the estimator concludes over a drive-length run.
 
-The wall clock is the instrument that makes this more than a self-report. Both
-devices run NTP, so their wall clocks are slewed toward each other and do not
-drift apart; their monotonic clocks do. Estimating the offset twice, once on each
-pair of clocks, therefore separates the two:
+`ASSUMED_SKEW_PPM` is the sole bound on the true relative skew of the two
+monotonic clocks, so the whole guarantee rests on it. Measuring that quantity is
+this experiment's second job, and the first way of doing it does not work.
 
-    d(mono_offset)/dt - d(wall_offset)/dt  ~  the true relative monotonic skew
+**The cross-device wall pair is not an instrument for it.** Running the same
+midpoint arithmetic on the two wall clocks and differencing the slopes cancels
+the quantity of interest. With each device's own wall-versus-monotonic slew
+written `s`, and the true monotonic skew `sigma`:
 
-which is the one quantity the estimator cannot measure and currently assumes.
-`ASSUMED_SKEW_PPM` is the sole bound on it, so the whole guarantee rests on that
-constant being large enough -- and this is the measurement that says whether it
-is, rather than leaving it as a premise carried into production.
+    mono-pair slope  =  sigma
+    wall-pair slope  =  sigma + (s_remote - s_local)
+    difference       =  s_local - s_remote          <- sigma is gone
 
-Nothing here compares a phone monotonic value with a Jetson one directly. Both
-offsets come from the four-timestamp exchange, which is differences within one
-clock on each side.
+So it reports the difference of the two NTP slew rates and says nothing about the
+skew. Measured on this pair, it returned +10.4 ppm and +75.8 ppm on two runs the
+same evening -- the first being roughly the slew difference and the second mostly
+noise from the delay asymmetry in the midpoint.
+
+**What does work needs no network at all.** Each device measures its own
+`wall - monotonic` slew locally, which is exact and needs no delay model; both
+wall clocks are NTP-locked to UTC, so each local slew states how far that
+device's monotonic clock runs from UTC, and the difference of the two is the
+skew. Both roles record it here and the analysis differences them.
+
+Nothing here compares a phone monotonic value with a Jetson one directly. The
+exchange offsets are differences within one clock on each side, and the slews are
+each within one device.
 """
 
 from __future__ import annotations
@@ -39,6 +51,7 @@ sys.path.insert(0, str(REPO / "deployment" / "jetson"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from transport.channels import Channel  # noqa: E402
+from transport.frames import WIRE_STAMP_KEY  # noqa: E402
 from transport.client import Backoff, SessionClient  # noqa: E402
 from transport.clock import now_mono_ns, now_wall_ns  # noqa: E402
 from transport.endpoint import SessionStarted, TransportListener  # noqa: E402
@@ -55,6 +68,41 @@ from transport.timebase import (  # noqa: E402
 
 from run_message_exercise import UPSTREAM_PLAN, build, percentiles  # noqa: E402
 from run_message_link import tailnet_path  # noqa: E402
+
+
+def local_slew_ppm(duration_s: float, stop: threading.Event) -> dict:
+    """This device's own wall-versus-monotonic slew, sampled while the run goes on.
+
+    No network, no delay model, no cross-device arithmetic -- so unlike the wall
+    pair this is not contaminated by asymmetry, and it is the term that actually
+    carries the skew. Reported with its halves so a reader can see whether it was
+    a steady slew or an NTP correction event.
+    """
+    rows: list[tuple[int, int]] = []
+    start_m, start_w = now_mono_ns(), now_wall_ns()
+    deadline = time.monotonic() + duration_s
+    while time.monotonic() < deadline and not stop.is_set():
+        mono, wall = now_mono_ns(), now_wall_ns()
+        rows.append((mono - start_m, (wall - start_w) - (mono - start_m)))
+        stop.wait(2.0)
+    if len(rows) < 6:
+        return {"measured": False, "samples": len(rows)}
+    half = len(rows) // 2
+    steps = [
+        round((b[1] - a[1]) / 1e6, 3)
+        for a, b in zip(rows, rows[1:]) if abs(b[1] - a[1]) > 1_000_000
+    ]
+    return {
+        "measured": True,
+        "samples": len(rows),
+        "span_s": round(rows[-1][0] / 1e9, 1),
+        "slew_ppm": slope_ppm(rows),
+        "slew_ppm_first_half": slope_ppm(rows[:half]),
+        "slew_ppm_second_half": slope_ppm(rows[half:]),
+        "total_drift_ms": round(rows[-1][1] / 1e6, 3),
+        "steps_over_1ms": steps[:8],
+        "step_count": len(steps),
+    }
 
 
 def slope_ppm(points: list[tuple[int, int]]) -> float | None:
@@ -87,7 +135,19 @@ def run_jetson(args) -> dict:
 
     stop = threading.Event()
     served = {"pings": 0, "invalid": 0, "wrong_direction": 0}
+    # What write-time stamping actually bought, measured where it is visible: the
+    # sender's enqueue stamp and its departure stamp both ride the frame, so the
+    # gap between them is exactly the queueing delay t1 would otherwise have
+    # carried. Only the receiver can see it, which is why it is measured here.
+    enqueue_to_wire: list[int] = []
     routers: list[MessageRouter] = []
+    slew_box: dict[str, dict] = {}
+
+    def measure_slew():
+        slew_box["local"] = local_slew_ppm(args.duration, stop)
+
+    slew_thread = threading.Thread(target=measure_slew, daemon=True)
+    slew_thread.start()
 
     def serve(session):
         router = MessageRouter(session)
@@ -98,6 +158,10 @@ def run_jetson(args) -> dict:
             # the initiator subtracts one from the other.
             arrived = router.recv_with_receipt(Channel.CONTROL, timeout=0.05)
             if arrived is not None:
+                frame = arrived[1].frame
+                departed = frame.extensions.get(WIRE_STAMP_KEY)
+                if departed:
+                    enqueue_to_wire.append(departed - frame.t_mono_ns)
                 try:
                     if router.send(answer_ping(arrived)):
                         served["pings"] += 1
@@ -125,8 +189,11 @@ def run_jetson(args) -> dict:
     for worker in workers:
         worker.join(timeout=5.0)
 
+    slew_thread.join(timeout=10.0)
     report = {
         "role": "jetson",
+        "local_slew": slew_box.get("local", {"measured": False}),
+        "peer_enqueue_to_wire_ms": percentiles(enqueue_to_wire),
         "sessions_served": len(routers),
         "pings_answered": served["pings"],
         "answers_refused_as_invalid": served["invalid"],
@@ -288,8 +355,14 @@ def run_phone(args) -> dict:
                 row["conversion_refused"] = str(exc)
             trace.append(row)
 
+    slew_box: dict[str, dict] = {}
+
+    def measure_slew():
+        slew_box["local"] = local_slew_ppm(args.duration, stop)
+
     threads = [threading.Thread(target=syncer, daemon=True),
-               threading.Thread(target=sampler, daemon=True)]
+               threading.Thread(target=sampler, daemon=True),
+               threading.Thread(target=measure_slew, daemon=True)]
     if not args.no_sensor_load:
         for channel, plan in UPSTREAM_PLAN.items():
             threads.append(threading.Thread(
@@ -319,6 +392,7 @@ def run_phone(args) -> dict:
         "sensor_sent": {c.value: n for c, n in sensor_sent.items() if n},
         "initiator": None if initiator is None else initiator.to_record(),
         "trace": trace,
+        "local_slew": slew_box.get("local", {"measured": False}),
         "wall_cross_check": {
             # Counted, so a cross-check that silently measured nothing reads as
             # zero coverage rather than as agreement.
@@ -328,20 +402,17 @@ def run_phone(args) -> dict:
             "wall_pair_slope_ppm": wall_slope,
             "empirical_true_skew_ppm": empirical,
             "assumed_skew_ppm": ASSUMED_SKEW_PPM,
-            "within_assumption": (
-                None if empirical is None else abs(empirical) <= ASSUMED_SKEW_PPM
-            ),
+            "slew_difference_ppm": empirical,
             # Recorded, not assumed away: the local send stamp is taken before
             # the enqueue while the arrival stamps come from the readers, so this
             # is the one residual asymmetry left in the pair. A constant one
             # cancels in the slope; a drifting one is the thing that would
             # corrupt the number, so it is bounded rather than left unattributable.
             "local_send_to_arrival_ms": percentiles(send_to_arrival),
-            "note": (
-                "Both wall clocks are NTP-slewed, so their pair does not drift; "
-                "the monotonic pair does. The difference of the two slopes is the "
-                "quantity ASSUMED_SKEW_PPM stands in for, and it is the only "
-                "measurement that can tell whether that premise holds."
+            "INVALID_FOR_SKEW": (
+                "Retained as evidence, not as a measurement. This difference is "
+                "s_local - s_remote, the two NTP slew rates: the true skew cancels "
+                "out of it algebraically. Use local_slew from both roles instead."
             ),
         },
     }

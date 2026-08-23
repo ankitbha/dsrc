@@ -440,8 +440,120 @@ tunnels over USB and is unaffected.
     was then mutation-tested against the test that names it (15/15), which found
     that the first version of the new spec-bound assertion was satisfied by a
     second copy of the number elsewhere in the document.
-15. Shared timebase with clock-offset estimation and drift tracking, so
-    phone-side and Jetson-side events are comparable.
+15. ~~Shared timebase with clock-offset estimation and drift tracking, so
+    phone-side and Jetson-side events are comparable.~~
+    **DONE** — `transport/timebase.py`, stdlib only, **829 tests on the Jetson**.
+    Plan: `scratchpad/plan_task_15_shared_timebase.md`; contract: the Shared
+    Timebase section of `specs/transport_protocol.md`; harness:
+    `scripts/run_timebase_probe.py`.
+
+    `clock.py` forbids comparing a phone monotonic value with a Jetson one, and
+    tasks 13 and 14 both reported round trips on one clock only to honour that.
+    This is the sanctioned way across, and the whole discipline is that **no
+    conversion returns a bare number** — a converted instant carries its bound
+    and the id of the estimate that produced it, so a cross-device timestamp
+    cannot be mistaken for a same-device one. Below the gate it **raises** rather
+    than answering with a widened bound.
+
+    **One typed message on `control`, not two.** The channel is the
+    discriminator everywhere else, so a ping type and a pong type would need a
+    `kind` field — which the spec refuses. The null convention carries it
+    instead: `t_peer_recv_mono_ns` null means ping, set means pong, and since the
+    phone always initiates the receiver's role settles which. `control` had no
+    typed message before this; it is why `no_typed_message` exists.
+
+    **Three things implementation found that planning had wrong.** The pong must
+    echo the ping's wire stamp, because an initiator cannot read its own — the
+    writer applies it after the caller lets go — so without the echo the only t1
+    available carries the queueing delay, fixing one side of a symmetric
+    calculation and not the other. The skew fit must run over min-filtered
+    buckets: fitting raw samples put the whole delay tail in the residuals and a
+    planted **+20 ppm came back as −1.55 ppm**. And half the min round trip is a
+    *guaranteed* bound, not the optimistic one the plan feared — a sample's error
+    is `|up−down|/2` against a round trip of `up+down`, so it cannot escape
+    `rtt/2`.
+
+    **Measured on the Jetson** (aarch64, Python 3.10): 829 pass, 1 skip. Loopback
+    null case, where one machine means the truth is zero: offset spread **12 µs
+    over 145 s** and a fitted slope of −0.05 ppm, so the estimator invents no
+    structure where there is none.
+
+    **Over the real link, 330 s**: 357 exchanges, every one matched, **zero
+    refused, and all nine outcome counters close against pings sent** without
+    subtracting anything. `rtt_min` p50 **14.8 ms**, bound p50 **8.0 ms** (min
+    6.96, max 9.65), offset spread 2.7 ms across the run. Under the full sensor
+    load — 10 Hz camera at 40 KB, 50 Hz IMU — 218 exchanges with every channel on
+    cadence (IMU 49.9/50.0, camera 9.99/10.0).
+
+    **The premise the whole guarantee rests on is now measured, and the
+    instrument I designed for it was invalid.** `ASSUMED_SKEW_PPM = 50` is the
+    only bound on the true relative skew of the two monotonic clocks. The plan
+    proposed estimating the offset twice, once on each pair of clocks, and
+    differencing the slopes. That cancels the quantity of interest: with each
+    device's own wall-versus-monotonic slew written `s`, the mono-pair slope is
+    `σ` and the wall-pair slope is `σ + (s_remote − s_local)`, so the difference
+    is `s_local − s_remote` and **σ is gone**. Confirmed rather than argued: it
+    reported **+12.06 ppm** against an independently measured slew difference of
+    **+12.00 ppm**.
+
+    What works needs no network. Each device's own `wall − monotonic` slew is
+    exact, needs no delay model, and — since both wall clocks are NTP-locked to
+    UTC — states how far that device's monotonic clock runs from UTC:
+
+    ```text
+    phone (Mac)   +12.00 ppm over 329 s   (halves +12.00 / +12.00, 0 steps)
+    jetson         +0.00 ppm over 368 s   (halves -0.00 / +0.01, 0 steps)
+    => true monotonic skew  -12.00 ppm    against 50 ppm assumed, 4.2x margin
+    ```
+
+    **And that measurement is what vindicates the bound's hardest fix.** The
+    estimator *fitted* −1.09 ppm while the truth was −12.00 ppm, so the error
+    from applying its slope is 10.9 ppm — ten times the fitted magnitude. A
+    charge of `|fit|` alone, or of the fit's standard error alone, would have
+    been an order of magnitude too small. The additive form charges
+    `50 + |fit| = 51.1 ppm` and covers it with 4.7x margin. The floor is doing
+    the work, not the fit.
+
+    **What the write-time stamp bought, measured**: the phone's own
+    enqueue-to-departure gap on its control frames, read by the Jetson from the
+    two stamps the frame carries, is p50 **0.088 ms** and max 0.271 ms — real,
+    but about 1% of the bound. The ~100 ms case the design reasoned about needs a
+    relayed or congested link, and every run today went direct at LAN speed. So
+    the fix is right in principle and its measured benefit on *this* link is
+    small; the case that justifies it remains unproduced.
+
+    **Validation: four rounds, 34 findings**, and the two that matter most were
+    both mine. A **critical** one: `_stamped_at_wire` sat one line above the `try`
+    whose `except BaseException` exists precisely to stop a writer dying with the
+    session reporting health — and it calls `encode`, which raises when a
+    15-digit departure stamp overflows a header the one-digit placeholder fit.
+    Measured: writer gone, `is_closed` False, `send()` still returning True,
+    nothing transmitted again. Fixed at the root by reserving the widest possible
+    stamp at enqueue, so the caller's own encode is the verdict.
+
+    **The transferable lesson is about tests, and it cost two rounds.** After
+    round 1 I had fixed fifteen findings and pinned almost none of them: **16 of
+    19 reverts left the suite green**. After round 2, six more survivors. Worst
+    of them, each passing for the reason it should have failed — a test planting
+    *zero* true skew, so `max` and `sum` agree at the one point it measured; a
+    `recv_with_receipt` test wrapping its call in a **retry loop**, so a call
+    that returns nothing and leaves the good record queued is indistinguishable
+    from "not here yet"; and a no-bare-number check that evaluated every
+    candidate to `None`, so it was empty by construction. All three mutation
+    passes now kill 18/18, 13/13 and 7/7 by the test that names each.
+
+    **Two guards with no live path**, kept and pinned rather than deleted:
+    `no_typed_message` (every channel has a type now) and the skew baseline check
+    (20 buckets 10 s apart span 180 s, over the 120 s it asks for). Both reached
+    by tests that remove the thing that dominates them, on the principle that a
+    reason no test can reach is a reason that rots.
+
+    **The cadence anomaly from task 14 recurred once and again did not
+    reproduce.** One run offered ~12% of every commanded rate at once, uniformly,
+    losing nothing; three later runs held full cadence. The link path was
+    recorded this time — `direct` on both — so the relay hypothesis is dead and
+    the cause is still unattributed. It is a phone-side scheduling effect, not a
+    transport one.
 16. Loopback test with synthetic sensor frames and synthetic advisories;
     transport latency instrumented from the start.
 
