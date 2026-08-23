@@ -160,9 +160,11 @@ class ObservationBuilder:
         # answer rather than pretending it did.
         uncertainty_s = 0.0 if bound_s is None else bound_s
         timebase_unresolved = uncertainty_s > cfg.gps_stale_after_s * cfg.max_bound_fraction
-        future_allowance = min(
-            max(cfg.clock_sampling_epsilon_s, uncertainty_s), cfg.gps_stale_after_s
-        )
+        # No separate cap on the allowance. A bound large enough for one to bind
+        # is already past the unresolved threshold above -- half the window --
+        # so a cap would be unreachable code, and this project has enough of
+        # those to know they rot. The single guard is the one that fires.
+        future_allowance = max(cfg.clock_sampling_epsilon_s, uncertainty_s)
         gps_fresh = (
             gps.valid
             and not timebase_unresolved

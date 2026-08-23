@@ -853,14 +853,26 @@ def test_the_future_allowance_is_the_stamps_own_bound():
 def test_a_bound_too_wide_to_decide_is_refused_not_indulged():
     """`max()` had no cap, so a stamp claiming a 10 s bound was granted 10 s of
     future tolerance -- more slack than the whole 2 s past window -- and read as
-    measured nine seconds into this clock's future."""
+    measured nine seconds into this clock's future.
+
+    The isolating case is a bound just past half the window on a fix that is
+    otherwise perfectly current: every other clause passes it, so only the
+    unresolved check can refuse it. Probing with 9 s ahead and a 10 s bound does
+    not isolate anything -- the future-side clause refuses that on its own.
+    """
+    borderline = _fresh(0.0, 1.5)  # age 0, bound 1.5 s against a 2 s window
+    assert borderline["gps_fresh"] is False, (
+        "a bound wider than half the window decided freshness anyway"
+    )
+    assert borderline["gps_timebase_unresolved"] is True
+
     wide = _fresh(9.0, 10.0)
     assert wide["gps_fresh"] is False
-    assert wide["gps_timebase_unresolved"] is True, (
-        "the record does not say the timebase could not answer"
-    )
+    assert wide["gps_timebase_unresolved"] is True
+
     narrow = _fresh(0.0, 0.008)
     assert narrow["gps_timebase_unresolved"] is False
+    assert narrow["gps_fresh"] is True
 
 
 def test_the_bound_is_charged_on_the_past_side_too():
@@ -915,7 +927,53 @@ def test_a_clean_stop_ends_the_stream_so_a_consumer_can_terminate():
 
 
 def test_reader_alive_accounts_for_a_recorded_failure():
-    stamp = PhoneCameraStream.__new__(PhoneCameraStream)
-    stamp._thread = None
-    stamp.failure = "RuntimeError: boom"
-    assert stamp.health()["reader_alive"] is False
+    """The window between the guard recording a failure and the thread
+    unwinding. With a dead thread the answer is False either way, so the test has
+    to hold a LIVE thread with a failure recorded -- which is exactly the state
+    `to_record()` could publish as reader_alive: True."""
+    import threading
+
+    class _Blocking:
+        def recv_with_receipt(self, channel, timeout=0.0):
+            import time as clock
+            clock.sleep(0.01)
+            return None
+
+    camera = PhoneCameraStream(_Blocking(), PhoneClockAdapter(TimebaseEstimator())).start()
+    try:
+        assert camera._thread.is_alive()
+        assert camera.health()["reader_alive"] is True
+        # Simulate the guard having recorded a failure while the thread unwinds.
+        camera.failure = "RuntimeError: boom"
+        assert camera._thread.is_alive(), "the thread must still be live for this test"
+        assert camera.health()["reader_alive"] is False, (
+            "a reader with a recorded failure reported itself alive"
+        )
+        assert camera.to_record()["reader_alive"] is False
+    finally:
+        camera.failure = None
+        camera.stop()
+
+
+def test_a_zero_tick_run_can_still_print_its_summary():
+    """The crash my own fix introduced. Making an empty series report absence
+    rather than zeros meant run_demo's fallback needed every key the line below
+    it reads; it carried only `mean`, so a zero-tick run raised KeyError inside
+    the shutdown path and lost its summary. There is no test file for run_demo,
+    which is why it was free to happen."""
+    from pipeline import PipelineStats
+
+    snapshot = PipelineStats().snapshot()
+    assert snapshot["jetson_ms"] is None
+    absent = dict.fromkeys(("mean", "p50", "p95"), float("nan"))
+    stats = snapshot["jetson_ms"] or absent
+    # The exact format run_demo uses. A missing key raises here as it did there.
+    rendered = (
+        f"jetson mean {stats['mean']:.1f} ms, p50 {stats['p50']:.1f} ms, "
+        f"p95 {stats['p95']:.1f} ms"
+    )
+    assert "nan" in rendered
+
+    # And the dashboard's guard: get(k, default) does not apply the default for a
+    # present-but-None key.
+    assert (snapshot.get("link_ms") or {}).get("p50", 0) == 0
