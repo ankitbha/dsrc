@@ -11,7 +11,8 @@ RATE_HZ = 30.0
 
 
 def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
-              gps_fresh=True, leader_rel_measured=True) -> dict:
+              gps_fresh=True, leader_rel_measured=True, jetson_ms=None,
+              link_ms=None) -> dict:
     has_leader = leader_gap is not None
     gap = leader_gap if has_leader else float("inf")
     return {
@@ -20,6 +21,10 @@ def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
         "frame_id": i,
         "t_wall": T0 + i / RATE_HZ,
         "e2e_ms": e2e_ms,
+        # None means "absent from this run", which is what a pre-split recording
+        # looks like -- the fallback path. A value exercises the gate proper.
+        **({} if jetson_ms is None else {"jetson_ms": jetson_ms}),
+        **({} if link_ms is None else {"link_ms": link_ms}),
         "stage_ms": {"detect": 17.0, "track_distance": 0.4, "observe": 0.5,
                      "policy_advisory": 0.7, "capture_to_start": 1.0},
         "fps": RATE_HZ,
@@ -147,3 +152,56 @@ def test_empty_traffic_fails_perception_gate(tmp_path):
     result = analyze(run_dir)
     assert result["gates"]["perception_coverage"]["pass"] is False
     assert result["perception"]["leader_present_fraction"] == 0.0
+
+
+def test_the_gate_is_on_the_jetson_segment_not_end_to_end(tmp_path):
+    """The one behaviour change to a published number, and it had no test.
+
+    Every existing eval_run test omits `jetson_ms`, so they all ran through the
+    pre-split fallback and asserted a gate NAME rather than a gate: reverting the
+    threshold to `e2e_ms` left the whole suite green.
+
+    A run whose link is slow and whose Jetson is fast must PASS. The threshold is
+    a claim about this hardware, and charging it for a link the Jetson does not
+    control would fail a run for the network's behaviour.
+    """
+    ticks = [make_tick(i, e2e_ms=900.0, jetson_ms=30.0, link_ms=870.0) for i in range(120)]
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    assert result["gates"]["latency_jetson_p95"]["pass"] is True, (
+        "a fast Jetson behind a slow link failed a gate about the Jetson"
+    )
+    assert result["latency_ms"]["jetson_ms"]["p95"] == pytest.approx(30.0, abs=0.1)
+    assert result["latency_ms"]["e2e_ms"]["p95"] == pytest.approx(900.0, abs=0.1)
+    assert result["latency_ms"]["jetson_ms_source"] == "measured"
+
+
+def test_a_slow_jetson_fails_the_gate_even_behind_a_fast_link(tmp_path):
+    ticks = [make_tick(i, e2e_ms=260.0, jetson_ms=250.0, link_ms=10.0) for i in range(120)]
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    assert result["gates"]["latency_jetson_p95"]["pass"] is False
+
+
+def test_a_pre_split_run_says_the_gated_number_was_substituted(tmp_path):
+    """The fallback is correct -- on a local camera the two coincided -- but a
+    reader has to be told it happened rather than shown a number that looks
+    measured."""
+    ticks = [make_tick(i, e2e_ms=42.0) for i in range(120)]
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    assert result["latency_ms"]["jetson_ms_source"] == "absent from this run; e2e used"
+    assert result["latency_ms"]["jetson_ms"]["p95"] == pytest.approx(42.0, abs=0.1)
+    assert result["latency_ms"]["link_ms"] is None, (
+        "a run with no link segment reported one"
+    )
+
+
+def test_the_link_segment_reports_its_count_and_its_negatives(tmp_path):
+    """A converted capture stamp may land after the arrival it preceded, so the
+    segment can be negative -- and with only mean/p50/p95/max, a negative merely
+    lowered the p95 and was otherwise invisible."""
+    ticks = [make_tick(i, jetson_ms=20.0, link_ms=(-2.0 if i < 10 else 8.0))
+             for i in range(120)]
+    run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+    link = analyze(run_dir)["latency_ms"]["link_ms"]
+    assert link["n"] == 120
+    assert link["negative"] == 10
+    assert link["min"] == pytest.approx(-2.0, abs=0.01)

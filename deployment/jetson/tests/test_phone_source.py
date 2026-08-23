@@ -603,3 +603,198 @@ def _a_pipeline():
         actor=ActorRuntime(prefix),
         advisory_decoder=AdvisoryDecoder(units="mph"),
     )
+
+
+def test_a_fix_arrives_on_the_local_clock_with_an_exact_value():
+    """The GPS twin of the camera test, and it was missing.
+
+    Mutating `t_mono=stamp.t_capture_mono` to `stamp.t_arrival_mono` left the
+    whole suite green: every fix would be arrival-stamped forever while
+    `field_sources["ego_speed"]` still claimed `measured_converted`. A false
+    provenance claim on the one field this task is about.
+
+    The only session-level GPS test asserted `fix.t_mono != 0.0`, which is
+    satisfied by either value.
+    """
+    phone, jetson, up, down = phone_and_jetson()
+    estimator, _ = converged_estimator()
+    gps = PhoneGpsReader(down, PhoneClockAdapter(estimator)).start()
+    try:
+        capture_ns = BASE_NS + PLANTED_OFFSET_NS + 500_000_000
+        assert up.send(GpsRecord(
+            t_capture_mono_ns=capture_ns, valid=True, fix_quality=1, num_sats=9,
+            lat=40.744, lon=-74.032, speed_mps=27.0, heading_deg=90.0, hdop=0.9,
+            altitude_m=10.0,
+        ))
+        import time as clock
+        deadline = clock.monotonic() + 5.0
+        while clock.monotonic() < deadline and gps.latest().t_mono == 0.0:
+            clock.sleep(0.01)
+        fix = gps.latest()
+        assert fix.t_mono != 0.0, "the fix never arrived"
+        assert fix.t_mono == pytest.approx((BASE_NS + 500_000_000) / 1e9, abs=1e-6), (
+            "the fix was not stamped with its converted capture instant"
+        )
+        assert fix.timebase is not None and not fix.timebase.proxy
+        # And it is emphatically not the arrival stamp, which is ~now.
+        assert abs(fix.t_mono - fix.timebase.t_arrival_mono) > 1.0
+    finally:
+        gps.stop()
+        phone.close()
+        jetson.close()
+
+
+def test_the_tick_record_carries_the_timebase_it_used():
+    """Plan section 4's whole argument is that this record makes the proxy risk
+    auditable after the fact. Setting `Tick.timebase = None` unconditionally left
+    the suite green, and so did claiming `converted: true` on a proxied stamp."""
+    import time as clock
+
+    from sensors.camera_stream import Frame
+
+    pipeline = _a_pipeline()
+    now = clock.monotonic()
+    converted_stamp = TimebaseStamp(t_capture_mono=now - 0.01, t_arrival_mono=now,
+                                    bound_s=0.008, estimate_id=42, proxy=False)
+    tick = pipeline.step(
+        Frame(image=np.zeros((48, 64, 3), dtype=np.uint8), frame_id=1,
+              t_mono=now - 0.01, t_wall=0.0, timebase=converted_stamp),
+        GpsFix(), None, detections_override=[],
+    )
+    assert tick.timebase is not None, "the tick did not record its timebase"
+    assert tick.timebase["converted"] is True
+    assert tick.timebase["proxy"] is False
+    assert tick.timebase["estimate_id"] == 42
+    assert tick.timebase["bound_ms"] == pytest.approx(8.0, abs=0.01)
+    assert tick.to_record()["timebase"]["estimate_id"] == 42
+
+
+def test_a_proxied_stamp_does_not_claim_to_have_been_converted():
+    """The sharpest of the record mutations: a proxied stamp reporting
+    `converted: true` and nothing noticing."""
+    now = 1000.0
+    proxied = TimebaseStamp(t_capture_mono=now, t_arrival_mono=now, bound_s=None,
+                            estimate_id=None, proxy=True)
+    record = proxied.to_record()
+    assert record["converted"] is False
+    assert record["proxy"] is True
+    assert record["bound_ms"] is None
+    assert record["estimate_id"] is None
+    # And no link segment, because none was measured.
+    assert record["link_ms"] is None
+    assert proxied.link_s is None
+
+
+def test_the_observation_diagnostics_carry_the_timebase_too():
+    """`gps_timebase = None` unconditionally also left the suite green."""
+    now = 884_285.2
+    stamp = TimebaseStamp(t_capture_mono=now - 0.01, t_arrival_mono=now,
+                          bound_s=0.008, estimate_id=7, proxy=False)
+    fix = GpsFix(valid=True, speed_mps=27.0, fix_quality=1, num_sats=9,
+                 t_mono=now - 0.01, t_wall=0.0, timebase=stamp)
+    diagnostics = ObservationBuilder(BuilderConfig()).build(
+        [], fix, now, None
+    ).diagnostics
+    assert diagnostics["gps_timebase"] is not None
+    assert diagnostics["gps_timebase"]["estimate_id"] == 7
+    # None for a local fix, because there is nothing to record.
+    local = ObservationBuilder(BuilderConfig()).build(
+        [], GpsFix(valid=True, speed_mps=27.0, t_mono=now), now, None
+    ).diagnostics
+    assert local["gps_timebase"] is None
+
+
+def test_a_frame_is_delivered_once_and_drops_are_counted():
+    """Nothing called `wait_for_fresh` twice on a live stream, so deleting the
+    consumption bookkeeping returned the same frame forever -- a harness would
+    tick on frame 1 indefinitely with a full tick count and an intact account.
+    And nothing read `dropped_frames`."""
+    phone, jetson, up, down = phone_and_jetson()
+    estimator, _ = converged_estimator()
+    camera = PhoneCameraStream(down, PhoneClockAdapter(estimator)).start()
+    try:
+        assert up.send(CameraFrame(
+            t_capture_mono_ns=BASE_NS + PLANTED_OFFSET_NS, frame_id=1, width=16,
+            height=16, format="jpeg", quality=85, jpeg=a_jpeg(),
+        ))
+        first = camera.wait_for_fresh(timeout=5.0)
+        assert first is not None and first.frame_id == 1
+        # Nothing new has arrived, so the second call must not hand back frame 1.
+        assert camera.wait_for_fresh(timeout=0.2) is None, (
+            "the same frame was delivered twice"
+        )
+
+        # A frame replaced before it was consumed is a counted drop.
+        before = camera.dropped_frames
+        for frame_id in (2, 3):
+            assert up.send(CameraFrame(
+                t_capture_mono_ns=BASE_NS + PLANTED_OFFSET_NS + frame_id, frame_id=frame_id,
+                width=16, height=16, format="jpeg", quality=85, jpeg=a_jpeg(),
+            ))
+            import time as clock
+            clock.sleep(0.05)
+        latest = camera.wait_for_fresh(timeout=5.0)
+        assert latest is not None and latest.frame_id == 3, latest.frame_id
+        assert camera.dropped_frames == before + 1, (
+            f"frame 2 was replaced unconsumed but drops went {before} -> "
+            f"{camera.dropped_frames}"
+        )
+    finally:
+        camera.stop()
+        phone.close()
+        jetson.close()
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_the_reader_surfaces_a_failure_instead_of_looking_healthy():
+    """The transport's writer loop learned this and documented it against itself;
+    this module reintroduced it one layer up. A dead reader used to report
+    end_of_stream False, zeros in its record, and block a consumer forever."""
+    import contextlib
+    import io
+
+    class _Exploding:
+        def recv_with_receipt(self, channel, timeout=0.0):
+            raise RuntimeError("boom")
+
+    camera = PhoneCameraStream(_Exploding(), PhoneClockAdapter(TimebaseEstimator()))
+    try:
+        # The guard re-raises after recording, so the thread's traceback is not
+        # swallowed; it goes to stderr and is expected here.
+        with contextlib.redirect_stderr(io.StringIO()):
+            camera.start()
+            import time as clock
+            deadline = clock.monotonic() + 5.0
+            # Wait for the thread to be gone, not merely for the failure to be
+            # recorded: the guard records and then re-raises, so `is_alive()` is
+            # briefly true in between and a check there is a race.
+            while clock.monotonic() < deadline and camera._thread.is_alive():
+                clock.sleep(0.01)
+        assert camera.failure is not None and "boom" in camera.failure
+        assert camera.end_of_stream is True, "a dead reader did not end the stream"
+        record = camera.to_record()
+        assert record["reader_alive"] is False
+        assert record["failure"] is not None
+        # And a consumer is not left blocking with no way to learn why.
+        assert camera.wait_for_fresh(timeout=5.0) is None
+    finally:
+        camera.stop()
+
+
+def test_is_stale_refuses_a_fix_from_the_future():
+    """The same one-sidedness the builder's gate closed, in the other freshness
+    predicate. The two must not disagree about the dangerous direction."""
+
+    class _Silent:
+        def recv_with_receipt(self, channel, timeout=0.0):
+            return None
+
+    gps = PhoneGpsReader(_Silent(), PhoneClockAdapter(TimebaseEstimator()),
+                         stale_after_s=2.0)
+    now = 1000.0
+    gps._fix = GpsFix(valid=True, speed_mps=1.0, t_mono=now + 60.0)
+    assert gps.is_stale(now) is True, "a fix from this clock's future was called fresh"
+    gps._fix = GpsFix(valid=True, speed_mps=1.0, t_mono=now - 0.5)
+    assert gps.is_stale(now) is False
+    gps._fix = GpsFix(valid=True, speed_mps=1.0, t_mono=now - 60.0)
+    assert gps.is_stale(now) is True
