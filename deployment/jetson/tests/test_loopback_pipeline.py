@@ -24,9 +24,11 @@ sys.path.insert(0, str(SCRIPTS))
 from run_loopback_pipeline import (  # noqa: E402
     LINK_BOUND_MULTIPLE,
     LINK_FLOOR_MS,
-    MIN_CONVERTED_FRACTION,
+    MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE,
+    _account,
     _report,
 )
+from transport.channels import Channel  # noqa: E402
 
 
 class _Row:
@@ -95,14 +97,32 @@ def a_tick(index: int, link_ms: float, *, bound_ms: float | None = 0.4,
     }
 
 
-def report_for(ticks: list[dict], *, n_messages: int | None = None, **stats_kwargs) -> dict:
+CHANNELS = (Channel.CAMERA, Channel.GPS)
+
+
+def account_for(count: int, *, pending=0, pending_in=0, decode_errors=0,
+                **stats_kwargs) -> dict:
+    stats = _Stats(count, **stats_kwargs)
+    return _account(
+        stats, stats,
+        pending=dict.fromkeys(CHANNELS, pending),
+        pending_in=dict.fromkeys(CHANNELS, pending_in),
+        decode_errors=dict.fromkeys(CHANNELS, decode_errors),
+    )
+
+
+def report_for(ticks: list[dict], *, n_messages: int | None = None,
+               first_converted_at: float | None = 0.0, **stats_kwargs) -> dict:
     count = len(ticks) if n_messages is None else n_messages
     return _report(
         ticks, 10.0, 243_264_000_000_000,
         {"frames": count, "fixes": count, "pongs": count, "invalid": 0},
         {"received": len(ticks), "unmatched": 0, "frame_ids": {t["frame_id"] for t in ticks}},
-        _Recorder(), _Recorder(), _Recorder(), _Recorder(), _Pipeline(), 1.0,
-        phone_stats=_Stats(count, **stats_kwargs), jetson_stats=_Stats(count, **stats_kwargs),
+        _Recorder(), _Recorder(), _Recorder(), _Recorder(), _Pipeline(),
+        first_converted_at,
+        phone_stats=_Stats(count, **stats_kwargs),
+        jetson_stats=_Stats(count, **stats_kwargs),
+        account=account_for(count, **stats_kwargs),
     )
 
 
@@ -112,7 +132,7 @@ def report_for(ticks: list[dict], *, n_messages: int | None = None, **stats_kwar
 def test_a_healthy_run_passes():
     report = report_for([a_tick(i, 0.3) for i in range(60)])
     assert report["usable"] is True, report["gate_detail"]
-    assert report["gate_detail"]["converted_fraction"] == 1.0
+    assert report["gate_detail"]["converted_fraction_after_convergence"] == 1.0
 
 
 @pytest.mark.parametrize("wrong_by_ms", [900.0, -900.0, 50.0, -50.0])
@@ -146,17 +166,42 @@ def test_a_minority_of_wrong_conversions_is_not_hidden_behind_a_percentile():
     assert report["gate_detail"]["link_max_ms"] == pytest.approx(500.0)
 
 
-def test_a_run_that_mostly_proxied_fails():
-    """A timebase that converged once and then went unusable for the rest of the
-    drive is not a run that exercised the conversion -- and plan section 9's
-    stated risk is exactly the proxy being in use for longer than expected.
-    `converted_and_fresh == len(converted)` was satisfied by 1 == 1."""
+def test_a_run_that_fell_back_after_converging_fails():
+    """`converted_and_fresh == len(converted)` was satisfied by 1 == 1, so a
+    timebase that converged once and then went unusable for the rest of the drive
+    passed. Plan section 9's stated risk is exactly the proxy being in use for
+    longer than expected."""
     ticks = [a_tick(0, 0.3)] + [
         a_tick(i, 0.0, converted=False) for i in range(1, 91)
     ]
-    report = report_for(ticks)
+    report = report_for(ticks, first_converted_at=0.0)
     assert report["usable"] is False
-    assert report["gate_detail"]["converted_fraction"] < MIN_CONVERTED_FRACTION
+    assert (
+        report["gate_detail"]["converted_fraction_after_convergence"]
+        < MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE
+    )
+
+
+def test_a_healthy_short_run_is_not_failed_for_its_convergence_prefix():
+    """The timebase needs ~1.1 s, so a whole-run fraction rejected a perfectly
+    healthy two-second run -- and plan section 8.4, "the first ten seconds,
+    recorded deliberately", is short by design. A gate that fails a healthy rig
+    is a false claim about the run.
+
+    Half the ticks proxied because they came BEFORE the first conversion; every
+    tick after it converted.
+    """
+    ticks = [a_tick(i, 0.0, converted=False) for i in range(10)] + [
+        a_tick(i, 0.3) for i in range(10, 21)
+    ]
+    for tick in ticks[:10]:
+        tick["t_s"] = 0.05 * tick["frame_id"]
+    for tick in ticks[10:]:
+        tick["t_s"] = 1.2 + 0.05 * tick["frame_id"]
+    report = report_for(ticks, first_converted_at=1.2)
+    assert report["usable"] is True, report["gate_detail"]
+    assert report["gate_detail"]["ticks_before_convergence"] == 10
+    assert report["gate_detail"]["converted_fraction_after_convergence"] == 1.0
 
 
 def test_a_converted_tick_that_is_not_fresh_fails():
@@ -214,16 +259,66 @@ def test_a_record_that_arrived_and_was_never_delivered_is_a_gap():
 def test_frames_still_in_flight_do_not_break_the_identity():
     """`queued` increments at enqueue and `sent` at write, and the stats are
     sampled while the writer may still be draining -- so without an in-flight
-    term the flag went false for no defect."""
+    term the flag went false for no defect.
+
+    The term comes from the session's live queue depth. Derived as
+    `queued - accounted` it made this identity a tautology: `accounted +
+    (queued - accounted)` is `queued` for every input, so the clause could not
+    fail while its comment claimed it verified something.
+    """
     stats = _Stats(60)
-    stats._row.sent = 59  # one still queued when stats() was sampled
+    stats._row.sent = 59  # one still sitting in the outbound queue
     stats._row.received = 59
     stats._row.delivered = 59
-    report = _report(
-        [a_tick(i, 0.3) for i in range(40)], 10.0, 0,
-        {"frames": 60}, {"received": 40, "unmatched": 0, "frame_ids": set(range(40))},
-        _Recorder(), _Recorder(), _Recorder(), _Recorder(), _Pipeline(), 1.0,
-        phone_stats=stats, jetson_stats=stats,
+    account = _account(
+        stats, stats,
+        pending=dict.fromkeys(CHANNELS, 1),
+        pending_in=dict.fromkeys(CHANNELS, 0),
+        decode_errors=dict.fromkeys(CHANNELS, 0),
     )
-    assert report["transport"]["reconciled"] is True, report["transport"]["reconciliation"]
-    assert report["transport"]["upstream"]["camera"]["in_flight"] == 1
+    assert account["reconciled"] is True, account["reconciliation"]
+    assert account["upstream"]["camera"]["in_flight"] == 1
+
+
+def test_the_outbound_identity_can_actually_fail():
+    """The tautology test: with a real queue depth, a frame that vanished
+    without being sent, dropped, abandoned or queued is a gap."""
+    stats = _Stats(60)
+    stats._row.sent = 55  # five unaccounted for, and nothing in the queue
+    stats._row.received = 55
+    stats._row.delivered = 55
+    account = _account(
+        stats, stats,
+        pending=dict.fromkeys(CHANNELS, 0),
+        pending_in=dict.fromkeys(CHANNELS, 0),
+        decode_errors=dict.fromkeys(CHANNELS, 0),
+    )
+    assert account["reconciled"] is False
+    assert any("queued 60" in gap for gap in account["reconciliation"])
+
+
+def test_a_malformed_message_is_caught_by_the_router_not_by_delivered():
+    """The session counts `delivered` when the frame leaves it, and the router
+    rejects an undecodable one afterwards -- so a run where every message failed
+    to decode reconciled clean on the inbound identity alone. The comment used to
+    claim otherwise."""
+    clean = account_for(60, decode_errors=0)
+    assert clean["reconciled"] is True
+
+    broken = account_for(60, decode_errors=60)
+    assert broken["reconciled"] is False
+    assert any("failed to decode" in gap for gap in broken["reconciliation"])
+
+
+def test_records_still_in_the_inbound_queue_do_not_break_the_identity():
+    """The receive-side twin: without it the inbound check is flaky rather than
+    wrong, because `_report` runs after the readers are joined."""
+    stats = _Stats(60)
+    stats._row.delivered = 57
+    account = _account(
+        stats, stats,
+        pending=dict.fromkeys(CHANNELS, 0),
+        pending_in=dict.fromkeys(CHANNELS, 3),
+        decode_errors=dict.fromkeys(CHANNELS, 0),
+    )
+    assert account["reconciled"] is True, account["reconciliation"]

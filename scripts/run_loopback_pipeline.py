@@ -85,10 +85,14 @@ ADVISORY_ECHO_PREFIX = "frame:"
 LINK_FLOOR_MS = 5.0
 LINK_BOUND_MULTIPLE = 10.0
 
-# A run that converged once and then proxied for the rest of the drive is not a
-# run that exercised the conversion. Plan section 9's stated risk is exactly the
-# proxy being in use for longer than expected.
-MIN_CONVERTED_FRACTION = 0.5
+# A run that converged and then FELL BACK for much of the drive is not a run that
+# exercised the conversion -- plan section 9's stated risk is exactly the proxy
+# being in use for longer than expected. Measured over the ticks after the first
+# conversion, not over the whole run: the timebase needs ~1.1 s to converge, so a
+# whole-run fraction rejected a perfectly healthy two-second run, and plan section
+# 8.4 ("the first ten seconds, recorded deliberately") is short by design. A gate
+# that fails a healthy rig is a false claim about the run.
+MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE = 0.9
 
 
 class _FakeDetector:
@@ -298,10 +302,21 @@ def run(duration_s: float, offset_ns: int, sync_hz: float) -> dict:
         camera.stop()
         gps.stop()
 
+        # Sampled while the sessions are still open, so the queue depths are the
+        # real ones rather than a difference of counters.
+        channels = (Channel.CAMERA, Channel.GPS)
+        account = _account(
+            phone.stats(), jetson.stats(),
+            pending={c: phone.outbound_pending(c) for c in channels},
+            pending_in={c: jetson.pending(c) for c in channels},
+            decode_errors={
+                c: jetson_router.stats()[c].decode_errors for c in channels
+            },
+        )
         report = _report(
             ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps,
             initiator, pipeline, first_converted_at,
-            phone_stats=phone.stats(), jetson_stats=jetson.stats(),
+            phone_stats=phone.stats(), jetson_stats=jetson.stats(), account=account,
         )
     phone.close()
     jetson.close()
@@ -327,7 +342,8 @@ def _advisory_message(tick):
 
 
 def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps,
-            initiator, pipeline, first_converted_at, phone_stats, jetson_stats) -> dict:
+            initiator, pipeline, first_converted_at, phone_stats, jetson_stats,
+            account) -> dict:
     converted = [t for t in ticks if t["timebase"] and t["timebase"]["converted"]]
     proxied = [t for t in ticks if t["timebase"] and t["timebase"]["proxy"]]
     fresh = [t for t in ticks if t["gps_fresh"]]
@@ -344,7 +360,12 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
         None if bound_p95_ms is None
         else max(LINK_FLOOR_MS, LINK_BOUND_MULTIPLE * bound_p95_ms)
     )
-    converted_fraction = (len(converted) / len(ticks)) if ticks else 0.0
+    # Only the ticks from the first conversion onwards can be charged: before it
+    # the estimator had no answer to give, which is expected rather than a fault.
+    after = [t for t in ticks if first_converted_at is not None
+             and t["t_s"] >= first_converted_at]
+    converted_after = [t for t in after if t["timebase"] and t["timebase"]["converted"]]
+    converted_fraction = (len(converted_after) / len(after)) if after else 0.0
     return {
         "duration_s": duration_s,
         "planted_clock_offset_hours": round(offset_ns / 3.6e12, 3),
@@ -359,7 +380,7 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
         # send() returning True, which is ENQUEUED: camera is LATEST_WINS at
         # depth 1, so a replacement increments dropped_outbound and the two
         # numbers diverge with nothing else recording why.
-        "transport": _account(phone_stats, jetson_stats, sent, ticks, advisories),
+        "transport": account,
         "camera": camera.to_record(),
         "gps": gps.to_record(),
         "adapter": adapter.to_record(),
@@ -397,7 +418,7 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
             # Every converted tick must be fresh.
             and converted_fresh == len(converted)
             # Enough of the run actually exercised the conversion.
-            and converted_fraction >= MIN_CONVERTED_FRACTION
+            and converted_fraction >= MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE
             # The worst segment must sit inside what the run's own uncertainty
             # allows -- not inside a constant that is three orders wider.
             and ceiling_ms is not None
@@ -414,8 +435,11 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
         "gate_detail": {
             "converted_ticks": len(converted),
             "converted_and_fresh": converted_fresh,
-            "converted_fraction": round(converted_fraction, 4),
-            "min_converted_fraction": MIN_CONVERTED_FRACTION,
+            "converted_fraction_after_convergence": round(converted_fraction, 4),
+            "min_converted_fraction_after_convergence": (
+                MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE
+            ),
+            "ticks_before_convergence": len(ticks) - len(after),
             "link_max_ms": link_max_ms,
             "link_min_ms": link_min_ms,
             "bound_p95_ms": bound_p95_ms,
@@ -426,7 +450,7 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
     }
 
 
-def _account(phone_stats, jetson_stats, sent, ticks, advisories) -> dict:
+def _account(phone_stats, jetson_stats, pending, pending_in, decode_errors) -> dict:
     """Reconciled from records, never by subtraction."""
     up = {}
     for channel in (Channel.CAMERA, Channel.GPS):
@@ -434,16 +458,24 @@ def _account(phone_stats, jetson_stats, sent, ticks, advisories) -> dict:
         inn = jetson_stats.channels[channel]
         up[channel.value] = {
             "queued": out.queued,
-            # Sampled after the senders stop but while the writer may still be
-            # draining, so without this term the identity fails for no defect.
-            "in_flight": max(0, out.queued - out.sent - out.dropped_outbound
-                             - out.abandoned_outbound),
+            # From the session's own queue depth, NOT derived as
+            # `queued - accounted`. Derived, it made the identity below a
+            # tautology: `accounted + (queued - accounted)` is `queued` for every
+            # input, so the clause could not fail and the comment claiming it
+            # verified something was false. Exhaustive sweep: 1170 of 1296 count
+            # combinations "fired", none of them reachable.
+            "in_flight": pending[channel],
             "sent": out.sent,
             "dropped_outbound": out.dropped_outbound,
             "abandoned_outbound": out.abandoned_outbound,
             "received": inn.received,
             "dropped_inbound": inn.dropped_inbound,
             "delivered": inn.delivered,
+            # Still in the session's inbound queue when stats were sampled: the
+            # receive-side twin of `in_flight`, and without it this identity is
+            # flaky rather than wrong.
+            "queued_in": pending_in[channel],
+            "decode_errors": decode_errors.get(channel, 0),
             "seq_gaps": inn.seq_gaps,
             "missing_seqs": inn.missing_seqs,
         }
@@ -462,13 +494,20 @@ def _account(phone_stats, jetson_stats, sent, ticks, advisories) -> dict:
             )
         if row["sent"] != row["received"]:
             gaps.append(f"{channel}: {row['sent']} sent but {row['received']} received")
-        # The clause that would catch a malformed message: a record that arrived
-        # and was never handed to a consumer.
-        if row["received"] != row["delivered"] + row["dropped_inbound"]:
+        # An arrived record that reached no consumer. This is NOT the
+        # malformed-message check -- the session counts `delivered` when the
+        # frame leaves it, and the router rejects an undecodable one afterwards,
+        # so a run where every message failed to decode reconciles clean on this
+        # clause alone. The router's own count is charged separately below.
+        if row["received"] != row["delivered"] + row["dropped_inbound"] + row["queued_in"]:
             gaps.append(
                 f"{channel}: received {row['received']} but delivered "
-                f"{row['delivered']} + dropped inbound {row['dropped_inbound']}"
+                f"{row['delivered']} + dropped inbound {row['dropped_inbound']} "
+                f"+ still queued {row['queued_in']}"
             )
+        # The malformed-message check, from the router that actually refuses them.
+        if row["decode_errors"]:
+            gaps.append(f"{channel}: {row['decode_errors']} records failed to decode")
     lost = {c: r["dropped_outbound"] + r["abandoned_outbound"] + r["dropped_inbound"]
             for c, r in up.items()}
     return {
