@@ -289,6 +289,34 @@ What is *not* visible from the far side is the first kind, because a drop before
 sequence number is assigned leaves no gap for the peer to see. A receiver reading
 only sequence gaps undercounts camera loss.
 
+## Step 9 was the wrong half: the phone initiates, it does not answer
+
+The plan called step 9 "the time-sync responder". The spec calls the direction
+explicitly: **"The phone initiates and the Jetson only ever answers."** Python agrees --
+`TimeSyncInitiator`'s own docstring reads "The phone's side" -- so the responder is the
+Jetson's half and the phone should never answer a ping at all.
+
+What was built was the responder, and it was reachable from no code path: the class
+existed, had tests, and nothing routed a `control` frame to it. So the phone had the wrong
+half of the exchange, and the half it had was inert. Nothing initiated, which means the
+timebase never ran in either direction, and `wantsWireStamp` -- the field the whole
+estimate depends on -- had no consumer.
+
+The transport now owns the exchange the way it owns keepalives, and the role decides which
+half runs. A phone sends pings and delivers pongs upward, because the estimate belongs
+above a transport that does not know what the samples are for. A Jetson answers pings. The
+wrong direction arriving is a protocol error counted as `unknown_value`, which is the
+reason the spec names for it, "because the alternative is treating one as the other and
+silently producing an offset with the sign inverted".
+
+The responder stays in the Kotlin module rather than being deleted: a Kotlin session plays
+the Jetson in the loopback tests, and that is now the role that reaches it.
+
+**Still open:** nothing drives the ping cadence. `sendTimeSyncPing` exists and is
+exercised, but no timer calls it, so in a running app the exchange still does not happen
+on its own. The cadence and the estimator belong with whatever consumes the offset, which
+is not this task.
+
 ## 8. Needs sign-off
 
 1. **O1** — whether GPS receipt time should get a wire field (`t_receipt_mono_ns` on

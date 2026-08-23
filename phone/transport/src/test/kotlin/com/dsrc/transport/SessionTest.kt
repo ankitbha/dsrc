@@ -204,12 +204,18 @@ class SessionTest {
 
     @Test
     fun `control traffic starts at sequence one because the hello spent zero`() {
-        val (phone, jetson) = pair()
-        // A real ping, not an arbitrary payload: the sender rule now runs the typed
-        // decoder, and `control`'s typed message is the time-sync exchange.
-        assertTrue(phone.session.send(Channels.CONTROL, ping(), wantsWireStamp = true))
-        assertTrue(awaitFrames(jetson, 1), "the control frame never arrived")
-        assertEquals(1L, synchronized(jetson.received) { jetson.received.first().sequence })
+        val wire = WireLog()
+        val (phone, _) = pair(onPhoneWrite = wire::record)
+        // A real ping, not an arbitrary payload: the sender rule runs the typed decoder,
+        // and `control`'s typed message is the time-sync exchange.
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 1))
+        assertTrue(awaitCondition { wire.on(Channels.CONTROL).any { it.sequence == 1L } },
+            "the ping did not spend sequence 1: ${wire.on(Channels.CONTROL).map { it.sequence }}")
+        // Zero belongs to the hello, and nothing else may reuse it.
+        assertEquals(
+            listOf(0L, 1L),
+            wire.on(Channels.CONTROL).map { it.sequence }.distinct().sorted().take(2),
+        )
     }
 
     @Test
@@ -744,19 +750,17 @@ class SessionTest {
         // enqueue-then-poll returned whatever was already at the head, destroying an
         // application control message with `dropped` still zero, then writing the
         // heartbeat twice with a duplicate sequence number.
-        val (phone, jetson) = pair()
-        assertTrue(phone.session.send(Channels.CONTROL, ping(exchangeId = 99), wantsWireStamp = true))
+        val wire = WireLog()
+        val (phone, _) = pair(onPhoneWrite = wire::record)
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 99))
         // Long enough for at least one keepalive to fire alongside it.
         Thread.sleep(((Protocol.KEEPALIVE_INTERVAL_S * 2 + 1) * 1000).toLong())
 
-        assertTrue(awaitFrames(jetson, 1), "the control message was destroyed by a heartbeat")
-        val exchanges = synchronized(jetson.received) {
-            jetson.received.filter { it.channel == Channels.CONTROL }
-                .map { (it.header.entries["exchange_id"] as? JsonValue.Num)?.value }
-        }
-        assertTrue(99L in exchanges, "our ping never arrived; got $exchanges")
+        val control = wire.on(Channels.CONTROL)
+        val exchanges = control.map { (it.header.entries["exchange_id"] as? JsonValue.Num)?.value }
+        assertTrue(99L in exchanges, "our ping was destroyed by a heartbeat; got $exchanges")
 
-        val sequences = synchronized(jetson.received) { jetson.received.map { it.sequence } }
+        val sequences = control.map { it.sequence }
         assertEquals(sequences.size, sequences.distinct().size, "a sequence number was reused: $sequences")
     }
 
@@ -840,25 +844,25 @@ class SessionTest {
         // own clock call, so it was deterministically *earlier* and the delay it exposed
         // came out negative on every stamped frame.
         val clock = AtomicLong(0)
-        val (phone, jetson) = pair(clock = { clock.addAndGet(1_000) })
+        val wire = WireLog()
+        val (phone, _) = pair(clock = { clock.addAndGet(1_000) }, onPhoneWrite = wire::record)
 
         repeat(8) { exchange ->
-            assertTrue(phone.session.send(
-                Channels.CONTROL,
-                ping(exchangeId = exchange.toLong()),
-                wantsWireStamp = true,
-            ))
+            assertTrue(phone.session.sendTimeSyncPing(exchangeId = exchange.toLong()))
         }
-        assertTrue(awaitFrames(jetson, 8), "timebase frames never arrived")
+        assertTrue(
+            awaitCondition { wire.snapshot().count { it.header.entries.containsKey(Session.WIRE_STAMP) } >= 8 },
+            "timebase frames were never written",
+        )
 
-        val pairs = jetson.received
+        val pairs = wire.snapshot()
             .filter { it.header.entries.containsKey(Session.WIRE_STAMP) }
             .map {
                 val mono = (it.header.entries.getValue(Framing.KEY_MONO) as JsonValue.Num).value
                 val wire = (it.header.entries.getValue(Session.WIRE_STAMP) as JsonValue.Num).value
                 wire - mono
             }
-        assertEquals(8, pairs.size, "no stamped frames arrived")
+        assertEquals(8, pairs.size, "no stamped frames were written")
         assertTrue(pairs.all { it >= 0 }, "wire stamp precedes the enqueue stamp: $pairs")
     }
 
@@ -879,19 +883,20 @@ class SessionTest {
         // digit for a stamp that arrives with nineteen is short by eighteen bytes, so the
         // message passes the check and then throws on the writer thread.
         val clock = AtomicLong(1_000_000_000_000_000_000L)
-        val (phone, jetson) = pair(clock = { clock.get() })
+        val wire = WireLog()
+        val (phone, _) = pair(clock = { clock.get() }, onPhoneWrite = wire::record)
 
         val fits = longestPaddingAccepted(phone.session)
         assertTrue(fits > 0, "no padding fits at all")
 
-        val before = jetson.received.size
+        val before = wire.snapshot().size
         assertTrue(
             phone.session.send(Channels.CONTROL, paddedPing(fits), wantsWireStamp = true),
             "the largest fitting header was refused",
         )
         assertTrue(
-            awaitFrames(jetson, before + 1),
-            "a header that send() accepted never arrived: it grew past the limit at write time",
+            awaitCondition { wire.snapshot().size > before },
+            "a header that send() accepted was never written: it grew past the limit at write time",
         )
         assertTrue(phone.session.isRunning, "the session died writing a header send() had accepted")
 
@@ -1064,6 +1069,30 @@ class SessionTest {
         assertEquals(thrown, end?.second, "the cause was discarded")
     }
 
+    /**
+     * Frames the phone wrote, decoded from the bytes as they went out.
+     *
+     * The right instrument for any claim about what the *sender* produced. Reading the
+     * peer's delivered frames was never quite that, and stopped working entirely once the
+     * transport began absorbing the control channel: a responder answers a ping instead of
+     * handing it up, so an assertion about the ping's sequence number could no longer see
+     * it at all.
+     */
+    private class WireLog {
+        private val frames = mutableListOf<Frame>()
+
+        fun record(bytes: ByteArray) {
+            val frame = runCatching {
+                Framing.read(java.io.ByteArrayInputStream(bytes))
+            }.getOrNull() ?: return
+            synchronized(frames) { frames.add(frame) }
+        }
+
+        fun snapshot(): List<Frame> = synchronized(frames) { frames.toList() }
+
+        fun on(channel: String): List<Frame> = snapshot().filter { it.channel == channel }
+    }
+
     /** Poll a condition with a deadline, so a failure is a failure and not a hang. */
     private fun awaitCondition(timeoutMs: Long = 5_000, condition: () -> Boolean): Boolean {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -1072,6 +1101,95 @@ class SessionTest {
             Thread.sleep(5)
         }
         return false
+    }
+
+
+    // -- the timebase exchange ----------------------------------------------
+
+    @Test
+    fun `a ping is answered and the pong reaches the initiator`() {
+        // The whole exchange, which could not complete at all: TimeSyncResponder existed,
+        // had tests, and was reachable from no code path, so a ping was delivered to an
+        // application that has no handler for it and no pong was ever produced.
+        val clock = AtomicLong(1_000)
+        val (phone, jetson) = pair(clock = { clock.addAndGet(1_000) })
+
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 42))
+        assertTrue(awaitFrames(phone, 1), "no pong came back")
+
+        val pong = phone.received.single { it.channel == Channels.CONTROL }
+        val decoded = TimeSyncMessage.fromWire(pong.header.entries, pong.payload)
+        assertFalse(decoded.isPing, "the answer was itself a ping")
+        assertEquals(42, decoded.exchangeId, "the pong changed the exchange id")
+        // All three peer fields are set together, per the spec.
+        assertTrue(decoded.peerRecvMonoNs != null && decoded.peerRecvWallNs != null &&
+            decoded.peerWireMonoNs != null, "a pong with a partial peer triple: $decoded")
+
+        // t1 echoed back. Substituting the responder's own clock here would replace the
+        // initiator's departure with a reading from a different device, and the offset
+        // would be wrong by the whole link delay.
+        val ping = jetson.received.firstOrNull { it.channel == Channels.CONTROL }
+        if (ping != null) {
+            val sent = TimeSyncMessage.fromWire(ping.header.entries, ping.payload)
+            assertEquals(sent.wireMonoNs, decoded.peerWireMonoNs)
+        }
+        assertTrue(phone.session.stats().inboundRefusals.isEmpty(),
+            "the pong was refused: ${phone.session.stats().inboundRefusals}")
+    }
+
+    @Test
+    fun `a phone refuses a ping, because the phone is the initiator`() {
+        // The spec: "The phone initiates and the Jetson only ever answers... A Jetson
+        // receiving a pong, or a phone receiving a ping, is a protocol error", counted as
+        // unknown_value, "because the alternative is treating one as the other and
+        // silently producing an offset with the sign inverted".
+        val (phone, jetson) = pair()
+        val before = phone.received.size
+
+        assertTrue(jetson.session.send(Channels.CONTROL, ping(exchangeId = 7), wantsWireStamp = true))
+        assertTrue(
+            awaitCondition {
+                phone.session.stats().inboundRefusals[RefusalReason.UNKNOWN_VALUE.wire] == 1L
+            },
+            "a ping to the initiator was not refused as unknown_value: " +
+                "${phone.session.stats().inboundRefusals}",
+        )
+        assertEquals(before, phone.received.size, "the ping was delivered as well as counted")
+        assertTrue(phone.session.isRunning, "a wrong-direction message ended the session")
+    }
+
+    @Test
+    fun `a responder refuses a pong`() {
+        val clock = AtomicLong(5_000)
+        val (phone, jetson) = pair(clock = { clock.addAndGet(1_000) })
+        val pong = TimeSyncMessage(
+            captureMonoNs = 1_000,
+            exchangeId = 11,
+            wireMonoNs = 0,
+            peerRecvMonoNs = 2_000,
+            peerRecvWallNs = 1_755_648_000_000_000_000,
+            peerWireMonoNs = 1_500,
+        )
+        assertTrue(phone.session.send(Channels.CONTROL, pong.toExtensions(), wantsWireStamp = true))
+        assertTrue(
+            awaitCondition {
+                jetson.session.stats().inboundRefusals[RefusalReason.UNKNOWN_VALUE.wire] == 1L
+            },
+            "a pong to a responder was not refused: ${jetson.session.stats().inboundRefusals}",
+        )
+    }
+
+    @Test
+    fun `only the initiator may send a ping`() {
+        val (_, jetson) = pair()
+        // A responder that pinged would put two responders in a loop, each answering the
+        // other's answer.
+        val refused = runCatching { jetson.session.sendTimeSyncPing(exchangeId = 1) }
+        assertTrue(refused.isFailure, "a responder was allowed to initiate")
+        assertTrue(
+            refused.exceptionOrNull() is IllegalArgumentException,
+            "wrong failure: ${refused.exceptionOrNull()}",
+        )
     }
 
 }

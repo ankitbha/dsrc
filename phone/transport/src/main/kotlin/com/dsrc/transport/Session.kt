@@ -64,6 +64,16 @@ class Session(
 ) {
 
     private val queues = OutboundQueues()
+
+    /**
+     * Answers pings, for a session in the Jetson's role.
+     *
+     * Was reachable from nothing at all: the class existed, had tests, and no code path
+     * led to it, so the timebase exchange could not complete in either direction. It is
+     * the Jetson's half -- retained here because a Kotlin session plays the Jetson in the
+     * loopback tests, and because the phone's half is `sendTimeSyncPing`.
+     */
+    private val timeSync = TimeSyncResponder(monoClock, wallClock)
     private val running = AtomicBoolean(true)
     private val ended = AtomicBoolean(false)
 
@@ -344,6 +354,69 @@ class Session(
         heartbeatsSent.incrementAndGet()
     }
 
+    /**
+     * The timebase exchange, which the transport owns the way it owns keepalives.
+     *
+     * Direction is not symmetric and the spec is explicit about it: *the phone initiates
+     * and the Jetson only ever answers*. So the role decides which half runs, and the
+     * wrong half arriving is a protocol error rather than something to interpret --
+     * "treating one as the other produces an offset with the sign inverted", a plausible
+     * number that is exactly wrong. Both wrong-direction cases are counted as
+     * `unknown_value`, which the spec names for them.
+     *
+     * @return true if the frame was consumed here and must not be delivered.
+     */
+    private fun handleTimeSync(frame: Frame): Boolean {
+        val message = try {
+            TimeSyncMessage.fromWire(frame.header.entries, frame.payload)
+        } catch (e: MessageError) {
+            countInboundRefusal(e.reason.wire)
+            return true
+        }
+
+        if (role == ROLE_PHONE) {
+            if (message.isPing) {
+                // Nobody should be pinging the initiator.
+                countInboundRefusal(RefusalReason.UNKNOWN_VALUE.wire)
+                return true
+            }
+            // A pong is the answer to our own ping, and the estimate is built above the
+            // transport, so it is delivered rather than absorbed.
+            return false
+        }
+
+        val reply = timeSync.reply(message, monoClock(), wallClock())
+        if (reply == null) {
+            // A responder receiving a pong: the other wrong direction.
+            countInboundRefusal(RefusalReason.UNKNOWN_VALUE.wire)
+            return true
+        }
+        // Wire-stamped, because t3 is the pong's departure and the enqueue stamp would
+        // carry this session's own queueing delay into the peer's offset.
+        send(Channels.CONTROL, reply.toExtensions(), wantsWireStamp = true)
+        return true
+    }
+
+    /**
+     * Send a timebase ping. The phone's half of the exchange.
+     *
+     * Exposed rather than driven from here: the cadence and the estimator belong above the
+     * transport, which does not know what the samples are for.
+     */
+    fun sendTimeSyncPing(exchangeId: Long): Boolean {
+        require(role == ROLE_PHONE) { "only the initiator sends pings; this session is '$role'" }
+        val ping = TimeSyncMessage(
+            captureMonoNs = monoClock(),
+            exchangeId = exchangeId,
+            // The writer stamps the real departure; zero is the spec's placeholder.
+            wireMonoNs = 0,
+            peerRecvMonoNs = null,
+            peerRecvWallNs = null,
+            peerWireMonoNs = null,
+        )
+        return send(Channels.CONTROL, ping.toExtensions(), wantsWireStamp = true)
+    }
+
     private fun readLoop() {
         try {
             while (running.get()) {
@@ -359,6 +432,8 @@ class Session(
                     heartbeatsReceived.incrementAndGet()
                     continue
                 }
+
+                if (frame.channel == Channels.CONTROL && handleTimeSync(frame)) continue
                 try {
                     onFrame(frame)
                 } catch (e: MessageError) {
@@ -432,6 +507,7 @@ class Session(
     fun outboundPending(): Long = queues.pending()
 
     companion object {
+        const val ROLE_PHONE = "phone"
         const val HELLO = "hello"
         const val HEARTBEAT = "heartbeat"
         const val WIRE_STAMP = "t_wire_mono_ns"
