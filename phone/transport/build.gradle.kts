@@ -34,6 +34,14 @@ tasks.test {
     systemProperty("dsrc.protocolSpec", protocolSpec.asFile.absolutePath)
     inputs.file(goldenFrames).withPropertyName("goldenFrames")
     systemProperty("dsrc.goldenFrames", goldenFrames.asFile.absolutePath)
+
+    // The interop test spawns the real Python peer. Both the script and the Python
+    // transport package it imports are declared inputs, so a change to either re-runs
+    // the one test that can catch the two implementations drifting apart.
+    val repoRoot = rootProject.layout.projectDirectory.dir("..")
+    systemProperty("dsrc.repoRoot", repoRoot.asFile.absolutePath)
+    inputs.file(repoRoot.file("scripts/interop_jetson_peer.py")).withPropertyName("interopPeer")
+    inputs.dir(repoRoot.dir("deployment/jetson/transport")).withPropertyName("pythonTransport")
     testLogging {
         events("failed")
     }
