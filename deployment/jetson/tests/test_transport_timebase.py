@@ -779,7 +779,7 @@ def test_the_skew_fit_spans_more_time_than_the_offset_window():
 
 def test_the_responder_echoes_receipt_and_the_pings_wire_stamp():
     ping = TimeSyncMessage(t_capture_mono_ns=10, exchange_id=88, t_wire_mono_ns=1_000)
-    pong = answer_ping(ping, t_recv_mono_ns=5_000, t_recv_wall_ns=1_755_000_000_000_000_000)
+    pong = answer_ping((ping, 5_000), wall_clock=lambda: 1_755_000_000_000_000_000)
     assert not pong.is_ping
     assert pong.exchange_id == 88
     assert pong.t_peer_recv_mono_ns == 5_000
@@ -796,7 +796,7 @@ def test_a_responder_refuses_a_pong():
         t_peer_recv_mono_ns=4, t_peer_recv_wall_ns=5, t_peer_wire_mono_ns=6,
     )
     with pytest.raises(MessageError) as caught:
-        answer_ping(pong, t_recv_mono_ns=9, t_recv_wall_ns=9)
+        answer_ping((pong, 9))
     assert caught.value.reason == "unknown_value"
 
 
@@ -868,10 +868,15 @@ def test_the_exchange_completes_over_a_real_session_and_produces_an_estimate():
     try:
         for _ in range(MIN_OFFSET_SAMPLES + 3):
             initiator.send_ping()
-            ping = down.recv(Channel.CONTROL, timeout=5.0)
-            assert ping is not None and ping.is_ping
-            assert ping.t_wire_mono_ns > 0, "the writer did not stamp the ping"
-            down.send(answer_ping(ping, now_mono_ns(), 1_755_000_000_000_000_000))
+            # recv_with_receipt, not recv: the responder's t2 must be the stamp
+            # the session's reader took, and this is the only worked example of
+            # the responder loop in the tree -- the one task 15.7 gets copied
+            # from. It used to call now_mono_ns() at handling time, which is the
+            # violation the spec says cannot be detected from the wire.
+            arrived = down.recv_with_receipt(Channel.CONTROL, timeout=5.0)
+            assert arrived is not None and arrived[0].is_ping
+            assert arrived[0].t_wire_mono_ns > 0, "the writer did not stamp the ping"
+            down.send(answer_ping(arrived))
             assert initiator.pump(timeout=5.0) is not None
 
         assert initiator.pongs_matched == MIN_OFFSET_SAMPLES + 3
@@ -938,6 +943,8 @@ def test_every_timebase_constant_in_the_spec_matches_the_code():
         "assumed skew": f"{timebase.ASSUMED_SKEW_PPM:g} ppm",
         "admission ceiling": f"{timebase.MAX_SAMPLE_RTT_NS // 1_000_000:g} ms",
         "extrapolation limit": f"{timebase.MAX_EXTRAPOLATION_S:g} s",
+        "pending timeout": f"{timebase.PENDING_TIMEOUT_S:g} s",
+        "late window": f"{timebase.LATE_WINDOW_S:g} s",
     }
     # Both directions. Checking code->spec only meant a table row with no code
     # constant behind it -- or a constant the table never mentions -- was
@@ -1338,7 +1345,14 @@ def test_the_history_is_bounded_and_says_what_it_dropped():
     assert estimator.estimates_evicted == 50
     record = estimator.to_record()
     assert record["estimates_evicted"] == 50
-    assert record["estimates_published"] == MAX_HISTORY
+    # Retained and published are different numbers once the bound bites, and the
+    # record has to say which is which: reading 4096 as "published" over a long
+    # run understates it by thousands.
+    assert record["estimates_retained"] == MAX_HISTORY
+    assert record["estimates_published"] == MAX_HISTORY + 50
+    assert record["estimates_retained"] + record["estimates_evicted"] == (
+        record["estimates_published"]
+    )
     # The newest are the ones kept, since those are what recent conversions cite.
     assert history[-1].estimate_id == MAX_HISTORY + 50
 
@@ -1635,3 +1649,101 @@ def test_the_spec_states_the_drift_charge_in_its_additive_form():
     )
     # And it must not still be describing the charge it replaced.
     assert "the standard error of the fitted skew once skew is known" not in flat
+
+
+def test_a_matched_exchange_is_not_recorded_as_timed_out():
+    """The pop guard was added around the counter but not around the id set, so
+    an exchange matched during the expiry race still landed in the timed-out set
+    -- and a later duplicate was then labelled late rather than stray, which is
+    the wrong one of the two diagnoses the counter was split to give."""
+    from transport.timebase import PENDING_TIMEOUT_S
+
+    clock = SteppedClock()
+    initiator = TimeSyncInitiator(_NullRouter(), mono_clock=clock)
+    exchange_id = initiator.send_ping()
+
+    class _MatchingDict(dict):
+        """Matches the exchange between the sweep's scan and its pop, which is
+        the interleaving the pop tolerates."""
+
+        def items(self):
+            snapshot = list(super().items())
+            for key in list(super().keys()):
+                super().pop(key, None)
+            return snapshot
+
+    initiator._pending = _MatchingDict(initiator._pending)  # noqa: SLF001
+    initiator.pongs_matched += 1  # what on_pong would have done
+    clock.now_ns += int((PENDING_TIMEOUT_S + 1) * NS_PER_S)
+    initiator._expire_pending()  # noqa: SLF001
+
+    assert initiator.pongs_timed_out == 0, "a matched exchange was counted as timed out"
+    assert exchange_id not in initiator._timed_out_ids, (  # noqa: SLF001
+        "a matched exchange is in the timed-out set, so a duplicate pong for it "
+        "would be mislabelled as late"
+    )
+
+
+def test_the_timed_out_id_set_is_pruned():
+    """`discard` only fires when a timed-out pong eventually arrives, which for a
+    genuinely lost one never happens -- so without pruning the set is monotone
+    for exactly the entries that dominate it, and grows fastest when the link is
+    worst and nobody can intervene."""
+    from transport.timebase import LATE_WINDOW_S, PENDING_TIMEOUT_S
+
+    clock = SteppedClock()
+    initiator = TimeSyncInitiator(_NullRouter(), mono_clock=clock)
+    for _ in range(40):
+        initiator.send_ping()
+        clock.now_ns += int(PENDING_TIMEOUT_S * 1.5 * NS_PER_S)
+    assert initiator.pongs_timed_out > 0
+    held = len(initiator._timed_out_ids)  # noqa: SLF001
+    assert held > 0
+
+    clock.now_ns += int((LATE_WINDOW_S + 1) * NS_PER_S)
+    initiator.send_ping()
+    assert len(initiator._timed_out_ids) <= 1, (  # noqa: SLF001
+        f"{len(initiator._timed_out_ids)} ids retained past the late window"  # noqa: SLF001
+    )
+
+
+def test_answer_ping_cannot_be_given_a_locally_read_stamp():
+    """The signature carries the requirement now. Prose was guarding the one
+    hazard with no wire-side check, and the only worked example in the tree
+    violated it."""
+    ping = TimeSyncMessage(t_capture_mono_ns=1, exchange_id=2, t_wire_mono_ns=3)
+    with pytest.raises(TypeError):
+        answer_ping(ping, now_mono_ns())  # the old, error-prone shape
+    pong = answer_ping((ping, 4_000))
+    assert pong.t_peer_recv_mono_ns == 4_000
+
+
+def test_the_record_publishes_the_bound_as_it_stands():
+    """The drift term dominates the bound and the gate deliberately does not
+    limit it, so the number a consumer checks against its own tolerance has to be
+    in the record rather than left to be recomputed."""
+    link = Link(seed=163)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=20, period_ns=100_000_000)
+
+    record = estimator.to_record()
+    estimate = estimator.estimate
+    assert estimate is not None
+    assert record["bound_now_ns"] == estimate.bound_ns_at(clock.now_ns)
+    assert record["bound_now_ns"] >= -(-estimate.rtt_min_ns // 2)
+    json.dumps(record, allow_nan=False)
+
+    empty = TimebaseEstimator(mono_clock=SteppedClock())
+    assert empty.to_record()["bound_now_ns"] is None
+
+
+def test_the_spec_says_the_gate_does_not_limit_the_bound():
+    """The round-trip clause used to be justified as keeping the bound narrow,
+    which stopped being true when the drift term became the dominant one -- a
+    converged estimator can exceed that width eightfold on a healthy link."""
+    text = (REPO / "specs" / "transport_protocol.md").read_text()
+    section = text[text.index("## Shared Timebase"):text.index("## Golden Vectors")]
+    flat = " ".join(section.split())
+    assert "The gate does not limit the bound, deliberately" in flat
+    assert "link-health floor" in flat

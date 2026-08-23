@@ -53,6 +53,12 @@ SKEW_WINDOW_S = 300.0
 # derived from it would be a guess wearing a number's clothes.
 MIN_OFFSET_SAMPLES = 5
 MAX_SAMPLE_AGE_S = 5.0
+# A link-health floor, not a bound-width limit. The distinction matters now that
+# the drift term routinely dominates: a converged estimator can hand out a 90 ms
+# bound on a 10 ms link, far wider than the 100 ms this clause refuses, and that
+# is correct -- the bound is honest and only the consumer knows what width it can
+# use. What this clause catches is a link so poor that the offset itself is barely
+# constrained by any sample in the window.
 MAX_ACCEPTABLE_RTT_NS = 200_000_000
 
 # Admission, which is a different question from the gate. The gate above asks
@@ -112,6 +118,11 @@ MAX_EXTRAPOLATION_S = SKEW_WINDOW_S
 # trip, short against the drive: a pong later than this is not a slow answer, it
 # is an answer to a question the link has forgotten.
 PENDING_TIMEOUT_S = 10.0
+
+# How long an abandoned exchange stays distinguishable from one we never sent.
+# Past it a pong is a stray, which is the honest label: nothing that old can
+# produce a usable sample, because the admission ceiling refuses the round trip.
+LATE_WINDOW_S = 60.0
 
 # The published history is bounded, which bounds the re-derivation promise with
 # it: at the steady 1 Hz this is about 68 minutes, inside a long drive. A
@@ -328,6 +339,7 @@ class TimebaseEstimator:
         self.samples_accepted = 0
         self.samples_refused = 0
         self.estimates_evicted = 0
+        self.estimates_published = 0
         self.refused_by_reason: dict[str, int] = {}
 
     # -- feeding -----------------------------------------------------------
@@ -399,6 +411,7 @@ class TimebaseEstimator:
         if len(self._published) == MAX_HISTORY:
             self.estimates_evicted += 1
         self._published.append(estimate)
+        self.estimates_published += 1
 
     # -- reading -----------------------------------------------------------
 
@@ -508,37 +521,50 @@ class TimebaseEstimator:
                 "samples_accepted": self.samples_accepted,
                 "samples_refused": self.samples_refused,
                 "refused_by_reason": dict(sorted(self.refused_by_reason.items())),
-                "estimates_published": len(self._published),
+                # Retained, not published: the deque saturates at MAX_HISTORY, so
+                # the length stopped being the lifetime count when the bound went
+                # in. An operator reading a five-hour run saw 4096 and concluded
+                # 4096 were published when it was nearer eighteen thousand.
+                "estimates_retained": len(self._published),
+                "estimates_published": self.estimates_published,
                 "estimates_evicted": self.estimates_evicted,
                 "retained_samples": len(self._samples),
                 "usable": reason is None,
                 "why_not_usable": reason,
+                # The bound as it stands, so an operator does not have to
+                # recompute it: the drift term dominates it and the gate
+                # deliberately does not limit it, so it is the number a consumer
+                # checks against its own tolerance.
+                "bound_now_ns": None if current is None else current.bound_ns_at(self._mono()),
                 "current": None if current is None else current.to_record(),
             }
 
 
 def answer_ping(
-    ping: TimeSyncMessage,
-    t_recv_mono_ns: int,
-    t_recv_wall_ns: int,
+    received: tuple[TimeSyncMessage, int],
     *,
     mono_clock: MonoClock = now_mono_ns,
+    wall_clock: WallClock = now_wall_ns,
 ) -> TimeSyncMessage:
     """The responder's whole job: echo the exchange with receipt stamped.
 
     `t_wire_mono_ns` goes out as the placeholder; the writer replaces it with the
     departure time, which is what makes t3 a departure rather than an enqueue.
 
-    **`t_recv_mono_ns` must be the session's own receive stamp** -- take it from
-    `MessageRouter.recv_with_receipt`, not from a fresh clock reading at handling
-    time. The initiator computes the responder's service interval as
-    `t3 - t2`, and t3 is stamped by this session's writer clock. A t2 from any
-    other clock makes that difference arbitrary, and it enters the round trip
-    with a minus sign: an interval reported longer than really elapsed shrinks
-    the round trip below the true one and shrinks the bound with it, under an
-    error that has not moved. Nothing on the wire can detect it, which is why it
-    is a requirement here rather than a check downstream.
+    Takes what `MessageRouter.recv_with_receipt` returns, rather than a message
+    and a timestamp separately. The receipt stamp **must** be the one the
+    session's reader took on arrival: the initiator computes the responder's
+    service interval as `t3 - t2`, t3 is stamped by this session's writer clock,
+    and a t2 from any other clock makes that difference arbitrary -- entering the
+    round trip with a minus sign, so an interval reported longer than really
+    elapsed shrinks the bound under an error that has not moved. Nothing on the
+    wire can detect it. Prose was guarding the one hazard with no wire-side
+    check, so the signature guards it instead: a bare `now_mono_ns()` will not fit.
+
+    The wall stamp is read here and is for log correlation only -- it appears in
+    no part of the arithmetic.
     """
+    ping, t_recv_mono_ns = received
     if not ping.is_ping:
         raise MessageError(
             f"exchange {ping.exchange_id} is a pong; a responder must not receive one",
@@ -548,7 +574,7 @@ def answer_ping(
         t_capture_mono_ns=mono_clock(),
         exchange_id=ping.exchange_id,
         t_peer_recv_mono_ns=t_recv_mono_ns,
-        t_peer_recv_wall_ns=t_recv_wall_ns,
+        t_peer_recv_wall_ns=wall_clock(),
         # Echoed, because the initiator cannot read its own: its writer stamped
         # the frame after the caller let go of it.
         t_peer_wire_mono_ns=ping.t_wire_mono_ns,
@@ -593,9 +619,13 @@ class TimeSyncInitiator:
         self.pongs_timed_out = 0
         self.pongs_refused = 0
         self.pongs_late = 0
-        # Exchange ids we gave up on, so a pong that arrives afterwards is
+        # Exchange ids we gave up on, with when, so a pong arriving afterwards is
         # counted as late rather than as a stray for an exchange we never sent.
-        self._timed_out_ids: set[int] = set()
+        # Pruned on the same horizon as the pending table: `discard` only fires
+        # when a timed-out pong eventually arrives, which for a genuinely lost
+        # one never happens -- so without pruning the set is monotone for exactly
+        # the entries that dominate it, and grows fastest when the link is worst.
+        self._timed_out_ids: dict[int, int] = {}
 
     @property
     def period_s(self) -> float:
@@ -633,15 +663,25 @@ class TimeSyncInitiator:
         window with a round trip of however long it was gone.
         """
         horizon = self._mono() - int(PENDING_TIMEOUT_S * NS_PER_S)
+        # An id older than the late window cannot produce a usable sample anyway:
+        # the admission ceiling would refuse a round trip that long.
+        late_horizon = self._mono() - int(LATE_WINDOW_S * NS_PER_S)
+        for key in [k for k, at in list(self._timed_out_ids.items()) if at < late_horizon]:
+            self._timed_out_ids.pop(key, None)
         stale = [key for key, pending in list(self._pending.items())
                  if pending.t_sent_mono_ns < horizon]
         for key in stale:
             # pop, not del: on_pong pops from the same dict on another thread,
             # and a del that lost the race raised KeyError out of send_ping and
             # killed the cadence thread.
-            if self._pending.pop(key, None) is not None:
-                self.pongs_timed_out += 1
-            self._timed_out_ids.add(key)
+            if self._pending.pop(key, None) is None:
+                # on_pong matched it between the scan and the pop -- the race the
+                # pop tolerates. Recording it as timed out anyway would label a
+                # later duplicate `pongs_late`, which is the wrong one of the two
+                # diagnoses this counter was split to distinguish.
+                continue
+            self.pongs_timed_out += 1
+            self._timed_out_ids[key] = self._mono()
 
     def on_pong(self, pong: TimeSyncMessage, t_recv_mono_ns: int) -> TimeSyncSample | None:
         """Match a pong to its ping and feed the sample. None if unusable.
@@ -661,7 +701,7 @@ class TimeSyncInitiator:
             # increment two counters and gave an operator one number for two
             # different diagnoses.
             if pong.exchange_id in self._timed_out_ids:
-                self._timed_out_ids.discard(pong.exchange_id)
+                self._timed_out_ids.pop(pong.exchange_id, None)
                 self.pongs_late += 1
             else:
                 self.pongs_unmatched += 1

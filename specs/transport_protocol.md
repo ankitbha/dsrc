@@ -549,7 +549,9 @@ publishing that invites a consumer to apply it as though it were a measurement.
 | minimum offset samples | 5 | below this the minimum is not yet a floor |
 | minimum skew buckets | 20 | guarantees a 180 s baseline before a slope is published |
 | maximum sample age | 5.0 s | five missed samples at the steady rate |
-| maximum acceptable min-rtt | 200 ms | above this the bound is too wide to mean anything |
+| maximum acceptable min-rtt | 200 ms | a link-health floor: below it no sample constrains the offset |
+| pending timeout | 10 s | an unanswered exchange stops being matchable |
+| late window | 60 s | past it an answer is a stray, not a late one |
 | assumed skew | 50 ppm | bounds the unmeasured true skew; a stated premise |
 | admission ceiling | 2000 ms | a round trip past this is not data, and never enters a window |
 | extrapolation limit | 300 s | equal to the skew window: no reach beyond the samples |
@@ -610,6 +612,14 @@ the error can never exceed `rtt / 2`. A persistent one-way asymmetry therefore
 biases the point estimate -- undetectably, by half the difference -- while still
 lying inside the bound. Accurate and bounded are different properties, and this
 protocol promises the second.
+
+**The gate does not limit the bound, deliberately.** The drift term routinely
+dominates it, so a converged estimator on a healthy link can report a bound many
+times wider than the round-trip clause would refuse -- and that is correct,
+because the bound is honest and only the consumer knows what width it can use.
+The round-trip clause is a link-health floor: past it no sample in the window
+constrains the offset at all. A consumer with a tolerance checks the bound
+itself.
 
 Conversion is gated on all three of:
 
