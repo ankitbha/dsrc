@@ -40,9 +40,9 @@ it.
 | Decision | Taken | Why |
 |---|---|---|
 | Which sensors | `TYPE_ACCELEROMETER` + `TYPE_GYROSCOPE` | The calibrated pair. Uncalibrated variants expose bias estimates the Jetson has not asked for, and the message has no field for them. |
-| Which event drives a sample | The **accelerometer** | It is the higher-rate stream on every device we have, so pairing against the latest gyro reading holds the gyro's age below one accelerometer period rather than the other way round. |
+| Which event drives a sample | The **accelerometer** | The stamp has to belong to one of the two readings, and it should be the one that produced the sample. **The original reason given here — "it is the higher-rate stream" — was wrong**: both sensors are registered at the same commanded period, and on the emulator both report 2–100 Hz. With equal rates the gyro's age is roughly uniform over one period, so `staleGyroSamples` will not be rare. |
 | The sample's capture stamp | The accelerometer event's own timestamp | It is the stamp of the reading that produced the sample. Using "now" would fold the delivery delay into the capture instant, which is the mistake task 19 corrected for the pong's wire stamp. |
-| Pairing skew | Recorded, not hidden | `gyroAgeNs` is tracked as a statistic. A sample whose gyro half is older than one commanded period is still sent — it is the best available — but the age is counted so a bad pairing is visible rather than inferred. |
+| Pairing skew | Recorded, not hidden | `gyroAgeNs` is a phone-side statistic on `ImuPipeline.Stats`, **not** a wire field — `ImuSample` carries `ax..gz` and `accuracy` and the contract is frozen. A sample whose gyro half is older than one commanded period is still sent, and the age is counted so a bad pairing is visible rather than inferred. A gyro stamped *after* the accelerometer is real (one handler, equal rates) and gets its own counter rather than a negative age that would cancel real error in the mean. |
 | A sample with no gyro yet | Dropped, counted | At startup the accelerometer may fire before the first gyro event. There is no defensible filler: zeros are a reading, and nulls are not what the message allows. |
 | Requested sampling period | `SENSOR_DELAY_GAME` equivalent, computed from the commanded rate | Asking for exactly the commanded period and gating on top is what the camera does. |
 | Batching (`maxReportLatencyUs`) | Zero — no batching | Batched delivery hands over a burst of events whose timestamps are correct but whose *arrival* is late, and the rate gate would then pass one and drop the rest of the burst. Latency here is worth more than the wakeup saving. |
@@ -55,16 +55,25 @@ On start, the source reads `SensorEvent.timestamp` from the first event and comp
 against `SystemClock.elapsedRealtimeNanos()` taken at delivery. The delivery stamp is
 necessarily *later* than the capture stamp, so:
 
-- A small positive difference (delivery minus capture, within a bound) means the two are
-  on the same base — the difference is just delivery latency.
-- A large difference, or a negative one, means they are not.
+**This is not enough on its own, and the first version got it wrong.** The headline vendor
+bug is `SensorEvent.timestamp` on `System.nanoTime` (CLOCK_MONOTONIC) rather than
+`elapsedRealtimeNanos` (CLOCK_BOOTTIME), and those two do not differ by an *epoch* — they
+differ by the device's accumulated suspend time, which starts at zero and grows. A handset
+that had suspended for 1.5 s produced a difference of 1.5 s, inside any bound generous
+enough not to false-alarm, and every sample after it carried a silent constant 1.5 s
+error: about 21 m of road at 50 km/h.
 
-The bound is deliberately generous. What is being detected is a *different epoch*, which
-on a device that has been up for any time at all is seconds to hours, not milliseconds.
-A tight bound would turn a slow first delivery into a false alarm.
+So both candidate clocks are read at delivery and the event is attributed to whichever it
+is nearer. The ambiguous case is exactly the harmless one — when the two clocks have
+barely diverged it does not matter which the sensor uses, because choosing wrong costs at
+most that gap — and the gap is recorded, so an *accepting* verdict still says how wrong it
+could be. Two tolerances, not one: how long a delivery may plausibly take, and how far the
+clocks may drift before the attribution is worth making.
 
 If the check fails the source does not convert and does not guess an offset — it reports
-`ImuTimebase.MISMATCHED` and captures nothing. A wrong offset applied silently is the
+`ImuTimebase.MISMATCHED` and **tears the registrations down**. An earlier version only
+stopped *emitting*: both listeners stayed registered and the thread stayed up, so two
+sensors were held awake at the commanded rate for the whole drive to produce nothing. A wrong offset applied silently is the
 failure this exists to prevent, and an IMU stream is not worth taking the phone down for:
 sensing continues with camera and GPS.
 
@@ -97,7 +106,13 @@ heading gets its own assertion alongside the balance.
 
 ## Tests
 
-JVM, with an injected event source and clock, so none of this needs the device:
+JVM. There is no injected event *source* — the platform listener is thin glue, and
+everything it decides lives in `ImuPairing`, which a test drives directly. Round 1 is why:
+with the decisions inside the `SensorEventListener`, thirteen mutations to them survived
+267 tests, and four applied at once left the instrumented suite green while the channel
+transmitted nothing all session. A pure verdict function was pinned and its *use* was not,
+which is the distinction that matters — extracting a function only helps if the caller is
+reachable too.
 
 - Rate: a commanded 50 Hz over a simulated minute emits within tolerance of 3,000, and a
   re-commanded rate re-anchors rather than drifting.

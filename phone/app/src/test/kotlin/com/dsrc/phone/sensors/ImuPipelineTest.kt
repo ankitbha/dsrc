@@ -66,10 +66,13 @@ class ImuPipelineTest {
         // 10 Hz over the first second takes about 10 of 100; 50 Hz over the second takes
         // about 50. The point is that the second stretch is roughly five times the first,
         // not that either number is exact.
+        // Bounded on both sides. `> first * 3` admits a gate running at ten times the
+        // commanded rate exactly as readily as one running at the commanded rate, so it
+        // did not distinguish "the new rate took effect" from "the rate is wrong".
         val atSecondRate = p.stats.accepted - atFirstRate
         assertTrue(
-            "first=$atFirstRate second=$atSecondRate: the new rate did not take effect",
-            atSecondRate > atFirstRate * 3,
+            "first=$atFirstRate second=$atSecondRate: wanted about 5x, which is 50 Hz over 10",
+            atSecondRate in (atFirstRate * 4)..(atFirstRate * 6),
         )
     }
 
@@ -217,20 +220,72 @@ class ImuPipelineTest {
         // A sum is blind to a swap between its own terms -- that is how a delivery failure
         // came to be filed as a success elsewhere in this codebase and the identity held
         // perfectly. So each heading gets its own number alongside the balance.
+        // Distinct counts per heading, and that is the whole point. The first version drove
+        // all four to 1, which made the four assertions mutually interchangeable: swapping
+        // `gated` and `unpaired` in the production code -- a true swap, both directions --
+        // passed this test alone with the mutation in place. A test named for swap-blindness
+        // that is itself swap-blind is worse than none, because it is cited as coverage.
         val (p, _) = pipeline(hz = 100.0)
-        p.offer(reading(0))                    // accepted
-        p.offer(reading(1 * ms))               // gated: inside the 10 ms period
-        p.offerUnpaired()                      // unpaired
+        p.offer(reading(0))                    // accepted: 1
+        repeat(2) { p.offer(reading(1L * ms)) } // gated: 2, inside the 10 ms period
+        repeat(3) { p.offerUnpaired() }        // unpaired: 3
         p.stop()
-        p.offer(reading(500 * ms))             // refusedStopped
+        repeat(4) { p.offer(reading(500 * ms)) } // refusedStopped: 4
 
         val stats = p.stats
-        assertEquals(4, stats.seen)
+        assertEquals(10, stats.seen)
         assertEquals(1, stats.accepted)
-        assertEquals(1, stats.gated)
-        assertEquals(1, stats.unpaired)
-        assertEquals(1, stats.refusedStopped)
+        assertEquals(2, stats.gated)
+        assertEquals(3, stats.unpaired)
+        assertEquals(4, stats.refusedStopped)
         assertTrue("$stats", stats.balances)
+    }
+
+    @Test
+    fun `the pairing statistics cover the samples that went out, not the ones gated away`() {
+        // Every test carrying a nonzero age ran at a rate where nothing was gated, so
+        // `accepted == seen` and "measured on the accepted" was indistinguishable from
+        // "measured on everything". Moving the statistics block above the gate, or dividing
+        // by `seen`, both survived the suite.
+        //
+        // At 10 Hz with offers 1 ms apart, only the first of each burst is accepted.
+        val (p, _) = pipeline(hz = 10.0)
+        p.offer(reading(0, gyroAgeNs = 2 * ms))            // accepted
+        p.offer(reading(1 * ms, gyroAgeNs = 100 * ms))     // gated, and very stale
+        p.offer(reading(2 * ms, gyroAgeNs = 100 * ms))     // gated, and very stale
+
+        val stats = p.stats
+        assertEquals(1, stats.accepted)
+        assertEquals(2, stats.gated)
+        assertEquals("only the accepted sample's age counts", 2 * ms, stats.gyroAgeMeanNs)
+        assertEquals(2 * ms, stats.gyroAgeMaxNs)
+        assertEquals("a gated sample's staleness costs nobody anything", 0, stats.staleGyroSamples)
+    }
+
+    @Test
+    fun `a reversal wholly inside a gated run is still seen`() {
+        // The comment claimed an out-of-order event the gate would have dropped "is still
+        // visible". The count sits before the gate, but the baseline only advanced on an
+        // accepted sample, so a reversal between two gated events was invisible: at 10 Hz,
+        // offers at 0, 50 ms, 40 ms gave nonMonotonicSamples = 0.
+        val (p, _) = pipeline(hz = 10.0)
+        p.offer(reading(0))          // accepted, anchors the gate
+        p.offer(reading(50 * ms))    // gated
+        p.offer(reading(40 * ms))    // gated, and a reversal against the one before it
+
+        assertEquals("a reversal between two gated events is still a reversal", 1, p.stats.nonMonotonicSamples)
+    }
+
+    @Test
+    fun `two events at the same instant are not a reversal`() {
+        // The boundary was stepped over: no test ever offered a duplicate stamp, so `<` and
+        // `<=` gave the same answer. Equal stamps are two events in the same nanosecond,
+        // which is a resolution limit rather than an ordering failure.
+        val (p, _) = pipeline(hz = 1_000.0)
+        p.offer(reading(100 * ms))
+        p.offer(reading(100 * ms))
+
+        assertEquals(0, p.stats.nonMonotonicSamples)
     }
 
     @Test
@@ -241,21 +296,21 @@ class ImuPipelineTest {
             ImuPipeline.Stats(
                 seen = 4, accepted = 1, gated = 1, refusedStopped = 1, unpaired = 1,
                 delivered = 1, refusedBySink = 0, nonMonotonicSamples = 0,
-                staleGyroSamples = 0, gyroAgeMeanNs = 0, gyroAgeMaxNs = 0,
+                staleGyroSamples = 0, gyroAgeMeanNs = 0, gyroAgeMaxNs = 0, rateHz = 50.0,
             ).balances
         )
         assertFalse(
             ImuPipeline.Stats(
                 seen = 5, accepted = 1, gated = 1, refusedStopped = 1, unpaired = 1,
                 delivered = 1, refusedBySink = 0, nonMonotonicSamples = 0,
-                staleGyroSamples = 0, gyroAgeMeanNs = 0, gyroAgeMaxNs = 0,
+                staleGyroSamples = 0, gyroAgeMeanNs = 0, gyroAgeMaxNs = 0, rateHz = 50.0,
             ).balances
         )
         assertFalse(
             ImuPipeline.Stats(
                 seen = 1, accepted = 1, gated = 0, refusedStopped = 0, unpaired = 0,
                 delivered = 0, refusedBySink = 0, nonMonotonicSamples = 0,
-                staleGyroSamples = 0, gyroAgeMeanNs = 0, gyroAgeMaxNs = 0,
+                staleGyroSamples = 0, gyroAgeMeanNs = 0, gyroAgeMaxNs = 0, rateHz = 50.0,
             ).acceptedBalances
         )
     }
@@ -274,4 +329,21 @@ class ImuPipelineTest {
         p.stop()
         assertTrue("a stopped pipeline says so", p.isStopped)
     }
+
+    @Test
+    fun `the stats carry the rate they were measured at, and it follows a re-command`() {
+        // Added so staleGyroSamples is interpretable, then asserted by nothing -- which is
+        // the shape this whole round was about, so it would have been a poor place to stop.
+        // A constant survived every other test.
+        val (p, _) = pipeline(hz = 50.0)
+        assertEquals(50.0, p.stats.rateHz, 1e-9)
+        p.setRate(10.0)
+        assertEquals(
+            "the rate on the record must be the one in force, not the one at construction",
+            10.0,
+            p.stats.rateHz,
+            1e-9,
+        )
+    }
+
 }

@@ -10,7 +10,6 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import com.dsrc.phone.config.SensingConfig
-import java.util.concurrent.atomic.AtomicLong
 
 /** Whether the sensor clock and the app's clock are the same clock. */
 enum class ImuTimebase {
@@ -42,10 +41,21 @@ enum class ImuTimebase {
  * certainly not worth a stream of confidently wrong timestamps.
  *
  * **The pairing.** [ImuSample] carries both sensors in one message, and they arrive on
- * separate callbacks that drift against each other. The accelerometer drives, because it
- * is the faster stream on every device here, so pairing against the latest gyro reading
- * keeps the gyro's age below one accelerometer period rather than the other way round. The
- * age rides along with the sample so the approximation is measurable rather than assumed.
+ * separate callbacks that drift against each other. The accelerometer drives and the gyro
+ * is taken from its latest reading.
+ *
+ * Two things that earlier drafts of this comment got wrong, both worth correcting rather
+ * than deleting. The accelerometer is not "the faster stream": both sensors are registered
+ * at the same commanded period, and on the emulator both report the same 2-100 Hz range.
+ * With equal rates and independent phase the gyro's age is roughly uniform over one period
+ * and reaches a full period, which is exactly the threshold `staleGyroSamples` calls the
+ * point where the pairing stops being an approximation. Driving from the accelerometer is
+ * still the right choice -- the stamp has to be one of the two, and it should be the one
+ * belonging to the reading that produced the sample -- but not for the reason given.
+ *
+ * And the age does *not* ride along with the sample. [ImuSample] carries `ax..gz` and
+ * `accuracy`, and the wire contract is frozen; the pairing error is a phone-side statistic
+ * on [ImuPipeline.Stats], which the peer never sees.
  *
  * **The rate.** Android treats a sampling period as a hint and delivers faster or slower
  * than asked. The commanded rate comes from [ImuPipeline]'s gate, as it does for camera
@@ -54,8 +64,17 @@ enum class ImuTimebase {
 class ImuSource(
     context: Context,
     private val config: SensingConfig,
-    /** Injectable so the timebase check can be driven from both sides in a test. */
+    /**
+     * The clock everything else in this app stamps on: GPS fixes, the transport's enqueue
+     * stamp, the timebase exchange.
+     */
     private val appClock: () -> Long = SystemClock::elapsedRealtimeNanos,
+    /**
+     * The other candidate. Read at the same instant as [appClock] so the difference is the
+     * device's accumulated suspend time -- which is what tells the two apart, and what a
+     * wrong attribution would cost.
+     */
+    private val monoClock: () -> Long = System::nanoTime,
 ) {
 
     private val manager =
@@ -64,19 +83,28 @@ class ImuSource(
     private var thread: HandlerThread? = null
     private var listener: SensorEventListener? = null
 
-    @Volatile
-    var timebase: ImuTimebase = ImuTimebase.UNKNOWN
-        private set
+    private val pairing = ImuPairing()
 
-    /** The measured difference, for the log line that explains a refusal. */
-    @Volatile
-    var timebaseOffsetNs: Long = 0
-        private set
+    val timebase: ImuTimebase get() = pairing.timebase
+    val timebaseOffsetNs: Long get() = pairing.timebaseOffsetNs
 
-    private val gyroNs = AtomicLong(Long.MIN_VALUE)
-    private var gx = 0.0
-    private var gy = 0.0
-    private var gz = 0.0
+    /** Whether the listeners are registered right now. Zero after a stop. */
+    val registrations: Int get() = registered
+
+    @Volatile
+    private var registered = 0
+
+    /**
+     * True once a wrong timebase has torn the registrations down.
+     *
+     * The KDoc used to say a mismatch "stops capture", and it did not: both listeners
+     * stayed registered, the thread stayed up, and every accelerometer event ran the check
+     * and returned. That is a sensor kept awake at 50 Hz for the whole drive to produce
+     * nothing. It stops for real now.
+     */
+    @Volatile
+    var stoppedForTimebase = false
+        private set
 
     fun start(onReading: (ImuReading) -> Unit, onUnpaired: () -> Unit) {
         val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -97,35 +125,27 @@ class ImuSource(
         val callback = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 when (event.sensor.type) {
-                    Sensor.TYPE_GYROSCOPE -> {
-                        gx = event.values[0].toDouble()
-                        gy = event.values[1].toDouble()
-                        gz = event.values[2].toDouble()
-                        gyroNs.set(event.timestamp)
-                    }
+                    Sensor.TYPE_GYROSCOPE -> pairing.onGyro(
+                        event.timestamp,
+                        event.values[0].toDouble(),
+                        event.values[1].toDouble(),
+                        event.values[2].toDouble(),
+                    )
                     Sensor.TYPE_ACCELEROMETER -> {
-                        if (!checkTimebase(event.timestamp)) return
-                        val gyroAt = gyroNs.get()
-                        if (gyroAt == Long.MIN_VALUE) {
-                            // The accelerometer can fire before the first gyro event. There
-                            // is no defensible filler: zeros are a reading, and the message
-                            // has no null for those axes.
-                            onUnpaired()
-                            return
-                        }
-                        onReading(
-                            ImuReading(
-                                captureMonoNs = event.timestamp,
-                                ax = event.values[0].toDouble(),
-                                ay = event.values[1].toDouble(),
-                                az = event.values[2].toDouble(),
-                                gx = gx,
-                                gy = gy,
-                                gz = gz,
-                                accuracy = event.accuracy.toLong(),
-                                gyroAgeNs = event.timestamp - gyroAt,
-                            )
+                        val outcome = pairing.onAccelerometer(
+                            captureNs = event.timestamp,
+                            x = event.values[0].toDouble(),
+                            y = event.values[1].toDouble(),
+                            z = event.values[2].toDouble(),
+                            accuracy = event.accuracy.toLong(),
+                            appNowNs = appClock(),
+                            monoNowNs = monoClock(),
                         )
+                        when (outcome) {
+                            is ImuOutcome.Paired -> onReading(outcome.reading)
+                            ImuOutcome.Unpaired -> onUnpaired()
+                            ImuOutcome.WrongTimebase -> stopBecauseOfTimebase()
+                        }
                     }
                 }
             }
@@ -142,73 +162,44 @@ class ImuSource(
         // the first of the burst and drop the rest -- turning a 50 Hz command into one
         // sample per batch. Latency is worth more here than the wakeup saving.
         val periodUs = (1_000_000.0 / config.imuHz).toInt().coerceAtLeast(1)
-        manager.registerListener(callback, accelerometer, periodUs, 0, handler)
-        manager.registerListener(callback, gyroscope, periodUs, 0, handler)
+        // Counted, so "the gyroscope was never registered" is observable. Deleting that
+        // second call left both suites green while the channel transmitted nothing.
+        if (manager.registerListener(callback, accelerometer, periodUs, 0, handler)) registered++
+        if (manager.registerListener(callback, gyroscope, periodUs, 0, handler)) registered++
     }
 
-    /**
-     * Compare the sensor clock against the app clock, once.
-     *
-     * The app clock is read *now*, at delivery, and the event was captured before it, so a
-     * healthy difference is small and positive -- it is just delivery latency. What this is
-     * looking for is a different *epoch*, which on a device that has been up any length of
-     * time is seconds to hours, not milliseconds. Hence a deliberately generous bound: a
-     * tight one would turn a slow first delivery into a false alarm, and the failure being
-     * detected is not subtle.
-     *
-     * A negative difference is as damning as a large one: it means the sensor stamp is
-     * ahead of a clock that was read afterwards.
-     */
-    private fun checkTimebase(eventNs: Long): Boolean {
-        if (timebase == ImuTimebase.MISMATCHED) return false
-        if (timebase == ImuTimebase.MATCHED) return true
-
-        val delta = appClock() - eventNs
-        timebaseOffsetNs = delta
-        timebase = verdictFor(delta)
-        if (timebase == ImuTimebase.MISMATCHED) {
-            Log.e(
-                TAG,
-                "sensor clock is not elapsedRealtime: delivery delta ${delta}ns is outside " +
-                    "[0, $MAX_PLAUSIBLE_DELIVERY_NS]. Not capturing IMU; a stamp on the " +
-                    "wrong timebase would land the Jetson's fusion at the wrong instant.",
-            )
-        }
-        return timebase == ImuTimebase.MATCHED
-    }
 
     fun stop() {
         listener?.let { manager.unregisterListener(it) }
         listener = null
+        registered = 0
         thread?.quitSafely()
         thread = null
+    }
+
+    /**
+     * Tear down because the sensor clock is not ours.
+     *
+     * Deliberately the whole teardown and not a flag. Leaving the listeners registered
+     * meant two sensors held awake at the commanded rate for the life of the process,
+     * delivering into a looper whose every message was discarded.
+     */
+    private fun stopBecauseOfTimebase() {
+        if (stoppedForTimebase) return
+        stoppedForTimebase = true
+        Log.e(
+            TAG,
+            "sensor clock is not elapsedRealtime: delivery delta ${pairing.timebaseOffsetNs}ns " +
+                "against a clock gap of ${pairing.clockGapNs}ns. Stopping IMU capture; a stamp " +
+                "on the wrong timebase would land the Jetson's fusion at the wrong instant.",
+        )
+        stop()
     }
 
     companion object {
         const val THREAD_NAME = "dsrc-imu"
 
-        /**
-         * The widest plausible gap between a sensor capture and its delivery here.
-         *
-         * Two seconds, which is far above any real delivery latency and far below the
-         * epoch difference this is looking for.
-         */
-        const val MAX_PLAUSIBLE_DELIVERY_NS = 2_000_000_000L
 
-        /**
-         * The verdict for one measured delivery delta, as a pure function.
-         *
-         * Separated from the listener so the *policy* can be pinned on the JVM, which is
-         * the only part a test can settle: whether a given handset really has the vendor
-         * bug is not something the emulator can tell us -- its virtual sensors report the
-         * same clock -- so what gets tested is what we do when the numbers say they differ.
-         */
-        fun verdictFor(deliveryDeltaNs: Long): ImuTimebase =
-            if (deliveryDeltaNs in 0..MAX_PLAUSIBLE_DELIVERY_NS) {
-                ImuTimebase.MATCHED
-            } else {
-                ImuTimebase.MISMATCHED
-            }
 
         private const val TAG = "ImuSource"
     }

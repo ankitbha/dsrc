@@ -91,7 +91,12 @@ class ImuPipeline(
         // and the receiver's arithmetic is built on these being monotonic. Counted rather
         // than corrected, for the same reason GPS counts it: a silent fix is a measurement
         // nobody can trust.
-        val previous = lastCaptureNs.get()
+        // Against the previous *event*, and updated on every event, not only on the ones
+        // the gate kept. The baseline used to advance after the gate, which made a reversal
+        // between two gated events invisible -- at 10 Hz, offers at 0, 50 ms, 40 ms counted
+        // nothing, though the platform had plainly delivered out of order. What is being
+        // detected is a property of the delivery, so the gate has no business in it.
+        val previous = lastCaptureNs.getAndSet(reading.captureMonoNs)
         if (previous != Long.MIN_VALUE && reading.captureMonoNs < previous) {
             nonMonotonic.incrementAndGet()
         }
@@ -100,7 +105,6 @@ class ImuPipeline(
             gated.incrementAndGet()
             return false
         }
-        lastCaptureNs.set(reading.captureMonoNs)
         accepted.incrementAndGet()
 
         // Pairing error, on the samples that actually went out rather than on everything
@@ -141,6 +145,7 @@ class ImuPipeline(
                 staleGyroSamples = staleGyro.get(),
                 gyroAgeMeanNs = if (kept == 0L) 0 else gyroAgeTotalNs.get() / kept,
                 gyroAgeMaxNs = gyroAgeMaxNs.get(),
+                rateHz = gate.hz,
             )
         }
 
@@ -156,6 +161,17 @@ class ImuPipeline(
         val nonMonotonicSamples: Long,
         /** Samples whose gyro half was older than one commanded period. */
         val staleGyroSamples: Long,
+        /**
+         * The commanded rate when these statistics were read.
+         *
+         * `staleGyroSamples` counts against the period at the time of each sample, so the
+         * number means nothing on its own once the rate has been re-commanded: three
+         * samples with an identical 15 ms age at 50, 10 and 200 Hz give a count of one, and
+         * nothing recorded which regime produced it. `gyroAgeMeanNs` mixes regimes the same
+         * way. Carrying the rate does not un-mix them, but it stops the number being read
+         * as if it had one meaning.
+         */
+        val rateHz: Double,
         val gyroAgeMeanNs: Long,
         val gyroAgeMaxNs: Long,
     ) {
