@@ -91,16 +91,24 @@ class OutboundQueues {
         )
 
         var displaced: Outbound? = null
+        var displacedCount = 0
         when (policy.overflow) {
             Overflow.RELIABLE ->
                 if (queue.size >= policy.depth) {
                     // Oldest out: for every reliable channel here a newer message is
                     // worth more than an older one.
                     displaced = queue.removeFirst()
+                    displacedCount = 1
                 }
             Overflow.LATEST_WINS ->
                 while (queue.size >= policy.depth) {
                     displaced = queue.removeFirst()
+                    // Counted per message, not per enqueue. The loop can shed more than
+                    // one, and a single increment would undercount. Unreachable at depth 1,
+                    // which is every latest_wins channel today, and wrong the moment a
+                    // depth changes -- the kind of latent miscount that surfaces as a
+                    // drop rate that does not add up.
+                    displacedCount++
                 }
         }
         queue.addLast(message)
@@ -108,7 +116,7 @@ class OutboundQueues {
         val previous = counters.getValue(channel)
         counters[channel] = previous.copy(
             enqueued = previous.enqueued + 1,
-            dropped = previous.dropped + if (displaced != null) 1 else 0,
+            dropped = previous.dropped + displacedCount,
         )
         return Enqueued(sequence, displaced)
     }

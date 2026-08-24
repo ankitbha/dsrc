@@ -1293,4 +1293,106 @@ class SessionTest {
         )
     }
 
+
+    // -- how a session ends -------------------------------------------------
+
+    @Test
+    fun `a peer that connects and says nothing is peer_closed, not a framing error`() {
+        // The same EOFException is PEER_CLOSED once the session is running. Reporting it
+        // as a framing error during the handshake made the reason depend on when it
+        // happened rather than on what happened, and the spec lists peer_closed as its own
+        // row.
+        val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).also { servers.add(it) }
+        val clientSocket = Socket(InetAddress.getLoopbackAddress(), server.localPort).also { sockets.add(it) }
+        val silent = server.accept().also { sockets.add(it) }
+
+        val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
+        val session = Session(
+            input = clientSocket.getInputStream(),
+            output = clientSocket.getOutputStream(),
+            deviceId = "test-phone",
+            role = "phone",
+            monoClock = { System.nanoTime() },
+            wallClock = { 0 },
+            onFrame = {},
+            onEnd = { reason, cause -> ends.add(reason to cause) },
+        ).also { sessions.add(it) }
+
+        silent.close()
+        runCatching { session.start() }
+
+        assertEquals(listOf(SessionEnd.PEER_CLOSED), ends.map { it.first })
+        assertFalse(session.isRunning)
+    }
+
+    @Test
+    fun `a hello that cannot be written ends the session instead of leaving it half-open`() {
+        // readPeerHello ended the session on every failure path and the hello write did
+        // not, so a failed write left `running` true with no onEnd ever fired: send() kept
+        // enqueueing into a queue with no writer, and the sequence counters had already
+        // moved for a handshake that never happened.
+        val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).also { servers.add(it) }
+        val clientSocket = Socket(InetAddress.getLoopbackAddress(), server.localPort).also { sockets.add(it) }
+        server.accept().also { sockets.add(it) }
+
+        val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
+        val session = Session(
+            input = clientSocket.getInputStream(),
+            output = object : java.io.OutputStream() {
+                override fun write(b: Int) = throw java.io.IOException("cable yanked")
+                override fun write(b: ByteArray, off: Int, len: Int) = throw java.io.IOException("cable yanked")
+            },
+            deviceId = "test-phone",
+            role = "phone",
+            monoClock = { System.nanoTime() },
+            wallClock = { 0 },
+            onFrame = {},
+            onEnd = { reason, cause -> ends.add(reason to cause) },
+        ).also { sessions.add(it) }
+
+        val started = runCatching { session.start() }
+        assertTrue(started.isFailure, "start() reported success with no hello written")
+        assertEquals(listOf(SessionEnd.TRANSPORT_ERROR), ends.map { it.first })
+        assertFalse(session.isRunning, "the session still reports itself running")
+        assertFalse(session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()),
+            "a dead session accepted a message")
+    }
+
+    @Test
+    fun `closing a healthy session reports a local close`() {
+        val (phone, _) = pair()
+        phone.session.close()
+        assertTrue(awaitCondition { phone.ends.isNotEmpty() }, "the session never ended")
+        assertEquals(listOf(SessionEnd.CLOSED_LOCAL), phone.ends.map { it.first })
+    }
+
+    @Test
+    fun `a session ends exactly once, whoever gets there first`() {
+        // Round 2 reported a "phantom STALLED" when close() races the watchdog. It does not
+        // hold, and the reason is worth writing down: finish() is a compare-and-set, so a
+        // caller that loses cannot overwrite the reason. A flag to make close() win was
+        // tried and removed -- removing it again survives 200 rounds, because the CAS had
+        // already decided, and shipping a guard nothing can observe is worse than shipping
+        // none.
+        //
+        // If the watchdog does win, it won by detecting a timeout that had genuinely
+        // expired before close() arrived, so STALLED is not a misnaming. What must hold is
+        // that there is exactly one end and one reason, and that is what this asserts --
+        // the clock is forced past the timeout precisely so both contenders are live.
+        repeat(200) {
+            val clock = AtomicLong(0)
+            val (phone, _) = pair(clock = { clock.get() })
+            clock.set((Protocol.STALL_TIMEOUT_S * 2e9).toLong())
+            phone.session.close()
+            assertTrue(awaitCondition(2_000) { phone.ends.isNotEmpty() }, "the session never ended")
+            Thread.sleep(1)   // give a losing contender room to try
+            assertEquals(1, phone.ends.size, "two ends recorded: ${phone.ends.map { it.first }}")
+            assertTrue(
+                phone.ends.first().first in setOf(SessionEnd.CLOSED_LOCAL, SessionEnd.STALLED),
+                "unexpected reason ${phone.ends.first().first}",
+            )
+            cleanup()
+        }
+    }
+
 }

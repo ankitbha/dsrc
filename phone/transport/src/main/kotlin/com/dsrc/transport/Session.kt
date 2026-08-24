@@ -144,7 +144,16 @@ class Session(
             extensions = mapOf(HELLO to hello),
             allowReserved = setOf(HELLO),
         )
-        Framing.write(header, ByteArray(0), output)
+        try {
+            Framing.write(header, ByteArray(0), output)
+        } catch (e: Exception) {
+            // readPeerHello ends the session on every failure path and this did not, so a
+            // hello that failed to go out left `running` true with no `onEnd` ever fired:
+            // `send()` kept enqueueing into a queue with no writer, and the sequence
+            // counters had already moved for a handshake that never happened.
+            finish(SessionEnd.TRANSPORT_ERROR, e)
+            throw e
+        }
         framesSent.incrementAndGet()
 
         readPeerHello()
@@ -168,6 +177,13 @@ class Session(
     private fun readPeerHello() {
         val frame = try {
             Framing.read(input) { lastReadProgressNs.set(monoClock()) }
+        } catch (e: EOFException) {
+            // A peer that connected and closed without saying anything. The same
+            // EOFException is PEER_CLOSED once the session is running, and reporting it as
+            // a framing error here made the reason depend on when it happened rather than
+            // on what happened.
+            finish(SessionEnd.PEER_CLOSED, e)
+            throw e
         } catch (e: Exception) {
             finish(SessionEnd.FRAMING_ERROR, e)
             throw e
@@ -502,6 +518,17 @@ class Session(
 
     fun close() = finish(SessionEnd.CLOSED_LOCAL, null)
 
+    /**
+     * End the session once, recording the first reason offered.
+     *
+     * The compare-and-set is the whole ordering guarantee, and it is stronger than it
+     * looks: a caller that loses the race cannot overwrite the reason, so a `close()` and a
+     * watchdog firing at the same instant produce exactly one `onEnd` and one reason. An
+     * extra flag to make `close()` win was tried and removed -- it changed nothing that any
+     * test could observe, because the CAS had already decided. If the watchdog wins, it
+     * won by detecting a genuinely-expired timeout before `close()` arrived, which is not
+     * a misnamed shutdown.
+     */
     private fun finish(reason: SessionEnd, cause: Throwable?) {
         if (!ended.compareAndSet(false, true)) return
         running.set(false)
@@ -510,6 +537,11 @@ class Session(
         runCatching { output.close() }
         writerThread?.interrupt()
         watchdogThread?.interrupt()
+        // The reader too. Closing the stream is what normally unblocks it, but that is a
+        // property of the stream implementation rather than of this class, and leaving one
+        // of three threads to a different mechanism is an asymmetry with no reason behind
+        // it.
+        readerThread?.interrupt()
         onEnd(reason, cause)
     }
 
