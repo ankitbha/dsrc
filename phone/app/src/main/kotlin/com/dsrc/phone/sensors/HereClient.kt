@@ -49,6 +49,15 @@ class HttpHereClient(
     private val monoClock: () -> Long,
     private val connectTimeoutMs: Int = 5_000,
     private val readTimeoutMs: Int = 10_000,
+    /**
+     * Opens the connection. Injectable so `fetch` itself can be tested without a socket.
+     *
+     * The key guarantee was asserted on the `urlFor` helper, which is not what `fetch`
+     * records -- rewriting the recorded URL to carry the key put it into `request_url` on
+     * every frame with the whole suite green. The seam exists so that claim is checked
+     * where it is made.
+     */
+    private val urlOpener: (String) -> URL = { URL(it) },
 ) : HereClient {
 
     init {
@@ -64,22 +73,35 @@ class HttpHereClient(
         val recorded = urlFor(query, key = null)
         val requestAt = monoClock()
         var connection: HttpURLConnection? = null
+        // Held outside the try, and that is the point. A corridor reply arrives in pieces
+        // on a cellular link, so a read can time out *after* the status line has been read
+        // -- and with these inside the try, such a call was reported as NO_RESPONSE with an
+        // empty body and a null content type, byte-identical to one where HERE was never
+        // reached. Both clocks show about the read timeout in either case, so no field was
+        // left to separate them, and the guarantee NO_RESPONSE exists for -- that it means
+        // no response at all -- was false in the one case where the phone had seen one.
+        var status = NO_RESPONSE
+        var contentType: String? = null
+        var body = ByteArray(0)
         return try {
-            connection = (URL(urlFor(query, apiKey)).openConnection() as HttpURLConnection).apply {
+            connection = (urlOpener(urlFor(query, apiKey)).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = connectTimeoutMs
                 readTimeout = readTimeoutMs
             }
-            val status = connection.responseCode
+            status = connection.responseCode
+            contentType = connection.contentType
             // errorStream on a failure, inputStream on success. HERE puts a JSON body on
             // both, and the failure body is the more informative of the two.
-            val body = (if (status in 200..299) connection.inputStream else connection.errorStream)
+            body = (if (status in 200..299) connection.inputStream else connection.errorStream)
                 ?.use { it.readBytes() } ?: ByteArray(0)
-            HereCall(recorded, status, connection.contentType, body, requestAt, monoClock())
+            HereCall(recorded, status, contentType, body, requestAt, monoClock())
         } catch (e: IOException) {
             // A timeout, a DNS failure, no route. Forwarded as a frame rather than counted
-            // and dropped, because a receiver cannot correlate a counter with a moment.
-            HereCall(recorded, NO_RESPONSE, null, ByteArray(0), requestAt, monoClock())
+            // and dropped, because a receiver cannot correlate a counter with a moment --
+            // and carrying whatever was learned before the failure, so a stalled body is
+            // distinguishable from a network that was never there.
+            HereCall(recorded, status, contentType, body, requestAt, monoClock())
         } finally {
             connection?.disconnect()
         }

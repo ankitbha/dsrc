@@ -472,6 +472,43 @@
       "frame_sha256": "fc215c9a5202c0dde73e34213e24f40dcf418f982c4d986c088ff9b307d627fc"
     },
     {
+      "name": "message_rate_cmd_with_here",
+      "why": "a rate command that also sets the HERE query shape, which is optional",
+      "frame": {
+        "ch": "rate_cmd",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000006,
+          "rates": {
+            "camera_hz": 5.0,
+            "gps_hz": 5.0,
+            "imu_hz": 50.0,
+            "here_hz": 0.5
+          },
+          "trigger": "advisory_bin_boundary",
+          "shadow": true,
+          "here": {
+            "in": "corridor:40.7128,-74.0060;40.7580,-73.9855;r=200",
+            "location_ref": "shape",
+            "lat": 40.7128,
+            "lon": -74.006,
+            "radius_m": 9000.0
+          }
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "00000000016e",
+      "header_hex": "7b226368223a22726174655f636d64222c2268657265223a7b22696e223a22636f727269646f723a34302e373132382c2d37342e303036303b34302e373538302c2d37332e393835353b723d323030222c226c6174223a34302e373132382c226c6f636174696f6e5f726566223a227368617065222c226c6f6e223a2d37342e3030362c227261646975735f6d223a393030302e307d2c226e223a302c227261746573223a7b2263616d6572615f687a223a352e302c226770735f687a223a352e302c22686572655f687a223a302e352c22696d755f687a223a35302e307d2c22736571223a312c22736861646f77223a747275652c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030362c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c2274726967676572223a2261647669736f72795f62696e5f626f756e64617279227d",
+      "header_len": 366,
+      "frame_len": 372,
+      "frame_sha256": "cb3ea62dcabbf22d59847874fb407595f7d6c6bdca99bd19158a88ed627c6917"
+    },
+    {
       "name": "message_telemetry",
       "why": "phone telemetry: thermal is a constraint, energy is deliberately not",
       "frame": {

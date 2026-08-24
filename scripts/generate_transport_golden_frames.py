@@ -27,6 +27,7 @@ from transport.channels import Channel  # noqa: E402
 from transport.messages import (  # noqa: E402
     AdvisoryMessage,
     CameraFrame,
+    HereQuery,
     GpsRecord,
     HereResponse,
     ImuSample,
@@ -235,6 +236,20 @@ MESSAGES = [
             t_capture_mono_ns=1_000_000_006,
             rates={"camera_hz": 5.0, "gps_hz": 5.0, "imu_hz": 50.0, "here_hz": 0.5},
             trigger="advisory_bin_boundary", shadow=True,
+        ),
+    ),
+    (
+        "message_rate_cmd_with_here",
+        "a rate command that also sets the HERE query shape, which is optional",
+        RateCommand(
+            t_capture_mono_ns=1_000_000_006,
+            rates={"camera_hz": 5.0, "gps_hz": 5.0, "imu_hz": 50.0, "here_hz": 0.5},
+            trigger="advisory_bin_boundary", shadow=True,
+            here=HereQuery(
+                in_="corridor:40.7128,-74.0060;40.7580,-73.9855;r=200",
+                location_ref="shape",
+                lat=40.7128, lon=-74.0060, radius_m=9000.0,
+            ),
         ),
     ),
     (
