@@ -70,7 +70,7 @@ class ImuPairingTest {
         val reading = (accel(pairing, captureNs = 12 * ms) as ImuOutcome.Paired).reading
 
         assertEquals("the statistic is about magnitude", 18 * ms, reading.gyroAgeNs)
-        assertEquals("and the direction gets its own counter", 1, pairing.outOfOrderPairings)
+        assertEquals("and the direction gets its own counter", 1, pairing.outOfOrderPairings.get())
     }
 
     @Test
@@ -78,7 +78,7 @@ class ImuPairingTest {
         val pairing = ImuPairing()
         pairing.onGyro(0, 0.0, 0.0, 0.0)
         accel(pairing, 10 * ms)
-        assertEquals(0, pairing.outOfOrderPairings)
+        assertEquals(0, pairing.outOfOrderPairings.get())
     }
 
     // -- the timebase --------------------------------------------------------
@@ -97,7 +97,15 @@ class ImuPairingTest {
 
         // A later event that would have looked fine is still refused.
         assertEquals(ImuOutcome.WrongTimebase, accel(pairing, captureNs = 20 * second))
-        assertEquals(2, pairing.refusedWrongTimebase)
+        assertEquals(2, pairing.refusedWrongTimebase.get())
+
+        // Recorded on the REFUSING branch, which is the branch that has a reader: the log
+        // line in stopBecauseOfTimebase is the only diagnostic a session that lost its IMU
+        // produces, and it prints these two. Assigning them only on the matched path left
+        // both mutations alive and that line printing zeroes -- a fix whose whole purpose
+        // was to explain a refusal, blank on refusal.
+        assertEquals("the delta that decided it", -10 * second, pairing.timebaseOffsetNs)
+        assertEquals("and the gap it was weighed against", 0, pairing.clockGapNs)
     }
 
     @Test
@@ -110,7 +118,7 @@ class ImuPairingTest {
         // A later event whose delta would fail on its own is accepted, because the
         // question was settled. Without the sticky branch this would be refused.
         assertTrue(accel(pairing, captureNs = 0, appNowNs = 10 * second, monoNowNs = 10 * second) is ImuOutcome.Paired)
-        assertEquals(0, pairing.refusedWrongTimebase)
+        assertEquals(0, pairing.refusedWrongTimebase.get())
     }
 
     @Test
@@ -264,22 +272,74 @@ class ImuPairingTest {
         // built ImuPairing(), so the mutation replacing the parameter with the constant
         // survived. Driven here through an instance, which is the only thing that reaches
         // that parameter at all.
+        // On the DIVERGED branch, which the first version never reached: it drove
+        // appNowNs == monoNowNs, so the gap was zero, the moot branch decided, and the
+        // injected bound never met the conjunct it exists for. A one-second gap puts this
+        // past the 50 ms threshold and into the attribution.
+        val gap = second
         val tight = ImuPairing(maxDeliveryNs = 10 * ms)
         tight.onGyro(0, 0.0, 0.0, 0.0)
-        // 20 ms of delivery latency, clocks together: inside the default bound, outside
-        // this one.
         assertEquals(
+            "20 ms of latency is outside a 10 ms bound even when it is the nearer clock",
             ImuOutcome.WrongTimebase,
-            tight.onAccelerometer(0, 0.1, 0.2, 9.8, 3, appNowNs = 20 * ms, monoNowNs = 20 * ms),
+            tight.onAccelerometer(0, 0.1, 0.2, 9.8, 3, appNowNs = 20 * ms, monoNowNs = 20 * ms - gap),
         )
 
         val loose = ImuPairing()
         loose.onGyro(0, 0.0, 0.0, 0.0)
         assertTrue(
             "the same event is accepted under the default bound",
-            loose.onAccelerometer(0, 0.1, 0.2, 9.8, 3, appNowNs = 20 * ms, monoNowNs = 20 * ms)
+            loose.onAccelerometer(0, 0.1, 0.2, 9.8, 3, appNowNs = 20 * ms, monoNowNs = 20 * ms - gap)
                 is ImuOutcome.Paired,
         )
+    }
+
+
+    @Test
+    fun `the accelerometer's accuracy reaches the reading`() {
+        // Pinned only where the test built the ImuReading itself, so the class that
+        // actually carries the value off the event was uncovered: replacing it with null
+        // survived.
+        val pairing = ImuPairing()
+        pairing.onGyro(0, 0.0, 0.0, 0.0)
+        assertEquals(
+            2L,
+            (pairing.onAccelerometer(ms, 0.1, 0.2, 9.8, accuracy = 2, appNowNs = 2 * ms, monoNowNs = 2 * ms)
+                as ImuOutcome.Paired).reading.accuracy,
+        )
+    }
+
+    @Test
+    fun `the timebase is decided even when there is no gyro to pair with`() {
+        // The order of the two guards was unpinned, and swapping them defers the decision
+        // until the first pairable event -- so a session whose gyroscope never registers
+        // never runs the gate at all, and a wrong clock goes unreported on exactly the
+        // device that has something else wrong with it too.
+        val pairing = ImuPairing()
+        assertEquals(
+            ImuOutcome.WrongTimebase,
+            pairing.onAccelerometer(10 * second, 0.1, 0.2, 9.8, 3, appNowNs = 0, monoNowNs = 0),
+        )
+        assertEquals(ImuTimebase.MISMATCHED, pairing.timebase)
+    }
+
+    @Test
+    fun `a negative clock gap gives the same verdict either way it is read`() {
+        // Round 3 asked whether a large negative gap "fails open" through the moot branch.
+        // It does reach that branch -- and it makes no difference, which is worth an
+        // assertion rather than an argument, because a magnitude guard was written here on
+        // the strength of the concern and had to come back out.
+        //
+        // With the gap negative, `fromMono = delta + |gap|` always exceeds `fromApp =
+        // delta`, so the attribution branch reduces to the same `delta <= maxDelivery` test
+        // the moot branch applies. Both readings agree for every negative gap.
+        for (delta in listOf(ms, 3 * second, 90 * second)) {
+            assertEquals(
+                "delta=$delta: the two readings of a negative gap must agree",
+                ImuPairing.verdictFor(deliveryDeltaNs = delta, clockGapNs = 0),
+                ImuPairing.verdictFor(deliveryDeltaNs = delta, clockGapNs = -90 * second),
+            )
+        }
     }
 
 }

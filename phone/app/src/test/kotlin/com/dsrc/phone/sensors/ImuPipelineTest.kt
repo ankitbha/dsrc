@@ -251,8 +251,11 @@ class ImuPipelineTest {
         // At 10 Hz with offers 1 ms apart, only the first of each burst is accepted.
         val (p, _) = pipeline(hz = 10.0)
         p.offer(reading(0, gyroAgeNs = 2 * ms))            // accepted
-        p.offer(reading(1 * ms, gyroAgeNs = 100 * ms))     // gated, and very stale
-        p.offer(reading(2 * ms, gyroAgeNs = 100 * ms))     // gated, and very stale
+        // 150 ms, comfortably past the 100 ms period. At exactly one period these are not
+        // stale under `>` wherever the counter sits, so the stale assertion below was inert
+        // and moving the whole block above the gate survived.
+        p.offer(reading(1 * ms, gyroAgeNs = 150 * ms))     // gated, and very stale
+        p.offer(reading(2 * ms, gyroAgeNs = 150 * ms))     // gated, and very stale
 
         val stats = p.stats
         assertEquals(1, stats.accepted)
@@ -343,6 +346,61 @@ class ImuPipelineTest {
             10.0,
             p.stats.rateHz,
             1e-9,
+        )
+    }
+
+
+    @Test
+    fun `staleness is judged against the live period, not a fixed one`() {
+        // Pinned at 50 Hz only, where a literal 20 ms agrees with the real period -- so
+        // hard-coding that literal survived. The same age is stale at one rate and not at
+        // another, which is the whole reason `rateHz` is on the record.
+        val slow = pipeline(hz = 10.0).first          // 100 ms period
+        slow.offer(reading(0, gyroAgeNs = 50 * ms))
+        assertEquals("50 ms is well inside a 100 ms period", 0, slow.stats.staleGyroSamples)
+
+        val fast = pipeline(hz = 100.0).first         // 10 ms period
+        fast.offer(reading(0, gyroAgeNs = 50 * ms))
+        assertEquals("the same age is stale at 100 Hz", 1, fast.stats.staleGyroSamples)
+    }
+
+    @Test
+    fun `the balance identities fail in both directions`() {
+        // Pinned in one direction only: every case supplied a left side that was too large,
+        // so weakening `==` to `<=` survived and a sum EXCEEDING seen -- one event counted
+        // under two headings, which is what a double-count looks like -- went unnoticed.
+        assertFalse(
+            "the parts must not exceed the whole",
+            ImuPipeline.Stats(
+                seen = 2, accepted = 2, gated = 1, refusedStopped = 0, unpaired = 0,
+                delivered = 2, refusedBySink = 0, nonMonotonicSamples = 0,
+                staleGyroSamples = 0, gyroAgeMeanNs = 0, gyroAgeMaxNs = 0, rateHz = 50.0,
+            ).balances
+        )
+        assertFalse(
+            ImuPipeline.Stats(
+                seen = 1, accepted = 1, gated = 0, refusedStopped = 0, unpaired = 0,
+                delivered = 1, refusedBySink = 1, nonMonotonicSamples = 0,
+                staleGyroSamples = 0, gyroAgeMeanNs = 0, gyroAgeMaxNs = 0, rateHz = 50.0,
+            ).acceptedBalances
+        )
+    }
+
+    @Test
+    fun `the reversal baseline is the previous event, not a high-water mark`() {
+        // Unpinned in one direction: a high-water mark survived, and it counts a different
+        // thing -- every event below the maximum ever seen, rather than every event below
+        // the one before it. The documented policy is about delivery order.
+        val (p, _) = pipeline(hz = 1_000.0)
+        p.offer(reading(0))
+        p.offer(reading(50 * ms))
+        p.offer(reading(40 * ms))     // a reversal against 50 ms
+        p.offer(reading(45 * ms))     // an advance against 40 ms, but below the 50 ms peak
+
+        assertEquals(
+            "a high-water mark would count two; the previous event counts one",
+            1,
+            p.stats.nonMonotonicSamples,
         )
     }
 

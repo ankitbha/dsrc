@@ -167,6 +167,18 @@ than by reading them:
 That is the same shape as the two findings in section E's status note, and it keeps
 happening in the tests rather than in the code.
 
+## Open, and deliberately not closed here
+
+- **The timebase verdict is taken from one event and is irreversible.** A single late first
+  delivery over two seconds — a HAL flush, or the `dsrc-imu` looper starved while the
+  camera opens and the socket connects — stops IMU capture for the whole drive, with no
+  retry and no re-arm. Nothing measures first-event delivery latency on hardware, so the
+  threshold is a guess about a distribution nobody has looked at.
+- **Nothing pins that `stop()` unregisters the listeners.** `quitSafely()` ends the thread
+  either way, so the thread census reports success on a leak.
+- **The teardown log line has no test.** It is the sole reader of five diagnostic fields,
+  and deleting every interpolation leaves both suites green.
+
 ## What this task does not settle
 
 - Whether the pairing approximation is good enough for the Jetson's fusion. That is a

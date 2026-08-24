@@ -51,13 +51,20 @@ class ImuPairing(
     var clockGapNs: Long = 0
         private set
 
-    /** Accelerometer events discarded because the timebase is wrong. */
-    var refusedWrongTimebase: Long = 0
-        private set
+    /**
+     * Accelerometer events discarded because the timebase is wrong.
+     *
+     * Atomic like everything on [ImuPipeline], not a plain `Long`. These two are written on
+     * the sensor thread and read from `onSensingDown` on the service thread, and neither
+     * `unregisterListener` nor `quitSafely()` establishes a happens-before with the sensor
+     * thread's writes -- so the teardown line could print a stale value. [onGyro]'s own
+     * comment criticises a class that asserts two concurrency stories at once, and these
+     * two were the second story.
+     */
+    val refusedWrongTimebase = java.util.concurrent.atomic.AtomicLong(0)
 
     /** Paired samples whose gyro half was stamped *after* the accelerometer's. */
-    var outOfOrderPairings: Long = 0
-        private set
+    val outOfOrderPairings = java.util.concurrent.atomic.AtomicLong(0)
 
     private var hasGyro = false
     private var gyroNs = 0L
@@ -91,7 +98,7 @@ class ImuPairing(
             // Counted, because it was not. A wrong-clock session and a device with no IMU
             // produced identical statistics -- `seen` never moved on either -- so the two
             // were distinguishable only by a field in a log line.
-            refusedWrongTimebase++
+            refusedWrongTimebase.incrementAndGet()
             return ImuOutcome.WrongTimebase
         }
         if (!hasGyro) return ImuOutcome.Unpaired
@@ -103,7 +110,7 @@ class ImuPairing(
         // ages of +18 ms and -18 ms averaged to zero and reported a perfect pairing. The
         // magnitude is what the statistic is about, and the direction is worth its own
         // counter rather than being folded into the number it corrupts.
-        if (age < 0) outOfOrderPairings++
+        if (age < 0) outOfOrderPairings.incrementAndGet()
         return ImuOutcome.Paired(
             ImuReading(
                 captureMonoNs = captureNs,
@@ -190,6 +197,17 @@ class ImuPairing(
             // is not "could this be delivery latency" but "is the error small enough that
             // choosing wrong does not matter", and those are different questions with
             // different answers.
+            // Signed, and a magnitude guard was tried here and reverted, because it is
+            // not the fix it looks like. Round 3 observed that a large *negative* gap reads
+            // as "barely diverged" and asked whether that fails open. It does -- but taking
+            // the magnitude changes nothing, and the algebra says why: with `clockGapNs`
+            // negative, `fromMono = deliveryDeltaNs + |clockGapNs|` is always larger than
+            // `fromApp = deliveryDeltaNs`, so the branch below reduces to exactly the test
+            // above it. Both arms return the same verdict for every negative gap.
+            //
+            // What actually guards the transposition is that the single call site passes
+            // both clocks by name. A magnitude here would have looked like protection and
+            // supplied none, which is worse than the honest version.
             if (clockGapNs <= MAX_TOLERABLE_CLOCK_GAP_NS) {
                 return if (deliveryDeltaNs <= maxDeliveryNs) {
                     ImuTimebase.MATCHED

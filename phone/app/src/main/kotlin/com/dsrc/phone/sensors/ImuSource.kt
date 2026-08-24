@@ -99,7 +99,7 @@ class ImuSource(
     val clockGapNs: Long get() = pairing.clockGapNs
 
     /** Accelerometer events discarded because the sensor clock is not ours. */
-    val refusedWrongTimebase: Long get() = pairing.refusedWrongTimebase
+    val refusedWrongTimebase: Long get() = pairing.refusedWrongTimebase.get()
 
     /**
      * Paired samples whose gyro half was stamped after the accelerometer's.
@@ -109,13 +109,8 @@ class ImuSource(
      * gyro lag from symmetric jitter -- the information was removed from one place and
      * landed in another nobody could reach.
      */
-    val outOfOrderPairings: Long get() = pairing.outOfOrderPairings
+    val outOfOrderPairings: Long get() = pairing.outOfOrderPairings.get()
 
-    /** Whether the listeners are registered right now. Zero after a stop. */
-    val registrations: Int get() = registered
-
-    @Volatile
-    private var registered = 0
 
     /**
      * True once a wrong timebase has torn the registrations down.
@@ -185,17 +180,14 @@ class ImuSource(
         // the first of the burst and drop the rest -- turning a 50 Hz command into one
         // sample per batch. Latency is worth more here than the wakeup saving.
         val periodUs = (1_000_000.0 / config.imuHz).toInt().coerceAtLeast(1)
-        // Counted, so "the gyroscope was never registered" is observable. Deleting that
-        // second call left both suites green while the channel transmitted nothing.
-        if (manager.registerListener(callback, accelerometer, periodUs, 0, handler)) registered++
-        if (manager.registerListener(callback, gyroscope, periodUs, 0, handler)) registered++
+        manager.registerListener(callback, accelerometer, periodUs, 0, handler)
+        manager.registerListener(callback, gyroscope, periodUs, 0, handler)
     }
 
 
     fun stop() {
         listener?.let { manager.unregisterListener(it) }
         listener = null
-        registered = 0
         thread?.quitSafely()
         thread = null
     }

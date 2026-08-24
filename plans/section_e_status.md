@@ -513,9 +513,11 @@ of the accelerometer, and the direction has its own counter rather than a sign t
 real error in the mean.
 
 `dsrc-imu` joins `WORKER_PREFIXES`, which is how a new resource gets teardown coverage
-without new tests: deleting the source's `start()` fails four instrumented tests.
+without new tests: deleting the source's `start()` fails four instrumented tests. That is
+not enough on its own — the census sees threads, and a thread starting proves nothing about
+what it then does. The assertion that settles it is that a sample comes *out*.
 
-**Eight of the tests written for this could not fail**, and mutation found every one. Two
+**Twelve of the tests written for this could not fail**, and mutation found every one. Two
 before the first validation round: the gyro ages only ever rose, so "keep the maximum" and
 "keep the last" agreed, and the stale-gyro test stepped over its own boundary, so `>` and
 `>=` agreed. Four more in round 1: the test named for swap-blindness drove all four
