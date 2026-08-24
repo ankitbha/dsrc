@@ -365,6 +365,48 @@ seven shapes CPython rejects, one of which **corrupted silently** — `toIntOrNu
 accepts a leading sign, so `\u-041` became U+FFBF. And a valid GPS fix with a null
 coordinate was accepted here and refused by Python.
 
+### Validator round 2 — seventeen findings, and round 1's fixes were unpinned
+
+The heavier round. Three of round 1's fixes turned out to be **pinned by nothing**: the
+widest-value probe, the write-time framing guard, and the wire stamp could each be reverted
+with the whole suite green. That is the same failure the earlier rounds kept finding, one
+level up — the fix was right and the test could not tell.
+
+The worst finding was underneath the probe rather than in it. `t_mono_ns` and `t_wall_ns`
+were read on the **writer** thread, where the spec defines them as the sender's clocks *at
+enqueue*. So `t_mono_ns - t_capture_mono_ns` — which the spec names as the queueing
+latency — measured capture-to-write and reported the queue's own depth as if it were the
+sensor's. The comment in `writeMessage` asserted the field was an enqueue stamp two lines
+above the call that made it a write stamp. It also inverted the wire stamp, which was built
+before the header's clock call and so came out **deterministically earlier** than the field
+it exists to postdate: 8 of 8 frames negative when measured. Both clocks now travel on the
+message, which makes the wire stamp later by construction and lets the probe check the real
+header instead of a guess.
+
+This would have poisoned the O1 experiment the plan and this file both promise. It would
+have produced a plausible, wrong number, which is worse than no number.
+
+Two more of the same shape as round 1's dead writer, in the two places round 1 did not
+look. The **reader** had no guard beyond `EOFException`/`FramingError`/`IOException`, so an
+application router bug killed the thread with `ended` still false — `isRunning` lying,
+`send()` returning true, inbound frames consumed by nobody with no counter moving, and the
+session finally ending as `STALLED` with a null cause, blaming the network for an app
+fault. And the **keepalive** lived in the writer's idle branch, so a phone under sustained
+camera traffic sent none at all.
+
+**The timebase finding, where the validator had the direction backwards.** It reported that
+the phone cannot answer a ping. The spec says the opposite — "The phone initiates and the
+Jetson only ever answers" — and Python's `TimeSyncInitiator` is documented as "The phone's
+side". So the phone had the *wrong half* built, and that half was reachable from no code
+path: nothing initiated, so the timebase never ran in either direction and
+`t_wire_mono_ns` had no consumer at all. Worse than reported, not better.
+
+**Still open:** nothing drives the ping cadence, and five of eight typed messages are
+absent — which is why `rate_cmd` with `rates: 0` is still accepted, the spec's own worked
+example for why the sender rule exists.
+
+---
+
 ### One of the two open findings is now closed
 
 **F8 is closed** (`7c4b632`). The adapter, the link and the service wiring are real:
