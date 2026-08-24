@@ -162,6 +162,18 @@ class SensingService : LifecycleService() {
                     }
 
                     onSensingUp()
+                    // After come-up and inside the same try, which is the whole point.
+                    // `handle` publishes the state, so anything raised from here on is
+                    // caught below and offered as `Failed` while the machine is already
+                    // RUNNING -- an arm the machine accepts, and until round 4 an arm with
+                    // no teardown behind it.
+                    //
+                    // A seam, because with listener failures now contained there is
+                    // nothing left in this window that throws, and the arm is still
+                    // reachable by construction: the next watchdog or bind escalation to
+                    // offer Failed from RUNNING gets here. Recording it as "unpinnable"
+                    // is what I did twice before, and both times it was wrong.
+                    startedFailureOverride?.invoke()
                     handle(SensingEvent.Started)
                 } catch (t: Throwable) {
                     // Startup failure has to land in the machine, not just the log, or
@@ -548,6 +560,16 @@ class SensingService : LifecycleService() {
          */
         @Volatile
         internal var comeUpFailureOverride: (() -> Unit)? = null
+
+        /**
+         * Test seam for a failure *after* come-up, while the machine is RUNNING.
+         *
+         * Null in production. It stands in for the next thing that legitimately raises
+         * there -- the machine pins `RUNNING + Failed -> STOPPED_ERROR`, so the route
+         * exists whether or not anything currently walks it.
+         */
+        @Volatile
+        internal var startedFailureOverride: (() -> Unit)? = null
 
         /**
          * Release steps that threw, across every instance.

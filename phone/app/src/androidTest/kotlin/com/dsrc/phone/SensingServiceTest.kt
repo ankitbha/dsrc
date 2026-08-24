@@ -568,28 +568,29 @@ class SensingServiceTest {
     @Test
     fun aFailureOfferedFromRunningDoesNotLeaveTheWholeSetLive() {
         // The route the removed re-entrancy guard covered, and my enumeration missed it a
-        // second time. react(STARTING)'s try encloses `handle(Started)` as well as
-        // `onSensingUp()`, and `handle` publishes the state, which calls every listener. So
-        // a throw from a *listener* -- after come-up has already succeeded -- is caught as a
+        // second time. react(STARTING)'s try encloses handle(Started) as well as
+        // onSensingUp(), so a throw after come-up has already succeeded is caught as a
         // start failure and offered as Failed while the machine is RUNNING. The machine
-        // accepts that (RUNNING + Failed -> STOPPED_ERROR) and nothing on the path tears
-        // anything down, so all seven fields and every worker stay live. STOPPED_ERROR then
-        // accepts Start, and the second come-up runs on top of the first.
+        // accepts that arm and nothing on the route called onSensingDown, so all seven
+        // fields and every worker stayed live -- and STOPPED_ERROR then accepts Start, so
+        // the second come-up ran on top of the first.
         //
-        // The listener also calls start() before throwing, because that is what makes AMS
-        // advance the last-delivered startId past the one release() passes to
-        // stopSelf(lastStartId): the stop is declined and the same instance takes the
-        // queued Start. Without it the service is destroyed and the leak is hidden behind a
-        // fresh process.
-        val thrown = java.util.concurrent.atomic.AtomicBoolean(false)
-        lateinit var listener: SensingStatus.Listener
-        listener = SensingStatus.Listener { state ->
-            if (state == SensingState.RUNNING && thrown.compareAndSet(false, true)) {
-                SensingService.start(context)
-                throw RuntimeException("a listener that throws is a UI bug, not a sensing failure")
-            }
+        // Driven through the seam rather than through a throwing status listener. The
+        // listener was the trigger the validator used, and it worked -- but containing
+        // listener failures (which is a fix in its own right) closed that door, and a test
+        // built on it then passed for the wrong reason: I mutated the teardown away and all
+        // 51 tests stayed green. The arm is still reachable by construction, so it gets a
+        // seam of its own.
+        //
+        // start() before throwing, because that is what makes AMS advance the
+        // last-delivered startId past the one release() hands stopSelf(lastStartId): the
+        // stop is declined and the same instance takes the queued Start. Without it the
+        // service is destroyed and a fresh process hides the leak.
+        SensingService.startedFailureOverride = {
+            SensingService.startedFailureOverride = null
+            SensingService.start(context)
+            throw RuntimeException("something offered Failed while we were RUNNING")
         }
-        SensingStatus.shared.addListener(listener)
         try {
             SensingService.start(context)
             await(SensingState.RUNNING)
@@ -597,13 +598,13 @@ class SensingServiceTest {
             for (prefix in WORKER_PREFIXES) {
                 val count = threadsNamed(listOf(prefix))
                 assertTrue(
-                    "a throwing listener orphaned a whole set: $count threads named " +
-                        "'$prefix', more than the ${if (prefix == POOL) 2 else 1} one run needs",
+                    "a failure offered from RUNNING orphaned a whole set: $count threads " +
+                        "named '$prefix', more than the ${if (prefix == POOL) 2 else 1} one run needs",
                     count <= if (prefix == POOL) 2 else 1,
                 )
             }
         } finally {
-            SensingStatus.shared.removeListener(listener)
+            SensingService.startedFailureOverride = null
             context.stopService(android.content.Intent(context, SensingService::class.java))
         }
     }
