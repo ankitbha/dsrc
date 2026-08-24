@@ -1640,9 +1640,13 @@ REQUIRE_INT_FIELDS = [
     (Channel.TELEMETRY, a_telemetry, "t_capture_mono_ns"),
     (Channel.ADVISORY, an_advisory, "t_capture_mono_ns"),
     (Channel.RATE_CMD, a_rate_command, "t_capture_mono_ns"),
-    # Found by the drift guard below on its first run, which is the whole reason it is
-    # there: control's exchange_id goes through require_int and had no case.
+    # Both found by the drift guard on a first run, which is the whole reason it is
+    # there. exchange_id was a plain literal it could already see; t_wire_mono_ns is
+    # passed as a constant and was invisible until the guard learned to resolve them,
+    # and a mutation confirmed it was unpinned -- making require_int give wrong_type for
+    # that field left all 942 tests passing.
     (Channel.CONTROL, a_time_sync_ping, "exchange_id"),
+    (Channel.CONTROL, a_time_sync_ping, "t_wire_mono_ns"),
 ]
 
 REQUIRE_STR_FIELDS = [
@@ -1690,9 +1694,20 @@ def test_a_null_in_a_required_field_is_null_not_allowed_not_wrong_type(channel, 
 def test_every_required_field_of_each_helper_is_covered_above():
     """The tables drift from the code otherwise.
 
-    A field added to a message with a required int, string or bool would
-    otherwise be uncovered silently, and the previous round's finding was
-    precisely a helper whose fix nobody had extended.
+    Two ways this guard was toothless, both found by round 7.
+
+    It asserted only that nothing was uncovered, so a regex matching *nothing*
+    satisfied it perfectly -- verified by breaking the pattern on purpose, which
+    left the test passing. A rename or a call reformatted across two lines would
+    have disarmed it permanently and silently. It now asserts the call sites it
+    found, by name, against a recorded set: a pattern that stops matching fails
+    here rather than going quiet.
+
+    And it read only literal arguments, so `require_int(extensions,
+    WIRE_STAMP_KEY)` in `TimeSyncMessage.from_wire` was invisible -- a live call
+    site with no case, which a mutation confirmed: making `require_int` give
+    `wrong_type` for `t_wire_mono_ns` left all 942 tests passing. Constants are
+    now resolved through the module rather than excused in a comment.
     """
     import inspect
 
@@ -1704,9 +1719,24 @@ def test_every_required_field_of_each_helper_is_covered_above():
         "require_str": {f for _, _, f in REQUIRE_STR_FIELDS},
         "require_bool": {f for _, _, f in REQUIRE_BOOL_FIELDS},
     }
+    # Recorded, so a pattern that matches nothing is a failure and not a pass. These
+    # are counts of *call sites the pattern must keep finding*, not of behaviours.
+    at_least = {"require_int": 9, "require_str": 9, "require_bool": 2}
+
     for helper, covered in named.items():
-        called = set(re.findall(helper + r'\(extensions, "([^"]+)"\)', source))
-        # CAPTURE_KEY is passed by constant rather than as a literal, and it is
-        # covered by name in the table above.
-        missing = called - covered
+        found = set()
+        for argument in re.findall(helper + r"\(extensions, ([A-Za-z_\"][^)]*)\)", source):
+            argument = argument.strip()
+            if argument.startswith('"'):
+                found.add(argument.strip('"'))
+            else:
+                # A constant: resolve it rather than excusing it. getattr keeps this
+                # honest -- a constant that is renamed away raises instead of vanishing
+                # from the comparison.
+                found.add(getattr(module, argument))
+        assert len(found) >= at_least[helper], (
+            f"{helper}: the pattern found only {sorted(found)}; it used to find at least "
+            f"{at_least[helper]} call sites, so either the pattern or the code moved"
+        )
+        missing = found - covered
         assert not missing, f"{helper} is called on {sorted(missing)} with no case"

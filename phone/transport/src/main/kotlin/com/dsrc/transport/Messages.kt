@@ -294,13 +294,17 @@ object MessageValidation {
         Channels.ADVISORY to { extensions, payload -> AdvisoryMessage.fromWire(extensions, payload) },
         Channels.RATE_CMD to { extensions, payload -> RateCommand.fromWire(extensions, payload) },
         Channels.TELEMETRY to { extensions, payload -> PhoneTelemetry.fromWire(extensions, payload) },
-        Channels.CONTROL to { extensions, payload ->
-            // The hello and heartbeat are the transport's own traffic, not timebase
-            // messages, and they legitimately carry a reserved key.
-            if (Session.HELLO !in extensions && Session.HEARTBEAT !in extensions) {
-                TimeSyncMessage.fromWire(extensions, payload)
-            }
-        },
+        // No hello/heartbeat exemption here, and there was one. It changed the *location*
+        // of a refusal and never its outcome, which is why both halves of it could be
+        // deleted with all 250 tests passing. The transport's own traffic does not arrive
+        // here: the handshake hello is read by `readPeerHello` before the read loop starts,
+        // and a heartbeat is absorbed in `readLoop` and never reaches `deliver`. The one
+        // frame the exemption did affect -- a peer re-sending its hello mid-session -- is
+        // refused either way, by the same decoder, with the same reason. Outbound it is
+        // moot twice over: heartbeats are written straight through `Framing.write`, and a
+        // caller that put a reserved key on `control` is refused by the reserved-key rule
+        // before any decoder runs.
+        Channels.CONTROL to { extensions, payload -> TimeSyncMessage.fromWire(extensions, payload) },
     )
 
     /** Whether every channel in the table has a decoder. Asserted by a test. */

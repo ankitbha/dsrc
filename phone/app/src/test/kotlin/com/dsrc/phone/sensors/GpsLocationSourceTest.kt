@@ -104,15 +104,21 @@ class GpsLocationSourceTest {
 
     @Test
     fun `a bearing outside the documented range is folded, not sent`() {
-        assertEquals(0.0, normaliseBearing(0f), 1e-9)
-        assertEquals(45.0, normaliseBearing(45f), 1e-4)
-        // 360 has been seen from real devices and is refused by our own outbound
-        // validation, so it would be counted as a bug on this side.
-        assertEquals(0.0, normaliseBearing(360f), 1e-9)
-        assertEquals(1.0, normaliseBearing(361f), 1e-4)
-        assertEquals(350.0, normaliseBearing(-10f), 1e-4)
-        assertEquals(0.0, normaliseBearing(Float.NaN), 1e-9)
-        assertEquals(0.0, normaliseBearing(Float.POSITIVE_INFINITY), 1e-9)
+        assertEquals(0.0, normaliseBearing(0f)!!, 1e-9)
+        assertEquals(45.0, normaliseBearing(45f)!!, 1e-4)
+        // 360 has been seen from real devices, and folding it is right because its meaning
+        // is unambiguous -- not, as this used to say, because our own outbound validation
+        // would refuse it. Neither side range-checks heading_deg: Kotlin only calls
+        // checkFinite, and Python accepts 360, -10, 720 and 1e9 alike.
+        assertEquals(0.0, normaliseBearing(360f)!!, 1e-9)
+        assertEquals(1.0, normaliseBearing(361f)!!, 1e-4)
+        assertEquals(350.0, normaliseBearing(-10f)!!, 1e-4)
+        // Null, not zero. Zero is a legitimate heading, so returning it for "no bearing"
+        // makes an unknown indistinguishable from a claim of due north -- and heading_deg
+        // is nullable so that it does not have to be.
+        assertNull("a non-finite bearing is unknown, not north", normaliseBearing(Float.NaN))
+        assertNull(normaliseBearing(Float.POSITIVE_INFINITY))
+        assertNull(normaliseBearing(Float.NEGATIVE_INFINITY))
     }
 
     @Test
@@ -148,13 +154,16 @@ class GpsLocationSourceTest {
     fun `a bearing is normalised on the way through reading, not only in the helper`() {
         // normaliseBearing was tested directly and never through reading(), so its only
         // call site could be replaced with a plain toDouble() and the suite stayed green.
-        // A device reporting 360 or a negative bearing would then put an out-of-range
-        // heading on the wire -- the thing the docstring says our own outbound validation
-        // would refuse.
+        // A device reporting 360 or a negative bearing would then put an unfolded heading
+        // on the wire. Nothing downstream would refuse it -- neither side range-checks the
+        // field -- so the Jetson would simply read 360 as a bearing.
         assertEquals(0.0, reading(fix(bearingDeg = 360f)).record.headingDeg!!, 1e-9)
         assertEquals(350.0, reading(fix(bearingDeg = -10f)).record.headingDeg!!, 1e-4)
         assertEquals(1.0, reading(fix(bearingDeg = 361f)).record.headingDeg!!, 1e-4)
-        assertEquals(0.0, reading(fix(bearingDeg = Float.NaN)).record.headingDeg!!, 1e-9)
+        assertNull(
+            "a non-finite bearing must reach the wire as null, not as due north",
+            reading(fix(bearingDeg = Float.NaN)).record.headingDeg,
+        )
     }
 
     @Test
@@ -162,6 +171,35 @@ class GpsLocationSourceTest {
         // Same shape: utcNanos was pinned directly and its call site was not.
         assertNull(reading(fix(utcEpochMs = 0)).record.utcEpochNs)
         assertEquals(1_770_000_000_000_000_000L, reading(fix(utcEpochMs = 1_770_000_000_000)).record.utcEpochNs)
+    }
+
+
+    @Test
+    fun `a receipt stamp older than its fix is clamped, and the clamp is counted`() {
+        // The clamp was silent, and that silence made two assertions in the on-device test
+        // unfailable: `receiptMonoNs >= fixMonoNs` and a non-negative latency hold for
+        // every input once the clamp runs, so only the 10-second upper bound could fail --
+        // in a test named for both clocks. Its counterpart on the other stamp, a fix
+        // arriving older than the previous fix, has been counted as `nonMonotonicFixes` all
+        // along.
+        GpsLocationSource.clampedReceipts.set(0)
+
+        val ordinary = reading(fix(fixMonoNs = 1_000, receiptMonoNs = 1_500))
+        assertEquals(1_500L, ordinary.receiptMonoNs)
+        assertEquals("nothing to clamp here", 0L, GpsLocationSource.clampedReceipts.get())
+
+        val backwards = reading(fix(fixMonoNs = 2_000, receiptMonoNs = 1_900))
+        assertEquals("clamped to the fix stamp", 2_000L, backwards.receiptMonoNs)
+        assertEquals(
+            "a corrected stamp must not be corrected in silence",
+            1L,
+            GpsLocationSource.clampedReceipts.get(),
+        )
+
+        // Equal is not clamped: it is a fix received in the same nanosecond, not a
+        // disagreement between two clocks.
+        reading(fix(fixMonoNs = 3_000, receiptMonoNs = 3_000))
+        assertEquals(1L, GpsLocationSource.clampedReceipts.get())
     }
 
 }

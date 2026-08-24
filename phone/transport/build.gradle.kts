@@ -47,6 +47,12 @@ tasks.test {
     val repoRoot = rootProject.layout.projectDirectory.dir("..")
     systemProperty("dsrc.repoRoot", repoRoot.asFile.absolutePath)
     inputs.file(repoRoot.file("scripts/interop_jetson_peer.py")).withPropertyName("interopPeer")
+    // The third Python input, and it was missed when round 6 added it. Without it,
+    // `:transport:test` reports UP-TO-DATE after this script changes -- so an edit that
+    // breaks the reconciliation passes the ordinary Gradle path in 332 ms having executed
+    // nothing. That is the same "a filtered run reported BUILD SUCCESSFUL without running"
+    // trap, on the default path rather than in a mutation loop.
+    inputs.file(repoRoot.file("scripts/refusal_reasons.py")).withPropertyName("refusalReasons")
     inputs.dir(repoRoot.dir("deployment/jetson/transport")).withPropertyName("pythonTransport")
     testLogging {
         events("failed")

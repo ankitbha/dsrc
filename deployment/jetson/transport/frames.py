@@ -184,6 +184,58 @@ def decode(data: bytes) -> Frame:
     return frame
 
 
+MAX_INT64 = 2**63 - 1
+MIN_INT64 = -(2**63)
+
+
+def _reject_non_finite_float(text: str) -> float:
+    """Refuse a float literal that overflows to infinity.
+
+    `parse_constant` covers the three bare literals; this covers the same class
+    arriving as ordinary digits. `1e999` is well-formed JSON and `float()` turns it
+    into `inf` without complaint, so it walked past the constant guard and became a
+    record the decoder refused one message later -- while Kotlin's parser refuses it
+    and ends the session. Same asymmetry the constant guard was written for: one
+    side loses a record, the other loses the link.
+    """
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError(f"{text} is not finite")
+    return value
+
+
+def _reject_out_of_range_int(text: str) -> int:
+    """Refuse an integer outside signed 64-bit.
+
+    Python's ints are unbounded and Kotlin's `Long` is not, so `2**63` parsed
+    cleanly here and was refused by the peer's parser -- and unlike the float case
+    it produced *no refusal at all* on this side: the value stayed intact and rode
+    through as a plausible sequence number.
+    """
+    value = int(text)
+    if not MIN_INT64 <= value <= MAX_INT64:
+        raise ValueError(f"{text} is outside signed 64-bit")
+    return value
+
+
+def _reject_duplicate_keys(pairs: list) -> dict:
+    """Refuse a repeated key rather than letting the last one win.
+
+    `{"a":1,"a":2}` is accepted by every JSON parser that builds a dict, and the
+    value that survives is a property of the parser rather than of the message.
+    Canonical JSON is the only form in which two headers are equal on this wire, and
+    a duplicate key means the sender cannot have produced one -- so this is a
+    malformed header, not a message to interpret. Kotlin's parser already refuses
+    it.
+    """
+    seen: dict = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(f"duplicate key {key!r}")
+        seen[key] = value
+    return seen
+
+
 def _reject_json_constant(name: str) -> float:
     """Refuse `NaN`, `Infinity` and `-Infinity`, which json accepts by default.
 
@@ -208,7 +260,13 @@ def _frame_from_parts(header_bytes: bytes, payload: bytes, payload_len: int) -> 
     except UnicodeDecodeError as exc:
         raise FramingError(f"header is not UTF-8: {exc}") from None
     try:
-        header = json.loads(text, parse_constant=_reject_json_constant)
+        header = json.loads(
+            text,
+            parse_constant=_reject_json_constant,
+            parse_float=_reject_non_finite_float,
+            parse_int=_reject_out_of_range_int,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
     except ValueError as exc:
         raise FramingError(f"header is not JSON: {exc}") from None
     if not isinstance(header, dict):

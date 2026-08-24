@@ -374,3 +374,45 @@ def test_a_quoted_nan_is_still_just_a_string():
     header = b'{"ch":"gps","seq":1,"n":0,"t_mono_ns":1,"t_wall_ns":2,"note":"NaN"}'
     data = struct.pack(">IH", 0, len(header)) + header
     assert read_frame(reader_for(data)).extensions["note"] == "NaN"
+
+@pytest.mark.parametrize(
+    "value,why",
+    [
+        (b'"speed_mps":1e999', "a float literal that overflows to infinity"),
+        (b'"seq":9223372036854775808', "an integer past signed 64-bit"),
+        (b'"a":1,"a":2', "a repeated key"),
+    ],
+)
+def test_the_rest_of_the_non_json_class_is_also_a_framing_error(value, why):
+    """`parse_constant` closed one door of four in the same class.
+
+    Each of these is accepted by `json` and refused by the peer's parser, and the
+    asymmetry is the one the bare-NaN fix was written to remove: one side loses a
+    record and the other loses the link. `1e999` is well-formed JSON that `float()`
+    turns into `inf` without complaint. `2**63` stays intact here and is refused
+    there -- and unlike the float it produced no refusal at all on this side, riding
+    through as a plausible sequence number. A repeated key is accepted by every
+    parser that builds a dict, and which value survives is a property of the parser
+    rather than of the message.
+    """
+    header = b'{"ch":"gps","seq":1,"n":0,"t_mono_ns":1,"t_wall_ns":2,' + value + b"}"
+    data = struct.pack(">IH", 0, len(header)) + header
+    with pytest.raises(FramingError, match="not JSON"):
+        read_frame(reader_for(data))
+
+
+def test_the_legitimate_edges_of_each_guard_still_decode():
+    """The guards refuse a class, not a neighbourhood.
+
+    Long.MAX_VALUE is a value the protocol carries on purpose -- the header comment
+    in Json.kt names it -- and an ordinary float must not pay for the overflow
+    check.
+    """
+    header = (
+        b'{"ch":"gps","seq":9223372036854775807,"n":0,"t_mono_ns":1,"t_wall_ns":2,'
+        b'"speed_mps":13.4,"altitude_m":-0.0}'
+    )
+    data = struct.pack(">IH", 0, len(header)) + header
+    frame = read_frame(reader_for(data))
+    assert frame.seq == 9223372036854775807
+    assert frame.extensions["speed_mps"] == 13.4

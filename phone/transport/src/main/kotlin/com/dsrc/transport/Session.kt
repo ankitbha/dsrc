@@ -599,9 +599,17 @@ class Session(
         } catch (t: Throwable) {
             // Our own bug, in transport code, not the peer's record and not the app's
             // handler. Counted where the other two are so the frame still has a heading.
+            // Description first, counter second, and it has to be this way round. `stats()`
+            // reads `lastDeliveryFailure` early and `inbound.counters()` late, and the
+            // latter blocks on the inbound lock -- so with the writes in the other order a
+            // reader could take a null description, block, and then read a count of one
+            // behind it. That is a self-contradictory snapshot from a public method, not
+            // only a flaky test: a consumer sees deliveryFailures = 1 with
+            // lastDeliveryFailure = null. Writing the text first means anything visible in
+            // the counter is already visible in the text.
+            lastDeliveryFailure = "timebase: ${t.javaClass.name}: ${t.message}"
             deliveryFailures.incrementAndGet()
             inbound.countFailed(frame.channel)
-            lastDeliveryFailure = "timebase: ${t.javaClass.name}: ${t.message}"
             return
         }
 
@@ -636,9 +644,10 @@ class Session(
             // killed the delivering thread while `running` stayed true, so `isRunning`
             // lied, `send()` kept returning true, and every later frame was consumed by
             // nobody with no counter moving.
+            // Description before counter, for the reason given above.
+            lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"
             deliveryFailures.incrementAndGet()
             inbound.countFailed(frame.channel)
-            lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"
         }
     }
 
@@ -730,8 +739,10 @@ class Session(
     }
 
     private fun countOutboundFramingRefusal(cause: Throwable) {
-        outboundFramingRefusals.incrementAndGet()
+        // Description before counter, the same ordering as the delivery failure above and
+        // for the same reason: `stats()` reads these two at different moments.
         lastOutboundFramingRefusal = "${cause.javaClass.simpleName}: ${cause.message}"
+        outboundFramingRefusals.incrementAndGet()
     }
 
     private fun countOutboundRefusal(reason: String) = synchronized(refusalLock) {

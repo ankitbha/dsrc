@@ -195,21 +195,57 @@ class GpsLocationSource(
                 // Both stamps come off elapsedRealtime, so unlike the camera's pair the
                 // difference here is a real latency rather than a latency plus an unknown
                 // offset between two clock bases.
-                receiptMonoNs = maxOf(fix.receiptMonoNs, fix.fixMonoNs),
+                //
+                // The clamp is counted, and it was not. Its counterpart on the other stamp
+                // -- a fix arriving with a *fix* time older than the previous one -- is
+                // counted as `nonMonotonicFixes`, but a receipt stamp older than the fix it
+                // belongs to was silently corrected. That made two of the three clock
+                // assertions in the on-device test tautologies: `receiptMonoNs >=
+                // fixMonoNs` and a non-negative latency are true for every input once the
+                // clamp is applied, so only the 10-second upper bound could fail, in a test
+                // whose subject is both clocks. In a task whose deliverable is logging fix
+                // time and receipt time, a corrected stamp is exactly the thing worth
+                // knowing about.
+                receiptMonoNs = if (fix.receiptMonoNs < fix.fixMonoNs) {
+                    clampedReceipts.incrementAndGet()
+                    fix.fixMonoNs
+                } else {
+                    fix.receiptMonoNs
+                },
             )
         }
 
         /**
-         * Fold a bearing into `[0, 360)`.
+         * Fixes whose receipt stamp arrived older than the fix stamp, and was clamped.
+         *
+         * Non-zero means the provider's two clocks disagree, which is worth seeing rather
+         * than corrected in silence. Beside `reading`, which is where the clamp happens
+         * and which is a companion function because the tests drive it directly.
+         */
+        val clampedReceipts = java.util.concurrent.atomic.AtomicLong(0)
+
+        /**
+         * Fold a bearing into `[0, 360)`, or null if there is no bearing to fold.
          *
          * Documented as being in that range already; devices have been seen reporting
          * exactly 360, and a negative value is the same bearing spelled the other way.
-         * Sending either would be refused by our own outbound validation and counted as
-         * a bug on this side, which is worse than normalising a value whose meaning is
-         * unambiguous.
+         * Folding those is right because their meaning is unambiguous: 361 is 1, and -10
+         * is 350.
+         *
+         * The reason this used to give for folding was wrong, and worth correcting rather
+         * than deleting: it said an out-of-range bearing "would be refused by our own
+         * outbound validation". It would not. Neither implementation range-checks
+         * `heading_deg` -- Kotlin only calls `checkFinite`, and Python accepts 360, -10,
+         * 720 and 1e9 alike, all verified. The folding stands on its own; it was not
+         * standing on that.
+         *
+         * A non-finite bearing returns **null**, not zero. Zero is a legitimate heading,
+         * so returning it for "no idea" makes an unknown indistinguishable from a claim of
+         * due north -- and `heading_deg` is nullable precisely so it does not have to be.
+         * The spec is explicit that an unknown value is present-and-null, never a sentinel.
          */
-        fun normaliseBearing(degrees: Float): Double {
-            if (!degrees.isFinite()) return 0.0
+        fun normaliseBearing(degrees: Float): Double? {
+            if (!degrees.isFinite()) return null
             val folded = degrees.toDouble() % 360.0
             return if (folded < 0) folded + 360.0 else folded
         }

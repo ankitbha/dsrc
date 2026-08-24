@@ -2422,14 +2422,11 @@ class SessionTest {
     }
 
     @Test
-    fun `a second hello mid-session is refused, not decoded as a timebase message`() {
-        // Reachable only through this door, and it took working out why. `checkInbound`
-        // runs the control decoder before `handleTimeSync` ever sees the frame, so an
-        // ordinary malformed timebase message is refused earlier and `fromWire`'s catch
-        // inside `handleTimeSync` never runs -- except for a frame carrying `hello`, which
-        // the decoder skips (the transport's own traffic legitimately carries the key) and
-        // which `readLoop` does not absorb the way it absorbs a heartbeat. So a peer that
-        // re-sends its hello lands in the timebase decoder with none of its fields.
+    fun `a second hello mid-session is refused, with the reason its decoder gives`() {
+        // A peer re-sending its hello mid-session. `readLoop` absorbs a heartbeat and
+        // never sees a second hello, so this is the one piece of transport-shaped traffic
+        // that reaches `deliver` -- and it lands in the timebase decoder with none of the
+        // fields that decoder needs.
         val (phone, jetson) = pair()
         writeRaw(phone, mapOf(Session.HELLO to JsonValue.Obj(sortedMapOf())), setOf(Session.HELLO))
 
@@ -2441,6 +2438,19 @@ class SessionTest {
         assertEquals(0L, control.failed, "a bad peer frame is not our bug: $control")
         assertTrue(control.balances, "$control")
         assertTrue(jetson.session.isRunning, "one bad control frame must not end the session")
+
+        // The reason, not just the count. Round 7 pointed out that this test used to assert
+        // only `refused >= 1`, `failed == 0`, `balances` and `isRunning` -- all four of
+        // which held identically whichever decoder did the refusing, so the mechanism the
+        // docstring described was unverified and the exemption it described could be
+        // deleted whole with 250 tests green. A hello has no exchange_id, so the timebase
+        // decoder's answer is `missing_field`, and that is what pins which decoder ran.
+        val reasons = jetson.session.stats().inboundRefusals.getValue(Channels.CONTROL)
+        assertEquals(
+            1L,
+            reasons[RefusalReason.MISSING_FIELD.wire],
+            "a hello reaching the timebase decoder is a missing exchange_id: $reasons",
+        )
     }
 
     @Test
