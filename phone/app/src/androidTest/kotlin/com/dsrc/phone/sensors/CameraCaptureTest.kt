@@ -155,4 +155,68 @@ class CameraCaptureTest {
             awaitFrames(second.pipeline, 3, 20_000) >= 3,
         )
     }
+
+    @Test
+    fun theRequestedAspectRatioReachesTheCamera() {
+        // Task 18's headline result had no test. Deleting the aspect-ratio strategy from
+        // CameraXSource restores exactly the documented bug -- asking for 1280x720 on a
+        // device that offers it returns 640x480 -- and all five tests here passed, because
+        // framesCarryDecodableJpegAtTheReportedSize compares the decoded bitmap against the
+        // frame's *own* width and height, which is self-consistent at any size.
+        //
+        // The ratio is what the fix controls, and asserting it is hardware-independent:
+        // ResolutionSelector defaults to 4:3, so without the strategy a 16:9 request is
+        // filtered out of the candidate set before any resolution rule runs. 640x480 is
+        // 1.333 against a requested 1.778.
+        val config = SensingConfig(cameraHz = 5.0, cameraWidth = 1280, cameraHeight = 720)
+        val harness = start(config)
+        val frame = awaitOneFrame(harness.pipeline, 15_000)
+        assertNotNull("no frame arrived", frame)
+        frame!!
+
+        val requested = config.cameraWidth.toDouble() / config.cameraHeight
+        val delivered = frame.width.toDouble() / frame.height
+        assertEquals(
+            "the requested ${config.cameraWidth}x${config.cameraHeight} ratio did not reach " +
+                "the camera: got ${frame.width}x${frame.height}",
+            requested,
+            delivered,
+            0.02,
+        )
+
+        // And on this emulator the exact size is available, so the request should be met
+        // outright. Stated separately from the ratio because it is the one part of this
+        // that is a property of the device rather than of the code.
+        assertEquals("emulator offers 1280x720 exactly", 1280, frame.width)
+        assertEquals("emulator offers 1280x720 exactly", 720, frame.height)
+    }
+
+    @Test
+    fun theConfiguredJpegQualityReachesTheEncoder() {
+        // jpegQuality reached no assertion anywhere: the pipeline's compress(..., quality)
+        // could be hardcoded to 1 and CapturedFrame.quality set to null, and the whole
+        // suite -- JVM and instrumented -- stayed green. CameraMeasurementTest logs
+        // config.jpegQuality rather than the frame's.
+        //
+        // Two qualities, because asserting one value proves only that *a* number arrived.
+        // A low quality must produce a materially smaller JPEG at the same resolution.
+        val high = start(SensingConfig(cameraHz = 5.0, jpegQuality = 95))
+        val highFrame = awaitOneFrame(high.pipeline, 15_000)
+        assertNotNull("no frame at quality 95", highFrame)
+        assertEquals("the frame must report the quality it was encoded at", 95, highFrame!!.quality)
+        val highBytes = highFrame.jpeg.size
+        high.stop()
+
+        val low = start(SensingConfig(cameraHz = 5.0, jpegQuality = 30))
+        val lowFrame = awaitOneFrame(low.pipeline, 15_000)
+        assertNotNull("no frame at quality 30", lowFrame)
+        assertEquals(30, lowFrame!!.quality)
+
+        assertTrue(
+            "quality 30 produced ${lowFrame.jpeg.size} bytes against ${highBytes} at 95, " +
+                "so the setting is not reaching the encoder",
+            lowFrame.jpeg.size < highBytes,
+        )
+    }
+
 }
