@@ -119,6 +119,33 @@ Instrumented, on the device:
   failed teardown — added to `WORKER_PREFIXES`, so the existing teardown tests cover it
   without new tests.
 
+## What was built, and the two decisions that moved
+
+Built as planned, with two departures worth naming.
+
+The timebase check's *verdict* is a pure function on the companion
+(`ImuSource.verdictFor`), not a private method. The plan said the policy would be pinned
+rather than the platform's behaviour, and that is only true if a JVM test can reach it --
+the emulator's virtual sensors report the same clock, so the mismatched branch is inert on
+a device and an instrumented test of it would assert nothing.
+
+`unpaired` is offered through its own entry point (`offerUnpaired`) rather than as a
+nullable reading. The alternative was an `ImuReading` with nullable gyro axes, which would
+have put a null in the one place the wire format has none and invited someone to fill it
+with zeros later.
+
+Two of the tests written for this could not fail, and both were found by mutation rather
+than by reading them:
+
+- The gyro ages in the summary test only ever rose, so "keep the maximum" and "keep the
+  last" gave the same answer. Fixed by making them descend.
+- The stale-gyro test used 5 ms and 25 ms against a 20 ms period, stepping over the
+  boundary, so `>` and `>=` agreed. Fixed by asserting exactly one period, which is *not*
+  stale because "older than one period" is strict.
+
+That is the same shape as the two findings in section E's status note, and it keeps
+happening in the tests rather than in the code.
+
 ## What this task does not settle
 
 - Whether the pairing approximation is good enough for the Jetson's fusion. That is a
