@@ -255,7 +255,7 @@ class Session(
             // only reserved keys and the channel name left six of the nine refusal
             // reasons unreachable outbound, so a message our own decoder would refuse
             // went out and came back as the peer's drop counter.
-            OutboundValidation.check(channel, extensions, payload, allowed)
+            MessageValidation.check(channel, extensions, payload, allowed)
 
             // Then the size. Only two fields are still unknown here: the sequence
             // number, which `enqueue` assigns under its own lock a moment from now, and
@@ -500,6 +500,17 @@ class Session(
                 }
 
                 if (frame.channel == Channels.CONTROL && handleTimeSync(frame)) continue
+                // The receiving half of the refusal table. Without it a malformed frame
+                // was handed to the application unchecked, and `inboundRefusals` moved
+                // only when a handler happened to throw -- so a deliberately bad record
+                // from the live Python peer crossed and was counted nowhere.
+                try {
+                    MessageValidation.checkInbound(frame)
+                } catch (e: MessageError) {
+                    countInboundRefusal(frame.channel, e.reason.wire)
+                    continue
+                }
+
                 try {
                     onFrame(frame)
                 } catch (e: MessageError) {

@@ -58,14 +58,55 @@ class InteropTest {
         return quoted.ifEmpty { raw }
     }
 
+    /**
+     * The peer's summary, parsed rather than pattern-matched.
+     *
+     * The substring checks this replaces were the weak link. A `contains` on
+     * `"first_seq": {"gps": 0}` depends on Python's default `json.dumps` spacing, says
+     * nothing about any other channel, and cannot reach a nested counter at all -- so the
+     * "counters compared field by field" the plan promised was never happening.
+     *
+     * Parsed with our own decoder, which is not circular: the golden vectors pin that
+     * decoder against frozen Python bytes in both directions, so it is validated
+     * independently of anything this file asserts.
+     */
+    private fun summaryOf(line: String): Map<String, JsonValue> =
+        (Json.decode(line) as? JsonValue.Obj)?.entries ?: error("summary is not an object: $line")
+
+    private fun Map<String, JsonValue>.obj(key: String): Map<String, JsonValue> =
+        (this[key] as? JsonValue.Obj)?.entries ?: error("'$key' is not an object in $this")
+
+    private fun Map<String, JsonValue>.num(key: String): Long =
+        (this[key] as? JsonValue.Num)?.value ?: error("'$key' is not an integer in $this")
+
+    private fun Map<String, JsonValue>.text(key: String): String? =
+        when (val value = this[key]) {
+            is JsonValue.Text -> value.value
+            null, is JsonValue.Null -> null
+            else -> error("'$key' is not a string in $this")
+        }
+
+    /** One channel's counters, from the peer's own ChannelStats. */
+    private fun Map<String, JsonValue>.channel(name: String): Map<String, JsonValue> =
+        obj("channels").obj(name)
+
     private class Peer(val process: Process, val stdout: BufferedReader, val port: Int)
 
-    private fun startPeer(seconds: Double = 30.0, echoAdvisory: Boolean = false): Peer {
+    private fun startPeer(
+        seconds: Double = 30.0,
+        echoAdvisory: Boolean = false,
+        quietDrain: Boolean = false,
+        sendMalformed: Boolean = false,
+        sendFramingError: Boolean = false,
+    ): Peer {
         val command = buildList {
             add("python3")
             add("scripts/interop_jetson_peer.py")
             add("--seconds"); add(seconds.toString())
             if (echoAdvisory) add("--echo-advisory")
+            if (quietDrain) add("--quiet-drain")
+            if (sendMalformed) add("--send-malformed")
+            if (sendFramingError) add("--send-framing-error")
         }
         val builder = ProcessBuilder(command).directory(repoRoot)
         builder.redirectErrorStream(false)
@@ -127,12 +168,23 @@ class InteropTest {
     }
 
     @Test
-    fun `gps records cross to the python side intact and in order`() {
-        val peer = startPeer(seconds = 25.0)
+    fun `a thousand gps records cross with both sides counters agreeing field by field`() {
+        // The plan's step 8 promised a thousand frames and a field-by-field comparison. It
+        // was forty frames and three substring checks against Python's json.dumps spacing.
+        val peer = startPeer(seconds = 90.0, quietDrain = true)
         val session = connect(peer)
 
-        val count = 40
+        val count = 1_000
         repeat(count) { i ->
+            // Paced. `gps` is reliable at depth 64 and a thousand unpaced sends outrun the
+            // writer by a wide margin -- the first attempt dropped 126 of them -- so an
+            // unpaced run cannot make a claim about clean delivery. Overflow gets its own
+            // test, deliberately.
+            while (session.outboundPending() > 32) Thread.sleep(1)
+            // And a breath every twenty-five, because pacing our own queue says nothing
+            // about the peer's: all thousand arrived, and 616 of them were shed by
+            // *Python's* inbound queue at depth 64 before its drain reached them.
+            if (i > 0 && i % 25 == 0) Thread.sleep(5)
             val record = GpsRecord(
                 captureMonoNs = 1_000_000L + i,
                 valid = true,
@@ -149,38 +201,190 @@ class InteropTest {
             assertTrue(session.send(Channels.GPS, record.toExtensions()), "send $i was refused")
         }
 
-        val summary = finishAndSummarise(peer, session)
-        assertNull(field(summary, "drain_error"), "the peer's drain failed: $summary")
+        val summary = summaryOf(finishAndSummarise(peer, session, settleMs = 3_000))
+        assertNull(summary.text("drain_error"), "the peer's drain failed: $summary")
 
-        val sent = session.stats().channels.getValue(Channels.GPS).sent
-        val received = field(summary, "frames_received")?.toIntOrNull() ?: -1
-        assertEquals(sent, received.toLong(), "python received $received of $sent written: $summary")
-        assertEquals(count.toLong(), sent, "nothing should be dropped at depth 64: $summary")
+        val ours = session.stats().channels.getValue(Channels.GPS)
+        val theirs = summary.channel(Channels.GPS)
 
-        // Sequence numbers are the peer's evidence about drops, so they matter as much as
-        // the payloads.
-        assertTrue(summary.contains("\"monotonic_seq\": {\"gps\": true}"), summary)
-        assertTrue(summary.contains("\"first_seq\": {\"gps\": 0}"), summary)
+        assertEquals(count.toLong(), ours.sent, "we did not write them all: $ours")
+        assertEquals(0L, ours.dropped, "we dropped some: $ours")
+
+        // The interop claim: every frame we wrote arrived, and none was lost on the wire.
+        assertEquals(ours.sent, theirs.num("received"), "arrivals disagree: $ours vs $theirs")
+        assertEquals(0L, theirs.num("missing_seqs"), "frames were lost in flight: $theirs")
+        assertEquals(0L, theirs.num("seq_gaps"), "a gap with nothing dropped: $theirs")
+
+        // Deliberately *not* asserted: that `delivered` equals `received`. The gap between
+        // them is Python's own inbound queue shedding at depth 64 because this harness's
+        // drain thread is slower than the arrival rate -- 616 at full speed, 11 once the
+        // send was paced. That is the harness's backpressure, not an interop property, and
+        // driving it to zero means tuning a sleep until a number appears, which buys the
+        // metric rather than measuring it. What must hold is that the peer's own accounting
+        // adds up, so nothing vanishes unattributed on its side either.
+        assertEquals(
+            theirs.num("received"),
+            theirs.num("delivered") + theirs.num("dropped_inbound"),
+            "python's own inbound accounting does not balance: $theirs",
+        )
     }
 
     @Test
-    fun `python decodes our gps fields, not merely our bytes`() {
-        // A frame can arrive intact and still be rejected by the far side's message
-        // layer. The peer's counters distinguish the two: `received` counts arrivals,
-        // `delivered` counts messages its decoder accepted.
-        val peer = startPeer(seconds = 20.0)
+    fun `a deliberate overflow is counted the same on both sides`() {
+        // `camera` is latest_wins at depth one, so a burst is guaranteed to displace. What
+        // we drop must equal what the peer finds missing -- one fact seen from two ends,
+        // and nothing compared them before.
+        val peer = startPeer(seconds = 60.0, quietDrain = true)
         val session = connect(peer)
-        repeat(10) { i -> session.send(Channels.GPS, GpsRecord.noFix(i.toLong()).toExtensions()) }
-        val summary = finishAndSummarise(peer, session)
 
-        assertNull(field(summary, "drain_error"), summary)
-        val gps = Regex(""""gps"\s*:\s*\{([^}]*)}""").findAll(summary)
-            .map { it.groupValues[1] }
-            .firstOrNull { it.contains("received") }
-            ?: error("no gps channel counters in: $summary")
-        assertTrue(gps.contains("\"received\": 10"), "python counted: $gps")
-        assertTrue(gps.contains("\"delivered\": 10"), "python's decoder rejected some: $gps")
-        assertTrue(gps.contains("\"dropped_inbound\": 0"), "python dropped some: $gps")
+        val payload = ByteArray(40_960) { ((it * 37 + 11) % 256).toByte() }
+        val burst = 200
+        repeat(burst) { i ->
+            session.send(
+                Channels.CAMERA,
+                mapOf(
+                    Fields.CAPTURE_KEY to JsonValue.Num(1_000_000_000L + i),
+                    "frame_id" to JsonValue.Num(i.toLong()),
+                    "width" to JsonValue.Num(1280),
+                    "height" to JsonValue.Num(720),
+                    "format" to JsonValue.Text("jpeg"),
+                    "quality" to JsonValue.Num(85),
+                ),
+                payload,
+            )
+        }
+
+        val summary = summaryOf(finishAndSummarise(peer, session, settleMs = 3_000))
+        assertNull(summary.text("drain_error"), summary.toString())
+
+        val ours = session.stats().channels.getValue(Channels.CAMERA)
+        val theirs = summary.channel(Channels.CAMERA)
+        assertEquals(burst.toLong(), ours.enqueued, "not every frame was offered: $ours")
+        assertTrue(ours.dropped > 0, "a 200-deep burst on a depth-1 queue dropped nothing: $ours")
+        assertEquals(
+            ours.sent,
+            theirs.num("received"),
+            "we wrote ${ours.sent} and python saw ${theirs.num("received")}",
+        )
+        // Everything offered either arrived or was counted as dropped.
+        assertEquals(ours.enqueued, ours.sent + ours.dropped, "our own accounting: $ours")
+
+        // The peer sees the gaps, but it cannot see them all: a receiver has no way to know
+        // about drops *after* the last frame it received, so its count is a lower bound on
+        // ours. Asserting equality was wrong -- 193 dropped against 92 gaps found, and the
+        // difference is the tail. What must hold is that it saw some, and never more than
+        // we dropped.
+        val gaps = theirs.num("missing_seqs")
+        assertTrue(gaps > 0, "python saw no gaps at all despite ${ours.dropped} drops: $theirs")
+        assertTrue(gaps <= ours.dropped, "python found more gaps ($gaps) than we dropped (${ours.dropped})")
+
+        // Python's own inbound queue is latest_wins at depth one too, so it sheds on its
+        // side as well -- which is why `delivered` is below `received` here and the two
+        // numbers answer different questions.
+        assertEquals(
+            theirs.num("received"),
+            theirs.num("delivered") + theirs.num("dropped_inbound"),
+            "python's own inbound accounting does not balance: $theirs",
+        )
+    }
+
+    @Test
+    fun `a malformed frame from python costs one message, and our counter names it`() {
+        // The plan promised this and it was never provoked. It also replaces an assertion
+        // that read `dropped_inbound: 0` off the *peer's* counters and presented it as
+        // ours -- we had no inbound counter to check, so it covered nothing it appeared to.
+        val peer = startPeer(seconds = 40.0, sendMalformed = true)
+        val session = connect(peer)
+
+        val sent = peer.stdout.readLine() ?: error("the peer never reported sending it")
+        assertTrue(sent.contains("sent_malformed"), "unexpected line: $sent")
+
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline &&
+            session.stats().inboundRefusals[Channels.GPS] == null
+        ) {
+            Thread.sleep(20)
+        }
+        val refusals = session.stats().inboundRefusals[Channels.GPS]
+            ?: error("we did not refuse it: ${session.stats().inboundRefusals}")
+        assertEquals(
+            1L,
+            refusals[RefusalReason.OUT_OF_RANGE.wire],
+            "refused for the wrong reason: $refusals",
+        )
+        // One bad record costs one record. At 50 Hz, reconnecting over a single malformed
+        // IMU sample would be far worse than dropping it.
+        assertTrue(session.isRunning, "a malformed message ended the session")
+        assertTrue(
+            session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()),
+            "the session stopped carrying traffic",
+        )
+    }
+
+    @Test
+    fun `a framing error from python ends the session, unlike a malformed message`() {
+        // The other half of the recoverability rule: a framing error means the byte stream
+        // has desynchronised and there is no delimiter to hunt for.
+        val ends = mutableListOf<SessionEnd>()
+        val peer = startPeer(seconds = 40.0, sendFramingError = true)
+        val socket = Socket(InetAddress.getLoopbackAddress(), peer.port).also { this.socket = it }
+        val session = Session(
+            input = socket.getInputStream(),
+            output = socket.getOutputStream(),
+            deviceId = "interop-phone",
+            role = "phone",
+            monoClock = { System.nanoTime() },
+            wallClock = { System.currentTimeMillis() * 1_000_000 },
+            onFrame = {},
+            onEnd = { reason, _ -> synchronized(ends) { ends.add(reason) } },
+        ).also { this.session = it }
+        session.start()
+
+        val deadline = System.currentTimeMillis() + 15_000
+        while (System.currentTimeMillis() < deadline && synchronized(ends) { ends.isEmpty() }) {
+            Thread.sleep(20)
+        }
+        assertEquals(
+            listOf(SessionEnd.FRAMING_ERROR),
+            synchronized(ends) { ends.toList() },
+            "an over-size header did not end the session as a framing error",
+        )
+        assertTrue(!session.isRunning)
+    }
+
+    @Test
+    fun `python answers our ping and echoes the wire stamp we wrote`() {
+        // The timebase exchange across the language boundary, which nothing exercised: the
+        // responder was reachable from no code path, so a ping was delivered to an
+        // application with no handler and no pong was ever produced.
+        val received = mutableListOf<Frame>()
+        val peer = startPeer(seconds = 40.0)
+        val session = connect(peer) { synchronized(received) { received.add(it) } }
+
+        assertTrue(session.sendTimeSyncPing(exchangeId = 4242))
+
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline &&
+            synchronized(received) { received.none { it.channel == Channels.CONTROL } }
+        ) {
+            Thread.sleep(20)
+        }
+        val pong = synchronized(received) { received.firstOrNull { it.channel == Channels.CONTROL } }
+            ?: error("no pong arrived; got ${synchronized(received) { received.map { it.channel } }}")
+
+        val decoded = TimeSyncMessage.fromWire(pong.header.entries, pong.payload)
+        assertEquals(4242, decoded.exchangeId, "python changed the exchange id")
+        assertTrue(!decoded.isPing, "python answered with a ping")
+        // The echoed t1 makes the offset computable, and a constant zero here would look
+        // like a working exchange while making every estimate wrong.
+        assertTrue(
+            (decoded.peerWireMonoNs ?: 0L) > 0L,
+            "our wire stamp came back as ${decoded.peerWireMonoNs}",
+        )
+        assertTrue(
+            decoded.peerRecvMonoNs != null && decoded.peerRecvWallNs != null,
+            "a pong with a partial peer triple: $decoded",
+        )
     }
 
     @Test
@@ -202,9 +406,17 @@ class InteropTest {
                 payload,
             )
         )
-        val summary = finishAndSummarise(peer, session)
-        assertNull(field(summary, "drain_error"), summary)
-        assertTrue(summary.contains("\"camera\": 1"), "the camera frame did not arrive: $summary")
+        val summary = summaryOf(finishAndSummarise(peer, session))
+        assertNull(summary.text("drain_error"), summary.toString())
+        val theirs = summary.channel(Channels.CAMERA)
+        assertEquals(1L, theirs.num("received"), "the camera frame did not arrive: $theirs")
+        assertEquals(1L, theirs.num("delivered"), "python's decoder refused it: $theirs")
+        // The payload is in bytes_received along with its header, so the floor is what
+        // matters: fewer bytes than the image means the image did not cross whole.
+        assertTrue(
+            theirs.num("bytes_received") >= payload.size.toLong(),
+            "only ${theirs.num("bytes_received")} bytes for a ${payload.size}-byte image",
+        )
     }
 
     @Test
@@ -216,7 +428,7 @@ class InteropTest {
         val summary = finishAndSummarise(peer, session, settleMs = 300)
 
         assertTrue(
-            (field(summary, "heartbeats_received")?.toIntOrNull() ?: 0) >= 2,
+            summaryOf(summary).num("heartbeats_received") >= 2,
             "python saw too few of our keepalives: $summary",
         )
         assertTrue(

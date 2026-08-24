@@ -267,8 +267,8 @@ class TypedMessagesTest {
         // documented the exemption was read by nothing -- so it could not go stale in a way
         // anything would notice.
         assertTrue(
-            OutboundValidation.ALL_CHANNELS_HAVE_A_DECODER,
-            "no decoder for ${OutboundValidation.CHANNELS_WITHOUT_A_DECODER}",
+            MessageValidation.ALL_CHANNELS_HAVE_A_DECODER,
+            "no decoder for ${MessageValidation.CHANNELS_WITHOUT_A_DECODER}",
         )
     }
 
@@ -277,7 +277,7 @@ class TypedMessagesTest {
         val reached = mutableSetOf<RefusalReason>()
         fun attempt(channel: String, extensions: Map<String, JsonValue>, payload: ByteArray = ByteArray(0)) {
             try {
-                OutboundValidation.check(channel, extensions, payload)
+                MessageValidation.check(channel, extensions, payload)
             } catch (e: MessageError) {
                 reached.add(e.reason)
             } catch (e: FramingError) {

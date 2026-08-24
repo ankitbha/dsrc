@@ -105,17 +105,17 @@ class CameraFrameMessageTest {
     fun `the camera channel is no longer exempt from the sender rule`() {
         // It was, and it was the one channel where an unchecked field would travel
         // thousands of times before anyone looked.
-        assertTrue(OutboundValidation.ALL_CHANNELS_HAVE_A_DECODER)
+        assertTrue(MessageValidation.ALL_CHANNELS_HAVE_A_DECODER)
 
         val error = runCatching {
-            OutboundValidation.check(Channels.CAMERA, message(width = 0).toExtensions(), jpeg)
+            MessageValidation.check(Channels.CAMERA, message(width = 0).toExtensions(), jpeg)
         }.exceptionOrNull()
         assertTrue("an invalid frame passed outbound validation", error is MessageError)
     }
 
     @Test
     fun `a valid frame passes outbound validation with its payload`() {
-        OutboundValidation.check(Channels.CAMERA, message().toExtensions(), jpeg)
+        MessageValidation.check(Channels.CAMERA, message().toExtensions(), jpeg)
     }
 
     @Test

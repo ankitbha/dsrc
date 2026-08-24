@@ -259,14 +259,21 @@ object Fields {
 }
 
 /**
- * Applies a receiver's rules to an outbound message.
+ * The refusal table, applied in both directions.
  *
- * The spec makes every refusal a *sender* rule as well: "before a message goes out, it
- * must satisfy the same table." A receiver rule alone leaves the sender free to emit
- * garbage and learn about it as someone else's drop counter, and the Python side runs its
- * typed decoder on every outbound message for exactly this reason.
+ * The spec states every condition as a *receiver* rule -- "message dropped, counted" --
+ * and then makes it a sender rule too: "before a message goes out, it must satisfy the
+ * same table." Both halves are needed and for different reasons. A receiver rule alone
+ * leaves the sender free to emit garbage and learn about it as someone else's drop
+ * counter. A sender rule alone leaves the receiver trusting whatever arrives, which is
+ * worse: the peer may be an older build, or a different language, or wrong.
+ *
+ * The receiving half was missing here. `send` ran the decoder and the reader did not, so a
+ * malformed frame from the peer was handed to the application unchecked and
+ * `inboundRefusals` only ever moved when an application handler happened to throw. A
+ * deliberately malformed record from the live Python peer crossed and was counted nowhere.
  */
-object OutboundValidation {
+object MessageValidation {
 
     /**
      * The typed decoder for every channel, by channel id.
@@ -313,6 +320,16 @@ object OutboundValidation {
      * @param allowReserved reserved keys this message legitimately carries -- the hello and
      *   heartbeat the transport sends itself, and the wire stamp on a timebase message.
      */
+    /**
+     * Apply the table to a frame that arrived.
+     *
+     * The wire stamp is allowed because the peer's *transport* adds it, so it is not a
+     * caller's reserved key on the way in -- refusing it would drop every timebase-stamped
+     * message the peer sends.
+     */
+    fun checkInbound(frame: Frame) =
+        check(frame.channel, frame.header.entries, frame.payload, allowReserved = setOf(Session.WIRE_STAMP))
+
     fun check(
         channel: String,
         extensions: Map<String, JsonValue>,
