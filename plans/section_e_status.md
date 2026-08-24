@@ -519,7 +519,7 @@ a *different* fix lands, and nothing announces it.
 
 ## What the suites cost, and the one thing that made them lie
 
-246 transport + 236 app JVM + 53 instrumented + 942 Python. The instrumented suite is
+252 transport + 245 app JVM + 53 instrumented + 952 Python. The instrumented suite is
 ~2 minutes and the Python suite ~47 seconds; the JVM suites are seconds.
 
 Instrumented runs were intermittently reporting failures in tests nobody had touched,
@@ -529,6 +529,28 @@ the one emulator kill each other, and whichever test was executing when the inst
 landed is named as the failure. A diagnosis pointing at innocent code is worse than a
 crash. `scripts/with_device.py` takes an exclusive lock; every device-touching command
 goes through it, including from a validator's mirror.
+
+## The pin harnesses
+
+`scripts/remutate.py` and `scripts/remutate_device.py` re-apply every mutation that some
+test is supposed to catch, and report one that no longer fails. They exist because a pin
+lapsed silently: a test written for the `Failed`-from-`RUNNING` route was driven by a
+throwing status listener, and a later unrelated fix -- containing listener exceptions --
+closed the door that trigger used. The test kept passing, and mutating the teardown away
+left all 53 instrumented tests green.
+
+Run them after landing a **batch** of fixes, not after landing one. That is when a fix
+defeats another fix's pin, and it has now happened twice: the second time, removing an
+inert-looking exemption from the control decoder made `handleTimeSync`'s error path
+unreachable, and the harness caught it between two commits.
+
+An anchor that no longer matches is reported as a failure rather than skipped, because
+the code having moved is exactly when the question matters.
+
+```
+python3 scripts/remutate.py           # JVM and Python, ~4 min
+python3 scripts/remutate_device.py    # instrumented, ~2 min per entry plus lock wait
+```
 
 ## How to run any of it
 

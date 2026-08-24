@@ -239,7 +239,16 @@ class SessionHolder(
         sendsWithoutSession = sendsWithoutSession.get(),
         lastEnd = lastEnd,
         lastError = lastError,
-        session = current?.stats(),
+        // Only a *live* session's counters. `current` is cleared by the link thread some
+        // time after `finish()` flips `isRunning`, so reading it unfiltered reported a dead
+        // session's counters as current -- which is the accounting error the test named for
+        // this has always described, while passing or failing on whether the link thread
+        // had got round to clearing the field yet. It reproduced 3 runs of 3 once an
+        // unrelated transport change shifted the timing by a hair.
+        //
+        // `usable` is the same predicate `sendOn` gates on, so the two agree by
+        // construction: if a send would be refused, the counters are not reported either.
+        session = current?.takeIf { usable(it) }?.stats(),
     )
 
     data class HolderStats(

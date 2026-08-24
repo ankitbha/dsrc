@@ -416,3 +416,44 @@ def test_the_legitimate_edges_of_each_guard_still_decode():
     frame = read_frame(reader_for(data))
     assert frame.seq == 9223372036854775807
     assert frame.extensions["speed_mps"] == 13.4
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"ch": "gps", "seq": 2**63, "n": 0, "t_mono_ns": 1, "t_wall_ns": 2},
+        {"ch": "gps", "seq": 1, "n": 0, "t_mono_ns": 1, "t_wall_ns": 2, "utc_epoch_ns": 2**63},
+        {"ch": "gps", "seq": 1, "n": 0, "t_mono_ns": 1, "t_wall_ns": 2, "t_capture_mono_ns": -(2**63) - 1},
+        {"ch": "rate_cmd", "seq": 1, "n": 0, "t_mono_ns": 1, "t_wall_ns": 2, "rates": {"gps_hz": 2**63}},
+    ],
+)
+def test_an_integer_this_reader_would_refuse_is_not_encodable(header):
+    """The read door was closed and the write door left open.
+
+    Python's ints are unbounded, so 2**63 in a stamp encoded cleanly, passed
+    MessageRouter.send's own decoder -- require_int and optional_int have no range,
+    unlike check_count -- went out, and ended the peer's session as a framing error,
+    because its parser reads into a signed 64-bit Long. One side losing the link for
+    a value the other considered fine is the asymmetry the non-finite guards exist to
+    remove, arriving from the sending end.
+
+    Nested values too: a rate inside `rates` is as much on the wire as `seq` is.
+    """
+    with pytest.raises(FramingError, match="not encodable"):
+        encode_header(header)
+
+
+def test_the_widest_values_the_protocol_carries_still_encode():
+    """Long.MAX_VALUE is a value this protocol carries on purpose.
+
+    A guard that refuses the class must not refuse its own edge -- the header comment
+    in Json.kt names exactly this value.
+    """
+    encoded = encode_header(
+        {"ch": "gps", "seq": 2**63 - 1, "n": 0, "t_mono_ns": 1, "t_wall_ns": -(2**63)}
+    )
+    assert b"9223372036854775807" in encoded
+
+    # And it round-trips through this module's own reader, which is the clearest
+    # statement of what the guard is for: we must not emit headers we cannot read back.
+    data = struct.pack(">IH", 0, len(encoded)) + encoded
+    assert read_frame(reader_for(data)).seq == 2**63 - 1

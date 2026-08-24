@@ -184,7 +184,17 @@ class GpsLocationSource(
                 // on the wire. Zero would be a claim that the vehicle is stopped.
                 speedMps = if (fix.hasSpeed) fix.speedMps.toDouble() else null,
                 headingDeg = if (fix.hasBearing) normaliseBearing(fix.bearingDeg) else null,
-                satellites = fix.satellitesUsedInFix.coerceAtLeast(0).toLong(),
+                // Counted, like the receipt clamp above it and for the same reason. A
+                // negative platform count was silently rewritten to 0, which on the wire is
+                // indistinguishable from "no satellites used" -- on a record carrying
+                // valid = true and fix_quality = 1. A correction nobody can see is a
+                // measurement nobody can trust.
+                satellites = if (fix.satellitesUsedInFix < 0) {
+                    clampedSatellites.incrementAndGet()
+                    0L
+                } else {
+                    fix.satellitesUsedInFix.toLong()
+                },
                 hdop = null,
                 altitudeM = if (fix.hasAltitude) fix.altitudeM else null,
                 utcEpochNs = utcNanos(fix.utcEpochMs),
@@ -223,6 +233,9 @@ class GpsLocationSource(
          * and which is a companion function because the tests drive it directly.
          */
         val clampedReceipts = java.util.concurrent.atomic.AtomicLong(0)
+
+        /** Fixes whose satellite count arrived negative, and was rewritten to zero. */
+        val clampedSatellites = java.util.concurrent.atomic.AtomicLong(0)
 
         /**
          * Fold a bearing into `[0, 360)`, or null if there is no bearing to fold.

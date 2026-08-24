@@ -100,6 +100,35 @@ class Frame:
         return len(encode(self))
 
 
+def _check_int_range(value: Any, path: str = "") -> None:
+    """Refuse to *encode* an integer this decoder would refuse to read.
+
+    The read door was closed and the write door left open. Python's ints are
+    unbounded, so `2**63` in a stamp encoded cleanly, passed `MessageRouter.send`'s
+    own decoder -- `require_int` and `optional_int` have no range, unlike
+    `check_count` -- went out on the wire, and ended the peer's session as a framing
+    error, because its parser reads into a signed 64-bit `Long`. Round-tripping it
+    through this module's own reader raises too, which is the clearest statement of
+    the problem: we were emitting headers we could not read back.
+
+    One side losing the link for a value the other side considered fine is the same
+    asymmetry the non-finite guards exist to remove, arriving from the sending end.
+    """
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        if not MIN_INT64 <= value <= MAX_INT64:
+            raise ValueError(f"{path or 'value'} is {value}, outside signed 64-bit")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _check_int_range(item, f"{path}.{key}" if path else str(key))
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _check_int_range(item, f"{path}[{index}]")
+
+
 def encode_header(header: Mapping[str, Any]) -> bytes:
     """Canonical JSON bytes. Any implementation must match this exactly.
 
@@ -115,6 +144,7 @@ def encode_header(header: Mapping[str, Any]) -> bytes:
     escapes the caller's except clause and kills the thread.
     """
     try:
+        _check_int_range(header)
         return json.dumps(
             header,
             separators=(",", ":"),

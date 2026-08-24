@@ -450,7 +450,16 @@ class SensingService : LifecycleService() {
             release("gps stats") {
                 gpsPipeline?.let {
                     if (!it.isStopped) statsReadBeforeStop.incrementAndGet()
-                    Log.i(TAG, "gps stats ${it.stats}")
+                    // The two silent corrections are logged beside the pipeline's own
+                    // counters. Without this they had no production reader at all: a
+                    // corrected stamp and a rewritten satellite count were visible only to
+                    // a unit test, in a task whose deliverable is logging both clocks.
+                    Log.i(
+                        TAG,
+                        "gps stats ${it.stats} " +
+                            "clampedReceipts=${GpsLocationSource.clampedReceipts.get()} " +
+                            "clampedSatellites=${GpsLocationSource.clampedSatellites.get()}",
+                    )
                 }
             }
             release("link stats") { link?.let { Log.i(TAG, "link stats ${it.stats()}") } }

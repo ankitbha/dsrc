@@ -202,4 +202,28 @@ class GpsLocationSourceTest {
         assertEquals(1L, GpsLocationSource.clampedReceipts.get())
     }
 
+
+    @Test
+    fun `a negative satellite count is rewritten to zero, and counted`() {
+        // The correction three lines from the receipt clamp, left silent when that one was
+        // fixed. Zero satellites is a legitimate reading, so rewriting a negative count to
+        // it makes a broken platform value indistinguishable from a real one -- on a record
+        // carrying valid = true and fix_quality = 1.
+        GpsLocationSource.clampedSatellites.set(0)
+
+        assertEquals(9L, reading(fix(satellitesUsedInFix = 9)).record.satellites)
+        assertEquals("nothing to clamp", 0L, GpsLocationSource.clampedSatellites.get())
+
+        assertEquals(0L, reading(fix(satellitesUsedInFix = -1)).record.satellites)
+        assertEquals(
+            "a rewritten count must not be rewritten in silence",
+            1L,
+            GpsLocationSource.clampedSatellites.get(),
+        )
+
+        // Zero itself is not a correction: it is a fix that used no satellites.
+        assertEquals(0L, reading(fix(satellitesUsedInFix = 0)).record.satellites)
+        assertEquals(1L, GpsLocationSource.clampedSatellites.get())
+    }
+
 }

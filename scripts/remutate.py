@@ -24,6 +24,22 @@ ROOT = pathlib.Path(".")
 GRADLE = ["env", "JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
           "./phone/gradlew", "-p", "phone"]
 
+# Deliberately absent: "deliver decodes a control frame twice"
+# (`if (frame.channel != Channels.CONTROL)` -> `if (true)`).
+#
+# It has no behavioural observable, and I looked for one rather than assuming. Both
+# routes refuse the same frames with the same reasons, because checkInbound's control
+# entry *is* TimeSyncMessage.fromWire. The two things checkInbound would add back --
+# checkAllFinite over the whole extension map, and the payload rule -- are respectively
+# unreachable inbound (both parsers refuse every non-finite literal at the framing layer,
+# so no frame carrying one can arrive) and already enforced by fromWire itself.
+#
+# What restoring the double decode actually does is make handleTimeSync's own
+# `catch (e: MessageError)` dead, because checkInbound's refusal fires first. So it is
+# guarded here, indirectly but genuinely: the entry below named "timebase: a decode
+# failure is passed through, not refused" starts SURVIVING the moment the double decode
+# comes back. An entry that asserts nothing directly is worse than a note saying which
+# entry covers it.
 MUTATIONS = [
     ("inbound: a delivery failure is filed as delivered",
      "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
@@ -44,11 +60,6 @@ MUTATIONS = [
      "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
      '        lastOutboundFramingRefusal = "${cause.javaClass.simpleName}: ${cause.message}"\n        outboundFramingRefusals.incrementAndGet()',
      '        outboundFramingRefusals.incrementAndGet()\n        lastOutboundFramingRefusal = "${cause.javaClass.simpleName}: ${cause.message}"',
-     "transport"),
-    ("deliver: a control frame is decoded twice",
-     "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
-     "        if (frame.channel != Channels.CONTROL) {",
-     "        if (true) {",
      "transport"),
     ("inbound: depth() returns the total across channels",
      "phone/transport/src/main/kotlin/com/dsrc/transport/Queues.kt",

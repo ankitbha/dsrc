@@ -116,8 +116,8 @@ phone/app/src/main/kotlin/com/dsrc/phone/
 |---|---|---|
 | 1 | `RateGate` | pure tests: steady rate, stall then resume with no burst, rate change mid-stream, zero and absurd rates refused |
 | 2 | `CapturedFrame` + `FrameBuffer` | depth-1 replacement counted; drain returns the newest; counters monotonic |
-| 3 | `JpegEncoder` | encodes a synthetic YUV plane; refuses a malformed one rather than emitting a truncated JPEG |
-| 4 | `CameraSource` + fake | the fake drives the whole chain at a commanded rate on the JVM |
+| 3 | `JpegEncoder` (**instrumented**, not pure -- it needs `android.graphics`) | encodes a synthetic YUV plane; refuses a malformed one rather than emitting a truncated JPEG |
+| 4 | `CameraSource` | **no fake was built** -- `CameraPipelineTest` drives `offer` directly instead, including the commanded-rate run, so the coverage exists but the abstraction has one implementation and no second consumer |
 | 5 | `SensingConfig` | rate/resolution/quality read from one place, validated on the way in |
 | 6 | `CameraXSource` | frames arrive on the emulator; `ImageProxy` closed exactly once |
 | 7 | Wire into `SensingService` | `onSensingUp` starts capture, `onSensingDown` stops it; a teardown throw is already handled |
@@ -149,8 +149,8 @@ phone/app/src/main/kotlin/com/dsrc/phone/
 
 **Instrumented**
 - CameraX delivers frames on the emulator and the commanded rate is honoured within
-  tolerance over 10 s.
-- A sustained 30 s run does not stall — the `ImageProxy` leak would show as frames
+  tolerance over 6 s (the figure here said 10 s; the test sleeps 6).
+- A sustained 20 s run does not stall (this said 30 s; the test sleeps 20) — the `ImageProxy` leak would show as frames
   ceasing after the pool size, so this is the test that would catch D7 being wrong.
 - `onSensingDown` releases the camera: a second start succeeds.
 

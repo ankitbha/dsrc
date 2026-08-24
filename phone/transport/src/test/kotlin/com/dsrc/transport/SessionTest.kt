@@ -2728,10 +2728,52 @@ class SessionTest {
         }
         sender.join(5_000)
 
-        assertTrue(samples > 1_000, "only $samples snapshots taken; the probe was not running")
         assertTrue(
             contradictions.isEmpty(),
             "a public snapshot contradicted itself after $samples samples: $contradictions",
+        )
+        // After the invariant, for the same reason as the probe below it.
+        assertTrue(samples > 1_000, "only $samples snapshots taken; the probe was not running")
+    }
+
+
+    @Test
+    fun `an outbound framing refusal is described before it is counted`() {
+        // The other half of the stats-consistency work, and it had no test at all: reverting
+        // this one site to counter-then-description passed the whole 250-test suite, so the
+        // fix was guarded by nothing. Same defect as the delivery-failure pair -- a consumer
+        // sampling between the two writes sees outboundFramingRefusals = 1 with
+        // lastOutboundFramingRefusal = null, from a public method.
+        //
+        // An unknown channel is the cheapest producer: it is a FramingError rather than a
+        // refusal reason, so it lands exactly here. Bounded by a deadline the loop checks
+        // itself.
+        val (phone, _) = pair()
+        val deadline = System.currentTimeMillis() + 3_000
+        val sender = Thread({
+            while (System.currentTimeMillis() < deadline) {
+                phone.session.send("not_a_channel", emptyMap())
+            }
+        }, "framing-refusal-sender").also { it.isDaemon = true; it.start() }
+
+        var samples = 0L
+        var contradiction: String? = null
+        while (System.currentTimeMillis() < deadline && contradiction == null) {
+            val stats = phone.session.stats()
+            samples++
+            if (stats.outboundFramingRefusals > 0 && stats.lastOutboundFramingRefusal == null) {
+                contradiction = "outboundFramingRefusals=${stats.outboundFramingRefusals} with no description"
+            }
+        }
+        sender.join(5_000)
+
+        assertTrue(contradiction == null, "after $samples samples: $contradiction")
+        // Only once the invariant holds: these guard against a vacuous pass, and a run that
+        // ended early because it *found* something is not vacuous.
+        assertTrue(samples > 1_000, "only $samples snapshots taken; the probe was not running")
+        assertTrue(
+            phone.session.stats().outboundFramingRefusals > 0,
+            "nothing was refused, so the probe proves nothing",
         )
     }
 

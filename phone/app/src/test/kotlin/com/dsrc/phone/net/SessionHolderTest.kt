@@ -460,12 +460,24 @@ class SessionHolderTest {
         // thread clearing its reference, because that window is where the accounting was
         // lost: `isRunning` goes false inside finish(), and the field is cleared later.
         assertFalse("a dead session accepted a message", holder.send(Channels.GPS, gpsExtensions()))
+        // Sampled here rather than three calls later, which is strictly better but does
+        // not make this assertion a pin, and saying so matters more than the tidier claim.
+        //
+        // Whether it can fail depends on whether the link thread has cleared `current`
+        // yet. Under load it had not: this test failed 3 runs of 3 while a transport suite
+        // was running beside it, reporting a dead session's counters as current. Idle, it
+        // passes 3 of 3 with the filter in `SessionHolder.stats()` deleted, because
+        // `current` is already null by the time anything reads it. So the filter is a fix
+        // for a race this test *observed* and cannot summon, and the evidence for it is
+        // that failure rather than this assertion.
+        val inTheWindow = holder.stats()
+
         assertEquals(
-            "the refusal was not counted where it happened: ${holder.stats()}",
+            "the refusal was not counted where it happened: $inTheWindow",
             before + 1,
-            holder.stats().sendsWithoutSession,
+            inTheWindow.sendsWithoutSession,
         )
-        assertNull("a dead session's counters were reported as current", holder.stats().session)
+        assertNull("a dead session's counters were reported as current", inTheWindow.session)
     }
 
     @Test
