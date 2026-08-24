@@ -692,3 +692,42 @@ hello frame.
 
 Payloads in the file are described by a deterministic generator rather than
 stored literally, so a 4 MiB case costs nothing to commit.
+
+## Refusal precedence when a record has more than one fault
+
+Unsettled, and recorded here because the two implementations currently disagree.
+
+Every refusal case in the reconciliation injects exactly one fault, so the order in which
+a decoder applies its rules was never compared. It differs. The Python decoder checks
+`utc_epoch_ns` before the constructor and the counts ahead of `lat`/`speed_mps`; the Kotlin
+decoder checks the capture stamp first and speed/heading ahead of the counts. Four
+two-fault inputs therefore get two different answers:
+
+| input | Kotlin | Python |
+|---|---|---|
+| gps: negative `num_sats` + wrong-typed `speed_mps` | `wrong_type` | `out_of_range` |
+| gps: null `t_capture_mono_ns` + wrong-typed `utc_epoch_ns` | `null_not_allowed` | `wrong_type` |
+| camera: missing `height` + null `frame_id` | `missing_field` | `null_not_allowed` |
+| control: negative `exchange_id` + partially filled pong | `null_not_allowed` | `out_of_range` |
+
+Neither answer is wrong on its own — both name a fault that is really there. What is wrong
+is that they differ, because `inboundRefusals` on the phone and `errors_by_reason` on the
+Jetson then attribute the same frames to different causes, which is the one thing
+per-reason counting exists to prevent. One systematic mapping bug in a phone build
+produces multi-fault records by the thousand.
+
+**The rule to adopt: report the most structural fault present.** A field that is absent
+cannot have a type; a field that is null cannot have a range. So:
+
+    unexpected_payload  >  missing_field  >  null_not_allowed  >  wrong_type
+                        >  non_finite  >  out_of_range / unknown_value
+
+That ordering is forced by dependency rather than chosen by taste, and it makes the answer
+independent of the order the decoder happens to walk its fields — which is the property
+that matters, since that order is an implementation detail on both sides.
+
+It is not implemented. Doing so requires both decoders to evaluate every field and then
+select, rather than throwing on the first fault, which is a real change to eight message
+types in two languages. Until then the four rows above are listed in `DifferentialTest` as
+known divergences: a *new* disagreement still fails, and fixing one of these also fails,
+so the list has to shrink deliberately instead of rotting into a permanent exemption.

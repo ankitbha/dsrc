@@ -131,8 +131,31 @@ class DifferentialTest {
                 differentInputs.joinToString("\n"),
         )
 
-        val disagreements = ours.filter { (name, value) -> verdict(theirs.getValue(name)) != verdict(value) }
+        // Recorded, not papered over. These four are the multi-fault rows above, where the
+        // two decoders genuinely disagree because they check fields in different orders.
+        // Listing them means a NEW divergence still fails, and fixing one of these also
+        // fails -- forcing the list to shrink deliberately rather than rotting into a
+        // permanent exemption. The resolution is a precedence rule ("report the most
+        // structural fault present", so absent beats null beats wrong-typed beats
+        // out-of-range) applied on both sides, which needs both decoders to evaluate every
+        // field rather than throw on the first, and is a change worth making on purpose.
+        val knownOrderDivergences = setOf(
+            "two faults: gps negative count and wrong-typed speed",
+            "two faults: gps null capture stamp and wrong-typed utc",
+            "two faults: camera missing height and null frame id",
+            "two faults: control negative exchange id and partial pong",
+        )
+        val disagreements = ours
+            .filter { (name, value) -> verdict(theirs.getValue(name)) != verdict(value) }
+            .filterKeys { it !in knownOrderDivergences }
             .map { (name, value) -> "$name: kotlin=${verdict(value)} python=${verdict(theirs.getValue(name))}" }
+        val agreedAfterAll = knownOrderDivergences
+            .filter { verdict(theirs.getValue(it)) == verdict(ours.getValue(it)) }
+        assertTrue(
+            agreedAfterAll.isEmpty(),
+            "these were recorded as check-order divergences and now agree; remove them from " +
+                "knownOrderDivergences: $agreedAfterAll",
+        )
         assertTrue(
             disagreements.isEmpty(),
             "the two sides disagree on ${disagreements.size} of ${ours.size} cases:\n" +
@@ -376,6 +399,33 @@ class DifferentialTest {
             "control absent peer field" to case(ping - "t_peer_wire_mono_ns", empty) { e, p -> TimeSyncMessage.fromWire(e, p) },
             "control negative exchange id" to case(ping + ("exchange_id" to JsonValue.Num(-5)), empty) { e, p -> TimeSyncMessage.fromWire(e, p) },
             "control negative wire stamp" to case(ping + (Session.WIRE_STAMP to JsonValue.Num(-7)), empty) { e, p -> TimeSyncMessage.fromWire(e, p) },
+            // -- two faults at once ------------------------------------------------
+            //
+            // Every row above injects exactly one fault, so the ORDER in which each
+            // decoder applies its rules has never been compared. It differs: Python
+            // checks utc_epoch_ns before the constructor and the counts ahead of
+            // lat/speed, while this side checks the capture stamp first and speed/heading
+            // ahead of the counts. One systematic mapping bug in a phone build produces
+            // multi-fault records, and then inboundRefusals and errors_by_reason name
+            // different causes for the same frames -- which is what per-reason counting
+            // exists to prevent.
+            "two faults: gps negative count and wrong-typed speed" to case(
+                gps + ("num_sats" to JsonValue.Num(-1)) + ("speed_mps" to JsonValue.Text("x")),
+                empty,
+            ) { e, p -> GpsRecord.fromWire(e, p) },
+            "two faults: gps null capture stamp and wrong-typed utc" to case(
+                gps + (Fields.CAPTURE_KEY to JsonValue.Null) + ("utc_epoch_ns" to JsonValue.Text("x")),
+                empty,
+            ) { e, p -> GpsRecord.fromWire(e, p) },
+            "two faults: camera missing height and null frame id" to case(
+                camera - "height" + ("frame_id" to JsonValue.Null),
+                empty,
+            ) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "two faults: control negative exchange id and partial pong" to case(
+                ping + ("exchange_id" to JsonValue.Num(-5)) +
+                    (TimeSyncMessage.KEY_PEER_RECV_MONO to JsonValue.Num(5)),
+                empty,
+            ) { e, p -> TimeSyncMessage.fromWire(e, p) },
             "control payload on a channel that carries none" to case(ping, byteArrayOf(1)) { e, p -> TimeSyncMessage.fromWire(e, p) },
         )
     }

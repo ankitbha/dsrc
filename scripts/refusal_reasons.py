@@ -116,6 +116,33 @@ CASES = {
     "control negative exchange id": (TimeSyncMessage, {**PING, "exchange_id": -5}, b""),
     "control negative wire stamp": (TimeSyncMessage, {**PING, "t_wire_mono_ns": -7}, b""),
     "control payload on a channel that carries none": (TimeSyncMessage, PING, b"x"),
+
+    # -- two faults at once ------------------------------------------------------
+    #
+    # Every row above injects exactly one fault, so the ORDER in which each decoder
+    # applies its rules has never been compared. It differs: this side checks
+    # utc_epoch_ns before the constructor and the counts ahead of lat/speed, while
+    # Kotlin checks the capture stamp first and speed/heading ahead of the counts. One
+    # systematic mapping bug in a phone build produces multi-fault records, and then
+    # inboundRefusals and errors_by_reason name different causes for the same frames --
+    # which is what per-reason counting exists to prevent.
+    #
+    # Recorded rather than papered over: DifferentialTest allows exactly these names to
+    # disagree and fails on any other, so a NEW divergence is caught and fixing one of
+    # these forces the list to be updated. See specs/transport_protocol.md for the
+    # precedence this should settle on.
+    "two faults: gps negative count and wrong-typed speed": (
+        GpsRecord, {**GPS, "num_sats": -1, "speed_mps": "x"}, b"",
+    ),
+    "two faults: gps null capture stamp and wrong-typed utc": (
+        GpsRecord, {**GPS, "t_capture_mono_ns": None, "utc_epoch_ns": "x"}, b"",
+    ),
+    "two faults: camera missing height and null frame id": (
+        CameraFrame, {k: v for k, v in CAMERA.items() if k != "height"} | {"frame_id": None}, b"",
+    ),
+    "two faults: control negative exchange id and partial pong": (
+        TimeSyncMessage, {**PING, "exchange_id": -5, "t_peer_recv_mono_ns": 5}, b"",
+    ),
 }
 
 
