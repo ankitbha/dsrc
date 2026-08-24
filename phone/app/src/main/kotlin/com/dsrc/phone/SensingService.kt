@@ -183,15 +183,25 @@ class SensingService : LifecycleService() {
                 }
             }
             SensingState.STOPPING -> {
+                // Outside the try, because it does not throw: every release inside it is
+                // individually guarded, and that is the property the whole arrangement
+                // rests on. Leaving it inside implied a failure mode it does not have.
+                onSensingDown()
                 try {
-                    onSensingDown()
                     handle(SensingEvent.Stopped)
                 } catch (t: Throwable) {
-                    // The machine models a failure during shutdown; until now nothing
-                    // could produce one, and the exception escaped to onStartCommand
-                    // and killed the process instead.
+                    // Recorded here, not offered to the machine. Round 4 showed why: the
+                    // only way into this catch is through handle's own subtree, and
+                    // `machine.offer` advances the state *before* anything below it runs --
+                    // so by the time we arrive the machine is already IDLE, where `Failed`
+                    // is ignored. The previous shape offered it anyway and left the failure
+                    // in a log line: no STOPPED_ERROR, no lastFailure, nothing a caller
+                    // could see. The claim that this catch was dead was wrong; what is
+                    // actually dead is the machine's Failed-from-STOPPING arm, and only
+                    // because every reachable door has the machine past STOPPING.
+                    shutdownFailures.incrementAndGet()
+                    lastShutdownFailure = "${t.javaClass.name}: ${t.message}"
                     Log.e(TAG, "sensing failed to stop cleanly", t)
-                    handle(SensingEvent.Failed(t.toString()))
                 }
             }
             SensingState.IDLE,
@@ -389,10 +399,15 @@ class SensingService : LifecycleService() {
      * This method therefore does not throw, which has two consequences worth stating.
      * `onDestroy` calls it with no catch of its own, so a throw here was process death on
      * any platform teardown -- and a seam that escaped it did exactly that, killing the
-     * instrumentation run with "Unable to stop service". And `react(STOPPING)`'s catch,
-     * plus the machine's `Failed`-from-`STOPPING` arm, are now unreachable *through this
-     * call*. They stay because that branch may grow a second call, but they are dead today
-     * and saying so is better than leaving a reader to assume otherwise.
+     * instrumentation run with "Unable to stop service". It is now called outside
+     * `react(STOPPING)`'s try, since leaving it inside implied a failure mode it does not
+     * have.
+     *
+     * The second consequence I got wrong. I wrote that `react(STOPPING)`'s catch was dead
+     * along with the machine's `Failed`-from-`STOPPING` arm; round 4 showed the catch is
+     * reachable through the *other* statement in that try, and that when it fired the
+     * failure was recorded nowhere. The arm is dead, but for a different reason: every
+     * reachable door has the machine past `STOPPING` by the time the catch runs.
      */
     private fun onSensingDown() {
         // Order matters, and it is the reverse of construction: stop the producers first
@@ -591,6 +606,20 @@ class SensingService : LifecycleService() {
          */
         @Volatile
         internal var resourcesHeldAfterTeardown: Int = -1
+
+        /**
+         * Failures raised while publishing the stop, which the machine cannot represent.
+         *
+         * The remaining door is a platform call inside `release()` -- `stopForeground` or
+         * `stopSelf` -- and I could not make either throw on this emulator, so this pair is
+         * recorded rather than pinned. Stated plainly because the alternative is the shape
+         * that has now been wrong twice here: an argument that a path cannot be reached,
+         * standing in for a test.
+         */
+        internal val shutdownFailures = java.util.concurrent.atomic.AtomicInteger(0)
+
+        @Volatile
+        internal var lastShutdownFailure: String? = null
 
         /**
          * Release steps that threw, across every instance.

@@ -339,4 +339,41 @@ class CameraPipelineTest {
         assertEquals(0, settled.copy(encoded = 3, abandoned = 2).inFlight)
     }
 
+
+    @Test
+    fun `a rejected encode submit leaves the frame under a heading, not in flight`() {
+        // The one submit with no guard. `running` is read before the submit, and in the
+        // service the encoder is shut down four release steps before the pipeline is
+        // stopped -- so a frame already past that check meets a dead executor. The
+        // rejection escaped `offer` entirely, into CameraXSource's analyzer catch where it
+        // is logged as "analyzer failed": `accepted` incremented with no outcome, so
+        // `inFlight` never returned to zero and a teardown read as an encoder backlog.
+        // That is precisely the misreading `abandoned` and `packFailures` were added to
+        // prevent, arriving through the door neither of them covered.
+        val dead = java.util.concurrent.Executors.newSingleThreadExecutor()
+        dead.shutdown()
+        val p = pipeline(executor = dead)
+
+        assertFalse("a frame that was never queued must not report success", offer(p, 0))
+
+        val stats = p.stats
+        assertEquals("the frame was accepted", 1, stats.accepted)
+        assertEquals("and it has an outcome", 1, stats.abandoned)
+        assertEquals(
+            "so nothing is left in flight, which is what made teardown look like a backlog",
+            0,
+            stats.inFlight,
+        )
+        assertTrue("$stats", stats.balances)
+    }
+
+    @Test
+    fun `a rejected submit does not escape offer`() {
+        // Asserted separately from the counters, because the counters would also be
+        // satisfied by an implementation that counted and *then* rethrew -- and rethrowing
+        // is what put this in the analyzer's catch in the first place.
+        val p = pipeline(executor = Executor { throw java.util.concurrent.RejectedExecutionException("shut") })
+        assertNull(runCatching { offer(p, 0) }.exceptionOrNull())
+    }
+
 }

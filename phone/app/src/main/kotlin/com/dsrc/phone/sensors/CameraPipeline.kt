@@ -1,6 +1,7 @@
 package com.dsrc.phone.sensors
 
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -86,37 +87,52 @@ class CameraPipeline(
             packFailures.incrementAndGet()
             return false
         }
-        encodeExecutor.execute {
-            // Re-checked inside the task: stop() can land between submission and
-            // execution, and a frame encoded after teardown would arrive in a buffer
-            // nobody is draining.
-            if (!running) {
-                // Same shape as the pack early-return: without a counter this frame
-                // leaves `accepted` incremented and no outcome recorded, so `inFlight`
-                // never returns to zero and a teardown reads as an encoder backlog.
-                abandoned.incrementAndGet()
-                return@execute
-            }
-            try {
-                val jpeg = compress(packed, width, height, quality)
-                buffer.offer(
-                    CapturedFrame(
-                        frameId = frameId,
-                        width = width,
-                        height = height,
-                        format = "jpeg",
-                        quality = quality,
-                        captureMonoNs = timestampNs,
-                        jpeg = jpeg,
+        // The submit itself, guarded. `running` is read above and the executor is shut down
+        // four release steps before the pipeline is stopped, so a frame already past that
+        // check meets a dead executor and the rejection escaped `offer` entirely -- into
+        // CameraXSource's analyzer catch, logged as "analyzer failed". `accepted` was
+        // incremented with no outcome, so `inFlight` never returned to zero and teardown
+        // read as an encoder backlog: exactly the misreading `abandoned` and `packFailures`
+        // exist to prevent, through the one submit that had no guard.
+        try {
+            encodeExecutor.execute {
+                // Re-checked inside the task: stop() can land between submission and
+                // execution, and a frame encoded after teardown would arrive in a buffer
+                // nobody is draining.
+                if (!running) {
+                    // Same shape as the pack early-return: without a counter this frame
+                    // leaves `accepted` incremented and no outcome recorded, so `inFlight`
+                    // never returns to zero and a teardown reads as an encoder backlog.
+                    abandoned.incrementAndGet()
+                    return@execute
+                }
+                try {
+                    val jpeg = compress(packed, width, height, quality)
+                    buffer.offer(
+                        CapturedFrame(
+                            frameId = frameId,
+                            width = width,
+                            height = height,
+                            format = "jpeg",
+                            quality = quality,
+                            captureMonoNs = timestampNs,
+                            jpeg = jpeg,
+                        )
                     )
-                )
-                encoded.incrementAndGet()
-            } catch (t: Throwable) {
-                // One bad frame costs one frame. Letting it out would kill the encoder
-                // thread and stop the stream silently, which is the failure mode the
-                // protocol's drop-and-count rule exists to avoid.
-                encodeFailures.incrementAndGet()
+                    encoded.incrementAndGet()
+                } catch (t: Throwable) {
+                    // One bad frame costs one frame. Letting it out would kill the encoder
+                    // thread and stop the stream silently, which is the failure mode the
+                    // protocol's drop-and-count rule exists to avoid.
+                    encodeFailures.incrementAndGet()
+                }
             }
+        } catch (t: RejectedExecutionException) {
+            // Same heading as a frame the task itself abandons: sensing stopped between
+            // acceptance and encoding. Which side of the submit that happened on is not a
+            // distinction anything downstream can act on.
+            abandoned.incrementAndGet()
+            return false
         }
         return true
     }
