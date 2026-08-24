@@ -153,7 +153,6 @@ class Session(
     var peer: PeerHello? = null
         private set
 
-    private var readerThread: Thread? = null
     private var writerThread: Thread? = null
     private var watchdogThread: Thread? = null
     private var deliveryThread: Thread? = null
@@ -199,7 +198,7 @@ class Session(
         readPeerHello()
 
         lastReadProgressNs.set(monoClock())
-        readerThread = Thread({ readLoop() }, "dsrc-reader").also { it.isDaemon = true; it.start() }
+        Thread({ readLoop() }, "dsrc-reader").also { it.isDaemon = true; it.start() }
         writerThread = Thread({ writeLoop() }, "dsrc-writer").also { it.isDaemon = true; it.start() }
         // A third thread, and it has to be one. Both the reader and the writer spend
         // their time blocked -- the reader in a read, the writer in a write once the
@@ -493,36 +492,39 @@ class Session(
         }
     }
 
-    private fun handleTimeSync(message: Received): Boolean {
+    /** What the timebase handler did with a control frame. */
+    private enum class TimeSyncOutcome { ANSWERED, REFUSED, NOT_OURS }
+
+    private fun handleTimeSync(message: Received): TimeSyncOutcome {
         val frame = message.frame
         val decoded = try {
             TimeSyncMessage.fromWire(frame.header.entries, frame.payload)
         } catch (e: MessageError) {
             countInboundRefusal(frame.channel, e.reason.wire)
-            return true
+            return TimeSyncOutcome.REFUSED
         }
 
         if (role == ROLE_PHONE) {
             if (decoded.isPing) {
                 // Nobody should be pinging the initiator.
                 countInboundRefusal(frame.channel, RefusalReason.UNKNOWN_VALUE.wire)
-                return true
+                return TimeSyncOutcome.REFUSED
             }
             // A pong is the answer to our own ping, and the estimate is built above the
             // transport, so it is delivered rather than absorbed.
-            return false
+            return TimeSyncOutcome.NOT_OURS
         }
 
         val reply = timeSync.reply(decoded, message.recvMonoNs, message.recvWallNs)
         if (reply == null) {
             // A responder receiving a pong: the other wrong direction.
             countInboundRefusal(frame.channel, RefusalReason.UNKNOWN_VALUE.wire)
-            return true
+            return TimeSyncOutcome.REFUSED
         }
         // Wire-stamped, because t3 is the pong's departure and the enqueue stamp would
         // carry this session's own queueing delay into the peer's offset.
         send(Channels.CONTROL, reply.toExtensions(), wantsWireStamp = true)
-        return true
+        return TimeSyncOutcome.ANSWERED
     }
 
     /**
@@ -587,9 +589,21 @@ class Session(
             return
         }
 
-        if (frame.channel == Channels.CONTROL && handleTimeSync(message)) {
-            inbound.countDelivered(frame.channel)
-            return
+        if (frame.channel == Channels.CONTROL) {
+            when (handleTimeSync(message)) {
+                TimeSyncOutcome.ANSWERED -> {
+                    inbound.countDelivered(frame.channel)
+                    return
+                }
+                TimeSyncOutcome.REFUSED -> {
+                    // Already in inboundRefusals. Counting it as *delivered* as well made
+                    // the two contradict each other by construction: a refusal filed as a
+                    // success, on the channel that carries the timebase.
+                    inbound.countRefused(frame.channel)
+                    return
+                }
+                TimeSyncOutcome.NOT_OURS -> Unit
+            }
         }
 
         try {
@@ -607,6 +621,7 @@ class Session(
             // lied, `send()` kept returning true, and every later frame was consumed by
             // nobody with no counter moving.
             deliveryFailures.incrementAndGet()
+            inbound.countFailed(frame.channel)
             lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"
         }
     }

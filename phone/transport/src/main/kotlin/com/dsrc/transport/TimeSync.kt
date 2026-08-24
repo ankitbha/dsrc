@@ -63,8 +63,8 @@ data class TimeSyncMessage(
 
             return TimeSyncMessage(
                 captureMonoNs = Fields.requireInt(extensions, Fields.CAPTURE_KEY),
-                exchangeId = Fields.requireInt(extensions, KEY_EXCHANGE),
-                wireMonoNs = Fields.requireInt(extensions, KEY_WIRE),
+                exchangeId = Fields.requireCount(extensions, KEY_EXCHANGE),
+                wireMonoNs = Fields.requireCount(extensions, KEY_WIRE),
                 peerRecvMonoNs = peerRecvMono,
                 peerRecvWallNs = peerRecvWall,
                 peerWireMonoNs = peerWire,

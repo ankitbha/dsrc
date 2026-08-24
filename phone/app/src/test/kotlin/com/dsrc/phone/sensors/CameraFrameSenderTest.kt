@@ -182,4 +182,25 @@ class CameraFrameSenderTest {
         assertTrue("stop took $elapsedMs ms", elapsedMs < 2_000)
     }
 
+
+    @Test
+    fun `starting twice is refused`() {
+        // Item 10 claimed both double-start guards were pinned; only SessionHolder's was.
+        // A second start here spawns a second dsrc-camera-send thread and overwrites the
+        // field, so stop() interrupts only the newer one and the first polls the buffer
+        // forever -- stealing frames from the live sender.
+        val sender = CameraFrameSender(drain = { null }, send = { _, _, _ -> true }, pollMs = 5)
+        sender.start()
+        try {
+            val second = runCatching { sender.start() }
+            assertTrue("a second start was allowed", second.isFailure)
+            assertTrue(
+                "wrong failure: ${second.exceptionOrNull()}",
+                second.exceptionOrNull() is IllegalStateException,
+            )
+        } finally {
+            sender.stop()
+        }
+    }
+
 }

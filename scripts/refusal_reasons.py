@@ -1,0 +1,116 @@
+"""Print the reason Python gives for each refusal input, as one JSON object.
+
+Exists because a Kotlin test asserting "this matches Python" cannot fail when it stops
+matching. Round 3 shipped exactly that: the docstring said the expectations were recorded
+by running this package, and one of them -- a null `action` -- had never matched, because
+the fix landed in `_nested_object` and `AdvisoryMessage.from_wire` has its own inline check.
+
+`InteropTest` already spawns Python, so the comparison can be executed instead of asserted
+by hand. Keys here must match the Kotlin side's case names exactly.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deployment" / "jetson"))
+
+from transport.messages import (  # noqa: E402
+    AdvisoryMessage,
+    CameraFrame,
+    GpsRecord,
+    MessageError,
+    RateCommand,
+    TimeSyncMessage,
+)
+
+GPS = {
+    "t_capture_mono_ns": 1, "valid": False, "lat": None, "lon": None, "speed_mps": None,
+    "heading_deg": None, "fix_quality": 0, "num_sats": 0, "hdop": None,
+    "altitude_m": None, "utc_epoch_ns": None,
+}
+CAMERA = {
+    "t_capture_mono_ns": 1, "frame_id": 1, "width": 1280, "height": 720,
+    "format": "jpeg", "quality": 85,
+}
+ACTION = {
+    "desired_speed_bin": "nominal", "desired_headway_bin": "normal",
+    "lane_preference": "keep", "merge_mode": "normal",
+}
+ADVISORY = {
+    "t_capture_mono_ns": 1, "rec_speed_mps": 13.4, "rec_speed_display": 30.0,
+    "current_speed_display": 28.0, "units": "mph", "headway_target_s": 2.0,
+    "lane_text": "keep", "merge_text": "normal", "traffic_text": "clear",
+    "confidence": 0.87, "confidence_label": "high", "action": ACTION,
+}
+RATES = {"camera_hz": 5.0, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.2}
+RATE_CMD = {"t_capture_mono_ns": 1, "rates": RATES, "trigger": "thermal", "shadow": False}
+PING = {
+    "t_capture_mono_ns": 1, "exchange_id": 1, "t_wire_mono_ns": 0,
+    "t_peer_recv_mono_ns": None, "t_peer_recv_wall_ns": None, "t_peer_wire_mono_ns": None,
+}
+
+CASES = {
+    "gps required int is null": (GpsRecord, {**GPS, "fix_quality": None}, b""),
+    "gps required bool is null": (GpsRecord, {**GPS, "valid": None}, b""),
+    "gps valid fix with null coordinates": (GpsRecord, {**GPS, "valid": True}, b""),
+    "gps negative count": (GpsRecord, {**GPS, "num_sats": -1}, b""),
+    "gps fractional count": (GpsRecord, {**GPS, "num_sats": 1.5}, b""),
+    "camera quality zero": (CameraFrame, {**CAMERA, "quality": 0}, b""),
+    "camera quality over one hundred": (CameraFrame, {**CAMERA, "quality": 101}, b""),
+    "camera zero width": (CameraFrame, {**CAMERA, "width": 0}, b""),
+    "camera negative frame id": (CameraFrame, {**CAMERA, "frame_id": -1}, b""),
+    "camera empty format": (CameraFrame, {**CAMERA, "format": ""}, b""),
+    "advisory action is null": (AdvisoryMessage, {**ADVISORY, "action": None}, b""),
+    "advisory action is not an object": (AdvisoryMessage, {**ADVISORY, "action": 5}, b""),
+    "advisory action head is an integer": (
+        AdvisoryMessage, {**ADVISORY, "action": {**ACTION, "desired_speed_bin": 5}}, b"",
+    ),
+    "advisory action head outside the set": (
+        AdvisoryMessage, {**ADVISORY, "action": {**ACTION, "merge_mode": "ram_it"}}, b"",
+    ),
+    "advisory action missing a head": (
+        AdvisoryMessage,
+        {**ADVISORY, "action": {k: v for k, v in ACTION.items() if k != "merge_mode"}},
+        b"",
+    ),
+    "advisory units outside the three": (AdvisoryMessage, {**ADVISORY, "units": "furlongs"}, b""),
+    "rate_cmd rates is null": (RateCommand, {**RATE_CMD, "rates": None}, b""),
+    "rate_cmd zero rate": (RateCommand, {**RATE_CMD, "rates": {**RATES, "gps_hz": 0.0}}, b""),
+    "rate_cmd rate above the ceiling": (
+        RateCommand, {**RATE_CMD, "rates": {**RATES, "gps_hz": 1000.001}}, b"",
+    ),
+    "rate_cmd missing a rate key": (
+        RateCommand,
+        {**RATE_CMD, "rates": {k: v for k, v in RATES.items() if k != "imu_hz"}},
+        b"",
+    ),
+    "control partial pong": (
+        TimeSyncMessage, {**PING, "t_peer_recv_mono_ns": 2}, b"",
+    ),
+    "control absent peer field": (
+        TimeSyncMessage, {k: v for k, v in PING.items() if k != "t_peer_wire_mono_ns"}, b"",
+    ),
+    "control negative exchange id": (TimeSyncMessage, {**PING, "exchange_id": -5}, b""),
+    "control negative wire stamp": (TimeSyncMessage, {**PING, "t_wire_mono_ns": -7}, b""),
+    "control payload on a channel that carries none": (TimeSyncMessage, PING, b"x"),
+}
+
+
+def reason(cls, extensions, payload) -> str:
+    try:
+        cls.from_wire(extensions, payload)
+    except MessageError as exc:
+        return getattr(exc, "reason", None) or "unknown"
+    return "ACCEPTED"
+
+
+def main() -> int:
+    print(json.dumps({name: reason(*case) for name, case in CASES.items()}, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

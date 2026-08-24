@@ -558,4 +558,38 @@ class SessionHolderTest {
         assertTrue(second.exceptionOrNull() is IllegalStateException)
     }
 
+
+    @Test
+    fun `a session reference is usable only while it is alive`() {
+        // The liveness half of the send check was caught about once in thirteen runs when
+        // tested through the live loop, because its premise is a window of microseconds
+        // between finish() clearing isRunning and the link thread clearing the field. A 5 ms
+        // poll almost always lands after the clear, and once the scripted dial stops
+        // reconnecting the window never reopens -- a test with a 1-in-13 ticket.
+        //
+        // The predicate is extracted, so no race is needed: a session that has handshaken
+        // and then been closed is a non-null reference that is not alive, which is exactly
+        // the state the window produces.
+        val peer = PeerServer()
+        val socket = Socket(InetAddress.getLoopbackAddress(), peer.port).also { closers += { it.close() } }
+        val session = Session(
+            input = socket.getInputStream(),
+            output = socket.getOutputStream(),
+            deviceId = "phone-test",
+            role = Session.ROLE_PHONE,
+            monoClock = { System.nanoTime() },
+            wallClock = { 0 },
+            onFrame = {},
+        )
+        session.start()
+        assertTrue("a live session must be usable", SessionHolder.usable(session))
+
+        session.close()
+        assertFalse("a closed session is not usable", SessionHolder.usable(session))
+        // And the reference is still there, which is the whole point: `!= null` is not the
+        // question.
+        assertFalse(session.isRunning)
+        assertFalse("null is not usable either", SessionHolder.usable(null))
+    }
+
 }

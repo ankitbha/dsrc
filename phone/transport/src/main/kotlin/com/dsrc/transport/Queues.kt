@@ -259,8 +259,20 @@ data class InboundCounters(
     val delivered: Long = 0,
     val dropped: Long = 0,
     val refused: Long = 0,
+    /** The application's handler threw. Not a refusal: a bug here, not a bad record. */
+    val failed: Long = 0,
     val abandoned: Long = 0,
-)
+) {
+    /**
+     * Every frame that arrived is under exactly one heading.
+     *
+     * Each term is counted where it happens. `received` was the only one any test could
+     * see: `delivered`, `refused` and `abandoned` could each be made a no-op with the whole
+     * suite green, and a handler that threw left the sum short with nothing naming the gap.
+     */
+    val balances: Boolean
+        get() = received == delivered + dropped + refused + failed + abandoned
+}
 
 /**
  * The inbound side: one queue per channel, same policies and depths as outbound.
@@ -339,6 +351,11 @@ class InboundQueues {
     fun countRefused(channel: String) = synchronized(lock) {
         val previous = counters.getValue(channel)
         counters[channel] = previous.copy(refused = previous.refused + 1)
+    }
+
+    fun countFailed(channel: String) = synchronized(lock) {
+        val previous = counters.getValue(channel)
+        counters[channel] = previous.copy(failed = previous.failed + 1)
     }
 
     fun abandonAll(): Long = synchronized(lock) {

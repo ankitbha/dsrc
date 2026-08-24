@@ -310,4 +310,24 @@ class CameraPipelineTest {
         assertEquals("the newest accepted frame survives", 5L, frame.frameId)
         assertEquals("four were displaced", 4, p.stats.buffer.dropped)
     }
+
+    @Test
+    fun `inFlight is a real function of its terms, not always zero`() {
+        // Asserted as `== 0` in four tests and nowhere else, so replacing the body with a
+        // constant 0 satisfied all four -- the last derived term in this class, and the same
+        // shape as the derived `gated` that once made `balances` unfailable.
+        val settled = CameraPipeline.Stats(
+            seen = 5, accepted = 5, encoded = 5, encodeFailures = 0, packFailures = 0,
+            refusedStopped = 0, gated = 0, abandoned = 0, buffer = FrameBuffer.Stats(5, 0, 5, 0, false),
+        )
+        assertEquals(0, settled.inFlight)
+
+        // Accepted but not yet encoded: two frames are with the encoder right now.
+        assertEquals(2, settled.copy(encoded = 3).inFlight)
+        // A pack failure removes a frame from flight as surely as an encode does.
+        assertEquals(0, settled.copy(encoded = 3, packFailures = 2).inFlight)
+        assertEquals(0, settled.copy(encoded = 3, encodeFailures = 2).inFlight)
+        assertEquals(0, settled.copy(encoded = 3, abandoned = 2).inFlight)
+    }
+
 }

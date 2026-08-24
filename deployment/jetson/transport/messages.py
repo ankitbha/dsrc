@@ -175,6 +175,13 @@ def require(extensions: Mapping[str, Any], field: str) -> Any:
 
 def require_int(extensions: Mapping[str, Any], field: str) -> int:
     value = require(extensions, field)
+    # Null before type. The spec's refusal table gives "null where a value is required"
+    # its own row, and folding it into wrong_type named the wrong cause on every message
+    # with a required integer -- gps, imu, camera and control alike. The Kotlin side read
+    # the table correctly; this is the general case of a fix that previously landed on one
+    # instance only.
+    if value is None:
+        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)
     if isinstance(value, bool) or not isinstance(value, int):
         raise MessageError(f"{field} is {type(value).__name__}, expected int", REASON_WRONG_TYPE)
     return value
@@ -196,6 +203,9 @@ def require_str(extensions: Mapping[str, Any], field: str) -> str:
 
 def require_bool(extensions: Mapping[str, Any], field: str) -> bool:
     value = require(extensions, field)
+    # Null before type, for the same reason as require_int: the table gives it a row.
+    if value is None:
+        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)
     if not isinstance(value, bool):
         raise MessageError(f"{field} is {type(value).__name__}, expected bool", REASON_WRONG_TYPE)
     return value
@@ -409,8 +419,8 @@ class GpsRecord:
         return cls(
             t_capture_mono_ns=require_capture(extensions),
             valid=valid,
-            fix_quality=require_int(extensions, "fix_quality"),
-            num_sats=require_int(extensions, "num_sats"),
+            fix_quality=check_count(require(extensions, "fix_quality"), "fix_quality"),
+            num_sats=check_count(require(extensions, "num_sats"), "num_sats"),
             lat=lat,
             lon=lon,
             speed_mps=optional_number(extensions, "speed_mps"),
@@ -606,6 +616,12 @@ class AdvisoryMessage:
         if units not in DISPLAY_UNITS:
             raise MessageError(f"units {units!r} not one of {DISPLAY_UNITS}", REASON_UNKNOWN_VALUE)
         action = require(extensions, "action")
+        if action is None:
+            # Same row of the table as every other required-but-null field. This check is
+            # inline rather than going through _nested_object -- `action`'s heads are a
+            # closed set, unlike the additive rate objects -- which is why the earlier fix
+            # to _nested_object did not reach it.
+            raise MessageError("action must not be null", REASON_NULL_NOT_ALLOWED)
         if not isinstance(action, Mapping):
             raise MessageError(
                 f"action is {type(action).__name__}, expected object", REASON_WRONG_TYPE

@@ -74,6 +74,7 @@ class CameraCaptureTest {
         }
 
         val closeFailures: Long get() = source.closeFailures
+        val bindFailures: Long get() = source.bindFailures
     }
 
     private fun start(config: SensingConfig): CameraHarness =
@@ -226,10 +227,16 @@ class CameraCaptureTest {
         assertNotNull("no frame at quality 30", lowFrame)
         assertEquals(30, lowFrame!!.quality)
 
+        // A margin, not a bare `<`. The two frames come from two different camera sessions,
+        // so the scene varies between them: measured same-quality noise is about +/-5% and
+        // the ordering *inverted* in 2 of 5 runs when the encoder quality was hardcoded, so
+        // a bare inequality survived the mutation 3 times in 5. The real signal is about
+        // -38%, which a 0.8 factor separates from the noise cleanly.
         assertTrue(
-            "quality 30 produced ${lowFrame.jpeg.size} bytes against ${highBytes} at 95, " +
-                "so the setting is not reaching the encoder",
-            lowFrame.jpeg.size < highBytes,
+            "quality 30 produced ${lowFrame.jpeg.size} bytes against $highBytes at 95, " +
+                "which is not the ~38% smaller a real quality change gives -- " +
+                "the setting is not reaching the encoder",
+            lowFrame.jpeg.size < highBytes * 0.8,
         )
     }
 
@@ -283,6 +290,44 @@ class CameraCaptureTest {
         assertNotNull("the camera was wedged by the start/stop races", awaitOneFrame(harness.pipeline, 15_000))
     }
 
+    @Test
+    fun stoppingTheSourceDeclinesAPendingBindCleanly() {
+        // The `stopped` flag and the lifecycle check are two halves of one guard, and every
+        // test that stops also destroys the lifecycle -- so the second half alone declined
+        // the bind and the flag was unpinned.
+        //
+        // Finding the observable took two wrong guesses. A source stopped with the lifecycle
+        // still alive (production's shape, since onSensingDown runs before release()) does
+        // let the bind proceed without the flag -- but it then *fails*, because stop() has
+        // already shut down the analysis executor and setAnalyzer rejects. So the camera
+        // never connects either way, and "no CONNECT" cannot tell them apart. Confirmed from
+        // logcat: the clean run logs "camera provider resolved after teardown; not binding".
+        //
+        // What the flag actually buys is that this is a *decision* rather than an exception:
+        // without it the pending bind is attempted and counted as a failure. That is the
+        // difference worth asserting, and it is the difference a reader of bindFailures
+        // would care about.
+        val before = cameraClientLog().size
+        val harness = start(SensingConfig(cameraHz = 5.0))
+        // No wait at all: the provider future is deliberately still in flight, and the
+        // lifecycle stays alive so only the flag can decline it.
+        harness.stopSourceOnly()
+        Thread.sleep(3_000)
+
+        assertEquals(
+            "the pending bind was attempted and failed instead of being declined",
+            0L,
+            harness.bindFailures,
+        )
+        val log = cameraClientLog()
+        val fresh = log.take((log.size - before).coerceAtLeast(0))
+        assertEquals(
+            "a bind completed after the source was stopped: ${fresh.take(3)}",
+            0,
+            fresh.count { it.contains("CONNECT") && !it.contains("DISCONNECT") },
+        )
+    }
+
     /** The camera service's own client log for this package, most recent first. */
     private fun cameraClientLog(): List<String> {
         val dump = shell("dumpsys media.camera")
@@ -301,5 +346,4 @@ class CameraCaptureTest {
             it.readBytes().toString(Charsets.UTF_8)
         }
     }
-
 }

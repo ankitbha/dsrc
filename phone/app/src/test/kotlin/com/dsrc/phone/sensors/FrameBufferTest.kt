@@ -160,6 +160,11 @@ class FrameBufferTest {
         // It is asserted in five tests and had no control, so replacing it with `true`
         // survived all five -- an identity that cannot charge you.
         assertTrue(FrameBuffer.Stats(accepted = 3, dropped = 1, drained = 1, discarded = 1, holding = false).balances)
+        // A `holding = true` row, because the term was otherwise pinned only by the
+        // concurrent test, whose kill depends on the producer outliving the consumer --
+        // true 10 times out of 10 here and not a property of the code.
+        assertTrue(FrameBuffer.Stats(accepted = 3, dropped = 1, drained = 1, discarded = 0, holding = true).balances)
+        assertFalse(FrameBuffer.Stats(accepted = 3, dropped = 1, drained = 1, discarded = 1, holding = true).balances)
         assertFalse(FrameBuffer.Stats(accepted = 9, dropped = 1, drained = 1, discarded = 1, holding = false).balances)
         assertFalse(FrameBuffer.Stats(accepted = 3, dropped = 0, drained = 0, discarded = 0, holding = false).balances)
     }

@@ -78,7 +78,7 @@ class SessionHolder(
         private set
 
     /** Whether a handshaken session exists right now. */
-    val isUp: Boolean get() = current?.isRunning == true
+    val isUp: Boolean get() = usable(current)
 
     fun start() {
         // `check`, not `require`: starting twice is a state problem rather than a bad
@@ -111,11 +111,11 @@ class SessionHolder(
         // neither here nor in any refusal counter. The window is short and it is exactly
         // when a link drops, which is when the accounting matters most.
         val session = current
-        if (session == null || !session.isRunning) {
+        if (!usable(session)) {
             sendsWithoutSession.incrementAndGet()
             return false
         }
-        return session.send(channel, extensions, payload, wantsWireStamp)
+        return session!!.send(channel, extensions, payload, wantsWireStamp)
     }
 
     fun stop() {
@@ -247,6 +247,20 @@ class SessionHolder(
     }
 
     companion object {
+        /**
+         * Whether a session reference can carry a message.
+         *
+         * Extracted so it can be pinned. Reference *and* liveness, and the second half was
+         * caught roughly once in thirteen runs when tested through the live loop, because
+         * the premise is a window of microseconds between `finish()` clearing `isRunning`
+         * and the link thread's `finally` clearing the field. A 5 ms poll almost always
+         * lands after the clear, and once the loop stops reconnecting the window never
+         * reopens -- so the test was a lottery with a 1-in-13 ticket.
+         *
+         * Reducing this to `session != null` was invisible to the whole suite.
+         */
+        internal fun usable(session: Session?): Boolean = session != null && session.isRunning
+
         /**
          * The phone's role in the hello.
          *

@@ -1925,4 +1925,98 @@ class SessionTest {
         }
     }
 
+
+    // -- the inbound accounting, which was mostly unobservable -----------------
+
+    @Test
+    fun `the inbound identity is a real function of independent fields`() {
+        // `received` was the only field any test could see. Making countDelivered,
+        // countRefused or abandonAll a no-op each left the whole suite green, and a handler
+        // that threw left the sum short with nothing naming the gap.
+        assertTrue(InboundCounters(received = 5, delivered = 5).balances)
+        assertTrue(InboundCounters(received = 5, delivered = 2, dropped = 1, refused = 1, failed = 1).balances)
+        assertTrue(InboundCounters(received = 3, delivered = 1, abandoned = 2).balances)
+        // And it can be false, which is the half a derived term always loses.
+        assertFalse(InboundCounters(received = 5, delivered = 2).balances)
+        assertFalse(InboundCounters(received = 1, delivered = 2).balances)
+    }
+
+    @Test
+    fun `a delivered frame is counted where it is delivered`() {
+        val (phone, jetson) = pair()
+        repeat(3) { index ->
+            assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(index.toLong()).toExtensions()))
+        }
+        assertTrue(awaitCondition {
+            phone.session.stats().inboundChannels.getValue(Channels.GPS).delivered >= 3
+        }, "nothing was counted as delivered: ${phone.session.stats().inboundChannels[Channels.GPS]}")
+
+        val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+        assertEquals(3, gps.received)
+        assertEquals(3, gps.delivered)
+        assertTrue(gps.balances, "the identity does not hold: $gps")
+    }
+
+    @Test
+    fun `a handler that throws is counted against its own channel`() {
+        // The third outcome had no per-channel heading, so `received` exceeded the sum of
+        // the outcomes and nothing showed where the difference went.
+        val (phone, jetson) = pair(onPhoneFrame = { throw IllegalStateException("a router bug") })
+        repeat(2) { index ->
+            assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(index.toLong()).toExtensions()))
+        }
+        assertTrue(awaitCondition {
+            phone.session.stats().inboundChannels.getValue(Channels.GPS).failed >= 2
+        }, "not counted per channel: ${phone.session.stats().inboundChannels[Channels.GPS]}")
+
+        val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+        assertEquals(2, gps.failed)
+        assertEquals(0, gps.delivered, "a failed delivery was also counted as delivered")
+        assertTrue(gps.balances, "the identity does not hold: $gps")
+    }
+
+    @Test
+    fun `a wrong-direction timebase message is counted refused, not delivered`() {
+        // handleTimeSync returned the same value for an answer and for both refusals, and
+        // the caller counted the whole branch as delivered -- so a refusal was filed as a
+        // success while inboundRefusals recorded it too. The two counters contradicted each
+        // other by construction, on the channel that carries the timebase.
+        val (phone, _) = pair(clock = { 1_000 })
+        injectRaw(phone, ping(exchangeId = 7))
+
+        assertTrue(awaitCondition {
+            phone.session.stats().inboundChannels.getValue(Channels.CONTROL).refused >= 1
+        }, "not counted as refused: ${phone.session.stats().inboundChannels[Channels.CONTROL]}")
+
+        val control = phone.session.stats().inboundChannels.getValue(Channels.CONTROL)
+        assertEquals(0, control.delivered, "a refusal was also counted as delivered")
+        assertEquals(
+            1L,
+            phone.session.stats().inboundRefusalsByReason[RefusalReason.UNKNOWN_VALUE.wire],
+        )
+        assertTrue(control.balances, "the identity does not hold: $control")
+    }
+
+    @Test
+    fun `abandoning actually discards, not merely counts`() {
+        // The earlier assertion was self-referential: `pending` is derived as
+        // enqueued - dropped - sent - abandoned, so `assertEquals(0, pending)` restated the
+        // line above it and certified the counter rather than the queue. Removing
+        // `queue.clear()` from both abandonAll bodies survived the whole suite. `depth()`
+        // exists for exactly this and the test was not calling it.
+        val gate = CountDownLatch(1)
+        val (phone, _) = pair(phoneOutputGate = gate)
+        repeat(40) { index ->
+            assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(index.toLong()).toExtensions()))
+        }
+        phone.session.close()
+        gate.countDown()
+
+        val gps = phone.session.stats().channels.getValue(Channels.GPS)
+        assertTrue(gps.abandoned > 0, "nothing was abandoned: $gps")
+        // The real queue, not the derived arithmetic.
+        assertEquals(0, phone.session.outboundPending(), "the queue still holds messages")
+        assertEquals(gps.enqueued, gps.sent + gps.dropped + gps.abandoned, "accounting: $gps")
+    }
+
 }
