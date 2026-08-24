@@ -26,12 +26,39 @@ class AdvisoryHolder(
     private var arrivedAtNs = 0L
     private var received = 0L
     private var expired = 0L
+    private var afterStop = 0L
+
+    /**
+     * Whether advisories are being taken at all.
+     *
+     * Stopping does not join the delivery thread -- `SessionHolder.stop()` closes the
+     * session and interrupts, and `Session.finish()` joins nothing -- so a frame already
+     * off the inbound queue is delivered to completion. A delivery thread descheduled
+     * between the dequeue and `accept` therefore resumes *after* teardown has cleared the
+     * holder and refills it, putting a full recommendation in front of a driver who has
+     * pressed Stop, for up to the whole expiry. Clearing cannot fix that on its own,
+     * because the clear has already happened; the holder has to refuse.
+     */
+    private var accepting = true
 
     /** Take a newly arrived advisory. Replaces any previous one, however recent. */
     fun accept(advisory: AdvisoryMessage, nowNs: Long) = synchronized(lock) {
+        if (!accepting) {
+            // A late delivery from a session that has ended. Counted, because "the panel
+            // went blank" and "an advisory arrived after the stop and was refused" are
+            // different facts about a drive.
+            afterStop++
+            return@synchronized
+        }
         latest = advisory
         arrivedAtNs = nowNs
         received++
+    }
+
+    /** Begin taking advisories. Called when sensing comes up. */
+    fun start() = synchronized(lock) {
+        accepting = true
+        latest = null
     }
 
     /**
@@ -57,15 +84,27 @@ class AdvisoryHolder(
      * and leaving the last recommendation up would say otherwise.
      */
     fun clear() = synchronized(lock) {
+        accepting = false
         latest = null
     }
 
     val stats: Stats
         get() = synchronized(lock) {
-            Stats(received = received, expired = expired, showing = latest != null)
+            Stats(
+                received = received,
+                expired = expired,
+                showing = latest != null,
+                afterStop = afterStop,
+            )
         }
 
-    data class Stats(val received: Long, val expired: Long, val showing: Boolean)
+    data class Stats(
+        val received: Long,
+        val expired: Long,
+        val showing: Boolean,
+        /** Advisories that arrived after the session ended, and were refused. */
+        val afterStop: Long,
+    )
 
     companion object {
         /**

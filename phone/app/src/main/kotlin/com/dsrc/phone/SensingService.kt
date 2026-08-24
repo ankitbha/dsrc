@@ -386,6 +386,9 @@ class SensingService : LifecycleService() {
         imuSource = motion
         liveImuSource = motion
 
+        // Advisories are taken from here until teardown refuses them again.
+        advisories.start()
+
         configApplier = ConfigApplier(object : ConfigApplier.Targets {
             override fun setCameraRate(hz: Double) = pipe.setRate(hz)
             override fun setGpsRate(hz: Double) {
@@ -577,6 +580,7 @@ class SensingService : LifecycleService() {
                     Log.i(TAG, "camera stats ${it.stats}")
                 }
             }
+            release("advisory stats") { Log.i(TAG, "advisory stats ${advisories.stats}") }
             release("here stats") {
                 herePipeline?.let {
                     if (!it.isStopped) statsReadBeforeStop.incrementAndGet()

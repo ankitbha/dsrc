@@ -6,6 +6,7 @@ import pathlib, re, subprocess, sys
 
 SERVICE = pathlib.Path("phone/app/src/main/kotlin/com/dsrc/phone/SensingService.kt")
 SOURCE = pathlib.Path("phone/app/src/main/kotlin/com/dsrc/phone/sensors/ImuSource.kt")
+ACTIVITY = pathlib.Path("phone/app/src/main/kotlin/com/dsrc/phone/MainActivity.kt")
 
 # Not listed, deliberately: passing a literal 20_000 for the accelerometer's sampling
 # period. It survives, and it should -- 20,000 us *is* the 50 Hz default, so the mutant is
@@ -30,6 +31,8 @@ MUTATIONS = [
     # unregistered" and "batching is turned back on". Both are still real defects and
     # neither is pinned now -- see the note in ImuCaptureTest. Leaving them here would make
     # the harness permanently red for a gap that is recorded elsewhere.
+    (ACTIVITY, "advisory: the labels keep their text while backgrounded",
+     "        blankAdvisory()\n        super.onStop()", "        super.onStop()"),
     (SERVICE, "advisory: advisories are never routed",
      "        if (frame.channel == Channels.ADVISORY) {", "        if (false) {"),
     (SERVICE, "advisory: a stop leaves the advisory up",

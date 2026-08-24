@@ -94,9 +94,13 @@ class MainActivity : ComponentActivity() {
         // fields arrive as text. The phone formats nothing, because a phone that rounded
         // 30.4 to 30 while the Jetson meant 30.4 would be showing a recommendation nobody
         // made.
-        speedLabel = TextView(this).apply { textSize = 44f }
-        adviceLabel = TextView(this).apply { textSize = 18f }
-        confidenceLabel = TextView(this).apply { textSize = 16f }
+        // Tagged so a test can address the advisory panel specifically. Walking every
+        // TextView picks up the state line and both buttons, which are TextViews too, and a
+        // test that asserts "nothing is displayed" would then be asserting the screen is
+        // empty rather than that the panel is.
+        speedLabel = TextView(this).apply { textSize = 44f; tag = TAG_SPEED }
+        adviceLabel = TextView(this).apply { textSize = 18f; tag = TAG_ADVICE }
+        confidenceLabel = TextView(this).apply { textSize = 16f; tag = TAG_CONFIDENCE }
         root.addView(speedLabel)
         root.addView(adviceLabel)
         root.addView(confidenceLabel)
@@ -115,12 +119,30 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         SensingStatus.shared.addListener(listener)
         refresh()
+        // Synchronously, before the resume traversal draws. Posting the tick is not enough:
+        // the traversal goes through Choreographer's async message, which jumps ahead of an
+        // ordinary posted callback, so the window was painted from whatever text the labels
+        // still held -- the advisory that was on screen when the driver looked away, however
+        // many minutes ago. Measured at two consecutive frames spanning ~29 ms showing an
+        // advisory that had expired three and a half seconds earlier.
+        //
+        // With `blankAdvisory()` in `onStop` this is no longer what keeps a *stale* advisory
+        // off the screen, and no test can separate the two: deleting this line alone leaves
+        // the suite green. What it still does is put a *current* advisory up on the frame
+        // the driver returns to, rather than a blank panel for up to one tick. Kept for
+        // that, and unpinned, which is said here rather than left for a green suite to
+        // imply.
+        refreshAdvisory()
         advisoryHandler.post(advisoryTick)
     }
 
     override fun onStop() {
         SensingStatus.shared.removeListener(listener)
         advisoryHandler.removeCallbacks(advisoryTick)
+        // And blanked on the way out, so there is nothing stale to paint even if something
+        // draws before onStart runs. Belt and braces on a driver-facing surface: the two
+        // together mean no path exists on which an old recommendation reaches a pixel.
+        blankAdvisory()
         super.onStop()
     }
 
@@ -130,12 +152,16 @@ class MainActivity : ComponentActivity() {
      * "Nothing at all" is a real state and it is the safe one: an advisory that has expired
      * is about road the driver has covered, and leaving it up would say otherwise.
      */
+    private fun blankAdvisory() {
+        speedLabel.text = ""
+        adviceLabel.text = ""
+        confidenceLabel.text = ""
+    }
+
     private fun refreshAdvisory() {
         val advisory = SensingService.advisories.current(android.os.SystemClock.elapsedRealtimeNanos())
         if (advisory == null) {
-            speedLabel.text = ""
-            adviceLabel.text = ""
-            confidenceLabel.text = ""
+            blankAdvisory()
             return
         }
         speedLabel.text = "${advisory.recSpeedDisplay} ${advisory.units}"
@@ -214,7 +240,12 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private companion object {
+    companion object {
+        /** View tags for the three advisory labels, so a test can address just those. */
+        const val TAG_SPEED = "advisory-speed"
+        const val TAG_ADVICE = "advisory-advice"
+        const val TAG_CONFIDENCE = "advisory-confidence"
+
         /**
          * How often the advisory panel is redrawn.
          *
