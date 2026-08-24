@@ -2398,6 +2398,127 @@ class SessionTest {
         )
     }
 
+    // -- the timebase paths in deliver, one heading each -----------------------------
+    //
+    // Round 6 named three (path, heading) pairs in `deliver` that no test asserted. Each
+    // one is a distinct way a control frame can be wrong, and they are counted differently
+    // on purpose: a decode refusal, a direction refusal, and a bug in our own transport
+    // code. Only the last is our fault, and only the last must not be filed as the peer's.
+
+    /** Write a frame straight to the socket, bypassing `Session.send` and its rules. */
+    private fun writeRaw(peer: Peer, extensions: Map<String, JsonValue>, reserved: Set<String>) {
+        val header = Framing.header(
+            channel = Channels.CONTROL,
+            sequence = 99,
+            monoNs = 1,
+            wallNs = 2,
+            extensions = extensions,
+            allowReserved = reserved,
+        )
+        val out = requireNotNull(peer.socket) { "this peer has no socket to write to" }
+            .getOutputStream()
+        Framing.write(header, ByteArray(0), out)
+        out.flush()
+    }
+
+    @Test
+    fun `a second hello mid-session is refused, not decoded as a timebase message`() {
+        // Reachable only through this door, and it took working out why. `checkInbound`
+        // runs the control decoder before `handleTimeSync` ever sees the frame, so an
+        // ordinary malformed timebase message is refused earlier and `fromWire`'s catch
+        // inside `handleTimeSync` never runs -- except for a frame carrying `hello`, which
+        // the decoder skips (the transport's own traffic legitimately carries the key) and
+        // which `readLoop` does not absorb the way it absorbs a heartbeat. So a peer that
+        // re-sends its hello lands in the timebase decoder with none of its fields.
+        val (phone, jetson) = pair()
+        writeRaw(phone, mapOf(Session.HELLO to JsonValue.Obj(sortedMapOf())), setOf(Session.HELLO))
+
+        assertTrue(awaitCondition {
+            jetson.session.stats().inboundChannels.getValue(Channels.CONTROL).refused >= 1
+        }, "a second hello was not refused: ${jetson.session.stats().inboundChannels[Channels.CONTROL]}")
+
+        val control = jetson.session.stats().inboundChannels.getValue(Channels.CONTROL)
+        assertEquals(0L, control.failed, "a bad peer frame is not our bug: $control")
+        assertTrue(control.balances, "$control")
+        assertTrue(jetson.session.isRunning, "one bad control frame must not end the session")
+    }
+
+    @Test
+    fun `a responder that receives a pong refuses it as the wrong direction`() {
+        // The phone initiates and the Jetson only ever answers, and `send` enforces that on
+        // the way out -- which is exactly why this had no test: the direction rule makes the
+        // frame unsendable through the API. Written raw to the socket instead, because the
+        // receiver's behaviour when the peer misbehaves is the thing being asserted.
+        val (phone, jetson) = pair()
+        val pong = TimeSyncMessage(
+            captureMonoNs = 1_000,
+            exchangeId = 5,
+            wireMonoNs = 1_100,
+            peerRecvMonoNs = 2_000,
+            peerRecvWallNs = 3_000,
+            peerWireMonoNs = 1_050,
+        )
+        writeRaw(phone, pong.toExtensions(), setOf(Session.WIRE_STAMP))
+
+        assertTrue(awaitCondition {
+            jetson.session.stats().inboundChannels.getValue(Channels.CONTROL).refused >= 1
+        }, "the pong was not refused: ${jetson.session.stats().inboundChannels[Channels.CONTROL]}")
+
+        // The *reason*, not just the count. A decode failure and a wrong-direction frame are
+        // both refusals, so asserting `refused >= 1` alone would pass for either and this
+        // test would not distinguish itself from the one above it.
+        val reasons = jetson.session.stats().inboundRefusals.getValue(Channels.CONTROL)
+        assertEquals(
+            1L,
+            reasons[RefusalReason.UNKNOWN_VALUE.wire],
+            "a pong at a responder is the wrong direction, not a bad record: $reasons",
+        )
+        assertEquals(0L, jetson.session.stats().inboundChannels.getValue(Channels.CONTROL).failed)
+        assertTrue(jetson.session.isRunning)
+    }
+
+    @Test
+    fun `a bug in our own timebase handling is counted as a failure, not as the peer's refusal`() {
+        // The path the round-5 backstop was justified by and which nothing entered: anything
+        // `handleTimeSync` raises that is not a MessageError. It is our code, not the peer's
+        // record, so it must not appear as a refusal -- a refusal says the frame was bad.
+        //
+        // Armed on the delivery thread only, which makes it land in exactly one place.
+        // `deliveryLoop` itself never reads the clock; the first call a delivery thread
+        // makes is inside TimeSyncResponder.reply, and it disarms itself so the send that
+        // follows is unaffected. A clock that simply threw would have taken the heartbeat
+        // writer and the watchdog with it and proved nothing about this path.
+        val armed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val (phone, jetson) = pair(clock = {
+            if (armed.get() && Thread.currentThread().name == "dsrc-delivery") {
+                armed.set(false)
+                throw IllegalStateException("clock exploded")
+            }
+            System.nanoTime()
+        })
+
+        armed.set(true)
+        assertTrue(phone.session.sendTimeSyncPing(11), "the ping was not accepted")
+
+        assertTrue(awaitCondition {
+            jetson.session.stats().inboundChannels.getValue(Channels.CONTROL).failed >= 1
+        }, "our own bug was not counted: ${jetson.session.stats().inboundChannels[Channels.CONTROL]}")
+
+        val stats = jetson.session.stats()
+        val control = stats.inboundChannels.getValue(Channels.CONTROL)
+        assertEquals(0L, control.refused, "our bug is not the peer's bad record: $control")
+        assertEquals(0L, control.delivered, "a frame we failed on was not delivered: $control")
+        assertTrue(control.balances, "$control")
+        assertTrue(
+            stats.lastDeliveryFailure?.startsWith("timebase: ") == true,
+            "the failure must name where it happened, not just that it happened: " +
+                "${stats.lastDeliveryFailure}",
+        )
+        // And the link survives it. A bug in transport code is no reason to drop a session
+        // that is otherwise carrying GPS.
+        assertTrue(jetson.session.isRunning, "a timebase bug must not end the session")
+    }
+
     @Test
     fun `inbound depth reports the frames waiting on one channel, not across all of them`() {
         // depth() was called by no test at all, so it could have returned pending() -- the
