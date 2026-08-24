@@ -293,11 +293,65 @@ class SensingServiceTest {
         )
     }
 
-    /** Encoder/analysis pool threads belonging to this process. */
-    private fun workerThreads(): Int {
-        val all = arrayOfNulls<Thread>(Thread.activeCount() * 2)
+    /**
+     * Every thread the service owns, by name.
+     *
+     * This counted only `pool-` threads, which is the encoder and CameraX's analyser. The
+     * link, the frame sender and the GPS looper all use *named* threads, so the one test
+     * that claimed to pin teardown could not see three of the five resources -- and
+     * deleting `holder.start()`, `sender.start()` or `locations.start()` left the whole
+     * instrumented suite green while sensing transmitted nothing at all.
+     *
+     * Named prefixes are asserted individually below rather than summed, because a total
+     * hides which one went missing.
+     */
+    private fun workerThreads(): Int = threadsNamed(WORKER_PREFIXES)
+
+    private fun threadsNamed(prefixes: List<String>): Int {
+        val all = arrayOfNulls<Thread>(Thread.activeCount() * 2 + 32)
         val n = Thread.enumerate(all)
-        return (0 until n).count { all[it]?.name?.startsWith("pool-") == true }
+        return (0 until n).count { index ->
+            val name = all[index]?.name ?: return@count false
+            prefixes.any { name.startsWith(it) }
+        }
+    }
+
+    private companion object {
+        /** The encoder and CameraX's analyser. */
+        const val POOL = "pool-"
+        /** SessionHolder's reconnect thread. */
+        const val LINK = "dsrc-link"
+        /** CameraFrameSender's drain thread. */
+        const val SENDER = "dsrc-camera-send"
+        /** GpsLocationSource's HandlerThread. */
+        const val GPS = "dsrc-gps"
+
+        val WORKER_PREFIXES = listOf(POOL, LINK, SENDER, GPS)
+    }
+
+    @Test
+    fun everyResourceStartsWhenSensingStartsAndStopsWhenItStops() {
+        // Named per resource, because a summed census hides which one never started. Each
+        // of these was individually deletable with the suite green: no link, no frames
+        // reaching the wire, no GPS registration.
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+
+        for (prefix in WORKER_PREFIXES) {
+            assertTrue(
+                "nothing named '$prefix' started, so that resource is doing nothing",
+                pollUntil(10_000) { threadsNamed(listOf(prefix)) > 0 },
+            )
+        }
+
+        context.stopService(android.content.Intent(context, SensingService::class.java))
+
+        for (prefix in WORKER_PREFIXES) {
+            assertTrue(
+                "a thread named '$prefix' outlived the service",
+                pollUntil(10_000) { threadsNamed(listOf(prefix)) == 0 },
+            )
+        }
     }
 
     // -- a failed foreground transition -----------------------------------------
