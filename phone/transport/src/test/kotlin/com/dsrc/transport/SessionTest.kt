@@ -2369,17 +2369,83 @@ class SessionTest {
         }
 
         // The interrupt from finish() lands inside the blocked handler and is caught as a
-        // delivery failure, so the in-flight frame has a heading. Asserted rather than
-        // assumed, because it is the only heading it can have and nothing said so.
+        // delivery failure, so the in-flight frame has a heading.
         assertTrue(awaitCondition {
             phone.session.stats().inboundChannels.getValue(Channels.GPS).balances
         }, "the inbound accounting is short: ${phone.session.stats().inboundChannels[Channels.GPS]}")
         val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
-        assertEquals(
-            gps.received,
-            gps.delivered + gps.dropped + gps.refused + gps.failed + gps.abandoned,
-            "a frame in flight at shutdown is in no counter: $gps",
+
+        // Per heading, and this is the whole point. `balances` is a *sum*, so it is blind to
+        // a swap between its own terms: the interrupted frame could be filed as `delivered`
+        // -- a handler that never returned, recorded as a success -- and the identity would
+        // hold exactly as well. The assertion that used to sit here,
+        // `received == delivered + dropped + refused + failed + abandoned`, is character for
+        // character the definition of `balances`, so it restated the previous line and could
+        // not fail unless that one already had.
+        assertTrue(
+            gps.failed >= 1,
+            "the frame whose handler was interrupted must be a delivery failure, not a " +
+                "success: $gps",
         )
+        assertTrue(
+            gps.abandoned >= 1,
+            "the frames still queued at close must be abandoned: $gps",
+        )
+        assertEquals(
+            0L,
+            gps.delivered,
+            "no handler ever returned, so nothing was delivered: $gps",
+        )
+    }
+
+    @Test
+    fun `inbound depth reports the frames waiting on one channel, not across all of them`() {
+        // depth() was called by no test at all, so it could have returned pending() -- the
+        // total across every channel -- and nothing would have noticed. The two agree
+        // whenever only one channel is in use, which is every other test here.
+        val queues = InboundQueues()
+        fun arrive(channel: String, index: Long) {
+            val extensions = when (channel) {
+                Channels.GPS -> GpsRecord.noFix(index).toExtensions()
+                else -> ImuSample(index, 0.0, 0.0, 9.8, 0.0, 0.0, 0.0, accuracy = 3).toExtensions()
+            }
+            val header = Framing.header(channel, index, index, index, extensions)
+            queues.receive(Frame(header, ByteArray(0)), index, index)
+        }
+
+        repeat(3) { arrive(Channels.GPS, it.toLong()) }
+        arrive(Channels.IMU, 99)
+
+        assertEquals(3, queues.depth(Channels.GPS), "gps holds three")
+        assertEquals(1, queues.depth(Channels.IMU), "imu holds one")
+        assertEquals(4, queues.pending(), "four across the two")
+        assertEquals(0, queues.depth(Channels.CAMERA), "an untouched channel holds none")
+    }
+
+    @Test
+    fun `abandoning inbound counts per channel and empties every queue`() {
+        val queues = InboundQueues()
+        fun arrive(channel: String, extensions: Map<String, JsonValue>, index: Long) {
+            queues.receive(
+                Frame(Framing.header(channel, index, index, index, extensions), ByteArray(0)),
+                index,
+                index,
+            )
+        }
+        repeat(2) { arrive(Channels.GPS, GpsRecord.noFix(it.toLong()).toExtensions(), it.toLong()) }
+        arrive(Channels.IMU, ImuSample(7, 0.0, 0.0, 9.8, 0.0, 0.0, 0.0, accuracy = 3).toExtensions(), 7)
+
+        assertEquals(3, queues.abandonAll(), "three were waiting")
+
+        val gps = queues.counters().getValue(Channels.GPS)
+        val imu = queues.counters().getValue(Channels.IMU)
+        // Per channel, because a total of three is equally consistent with three on gps and
+        // none on imu -- which is what a single accumulator would have produced.
+        assertEquals(2, gps.abandoned, "gps: $gps")
+        assertEquals(1, imu.abandoned, "imu: $imu")
+        assertTrue(gps.balances && imu.balances, "gps=$gps imu=$imu")
+        assertEquals(0, queues.pending(), "the queues must be empty afterwards")
+        assertEquals(0, queues.abandonAll(), "a second pass has nothing to abandon")
     }
 
 
