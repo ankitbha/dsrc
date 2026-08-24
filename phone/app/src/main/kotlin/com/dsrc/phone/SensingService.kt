@@ -20,6 +20,8 @@ import com.dsrc.phone.sensors.CameraPipeline
 import com.dsrc.phone.sensors.CameraXSource
 import com.dsrc.phone.sensors.CameraFrameSender
 import com.dsrc.phone.sensors.GpsLocationSource
+import com.dsrc.phone.sensors.ImuPipeline
+import com.dsrc.phone.sensors.ImuSource
 import com.dsrc.phone.sensors.GpsPipeline
 import com.dsrc.phone.sensors.GpsReading
 import com.dsrc.phone.sensors.GpsSource
@@ -54,6 +56,8 @@ class SensingService : LifecycleService() {
     private var frameSender: CameraFrameSender? = null
     private var gpsPipeline: GpsPipeline? = null
     private var gpsSource: GpsSource? = null
+    private var imuPipeline: ImuPipeline? = null
+    private var imuSource: ImuSource? = null
 
     override fun onBind(intent: Intent): IBinder? {
         // LifecycleService dispatches lifecycle events from its overrides, so every one
@@ -320,14 +324,23 @@ class SensingService : LifecycleService() {
         val locations = GpsLocationSource(this, config)
         gpsSource = locations
 
+        val imu = ImuPipeline(config) { sample ->
+            holder.send(Channels.IMU, sample.toExtensions())
+        }
+        imuPipeline = imu
+        val motion = ImuSource(this, config)
+        imuSource = motion
+
         source.start(pipe)
         locations.start { reading ->
             recordReceipt(reading)
             gps.offer(reading)
         }
+        motion.start(onReading = { imu.offer(it) }, onUnpaired = { imu.offerUnpaired() })
         Log.i(
             TAG,
             "capture starting: camera ${config.cameraHz} Hz, gps ${config.gpsHz} Hz, " +
+                "imu ${config.imuHz} Hz, " +
                 "link ${LinkConfig().host}:${LinkConfig().port}",
         )
         // Last, so a test can fail a start with every resource already published -- which is
@@ -430,8 +443,10 @@ class SensingService : LifecycleService() {
             release("test seam") { teardownFailureOverride?.invoke() }
             release("camera source") { cameraSource?.stop() }
             release("gps source") { gpsSource?.stop() }
+            release("imu source") { imuSource?.stop() }
             release("camera pipeline") { pipeline?.stop() }
             release("gps pipeline") { gpsPipeline?.stop() }
+            release("imu pipeline") { imuPipeline?.stop() }
             release("frame sender") { frameSender?.stop() }
             release("encoder") { encodeExecutor?.shutdown() }
             // Stats *after* the stops, and round 5 is why. `abandoned`, `refusedStopped`
@@ -445,6 +460,16 @@ class SensingService : LifecycleService() {
                 pipeline?.let {
                     if (!it.isStopped) statsReadBeforeStop.incrementAndGet()
                     Log.i(TAG, "camera stats ${it.stats}")
+                }
+            }
+            release("imu stats") {
+                imuPipeline?.let {
+                    if (!it.isStopped) statsReadBeforeStop.incrementAndGet()
+                    Log.i(
+                        TAG,
+                        "imu stats ${it.stats} timebase=${imuSource?.timebase} " +
+                            "offsetNs=${imuSource?.timebaseOffsetNs}",
+                    )
                 }
             }
             release("gps stats") {
@@ -467,6 +492,8 @@ class SensingService : LifecycleService() {
         } finally {
             cameraSource = null
             gpsSource = null
+            imuPipeline = null
+            imuSource = null
             pipeline = null
             gpsPipeline = null
             frameSender = null
@@ -474,6 +501,7 @@ class SensingService : LifecycleService() {
             link = null
             resourcesHeldAfterTeardown = listOfNotNull(
                 cameraSource, gpsSource, pipeline, gpsPipeline, frameSender, encodeExecutor, link,
+                imuPipeline, imuSource,
             ).size
         }
     }

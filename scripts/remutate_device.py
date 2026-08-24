@@ -16,6 +16,8 @@ MUTATIONS = [
     ("teardown: entering a stopped state does not tear down",
      "                onSensingDown()\n                release()\n            }",
      "                release()\n            }"),
+    ("imu: the source is never started",
+     "        motion.start(onReading = { imu.offer(it) }, onUnpaired = { imu.offerUnpaired() })\n", ""),
     ("teardown: one later release is skipped",
      '            release("gps source") { gpsSource?.stop() }\n', ''),
 ]
