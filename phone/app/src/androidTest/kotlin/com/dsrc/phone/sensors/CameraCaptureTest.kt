@@ -314,17 +314,21 @@ class CameraCaptureTest {
         //      entries, so `log.size - before` is always 0 and `take(0).count { ... }` is
         //      identically zero. The content rotates correctly; only the count was pinned.
         //
-        // Watermarking by the newest *entry* rather than by length discriminates: with the
-        // flag, logcat shows "provider resolved after teardown; not binding" and no new
-        // CONNECT; without it, the bind completes and the camera connects after the stop.
-        val watermark = cameraClientLog().firstOrNull()
+        // Watermarking by *position* rather than by content. Entry text is not unique --
+        // second resolution, constant PID, constant wording, and a live dump here contains
+        // duplicated lines -- so matching the newest string-equal entry let a tying entry
+        // collapse the fresh window to empty and the count below pass for any behaviour.
+        // With the flag, logcat shows "provider resolved after teardown; not binding" and
+        // no new CONNECT; without it, the bind completes and the camera connects after the
+        // stop.
+        val entriesBefore = cameraClientLog().size
         val harness = start(SensingConfig(cameraHz = 5.0))
         // No wait: the provider future is deliberately still in flight, and the lifecycle
         // stays alive so only the flag can decline it.
         harness.stopSourceOnly()
         Thread.sleep(3_000)
 
-        val fresh = entriesNewerThan(watermark)
+        val fresh = entriesNewerThan(entriesBefore)
         val connects = fresh.count { it.contains("CONNECT") && !it.contains("DISCONNECT") }
         assertEquals(
             "a bind completed after the source was stopped: ${fresh.take(3)}",
@@ -336,15 +340,31 @@ class CameraCaptureTest {
     /**
      * Camera-service entries newer than a watermark entry.
      *
-     * By content, not by count. The dump's event log is a saturated fixed-capacity ring, so
-     * its length never changes and a size delta is always zero -- which made the previous
-     * version of the assertion above inert.
+     * By content, not by count: the dump's event log is a saturated fixed-capacity ring, so
+     * its length never changes and a size delta is always zero, which made an earlier
+     * version of this inert.
+     *
+     * By content *and position*, though, because content alone is not unique. The entries
+     * are `08-24 06:18:00 : CONNECT device 1 client for package com.dsrc.phone (PID 21389)`
+     * -- second resolution, constant PID, constant text -- and a live dump on this emulator
+     * contains literally duplicated lines. `indexOf` finds the *newest* string-equal entry,
+     * so a new entry that ties the watermark's text collapses the fresh window to empty and
+     * the count it feeds passes for any behaviour at all.
+     *
+     * The watermark is therefore taken as an index into the list it was read from, and the
+     * caller passes back how many entries the log had at the time. Anything above that
+     * count is new; a shorter log means the ring rotated and the window is unusable, which
+     * is reported rather than silently treated as "nothing happened".
      */
-    private fun entriesNewerThan(watermark: String?): List<String> {
+    private fun entriesNewerThan(entriesBefore: Int?): List<String> {
         val log = cameraClientLog()
-        if (watermark == null) return log
-        val index = log.indexOf(watermark)
-        return if (index < 0) log else log.take(index)
+        if (entriesBefore == null) return log
+        require(log.size >= entriesBefore) {
+            "the camera log shrank from $entriesBefore to ${log.size} entries; the ring " +
+                "rotated and this window cannot be trusted"
+        }
+        // Most recent first, so the new entries are the ones at the front.
+        return log.take(log.size - entriesBefore)
     }
 
     /** The camera service's own client log for this package, most recent first. */

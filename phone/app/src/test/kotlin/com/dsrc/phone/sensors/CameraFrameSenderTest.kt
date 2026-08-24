@@ -135,11 +135,25 @@ class CameraFrameSenderTest {
         )
         sender.start()
         while (sleeps.get() < 2) Thread.sleep(1)
+
+        // Read at the moment of the stop, not 50 ms later, and that is the finding. Taking
+        // the baseline after a sleep hides every sleep that happened inside the window --
+        // so deleting the loop's own `if (stopped.get()) break` left the test green, because
+        // the one extra poll it allows lands in exactly that gap. The counter is not the
+        // subject; what happens between `stop()` returning and the loop noticing is.
+        val atStop = sleeps.get()
         sender.stop()
-        Thread.sleep(50)
-        val after = sleeps.get()
-        Thread.sleep(50)
-        assertEquals("the loop kept polling after stop", after, sleeps.get())
+        Thread.sleep(100)
+
+        // At most one more: the poll already in flight when stop() was called may finish.
+        // A second means the loop went round again, which is what the flag is for. The
+        // upper bound is the assertion -- equality would be a race, since the in-flight
+        // poll may or may not have started.
+        val extra = sleeps.get() - atStop
+        assertTrue(
+            "the loop went round $extra more times after stop; at most one poll may be in flight",
+            extra <= 1,
+        )
     }
 
     private fun assertArrayEquals(expected: ByteArray, actual: ByteArray) {

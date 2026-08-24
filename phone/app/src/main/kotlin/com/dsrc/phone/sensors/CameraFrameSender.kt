@@ -60,6 +60,24 @@ class CameraFrameSender(
         thread?.interrupt()
     }
 
+    /**
+     * Drain and send until stopped.
+     *
+     * Three guards end this loop and every one of them is individually deletable with the
+     * suite green: the `while` condition, the `if (stopped.get()) break` before the sleep,
+     * and the `InterruptedException` catch. That is deliberate rather than accidental, but
+     * only two of the three were ever written down, so the third read as an oversight.
+     *
+     * They are not equivalent. `stop()` sets the flag *and* interrupts, so on a healthy
+     * stop the interrupt lands inside `sleeper` and the catch is what actually breaks --
+     * which is why deleting the mid-loop check changes nothing measurable, and why a test
+     * cannot distinguish them. The flag covers the case where the interrupt is consumed by
+     * something inside `drain` or `send` before this loop sees it; the mid-loop check keeps
+     * a drain that took longer than the poll interval from sleeping once more on the way
+     * out. Each is cheap, and the failure mode they guard against is a send loop that keeps
+     * running after teardown with nothing reading its output -- silent, and the reason this
+     * class has a stop path at all.
+     */
     private fun loop() {
         while (!stopped.get()) {
             // Drain until empty, then sleep. Taking one frame per sleep would cap the
