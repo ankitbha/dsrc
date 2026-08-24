@@ -2685,4 +2685,54 @@ class SessionTest {
         assertTrue(control.balances, "$control")
     }
 
+
+    @Test
+    fun `a stats snapshot is never self-contradictory under live traffic`() {
+        // Round 8 measured 18,530 contradictory snapshots in 49,866,568 samples: a session
+        // reporting deliveryFailures = 1 alongside failed = 2, and framesReceived below the
+        // per-channel total it is a superset of. Both come from reading a session-wide
+        // counter and a per-channel map at two different instants, under two different
+        // locks -- so inverting a *write*, which is what round 7 did, fixes one pair and
+        // leaves the class alone.
+        //
+        // Sampled rather than reasoned about, because the previous fix was reasoned about
+        // and the reasoning covered one field. The loop is bounded by a deadline it checks
+        // itself, so it cannot outlive the test whatever happens to the peer.
+        val (phone, jetson) = pair(onPhoneFrame = { throw IllegalStateException("always") })
+        val deadline = System.currentTimeMillis() + 3_000
+        val sender = Thread({
+            var index = 0L
+            while (System.currentTimeMillis() < deadline) {
+                jetson.session.send(Channels.GPS, GpsRecord.noFix(index++).toExtensions())
+            }
+        }, "stats-probe-sender").also { it.isDaemon = true; it.start() }
+
+        var samples = 0L
+        val contradictions = mutableListOf<String>()
+        while (System.currentTimeMillis() < deadline && contradictions.isEmpty()) {
+            val stats = phone.session.stats()
+            samples++
+            val failed = stats.inboundChannels.values.sumOf { it.failed }
+            val received = stats.inboundChannels.values.sumOf { it.received }
+            if (failed > stats.deliveryFailures) {
+                contradictions.add("failed=$failed > deliveryFailures=${stats.deliveryFailures}")
+            }
+            // framesReceived counts heartbeats too, which never reach the inbound queues,
+            // so it can only ever exceed the per-channel total.
+            if (received > stats.framesReceived) {
+                contradictions.add("received=$received > framesReceived=${stats.framesReceived}")
+            }
+            if (stats.deliveryFailures > 0 && stats.lastDeliveryFailure == null) {
+                contradictions.add("deliveryFailures=${stats.deliveryFailures} with no description")
+            }
+        }
+        sender.join(5_000)
+
+        assertTrue(samples > 1_000, "only $samples snapshots taken; the probe was not running")
+        assertTrue(
+            contradictions.isEmpty(),
+            "a public snapshot contradicted itself after $samples samples: $contradictions",
+        )
+    }
+
 }

@@ -263,11 +263,21 @@ class DifferentialTest {
      * is portable, so the comparison uses neither.
      */
     private fun typeName(value: JsonValue): String = when (value) {
+        // Values, not just types, for everything both languages spell identically. Round 8
+        // showed why: with `key:type` alone, two same-typed siblings are interchangeable,
+        // so moving "ram_it" from `merge_mode` to `lane_preference` on one side only was
+        // still invisible -- which is verbatim the drift the previous commit claimed to
+        // have closed. Recursion bought key-set drift and nothing else.
+        //
+        // Reals carry a rendering rather than a value because the two runtimes need not
+        // agree on how a double prints. Both use shortest-round-trip for the magnitudes in
+        // this table, and if that ever stops being true every row fails at once rather than
+        // one row failing quietly -- which is the right way for this to break.
         is JsonValue.Null -> "null"
-        is JsonValue.Bool -> "bool"
-        is JsonValue.Num -> "int"
-        is JsonValue.Real -> "real"
-        is JsonValue.Text -> "str"
+        is JsonValue.Bool -> "bool=${value.value}"
+        is JsonValue.Num -> "int=${value.value}"
+        is JsonValue.Real -> if (value.value.isFinite()) "real=${value.value}" else "real=nonfinite"
+        is JsonValue.Text -> "str=${value.value}"
         // Recursive, and round 7 is why. Emitting a bare "obj" hid the contents of
         // `action` and `rates`, so six of the thirty-two rows -- the three advisory
         // action heads and the three rate keys -- were still open to exactly the drift

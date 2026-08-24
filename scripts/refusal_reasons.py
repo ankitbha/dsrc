@@ -138,9 +138,7 @@ def shape(extensions, payload) -> str:
     `lane_preference` on one side only is both reason- and shape-preserving at
     depth zero, and the suite stayed green.
     """
-    names = {
-        type(None): "null", bool: "bool", int: "int", float: "real", str: "str",
-    }
+    import math
 
     # bool before int: True is an int of value 1, and the two must not be conflated
     # here any more than they are in the decoders. Mapping by exact type() rather
@@ -150,7 +148,23 @@ def shape(extensions, payload) -> str:
             return f"obj({object_shape(value)})"
         if isinstance(value, (list, tuple)):
             return "arr[" + ",".join(name_of(item) for item in value) + "]"
-        return names.get(type(value), type(value).__name__)
+        if value is None:
+            return "null"
+        if type(value) is bool:
+            return f"bool={'true' if value else 'false'}"
+        if type(value) is int:
+            return f"int={value}"
+        if type(value) is float:
+            # Rendered, not compared as a number: the two runtimes need not agree on
+            # how a double prints. Both use shortest-round-trip for the magnitudes in
+            # this table, and a disagreement fails every row at once rather than one
+            # row quietly -- which is the right way for it to break.
+            if not math.isfinite(value):
+                return "real=nonfinite"
+            return f"real={value!r}"
+        if type(value) is str:
+            return f"str={value}"
+        return type(value).__name__
 
     def object_shape(mapping):
         return ",".join(sorted(f"{key}:{name_of(value)}" for key, value in mapping.items()))

@@ -762,7 +762,30 @@ class Session(
         outboundRefusals[reason] = (outboundRefusals[reason] ?: 0) + 1
     }
 
+    /**
+     * A snapshot of everything this session counts.
+     *
+     * **Read in the reverse of the write order**, and that is the whole of why the fields
+     * below are assembled bottom-up. Round 7 fixed one pair of these by inverting a *write*;
+     * round 8 measured 18,530 contradictory snapshots out of 49,866,568 and showed that
+     * ordering the writes cannot close the class, because the two values sit under
+     * different locks and are read at different instants.
+     *
+     * The rule that does close it: every writer increments the session-wide counter
+     * *before* the per-channel one, so a reader must take the per-channel map **first** and
+     * the session-wide counter **second**. Then anything counted in the map was counted in
+     * the total before it, and `total >= map` holds by construction rather than by luck.
+     * Taken the other way round -- which is what this used to do -- a reader could sample
+     * `deliveryFailures = 1`, block on the inbound lock, and come back to `failed = 2`.
+     *
+     * A single lock over the snapshot would also work and is worse: every counter write is
+     * on a hot path, and the reader is a diagnostic.
+     */
     fun stats(): SessionStats = synchronized(refusalLock) {
+        // Per-channel maps first. Both of these take their own lock.
+        val inboundChannels = inbound.counters()
+        val channels = queues.counters()
+        // Then the session-wide totals, which were written before the entries above.
         SessionStats(
             framesSent = framesSent.get(),
             framesReceived = framesReceived.get(),
@@ -774,8 +797,8 @@ class Session(
             outboundFramingRefusals = outboundFramingRefusals.get(),
             lastOutboundFramingRefusal = lastOutboundFramingRefusal,
             outboundRefusals = outboundRefusals.toMap(),
-            channels = queues.counters(),
-            inboundChannels = inbound.counters(),
+            channels = channels,
+            inboundChannels = inboundChannels,
         )
     }
 

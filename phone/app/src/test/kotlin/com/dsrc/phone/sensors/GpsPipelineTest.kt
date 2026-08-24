@@ -230,4 +230,41 @@ class GpsPipelineTest {
         val record = GpsRecord.noFix(1_000_000_002)
         assertEquals(record, GpsRecord.fromWire(record.toExtensions(), ByteArray(0)))
     }
+
+    @Test
+    fun `isStopped tracks stop, and is not a constant`() {
+        // The whole stats-ordering claim in SensingService rests on this accessor, and no
+        // test named it: reducing it to `get() = true` left 241 JVM and all 53 instrumented
+        // tests green while fully restoring the defect it guards -- abandoned,
+        // refusedStopped and the buffer's discarded structurally zero at the only place
+        // production reads them. Both ends asserted, because `= true` and `= false` are
+        // each satisfied by half of this.
+        val (p, _) = pipeline()
+        assertFalse("a running pipeline is not stopped", p.isStopped)
+        p.stop()
+        assertTrue("a stopped pipeline says so", p.isStopped)
+    }
+
+
+    @Test
+    fun `a reading the transport accepts is counted as delivered, not as refused`() {
+        // The other half, and it was missing. The only test touching this split runs with
+        // accept = false and asserts refusedBySink == 5, delivered == 0 -- both of which a
+        // mutant that increments refusedBySink on the success path satisfies exactly. So
+        // every delivered fix could be reported as refused by the transport, permanently,
+        // with 241 tests green. `acceptedBalances` cannot see it either: it is a sum over
+        // the two terms, and a transfer between them leaves the sum alone.
+        //
+        // The same swaps in CameraFrameSender and CameraPipeline are both caught; GPS was
+        // the one modality without the pin.
+        val (p, delivered) = pipeline(accept = true)
+        repeat(3) { p.offer(reading(it * 1_000_000_000L)) }
+
+        val stats = p.stats
+        assertEquals("the sink took them", 3, delivered.size)
+        assertEquals("and they are counted as delivered", 3, stats.delivered)
+        assertEquals("with nothing refused", 0, stats.refusedBySink)
+        assertTrue("$stats", stats.acceptedBalances)
+    }
+
 }

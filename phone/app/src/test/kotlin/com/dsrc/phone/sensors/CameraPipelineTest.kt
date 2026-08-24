@@ -376,4 +376,19 @@ class CameraPipelineTest {
         assertNull(runCatching { offer(p, 0) }.exceptionOrNull())
     }
 
+
+    @Test
+    fun `isStopped tracks stop, and is not a constant`() {
+        // The whole stats-ordering claim in SensingService rests on this accessor, and no
+        // test named it: reducing it to `get() = true` left 241 JVM and all 53 instrumented
+        // tests green while fully restoring the defect it guards -- abandoned,
+        // refusedStopped and the buffer's discarded structurally zero at the only place
+        // production reads them. Both ends asserted, because `= true` and `= false` are
+        // each satisfied by half of this.
+        val p = pipeline()
+        assertFalse("a running pipeline is not stopped", p.isStopped)
+        p.stop()
+        assertTrue("a stopped pipeline says so", p.isStopped)
+    }
+
 }
