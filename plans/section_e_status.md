@@ -476,10 +476,47 @@ The golden vectors pin framing, not message decode, so they pass without them.
 
 ---
 
+## Task 20 — IMU capture and forwarding (written, under validation)
+
+`ImuSource` and `ImuPipeline`, mirroring the GPS pair so that "at the commanded rate"
+means the same thing on every modality: the same `RateGate`, the same per-heading
+accounting, the same named worker thread.
+
+The part worth knowing is the clock. Everything else in this app stamps on
+`elapsedRealtimeNanos` — GPS fixes, the transport's enqueue stamp, the timebase exchange
+with the Jetson. `SensorEvent.timestamp` is only *documented* to share that base, and it
+is a long-standing vendor bug for it to be `System.nanoTime` or a different epoch
+entirely. A sample on the wrong timebase is worse than a missing one: it arrives looking
+valid and lands the Jetson's fusion at the wrong instant. So the offset is measured on the
+first event, and a mismatch stops IMU capture rather than guessing a correction — camera
+and GPS carry on, because an IMU stream is not worth taking the phone down for and
+certainly not worth a stream of confidently wrong timestamps.
+
+The verdict is a pure function on the companion rather than a private method, because the
+emulator's virtual sensors report the same clock: the mismatched branch is inert on a
+device, so an instrumented test of it would assert nothing. What can be settled is the
+policy, and that is what is pinned.
+
+The pairing carries its own error term. The accelerometer drives and the gyro comes from
+its latest reading, so the gyro's age stays under one accelerometer period rather than the
+other way round; the age is summarised over the samples that actually went out, since a
+gated sample's staleness costs nobody anything. An accelerometer event arriving before the
+first gyro event is `unpaired` and dropped — zeros are a reading, and the message has no
+null for those axes.
+
+`dsrc-imu` joins `WORKER_PREFIXES`, which is how a new resource gets teardown coverage
+without new tests: deleting the source's `start()` fails four instrumented tests.
+
+Two of the tests written for it could not fail, and mutation found both. The gyro ages in
+the summary test only ever rose, so "keep the maximum" and "keep the last" gave the same
+answer; and the stale-gyro test stepped over its own boundary, so `>` and `>=` agreed.
+That is the same shape as the findings above, and it keeps happening in the tests rather
+than in the code.
+
 ## Not started
 
-Tasks 20 (IMU), 21 (HERE client), 22 (sensing-config handling), 23 (advisory display,
-plus task 17's deferred Activity harness), 24 (thermal), 25 (local session logging).
+Tasks 21 (HERE client), 22 (sensing-config handling), 23 (advisory display, plus task 17's
+deferred Activity harness), 24 (thermal), 25 (local session logging).
 
 **Section E will not finish in one sitting.** Each task is taking a validator
 conversation of several rounds, and those rounds keep finding real defects — including
