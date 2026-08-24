@@ -115,17 +115,57 @@ class GpsLocationSource(
 
         val updates = LocationListener { location -> deliver(location) }
         listener = updates
+        this.looper = looper
+        request(config.gpsHz)
+    }
+
+    /**
+     * Ask the provider for a new interval.
+     *
+     * The rate gate can only ever *lower* a rate -- it drops fixes the provider already
+     * delivered -- so a command raising `gps_hz` above what was requested at start changed
+     * nothing while the pipeline reported the new rate as in force.
+     *
+     * `requestLocationUpdates` with the same listener replaces the previous request rather
+     * than adding a second one, so this is not restarting capture: the pipeline, its
+     * counters and the session are untouched.
+     *
+     * **Not pinned by a test.** The IMU half of this is, by counting frames the peer
+     * receives after a raise the gate cannot serve. The GPS half is not: the emulator's
+     * provider serves a static position, so asking it for a shorter interval does not make
+     * it deliver faster and no measurement on this machine can tell the fix from its
+     * absence. Same code path and same reasoning as the IMU; said here rather than left to
+     * a green suite to imply.
+     */
+    @SuppressLint("MissingPermission")
+    fun setRate(hz: Double) {
+        if (listener != null && looper != null) request(hz)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun request(hz: Double) {
+        val updates = listener ?: return
+        val target = looper ?: return
         manager.requestLocationUpdates(
             LocationManager.GPS_PROVIDER,
-            periodMs(config.gpsHz),
+            periodMs(hz),
             // No distance filter: a stationary vehicle at a light still needs fixes, and
             // a filter here would silently become a second rate limit alongside the gate.
             0f,
             updates,
-            looper,
+            target,
         )
-        Log.i(TAG, "GPS updates requested at ${config.gpsHz} Hz (${periodMs(config.gpsHz)} ms)")
+        requestedHz = hz
+        Log.i(TAG, "GPS updates requested at $hz Hz (${periodMs(hz)} ms)")
     }
+
+    /** The interval last asked of the provider, which bounds what the gate can pass. */
+    @Volatile
+    var requestedHz: Double = 0.0
+        private set
+
+    @Volatile
+    private var looper: android.os.Looper? = null
 
     override fun stop() {
         listener?.let { manager.removeUpdates(it) }

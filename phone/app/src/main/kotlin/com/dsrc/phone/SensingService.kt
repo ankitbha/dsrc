@@ -309,7 +309,18 @@ class SensingService : LifecycleService() {
             onFrame = ::onInboundFrame,
         )
         link = holder
-        holder.start()
+        // Not started here. Starting the link starts the reader and delivery threads, and
+        // therefore `onInboundFrame` -- sixty lines before `configApplier` exists. A command
+        // arriving in that window reached a null applier, was dropped with no else branch,
+        // and the transport counted it delivered: `rate_cmd` showed delivered=1, dropped=0,
+        // refused=0, and the phone ran the whole drive on its compiled-in defaults after a
+        // command the Jetson believed it had landed. Measured at 3.4-6.3 ms wide, which a
+        // Jetson that configures the phone on session establishment aims straight at -- and
+        // HERE makes no call at all until a query arrives, so losing that one command means
+        // no HERE traffic for the drive with every counter reading healthy.
+        //
+        // The link starts at the end of this method instead, once everything a frame can
+        // reach exists.
 
         // One thread, because two would let frames finish compressing out of order and
         // make the monotonic frame_id a lie.
@@ -375,8 +386,16 @@ class SensingService : LifecycleService() {
 
         configApplier = ConfigApplier(object : ConfigApplier.Targets {
             override fun setCameraRate(hz: Double) = pipe.setRate(hz)
-            override fun setGpsRate(hz: Double) = gps.setRate(hz)
-            override fun setImuRate(hz: Double) = imu.setRate(hz)
+            override fun setGpsRate(hz: Double) {
+                // Both the gate and the provider. The gate alone can only lower a rate, so
+                // a command raising it changed nothing while reporting the new value.
+                gps.setRate(hz)
+                locations.setRate(hz)
+            }
+            override fun setImuRate(hz: Double) {
+                imu.setRate(hz)
+                motion.setRate(hz)
+            }
             override fun setHereRate(hz: Double) = here.setRate(hz)
             override fun setHereQuery(query: com.dsrc.transport.HereQuery?) = here.setQuery(query)
         })
@@ -388,6 +407,9 @@ class SensingService : LifecycleService() {
         }
         motion.start(onReading = { imu.offer(it) }, onUnpaired = { imu.offerUnpaired() })
         here.start()
+
+        // Last, so no inbound frame can arrive before the thing that handles it exists.
+        holder.start()
         Log.i(
             TAG,
             "capture starting: camera ${config.cameraHz} Hz, gps ${config.gpsHz} Hz, " +
@@ -447,7 +469,16 @@ class SensingService : LifecycleService() {
             return
         }
         val command = RateCommand.fromWire(frame.header.entries, frame.payload)
-        configApplier?.apply(command)
+        val applier = configApplier
+        if (applier == null) {
+            // The link now starts last, so this window is closed. Counted rather than
+            // dropped anyway: a silent no-op here is a command the Jetson believes it
+            // landed, and that is the failure that made the window worth closing.
+            commandsWithoutApplier.incrementAndGet()
+            Log.e(TAG, "rate_cmd arrived with no applier; it has been discarded")
+            return
+        }
+        applier.apply(command)
         Log.i(
             TAG,
             "rate_cmd trigger=${command.trigger} shadow=${command.shadow} " +
@@ -818,6 +849,9 @@ class SensingService : LifecycleService() {
         /** The running HERE pipeline, for a test that wants what it actually did. */
         @Volatile
         internal var liveHere: HerePipeline? = null
+
+        /** Commands that arrived with nothing to apply them. Non-zero is a defect. */
+        internal val commandsWithoutApplier = java.util.concurrent.atomic.AtomicLong(0)
 
         /**
          * Release steps that threw, across every instance.

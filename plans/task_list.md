@@ -742,8 +742,19 @@ tunnels over USB and is unaffected.
     validation finding was that a reply which stalled mid-body was reported that
     way too, losing a status the phone had already seen. The key never reaches
     `request_url`, which goes on the wire and into every artifact.
-22. Sensing-configuration handling across all four modalities -- rates and
-    per-modality settings alike -- applied without restarting capture.
+22. ~~Sensing-configuration handling across all four modalities -- rates and
+    per-modality settings alike -- applied without restarting capture.~~ **DONE**
+    — `ConfigApplier` routes a decoded `rate_cmd` to all four pipelines *and* to
+    the IMU and GPS sources, because a rate gate can only ever lower a rate:
+    commanding 200 Hz gave 50 on the wire while the phone reported 200, with
+    nothing on either side recording the difference. `shadow` changes nothing at
+    all, per the spec's definition. The link now starts **last** in come-up: it
+    used to start sixty lines before the applier existed, so a command arriving
+    in that 3–6 ms window was dropped while the transport counted it delivered —
+    and since HERE makes no call until a query arrives, losing that one command
+    meant no HERE traffic for the drive with every counter healthy. The only
+    non-rate setting the downlink carries is the HERE query; camera geometry and
+    JPEG quality stay compile-time.
 23. Advisory display: the driver-facing UI.
 24. Thermal monitoring reported upstream, plus throttle-safe capture that
     degrades rather than failing.

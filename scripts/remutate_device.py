@@ -30,6 +30,12 @@ MUTATIONS = [
     # unregistered" and "batching is turned back on". Both are still real defects and
     # neither is pinned now -- see the note in ImuCaptureTest. Leaving them here would make
     # the harness permanently red for a gap that is recorded elsewhere.
+    (SERVICE, "config: a raise never reaches the imu source",
+     "                motion.setRate(hz)", ""),
+    (SERVICE, "config: the rate_cmd handler is never reached",
+     "        if (frame.channel != Channels.RATE_CMD) {", "        if (true) {"),
+    (SERVICE, "config: the command is decoded but never applied",
+     "        applier.apply(command)", ""),
     (SERVICE, "imu: the sink never reaches the transport",
      "            holder.send(Channels.IMU, sample.toExtensions())",
      "            sample.toExtensions().isEmpty()"),

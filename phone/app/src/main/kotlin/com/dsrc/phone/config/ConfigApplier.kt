@@ -38,6 +38,15 @@ class ConfigApplier(
     private var current: RateCommand? = null
 
     /**
+     * The query in force, which is not the last command's.
+     *
+     * A command that omits `here` means "no change", so deriving this from the last command
+     * reported no query configured while HERE was still querying the one before it.
+     */
+    @Volatile
+    private var currentQuery: com.dsrc.transport.HereQuery? = null
+
+    /**
      * Apply one command, or record it without applying.
      *
      * `shadow` is the Jetson asking what *would* happen: the spec defines it as whether the
@@ -55,6 +64,7 @@ class ConfigApplier(
             }
             applied++
             current = command
+            command.here?.let { currentQuery = it }
         }
 
         // Outside the lock: these reach into the pipelines, and holding a lock across a
@@ -79,7 +89,7 @@ class ConfigApplier(
                 shadowed = shadowed,
                 lastTrigger = lastTrigger,
                 currentRates = current?.rates ?: emptyMap(),
-                hereConfigured = current?.here != null,
+                hereConfigured = currentQuery != null,
             )
         }
 

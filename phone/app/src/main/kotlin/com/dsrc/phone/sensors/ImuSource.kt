@@ -194,10 +194,60 @@ class ImuSource(
         // timestamps are right but whose arrival is late, and the rate gate would then pass
         // the first of the burst and drop the rest -- turning a 50 Hz command into one
         // sample per batch. Latency is worth more here than the wakeup saving.
-        val periodUs = (1_000_000.0 / config.imuHz).toInt().coerceAtLeast(1)
-        manager.registerListener(callback, accelerometer, periodUs, 0, handler)
-        manager.registerListener(callback, gyroscope, periodUs, 0, handler)
+        this.accelerometer = accelerometer
+        this.gyroscope = gyroscope
+        this.handler = handler
+        register(config.imuHz)
     }
+
+    /**
+     * Ask the platform for a new sampling period.
+     *
+     * The rate gate can only ever *lower* a rate: it drops samples the platform already
+     * produced. So a command raising `imu_hz` above what was requested at start changed
+     * nothing on the wire while the pipeline reported the new rate as in force -- commanded
+     * 200 Hz, measured 50, reported 200. Nobody on either side could see the difference.
+     *
+     * Re-registering is not restarting capture in the sense task 22 forbids: the pipeline,
+     * its counters and the session are untouched, and the listener object is the same one.
+     * Only the period the platform is asked for changes.
+     */
+    fun setRate(hz: Double) {
+        val callback = listener ?: return
+        val sensor = accelerometer ?: return
+        val gyro = gyroscope ?: return
+        val worker = handler ?: return
+        manager.unregisterListener(callback)
+        register(hz, callback, sensor, gyro, worker)
+    }
+
+    private fun register(
+        hz: Double,
+        callback: SensorEventListener? = listener,
+        sensor: Sensor? = accelerometer,
+        gyro: Sensor? = gyroscope,
+        worker: Handler? = handler,
+    ) {
+        if (callback == null || sensor == null || gyro == null || worker == null) return
+        val periodUs = (1_000_000.0 / hz).toInt().coerceAtLeast(1)
+        manager.registerListener(callback, sensor, periodUs, 0, worker)
+        manager.registerListener(callback, gyro, periodUs, 0, worker)
+        requestedHz = hz
+    }
+
+    /** The period last asked of the platform, which bounds what the gate can pass. */
+    @Volatile
+    var requestedHz: Double = 0.0
+        private set
+
+    @Volatile
+    private var accelerometer: Sensor? = null
+
+    @Volatile
+    private var gyroscope: Sensor? = null
+
+    @Volatile
+    private var handler: Handler? = null
 
 
     fun stop() {

@@ -234,6 +234,57 @@ class ImuWireTest {
         assertTrue("sensing stopped when the rate changed: $after", after.accepted > 0)
     }
 
+    @Test
+    fun aCommandRaisingTheRateIsHonouredOnTheWire() {
+        // The direction the gate cannot serve. A RateGate only ever *drops* samples the
+        // platform already produced, so raising imu_hz above what was requested at start
+        // changed nothing on the wire while the pipeline reported the new rate as in force
+        // -- commanded 200 Hz, measured 50, reported 200, with nothing on either side of
+        // the link recording the difference. The source re-requests its period now.
+        //
+        // Measured by counting frames the peer actually received, because the pipeline's
+        // own rateHz is exactly the number that was lying.
+        SensingService.start(context)
+        awaitState(SensingState.RUNNING)
+        assertTrue(pollUntil(15_000) { sessions.any { it.isRunning } })
+        assertTrue(pollUntil(10_000) { imuFrames().isNotEmpty() })
+
+        // Above the rate the source was started at, which is the only direction that
+        // discriminates. Commanding down and then back up does not: the source began at
+        // 50 Hz, so a version that never re-requests is still sitting at 50 when the raise
+        // arrives and produces the same answer. Both mutations survived that sequence.
+        val baselineFrom = imuFrames().size
+        Thread.sleep(3_000)
+        val baseline = (imuFrames().size - baselineFrom) / 3.0
+
+        command(imuHz = 200.0)
+        Thread.sleep(1_000)
+        val raisedFrom = imuFrames().size
+        Thread.sleep(3_000)
+        val raised = (imuFrames().size - raisedFrom) / 3.0
+
+        assertTrue(
+            "commanded 200 Hz from a 50 Hz baseline and measured $raised/s against " +
+                "$baseline/s: a raise the gate cannot serve must reach the source",
+            raised > baseline * 1.4,
+        )
+    }
+
+    private fun command(imuHz: Double) {
+        val sent = sessions.first { it.isRunning }.send(
+            Channels.RATE_CMD,
+            RateCommand(
+                captureMonoNs = android.os.SystemClock.elapsedRealtimeNanos(),
+                rates = mapOf(
+                    "camera_hz" to 5.0, "gps_hz" to 1.0, "imu_hz" to imuHz, "here_hz" to 0.2,
+                ),
+                trigger = "instrumented-test",
+                shadow = false,
+            ).toExtensions(),
+        )
+        assertTrue("the peer could not send the command", sent)
+    }
+
     private fun imuFrames() = frames.filter { it.channel == Channels.IMU }
 
     private fun awaitState(state: SensingState) {

@@ -108,7 +108,11 @@ class ConfigApplierTest {
         applier.apply(command(query = null))
 
         assertEquals(listOf(query, null), recorder.queries)
-        assertTrue(applier.stats.hereConfigured || recorder.queries.first() != null)
+        assertTrue(
+            "a later command that omits the query means no change, so the query is still " +
+                "configured -- the previous assertion had a right operand that was always true",
+            applier.stats.hereConfigured,
+        )
     }
 
     @Test
