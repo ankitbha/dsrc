@@ -114,11 +114,25 @@ class DifferentialTest {
         // `theirs` is included because it was not: the assertion covered Kotlin only, and a
         // Python decoder that blew up used to take the whole script down, which reads as
         // "python failed to run" rather than naming the input.
-        val crashed = (ours + theirs).filterValues { it.startsWith("CRASH:") }
+        // Verdict and input shape are compared separately, so a mismatch says which it is.
+        // Together in one string they would report an input drift as a refusal-table
+        // disagreement, which is the wrong diagnosis for the wrong reader.
+        fun verdict(value: String) = value.substringBefore('|')
+        fun shape(value: String) = value.substringAfter('|', "")
+
+        val crashed = (ours + theirs).filterValues { verdict(it).startsWith("CRASH:") }
         assertTrue(crashed.isEmpty(), "a decoder crashed rather than refusing: $crashed")
 
-        val disagreements = ours.filter { (name, reason) -> theirs[name] != reason }
-            .map { (name, reason) -> "$name: kotlin=$reason python=${theirs[name]}" }
+        val differentInputs = ours.filter { (name, value) -> shape(theirs.getValue(name)) != shape(value) }
+            .map { (name, value) -> "$name:\n  kotlin ${shape(value)}\n  python ${shape(theirs.getValue(name))}" }
+        assertTrue(
+            differentInputs.isEmpty(),
+            "the two sides agree on the reason while asking different questions:\n" +
+                differentInputs.joinToString("\n"),
+        )
+
+        val disagreements = ours.filter { (name, value) -> verdict(theirs.getValue(name)) != verdict(value) }
+            .map { (name, value) -> "$name: kotlin=${verdict(value)} python=${verdict(theirs.getValue(name))}" }
         assertTrue(
             disagreements.isEmpty(),
             "the two sides disagree on ${disagreements.size} of ${ours.size} cases:\n" +
@@ -130,7 +144,8 @@ class DifferentialTest {
         // nine the table defines, and a decoder that started crashing would have pushed the
         // number *up*.
         assertTrue(ours.size >= 30, "the case table has shrunk to ${ours.size}")
-        val reasons = ours.values.filter { it != "ACCEPTED" && !it.startsWith("CRASH:") }.toSet()
+        val reasons = ours.values.map { verdict(it) }
+            .filter { it != "ACCEPTED" && !it.startsWith("CRASH:") }.toSet()
         // Seven of the nine, and the two absences are structural rather than gaps.
         // `reserved_key` is a *sender* rule -- it lives in MessageValidation.check, which
         // this table does not call, because it compares decoders. `no_typed_message` is
@@ -210,6 +225,53 @@ class DifferentialTest {
             ?: "CRASH:${thrown.javaClass.simpleName}"
     }
 
+    /**
+     * One case: its verdict, and a fingerprint of the inputs that produced it.
+     *
+     * Comparing the case *names* proves only that both sides have a row called the same
+     * thing. Round 6 asked for the inputs to be compared too, and most of that concern is
+     * already covered from an unexpected direction: if one side's inputs change and the
+     * other's do not, the two verdicts diverge and the disagreement check catches it. What
+     * survives is a *reason-preserving* edit on one side only -- nulling a different field
+     * that refuses for the same reason -- where both sides still answer `null_not_allowed`
+     * about two different questions.
+     *
+     * So the fingerprint is structural rather than a digest of the values. A value digest
+     * would have to agree with Python's float formatting exactly, and it cannot even be
+     * computed for the two `non_finite` cases: canonical JSON refuses to encode a NaN on
+     * both sides, which is the property those cases exist to check. Keys and types are
+     * enough to catch a case that stops exercising the field it is named for, and they
+     * cost nothing to keep in step.
+     */
+    private fun case(
+        extensions: Map<String, JsonValue>,
+        payload: ByteArray,
+        decode: (Map<String, JsonValue>, ByteArray) -> Unit,
+    ): String = "${reasonOf { decode(extensions, payload) }}|${shapeOf(extensions, payload)}"
+
+    /** `key:type` for every key, sorted, plus the payload length. */
+    private fun shapeOf(extensions: Map<String, JsonValue>, payload: ByteArray): String =
+        extensions.entries
+            .map { (key, value) -> "$key:${typeName(value)}" }
+            .sorted()
+            .joinToString(",") + "#${payload.size}"
+
+    /**
+     * A type vocabulary both languages can spell the same way.
+     *
+     * `JsonValue.Num` and Python's `int` are the same thing on this wire and neither name
+     * is portable, so the comparison uses neither.
+     */
+    private fun typeName(value: JsonValue): String = when (value) {
+        is JsonValue.Null -> "null"
+        is JsonValue.Bool -> "bool"
+        is JsonValue.Num -> "int"
+        is JsonValue.Real -> "real"
+        is JsonValue.Text -> "str"
+        is JsonValue.Obj -> "obj"
+        is JsonValue.Arr -> "arr"
+    }
+
     private fun kotlinReasons(): Map<String, String> {
         val gps = GpsRecord.noFix(1).toExtensions()
         val camera = CameraFrameMessage(1, 1, 1280, 720, "jpeg", 85).toExtensions()
@@ -259,50 +321,38 @@ class DifferentialTest {
             // has to be built here rather than parsed from a header: a bare NaN on the wire
             // is a framing error on both sides now, so a decoder only sees one from an
             // in-process caller.
-            "gps speed is not finite" to reasonOf { GpsRecord.fromWire(gps + ("speed_mps" to JsonValue.Real(Double.NaN)), empty) },
-            "gps altitude is infinite" to reasonOf { GpsRecord.fromWire(gps + ("altitude_m" to JsonValue.Real(Double.POSITIVE_INFINITY)), empty) },
-            "gps count is null" to reasonOf { GpsRecord.fromWire(gps + ("fix_quality" to JsonValue.Null), empty) },
-            "gps capture stamp is null" to reasonOf { GpsRecord.fromWire(gps + (Fields.CAPTURE_KEY to JsonValue.Null), empty) },
-            "camera frame id is null" to reasonOf { CameraFrameMessage.fromWire(camera + ("frame_id" to JsonValue.Null), empty) },
-            "camera format is null" to reasonOf { CameraFrameMessage.fromWire(camera + ("format" to JsonValue.Null), empty) },
-            "advisory units is null" to reasonOf { AdvisoryMessage.fromWire(advisory() + ("units" to JsonValue.Null), empty) },
-            "rate_cmd trigger is null" to reasonOf { RateCommand.fromWire(rateCmd() + ("trigger" to JsonValue.Null), empty) },
-            "gps required bool is null" to reasonOf { GpsRecord.fromWire(gps + ("valid" to JsonValue.Null), empty) },
-            "gps valid fix with null coordinates" to reasonOf { GpsRecord.fromWire(gps + ("valid" to JsonValue.Bool(true)), empty) },
-            "gps negative count" to reasonOf { GpsRecord.fromWire(gps + ("num_sats" to JsonValue.Num(-1)), empty) },
-            "gps fractional count" to reasonOf { GpsRecord.fromWire(gps + ("num_sats" to JsonValue.Real(1.5)), empty) },
-            "camera quality zero" to reasonOf { CameraFrameMessage.fromWire(camera + ("quality" to JsonValue.Num(0)), empty) },
-            "camera quality over one hundred" to reasonOf { CameraFrameMessage.fromWire(camera + ("quality" to JsonValue.Num(101)), empty) },
-            "camera zero width" to reasonOf { CameraFrameMessage.fromWire(camera + ("width" to JsonValue.Num(0)), empty) },
-            "camera negative frame id" to reasonOf { CameraFrameMessage.fromWire(camera + ("frame_id" to JsonValue.Num(-1)), empty) },
-            "camera empty format" to reasonOf { CameraFrameMessage.fromWire(camera + ("format" to JsonValue.Text("")), empty) },
-            "advisory action is null" to reasonOf { AdvisoryMessage.fromWire(advisory() + ("action" to JsonValue.Null), empty) },
-            "advisory action is not an object" to reasonOf { AdvisoryMessage.fromWire(advisory() + ("action" to JsonValue.Num(5)), empty) },
-            "advisory action head is an integer" to reasonOf {
-                AdvisoryMessage.fromWire(advisory(action + ("desired_speed_bin" to JsonValue.Num(5))), empty)
-            },
-            "advisory action head outside the set" to reasonOf {
-                AdvisoryMessage.fromWire(advisory(action + ("merge_mode" to JsonValue.Text("ram_it"))), empty)
-            },
-            "advisory action missing a head" to reasonOf {
-                AdvisoryMessage.fromWire(advisory(action - "merge_mode"), empty)
-            },
-            "advisory units outside the three" to reasonOf {
-                AdvisoryMessage.fromWire(advisory() + ("units" to JsonValue.Text("furlongs")), empty)
-            },
-            "rate_cmd rates is null" to reasonOf { RateCommand.fromWire(rateCmd() + ("rates" to JsonValue.Null), empty) },
-            "rate_cmd zero rate" to reasonOf { RateCommand.fromWire(rateCmd(rates + ("gps_hz" to JsonValue.Real(0.0))), empty) },
-            "rate_cmd rate above the ceiling" to reasonOf {
-                RateCommand.fromWire(rateCmd(rates + ("gps_hz" to JsonValue.Real(1000.001))), empty)
-            },
-            "rate_cmd missing a rate key" to reasonOf { RateCommand.fromWire(rateCmd(rates - "imu_hz"), empty) },
-            "control partial pong" to reasonOf {
-                TimeSyncMessage.fromWire(ping + ("t_peer_recv_mono_ns" to JsonValue.Num(2)), empty)
-            },
-            "control absent peer field" to reasonOf { TimeSyncMessage.fromWire(ping - "t_peer_wire_mono_ns", empty) },
-            "control negative exchange id" to reasonOf { TimeSyncMessage.fromWire(ping + ("exchange_id" to JsonValue.Num(-5)), empty) },
-            "control negative wire stamp" to reasonOf { TimeSyncMessage.fromWire(ping + (Session.WIRE_STAMP to JsonValue.Num(-7)), empty) },
-            "control payload on a channel that carries none" to reasonOf { TimeSyncMessage.fromWire(ping, byteArrayOf(1)) },
+            "gps speed is not finite" to case(gps + ("speed_mps" to JsonValue.Real(Double.NaN)), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            "gps altitude is infinite" to case(gps + ("altitude_m" to JsonValue.Real(Double.POSITIVE_INFINITY)), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            "gps count is null" to case(gps + ("fix_quality" to JsonValue.Null), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            "gps capture stamp is null" to case(gps + (Fields.CAPTURE_KEY to JsonValue.Null), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            "camera frame id is null" to case(camera + ("frame_id" to JsonValue.Null), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera format is null" to case(camera + ("format" to JsonValue.Null), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "advisory units is null" to case(advisory() + ("units" to JsonValue.Null), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            "rate_cmd trigger is null" to case(rateCmd() + ("trigger" to JsonValue.Null), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "gps required bool is null" to case(gps + ("valid" to JsonValue.Null), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            "gps valid fix with null coordinates" to case(gps + ("valid" to JsonValue.Bool(true)), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            "gps negative count" to case(gps + ("num_sats" to JsonValue.Num(-1)), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            "gps fractional count" to case(gps + ("num_sats" to JsonValue.Real(1.5)), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            "camera quality zero" to case(camera + ("quality" to JsonValue.Num(0)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera quality over one hundred" to case(camera + ("quality" to JsonValue.Num(101)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera zero width" to case(camera + ("width" to JsonValue.Num(0)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera negative frame id" to case(camera + ("frame_id" to JsonValue.Num(-1)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera empty format" to case(camera + ("format" to JsonValue.Text("")), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "advisory action is null" to case(advisory() + ("action" to JsonValue.Null), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            "advisory action is not an object" to case(advisory() + ("action" to JsonValue.Num(5)), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            "advisory action head is an integer" to case(advisory(action + ("desired_speed_bin" to JsonValue.Num(5))), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            "advisory action head outside the set" to case(advisory(action + ("merge_mode" to JsonValue.Text("ram_it"))), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            "advisory action missing a head" to case(advisory(action - "merge_mode"), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            "advisory units outside the three" to case(advisory() + ("units" to JsonValue.Text("furlongs")), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            "rate_cmd rates is null" to case(rateCmd() + ("rates" to JsonValue.Null), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd zero rate" to case(rateCmd(rates + ("gps_hz" to JsonValue.Real(0.0))), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd rate above the ceiling" to case(rateCmd(rates + ("gps_hz" to JsonValue.Real(1000.001))), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd missing a rate key" to case(rateCmd(rates - "imu_hz"), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "control partial pong" to case(ping + ("t_peer_recv_mono_ns" to JsonValue.Num(2)), empty) { e, p -> TimeSyncMessage.fromWire(e, p) },
+            "control absent peer field" to case(ping - "t_peer_wire_mono_ns", empty) { e, p -> TimeSyncMessage.fromWire(e, p) },
+            "control negative exchange id" to case(ping + ("exchange_id" to JsonValue.Num(-5)), empty) { e, p -> TimeSyncMessage.fromWire(e, p) },
+            "control negative wire stamp" to case(ping + (Session.WIRE_STAMP to JsonValue.Num(-7)), empty) { e, p -> TimeSyncMessage.fromWire(e, p) },
+            "control payload on a channel that carries none" to case(ping, byteArrayOf(1)) { e, p -> TimeSyncMessage.fromWire(e, p) },
         )
     }
 

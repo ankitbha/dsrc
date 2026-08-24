@@ -113,6 +113,32 @@ CASES = {
 }
 
 
+def shape(extensions, payload) -> str:
+    """`key:type` for every key, sorted, plus the payload length.
+
+    The Kotlin side computes the same string. Comparing case *names* proves only
+    that both tables have a row called the same thing; this catches a case that has
+    quietly stopped exercising the field it is named for.
+
+    Structural rather than a digest of the values, deliberately. A value digest
+    would have to agree with the other side's float formatting exactly, and it
+    cannot be computed at all for the two non_finite cases -- canonical JSON
+    refuses to encode a NaN on both sides, which is the property those cases exist
+    to check.
+    """
+    names = {
+        type(None): "null", bool: "bool", int: "int", float: "real",
+        str: "str", dict: "obj", list: "arr", tuple: "arr",
+    }
+    # bool before int: True is an int of value 1, and the two must not be conflated
+    # here any more than they are in the decoders.
+    def name_of(value):
+        return names.get(type(value), type(value).__name__)
+
+    body = ",".join(sorted(f"{key}:{name_of(value)}" for key, value in extensions.items()))
+    return f"{body}#{len(payload)}"
+
+
 def reason(cls, extensions, payload) -> str:
     try:
         cls.from_wire(extensions, payload)
@@ -131,7 +157,15 @@ def main() -> int:
     # starts with "{", so a provenance line cannot break the parse. Which interpreter ran
     # is part of the result, not a detail of how it was produced.
     print(f"VERSION {sys.version.split()[0]}")
-    print(json.dumps({name: reason(*case) for name, case in CASES.items()}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                name: f"{reason(*case)}|{shape(case[1], case[2])}"
+                for name, case in CASES.items()
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 
