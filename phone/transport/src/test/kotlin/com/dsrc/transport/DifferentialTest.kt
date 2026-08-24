@@ -106,6 +106,17 @@ class DifferentialTest {
         val ours = kotlinReasons()
 
         assertEquals(theirs.keys, ours.keys, "the two case tables have drifted apart")
+
+        // Crashes first, and the order is the point. A one-sided crash is caught by the
+        // disagreement check below either way -- but it is reported as "the two sides
+        // disagree on 1 of 32 cases", which sends a reader looking for a refusal-table
+        // divergence that is not there. Checked here, the same mutant reads as what it is.
+        // `theirs` is included because it was not: the assertion covered Kotlin only, and a
+        // Python decoder that blew up used to take the whole script down, which reads as
+        // "python failed to run" rather than naming the input.
+        val crashed = (ours + theirs).filterValues { it.startsWith("CRASH:") }
+        assertTrue(crashed.isEmpty(), "a decoder crashed rather than refusing: $crashed")
+
         val disagreements = ours.filter { (name, reason) -> theirs[name] != reason }
             .map { (name, reason) -> "$name: kotlin=$reason python=${theirs[name]}" }
         assertTrue(
@@ -130,11 +141,7 @@ class DifferentialTest {
             reasons.size >= 7,
             "the table exercises too few distinct refusal reasons: $reasons",
         )
-        // Neither side may report a crash. `theirs` was excluded, so the assertion covered
-        // Kotlin only -- and a Python decoder that blew up used to take the whole script
-        // down, which reads as "python failed to run" rather than naming the input.
-        val crashed = (ours + theirs).filterValues { it.startsWith("CRASH:") }
-        assertTrue(crashed.isEmpty(), "a decoder crashed rather than refusing: $crashed")
+
     }
 
     private fun pythonReasons(): Map<String, String> {
