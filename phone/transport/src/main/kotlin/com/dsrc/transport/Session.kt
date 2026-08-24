@@ -687,7 +687,7 @@ class Session(
             // Description before counter, for the reason given above.
             lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"
             deliveryFailures.incrementAndGet()
-            inbound.countDelivered(frame.channel)
+            inbound.countFailed(frame.channel)
         }
     }
 
