@@ -17,6 +17,17 @@ class ImuPairingTest {
     private val ms = 1_000_000L
     private val second = 1_000_000_000L
 
+    /** A gyro reading on clocks that agree, which is what most of these tests want. */
+    private fun gyro(
+        pairing: ImuPairing,
+        captureNs: Long,
+        x: Double = 0.0,
+        y: Double = 0.0,
+        z: Double = 0.0,
+        appNowNs: Long = captureNs + ms,
+        monoNowNs: Long = captureNs + ms,
+    ) = pairing.onGyro(captureNs, x, y, z, appNowNs, monoNowNs)
+
     /** Clocks agreeing: no accumulated suspend, delivery a millisecond after capture. */
     private fun accel(
         pairing: ImuPairing,
@@ -33,8 +44,8 @@ class ImuPairingTest {
         // The mutation that kept the *first* reading survived the whole suite, because
         // nothing ever supplied a second one.
         val pairing = ImuPairing()
-        pairing.onGyro(0, 0.01, 0.02, 0.03)
-        pairing.onGyro(10 * ms, 0.44, 0.55, 0.66)
+        gyro(pairing, 0, 0.01, 0.02, 0.03)
+        gyro(pairing, 10 * ms, 0.44, 0.55, 0.66)
 
         val outcome = accel(pairing, 20 * ms)
         val reading = (outcome as ImuOutcome.Paired).reading
@@ -53,7 +64,7 @@ class ImuPairingTest {
         // Driven apart deliberately: with the two equal this assertion cannot fail, which
         // is the trap that made a camera receipt test unfailable in an earlier round.
         val pairing = ImuPairing()
-        pairing.onGyro(0, 0.0, 0.0, 0.0)
+        gyro(pairing, 0, 0.0, 0.0, 0.0)
         val reading = (accel(pairing, captureNs = 7 * ms, appNowNs = 900 * ms, monoNowNs = 900 * ms)
             as ImuOutcome.Paired).reading
         assertEquals(7 * ms, reading.captureMonoNs)
@@ -66,7 +77,7 @@ class ImuPairingTest {
         // signed, the age cancelled real error in the mean: +18 ms and -18 ms averaged to
         // zero and reported a perfect pairing.
         val pairing = ImuPairing()
-        pairing.onGyro(30 * ms, 0.0, 0.0, 0.0)
+        gyro(pairing, 30 * ms, 0.0, 0.0, 0.0)
         val reading = (accel(pairing, captureNs = 12 * ms) as ImuOutcome.Paired).reading
 
         assertEquals("the statistic is about magnitude", 18 * ms, reading.gyroAgeNs)
@@ -76,7 +87,7 @@ class ImuPairingTest {
     @Test
     fun `an in-order pairing is not counted as out of order`() {
         val pairing = ImuPairing()
-        pairing.onGyro(0, 0.0, 0.0, 0.0)
+        gyro(pairing, 0, 0.0, 0.0, 0.0)
         accel(pairing, 10 * ms)
         assertEquals(0, pairing.outOfOrderPairings.get())
     }
@@ -89,7 +100,9 @@ class ImuPairingTest {
         // wrong-clock session and a device with no IMU at all produced identical
         // statistics, distinguishable only by a field in a log line.
         val pairing = ImuPairing()
-        pairing.onGyro(0, 0.0, 0.0, 0.0)
+        // No gyro first. The gate runs on whichever stream arrives first, so seeding one on
+        // agreeing clocks would settle the question before the event under test -- and the
+        // timebase gate precedes the unpaired check, so this still reaches the refusal.
 
         // Delivery stamp far in the past relative to the event: not one clock.
         assertEquals(ImuOutcome.WrongTimebase, accel(pairing, captureNs = 10 * second, appNowNs = 0, monoNowNs = 0))
@@ -111,7 +124,7 @@ class ImuPairingTest {
     @Test
     fun `a matching timebase decides once and stops re-deciding`() {
         val pairing = ImuPairing()
-        pairing.onGyro(0, 0.0, 0.0, 0.0)
+        gyro(pairing, 0, 0.0, 0.0, 0.0)
         assertTrue(accel(pairing, 10 * ms) is ImuOutcome.Paired)
         assertEquals(ImuTimebase.MATCHED, pairing.timebase)
 
@@ -195,7 +208,6 @@ class ImuPairingTest {
         // version computed the offset and then discarded its magnitude, so 3 ms and 1.9 s
         // were indistinguishable to everything downstream.
         val pairing = ImuPairing()
-        pairing.onGyro(0, 0.0, 0.0, 0.0)
         accel(pairing, captureNs = 0, appNowNs = 5 * ms, monoNowNs = 2 * ms)
 
         assertEquals(ImuTimebase.MATCHED, pairing.timebase)
@@ -278,7 +290,9 @@ class ImuPairingTest {
         // past the 50 ms threshold and into the attribution.
         val gap = second
         val tight = ImuPairing(maxDeliveryNs = 10 * ms)
-        tight.onGyro(0, 0.0, 0.0, 0.0)
+        // Seeded on the same readings as the event under test, so the gyro does not settle
+        // the timebase on different terms before the accelerometer is offered.
+        gyro(tight, 0, appNowNs = 20 * ms, monoNowNs = 20 * ms - gap)
         assertEquals(
             "20 ms of latency is outside a 10 ms bound even when it is the nearer clock",
             ImuOutcome.WrongTimebase,
@@ -286,7 +300,7 @@ class ImuPairingTest {
         )
 
         val loose = ImuPairing()
-        loose.onGyro(0, 0.0, 0.0, 0.0)
+        gyro(loose, 0, appNowNs = 20 * ms, monoNowNs = 20 * ms - gap)
         assertTrue(
             "the same event is accepted under the default bound",
             loose.onAccelerometer(0, 0.1, 0.2, 9.8, 3, appNowNs = 20 * ms, monoNowNs = 20 * ms - gap)
@@ -301,7 +315,7 @@ class ImuPairingTest {
         // actually carries the value off the event was uncovered: replacing it with null
         // survived.
         val pairing = ImuPairing()
-        pairing.onGyro(0, 0.0, 0.0, 0.0)
+        gyro(pairing, 0, 0.0, 0.0, 0.0)
         assertEquals(
             2L,
             (pairing.onAccelerometer(ms, 0.1, 0.2, 9.8, accuracy = 2, appNowNs = 2 * ms, monoNowNs = 2 * ms)
@@ -333,10 +347,15 @@ class ImuPairingTest {
         // With the gap negative, `fromMono = delta + |gap|` always exceeds `fromApp =
         // delta`, so the attribution branch reduces to the same `delta <= maxDelivery` test
         // the moot branch applies. Both readings agree for every negative gap.
+        // A gap of 0 is on the *moot* branch and so is -90 s under a signed comparison, so
+        // comparing those two never reached the attribution branch at all -- the test named
+        // for "either way it is read" never made the comparison. The positive control has
+        // to be a gap that genuinely diverges, so both readings are exercised where they
+        // could differ.
         for (delta in listOf(ms, 3 * second, 90 * second)) {
             assertEquals(
-                "delta=$delta: the two readings of a negative gap must agree",
-                ImuPairing.verdictFor(deliveryDeltaNs = delta, clockGapNs = 0),
+                "delta=$delta: a negative gap must give the verdict its magnitude would",
+                ImuPairing.verdictFor(deliveryDeltaNs = delta, clockGapNs = 90 * second),
                 ImuPairing.verdictFor(deliveryDeltaNs = delta, clockGapNs = -90 * second),
             )
         }
@@ -349,7 +368,7 @@ class ImuPairingTest {
         // survived the suite. Pinning only the pipeline would leave this one open, which is
         // why the axis family needs an assertion at each layer rather than one at the end.
         val pairing = ImuPairing()
-        pairing.onGyro(0, 4.0, 5.0, 6.0)
+        gyro(pairing, 0, 4.0, 5.0, 6.0)
         val reading = (pairing.onAccelerometer(
             captureNs = ms, x = 1.0, y = 2.0, z = 3.0,
             accuracy = 3, appNowNs = 2 * ms, monoNowNs = 2 * ms,
@@ -361,6 +380,86 @@ class ImuPairingTest {
         assertEquals(4.0, reading.gx, 1e-9)
         assertEquals(5.0, reading.gy, 1e-9)
         assertEquals(6.0, reading.gz, 1e-9)
+    }
+
+
+    @Test
+    fun `the boundaries of the two guards are landed on, not stepped over`() {
+        // Three exact values no test drove, each one the sort of off-by-one that this
+        // project has repeatedly found surviving: `delta == 0`, the diverged branch's
+        // delivery bound exactly, and `age == 0`.
+        //
+        // A delta of exactly zero is not "ahead of the clock": it is one clock read twice
+        // in the same nanosecond, which is a resolution limit rather than a disagreement.
+        assertEquals(
+            ImuTimebase.MATCHED,
+            ImuPairing.verdictFor(deliveryDeltaNs = 0, clockGapNs = 0),
+        )
+
+        // The diverged branch's bound exactly. Asserted only on the moot branch before, so
+        // tightening this one to `<` survived.
+        val gap = 10 * second
+        assertEquals(
+            "exactly the bound, and nearer the app clock, is still delivery latency",
+            ImuTimebase.MATCHED,
+            ImuPairing.verdictFor(
+                deliveryDeltaNs = ImuPairing.MAX_PLAUSIBLE_DELIVERY_NS,
+                clockGapNs = gap,
+            ),
+        )
+        assertEquals(
+            "one nanosecond past it is not",
+            ImuTimebase.MISMATCHED,
+            ImuPairing.verdictFor(
+                deliveryDeltaNs = ImuPairing.MAX_PLAUSIBLE_DELIVERY_NS + 1,
+                clockGapNs = gap,
+            ),
+        )
+    }
+
+    @Test
+    fun `two halves stamped in the same nanosecond are not out of order`() {
+        // `age == 0` was never driven, so `< 0` and `<= 0` agreed. Simultaneous is the one
+        // case that is neither early nor late, and counting it as out-of-order would put a
+        // permanent floor under a statistic whose whole point is to be rare.
+        val pairing = ImuPairing()
+        gyro(pairing, 5 * ms, 0.0, 0.0, 0.0)
+        val reading = (accel(pairing, captureNs = 5 * ms) as ImuOutcome.Paired).reading
+
+        assertEquals(0, reading.gyroAgeNs)
+        assertEquals(0, pairing.outOfOrderPairings.get())
+    }
+
+    @Test
+    fun `the delivery bound is the value it is documented as`() {
+        // Pinned only to a band: 2 s could become 2.5 s or 1 s and every test still passed,
+        // while halving it doubles the exposure to the irreversible refusal this class's
+        // own Open section names. Its sibling constant carries exactly this guard, for
+        // exactly this reason, and this one did not -- and the test that looked like it
+        // covered the bound derives its inputs from the constant, so it moves with it.
+        assertEquals(2_000_000_000L, ImuPairing.MAX_PLAUSIBLE_DELIVERY_NS)
+    }
+
+
+    @Test
+    fun `a gyroscope on a different clock stops the modality too`() {
+        // The gate used to run on the accelerometer only, so a device whose *gyroscope* sat
+        // on a different base still produced paired samples: the sample's stamp is the
+        // accelerometer's, so nothing looked wrong, and the mismatch surfaced only as a
+        // large gyroAgeNs, which is counted and refuses nothing. Two sensors registered
+        // together at one rate on one handler have no business disagreeing about which
+        // clock they are on, and if they do the pairing is wrong however right the stamp is.
+        val pairing = ImuPairing()
+        gyro(pairing, captureNs = 10 * second, appNowNs = 0, monoNowNs = 0)
+
+        assertEquals(ImuTimebase.MISMATCHED, pairing.timebase)
+        assertEquals("the refusal is counted where it happened", 1, pairing.refusedWrongTimebase.get())
+
+        // And the reading is not kept, so a later accelerometer event cannot pair with it.
+        assertEquals(
+            ImuOutcome.WrongTimebase,
+            accel(pairing, captureNs = 11 * second),
+        )
     }
 
 }

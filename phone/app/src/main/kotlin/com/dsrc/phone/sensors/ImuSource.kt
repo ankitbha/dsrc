@@ -91,7 +91,14 @@ class ImuSource(
     private val manager =
         context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
+    // Volatile because `stop()` reaches them from two threads: the main thread through
+    // `onSensingDown`, and the sensor thread through `stopBecauseOfTimebase`. Benign today
+    // -- the second unregister and quit are no-ops -- but this class made its other
+    // cross-thread fields atomic for precisely this reason and then left these two out.
+    @Volatile
     private var thread: HandlerThread? = null
+
+    @Volatile
     private var listener: SensorEventListener? = null
 
     private val pairing = ImuPairing()
@@ -123,17 +130,9 @@ class ImuSource(
     val outOfOrderPairings: Long get() = pairing.outOfOrderPairings.get()
 
 
-    /**
-     * True once a wrong timebase has torn the registrations down.
-     *
-     * The KDoc used to say a mismatch "stops capture", and it did not: both listeners
-     * stayed registered, the thread stayed up, and every accelerometer event ran the check
-     * and returned. That is a sensor kept awake at 50 Hz for the whole drive to produce
-     * nothing. It stops for real now.
-     */
+    /** Guards the teardown against the second event that arrives before it finishes. */
     @Volatile
-    var stoppedForTimebase = false
-        private set
+    private var stoppedForTimebase = false
 
     fun start(onReading: (ImuReading) -> Unit, onUnpaired: () -> Unit) {
         val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -154,12 +153,17 @@ class ImuSource(
         val callback = object : SensorEventListener {
             override fun onSensorChanged(event: SensorEvent) {
                 when (event.sensor.type) {
-                    Sensor.TYPE_GYROSCOPE -> pairing.onGyro(
-                        event.timestamp,
-                        event.values[0].toDouble(),
-                        event.values[1].toDouble(),
-                        event.values[2].toDouble(),
-                    )
+                    Sensor.TYPE_GYROSCOPE -> {
+                        pairing.onGyro(
+                            captureNs = event.timestamp,
+                            x = event.values[0].toDouble(),
+                            y = event.values[1].toDouble(),
+                            z = event.values[2].toDouble(),
+                            appNowNs = appClock(),
+                            monoNowNs = monoClock(),
+                        )
+                        if (pairing.timebase == ImuTimebase.MISMATCHED) stopBecauseOfTimebase()
+                    }
                     Sensor.TYPE_ACCELEROMETER -> {
                         val outcome = pairing.onAccelerometer(
                             captureNs = event.timestamp,

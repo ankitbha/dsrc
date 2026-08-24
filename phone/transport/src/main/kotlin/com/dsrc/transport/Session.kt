@@ -138,15 +138,16 @@ class Session(
     /**
      * The outbound framing refusals, count and description together.
      *
-     * One field rather than two, so `stats()` cannot read a fresh count against a stale
-     * description. Written only from `countOutboundFramingRefusal`, which is called from
-     * `send` under no lock -- a concurrent pair of refusals can therefore lose a count,
-     * and that is the trade: an exact count that can contradict its own description is
-     * worth less here than a count that may be one low but always agrees with it. These
-     * are diagnostics for a log line, not accounting the peer can see.
+     * One value rather than two, so `stats()` cannot read a fresh count against a stale
+     * description -- provided it reads the reference once, which is its own hazard and is
+     * handled where `stats()` reads it.
+     *
+     * An `AtomicReference` rather than a `@Volatile var`. The first version incremented
+     * with `(count ?: 0) + 1`, a read-modify-write that loses increments when two of the
+     * three producer threads refuse at once, and its comment called that "the trade" for
+     * an untearable pair. It was not a trade: `updateAndGet` is atomic *and* exact.
      */
-    @Volatile
-    private var outboundFraming: OutboundFramingRefusals? = null
+    private val outboundFraming = java.util.concurrent.atomic.AtomicReference<OutboundFramingRefusals?>(null)
 
     private val deliveryFailures = AtomicLong(0)
 
@@ -774,10 +775,10 @@ class Session(
         // A single immutable record removes the window instead of narrowing it. The
         // invariant "a non-zero count always has a description" now holds by construction,
         // and the test is deterministic because there is no interleaving left to catch.
-        outboundFraming = OutboundFramingRefusals(
-            count = (outboundFraming?.count ?: 0) + 1,
-            last = "${cause.javaClass.simpleName}: ${cause.message}",
-        )
+        val description = "${cause.javaClass.simpleName}: ${cause.message}"
+        outboundFraming.updateAndGet { previous ->
+            OutboundFramingRefusals(count = (previous?.count ?: 0) + 1, last = description)
+        }
     }
 
     private fun countOutboundRefusal(reason: String) = synchronized(refusalLock) {
@@ -804,6 +805,11 @@ class Session(
      * on a hot path, and the reader is a diagnostic.
      */
     fun stats(): SessionStats = synchronized(refusalLock) {
+        // Read once. Dereferencing the record twice put back the mirror image of the tear
+        // it was introduced to remove: a refusal landing between the two reads yields a
+        // stale count against a fresh description, which is the same defect wearing the
+        // other hat.
+        val framing = outboundFraming.get()
         // Per-channel maps first. Both of these take their own lock.
         val inboundChannels = inbound.counters()
         val channels = queues.counters()
@@ -816,8 +822,8 @@ class Session(
             deliveryFailures = deliveryFailures.get(),
             lastDeliveryFailure = lastDeliveryFailure,
             inboundRefusals = inboundRefusals.mapValues { (_, byReason) -> byReason.toMap() },
-            outboundFramingRefusals = outboundFraming?.count ?: 0,
-            lastOutboundFramingRefusal = outboundFraming?.last,
+            outboundFramingRefusals = framing?.count ?: 0,
+            lastOutboundFramingRefusal = framing?.last,
             outboundRefusals = outboundRefusals.toMap(),
             channels = channels,
             inboundChannels = inboundChannels,

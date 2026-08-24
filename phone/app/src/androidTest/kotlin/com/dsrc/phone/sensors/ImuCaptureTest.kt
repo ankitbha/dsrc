@@ -77,15 +77,28 @@ class ImuCaptureTest {
         )
 
         val stats = requireNotNull(SensingService.liveImu).stats
-        assertTrue("events must be arriving at all: $stats", stats.seen > 0)
-        assertTrue(
-            "every event was unpaired, so the gyroscope is not reaching the pairing: $stats",
-            stats.unpaired < stats.seen,
+
+        // Three of the four assertions here used to be entailed by the poll above.
+        // `accepted >= 1` already forces `seen > 0` and `unpaired < seen`, since `seen` is
+        // incremented on every offer and `unpaired` only on the unpaired path -- so they
+        // could not fail once the poll had passed. And `refusedStopped` was asserted with
+        // the message "the timebase was refused on a device whose clocks agree", which it
+        // does not measure at all: a timebase refusal never reaches the pipeline. It is
+        // counted in `ImuPairing.refusedWrongTimebase` and short-circuits into a teardown.
+        //
+        // What is left are the two facts the poll does not give: the timebase question was
+        // actually settled and settled in favour of capturing, and the accounting balances.
+        val source = requireNotNull(SensingService.liveImuSource)
+        assertEquals(
+            "the timebase was refused on a device whose clocks agree: " +
+                "offset=${source.timebaseOffsetNs} gap=${source.clockGapNs}",
+            ImuTimebase.MATCHED,
+            source.timebase,
         )
         assertEquals(
-            "the timebase was refused on a device whose clocks agree: $stats",
-            0,
-            stats.refusedStopped,
+            "events were discarded for a wrong timebase on a device whose clocks agree",
+            0L,
+            source.refusedWrongTimebase,
         )
         assertTrue("$stats", stats.balances)
     }

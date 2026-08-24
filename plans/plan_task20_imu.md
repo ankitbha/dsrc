@@ -169,9 +169,33 @@ than by reading them:
 That is the same shape as the two findings in section E's status note, and it keeps
 happening in the tests rather than in the code.
 
+## Correct by construction, and not pinned by a test
+
+Three properties here are about *ordering or atomicity*, and no single-threaded test can
+tell a correct one from a broken one. A sampling probe that catches a regression most runs
+is a pin nobody can trust either way — that lesson cost the transport a whole round, and
+the probe it produced was replaced rather than tuned. So these are built so the failure
+cannot occur, and listed here so nobody mistakes a green suite for coverage of them:
+
+- **`ImuPipeline`'s counters live under one lock**, the sink included, so the identity the
+  teardown log asserts across eleven of them is exact rather than true-most-of-the-time. An
+  ordering rule alone (headings first, `seen` last) makes `seen >= the parts` hold, which is
+  sound and is not what the reader asserts.
+- **`Session`'s outbound framing refusals are one `AtomicReference`**, read once and updated
+  with `updateAndGet`. The version before it lost increments under three producer threads
+  and called that a trade; it was not one.
+- **Both of `ImuSource`'s clocks are required parameters.** Wiring one clock twice disables
+  the vendor-bug detector silently, and on a machine that never suspends the two real clocks
+  sit as close together as two sequential reads of one — so the assertion I wrote for it did
+  not discriminate and was deleted.
+
 ## Open, and deliberately not closed here
 
-- **The timebase verdict is taken from one event and is irreversible.** A single late first
+- **The timebase verdict is irreversible.** It is now taken from whichever *stream* fires
+  first rather than from the accelerometer alone — a gyroscope on a different base used to
+  pair happily, since the sample carries the accelerometer's stamp and the mismatch showed
+  up only as a large `gyroAgeNs`, which is counted and refuses nothing. But it is still
+  taken once: A single late first
   delivery over two seconds — a HAL flush, or the `dsrc-imu` looper starved while the
   camera opens and the socket connects — stops IMU capture for the whole drive, with no
   retry and no re-arm. Nothing measures first-event delivery latency on hardware, so the

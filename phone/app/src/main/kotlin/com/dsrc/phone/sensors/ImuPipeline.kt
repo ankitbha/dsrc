@@ -48,17 +48,27 @@ class ImuPipeline(
 ) {
     private val gate = RateGate(config.imuHz)
 
-    private val seen = AtomicLong(0)
-    private val accepted = AtomicLong(0)
-    private val gated = AtomicLong(0)
-    private val refusedStopped = AtomicLong(0)
-    private val unpaired = AtomicLong(0)
-    private val refusedBySink = AtomicLong(0)
-    private val delivered = AtomicLong(0)
-    private val nonMonotonic = AtomicLong(0)
-    private val staleGyro = AtomicLong(0)
-    private val gyroAgeTotalNs = AtomicLong(0)
-    private val gyroAgeMaxNs = AtomicLong(0)
+    /**
+     * The lock every counter is read and written under.
+     *
+     * Plain fields rather than atomics, because the property that matters is not that each
+     * counter is individually consistent but that the *set* of them is: the one production
+     * reader asserts an identity across eleven, and a live pipeline can always be
+     * mid-`offer`. Eleven atomics give eleven consistent numbers that need not add up.
+     */
+    private val counters = Any()
+
+    private var seen = 0L
+    private var accepted = 0L
+    private var gated = 0L
+    private var refusedStopped = 0L
+    private var unpaired = 0L
+    private var refusedBySink = 0L
+    private var delivered = 0L
+    private var nonMonotonic = 0L
+    private var staleGyro = 0L
+    private var gyroAgeTotalNs = 0L
+    private var gyroAgeMaxNs = 0L
 
     @Volatile
     private var running = true
@@ -73,20 +83,29 @@ class ImuPipeline(
      *
      * Separate from [offer] so the caller does not have to invent axes it does not have.
      */
-    fun offerUnpaired() {
-        seen.incrementAndGet()
+    fun offerUnpaired() = synchronized(counters) {
+        seen++
         if (!running) {
-            refusedStopped.incrementAndGet()
-            return
+            refusedStopped++
+            return@synchronized
         }
-        unpaired.incrementAndGet()
+        unpaired++
     }
 
-    fun offer(reading: ImuReading): Boolean {
-        seen.incrementAndGet()
+    /**
+     * Offer one paired reading.
+     *
+     * The whole body is under the counter lock, the sink included. That is deliberate: an
+     * offer that released the lock across the sink would let `stats()` see a sample counted
+     * as accepted and not yet as delivered or refused, and the identity the production
+     * reader asserts would be false in flight. At 50 Hz, and with a sink that enqueues
+     * rather than blocks, the lock costs nothing worth measuring.
+     */
+    fun offer(reading: ImuReading): Boolean = synchronized(counters) {
+        seen++
         if (!running) {
-            refusedStopped.incrementAndGet()
-            return false
+            refusedStopped++
+            return@synchronized false
         }
 
         // A capture stamp that goes backwards means the platform delivered out of order,
@@ -104,26 +123,26 @@ class ImuPipeline(
         // a reader has to disprove.
         val previous = lastCaptureNs.getAndSet(reading.captureMonoNs)
         if (reading.captureMonoNs < previous) {
-            nonMonotonic.incrementAndGet()
+            nonMonotonic++
         }
 
         if (!gate.accept(reading.captureMonoNs)) {
-            gated.incrementAndGet()
-            return false
+            gated++
+            return@synchronized false
         }
-        accepted.incrementAndGet()
+        accepted++
 
         // Pairing error, on the samples that actually went out rather than on everything
         // the sensor produced -- a gated sample's staleness costs nobody anything.
-        gyroAgeTotalNs.addAndGet(reading.gyroAgeNs)
-        gyroAgeMaxNs.getAndUpdate { maxOf(it, reading.gyroAgeNs) }
-        if (reading.gyroAgeNs > gate.periodNanos) staleGyro.incrementAndGet()
+        gyroAgeTotalNs += reading.gyroAgeNs
+        gyroAgeMaxNs = maxOf(gyroAgeMaxNs, reading.gyroAgeNs)
+        if (reading.gyroAgeNs > gate.periodNanos) staleGyro++
 
-        return if (sink(sample(reading))) {
-            delivered.incrementAndGet()
+        return@synchronized if (sink(sample(reading))) {
+            delivered++
             true
         } else {
-            refusedBySink.incrementAndGet()
+            refusedBySink++
             false
         }
     }
@@ -137,20 +156,35 @@ class ImuPipeline(
     }
 
     val stats: Stats
-        get() {
-            val kept = accepted.get()
-            return Stats(
-                seen = seen.get(),
+        get() = synchronized(counters) {
+            // Under the same lock the counters are written under, so the snapshot is exact
+            // rather than merely well-ordered.
+            //
+            // The first attempt here was a read-order rule, copied from `Session.stats()`:
+            // headings first, `seen` last, which makes `seen >= the parts` hold by
+            // construction. That is sound and it is not enough, because the one production
+            // reader asserts *equality* across eleven counters, and a live pipeline can
+            // always be mid-`offer`. A lock is free at 50 Hz -- this is not a hot path in
+            // any sense that matters -- and it turns an identity that was true most of the
+            // time into one that is true.
+            //
+            // Neither this nor the ordering it replaces is pinned by a test. No
+            // single-threaded test can tell them apart, and a sampling probe that catches a
+            // regression most runs is a pin nobody can trust either way; that lesson cost a
+            // whole round on the transport. Correct by construction, and said so here.
+            val kept = accepted
+            Stats(
+                seen = seen,
                 accepted = kept,
-                gated = gated.get(),
-                refusedStopped = refusedStopped.get(),
-                unpaired = unpaired.get(),
-                delivered = delivered.get(),
-                refusedBySink = refusedBySink.get(),
-                nonMonotonicSamples = nonMonotonic.get(),
-                staleGyroSamples = staleGyro.get(),
-                gyroAgeMeanNs = if (kept == 0L) 0 else gyroAgeTotalNs.get() / kept,
-                gyroAgeMaxNs = gyroAgeMaxNs.get(),
+                gated = gated,
+                refusedStopped = refusedStopped,
+                unpaired = unpaired,
+                delivered = delivered,
+                refusedBySink = refusedBySink,
+                nonMonotonicSamples = nonMonotonic,
+                staleGyroSamples = staleGyro,
+                gyroAgeMeanNs = if (kept == 0L) 0 else gyroAgeTotalNs / kept,
+                gyroAgeMaxNs = gyroAgeMaxNs,
                 rateHz = gate.hz,
             )
         }

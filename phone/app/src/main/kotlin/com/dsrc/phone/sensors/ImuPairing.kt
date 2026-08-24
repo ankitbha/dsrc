@@ -72,7 +72,24 @@ class ImuPairing(
     private var gy = 0.0
     private var gz = 0.0
 
-    fun onGyro(captureNs: Long, x: Double, y: Double, z: Double) {
+    /**
+     * A gyroscope reading, gated on the same timebase question as the accelerometer.
+     *
+     * The gate used to run on one stream only, so a device whose *gyroscope* sat on a
+     * different base still produced paired samples: the sample's stamp is the
+     * accelerometer's, so nothing looked wrong, and the mismatch surfaced only as a large
+     * `gyroAgeNs`, which is counted and refuses nothing. The plan called this "taken from
+     * one event", which understated it -- it was taken from one stream.
+     *
+     * The two sensors are registered together at one rate on one handler, so if their
+     * stamps disagree about which clock they are on, the pairing is wrong even though the
+     * stamp is right. Same question, same answer, both streams.
+     */
+    fun onGyro(captureNs: Long, x: Double, y: Double, z: Double, appNowNs: Long, monoNowNs: Long) {
+        if (!checkTimebase(captureNs, appNowNs, monoNowNs)) {
+            refusedWrongTimebase.incrementAndGet()
+            return
+        }
         // Written as one group, read as one group, on one thread. The previous shape made
         // the timestamp an AtomicLong and left the three axes plain, which asserted two
         // different concurrency stories at once: the atomic bought nothing on a single
