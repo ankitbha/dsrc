@@ -19,6 +19,7 @@ import com.dsrc.phone.net.SessionHolder
 import com.dsrc.phone.sensors.CameraPipeline
 import com.dsrc.phone.sensors.CameraXSource
 import com.dsrc.phone.sensors.CameraFrameSender
+import com.dsrc.phone.config.ConfigApplier
 import com.dsrc.phone.sensors.GpsLocationSource
 import com.dsrc.phone.sensors.HerePipeline
 import com.dsrc.phone.sensors.HttpHereClient
@@ -28,6 +29,7 @@ import com.dsrc.phone.sensors.GpsPipeline
 import com.dsrc.phone.sensors.GpsReading
 import com.dsrc.phone.sensors.GpsSource
 import com.dsrc.transport.Channels
+import com.dsrc.transport.RateCommand
 import com.dsrc.transport.Frame
 import java.time.Instant
 import java.util.concurrent.ExecutorService
@@ -60,6 +62,15 @@ class SensingService : LifecycleService() {
     private var gpsSource: GpsSource? = null
     private var imuPipeline: ImuPipeline? = null
     private var herePipeline: HerePipeline? = null
+
+    /**
+     * Routes a command to the running modalities.
+     *
+     * Published with them and cleared with them, so a command arriving between a teardown
+     * and the next come-up reaches nothing rather than a half-released pipeline.
+     */
+    @Volatile
+    private var configApplier: ConfigApplier? = null
     private var imuSource: ImuSource? = null
 
     override fun onBind(intent: Intent): IBinder? {
@@ -362,6 +373,14 @@ class SensingService : LifecycleService() {
         imuSource = motion
         liveImuSource = motion
 
+        configApplier = ConfigApplier(object : ConfigApplier.Targets {
+            override fun setCameraRate(hz: Double) = pipe.setRate(hz)
+            override fun setGpsRate(hz: Double) = gps.setRate(hz)
+            override fun setImuRate(hz: Double) = imu.setRate(hz)
+            override fun setHereRate(hz: Double) = here.setRate(hz)
+            override fun setHereQuery(query: com.dsrc.transport.HereQuery?) = here.setQuery(query)
+        })
+
         source.start(pipe)
         locations.start { reading ->
             recordReceipt(reading)
@@ -409,8 +428,31 @@ class SensingService : LifecycleService() {
      * all -- which is how a downlink that was never wired up looks identical to a Jetson
      * that never sent anything.
      */
+    /**
+     * A frame from the Jetson.
+     *
+     * Only `rate_cmd` has a handler. An advisory arrives on its own channel and is task
+     * 23's; anything else is logged and dropped rather than counted as a failure, because
+     * an unrecognised channel from a newer Jetson is a rolling deploy, not a fault.
+     *
+     * The decode here is a second one — `MessageValidation.checkInbound` already ran the
+     * channel's decoder and the transport refused the frame if it threw. So a throw here
+     * means our two calls disagree, which is our bug and not the peer's, and letting it
+     * reach the delivery thread's backstop counts it as `failed` rather than `refused`.
+     * That is the right heading for it.
+     */
     private fun onInboundFrame(frame: Frame) {
-        Log.i(TAG, "inbound ${frame.channel} seq=${frame.sequence} (no handler yet)")
+        if (frame.channel != Channels.RATE_CMD) {
+            Log.i(TAG, "inbound ${frame.channel} seq=${frame.sequence} (no handler)")
+            return
+        }
+        val command = RateCommand.fromWire(frame.header.entries, frame.payload)
+        configApplier?.apply(command)
+        Log.i(
+            TAG,
+            "rate_cmd trigger=${command.trigger} shadow=${command.shadow} " +
+                "rates=${command.rates} here=${command.here != null}",
+        )
     }
 
     /**
@@ -538,6 +580,7 @@ class SensingService : LifecycleService() {
             imuSource = null
             herePipeline = null
             liveHere = null
+            configApplier = null
             liveImu = null
             liveImuSource = null
             pipeline = null

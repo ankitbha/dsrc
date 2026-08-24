@@ -11,6 +11,7 @@ import com.dsrc.transport.Channels
 import com.dsrc.transport.Frame
 import com.dsrc.transport.ImuSample
 import com.dsrc.transport.Protocol
+import com.dsrc.transport.RateCommand
 import com.dsrc.transport.Session
 import org.junit.After
 import org.junit.Assert.assertTrue
@@ -102,19 +103,26 @@ class ImuWireTest {
                 return
             }
             client.tcpNoDelay = true
-            runCatching {
-                val session = Session(
-                    input = client.getInputStream(),
-                    output = client.getOutputStream(),
-                    deviceId = "imu-wire-test",
-                    role = Session.ROLE_JETSON,
-                    monoClock = { System.nanoTime() },
-                    wallClock = { System.currentTimeMillis() * 1_000_000L },
-                    onFrame = { frames.add(it) },
-                )
-                sessions.add(session)
-                session.start()
-            }
+            // Each connection on its own thread. `session.start()` blocks for the handshake,
+            // and the reachability probe in @Before connects and closes without ever saying
+            // hello -- so on one thread the loop sat in that dead handshake while the
+            // service's real connection waited unaccepted, and the failure read as "the
+            // link never came up".
+            Thread({
+                runCatching {
+                    val session = Session(
+                        input = client.getInputStream(),
+                        output = client.getOutputStream(),
+                        deviceId = "imu-wire-test",
+                        role = Session.ROLE_JETSON,
+                        monoClock = { System.nanoTime() },
+                        wallClock = { System.currentTimeMillis() * 1_000_000L },
+                        onFrame = { frames.add(it) },
+                    )
+                    sessions.add(session)
+                    session.start()
+                }
+            }, "imu-wire-session").also { it.isDaemon = true; it.start() }
         }
     }
 
@@ -178,6 +186,52 @@ class ImuWireTest {
                 sample.captureMonoNs in (now - 60_000_000_000L)..now,
             )
         }
+    }
+
+    @Test
+    fun aRateCommandFromTheJetsonChangesARunningRate() {
+        // The whole of task 22 in one assertion: a command arrives on the live link and the
+        // modality's rate changes, with capture never restarting. Driven from the peer
+        // rather than by calling the applier, because the routing -- decode, dispatch,
+        // reach the right pipeline -- is the part that had no handler at all.
+        SensingService.start(context)
+        awaitState(SensingState.RUNNING)
+        // A *running* session, not the first one. The reachability probe in @Before also
+        // gets a session, and it is dead the moment the probe closes -- so `first()` picked
+        // that one and the failure read as "the link never came up" while the phone was
+        // happily sending hundreds of frames over the session next to it.
+        assertTrue(
+            "the link never came up, so no command could arrive",
+            pollUntil(15_000) { sessions.any { it.isRunning } },
+        )
+        assertTrue(
+            "sensing never produced a sample, so there is no rate to change",
+            pollUntil(10_000) { (SensingService.liveImu?.stats?.accepted ?: 0) > 0 },
+        )
+
+        val before = requireNotNull(SensingService.liveImu).stats.rateHz
+        val wanted = if (before == 20.0) 10.0 else 20.0
+        val command = RateCommand(
+            captureMonoNs = android.os.SystemClock.elapsedRealtimeNanos(),
+            rates = mapOf("camera_hz" to 5.0, "gps_hz" to 1.0, "imu_hz" to wanted, "here_hz" to 0.2),
+            trigger = "instrumented-test",
+            shadow = false,
+        )
+        assertTrue(
+            "the peer could not send the command",
+            sessions.first { it.isRunning }.send(Channels.RATE_CMD, command.toExtensions()),
+        )
+
+        assertTrue(
+            "the commanded rate never reached the imu pipeline: " +
+                "${SensingService.liveImu?.stats?.rateHz} (was $before, wanted $wanted)",
+            pollUntil(10_000) { SensingService.liveImu?.stats?.rateHz == wanted },
+        )
+
+        // And capture kept running across it. A rate change that restarted the modality
+        // would show as the sample count going backwards or the thread being replaced.
+        val after = requireNotNull(SensingService.liveImu).stats
+        assertTrue("sensing stopped when the rate changed: $after", after.accepted > 0)
     }
 
     private fun imuFrames() = frames.filter { it.channel == Channels.IMU }
