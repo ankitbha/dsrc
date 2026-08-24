@@ -755,7 +755,7 @@ tunnels over USB and is unaffected.
     meant no HERE traffic for the drive with every counter healthy. The only
     non-rate setting the downlink carries is the HERE query; camera geometry and
     JPEG quality stay compile-time.
-23. Advisory display: the driver-facing UI.
+23. ~~Advisory display: the driver-facing UI.~~ **DONE** — `AdvisoryHolder` plus a panel on `MainActivity` showing the Jetson's own strings: `rec_speed_display` and `current_speed_display` arrive already converted into `units`, and the phone formats nothing, because a phone that rounded 30.4 to 30 while the Jetson meant 30.4 would be showing a recommendation nobody made. The task's correctness content is staleness: the transport keeps only the newest, but that governs the *queue*, and once nothing arrives there is nothing to displace what is on screen. The holder expires three seconds after **arrival** (not `t_capture_mono_ns`, which is the Jetson's clock — a panel going blank because a clock estimate wandered would be a fault invented by its own safety check), and the panel redraws on a tick, because an event-driven redraw can only react to an event that happened. Validation found two more ways a stale advisory reached the driver: returning to the app repainted the old one for ~29 ms, and an advisory could land after Stop because teardown joins no delivery thread. Also closes task 17's deferred Activity harness, which is what the first of those needed.
 24. Thermal monitoring reported upstream, plus throttle-safe capture that
     degrades rather than failing.
 25. Local session logging on the phone, for ground truth and post-hoc analysis.
