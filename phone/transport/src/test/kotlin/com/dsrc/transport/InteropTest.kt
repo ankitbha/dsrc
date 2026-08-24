@@ -231,56 +231,72 @@ class InteropTest {
 
     @Test
     fun `a deliberate overflow is counted the same on both sides`() {
-        // `camera` is latest_wins at depth one, so a burst is guaranteed to displace. What
-        // we drop must equal what the peer finds missing -- one fact seen from two ends,
-        // and nothing compared them before.
+        // `camera` is latest_wins at depth one, so a burst is guaranteed to displace.
+        //
+        // The first version asserted `gaps > 0` straight after the burst and was a race
+        // dressed as a property: a gap is only *visible* to the receiver if at least two
+        // frames arrive with drops between them, and a 200-deep burst sometimes delivers
+        // exactly one. It failed on unmutated HEAD, and it failed under mutations that
+        // could not affect it -- which is worse than useless, because a red test that
+        // moves on its own teaches people to ignore the suite.
+        //
+        // Bracketed now: one frame delivered, then the burst, then one more delivered. The
+        // bracket is what makes a gap necessary rather than likely.
         val peer = startPeer(seconds = 60.0, quietDrain = true)
         val session = connect(peer)
 
         val payload = ByteArray(40_960) { ((it * 37 + 11) % 256).toByte() }
+        fun frame(id: Int) = mapOf(
+            Fields.CAPTURE_KEY to JsonValue.Num(1_000_000_000L + id),
+            "frame_id" to JsonValue.Num(id.toLong()),
+            "width" to JsonValue.Num(1280),
+            "height" to JsonValue.Num(720),
+            "format" to JsonValue.Text("jpeg"),
+            "quality" to JsonValue.Num(85),
+        )
+
+        // The opening bracket, drained before anything else is offered.
+        assertTrue(session.send(Channels.CAMERA, frame(0), payload))
+        val drained = System.currentTimeMillis() + 10_000
+        while (session.outboundPending() > 0 && System.currentTimeMillis() < drained) Thread.sleep(2)
+
         val burst = 200
-        repeat(burst) { i ->
-            session.send(
-                Channels.CAMERA,
-                mapOf(
-                    Fields.CAPTURE_KEY to JsonValue.Num(1_000_000_000L + i),
-                    "frame_id" to JsonValue.Num(i.toLong()),
-                    "width" to JsonValue.Num(1280),
-                    "height" to JsonValue.Num(720),
-                    "format" to JsonValue.Text("jpeg"),
-                    "quality" to JsonValue.Num(85),
-                ),
-                payload,
-            )
-        }
+        repeat(burst) { i -> session.send(Channels.CAMERA, frame(i + 1), payload) }
+
+        // The closing bracket. Its sequence is far above the opening one, so whatever was
+        // shed in between is a gap the peer must see.
+        val settled = System.currentTimeMillis() + 15_000
+        while (session.outboundPending() > 0 && System.currentTimeMillis() < settled) Thread.sleep(2)
+        assertTrue(session.send(Channels.CAMERA, frame(burst + 1), payload))
+        val closed = System.currentTimeMillis() + 10_000
+        while (session.outboundPending() > 0 && System.currentTimeMillis() < closed) Thread.sleep(2)
 
         val summary = summaryOf(finishAndSummarise(peer, session, settleMs = 3_000))
         assertNull(summary.text("drain_error"), summary.toString())
 
         val ours = session.stats().channels.getValue(Channels.CAMERA)
         val theirs = summary.channel(Channels.CAMERA)
-        assertEquals(burst.toLong(), ours.enqueued, "not every frame was offered: $ours")
+
+        assertEquals((burst + 2).toLong(), ours.enqueued, "not every frame was offered: $ours")
         assertTrue(ours.dropped > 0, "a 200-deep burst on a depth-1 queue dropped nothing: $ours")
+        // Everything offered either went out or was counted as dropped.
+        assertEquals(ours.enqueued, ours.sent + ours.dropped, "our own accounting: $ours")
         assertEquals(
             ours.sent,
             theirs.num("received"),
             "we wrote ${ours.sent} and python saw ${theirs.num("received")}",
         )
-        // Everything offered either arrived or was counted as dropped.
-        assertEquals(ours.enqueued, ours.sent + ours.dropped, "our own accounting: $ours")
 
-        // The peer sees the gaps, but it cannot see them all: a receiver has no way to know
-        // about drops *after* the last frame it received, so its count is a lower bound on
-        // ours. Asserting equality was wrong -- 193 dropped against 92 gaps found, and the
-        // difference is the tail. What must hold is that it saw some, and never more than
-        // we dropped.
+        // The two views of one fact. The peer's count is a *lower* bound: a receiver cannot
+        // know about drops after the last frame it received, which is why the bracket
+        // exists and why this is not an equality.
         val gaps = theirs.num("missing_seqs")
-        assertTrue(gaps > 0, "python saw no gaps at all despite ${ours.dropped} drops: $theirs")
+        assertTrue(gaps > 0, "python saw no gaps despite ${ours.dropped} drops: $theirs")
         assertTrue(gaps <= ours.dropped, "python found more gaps ($gaps) than we dropped (${ours.dropped})")
 
-        // Python's own inbound queue is latest_wins at depth one too, so it sheds on its
-        // side as well -- which is why `delivered` is below `received` here and the two
-        // numbers answer different questions.
+        // And the peer's own accounting adds up, so nothing vanishes unattributed there
+        // either. Python's inbound queue is latest_wins at depth one too, so `delivered`
+        // and `received` answer different questions.
         assertEquals(
             theirs.num("received"),
             theirs.num("delivered") + theirs.num("dropped_inbound"),

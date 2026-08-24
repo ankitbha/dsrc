@@ -42,7 +42,6 @@ data class CameraFrameMessage(
          *   somewhere rather than being absent by omission.
          */
         fun fromWire(extensions: Map<String, JsonValue>, @Suppress("UNUSED_PARAMETER") payload: ByteArray): CameraFrameMessage {
-            Fields.checkReserved(extensions)
 
             val width = Fields.requireCount(extensions, KEY_WIDTH)
             val height = Fields.requireCount(extensions, KEY_HEIGHT)

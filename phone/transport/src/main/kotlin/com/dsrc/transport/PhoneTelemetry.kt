@@ -31,7 +31,6 @@ data class PhoneTelemetry(
 
         fun fromWire(extensions: Map<String, JsonValue>, payload: ByteArray): PhoneTelemetry {
             Fields.checkNoPayload(payload, Channels.TELEMETRY)
-            Fields.checkReserved(extensions)
             return PhoneTelemetry(
                 captureMonoNs = Fields.requireInt(extensions, Fields.CAPTURE_KEY),
                 thermalStatus = Fields.requireString(extensions, "thermal_status"),

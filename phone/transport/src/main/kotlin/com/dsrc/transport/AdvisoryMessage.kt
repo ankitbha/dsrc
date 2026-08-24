@@ -54,7 +54,6 @@ data class AdvisoryMessage(
 
         fun fromWire(extensions: Map<String, JsonValue>, payload: ByteArray): AdvisoryMessage {
             Fields.checkNoPayload(payload, Channels.ADVISORY)
-            Fields.checkReserved(extensions)
 
             val units = Fields.requireString(extensions, "units")
             if (units !in DISPLAY_UNITS) {

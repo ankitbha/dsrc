@@ -274,7 +274,7 @@ class Session(
                 extensions = if (wantsWireStamp) extensions + (WIRE_STAMP to JsonValue.Num(WIDEST_LONG)) else extensions,
                 allowReserved = allowed,
             )
-            Framing.encode(probe, payload)
+            Framing.checkSizes(probe, payload.size)
         } catch (e: MessageError) {
             countOutboundRefusal(e.reason.wire)
             return false

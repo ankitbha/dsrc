@@ -183,11 +183,23 @@ class GpsRecordTest {
     }
 
     @Test
-    fun `a reserved key on gps is refused`() {
-        for (key in listOf("hello", "heartbeat")) {
+    fun `a reserved key on gps is refused on the way out, and delivered on the way in`() {
+        // The rule moved to the validation layer, where it belongs: it is a *sender* rule.
+        // Python applies it in MessageRouter.send and in no from_wire, and the spec's
+        // keepalive paragraph says a reserved key on a data channel is a caller's message
+        // that MUST be delivered. Applying it in the decoder too overrode the inbound
+        // allowance on seven of eight channels and made our own wire-stamped sends
+        // unreadable by our own reader.
+        for (key in listOf("hello", "heartbeat", Session.WIRE_STAMP)) {
             val reserved = wire(full) + (key to JsonValue.Bool(true))
-            val error = assertFailsWith<MessageError>("reserved $key") { decode(reserved) }
+            val error = assertFailsWith<MessageError>("reserved $key outbound") {
+                MessageValidation.check(Channels.GPS, reserved, ByteArray(0))
+            }
             assertEquals(RefusalReason.RESERVED_KEY, error.reason)
+
+            // And the decoder itself no longer refuses it, so an arriving frame carrying
+            // one still decodes.
+            decode(reserved)
         }
     }
 

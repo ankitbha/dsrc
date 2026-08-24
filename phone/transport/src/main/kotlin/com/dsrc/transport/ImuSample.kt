@@ -32,7 +32,6 @@ data class ImuSample(
 
         fun fromWire(extensions: Map<String, JsonValue>, payload: ByteArray): ImuSample {
             Fields.checkNoPayload(payload, Channels.IMU)
-            Fields.checkReserved(extensions)
             val axes = AXES.associateWith {
                 Fields.checkFinite(it, Fields.requireNumber(extensions, it))!!
             }

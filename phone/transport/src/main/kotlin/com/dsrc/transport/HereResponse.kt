@@ -31,7 +31,6 @@ data class HereResponse(
 
     companion object {
         fun fromWire(extensions: Map<String, JsonValue>, payload: ByteArray): HereResponse {
-            Fields.checkReserved(extensions)
             // The payload is the response body and is not validated: an empty one is a
             // failed call worth seeing rather than one the transport hides.
             return HereResponse(

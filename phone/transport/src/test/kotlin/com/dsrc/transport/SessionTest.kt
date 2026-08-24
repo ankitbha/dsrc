@@ -1433,4 +1433,53 @@ class SessionTest {
         assertEquals(1L, byReason["out_of_range"])
     }
 
+
+    @Test
+    fun `a near-limit header still fits once the sequence number is three digits`() {
+        // The size probe substitutes `seq` and the wire stamp at their widest, and the two
+        // substitutions were only *jointly* pinned: setting the seq one back to 0 survived
+        // the whole suite. The arithmetic is why. Long.MIN_VALUE is 20 characters and a
+        // real wire stamp is 19, so the stamp reserves one surplus byte -- enough to absorb
+        // a two-digit sequence. The other boundary test never gets past a one-digit control
+        // sequence, so it could not see half of what it was named for.
+        //
+        // Past 100 the surplus is gone and the header grows after the check. In production
+        // that needs about a hundred seconds of keepalives and a near-cap header: mid-drive,
+        // not in a test, and it kills the session on the writer thread.
+        val clock = AtomicLong(1_000_000_000_000_000_000L)
+        val (phone, _) = pair(clock = { clock.get() })
+
+        // Burn the control sequence past three digits.
+        repeat(140) { assertTrue(phone.session.sendTimeSyncPing(exchangeId = it.toLong())) }
+        val deadline = System.currentTimeMillis() + 10_000
+        while (phone.session.outboundPending() > 0 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(2)
+        }
+        val control = phone.session.stats().channels.getValue(Channels.CONTROL)
+        assertTrue(control.enqueued >= 100, "the sequence never reached three digits: $control")
+
+        val fits = longestPaddingAccepted(phone.session)
+        assertTrue(fits > 0, "no padding fits at all")
+        assertTrue(
+            phone.session.send(Channels.CONTROL, paddedPing(fits), wantsWireStamp = true),
+            "the largest fitting header was refused",
+        )
+        // The point: what send() accepted must still fit when a three-digit sequence and a
+        // real wire stamp replace the substitutions.
+        val settle = System.currentTimeMillis() + 5_000
+        while (phone.session.outboundPending() > 0 && System.currentTimeMillis() < settle) {
+            Thread.sleep(2)
+        }
+        assertTrue(
+            phone.session.isRunning,
+            "the session died writing a header send() accepted: " +
+                "framing refusals ${phone.session.stats().outboundFramingRefusals}",
+        )
+        assertEquals(
+            listOf<SessionEnd>(),
+            phone.ends.map { it.first },
+            "the session ended: ${phone.ends}",
+        )
+    }
+
 }

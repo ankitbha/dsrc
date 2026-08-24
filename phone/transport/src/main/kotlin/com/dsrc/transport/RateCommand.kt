@@ -32,7 +32,6 @@ data class RateCommand(
 
         fun fromWire(extensions: Map<String, JsonValue>, payload: ByteArray): RateCommand {
             Fields.checkNoPayload(payload, Channels.RATE_CMD)
-            Fields.checkReserved(extensions)
             val rates = Fields.requireNestedNumbers(extensions, "rates", RATE_KEYS)
             for ((key, value) in rates) {
                 if (!(value > 0.0 && value <= MAX_RATE_HZ)) {

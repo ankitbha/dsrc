@@ -70,7 +70,6 @@ data class GpsRecord(
 
         fun fromWire(extensions: Map<String, JsonValue>, payload: ByteArray): GpsRecord {
             Fields.checkNoPayload(payload, Channels.GPS)
-            Fields.checkReserved(extensions)
 
             val valid = Fields.requireBool(extensions, KEY_VALID)
             val latitude = Fields.checkFinite(KEY_LAT, Fields.optionalNumber(extensions, KEY_LAT))

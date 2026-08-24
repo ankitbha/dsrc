@@ -100,6 +100,26 @@ object Framing {
         )
     }
 
+    /**
+     * Check both size limits without building the frame.
+     *
+     * For the sender's pre-flight check, where [encode] was being called purely to learn
+     * whether the header fits: it allocates prefix + header + payload and copies the
+     * payload in, so a 4 MiB camera frame was copied twice on every send -- once to size
+     * the header and once to write it. Python sizes at enqueue and reuses the buffer.
+     */
+    fun checkSizes(header: JsonValue.Obj, payloadSize: Int) {
+        val complete = withPayloadLength(header, payloadSize)
+        validateHeader(complete, payloadSize)
+        val headerSize = Json.encodeToBytes(complete).size
+        if (headerSize > Protocol.MAX_HEADER_BYTES) {
+            throw FramingError("header is $headerSize bytes, over ${Protocol.MAX_HEADER_BYTES}")
+        }
+        if (payloadSize > Protocol.MAX_PAYLOAD_BYTES) {
+            throw FramingError("payload is $payloadSize bytes, over ${Protocol.MAX_PAYLOAD_BYTES}")
+        }
+    }
+
     fun encode(header: JsonValue.Obj, payload: ByteArray): ByteArray {
         // `n` is transport-owned and derived from the payload, so a caller supplies the
         // logical header and the framer fills it in -- which is how the golden vectors

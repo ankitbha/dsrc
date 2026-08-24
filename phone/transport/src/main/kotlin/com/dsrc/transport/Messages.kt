@@ -323,18 +323,33 @@ object MessageValidation {
     /**
      * Apply the table to a frame that arrived.
      *
-     * The wire stamp is allowed because the peer's *transport* adds it, so it is not a
-     * caller's reserved key on the way in -- refusing it would drop every timebase-stamped
-     * message the peer sends.
+     * The reserved-key rule is deliberately **not** applied here, and the earlier attempt
+     * to allow only the wire stamp was worse than either extreme. It passed
+     * `allowReserved = setOf(WIRE_STAMP)` while seven of the eight decoders called
+     * `checkReserved` themselves with no allow set, so the allowance was overridden on
+     * every channel but `control` -- and the damage ran outbound as well as inbound:
+     * `send(gps, ..., wantsWireStamp = true)` passed validation on the caller's map, the
+     * writer added the stamp, and the receiving session refused the result as
+     * `reserved_key`. A sender emitting what its own decoder refuses is the exact rule
+     * the sender check exists to enforce.
+     *
+     * The rule belongs on the send path. Python agrees structurally: `check_reserved`
+     * appears in `MessageRouter.send` and in no `from_wire`. The spec's own keepalive
+     * paragraph agrees too -- a reserved key on a data channel "is a caller's message and
+     * MUST be delivered" -- though its refusal table lists `reserved_key` as a receiver
+     * condition, so the two paragraphs contradict each other. Matching Python is what
+     * keeps the link working; the contradiction is recorded in the plan.
      */
     fun checkInbound(frame: Frame) =
-        check(frame.channel, frame.header.entries, frame.payload, allowReserved = setOf(Session.WIRE_STAMP))
+        check(frame.channel, frame.header.entries, frame.payload, checkReservedKeys = false)
 
     fun check(
         channel: String,
         extensions: Map<String, JsonValue>,
         payload: ByteArray,
         allowReserved: Set<String> = emptySet(),
+        /** False on the receive path, where the rule does not apply. */
+        checkReservedKeys: Boolean = true,
     ) {
         // A FramingError, not a refusal. The spec's framing table is explicit -- "`ch` not
         // in the channel table -> framing error, session ends" -- and the read path already
@@ -343,7 +358,7 @@ object MessageValidation {
         if (!Channels.isKnown(channel)) {
             throw FramingError("unknown channel '$channel'")
         }
-        Fields.checkReserved(extensions, allowReserved)
+        if (checkReservedKeys) Fields.checkReserved(extensions, allowReserved)
 
         if (channel !in PAYLOAD_BEARING) Fields.checkNoPayload(payload, channel)
 
