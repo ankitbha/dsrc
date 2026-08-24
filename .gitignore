@@ -16,3 +16,4 @@ phone/build/
 phone/*/build/
 phone/local.properties
 phone/.kotlin/
+.remutate-restore

@@ -18,7 +18,8 @@ question. Every mutation is restored in a `finally`, including on Ctrl-C -- but
 this edits files in place, so do not run it with uncommitted work you would mind
 losing, and never point it at a tree a validator is reading.
 """
-import pathlib, subprocess, sys
+import pathlib, shutil, subprocess, sys
+from xml.etree import ElementTree
 
 ROOT = pathlib.Path(".")
 GRADLE = ["env", "JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home",
@@ -46,20 +47,24 @@ MUTATIONS = [
      '            lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"\n            deliveryFailures.incrementAndGet()\n            inbound.countFailed(frame.channel)',
      '            lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"\n            deliveryFailures.incrementAndGet()\n            inbound.countDelivered(frame.channel)',
      "transport"),
-    ("stats: the per-channel map is read after the session totals",
-     "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
-     "        val inboundChannels = inbound.counters()\n        val channels = queues.counters()",
-     "        val channels = queues.counters()",
-     "transport"),
+    # One entry, not two. The other spelling of this deleted a declaration that is still
+    # referenced below it, so it never compiled -- and a build that fails to compile exits
+    # non-zero, which the old exit-code scoring counted as CAUGHT. It measured the Kotlin
+    # compiler and reported a pin.
     ("stats: the per-channel map is read inline, after the totals",
      "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
      "            inboundChannels = inboundChannels,",
      "            inboundChannels = inbound.counters(),",
      "transport"),
-    ("stats: an outbound framing refusal counts before it describes",
+    # Replaced the write-ordering entry. That one was inherently probabilistic -- the
+    # window it opened is nanoseconds wide, so it reported SURVIVED one run and CAUGHT the
+    # next with nothing changed, and a harness cannot tell a lapsed pin from an unlucky
+    # one. The two fields are one volatile record now, so there is no ordering left to get
+    # wrong; what is worth pinning is that the count is reported at all.
+    ("stats: an outbound framing refusal is counted but never reported",
      "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
-     '        lastOutboundFramingRefusal = "${cause.javaClass.simpleName}: ${cause.message}"\n        outboundFramingRefusals.incrementAndGet()',
-     '        outboundFramingRefusals.incrementAndGet()\n        lastOutboundFramingRefusal = "${cause.javaClass.simpleName}: ${cause.message}"',
+     "            outboundFramingRefusals = outboundFraming?.count ?: 0,",
+     "            outboundFramingRefusals = 0,",
      "transport"),
     ("inbound: depth() returns the total across channels",
      "phone/transport/src/main/kotlin/com/dsrc/transport/Queues.kt",
@@ -138,12 +143,84 @@ MUTATIONS = [
      "python"),
 ]
 
+RESULTS = {
+    "transport": [ROOT / "phone/transport/build/test-results"],
+    "app": [ROOT / "phone/app/build/test-results"],
+    "python": [ROOT / "build/pytest-results"],
+}
+
+
+def failing_tests(kind):
+    """Names of the tests that failed, from the JUnit XML the run just wrote."""
+    # Parsed as XML, not by regex over the attributes. Gradle writes `name` first and
+    # pytest writes `classname` first, so a pattern that fixes the order silently matches
+    # nothing on one of the two -- which is how the first version of this reported both
+    # Python pins as SURVIVED while they were being caught perfectly well. A harness that
+    # reports a false SURVIVED is the same failure as one that reports a false CAUGHT.
+    names = []
+    for base in RESULTS[kind]:
+        for report in base.rglob("*.xml"):
+            try:
+                root = ElementTree.parse(report).getroot()
+            except ElementTree.ParseError:
+                continue
+            for case in root.iter("testcase"):
+                if case.find("failure") is None and case.find("error") is None:
+                    continue
+                cls = (case.get("classname") or "").rsplit(".", 1)[-1]
+                names.append(f"{cls}.{case.get('name')}" if cls else str(case.get("name")))
+    return names
+
+
+BUILD_ERROR = ["<the mutation did not compile>"]
+
+
 def run(kind):
+    """Run the suite and report *which* tests failed, not merely that something did.
+
+    Keying on the process exit code was not enough, and the reason is the whole
+    argument for this script existing. A run reported SURVIVED for the outbound
+    framing-refusal pin while the same mutation, applied by hand and run against the
+    same test, failed 5 times out of 5. Either verdict might have been the true one and
+    the harness could not say which -- so a tool built because pins lapse silently was
+    itself producing a verdict nobody could check.
+
+    Naming the failing test settles it. A mutation that is caught says which assertion
+    caught it, and one that is "caught" by an unrelated failure is now visible as such
+    instead of counting as a pass.
+    """
+    for base in RESULTS[kind]:
+        if base.exists():
+            shutil.rmtree(base)          # or a previous run's failures count as this one's
     if kind == "python":
-        return subprocess.run([".venv/bin/python3", "-m", "pytest", "-q", "deployment/jetson/tests/",
-                               "-p", "no:cacheprovider"], capture_output=True, text=True).returncode
-    target = ":transport:test" if kind == "transport" else ":app:test"
-    return subprocess.run(GRADLE + [target, "--rerun-tasks"], capture_output=True, text=True).returncode
+        subprocess.run(
+            [".venv/bin/python3", "-m", "pytest", "-q", "deployment/jetson/tests/",
+             "-p", "no:cacheprovider", f"--junit-xml={RESULTS['python'][0]}/results.xml"],
+            capture_output=True, text=True,
+        )
+    else:
+        target = ":transport:test" if kind == "transport" else ":app:test"
+        result = subprocess.run(GRADLE + [target, "--rerun-tasks"], capture_output=True, text=True)
+        if "e: file://" in result.stdout or "e: file://" in result.stderr:
+            return BUILD_ERROR
+    return failing_tests(kind)
+
+# A killed run used to leave its mutation in the tree. The `finally` below restores on an
+# exception and on Ctrl-C, and not on a SIGKILL -- and one of those left
+# `UNKNOWN_VALUE -> WRONG_TYPE` applied to Session.kt, which then surfaced as two unrelated
+# tests failing in a later run. Chasing that as a regression is exactly the wrong trail.
+#
+# So the pristine text goes to a sidecar first. If it exists on startup the previous run
+# died mid-mutation, and this restores it before doing anything else rather than mutating
+# an already-mutated file.
+SIDECAR = pathlib.Path(".remutate-restore")
+
+if SIDECAR.exists():
+    saved = SIDECAR.read_text().split("\n", 1)
+    target = ROOT / saved[0]
+    print(f"  a previous run died mid-mutation; restoring {saved[0]}")
+    target.write_text(saved[1])
+    SIDECAR.unlink()
 
 survived = []
 for name, rel, old, new, kind in MUTATIONS:
@@ -159,15 +236,25 @@ for name, rel, old, new, kind in MUTATIONS:
         mutated = mutated.replace(
             '    if value is None:\n        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)\n    if value is None or not isinstance(value, str):',
             '    if value is None or not isinstance(value, str):', 1)
+    SIDECAR.write_text(f"{rel}\n{keep}")
     try:
         path.write_text(mutated)
-        code = run(kind)
+        failed = run(kind)
     finally:
         path.write_text(keep)
-    verdict = "CAUGHT" if code != 0 else "*** SURVIVED ***"
-    if code == 0:
+        SIDECAR.unlink(missing_ok=True)
+    if failed == BUILD_ERROR:
+        # Distinct from both verdicts. A mutation that does not compile proves nothing
+        # about any test, and reporting it as CAUGHT is how one of these entries came to
+        # measure the compiler for weeks.
+        survived.append(name + " [did not compile]")
+        print(f"  DID NOT COMPILE    {name}")
+    elif failed:
+        print(f"  CAUGHT ({len(failed)})         {name}")
+        print(f"                     by {failed[0]}")
+    else:
         survived.append(name)
-    print(f"  {verdict:18} {name}")
+        print(f"  *** SURVIVED ***   {name}")
 
 print()
 print("survived:", len(survived), survived if survived else "(none)")

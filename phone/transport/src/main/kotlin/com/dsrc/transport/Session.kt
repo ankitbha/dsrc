@@ -82,6 +82,9 @@ data class SessionStats(
  * IP traffic to tailnet peers. Inbound works, and both directions work once the phone
  * has connected.
  */
+/** Outbound framing refusals as one value, so the count and the text cannot disagree. */
+private data class OutboundFramingRefusals(val count: Long, val last: String)
+
 class Session(
     private val input: InputStream,
     private val output: OutputStream,
@@ -132,10 +135,18 @@ class Session(
     private val framesReceived = AtomicLong(0)
     private val heartbeatsSent = AtomicLong(0)
     private val heartbeatsReceived = AtomicLong(0)
-    private val outboundFramingRefusals = AtomicLong(0)
-
+    /**
+     * The outbound framing refusals, count and description together.
+     *
+     * One field rather than two, so `stats()` cannot read a fresh count against a stale
+     * description. Written only from `countOutboundFramingRefusal`, which is called from
+     * `send` under no lock -- a concurrent pair of refusals can therefore lose a count,
+     * and that is the trade: an exact count that can contradict its own description is
+     * worth less here than a count that may be one low but always agrees with it. These
+     * are diagnostics for a log line, not accounting the peer can see.
+     */
     @Volatile
-    private var lastOutboundFramingRefusal: String? = null
+    private var outboundFraming: OutboundFramingRefusals? = null
 
     private val deliveryFailures = AtomicLong(0)
 
@@ -752,10 +763,21 @@ class Session(
     }
 
     private fun countOutboundFramingRefusal(cause: Throwable) {
-        // Description before counter, the same ordering as the delivery failure above and
-        // for the same reason: `stats()` reads these two at different moments.
-        lastOutboundFramingRefusal = "${cause.javaClass.simpleName}: ${cause.message}"
-        outboundFramingRefusals.incrementAndGet()
+        // One volatile write publishes both halves, so they cannot be torn at all.
+        //
+        // Ordering the two writes was the previous fix, and it worked -- but only
+        // probabilistically as a *pin*: the window between them is a few nanoseconds, so the
+        // test for it is a sampling probe that catches a regression most runs and not every
+        // run. It reported SURVIVED once and CAUGHT the next time with nothing changed,
+        // which is a pin that cannot be trusted either way.
+        //
+        // A single immutable record removes the window instead of narrowing it. The
+        // invariant "a non-zero count always has a description" now holds by construction,
+        // and the test is deterministic because there is no interleaving left to catch.
+        outboundFraming = OutboundFramingRefusals(
+            count = (outboundFraming?.count ?: 0) + 1,
+            last = "${cause.javaClass.simpleName}: ${cause.message}",
+        )
     }
 
     private fun countOutboundRefusal(reason: String) = synchronized(refusalLock) {
@@ -794,8 +816,8 @@ class Session(
             deliveryFailures = deliveryFailures.get(),
             lastDeliveryFailure = lastDeliveryFailure,
             inboundRefusals = inboundRefusals.mapValues { (_, byReason) -> byReason.toMap() },
-            outboundFramingRefusals = outboundFramingRefusals.get(),
-            lastOutboundFramingRefusal = lastOutboundFramingRefusal,
+            outboundFramingRefusals = outboundFraming?.count ?: 0,
+            lastOutboundFramingRefusal = outboundFraming?.last,
             outboundRefusals = outboundRefusals.toMap(),
             channels = channels,
             inboundChannels = inboundChannels,

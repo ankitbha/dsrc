@@ -10,6 +10,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -2738,43 +2739,31 @@ class SessionTest {
 
 
     @Test
-    fun `an outbound framing refusal is described before it is counted`() {
-        // The other half of the stats-consistency work, and it had no test at all: reverting
-        // this one site to counter-then-description passed the whole 250-test suite, so the
-        // fix was guarded by nothing. Same defect as the delivery-failure pair -- a consumer
-        // sampling between the two writes sees outboundFramingRefusals = 1 with
-        // lastOutboundFramingRefusal = null, from a public method.
+    fun `an outbound framing refusal never reports a count without a description`() {
+        // This was a sampling probe: a sender producing refusals while another thread read
+        // stats(), hunting the window between the two writes. It worked, and it was a pin
+        // nobody could trust -- the window is nanoseconds wide, so it reported SURVIVED one
+        // run and CAUGHT the next with nothing changed, and a harness cannot tell a lapsed
+        // pin from an unlucky one.
         //
-        // An unknown channel is the cheapest producer: it is a FramingError rather than a
-        // refusal reason, so it lands exactly here. Bounded by a deadline the loop checks
-        // itself.
+        // The count and the description are one volatile record now, so there is no window
+        // left to sample for and this is deterministic. An unknown channel is the cheapest
+        // producer: a FramingError rather than a refusal reason, so it lands exactly here.
         val (phone, _) = pair()
-        val deadline = System.currentTimeMillis() + 3_000
-        val sender = Thread({
-            while (System.currentTimeMillis() < deadline) {
-                phone.session.send("not_a_channel", emptyMap())
-            }
-        }, "framing-refusal-sender").also { it.isDaemon = true; it.start() }
+        assertNull(phone.session.stats().lastOutboundFramingRefusal, "nothing refused yet")
+        assertEquals(0, phone.session.stats().outboundFramingRefusals)
 
-        var samples = 0L
-        var contradiction: String? = null
-        while (System.currentTimeMillis() < deadline && contradiction == null) {
-            val stats = phone.session.stats()
-            samples++
-            if (stats.outboundFramingRefusals > 0 && stats.lastOutboundFramingRefusal == null) {
-                contradiction = "outboundFramingRefusals=${stats.outboundFramingRefusals} with no description"
-            }
-        }
-        sender.join(5_000)
+        repeat(3) { assertFalse(phone.session.send("not_a_channel", emptyMap())) }
 
-        assertTrue(contradiction == null, "after $samples samples: $contradiction")
-        // Only once the invariant holds: these guard against a vacuous pass, and a run that
-        // ended early because it *found* something is not vacuous.
-        assertTrue(samples > 1_000, "only $samples snapshots taken; the probe was not running")
+        val stats = phone.session.stats()
+        assertEquals(3, stats.outboundFramingRefusals, "every refusal counted")
         assertTrue(
-            phone.session.stats().outboundFramingRefusals > 0,
-            "nothing was refused, so the probe proves nothing",
+            stats.lastOutboundFramingRefusal != null,
+            "a non-zero count must always carry a description: $stats",
+        )
+        assertTrue(
+            stats.lastOutboundFramingRefusal!!.contains("FramingError"),
+            "and it names the cause: ${stats.lastOutboundFramingRefusal}",
         )
     }
-
 }
