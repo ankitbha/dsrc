@@ -33,8 +33,14 @@ data class SessionStats(
      */
     val deliveryFailures: Long,
     val lastDeliveryFailure: String?,
-    /** Messages the peer sent that we refused: a bug there. */
-    val inboundRefusals: Map<String, Long>,
+    /**
+     * Messages the peer sent that we refused: a bug there.
+     *
+     * Keyed channel then reason, because the spec asks for both and because the two
+     * inbound channels fail in unrelated ways -- a refused `advisory` is a display glitch,
+     * a refused `rate_cmd` is the phone running at the wrong rate for the rest of the drive.
+     */
+    val inboundRefusals: Map<String, Map<String, Long>>,
     /** Messages we refused to send: a bug here. */
     val outboundRefusals: Map<String, Long>,
     /**
@@ -46,7 +52,19 @@ data class SessionStats(
     val outboundFramingRefusals: Long,
     val lastOutboundFramingRefusal: String?,
     val channels: Map<String, ChannelCounters>,
-)
+) {
+    /**
+     * Inbound refusals totalled across channels.
+     *
+     * Computed, not stored: a second stored copy is a second thing to keep in agreement,
+     * and the per-channel map is the one the spec requires.
+     */
+    val inboundRefusalsByReason: Map<String, Long>
+        get() = inboundRefusals.values
+            .flatMap { it.entries }
+            .groupingBy { it.key }
+            .fold(0L) { total, entry -> total + entry.value }
+}
 
 /**
  * One connection, with the reader and writer on their own threads.
@@ -103,7 +121,7 @@ class Session(
     @Volatile
     private var lastDeliveryFailure: String? = null
 
-    private val inboundRefusals = mutableMapOf<String, Long>()
+    private val inboundRefusals = mutableMapOf<String, MutableMap<String, Long>>()
     private val outboundRefusals = mutableMapOf<String, Long>()
     private val refusalLock = Any()
 
@@ -418,14 +436,14 @@ class Session(
         val message = try {
             TimeSyncMessage.fromWire(frame.header.entries, frame.payload)
         } catch (e: MessageError) {
-            countInboundRefusal(e.reason.wire)
+            countInboundRefusal(frame.channel, e.reason.wire)
             return true
         }
 
         if (role == ROLE_PHONE) {
             if (message.isPing) {
                 // Nobody should be pinging the initiator.
-                countInboundRefusal(RefusalReason.UNKNOWN_VALUE.wire)
+                countInboundRefusal(frame.channel, RefusalReason.UNKNOWN_VALUE.wire)
                 return true
             }
             // A pong is the answer to our own ping, and the estimate is built above the
@@ -436,7 +454,7 @@ class Session(
         val reply = timeSync.reply(message, monoClock(), wallClock())
         if (reply == null) {
             // A responder receiving a pong: the other wrong direction.
-            countInboundRefusal(RefusalReason.UNKNOWN_VALUE.wire)
+            countInboundRefusal(frame.channel, RefusalReason.UNKNOWN_VALUE.wire)
             return true
         }
         // Wire-stamped, because t3 is the pong's departure and the enqueue stamp would
@@ -487,7 +505,7 @@ class Session(
                 } catch (e: MessageError) {
                     // Drop and count. The session stays open: one bad record costs one
                     // record.
-                    countInboundRefusal(e.reason.wire)
+                    countInboundRefusal(frame.channel, e.reason.wire)
                 } catch (t: Throwable) {
                     // A bug in the application's router, not in the link. It must not tear
                     // the session down -- a NullPointerException in an advisory handler is
@@ -545,8 +563,18 @@ class Session(
         onEnd(reason, cause)
     }
 
-    private fun countInboundRefusal(reason: String) = synchronized(refusalLock) {
-        inboundRefusals[reason] = (inboundRefusals[reason] ?: 0) + 1
+    /**
+     * Count an inbound refusal against its channel and its reason.
+     *
+     * The spec asks for both: "the drop is counted per channel and per reason". Keyed by
+     * reason alone, four thousand drops could not be attributed to a channel, and the
+     * `advisory` and `rate_cmd` paths would be indistinguishable in a summary -- one is a
+     * display glitch and the other is the phone running at the wrong rate for the rest of
+     * the drive.
+     */
+    private fun countInboundRefusal(channel: String, reason: String) = synchronized(refusalLock) {
+        val perChannel = inboundRefusals.getOrPut(channel) { mutableMapOf() }
+        perChannel[reason] = (perChannel[reason] ?: 0) + 1
     }
 
     private fun countOutboundFramingRefusal(cause: Throwable) {
@@ -566,7 +594,7 @@ class Session(
             heartbeatsReceived = heartbeatsReceived.get(),
             deliveryFailures = deliveryFailures.get(),
             lastDeliveryFailure = lastDeliveryFailure,
-            inboundRefusals = inboundRefusals.toMap(),
+            inboundRefusals = inboundRefusals.mapValues { (_, byReason) -> byReason.toMap() },
             outboundFramingRefusals = outboundFramingRefusals.get(),
             lastOutboundFramingRefusal = lastOutboundFramingRefusal,
             outboundRefusals = outboundRefusals.toMap(),

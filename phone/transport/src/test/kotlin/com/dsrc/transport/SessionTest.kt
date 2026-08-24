@@ -578,7 +578,8 @@ class SessionTest {
         assertTrue(awaitFrames(phone, 1), "the frame never arrived")
         Thread.sleep(200)
         assertTrue(phone.session.isRunning, "the session must stay open")
-        assertEquals(1, phone.session.stats().inboundRefusals["wrong_type"])
+        assertEquals(1, phone.session.stats().inboundRefusals[Channels.ADVISORY]?.get("wrong_type"),
+            "not attributed to the advisory channel: ${phone.session.stats().inboundRefusals}")
 
         // And it keeps working afterwards.
         assertTrue(jetson.session.send(Channels.ADVISORY, advisory(captureMonoNs = 2)))
@@ -1250,7 +1251,7 @@ class SessionTest {
         assertTrue(jetson.session.send(Channels.CONTROL, ping(exchangeId = 7), wantsWireStamp = true))
         assertTrue(
             awaitCondition {
-                phone.session.stats().inboundRefusals[RefusalReason.UNKNOWN_VALUE.wire] == 1L
+                phone.session.stats().inboundRefusalsByReason[RefusalReason.UNKNOWN_VALUE.wire] == 1L
             },
             "a ping to the initiator was not refused as unknown_value: " +
                 "${phone.session.stats().inboundRefusals}",
@@ -1274,7 +1275,7 @@ class SessionTest {
         assertTrue(phone.session.send(Channels.CONTROL, pong.toExtensions(), wantsWireStamp = true))
         assertTrue(
             awaitCondition {
-                jetson.session.stats().inboundRefusals[RefusalReason.UNKNOWN_VALUE.wire] == 1L
+                jetson.session.stats().inboundRefusalsByReason[RefusalReason.UNKNOWN_VALUE.wire] == 1L
             },
             "a pong to a responder was not refused: ${jetson.session.stats().inboundRefusals}",
         )
@@ -1393,6 +1394,43 @@ class SessionTest {
             )
             cleanup()
         }
+    }
+
+
+    @Test
+    fun `inbound refusals are attributed to their own channel`() {
+        // The spec asks for both axes: "the drop is counted per channel and per reason".
+        // Keyed by reason alone, a summary could not tell a refused advisory -- a display
+        // glitch -- from a refused rate_cmd, which leaves the phone sensing at the wrong
+        // rate for the rest of the drive.
+        val (phone, jetson) = pair(onPhoneFrame = { frame ->
+            when (frame.channel) {
+                Channels.ADVISORY -> throw MessageError(RefusalReason.WRONG_TYPE, "pretend")
+                Channels.GPS -> throw MessageError(RefusalReason.OUT_OF_RANGE, "pretend")
+                else -> Unit
+            }
+        })
+
+        assertTrue(jetson.session.send(Channels.ADVISORY, advisory(captureMonoNs = 1)))
+        // Waited for, not fired back to back: `advisory` is latest_wins at depth 1, so a
+        // second send would displace the first before the writer ever saw it and only one
+        // would arrive. The queue is doing its job; the test was asking the wrong thing.
+        assertTrue(awaitCondition { phone.session.stats().inboundRefusals.containsKey(Channels.ADVISORY) })
+        assertTrue(jetson.session.send(Channels.ADVISORY, advisory(captureMonoNs = 2)))
+        assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(3).toExtensions()))
+
+        assertTrue(
+            awaitCondition {
+                val refusals = phone.session.stats().inboundRefusals
+                refusals[Channels.ADVISORY]?.get("wrong_type") == 2L &&
+                    refusals[Channels.GPS]?.get("out_of_range") == 1L
+            },
+            "not attributed per channel: ${phone.session.stats().inboundRefusals}",
+        )
+        // And the by-reason view still totals correctly across channels.
+        val byReason = phone.session.stats().inboundRefusalsByReason
+        assertEquals(2L, byReason["wrong_type"])
+        assertEquals(1L, byReason["out_of_range"])
     }
 
 }

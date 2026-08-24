@@ -317,6 +317,29 @@ exercised, but no timer calls it, so in a running app the exchange still does no
 on its own. The cadence and the estimator belong with whatever consumes the offset, which
 is not this task.
 
+## Inbound queues: a deliberate divergence, and the test that hides it
+
+The spec says "Inbound queues use the same policies and depths". The Kotlin session has
+none: it calls `onFrame` synchronously on the reader thread. Python has real inbound
+queues with a per-channel `dropped_inbound`.
+
+The counting half of the divergence is fixed -- inbound refusals are keyed by channel and
+by reason, as the spec asks -- but the queues themselves are not built, deliberately, for
+two reasons. The phone's only inbound channels are `advisory` and `rate_cmd`, both
+low-rate and both handled by fast code, so the backpressure a queue would absorb does not
+exist yet. And adding one changes the app's threading contract: today a handler runs on the
+reader thread, and moving it introduces a second place inbound messages can be dropped,
+which is the exact arrangement `GpsPipeline` argues against for the outbound side.
+
+**What is not acceptable is the interop test.** It asserts `"dropped_inbound": 0` against
+the *Python peer's* counter, so it reads as a check on our inbound accounting and is
+nothing of the kind -- we have no such counter to check. A test that appears to cover the
+divergence is worse than no test, and it goes with the F9 work.
+
+The condition for building them: the moment a handler does anything slow -- a disk write in
+task 25, a UI hop in task 23 -- synchronous delivery couples that latency to the read loop,
+and the reader is what the stall timeout watches.
+
 ## 8. Needs sign-off
 
 1. **O1** — whether GPS receipt time should get a wire field (`t_receipt_mono_ns` on
