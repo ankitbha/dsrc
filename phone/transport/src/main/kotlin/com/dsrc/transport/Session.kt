@@ -581,12 +581,25 @@ class Session(
         // to the application unchecked, and `inboundRefusals` moved only when a handler
         // happened to throw -- so a deliberately bad record from the live Python peer
         // crossed and was counted nowhere.
-        try {
-            MessageValidation.checkInbound(frame)
-        } catch (e: MessageError) {
-            countInboundRefusal(frame.channel, e.reason.wire)
-            inbound.countRefused(frame.channel)
-            return
+        // Not on control, and that is a correction to the previous shape rather than an
+        // optimisation. `checkInbound` runs the channel's decoder, and for control that
+        // decoder is `TimeSyncMessage.fromWire` -- the very call `handleTimeSync` makes two
+        // lines later. So a control frame was decoded twice, the first decode owned the
+        // refusal, and `handleTimeSync`'s own `catch (e: MessageError)` became unreachable
+        // the moment the hello exemption was removed from that decoder. My pin harness
+        // caught it: the mutation that swallows that catch went from CAUGHT to SURVIVED
+        // between two commits, with nothing else changing.
+        //
+        // One decode. `handleTimeSync` owns control's refusal, which is where the reason
+        // and the direction rules already live.
+        if (frame.channel != Channels.CONTROL) {
+            try {
+                MessageValidation.checkInbound(frame)
+            } catch (e: MessageError) {
+                countInboundRefusal(frame.channel, e.reason.wire)
+                inbound.countRefused(frame.channel)
+                return
+            }
         }
 
         // Inside a try, because it was not. The backstop in `deliveryLoop` was justified
