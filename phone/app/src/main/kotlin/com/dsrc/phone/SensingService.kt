@@ -205,22 +205,20 @@ class SensingService : LifecycleService() {
             }
 
     private fun onSensingUp() {
-        // Re-entrancy first. `react()` reaches the terminal-stopped states through
-        // `release()` alone, so after a throw part-way through this method the allocations
-        // above the throw stay live until `onDestroy`, and cleanup depends on
-        // `stopSelf(lastStartId)` winning -- which the startId overload exists precisely to
-        // *lose* when a start is queued behind it. A retried Start then re-enters here and
-        // overwrites all seven fields, and the first set becomes unreachable and is never
-        // stopped: a link thread reconnecting forever, a sender polling forever, and a GNSS
-        // callback still registered.
+        // No re-entrancy release here, and the reason is worth stating because an earlier
+        // version had one.
         //
-        // Releasing anything already published makes that impossible rather than unlikely,
-        // and unlike adding `onSensingDown()` to the terminal branch it is observable: the
-        // harm is a *duplicate* thread per resource, which a census can count.
-        if (link != null || pipeline != null || gpsSource != null || frameSender != null) {
-            Log.w(TAG, "onSensingUp re-entered with resources live; releasing them first")
-            onSensingDown()
-        }
+        // Fields cannot be live on entry. `react()` reaches this only on a transition into
+        // STARTING, and every route into STARTING has already cleared them: a previous
+        // come-up that threw released in `allocateAndStart`'s own catch below; a previous
+        // run that succeeded is RUNNING, where the machine ignores Start; and STOPPING has
+        // been through `onSensingDown`. So a conditional release at the top could never
+        // fire, and it was unpinnable for that reason rather than for a hard-to-hit race --
+        // which is what I first recorded, wrongly.
+        //
+        // A guard nothing can reach is the shape this codebase keeps producing, so it is
+        // gone and the invariant is written down instead. The catch below is the
+        // load-bearing half and it *is* reachable.
         try {
             allocateAndStart()
         } catch (t: Throwable) {

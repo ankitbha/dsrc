@@ -589,8 +589,24 @@ class Session(
             return
         }
 
+        // Inside a try, because it was not. The backstop in `deliveryLoop` was justified
+        // by "deliver already covers every path", and this call was the counter-example:
+        // anything it raised other than a MessageError went past every clause here and out
+        // to the loop. Covering it makes the stated reason true instead of correcting the
+        // comment to match a gap.
+        val outcome = try {
+            if (frame.channel == Channels.CONTROL) handleTimeSync(message) else TimeSyncOutcome.NOT_OURS
+        } catch (t: Throwable) {
+            // Our own bug, in transport code, not the peer's record and not the app's
+            // handler. Counted where the other two are so the frame still has a heading.
+            deliveryFailures.incrementAndGet()
+            inbound.countFailed(frame.channel)
+            lastDeliveryFailure = "timebase: ${t.javaClass.name}: ${t.message}"
+            return
+        }
+
         if (frame.channel == Channels.CONTROL) {
-            when (handleTimeSync(message)) {
+            when (outcome) {
                 TimeSyncOutcome.ANSWERED -> {
                     inbound.countDelivered(frame.channel)
                     return

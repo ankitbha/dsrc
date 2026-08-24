@@ -209,24 +209,24 @@ sizes are not representative of a road.
 
 ---
 
-## An unpinnable guard, kept and not claimed
+## The re-entrancy guard was unreachable, not merely unpinnable
 
 `react()` reaches `STOPPED_ERROR` and `STOPPED_PERMISSION_REVOKED` through `release()`
-alone, so a throw part-way through `onSensingUp` left every allocation above it live until
-`onDestroy` — and cleanup then depended on `stopSelf(lastStartId)` winning, which the
-startId overload exists precisely to *lose* when a start is queued behind it. A retried
-Start re-entered and overwrote all seven fields, orphaning the first set: a link thread
-reconnecting forever, a sender polling forever, a GNSS callback still registered.
+alone, so a throw part-way through `onSensingUp` could leave allocations live until
+`onDestroy`. `allocateAndStart`'s own catch closes that, and it is reachable and worth
+keeping.
 
-`onSensingUp` now releases anything already published before allocating, and releases what
-it allocated if the come-up throws. **Neither change is pinned by a test, and that is
-stated rather than papered over.** Removing either leaves the instrumented suite green,
-because `onDestroy` cleans up by another route. Observing the difference needs the service
-to survive its own `stopSelf`, which needs a start queued behind it — a window of about two
-milliseconds that neither the validator nor I could force.
+The conditional release I *also* added at the top of `onSensingUp` is not. I recorded it as
+"kept and not claimed" on the grounds that observing it needed a ~2 ms race. That was the
+wrong diagnosis: the fields cannot be live on entry at all. Every route into `STARTING` has
+already cleared them — a come-up that threw released in its own catch, a run that succeeded
+is `RUNNING` where the machine ignores `Start`, and `STOPPING` has been through
+`onSensingDown`. So the guard could never fire, and "hard to race" was a guess that made an
+unreachable branch sound testable-in-principle.
 
-The two tests added alongside are named for what they do verify — a failed start leaves
-nothing running, and a restart does not accumulate threads — not for the guard.
+It is removed and the invariant is written into the code instead. A guard nothing can reach
+is the shape this codebase keeps producing, and a note saying "we could not test it" is
+worse than absent when the truth is "it cannot happen".
 
 ## D2 (`KEEP_ONLY_LATEST`) is unpinned, and why
 
