@@ -194,4 +194,92 @@ class ImuPairingTest {
         assertEquals(5 * ms, pairing.timebaseOffsetNs)
         assertEquals("the gap a wrong attribution would have cost", 3 * ms, pairing.clockGapNs)
     }
+
+    @Test
+    fun `a stamp near neither clock is refused, not attributed to the closer one`() {
+        // The "or near neither" half of the attribution, and the conjunct no test reached:
+        // dropping `fromApp <= maxDeliveryNs` from the diverged branch survived 279 tests.
+        // A delivery delta of 3 s against a 10 s clock gap is nearer the app clock than the
+        // monotonic one, and is still not delivery latency -- it is a stamp from neither.
+        assertEquals(
+            ImuTimebase.MISMATCHED,
+            ImuPairing.verdictFor(deliveryDeltaNs = 3 * second, clockGapNs = 10 * second),
+        )
+        // And the same shape inside the bound *is* attributed, so the assertion above is
+        // about the bound rather than about the comparison next to it.
+        assertEquals(
+            ImuTimebase.MATCHED,
+            ImuPairing.verdictFor(deliveryDeltaNs = ms, clockGapNs = 10 * second),
+        )
+    }
+
+    @Test
+    fun `the clock-gap threshold decides, and both sides of it are asserted`() {
+        // 50 ms was justified in a comment and asserted by nothing, so the constant could
+        // move without a test noticing -- and it is the number that decides whether the
+        // attribution is attempted at all.
+        //
+        // At exactly the threshold the question is still moot, so a delta that would lose
+        // the attribution is accepted. One nanosecond above it, the attribution runs and
+        // that same delta is refused.
+        // Literal 50 ms, not the constant. Deriving the inputs from the value under test
+        // makes the test move with it: widening the threshold tenfold left this passing,
+        // because `halfway` widened too. A test that reads its own subject cannot pin it.
+        assertEquals(
+            "the constant is 50 ms, and this test is about that number",
+            50_000_000L,
+            ImuPairing.MAX_TOLERABLE_CLOCK_GAP_NS,
+        )
+        val halfway = 26 * ms
+        assertEquals(
+            "at the threshold the clocks are close enough that it does not matter",
+            ImuTimebase.MATCHED,
+            ImuPairing.verdictFor(deliveryDeltaNs = halfway, clockGapNs = 50 * ms),
+        )
+        assertEquals(
+            "one nanosecond further apart, the attribution runs and this stamp loses it",
+            ImuTimebase.MISMATCHED,
+            ImuPairing.verdictFor(deliveryDeltaNs = halfway, clockGapNs = 50 * ms + 1),
+        )
+    }
+
+    @Test
+    fun `a tie between the two clocks is refused rather than guessed`() {
+        // delta exactly half the gap is equidistant. Refusing is the right call -- there is
+        // no evidence either way -- and `<` rather than `<=` is what holds it there, which
+        // nothing asserted.
+        // Inside the delivery bound, or the bound decides first and the comparison is never
+        // reached -- which is what a 10 s gap did: 5 s of "latency" fails the 2 s bound
+        // whatever the tie says. A 2 s gap puts the midpoint at 1 s, comfortably inside it.
+        val gap = 2 * second
+        assertEquals(
+            ImuTimebase.MISMATCHED,
+            ImuPairing.verdictFor(deliveryDeltaNs = gap / 2, clockGapNs = gap),
+        )
+    }
+
+    @Test
+    fun `the delivery bound is honoured on the diverged branch too, and is injectable`() {
+        // The `maxDeliveryNs` constructor seam existed and no test used it: every test
+        // built ImuPairing(), so the mutation replacing the parameter with the constant
+        // survived. Driven here through an instance, which is the only thing that reaches
+        // that parameter at all.
+        val tight = ImuPairing(maxDeliveryNs = 10 * ms)
+        tight.onGyro(0, 0.0, 0.0, 0.0)
+        // 20 ms of delivery latency, clocks together: inside the default bound, outside
+        // this one.
+        assertEquals(
+            ImuOutcome.WrongTimebase,
+            tight.onAccelerometer(0, 0.1, 0.2, 9.8, 3, appNowNs = 20 * ms, monoNowNs = 20 * ms),
+        )
+
+        val loose = ImuPairing()
+        loose.onGyro(0, 0.0, 0.0, 0.0)
+        assertTrue(
+            "the same event is accepted under the default bound",
+            loose.onAccelerometer(0, 0.1, 0.2, 9.8, 3, appNowNs = 20 * ms, monoNowNs = 20 * ms)
+                is ImuOutcome.Paired,
+        )
+    }
+
 }

@@ -88,6 +88,29 @@ class ImuSource(
     val timebase: ImuTimebase get() = pairing.timebase
     val timebaseOffsetNs: Long get() = pairing.timebaseOffsetNs
 
+    /**
+     * How far the two candidate clocks were apart when the timebase was decided.
+     *
+     * Exposed because three places claimed an accepting verdict "still says how wrong it
+     * could be" and none of them could print it: the only reader was the refusing branch,
+     * so a session accepted with a 49 ms gap and one accepted with a 0.3 ms gap were
+     * indistinguishable in every artefact the phone produced.
+     */
+    val clockGapNs: Long get() = pairing.clockGapNs
+
+    /** Accelerometer events discarded because the sensor clock is not ours. */
+    val refusedWrongTimebase: Long get() = pairing.refusedWrongTimebase
+
+    /**
+     * Paired samples whose gyro half was stamped after the accelerometer's.
+     *
+     * The counter that carries the sign `gyroAgeNs` gave up when it became a magnitude.
+     * Without a reader the mean was a mean of magnitudes with no way to tell a systematic
+     * gyro lag from symmetric jitter -- the information was removed from one place and
+     * landed in another nobody could reach.
+     */
+    val outOfOrderPairings: Long get() = pairing.outOfOrderPairings
+
     /** Whether the listeners are registered right now. Zero after a stop. */
     val registrations: Int get() = registered
 

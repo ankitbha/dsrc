@@ -78,9 +78,11 @@ failure this exists to prevent, and an IMU stream is not worth taking the phone 
 sensing continues with camera and GPS.
 
 This is the one piece of task 20 the emulator cannot really exercise, because its virtual
-sensors report the same clock. The check is therefore driven in tests through an injected
-clock and an injected event source, and the *policy* is what gets pinned, not the
-platform's behaviour.
+sensors report the same clock. The check is therefore driven in tests by calling
+`ImuPairing` directly with both clock readings — there is no injected event *source*; the
+platform listener is thin glue and everything it decides lives in that class. What the
+device does pin, through `dumpsys sensorservice`, is the glue itself: which sensors were
+registered, at what rate, with what batching, and whether they were given back.
 
 ## Shape
 
@@ -95,7 +97,8 @@ Mirrors the GPS pair, which is the closest existing model.
   `refusedBySink`, plus `unpaired` (no gyro yet) and a `gyroAge` summary.
 - **Wiring** — `SensingService.allocateAndStart` creates both, `onSensingDown` releases
   them as two more independent `release(...)` steps, and the seven-field invariant becomes
-  nine.
+  nine — which silently broke a mutation-harness anchor that had been written against the
+  seven, and left that pin inert until round 2 noticed.
 
 ## Counters, and the identity they have to satisfy
 
@@ -124,8 +127,11 @@ reachable too.
 - Timebase: a matched clock captures; a mismatched one reports `MISMATCHED` and emits
   nothing. Both directions, because a check that only ever sees the good case is a
   premise that is never active.
-- Teardown: both listeners are unregistered and the `dsrc-imu` thread is gone. Named per
-  resource rather than summed.
+- Teardown: the `dsrc-imu` thread is gone, from `WORKER_PREFIXES`. **Unregistration is not
+  a JVM test** — it needs the platform's record, and lives in `ImuCaptureTest`
+  (instrumented) instead. It went untested for two rounds because `quitSafely()` ends the
+  thread whether or not the listeners were removed, so the thread census reported success
+  on a leak.
 - Accounting: the identity above, per heading, plus the balance.
 
 Instrumented, on the device:
@@ -139,7 +145,7 @@ Instrumented, on the device:
 Built as planned, with two departures worth naming.
 
 The timebase check's *verdict* is a pure function on the companion
-(`ImuSource.verdictFor`), not a private method. The plan said the policy would be pinned
+(`ImuPairing.verdictFor`), not a private method. The plan said the policy would be pinned
 rather than the platform's behaviour, and that is only true if a JVM test can reach it --
 the emulator's virtual sensors report the same clock, so the mismatched branch is inert on
 a device and an instrumented test of it would assert nothing.

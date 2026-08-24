@@ -405,7 +405,7 @@ class SensingService : LifecycleService() {
      *
      * Every release is independent and the fields are cleared in a `finally`, and that is
      * the whole point rather than defensive habit. Previously the nine calls ran in
-     * sequence and the seven fields were nulled *last*, so a throw part-way through left
+     * sequence and the fields were nulled *last*, so a throw part-way through left
      * all of them set -- and `react(STOPPING)` catches exactly that and offers `Failed`,
      * which the machine turns into `STOPPED_ERROR`, from which `Start` goes to `STARTING`
      * and straight back into `onSensingUp` with a live CameraX binding, a live encoder
@@ -468,7 +468,10 @@ class SensingService : LifecycleService() {
                     Log.i(
                         TAG,
                         "imu stats ${it.stats} timebase=${imuSource?.timebase} " +
-                            "offsetNs=${imuSource?.timebaseOffsetNs}",
+                            "offsetNs=${imuSource?.timebaseOffsetNs} " +
+                            "clockGapNs=${imuSource?.clockGapNs} " +
+                            "refusedWrongTimebase=${imuSource?.refusedWrongTimebase} " +
+                            "outOfOrderPairings=${imuSource?.outOfOrderPairings}",
                     )
                 }
             }
@@ -632,7 +635,7 @@ class SensingService : LifecycleService() {
         /**
          * Test seam for a failure *after* everything is allocated.
          *
-         * Null in production. The leak it exposes needs a throw with all seven fields
+         * Null in production. The leak it exposes needs a throw with all nine fields
          * published, and nothing on a healthy device throws there.
          */
         @Volatile

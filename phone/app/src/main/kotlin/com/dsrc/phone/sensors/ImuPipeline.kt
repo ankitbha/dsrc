@@ -9,8 +9,10 @@ import java.util.concurrent.atomic.AtomicLong
  *
  * The pairing is the approximation this whole modality rests on, so it carries its own
  * error term: the two sensors fire independently and at rates that drift against each
- * other, and [gyroAgeNs] is how stale the gyro half was when the accelerometer fired.
- * Zero would be a claim the two were simultaneous, which they never are.
+ * other, and [gyroAgeNs] is *how far apart* the two halves were stamped -- a magnitude, not
+ * a signed staleness. The gyro can be stamped either side of the accelerometer, since both
+ * register on one handler at the same commanded period, and `ImuPairing.outOfOrderPairings`
+ * carries which. Zero would be a claim the two were simultaneous, which they never are.
  */
 data class ImuReading(
     val captureMonoNs: Long,
@@ -96,8 +98,12 @@ class ImuPipeline(
         // between two gated events invisible -- at 10 Hz, offers at 0, 50 ms, 40 ms counted
         // nothing, though the platform had plainly delivered out of order. What is being
         // detected is a property of the delivery, so the gate has no business in it.
+        // No sentinel test. `captureMonoNs < Long.MIN_VALUE` is false for every Long, so
+        // the guard could not fire, and RateGate records the argument against reusing
+        // Long.MIN_VALUE for "not set" in this domain. A guard nothing can reach is a claim
+        // a reader has to disprove.
         val previous = lastCaptureNs.getAndSet(reading.captureMonoNs)
-        if (previous != Long.MIN_VALUE && reading.captureMonoNs < previous) {
+        if (reading.captureMonoNs < previous) {
             nonMonotonic.incrementAndGet()
         }
 
@@ -159,7 +165,14 @@ class ImuPipeline(
         val delivered: Long,
         val refusedBySink: Long,
         val nonMonotonicSamples: Long,
-        /** Samples whose gyro half was older than one commanded period. */
+        /**
+         * Samples whose two halves were stamped more than one commanded period apart.
+         *
+         * Either direction. It reads as "older than one period" and is not: since
+         * `gyroAgeNs` became a magnitude this also counts a gyro stamped *after* the
+         * accelerometer by more than a period, which is the opposite condition and equally
+         * a pairing that has stopped being an approximation.
+         */
         val staleGyroSamples: Long,
         /**
          * The commanded rate when these statistics were read.

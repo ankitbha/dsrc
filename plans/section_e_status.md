@@ -498,20 +498,46 @@ device, so an instrumented test of it would assert nothing. What can be settled 
 policy, and that is what is pinned.
 
 The pairing carries its own error term. The accelerometer drives and the gyro comes from
-its latest reading, so the gyro's age stays under one accelerometer period rather than the
-other way round; the age is summarised over the samples that actually went out, since a
+its latest reading; the age is summarised over the samples that actually went out, since a
 gated sample's staleness costs nobody anything. An accelerometer event arriving before the
 first gyro event is `unpaired` and dropped — zeros are a reading, and the message has no
 null for those axes.
 
+The accelerometer is **not** the faster stream, and an earlier version of this note said it
+was. Both sensors are registered at the same commanded period, so the gyro's age is roughly
+uniform over one period and reaches a full one — meaning the "stale pairing" counter will
+not be rare. Driving from the accelerometer is still right, because the stamp has to belong
+to one of the two readings and it should be the one that produced the sample; but not for
+the reason first given. The age is also a *magnitude*: the gyro can be stamped either side
+of the accelerometer, and the direction has its own counter rather than a sign that cancels
+real error in the mean.
+
 `dsrc-imu` joins `WORKER_PREFIXES`, which is how a new resource gets teardown coverage
 without new tests: deleting the source's `start()` fails four instrumented tests.
 
-Two of the tests written for it could not fail, and mutation found both. The gyro ages in
-the summary test only ever rose, so "keep the maximum" and "keep the last" gave the same
-answer; and the stale-gyro test stepped over its own boundary, so `>` and `>=` agreed.
-That is the same shape as the findings above, and it keeps happening in the tests rather
-than in the code.
+**Eight of the tests written for this could not fail**, and mutation found every one. Two
+before the first validation round: the gyro ages only ever rose, so "keep the maximum" and
+"keep the last" agreed, and the stale-gyro test stepped over its own boundary, so `>` and
+`>=` agreed. Four more in round 1: the test named for swap-blindness drove all four
+headings to 1, making its assertions mutually interchangeable; the pairing statistics were
+only exercised at rates where nothing was gated; the non-monotonic baseline and the `<`/`<=`
+boundary were both stepped over; and the re-command test admitted a ten-times rate. Two in
+round 2's fixes: a tie test where the delivery bound decided before the comparison it was
+about, and a threshold test that read the constant it was meant to pin, so widening that
+constant tenfold moved the test with it.
+
+The last of those is worth naming separately. A test that derives its inputs from the value
+under test cannot pin that value — it is the self-referential check this project has been
+caught by before, in a different guise.
+
+Rounds 1 and 2 also found the same structural hole twice from opposite sides. Round 1: the
+decisions lived in a `SensorEventListener` nothing could invoke, so thirteen mutations to
+them survived. Round 2: moving the decisions somewhere testable did not make the *caller*
+reachable, so fourteen mutations to the glue survived — and the commit message claimed
+otherwise, having mutated the extracted class and reported it as covering the source.
+Extracting a function only helps if the caller is reachable too. `dumpsys sensorservice`
+closed it: the platform's own record of which sensors were registered, at what rate, with
+what batching, and whether they were given back.
 
 ## Not started
 

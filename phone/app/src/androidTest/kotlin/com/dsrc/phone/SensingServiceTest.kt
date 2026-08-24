@@ -443,7 +443,7 @@ class SensingServiceTest {
         // the guard, a throw part-way through onSensingUp left every allocation above it
         // live until onDestroy -- and cleanup depended on stopSelf(lastStartId) winning,
         // which the startId overload exists precisely to *lose* when a start is queued
-        // behind it. A retried Start then overwrote all seven fields and orphaned the first
+        // behind it. A retried Start then overwrote every field and orphaned the first
         // set: a link thread reconnecting forever, a sender polling forever, a GNSS callback
         // still registered.
         //
@@ -539,7 +539,7 @@ class SensingServiceTest {
     @Test
     fun aFailedTeardownStillClearsEverythingAndARestartDoesNotDoubleIt() {
         // The route I argued was unreachable, and it is not. onSensingDown used to run its
-        // releases in sequence and null the seven fields last, so a throw part-way through
+        // releases in sequence and null the fields last, so a throw part-way through
         // skipped every release behind it and left them all set -- and react(STOPPING)
         // catches exactly that and offers Failed, which the machine turns into
         // STOPPED_ERROR, from which Start goes to STARTING and straight back into
@@ -713,10 +713,10 @@ class SensingServiceTest {
     fun anOrdinaryStopReleasesEveryResourceWithoutOneRefusing() {
         // Round 4 found that a release *failing* is observable only for the four
         // thread-owning steps: making the camera pipeline throw on stop left the suite
-        // green, because nothing looks at the seven fields' objects afterwards and the
+        // green, because nothing looks at those objects afterwards and the
         // thread census cannot see a pipeline. The count closes that in aggregate -- a
         // release that starts throwing in production now fails the suite, whichever of the
-        // eleven it is, instead of being a log line nobody reads.
+        // fourteen it is, instead of being a log line nobody reads.
         SensingService.teardownFailures.set(0)
         SensingService.start(context)
         await(SensingState.RUNNING)
