@@ -193,6 +193,27 @@ class SessionTest {
     }
 
     /** A valid time-sync ping, which is what `control` actually carries. */
+    /** A valid advisory. The channel has a typed decoder now, so a stub no longer passes. */
+    private fun advisory(captureMonoNs: Long = 1_000) = AdvisoryMessage(
+        captureMonoNs = captureMonoNs,
+        recSpeedMps = 13.4,
+        recSpeedDisplay = 30.0,
+        currentSpeedDisplay = 28.0,
+        units = "mph",
+        headwayTargetS = 2.0,
+        laneText = "keep",
+        mergeText = "normal",
+        trafficText = "clear",
+        confidence = 0.87,
+        confidenceLabel = "high",
+        action = mapOf(
+            "desired_speed_bin" to "nominal",
+            "desired_headway_bin" to "normal",
+            "lane_preference" to "keep",
+            "merge_mode" to "normal",
+        ),
+    ).toExtensions()
+
     private fun ping(exchangeId: Long = 1) = TimeSyncMessage(
         captureMonoNs = 1_000,
         exchangeId = exchangeId,
@@ -553,14 +574,14 @@ class SessionTest {
             refusals.incrementAndGet()
             throw MessageError(RefusalReason.WRONG_TYPE, "pretend this field is wrong")
         })
-        assertTrue(jetson.session.send(Channels.ADVISORY, mapOf("k" to JsonValue.Num(1))))
+        assertTrue(jetson.session.send(Channels.ADVISORY, advisory(captureMonoNs = 1)))
         assertTrue(awaitFrames(phone, 1), "the frame never arrived")
         Thread.sleep(200)
         assertTrue(phone.session.isRunning, "the session must stay open")
         assertEquals(1, phone.session.stats().inboundRefusals["wrong_type"])
 
         // And it keeps working afterwards.
-        assertTrue(jetson.session.send(Channels.ADVISORY, mapOf("k" to JsonValue.Num(2))))
+        assertTrue(jetson.session.send(Channels.ADVISORY, advisory(captureMonoNs = 2)))
         assertTrue(awaitFrames(phone, 2), "the session stopped delivering")
     }
 

@@ -163,6 +163,90 @@ object Fields {
         }
     }
 
+    /**
+     * A nested object with exactly the named keys present.
+     *
+     * The spec calls `rates`, `achieved` and `dropped` additive: every listed key must be
+     * there, and an unlisted one is carried rather than refused. So a missing key is
+     * `missing_field` and an extra key is not an error -- unlike `action`, whose heads are
+     * a closed set because an unknown head is a policy the receiver cannot honour.
+     */
+    fun requireObject(extensions: Map<String, JsonValue>, key: String): Map<String, JsonValue> {
+        val value = require(extensions, key)
+        if (value is JsonValue.Null) {
+            throw MessageError(RefusalReason.NULL_NOT_ALLOWED, "'$key' is null")
+        }
+        val obj = (value as? JsonValue.Obj)
+            ?: throw MessageError(RefusalReason.WRONG_TYPE, "'$key' is not an object")
+        return obj.entries
+    }
+
+    /** A nested object of numbers, keyed exactly as [keys] requires. */
+    fun requireNestedNumbers(
+        extensions: Map<String, JsonValue>,
+        key: String,
+        keys: List<String>,
+    ): Map<String, Double> {
+        val nested = requireObject(extensions, key)
+        return keys.associateWith { inner ->
+            val value = nested[inner]
+                ?: throw MessageError(RefusalReason.MISSING_FIELD, "'$key.$inner' is absent")
+            when (value) {
+                is JsonValue.Real -> checkFinite("$key.$inner", value.value)!!
+                is JsonValue.Num -> value.value.toDouble()
+                is JsonValue.Null ->
+                    throw MessageError(RefusalReason.NULL_NOT_ALLOWED, "'$key.$inner' is null")
+                else -> throw MessageError(RefusalReason.WRONG_TYPE, "'$key.$inner' is not a number")
+            }
+        }
+    }
+
+    /** A nested object of counts: integral, non-negative, never fractional. */
+    fun requireNestedCounts(
+        extensions: Map<String, JsonValue>,
+        key: String,
+        keys: List<String>,
+    ): Map<String, Long> {
+        val nested = requireObject(extensions, key)
+        return keys.associateWith { inner ->
+            val value = nested[inner]
+                ?: throw MessageError(RefusalReason.MISSING_FIELD, "'$key.$inner' is absent")
+            when (value) {
+                // Refused rather than truncated: a fractional count is a bug in the
+                // sender, and truncating hides it behind a plausible number.
+                is JsonValue.Real ->
+                    throw MessageError(
+                        RefusalReason.WRONG_TYPE,
+                        "'$key.$inner' is a count and must not be fractional",
+                    )
+                is JsonValue.Num -> {
+                    if (value.value < 0) {
+                        throw MessageError(
+                            RefusalReason.OUT_OF_RANGE,
+                            "'$key.$inner' is ${value.value}, below zero",
+                        )
+                    }
+                    value.value
+                }
+                is JsonValue.Null ->
+                    throw MessageError(RefusalReason.NULL_NOT_ALLOWED, "'$key.$inner' is null")
+                else -> throw MessageError(RefusalReason.WRONG_TYPE, "'$key.$inner' is not an integer")
+            }
+        }
+    }
+
+    /** Wrap a map of numbers for the wire. */
+    fun objectOf(values: Map<String, Double>): JsonValue =
+        JsonValue.Obj(values.mapValues { (_, v) -> toWire(v) })
+
+    /** Wrap a map of counts for the wire. */
+    fun countsOf(values: Map<String, Long>): JsonValue =
+        JsonValue.Obj(values.mapValues { (_, v) -> JsonValue.Num(v) as JsonValue })
+
+    /** Wrap a map of strings for the wire. */
+    fun stringsOf(values: Map<String, String>): JsonValue =
+        JsonValue.Obj(values.mapValues { (_, v) -> JsonValue.Text(v) as JsonValue })
+
     /** Convert a value that may be NaN into the wire's `null`. */
     fun toWire(value: Double?): JsonValue =
         if (value == null || value.isNaN() || value.isInfinite()) JsonValue.Null else JsonValue.Real(value)
@@ -185,24 +269,40 @@ object Fields {
 object OutboundValidation {
 
     /**
-     * Channels whose typed message has no producer yet, so no decoder exists to run.
+     * The typed decoder for every channel, by channel id.
      *
-     * Named explicitly rather than left as a silent gap: `imu`, `here` and `telemetry`
-     * land with tasks 20, 21 and 24, and `advisory` and `rate_cmd` are inbound on the
-     * phone. The generic checks below still apply to all of them.
-     *
-     * `camera` was in this set and should not have been. It is the highest-volume channel
-     * on the link, so it was the one place where an unchecked field would travel
-     * thousands of times before anyone noticed, and the sender rule that round 1 added
-     * did not reach it.
+     * A map rather than a `when` with an `else`, and the difference is not style. The
+     * `when` had `else -> Unit`, so a channel with no decoder was silently exempt from
+     * every per-field rule -- which is most of the refusal table. Alongside it sat a set
+     * named `WITHOUT_A_TYPED_DECODER` that documented the exemption and was read by
+     * nothing, so it could not go stale in a way anything would notice: documentation
+     * posing as logic. With a map, [ALL_CHANNELS_HAVE_A_DECODER] can be asserted, and
+     * adding a channel without a decoder fails a test instead of quietly widening the hole.
      */
-    val WITHOUT_A_TYPED_DECODER = setOf(
-        Channels.IMU,
-        Channels.HERE,
-        Channels.TELEMETRY,
-        Channels.ADVISORY,
-        Channels.RATE_CMD,
+    private val DECODERS: Map<String, (Map<String, JsonValue>, ByteArray) -> Unit> = mapOf(
+        Channels.GPS to { extensions, payload -> GpsRecord.fromWire(extensions, payload) },
+        Channels.CAMERA to { extensions, payload -> CameraFrameMessage.fromWire(extensions, payload) },
+        Channels.IMU to { extensions, payload -> ImuSample.fromWire(extensions, payload) },
+        Channels.HERE to { extensions, payload -> HereResponse.fromWire(extensions, payload) },
+        Channels.ADVISORY to { extensions, payload -> AdvisoryMessage.fromWire(extensions, payload) },
+        Channels.RATE_CMD to { extensions, payload -> RateCommand.fromWire(extensions, payload) },
+        Channels.TELEMETRY to { extensions, payload -> PhoneTelemetry.fromWire(extensions, payload) },
+        Channels.CONTROL to { extensions, payload ->
+            // The hello and heartbeat are the transport's own traffic, not timebase
+            // messages, and they legitimately carry a reserved key.
+            if (Session.HELLO !in extensions && Session.HEARTBEAT !in extensions) {
+                TimeSyncMessage.fromWire(extensions, payload)
+            }
+        },
     )
+
+    /** Whether every channel in the table has a decoder. Asserted by a test. */
+    val ALL_CHANNELS_HAVE_A_DECODER: Boolean
+        get() = Channels.ALL.map { it.id }.toSet() == DECODERS.keys
+
+    /** Channels in the table with no decoder, for a test that names them. */
+    val CHANNELS_WITHOUT_A_DECODER: Set<String>
+        get() = Channels.ALL.map { it.id }.toSet() - DECODERS.keys
 
     /** Channels whose message carries no payload, from the spec's message table. */
     private val PAYLOAD_BEARING = setOf(Channels.CAMERA, Channels.HERE)
@@ -210,7 +310,7 @@ object OutboundValidation {
     /**
      * Throws [MessageError] with the reason a receiver would give.
      *
-     * @param allowReserved reserved keys this message legitimately carries — the hello and
+     * @param allowReserved reserved keys this message legitimately carries -- the hello and
      *   heartbeat the transport sends itself, and the wire stamp on a timebase message.
      */
     fun check(
@@ -222,8 +322,7 @@ object OutboundValidation {
         // A FramingError, not a refusal. The spec's framing table is explicit -- "`ch` not
         // in the channel table -> framing error, session ends" -- and the read path already
         // treats it that way. Calling it `no_typed_message` put a framing condition into
-        // the refusal vocabulary, where `no_typed_message` means something narrower: a
-        // channel that is in the table but has no typed message.
+        // the refusal vocabulary, where that reason means something narrower.
         if (!Channels.isKnown(channel)) {
             throw FramingError("unknown channel '$channel'")
         }
@@ -237,19 +336,11 @@ object OutboundValidation {
         // into a sensor callback.
         checkAllFinite(extensions)
 
-        // Then the typed decoder, where one exists: it is the only thing that applies the
-        // per-field rules -- ranges, counts, null handling -- and those are most of the
-        // refusal table.
-        when (channel) {
-            Channels.GPS -> GpsRecord.fromWire(extensions, payload)
-            Channels.CAMERA -> CameraFrameMessage.fromWire(extensions, payload)
-            Channels.CONTROL ->
-                // The hello and heartbeat are transport traffic, not timebase messages.
-                if (Session.HELLO !in extensions && Session.HEARTBEAT !in extensions) {
-                    TimeSyncMessage.fromWire(extensions, payload)
-                }
-            else -> Unit
-        }
+        // Then the typed decoder, which is the only thing that applies the per-field rules
+        // -- ranges, counts, null handling -- and those are most of the refusal table.
+        val decoder = DECODERS[channel]
+            ?: throw MessageError(RefusalReason.NO_TYPED_MESSAGE, "no typed message for '$channel'")
+        decoder(extensions, payload)
     }
 
     private fun checkAllFinite(value: Any?) {
