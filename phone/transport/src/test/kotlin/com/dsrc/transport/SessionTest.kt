@@ -174,15 +174,21 @@ class SessionTest {
      * Safe only with a frozen clock, so no keepalive interleaves with this write on the
      * same stream.
      */
-    private fun injectRaw(into: Peer, extensions: Map<String, JsonValue>, sequence: Long = 900) {
+    private fun injectRaw(
+        into: Peer,
+        extensions: Map<String, JsonValue>,
+        sequence: Long = 900,
+        channel: String = Channels.CONTROL,
+        allowReserved: Set<String> = setOf(Session.WIRE_STAMP),
+    ) {
         val socket = into.peerSocket ?: error("no peer socket recorded")
         val header = Framing.header(
-            channel = Channels.CONTROL,
+            channel = channel,
             sequence = sequence,
             monoNs = 1_000,
             wallNs = 2_000,
             extensions = extensions,
-            allowReserved = setOf(Session.WIRE_STAMP),
+            allowReserved = allowReserved,
         )
         socket.getOutputStream().write(Framing.encode(header, ByteArray(0)))
         socket.getOutputStream().flush()
@@ -2147,5 +2153,219 @@ class SessionTest {
         trigger = "thermal",
         shadow = false,
     ).toExtensions()
+
+
+    // -- role, the MUST-deliver rule, and the payload limit --------------------
+
+    @Test
+    fun `a role outside the two the spec names is refused at construction`() {
+        // Unpinned on both halves. `role` decides which side of the timebase protocol a
+        // session runs, so "Phone" or "jetson " silently became a responder -- and
+        // sendTimeSyncPing then threw at the caller rather than at construction.
+        for (bad in listOf("Phone", "jetson ", "", "peer")) {
+            val refused = runCatching {
+                Session(
+                    input = java.io.ByteArrayInputStream(ByteArray(0)),
+                    output = java.io.ByteArrayOutputStream(),
+                    deviceId = "test",
+                    role = bad,
+                    monoClock = { 0 },
+                    wallClock = { 0 },
+                    onFrame = {},
+                )
+            }
+            assertTrue(refused.isFailure, "role '$bad' was accepted")
+            assertTrue(
+                refused.exceptionOrNull() is IllegalArgumentException,
+                "wrong failure for '$bad': ${refused.exceptionOrNull()}",
+            )
+        }
+        // And both real roles are accepted.
+        for (good in listOf(Session.ROLE_PHONE, Session.ROLE_JETSON)) {
+            Session(
+                input = java.io.ByteArrayInputStream(ByteArray(0)),
+                output = java.io.ByteArrayOutputStream(),
+                deviceId = "test",
+                role = good,
+                monoClock = { 0 },
+                wallClock = { 0 },
+                onFrame = {},
+            )
+        }
+    }
+
+    @Test
+    fun `a peer claiming a role outside the two is a framing error`() {
+        // The peer's hello was not checked either, so a Jetson announcing itself as
+        // something else would be accepted and its half of the exchange guessed at.
+        val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).also { servers.add(it) }
+        val clientSocket = Socket(InetAddress.getLoopbackAddress(), server.localPort).also { sockets.add(it) }
+        val peerSocket = server.accept().also { sockets.add(it) }
+
+        val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
+        val session = Session(
+            input = clientSocket.getInputStream(),
+            output = clientSocket.getOutputStream(),
+            deviceId = "test-phone",
+            role = Session.ROLE_PHONE,
+            monoClock = { System.nanoTime() },
+            wallClock = { 0 },
+            onFrame = {},
+            onEnd = { reason, cause -> ends.add(reason to cause) },
+        ).also { sessions.add(it) }
+
+        Thread({
+            runCatching {
+                val hello = Framing.header(
+                    channel = Channels.CONTROL,
+                    sequence = 0,
+                    monoNs = 1,
+                    wallNs = 2,
+                    extensions = mapOf(
+                        Session.HELLO to JsonValue.Obj(
+                            mapOf(
+                                "protocol_version" to JsonValue.Num(Protocol.VERSION.toLong()),
+                                "device_id" to JsonValue.Text("odd-peer"),
+                                "role" to JsonValue.Text("router"),
+                            )
+                        )
+                    ),
+                    allowReserved = setOf(Session.HELLO),
+                )
+                peerSocket.getOutputStream().write(Framing.encode(hello, ByteArray(0)))
+                peerSocket.getOutputStream().flush()
+            }
+        }, "odd-peer").also { it.isDaemon = true; it.start() }
+
+        val started = runCatching { session.start() }
+        assertTrue(started.isFailure, "a peer with an unknown role was accepted")
+        assertEquals(listOf(SessionEnd.FRAMING_ERROR), ends.map { it.first })
+        assertTrue(
+            started.exceptionOrNull()!!.message!!.contains("role"),
+            "the reason does not name the role: ${started.exceptionOrNull()?.message}",
+        )
+    }
+
+    @Test
+    fun `a reserved key on a data channel is delivered, not swallowed`() {
+        // This is the load-bearing half of moving the reserved-key rule to the send path.
+        // The spec is explicit that the keepalive key is honoured on `control` only -- "the
+        // same key arriving on a data channel is a caller's message and MUST be delivered"
+        // -- and deleting the channel test from the absorption survived the whole suite. A
+        // `heartbeat` on gps would then be swallowed with no counter moving anywhere, which
+        // is the one outcome the sentence forbids.
+        val (phone, _) = pair(clock = { 1_000 })
+        val before = phone.received.size
+
+        injectRaw(
+            phone,
+            GpsRecord.noFix(1).toExtensions() + (Session.HEARTBEAT to JsonValue.Bool(true)),
+            channel = Channels.GPS,
+            allowReserved = setOf(Session.HEARTBEAT),
+        )
+
+        assertTrue(
+            awaitCondition { phone.received.size > before },
+            "a heartbeat key on gps was swallowed: heartbeats=${phone.session.stats().heartbeatsReceived}, " +
+                "refusals=${phone.session.stats().inboundRefusals}",
+        )
+        val delivered = phone.received.last()
+        assertEquals(Channels.GPS, delivered.channel)
+        assertTrue(Session.HEARTBEAT in delivered.header.entries, "the key was stripped on the way up")
+        assertEquals(0, phone.session.stats().heartbeatsReceived, "counted as a keepalive")
+    }
+
+    @Test
+    fun `our own wire-stamped data frame is readable by our own reader`() {
+        // The case that motivated moving the rule, and it was untested: wantsWireStamp
+        // appeared in tests only on `control`. Before the move, this frame passed validation
+        // on the caller's map, the writer added the stamp, and the peer refused the result
+        // as reserved_key -- a sender emitting what its own decoder refuses.
+        val (phone, jetson) = pair()
+        assertTrue(
+            phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions(), wantsWireStamp = true),
+            "send refused its own wire-stamped frame",
+        )
+        assertTrue(awaitFrames(jetson, 1), "it never arrived")
+
+        val frame = jetson.received.first { it.channel == Channels.GPS }
+        assertTrue(Session.WIRE_STAMP in frame.header.entries, "the stamp did not travel")
+        assertTrue(
+            jetson.session.stats().inboundRefusals.isEmpty(),
+            "our own frame was refused on arrival: ${jetson.session.stats().inboundRefusals}",
+        )
+        assertEquals(1, jetson.session.stats().inboundChannels.getValue(Channels.GPS).delivered)
+    }
+
+    @Test
+    fun `an over-size payload is refused where the caller can see it`() {
+        // checkSizes replaced Framing.encode in the probe, and its payload half was
+        // unpinned. Nothing is lost today -- checkSizes is a faithful subset -- but if it
+        // were, an over-size payload would move from a counted refusal to a FramingError on
+        // the writer thread, which ends the session: exactly the failure the probe exists to
+        // prevent.
+        val (phone, _) = pair()
+        val tooBig = ByteArray(Protocol.MAX_PAYLOAD_BYTES + 1)
+        val message = CameraFrameMessage(1, 1, 1280, 720, "jpeg", 85)
+
+        assertFalse(
+            phone.session.send(Channels.CAMERA, message.toExtensions(), tooBig),
+            "a ${tooBig.size}-byte payload was accepted",
+        )
+        assertEquals(
+            1,
+            phone.session.stats().outboundFramingRefusals,
+            "not counted as a framing refusal",
+        )
+        assertTrue(phone.session.isRunning, "refusing to send ended our own session")
+        // And the boundary itself is legal.
+        assertTrue(
+            phone.session.send(Channels.CAMERA, message.toExtensions(), ByteArray(Protocol.MAX_PAYLOAD_BYTES)),
+            "the maximum payload was refused",
+        )
+    }
+
+
+    @Test
+    fun `a frame in flight when the session ends is still under one heading`() {
+        // The shape `abandoned` was added to close, one slot over: a frame already taken out
+        // of the queue by the delivery thread is not in the queue for abandonAll to count,
+        // so if nothing else claims it, `received` exceeds the sum of the outcomes and the
+        // difference has no name.
+        val held = CountDownLatch(1)
+        val inHandler = CountDownLatch(1)
+        val (phone, jetson) = pair(onPhoneFrame = {
+            inHandler.countDown()
+            held.await()
+        })
+        try {
+            val offered = 20
+            repeat(offered) { index ->
+                while (jetson.session.outboundPending() > 0) Thread.onSpinWait()
+                assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(index.toLong()).toExtensions()))
+            }
+            assertTrue(inHandler.await(5, TimeUnit.SECONDS), "the handler was never reached")
+            assertTrue(awaitCondition {
+                phone.session.stats().inboundChannels.getValue(Channels.GPS).received >= offered.toLong()
+            }, "not everything arrived")
+
+            phone.session.close()
+        } finally {
+            held.countDown()
+        }
+
+        // The interrupt from finish() lands inside the blocked handler and is caught as a
+        // delivery failure, so the in-flight frame has a heading. Asserted rather than
+        // assumed, because it is the only heading it can have and nothing said so.
+        assertTrue(awaitCondition {
+            phone.session.stats().inboundChannels.getValue(Channels.GPS).balances
+        }, "the inbound accounting is short: ${phone.session.stats().inboundChannels[Channels.GPS]}")
+        val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+        assertEquals(
+            gps.received,
+            gps.delivered + gps.dropped + gps.refused + gps.failed + gps.abandoned,
+            "a frame in flight at shutdown is in no counter: $gps",
+        )
+    }
 
 }

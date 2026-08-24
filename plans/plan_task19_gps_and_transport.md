@@ -394,6 +394,33 @@ The condition for building them: the moment a handler does anything slow -- a di
 task 25, a UI hop in task 23 -- synchronous delivery couples that latency to the read loop,
 and the reader is what the stall timeout watches.
 
+## Two guards kept without a test, and what makes them different
+
+**`deliveryLoop`'s outer `Throwable` catch is a backstop, not a defence.** Removing it leaves
+the suite green, and that is close to correct rather than a gap: `deliver` already catches
+`Throwable` around the application callback and around the counters, so the only escapes
+left are `checkInbound` and `handleTimeSync`, whose `FramingError` paths cannot fire because
+`Framing.read` has already validated the frame. It stays because "if this thread dies the
+session lies" is the failure the reader and writer both had, and one line is cheap
+insurance against a future edit opening a path. It is recorded as untested rather than
+claimed.
+
+**The `stopped` half of `CameraXSource`'s bind guard resists a test, and finding out why took
+two wrong attempts.** The first assumed the guard's other half (a destroyed lifecycle) was
+doing the work in every test — true, but not the whole story. The second used
+`stopSourceOnly()` so the lifecycle stayed alive, expecting the bind to proceed and connect;
+it does proceed, and then *fails*, because `stop()` has already shut the analysis executor
+and `setAnalyzer` rejects. So the camera never connects either way and "no CONNECT" cannot
+discriminate. Asserting `bindFailures == 0` should have: with the flag it is a decision, and
+without it an attempted bind that fails. That did not discriminate either — the counter
+stayed zero in both, which means the listener is not reaching `setAnalyzer` at all on this
+emulator.
+
+The flag stays: it makes the decline explicit and the alternative is relying on two
+downstream accidents. It is recorded as unpinned, alongside the `onSensingUp` re-entrancy
+guard and `@Volatile` on `SensingStatus.state` — three guards kept for correctness, none
+claimed as tested.
+
 ## 8. Needs sign-off
 
 1. **O1** — whether GPS receipt time should get a wire field (`t_receipt_mono_ns` on
