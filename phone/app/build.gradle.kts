@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -18,6 +20,21 @@ android {
         versionCode = 1
         versionName = "0.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // The HERE key, read from local.properties and never committed. It is shared with
+        // Nash production, so it is not going in the repository and not going in a default.
+        // Absent leaves it empty, which HttpHereClient refuses to build a URL with -- a
+        // stream of 401s against a production key would be a worse way to learn it is
+        // missing.
+        val hereKey = Properties().apply {
+            val file = rootProject.file("local.properties")
+            if (file.exists()) file.inputStream().use { load(it) }
+        }.getProperty("here.apiKey", "")
+        buildConfigField("String", "HERE_API_KEY", "\"$hereKey\"")
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     buildTypes {

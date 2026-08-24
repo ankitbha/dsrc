@@ -343,6 +343,9 @@ class DifferentialTest {
             val base = mutableMapOf<String, JsonValue>(
                 "in" to JsonValue.Text("corridor:40.7,-74.0;40.8,-74.1;r=200"),
                 "location_ref" to JsonValue.Text("shape"),
+                "lat" to JsonValue.Real(40.7128),
+                "lon" to JsonValue.Real(-74.0060),
+                "radius_m" to JsonValue.Real(9000.0),
             )
             overrides.forEach { base[it.first] = it.second }
             drop?.let { base.remove(it) }
@@ -412,6 +415,10 @@ class DifferentialTest {
             "rate_cmd here in is not a string" to case(rateCmd() + ("here" to hereQuery("in" to JsonValue.Num(7))), empty) { e, p -> RateCommand.fromWire(e, p) },
             "rate_cmd here in is blank" to case(rateCmd() + ("here" to hereQuery("in" to JsonValue.Text("   "))), empty) { e, p -> RateCommand.fromWire(e, p) },
             "rate_cmd here location_ref is null" to case(rateCmd() + ("here" to hereQuery("location_ref" to JsonValue.Null)), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here lat is missing" to case(rateCmd() + ("here" to hereQuery(drop = "lat")), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here lat is not a number" to case(rateCmd() + ("here" to hereQuery("lat" to JsonValue.Text("north"))), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here lat is off the globe" to case(rateCmd() + ("here" to hereQuery("lat" to JsonValue.Real(91.0))), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here radius is not finite" to case(rateCmd() + ("here" to hereQuery("radius_m" to JsonValue.Real(Double.NaN))), empty) { e, p -> RateCommand.fromWire(e, p) },
             "rate_cmd rates is null" to case(rateCmd() + ("rates" to JsonValue.Null), empty) { e, p -> RateCommand.fromWire(e, p) },
             "rate_cmd zero rate" to case(rateCmd(rates + ("gps_hz" to JsonValue.Real(0.0))), empty) { e, p -> RateCommand.fromWire(e, p) },
             "rate_cmd rate above the ceiling" to case(rateCmd(rates + ("gps_hz" to JsonValue.Real(1000.001))), empty) { e, p -> RateCommand.fromWire(e, p) },

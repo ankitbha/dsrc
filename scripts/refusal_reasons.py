@@ -47,7 +47,8 @@ ADVISORY = {
 }
 RATES = {"camera_hz": 5.0, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.2}
 RATE_CMD = {"t_capture_mono_ns": 1, "rates": RATES, "trigger": "thermal", "shadow": False}
-HERE_QUERY = {"in": "corridor:40.7,-74.0;40.8,-74.1;r=200", "location_ref": "shape"}
+HERE_QUERY = {"in": "corridor:40.7,-74.0;40.8,-74.1;r=200", "location_ref": "shape",
+              "lat": 40.7128, "lon": -74.0060, "radius_m": 9000.0}
 PING = {
     "t_capture_mono_ns": 1, "exchange_id": 1, "t_wire_mono_ns": 0,
     "t_peer_recv_mono_ns": None, "t_peer_recv_wall_ns": None, "t_peer_wire_mono_ns": None,
@@ -118,6 +119,18 @@ CASES = {
     ),
     "rate_cmd here location_ref is null": (
         RateCommand, {**RATE_CMD, "here": {**HERE_QUERY, "location_ref": None}}, b"",
+    ),
+    "rate_cmd here lat is missing": (
+        RateCommand, {**RATE_CMD, "here": {k: v for k, v in HERE_QUERY.items() if k != "lat"}}, b"",
+    ),
+    "rate_cmd here lat is not a number": (
+        RateCommand, {**RATE_CMD, "here": {**HERE_QUERY, "lat": "north"}}, b"",
+    ),
+    "rate_cmd here lat is off the globe": (
+        RateCommand, {**RATE_CMD, "here": {**HERE_QUERY, "lat": 91.0}}, b"",
+    ),
+    "rate_cmd here radius is not finite": (
+        RateCommand, {**RATE_CMD, "here": {**HERE_QUERY, "radius_m": float("nan")}}, b"",
     ),
     "rate_cmd rates is null": (RateCommand, {**RATE_CMD, "rates": None}, b""),
     "rate_cmd zero rate": (RateCommand, {**RATE_CMD, "rates": {**RATES, "gps_hz": 0.0}}, b""),

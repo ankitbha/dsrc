@@ -680,9 +680,18 @@ class HereQuery:
 
     in_: str
     location_ref: str
+    lat: float
+    lon: float
+    radius_m: float
 
     def to_wire(self) -> dict[str, Any]:
-        return {"in": self.in_, "location_ref": self.location_ref}
+        return {
+            "in": self.in_,
+            "location_ref": self.location_ref,
+            "lat": to_wire_number(self.lat),
+            "lon": to_wire_number(self.lon),
+            "radius_m": to_wire_number(self.radius_m),
+        }
 
     @classmethod
     def from_wire(cls, value: Any) -> "HereQuery | None":
@@ -703,7 +712,30 @@ class HereQuery:
             return None
         if not isinstance(value, Mapping):
             raise MessageError("'here' is not an object", REASON_WRONG_TYPE)
-        return cls(in_=_here_text(value, "in"), location_ref=_here_text(value, "location_ref"))
+        lat = _here_number(value, "lat")
+        lon = _here_number(value, "lon")
+        if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            raise MessageError("'here' position is off the globe", REASON_OUT_OF_RANGE)
+        return cls(
+            in_=_here_text(value, "in"),
+            location_ref=_here_text(value, "location_ref"),
+            lat=lat,
+            lon=lon,
+            radius_m=_here_number(value, "radius_m"),
+        )
+
+
+def _here_number(value: Mapping[str, Any], key: str) -> float:
+    if key not in value:
+        raise MessageError(f"'here.{key}' is missing", REASON_MISSING_FIELD)
+    number = value[key]
+    if number is None:
+        raise MessageError(f"'here.{key}' is null", REASON_NULL_NOT_ALLOWED)
+    if isinstance(number, bool) or not isinstance(number, (int, float)):
+        raise MessageError(f"'here.{key}' is not a number", REASON_WRONG_TYPE)
+    if not math.isfinite(number):
+        raise MessageError(f"'here.{key}' is not finite", REASON_NON_FINITE)
+    return float(number)
 
 
 def _here_text(value: Mapping[str, Any], key: str) -> str:

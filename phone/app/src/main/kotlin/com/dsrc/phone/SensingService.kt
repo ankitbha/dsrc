@@ -20,6 +20,8 @@ import com.dsrc.phone.sensors.CameraPipeline
 import com.dsrc.phone.sensors.CameraXSource
 import com.dsrc.phone.sensors.CameraFrameSender
 import com.dsrc.phone.sensors.GpsLocationSource
+import com.dsrc.phone.sensors.HerePipeline
+import com.dsrc.phone.sensors.HttpHereClient
 import com.dsrc.phone.sensors.ImuPipeline
 import com.dsrc.phone.sensors.ImuSource
 import com.dsrc.phone.sensors.GpsPipeline
@@ -57,6 +59,7 @@ class SensingService : LifecycleService() {
     private var gpsPipeline: GpsPipeline? = null
     private var gpsSource: GpsSource? = null
     private var imuPipeline: ImuPipeline? = null
+    private var herePipeline: HerePipeline? = null
     private var imuSource: ImuSource? = null
 
     override fun onBind(intent: Intent): IBinder? {
@@ -324,6 +327,24 @@ class SensingService : LifecycleService() {
         val locations = GpsLocationSource(this, config)
         gpsSource = locations
 
+        // No key means no HERE, and the rest of sensing carries on. The alternative is
+        // refusing to start the drive over a modality the Jetson may not even have
+        // configured.
+        val hereClient = runCatching {
+            HttpHereClient(
+                apiKey = com.dsrc.phone.BuildConfig.HERE_API_KEY,
+                monoClock = android.os.SystemClock::elapsedRealtimeNanos,
+            )
+        }.onFailure { Log.w(TAG, "HERE disabled: ${it.message}") }.getOrNull()
+
+        val here = HerePipeline(
+            config = config,
+            client = hereClient,
+            monoClock = android.os.SystemClock::elapsedRealtimeNanos,
+        ) { response, body -> holder.send(Channels.HERE, response.toExtensions(), body) }
+        herePipeline = here
+        liveHere = here
+
         val imu = ImuPipeline(config) { sample ->
             holder.send(Channels.IMU, sample.toExtensions())
         }
@@ -347,6 +368,7 @@ class SensingService : LifecycleService() {
             gps.offer(reading)
         }
         motion.start(onReading = { imu.offer(it) }, onUnpaired = { imu.offerUnpaired() })
+        here.start()
         Log.i(
             TAG,
             "capture starting: camera ${config.cameraHz} Hz, gps ${config.gpsHz} Hz, " +
@@ -457,6 +479,7 @@ class SensingService : LifecycleService() {
             release("camera pipeline") { pipeline?.stop() }
             release("gps pipeline") { gpsPipeline?.stop() }
             release("imu pipeline") { imuPipeline?.stop() }
+            release("here pipeline") { herePipeline?.stop() }
             release("frame sender") { frameSender?.stop() }
             release("encoder") { encodeExecutor?.shutdown() }
             // Stats *after* the stops, and round 5 is why. `abandoned`, `refusedStopped`
@@ -470,6 +493,12 @@ class SensingService : LifecycleService() {
                 pipeline?.let {
                     if (!it.isStopped) statsReadBeforeStop.incrementAndGet()
                     Log.i(TAG, "camera stats ${it.stats}")
+                }
+            }
+            release("here stats") {
+                herePipeline?.let {
+                    if (!it.isStopped) statsReadBeforeStop.incrementAndGet()
+                    Log.i(TAG, "here stats ${it.stats}")
                 }
             }
             release("imu stats") {
@@ -507,6 +536,8 @@ class SensingService : LifecycleService() {
             gpsSource = null
             imuPipeline = null
             imuSource = null
+            herePipeline = null
+            liveHere = null
             liveImu = null
             liveImuSource = null
             pipeline = null
@@ -516,7 +547,7 @@ class SensingService : LifecycleService() {
             link = null
             resourcesHeldAfterTeardown = listOfNotNull(
                 cameraSource, gpsSource, pipeline, gpsPipeline, frameSender, encodeExecutor, link,
-                imuPipeline, imuSource,
+                imuPipeline, imuSource, herePipeline,
             ).size
         }
     }
@@ -740,6 +771,10 @@ class SensingService : LifecycleService() {
          */
         @Volatile
         internal var liveImuSource: ImuSource? = null
+
+        /** The running HERE pipeline, for a test that wants what it actually did. */
+        @Volatile
+        internal var liveHere: HerePipeline? = null
 
         /**
          * Release steps that threw, across every instance.
