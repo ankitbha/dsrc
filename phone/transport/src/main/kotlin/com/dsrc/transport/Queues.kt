@@ -241,6 +241,20 @@ class OutboundQueues {
 class Received(
     val frame: Frame,
     /**
+     * Arrival order across all channels, assigned by the queue.
+     *
+     * Delivery follows this rather than the outbound priority tiers. The inbound side had
+     * a strict-priority, round-robin drain copied from the outbound side, and that reorders
+     * what the application sees relative to what the peer sent: wire order `gps, gps,
+     * rate_cmd` came out as `gps, rate_cmd, gps`. Nothing asks for that. The spec's
+     * sentence about inbound queues using "the same policies and depths" sits in a section
+     * defining `reliable`/`latest_wins` and depth numbers and says nothing about drain
+     * order, and Python has no inbound priority drain at all -- its `recv(channel)` is
+     * per-channel with the consumer naming the channel, so it never reorders. Priority is
+     * a *scheduling* choice, and there is nothing to schedule on the receiving side.
+     */
+    val arrival: Long,
+    /**
      * The reader's own clocks, both read at one instant on arrival.
      *
      * Carried rather than re-read at handling time because the timebase requires it: the
@@ -293,11 +307,16 @@ class InboundQueues {
     private val counters: MutableMap<String, InboundCounters> =
         Channels.ALL.associate { it.id to InboundCounters() }.toMutableMap()
 
-    private val cursor: MutableMap<Priority, Int> =
-        Priority.entries.associateWith { 0 }.toMutableMap()
+    private var nextArrival = 0L
+
+    /** Stamp a frame with its arrival order. Called by the reader, under the lock. */
+    fun receive(frame: Frame, recvMonoNs: Long, recvWallNs: Long): Received? = synchronized(lock) {
+        val message = Received(frame, nextArrival++, recvMonoNs, recvWallNs)
+        return offer(message)
+    }
 
     /** @return the message displaced by overflow, if any. */
-    fun offer(message: Received): Received? = synchronized(lock) {
+    private fun offer(message: Received): Received? {
         val channel = message.frame.channel
         val policy = Channels.policy(channel)
         val queue = queues.getValue(channel)
@@ -325,22 +344,25 @@ class InboundQueues {
         return displaced
     }
 
-    /** Strict priority across tiers, round-robin within one -- the outbound rule. */
+    /**
+     * The oldest arrival across all channels.
+     *
+     * Wire order, not priority order. Per-channel queues remain, because depth and
+     * overflow are per channel, but which one is drained next is decided by when the frame
+     * arrived. A round-robin cursor is unnecessary here -- arrival order is fair by
+     * construction, so the starvation the outbound cursor exists to prevent cannot occur.
+     */
     fun poll(): Received? = synchronized(lock) {
-        for (tier in Priority.entries) {
-            val tierChannels = Channels.inTier(tier)
-            if (tierChannels.isEmpty()) continue
-            val start = cursor.getValue(tier)
-            for (offset in tierChannels.indices) {
-                val index = (start + offset) % tierChannels.size
-                val queue = queues.getValue(tierChannels[index].id)
-                if (queue.isNotEmpty()) {
-                    cursor[tier] = (index + 1) % tierChannels.size
-                    return queue.removeFirst()
-                }
+        var oldest: ArrayDeque<Received>? = null
+        var oldestArrival = Long.MAX_VALUE
+        for (queue in queues.values) {
+            val head = queue.firstOrNull() ?: continue
+            if (head.arrival < oldestArrival) {
+                oldestArrival = head.arrival
+                oldest = queue
             }
         }
-        return null
+        return oldest?.removeFirst()
     }
 
     fun countDelivered(channel: String) = synchronized(lock) {

@@ -645,7 +645,7 @@ class Session(
                 // Both clocks at one instant, here, where the frame arrived. The
                 // timebase depends on it: a receipt stamp taken when a handler got round
                 // to the message makes the responder's service interval arbitrary.
-                inbound.offer(Received(frame, monoClock(), wallClock()))
+                inbound.receive(frame, monoClock(), wallClock())
             }
         } catch (e: EOFException) {
             finish(SessionEnd.PEER_CLOSED, e)

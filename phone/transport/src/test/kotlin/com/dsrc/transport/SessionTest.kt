@@ -1681,10 +1681,19 @@ class SessionTest {
         assertTrue(awaitCondition { pongs.isNotEmpty() }, "no pong arrived")
         val decoded = TimeSyncMessage.fromWire(pongs.first().header.entries, pongs.first().payload)
         // A handling-time reading would be the jumped value.
-        assertTrue(
-            decoded.peerRecvMonoNs!! < stampedAt + jump,
-            "the receipt was read at handling time: ${decoded.peerRecvMonoNs}, " +
-                "which is the jumped clock rather than the ~$stampedAt the reader saw",
+        // Exact equality, because the clock is frozen at `stampedAt` until the jump, so the
+        // reader's stamp is knowable. Asserting `< stampedAt + jump` let a hard-coded zero
+        // through -- the test would have passed with the receipt thrown away entirely. And
+        // the wall stamp is asserted too; it was checked nowhere in the module.
+        assertEquals(
+            stampedAt,
+            decoded.peerRecvMonoNs,
+            "the receipt is not the reader's stamp",
+        )
+        assertEquals(
+            HARNESS_WALL_NS,
+            decoded.peerRecvWallNs,
+            "the wall half of the receipt is not the reader's stamp",
         )
     }
 
@@ -1799,11 +1808,16 @@ class SessionTest {
 
     @Test
     fun `the wire stamp is strictly later than the enqueue stamp under queueing`() {
-        // The earlier test asserted `>= 0`, so setting the wire stamp equal to the enqueue
-        // stamp -- deleting the field's entire purpose -- survived, as did the interop
-        // check, which only asks that the echoed stamp is nonzero. The property is that the
-        // two differ once a frame waits, because their difference *is* the queueing delay a
-        // timebase estimate has to remove.
+        // The earlier test asserted `>= 0`, so a wire stamp equal to the enqueue stamp --
+        // deleting the field's purpose -- survived. The first rewrite over-corrected into a
+        // race: it required *every* frame's delta to be positive, and the head of the queue
+        // does not wait behind anything, so with a frozen clock its delta is legitimately
+        // zero. It was green only because the writer's 2 ms poll had not fired yet, and a
+        // sleep before the clock jump made it fail.
+        //
+        // The construction that makes waiting real: one frame written first, with the writer
+        // held inside that write, so the frames behind it have their wire stamps taken after
+        // the clock moves. Their deltas are the queueing delay; the primer's is not asserted.
         val clock = AtomicLong(1_000)
         val release = CountDownLatch(1)
         val wire = WireLog()
@@ -1813,8 +1827,11 @@ class SessionTest {
             phoneOutputGate = release,
         )
 
+        // The primer occupies the writer, which blocks inside output.write().
+        assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(0).toExtensions()))
+        Thread.sleep(200)
+
         repeat(3) { assertTrue(phone.session.sendTimeSyncPing(exchangeId = it.toLong())) }
-        // The frames are queued at clock 1_000; the writer is held until it moves.
         clock.set(9_000_000)
         release.countDown()
 
@@ -1829,9 +1846,10 @@ class SessionTest {
                 val stamp = (it.header.entries.getValue(Session.WIRE_STAMP) as JsonValue.Num).value
                 stamp - mono
             }
+        assertEquals(3, deltas.size, "expected three stamped frames, got $deltas")
         assertTrue(
             deltas.all { it > 0 },
-            "the wire stamp equals the enqueue stamp, so the queueing delay it exposes is zero: $deltas",
+            "a frame that waited behind another reports no queueing delay: $deltas",
         )
     }
 
@@ -2018,5 +2036,116 @@ class SessionTest {
         assertEquals(0, phone.session.outboundPending(), "the queue still holds messages")
         assertEquals(gps.enqueued, gps.sent + gps.dropped + gps.abandoned, "accounting: $gps")
     }
+
+
+    @Test
+    fun `inbound frames are delivered in the order the peer sent them`() {
+        // The inbound side had a strict-priority round-robin drain copied from the outbound
+        // side, which reorders what the application sees. Nothing asks for that: the spec's
+        // sentence about inbound queues using "the same policies and depths" is about
+        // reliable/latest_wins and depth numbers, and Python's recv(channel) never reorders
+        // because the consumer names the channel. Priority is a scheduling choice, and there
+        // is nothing to schedule on the receiving side.
+        //
+        // This took three attempts and each failure was instructive.
+        //
+        //   1. Pacing every send until the queue drained made the wire order unambiguous and
+        //      the test blind: with one frame queued inbound, priority order and arrival
+        //      order are identical, so the mutation survived.
+        //   2. Blocking the receiver without pacing the sender made it *flaky* -- 2 failures
+        //      in 3 runs -- because the order I call `send` is not the wire order. The
+        //      outbound side prioritises legitimately: `rate_cmd` is HIGH and `gps` is
+        //      NORMAL, so the sender writes rate_cmd first and "wire order" was my
+        //      assumption rather than a measurement.
+        //
+        // Both are needed: pace the sender so the wire order is what I think it is, and hold
+        // the receiver so the frames accumulate inbound where the drain order can matter.
+        val order = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val released = CountDownLatch(1)
+        val firstArrived = CountDownLatch(1)
+        val (phone, jetson) = pair(onPhoneFrame = { frame ->
+            order.add(frame.channel)
+            if (firstArrived.count > 0) {
+                firstArrived.countDown()
+                released.await()
+            }
+        })
+
+        fun sendAndWait(channel: String, extensions: Map<String, JsonValue>) {
+            assertTrue(jetson.session.send(channel, extensions), "$channel refused")
+            // Written before the next is offered, so the sender's own priority cannot
+            // reorder what reaches the wire.
+            val deadline = System.currentTimeMillis() + 5_000
+            while (jetson.session.outboundPending() > 0 && System.currentTimeMillis() < deadline) {
+                Thread.onSpinWait()
+            }
+            Thread.sleep(15)
+        }
+
+        try {
+            // The first frame occupies the delivery thread.
+            sendAndWait(Channels.GPS, GpsRecord.noFix(0).toExtensions())
+            assertTrue(firstArrived.await(5, TimeUnit.SECONDS), "the first frame never arrived")
+
+            // These three queue up behind it, in wire order. rate_cmd is a higher priority
+            // tier than gps, so a priority drain pulls it ahead of the gps frame before it.
+            sendAndWait(Channels.GPS, GpsRecord.noFix(1).toExtensions())
+            sendAndWait(Channels.RATE_CMD, rateCommand())
+            sendAndWait(Channels.GPS, GpsRecord.noFix(2).toExtensions())
+
+            assertTrue(awaitCondition {
+                phone.session.stats().inboundChannels.values.sumOf { it.received } >= 4
+            }, "not everything arrived: ${phone.session.stats().inboundChannels}")
+        } finally {
+            released.countDown()
+        }
+
+        assertTrue(awaitCondition { order.size >= 4 }, "only got ${order.toList()}")
+        assertEquals(
+            listOf(Channels.GPS, Channels.GPS, Channels.RATE_CMD, Channels.GPS),
+            order.toList().take(4),
+            "delivered out of wire order",
+        )
+    }
+
+    @Test
+    fun `the inbound queue sheds exactly at its depth`() {
+        // The old test asserted only `dropped > 0`, so an off-by-one in the depth comparison
+        // -- `>` instead of `>=` -- survived, on the check the test is named for.
+        val gate = CountDownLatch(1)
+        val (phone, jetson) = pair(onPhoneFrame = { gate.await() })
+        try {
+            val depth = Channels.policy(Channels.GPS).depth
+            // One is taken out of the queue immediately by the blocked handler, so the queue
+            // itself holds `depth` and the total the phone can absorb before shedding is
+            // depth + 1.
+            val absorbable = depth + 1
+            val offered = absorbable + 5
+            repeat(offered) { index ->
+                while (jetson.session.outboundPending() > 0) Thread.onSpinWait()
+                assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(index.toLong()).toExtensions()))
+            }
+            assertTrue(awaitCondition {
+                phone.session.stats().inboundChannels.getValue(Channels.GPS).received >= offered.toLong()
+            }, "not everything arrived: ${phone.session.stats().inboundChannels[Channels.GPS]}")
+
+            val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+            assertEquals(offered.toLong(), gps.received)
+            assertEquals(
+                (offered - absorbable).toLong(),
+                gps.dropped,
+                "shed the wrong number for a depth-$depth queue: $gps",
+            )
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    private fun rateCommand() = RateCommand(
+        captureMonoNs = 1,
+        rates = mapOf("camera_hz" to 5.0, "gps_hz" to 1.0, "imu_hz" to 50.0, "here_hz" to 0.2),
+        trigger = "thermal",
+        shadow = false,
+    ).toExtensions()
 
 }
