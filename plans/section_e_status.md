@@ -548,16 +548,57 @@ another instrument aimed at the glue but the simplest possible question, asked f
 the Jetson sits: did a frame arrive, on the right channel, with the two sensors in their
 own fields.
 
-## Not started
+## Section E is complete
 
-Tasks 21 (HERE client), 22 (sensing-config handling), 23 (advisory display, plus task 17's
-deferred Activity harness), 24 (thermal), 25 (local session logging).
+Tasks 17–25 are all struck. Every one went through at least one validation round under
+`plans/validator_brief.md`, and the suites at the end are 252 transport + app JVM + 63
+instrumented + 957 Python, plus lint, with both mutation harnesses reporting nothing
+survived. `./scripts/check.sh` runs the lot.
 
-**Section E will not finish in one sitting.** Each task is taking a validator
-conversation of several rounds, and those rounds keep finding real defects — including
-several in my own fixes. The bar is worth more than the pace.
+### What the rounds were actually for
 
----
+Twenty-odd behavioural defects, and the ones worth remembering are the ones no suite would
+have found by getting bigger:
+
+- **Samples counted but never sent.** Round 3 of task 20 asserted "a sample comes out" and
+  it came out of the *pipeline* — `accepted` is incremented before the sink runs, so a sink
+  that never called the transport left every suite green. Four rounds each found the same
+  defect one layer further out; what closed it was the simplest question, asked from where
+  the Jetson sits.
+- **The two IMU sensor streams transposable** with every suite green, every sample carrying
+  gyroscope rad/s in the accelerometer fields. The physics is the assertion: stationary, an
+  accelerometer reads one g and a gyroscope reads nothing.
+- **A rate gate can only ever lower a rate.** Commanding 200 Hz gave 50 on the wire while
+  the phone reported 200 as in force.
+- **A command arriving 3–6 ms into come-up was dropped and counted as delivered**, and since
+  HERE makes no call until a query arrives, that one command meant no HERE traffic for the
+  drive with every counter healthy.
+- **An API-30 call behind a minSdk of 29**, swallowed by a `runCatching` that did not log:
+  on an Android 10 handset the whole telemetry stream produced nothing for a drive. Lint had
+  the answer and nothing ran lint.
+
+### What kept going wrong in the tests
+
+More of the defects were in the instruments than in the code. The recurring shapes, in the
+order they bit: inputs that make two implementations agree by accident; a boundary stepped
+over rather than landed on; a test deriving its inputs from the constant it pins; a premise
+never active; an identity pinned in one direction. And twice, a *harness* was the thing at
+fault — the pin harness scored a mutation that did not compile as CAUGHT, and a device
+harness had three entries that had never once executed.
+
+The most expensive single lesson: **narrowing a race does not make a pin.** A sampling probe
+that catches a regression most runs is a pin nobody can trust either way, and the fix is to
+remove the window rather than tune the probe.
+
+### Deliberately open
+
+- `filesDir/sessions` is never pruned. The cap is per file, the storage is per device, and
+  bounding it needs a retention decision that is a research question.
+- Multi-fault refusal ordering diverges between the two decoders; the rule to adopt is in
+  `specs/transport_protocol.md` and the four diverging rows are listed as known.
+- Several ordering and atomicity properties are correct by construction and pinned by no
+  test, listed in `plan_task20_imu.md`, because no single-threaded test can tell a correct
+  one from a broken one.
 
 ## Two arguments I made, and why both were wrong
 
