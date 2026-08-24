@@ -249,12 +249,12 @@ class DifferentialTest {
         decode: (Map<String, JsonValue>, ByteArray) -> Unit,
     ): String = "${reasonOf { decode(extensions, payload) }}|${shapeOf(extensions, payload)}"
 
-    /** `key:type` for every key, sorted, plus the payload length. */
+    /** `key:type` for every key, sorted and recursive, plus the payload length. */
     private fun shapeOf(extensions: Map<String, JsonValue>, payload: ByteArray): String =
-        extensions.entries
-            .map { (key, value) -> "$key:${typeName(value)}" }
-            .sorted()
-            .joinToString(",") + "#${payload.size}"
+        objectShape(extensions) + "#${payload.size}"
+
+    private fun objectShape(entries: Map<String, JsonValue>): String =
+        entries.entries.map { (key, value) -> "$key:${typeName(value)}" }.sorted().joinToString(",")
 
     /**
      * A type vocabulary both languages can spell the same way.
@@ -268,8 +268,15 @@ class DifferentialTest {
         is JsonValue.Num -> "int"
         is JsonValue.Real -> "real"
         is JsonValue.Text -> "str"
-        is JsonValue.Obj -> "obj"
-        is JsonValue.Arr -> "arr"
+        // Recursive, and round 7 is why. Emitting a bare "obj" hid the contents of
+        // `action` and `rates`, so six of the thirty-two rows -- the three advisory
+        // action heads and the three rate keys -- were still open to exactly the drift
+        // this guard was added for. Moving `lane_preference: "ram_it"` to `merge_mode`
+        // on one side only was reason-preserving *and* shape-preserving, and the suite
+        // stayed green. A positive control one level up did fail, which is how it was
+        // clear the mechanism worked and the depth did not.
+        is JsonValue.Obj -> "obj(${objectShape(value.entries)})"
+        is JsonValue.Arr -> "arr[${value.items.joinToString(",") { typeName(it) }}]"
     }
 
     private fun kotlinReasons(): Map<String, String> {
@@ -323,6 +330,13 @@ class DifferentialTest {
             // in-process caller.
             "gps speed is not finite" to case(gps + ("speed_mps" to JsonValue.Real(Double.NaN)), empty) { e, p -> GpsRecord.fromWire(e, p) },
             "gps altitude is infinite" to case(gps + ("altitude_m" to JsonValue.Real(Double.POSITIVE_INFINITY)), empty) { e, p -> GpsRecord.fromWire(e, p) },
+            // The one entry of the shape vocabulary nothing exercised, so the two sides
+            // could have spelled a list differently with nothing to say so. Extensions are
+            // additive, so an unknown key is preserved rather than refused.
+            "gps unknown key holding a list is accepted by both" to case(
+                gps + ("future_field" to JsonValue.Arr(listOf(JsonValue.Num(1), JsonValue.Text("two"), JsonValue.Null))),
+                empty,
+            ) { e, p -> GpsRecord.fromWire(e, p) },
             "gps count is null" to case(gps + ("fix_quality" to JsonValue.Null), empty) { e, p -> GpsRecord.fromWire(e, p) },
             "gps capture stamp is null" to case(gps + (Fields.CAPTURE_KEY to JsonValue.Null), empty) { e, p -> GpsRecord.fromWire(e, p) },
             "camera frame id is null" to case(camera + ("frame_id" to JsonValue.Null), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
@@ -333,11 +347,11 @@ class DifferentialTest {
             "gps valid fix with null coordinates" to case(gps + ("valid" to JsonValue.Bool(true)), empty) { e, p -> GpsRecord.fromWire(e, p) },
             "gps negative count" to case(gps + ("num_sats" to JsonValue.Num(-1)), empty) { e, p -> GpsRecord.fromWire(e, p) },
             "gps fractional count" to case(gps + ("num_sats" to JsonValue.Real(1.5)), empty) { e, p -> GpsRecord.fromWire(e, p) },
-            "camera quality zero" to case(camera + ("quality" to JsonValue.Num(0)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
-            "camera quality over one hundred" to case(camera + ("quality" to JsonValue.Num(101)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
-            "camera zero width" to case(camera + ("width" to JsonValue.Num(0)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
-            "camera negative frame id" to case(camera + ("frame_id" to JsonValue.Num(-1)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
-            "camera empty format" to case(camera + ("format" to JsonValue.Text("")), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera quality zero is accepted by both" to case(camera + ("quality" to JsonValue.Num(0)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera quality over one hundred is accepted by both" to case(camera + ("quality" to JsonValue.Num(101)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera zero width is accepted by both" to case(camera + ("width" to JsonValue.Num(0)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera negative frame id is accepted by both" to case(camera + ("frame_id" to JsonValue.Num(-1)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
+            "camera empty format is accepted by both" to case(camera + ("format" to JsonValue.Text("")), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
             "advisory action is null" to case(advisory() + ("action" to JsonValue.Null), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
             "advisory action is not an object" to case(advisory() + ("action" to JsonValue.Num(5)), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
             "advisory action head is an integer" to case(advisory(action + ("desired_speed_bin" to JsonValue.Num(5))), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },

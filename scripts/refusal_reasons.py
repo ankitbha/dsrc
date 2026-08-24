@@ -59,6 +59,12 @@ CASES = {
     # error on both sides, so a decoder only ever sees one from an in-process caller.
     "gps speed is not finite": (GpsRecord, {**GPS, "speed_mps": float("nan")}, b""),
     "gps altitude is infinite": (GpsRecord, {**GPS, "altitude_m": float("inf")}, b""),
+    # The one entry of the shape vocabulary nothing exercised. Extensions are additive,
+    # so an unknown key is preserved rather than refused -- which makes this an
+    # acceptance on both sides, and the point is that the *shape* agrees.
+    "gps unknown key holding a list is accepted by both": (
+        GpsRecord, {**GPS, "future_field": [1, "two", None]}, b"",
+    ),
     "gps count is null": (GpsRecord, {**GPS, "fix_quality": None}, b""),
     # require_int's own null path, which the case above does not reach: fix_quality goes
     # through check_count. A capture stamp is require_int on every message.
@@ -72,11 +78,11 @@ CASES = {
     "gps valid fix with null coordinates": (GpsRecord, {**GPS, "valid": True}, b""),
     "gps negative count": (GpsRecord, {**GPS, "num_sats": -1}, b""),
     "gps fractional count": (GpsRecord, {**GPS, "num_sats": 1.5}, b""),
-    "camera quality zero": (CameraFrame, {**CAMERA, "quality": 0}, b""),
-    "camera quality over one hundred": (CameraFrame, {**CAMERA, "quality": 101}, b""),
-    "camera zero width": (CameraFrame, {**CAMERA, "width": 0}, b""),
-    "camera negative frame id": (CameraFrame, {**CAMERA, "frame_id": -1}, b""),
-    "camera empty format": (CameraFrame, {**CAMERA, "format": ""}, b""),
+    "camera quality zero is accepted by both": (CameraFrame, {**CAMERA, "quality": 0}, b""),
+    "camera quality over one hundred is accepted by both": (CameraFrame, {**CAMERA, "quality": 101}, b""),
+    "camera zero width is accepted by both": (CameraFrame, {**CAMERA, "width": 0}, b""),
+    "camera negative frame id is accepted by both": (CameraFrame, {**CAMERA, "frame_id": -1}, b""),
+    "camera empty format is accepted by both": (CameraFrame, {**CAMERA, "format": ""}, b""),
     "advisory action is null": (AdvisoryMessage, {**ADVISORY, "action": None}, b""),
     "advisory action is not an object": (AdvisoryMessage, {**ADVISORY, "action": 5}, b""),
     "advisory action head is an integer": (
@@ -125,18 +131,31 @@ def shape(extensions, payload) -> str:
     cannot be computed at all for the two non_finite cases -- canonical JSON
     refuses to encode a NaN on both sides, which is the property those cases exist
     to check.
+
+    Recursive, and round 7 is why. Emitting a bare "obj" hid the contents of
+    `action` and `rates`, so six of the thirty-two rows were still open to exactly
+    the drift this exists to catch: moving `"ram_it"` from `merge_mode` to
+    `lane_preference` on one side only is both reason- and shape-preserving at
+    depth zero, and the suite stayed green.
     """
     names = {
-        type(None): "null", bool: "bool", int: "int", float: "real",
-        str: "str", dict: "obj", list: "arr", tuple: "arr",
+        type(None): "null", bool: "bool", int: "int", float: "real", str: "str",
     }
+
     # bool before int: True is an int of value 1, and the two must not be conflated
-    # here any more than they are in the decoders.
+    # here any more than they are in the decoders. Mapping by exact type() rather
+    # than isinstance is what keeps that true.
     def name_of(value):
+        if isinstance(value, dict):
+            return f"obj({object_shape(value)})"
+        if isinstance(value, (list, tuple)):
+            return "arr[" + ",".join(name_of(item) for item in value) + "]"
         return names.get(type(value), type(value).__name__)
 
-    body = ",".join(sorted(f"{key}:{name_of(value)}" for key, value in extensions.items()))
-    return f"{body}#{len(payload)}"
+    def object_shape(mapping):
+        return ",".join(sorted(f"{key}:{name_of(value)}" for key, value in mapping.items()))
+
+    return f"{object_shape(extensions)}#{len(payload)}"
 
 
 def reason(cls, extensions, payload) -> str:
