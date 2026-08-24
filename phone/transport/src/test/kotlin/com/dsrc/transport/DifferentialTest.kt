@@ -134,7 +134,20 @@ class DifferentialTest {
         // measured against an interpreter the project does not ship or test with, and
         // nothing recorded which one ran.
         val venv = java.io.File(root, ".venv/bin/python3")
-        val interpreter = if (venv.canExecute()) venv.absolutePath else "python3"
+        // Recorded on the way past, not only when something fails. The fallback below is
+        // silent by nature: on a machine without the venv this test still goes green, and
+        // a green reconciliation that does not say which interpreter produced it is a
+        // measurement with no provenance. The version comes from the interpreter itself
+        // rather than from a constant, so it cannot drift from what actually ran.
+        val interpreter = if (venv.canExecute()) {
+            venv.absolutePath
+        } else {
+            println(
+                "MEASURE python_interpreter=fallback path=python3 -- .venv is absent, so " +
+                    "this reconciliation is against an interpreter the project does not ship",
+            )
+            "python3"
+        }
 
         // Streams merged, and the wait comes *first*. Reading stdout to EOF before waitFor
         // meant the timeout could only be reached after the child had already exited: a peer
@@ -156,6 +169,11 @@ class DifferentialTest {
         drain.join(5_000)
         val out = collected.toString()
         require(process.exitValue() == 0) { "python failed ($interpreter): $out" }
+        // The version, from the run itself. The comment above this method says the whole
+        // point was that "nothing recorded which one ran", and until now nothing did on the
+        // path where it worked.
+        val version = out.lines().firstOrNull { it.startsWith("VERSION ") }?.removePrefix("VERSION ")
+        println("MEASURE python_interpreter=$interpreter version=${version ?: "unreported"}")
         // The last line, so a warning on stdout cannot break the parse.
         val payload = out.trim().lines().last { it.startsWith("{") }
         val decoded = (Json.decode(payload) as JsonValue.Obj).entries

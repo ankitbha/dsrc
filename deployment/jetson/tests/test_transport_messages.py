@@ -1614,3 +1614,99 @@ def test_the_wire_stamp_reserve_stays_inside_the_count_range():
     assert reserve_digits == 19
     usable = MAX_HEADER_BYTES - reserve_digits
     assert usable < MAX_HEADER_BYTES
+
+# -- the null-before-type guards, per helper ---------------------------------------
+#
+# Three of the five survived the whole suite. `require_int`, `require_str` and
+# `require_bool` each had their null clause removed and all 913 tests stayed green --
+# so the fix that put a null under `null_not_allowed` instead of `wrong_type`, which
+# is what the spec's refusal table asks for and what Kotlin already did, was held in
+# place by nothing. Only `require_number` and `check_count` were pinned.
+#
+# Every field is named rather than sampled: the require_str clause was itself a fix
+# that landed on require_int and require_bool and missed this one, which is what
+# happens when one instance stands in for a rule.
+
+REQUIRE_INT_FIELDS = [
+    (Channel.CAMERA, a_camera_frame, "frame_id"),
+    (Channel.CAMERA, a_camera_frame, "width"),
+    (Channel.CAMERA, a_camera_frame, "height"),
+    (Channel.CAMERA, a_camera_frame, "t_capture_mono_ns"),
+    (Channel.GPS, a_gps_record, "t_capture_mono_ns"),
+    (Channel.IMU, an_imu_sample, "t_capture_mono_ns"),
+    (Channel.HERE, a_here_response, "status"),
+    (Channel.HERE, a_here_response, "t_request_mono_ns"),
+    (Channel.HERE, a_here_response, "t_response_mono_ns"),
+    (Channel.TELEMETRY, a_telemetry, "t_capture_mono_ns"),
+    (Channel.ADVISORY, an_advisory, "t_capture_mono_ns"),
+    (Channel.RATE_CMD, a_rate_command, "t_capture_mono_ns"),
+    # Found by the drift guard below on its first run, which is the whole reason it is
+    # there: control's exchange_id goes through require_int and had no case.
+    (Channel.CONTROL, a_time_sync_ping, "exchange_id"),
+]
+
+REQUIRE_STR_FIELDS = [
+    (Channel.CAMERA, a_camera_frame, "format"),
+    (Channel.HERE, a_here_response, "request_url"),
+    (Channel.TELEMETRY, a_telemetry, "thermal_status"),
+    (Channel.ADVISORY, an_advisory, "units"),
+    (Channel.ADVISORY, an_advisory, "lane_text"),
+    (Channel.ADVISORY, an_advisory, "merge_text"),
+    (Channel.ADVISORY, an_advisory, "traffic_text"),
+    (Channel.ADVISORY, an_advisory, "confidence_label"),
+    (Channel.RATE_CMD, a_rate_command, "trigger"),
+]
+
+REQUIRE_BOOL_FIELDS = [
+    (Channel.GPS, a_gps_record, "valid"),
+    (Channel.RATE_CMD, a_rate_command, "shadow"),
+]
+
+
+@pytest.mark.parametrize(
+    "channel,builder,field",
+    REQUIRE_INT_FIELDS + REQUIRE_STR_FIELDS + REQUIRE_BOOL_FIELDS,
+    ids=lambda value: value if isinstance(value, str) else "",
+)
+def test_a_null_in_a_required_field_is_null_not_allowed_not_wrong_type(channel, builder, field):
+    """Not `wrong_type`, which is the reason the guard exists to prevent.
+
+    Asserting only that it raises would pass either way -- the type clause below
+    the guard refuses a null too, just under the wrong heading, and a summary of
+    refusals would then name the wrong cause on every message with a required
+    integer, string or boolean.
+    """
+    extensions, payload = builder().to_wire()
+    assert field in extensions, f"{field} is not produced, so this case tests nothing"
+    extensions[field] = None
+    with pytest.raises(MessageError) as caught:
+        decode_message(channel, extensions, payload)
+    assert caught.value.reason == "null_not_allowed", (
+        f"{channel.value}.{field} gave {caught.value.reason}"
+    )
+    assert field in str(caught.value), "the message must name the field"
+
+
+def test_every_required_field_of_each_helper_is_covered_above():
+    """The tables drift from the code otherwise.
+
+    A field added to a message with a required int, string or bool would
+    otherwise be uncovered silently, and the previous round's finding was
+    precisely a helper whose fix nobody had extended.
+    """
+    import inspect
+
+    from transport import messages as module
+
+    source = inspect.getsource(module)
+    named = {
+        "require_int": {f for _, _, f in REQUIRE_INT_FIELDS},
+        "require_str": {f for _, _, f in REQUIRE_STR_FIELDS},
+        "require_bool": {f for _, _, f in REQUIRE_BOOL_FIELDS},
+    }
+    for helper, covered in named.items():
+        called = set(re.findall(helper + r'\(extensions, "([^"]+)"\)', source))
+        # CAPTURE_KEY is passed by constant rather than as a literal, and it is
+        # covered by name in the table above.
+        missing = called - covered
+        assert not missing, f"{helper} is called on {sorted(missing)} with no case"

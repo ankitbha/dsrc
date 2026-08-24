@@ -112,10 +112,19 @@ def reason(cls, extensions, payload) -> str:
         cls.from_wire(extensions, payload)
     except MessageError as exc:
         return getattr(exc, "reason", None) or "unknown"
+    except Exception as exc:  # noqa: BLE001 - the point is to name it, not to handle it
+        # Same spelling as the Kotlin side, so one assertion covers both. Letting this
+        # propagate killed the script, which reads as "python failed to run" rather than
+        # "this input crashed a decoder", and lost which of the thirty inputs did it.
+        return f"CRASH:{type(exc).__name__}"
     return "ACCEPTED"
 
 
 def main() -> int:
+    # Ahead of the JSON, and on its own line: the Kotlin side parses the last line that
+    # starts with "{", so a provenance line cannot break the parse. Which interpreter ran
+    # is part of the result, not a detail of how it was produced.
+    print(f"VERSION {sys.version.split()[0]}")
     print(json.dumps({name: reason(*case) for name, case in CASES.items()}, sort_keys=True))
     return 0
 
