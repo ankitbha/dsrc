@@ -143,4 +143,25 @@ class GpsLocationSourceTest {
         // The wire's floor. A period this long is the point: it means "almost never".
         assertTrue(periodMs(1e-9) > 0)
     }
+
+    @Test
+    fun `a bearing is normalised on the way through reading, not only in the helper`() {
+        // normaliseBearing was tested directly and never through reading(), so its only
+        // call site could be replaced with a plain toDouble() and the suite stayed green.
+        // A device reporting 360 or a negative bearing would then put an out-of-range
+        // heading on the wire -- the thing the docstring says our own outbound validation
+        // would refuse.
+        assertEquals(0.0, reading(fix(bearingDeg = 360f)).record.headingDeg!!, 1e-9)
+        assertEquals(350.0, reading(fix(bearingDeg = -10f)).record.headingDeg!!, 1e-4)
+        assertEquals(1.0, reading(fix(bearingDeg = 361f)).record.headingDeg!!, 1e-4)
+        assertEquals(0.0, reading(fix(bearingDeg = Float.NaN)).record.headingDeg!!, 1e-9)
+    }
+
+    @Test
+    fun `the wall clock conversion is applied on the way through reading`() {
+        // Same shape: utcNanos was pinned directly and its call site was not.
+        assertNull(reading(fix(utcEpochMs = 0)).record.utcEpochNs)
+        assertEquals(1_770_000_000_000_000_000L, reading(fix(utcEpochMs = 1_770_000_000_000)).record.utcEpochNs)
+    }
+
 }

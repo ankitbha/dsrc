@@ -528,4 +528,17 @@ class SessionHolderTest {
         assertEquals(Session.ROLE_PHONE, SessionHolder.ROLE)
     }
 
+
+    @Test
+    fun `the attempt identity is a real function of its fields`() {
+        // Asserted once with no control, so `get() = true` survived.
+        val stats = SessionHolder.HolderStats(
+            attempts = 3, established = 1, dialFailures = 2, sessionsEnded = 1,
+            sendsWithoutSession = 0, lastEnd = null, lastError = null, session = null,
+        )
+        assertTrue(stats.accountsForAttempts)
+        assertFalse(stats.copy(established = 5).accountsForAttempts)
+        assertFalse(stats.copy(dialFailures = 9).accountsForAttempts)
+    }
+
 }

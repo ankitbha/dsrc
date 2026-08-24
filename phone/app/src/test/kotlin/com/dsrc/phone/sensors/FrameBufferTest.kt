@@ -2,6 +2,7 @@ package com.dsrc.phone.sensors
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -153,4 +154,14 @@ class FrameBufferTest {
         assertEquals(2_000, stats.accepted)
         assertTrue("counters must balance under contention: $stats", stats.balances)
     }
+
+    @Test
+    fun `the balance identity is a real function of its fields`() {
+        // It is asserted in five tests and had no control, so replacing it with `true`
+        // survived all five -- an identity that cannot charge you.
+        assertTrue(FrameBuffer.Stats(accepted = 3, dropped = 1, drained = 1, discarded = 1, holding = false).balances)
+        assertFalse(FrameBuffer.Stats(accepted = 9, dropped = 1, drained = 1, discarded = 1, holding = false).balances)
+        assertFalse(FrameBuffer.Stats(accepted = 3, dropped = 0, drained = 0, discarded = 0, holding = false).balances)
+    }
+
 }
