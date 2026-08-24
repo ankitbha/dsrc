@@ -489,4 +489,79 @@ class SensingServiceTest {
         }
     }
 
+
+    @Test
+    fun aFailedTeardownStillClearsEverythingAndARestartDoesNotDoubleIt() {
+        // The route I argued was unreachable, and it is not. onSensingDown used to run its
+        // releases in sequence and null the seven fields last, so a throw part-way through
+        // skipped every release behind it and left them all set -- and react(STOPPING)
+        // catches exactly that and offers Failed, which the machine turns into
+        // STOPPED_ERROR, from which Start goes to STARTING and straight back into
+        // onSensingUp. A live CameraX binding, a live encoder executor, and a SessionHolder
+        // whose threads and socket are still up, all orphaned, with the Jetson seeing a
+        // second session displace the first.
+        //
+        // My argument covered only the paths where teardown succeeds. The failure path is
+        // the one the state machine models sixty lines above the guard I removed on the
+        // strength of it.
+        //
+        // The seam fails the *first* release, so what this pins is that the ten behind it
+        // still run. Nothing here asserts on the exception: the observable is that no
+        // worker thread survives a teardown whose first step threw.
+        SensingService.teardownFailures.set(0)
+        // One-shot, and it has to be. onSensingDown runs twice per stop -- once from
+        // react(STOPPING) and again from onDestroy, which is the safety net for a service
+        // destroyed without a Stop -- and onDestroy lands asynchronously after the state
+        // reaches IDLE. A seam that fires every time makes the count 1 or 2 depending on
+        // which side of the assertion the platform gets to, so either number would have
+        // been a race dressed as a constant.
+        SensingService.teardownFailureOverride = {
+            SensingService.teardownFailureOverride = null
+            throw IllegalStateException("release refused")
+        }
+        try {
+            SensingService.start(context)
+            await(SensingState.RUNNING)
+            for (prefix in WORKER_PREFIXES) {
+                assertTrue("nothing named '$prefix' started", pollUntil(10_000) { threadsNamed(listOf(prefix)) > 0 })
+            }
+
+            SensingService.stop(context)
+            // IDLE, not STOPPED_ERROR: a failed release is counted rather than propagated,
+            // so teardown completes. Letting it escape instead killed the whole process
+            // from onDestroy, which calls onSensingDown with no catch of its own -- found
+            // by writing this test, and the reason the guard is per-step.
+            await(SensingState.IDLE)
+            assertEquals(
+                "the seam has to have actually fired, or this test proves nothing",
+                1L,
+                SensingService.teardownFailures.get().toLong(),
+            )
+
+            for (prefix in WORKER_PREFIXES) {
+                assertTrue(
+                    "a thread named '$prefix' survived a teardown whose first step threw",
+                    pollUntil(10_000) { threadsNamed(listOf(prefix)) == 0 },
+                )
+            }
+
+            // And the restart the machine allows must not stack a second set of workers on
+            // top of an orphaned first.
+            SensingService.teardownFailureOverride = null
+            SensingService.start(context)
+            await(SensingState.RUNNING)
+            Thread.sleep(500)
+            for (prefix in WORKER_PREFIXES) {
+                val count = threadsNamed(listOf(prefix))
+                assertTrue(
+                    "restarting after a failed teardown left $count threads named '$prefix'",
+                    count <= if (prefix == POOL) 2 else 1,
+                )
+            }
+        } finally {
+            SensingService.teardownFailureOverride = null
+            context.stopService(android.content.Intent(context, SensingService::class.java))
+        }
+    }
+
 }

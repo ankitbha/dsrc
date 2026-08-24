@@ -340,29 +340,77 @@ class SensingService : LifecycleService() {
         return now.epochSecond * 1_000_000_000L + now.nano
     }
 
-    /** Idempotent: called from the machine's teardown and again from onDestroy. */
+    /**
+     * Idempotent: called from the machine's teardown and again from onDestroy.
+     *
+     * Every release is independent and the fields are cleared in a `finally`, and that is
+     * the whole point rather than defensive habit. Previously the nine calls ran in
+     * sequence and the seven fields were nulled *last*, so a throw part-way through left
+     * all of them set -- and `react(STOPPING)` catches exactly that and offers `Failed`,
+     * which the machine turns into `STOPPED_ERROR`, from which `Start` goes to `STARTING`
+     * and straight back into `onSensingUp` with a live CameraX binding, a live encoder
+     * executor and a `SessionHolder` whose four threads and socket are still up. The new
+     * holder then dials again and the Jetson sees a second session displacing the first.
+     *
+     * I had argued that route was unreachable and removed a guard on the strength of it.
+     * The argument covered only the paths where teardown *succeeds*; the failure path is
+     * the one the state machine explicitly models, sixty lines above. Making each release
+     * independent closes it at the cause, so the invariant "no field is live on entry to
+     * onSensingUp" holds because nothing can leave one set, not because a guard catches it.
+     *
+     * This method therefore does not throw, which has two consequences worth stating.
+     * `onDestroy` calls it with no catch of its own, so a throw here was process death on
+     * any platform teardown -- and a seam that escaped it did exactly that, killing the
+     * instrumentation run with "Unable to stop service". And `react(STOPPING)`'s catch,
+     * plus the machine's `Failed`-from-`STOPPING` arm, are now unreachable *through this
+     * call*. They stay because that branch may grow a second call, but they are dead today
+     * and saying so is better than leaving a reader to assume otherwise.
+     */
     private fun onSensingDown() {
         // Order matters, and it is the reverse of construction: stop the producers first
         // so nothing new is offered, then the pipelines so anything queued drops out and
         // is counted, then the threads that were draining them, and the link last so a
         // frame already in flight still has somewhere to go.
-        cameraSource?.stop()
-        gpsSource?.stop()
-        pipeline?.let { Log.i(TAG, "camera stats ${it.stats}") }
-        gpsPipeline?.let { Log.i(TAG, "gps stats ${it.stats}") }
-        pipeline?.stop()
-        gpsPipeline?.stop()
-        frameSender?.stop()
-        encodeExecutor?.shutdown()
-        link?.let { Log.i(TAG, "link stats ${it.stats()}") }
-        link?.stop()
-        cameraSource = null
-        gpsSource = null
-        pipeline = null
-        gpsPipeline = null
-        frameSender = null
-        encodeExecutor = null
-        link = null
+        try {
+            // First, and deliberately: a seam at the end simulates nothing, because no
+            // release follows it and so none can be skipped. A test built on a trailing
+            // seam passed whether or not the guard it meant to pin was there.
+            release("test seam") { teardownFailureOverride?.invoke() }
+            release("camera source") { cameraSource?.stop() }
+            release("gps source") { gpsSource?.stop() }
+            release("camera stats") { pipeline?.let { Log.i(TAG, "camera stats ${it.stats}") } }
+            release("gps stats") { gpsPipeline?.let { Log.i(TAG, "gps stats ${it.stats}") } }
+            release("camera pipeline") { pipeline?.stop() }
+            release("gps pipeline") { gpsPipeline?.stop() }
+            release("frame sender") { frameSender?.stop() }
+            release("encoder") { encodeExecutor?.shutdown() }
+            release("link stats") { link?.let { Log.i(TAG, "link stats ${it.stats()}") } }
+            release("link") { link?.stop() }
+        } finally {
+            cameraSource = null
+            gpsSource = null
+            pipeline = null
+            gpsPipeline = null
+            frameSender = null
+            encodeExecutor = null
+            link = null
+        }
+    }
+
+    /**
+     * Run one release step, recording a failure rather than abandoning the rest.
+     *
+     * One resource refusing to stop must not leave the other six running: they are
+     * independent, and the previous arrangement made them share a fate for no reason
+     * beyond statement order.
+     */
+    private fun release(what: String, step: () -> Unit) {
+        try {
+            step()
+        } catch (t: Throwable) {
+            teardownFailures.incrementAndGet()
+            Log.e(TAG, "releasing $what failed; continuing with the rest", t)
+        }
     }
 
     /** The frame source, while sensing is up. */
@@ -466,6 +514,17 @@ class SensingService : LifecycleService() {
         internal var enterForegroundOverride: (() -> Unit)? = null
 
         /**
+         * Test seam for a failure during teardown.
+         *
+         * Null in production. The route it opens -- a throw in `onSensingDown`, which
+         * `react(STOPPING)` turns into `STOPPED_ERROR`, from which a `Start` re-enters
+         * `onSensingUp` -- is the one I wrongly argued was unreachable, and nothing on a
+         * healthy device throws there.
+         */
+        @Volatile
+        internal var teardownFailureOverride: (() -> Unit)? = null
+
+        /**
          * Test seam for a failure *after* everything is allocated.
          *
          * Null in production. The leak it exposes needs a throw with all seven fields
@@ -473,6 +532,17 @@ class SensingService : LifecycleService() {
          */
         @Volatile
         internal var comeUpFailureOverride: (() -> Unit)? = null
+
+        /**
+         * Release steps that threw, across every instance.
+         *
+         * On the companion rather than the instance because teardown is the last thing an
+         * instance does: by the time a test can ask, there is nothing to ask. A test that
+         * uses the seam above reads this to confirm the seam actually fired -- without it
+         * the test passes just as well against a seam that was never wired up, which is
+         * the shape of an assertion that proves nothing.
+         */
+        internal val teardownFailures = java.util.concurrent.atomic.AtomicInteger(0)
         private const val NOTIFICATION_ID = 1
 
         /**
