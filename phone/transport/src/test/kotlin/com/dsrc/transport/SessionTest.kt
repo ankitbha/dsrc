@@ -136,7 +136,7 @@ class SessionTest {
                 deviceId = "test-$role",
                 role = role,
                 monoClock = clock,
-                wallClock = { 1_755_648_000_000_000_000 },
+                wallClock = { HARNESS_WALL_NS },
                 onFrame = { frame ->
                     synchronized(received) { received.add(frame) }
                     onFrame(frame)
@@ -730,12 +730,22 @@ class SessionTest {
         val now = AtomicLong(0)
         val (phone, jetson) = pair(clock = { now.get() })
         // Advance in steps under the timeout, with a frame arriving each time.
+        var sent = 0
         repeat(4) {
-            jetson.session.send(Channels.ADVISORY, mapOf("k" to JsonValue.Num(it.toLong())))
+            // A *valid* advisory, and the return value is asserted. This used to send
+            // `{"k": n}`, which the sender rule now refuses -- so no traffic crossed at all
+            // and the session survived on the peer's keepalives, making this a duplicate of
+            // the keepalive test under a name about traffic.
+            if (jetson.session.send(Channels.ADVISORY, advisory(captureMonoNs = it.toLong()))) sent++
             Thread.sleep(120)
             now.addAndGet((Protocol.STALL_TIMEOUT_S * 0.6 * 1e9).toLong())
             Thread.sleep(120)
         }
+        assertEquals(4, sent, "the traffic this test is named for was refused")
+        assertTrue(
+            phone.session.stats().inboundChannels.getValue(Channels.ADVISORY).received >= 4,
+            "the frames never arrived: ${phone.session.stats().inboundChannels[Channels.ADVISORY]}",
+        )
         assertTrue(phone.session.isRunning, "ended: ${phone.ends}")
     }
 
@@ -753,11 +763,10 @@ class SessionTest {
     fun `the peer closing is noticed`() {
         val (phone, jetson) = pair()
         jetson.session.close()
-        val end = awaitEnd(phone)
-        assertTrue(
-            end == SessionEnd.PEER_CLOSED || end == SessionEnd.TRANSPORT_ERROR,
-            "expected a peer-closed style end, got $end",
-        )
+        // Exactly PEER_CLOSED. Accepting TRANSPORT_ERROR as well made the test unable to
+        // tell apart the two reasons the spec lists separately, which is the whole point of
+        // naming them -- and Python reports this case deterministically.
+        assertEquals(SessionEnd.PEER_CLOSED, awaitEnd(phone))
     }
 
     @Test
@@ -1086,6 +1095,7 @@ class SessionTest {
 
     private companion object {
         const val ENQUEUE_NS = 1_000_000_000L
+        const val HARNESS_WALL_NS = 1_755_648_000_000_000_000L
     }
 
 
@@ -1419,14 +1429,36 @@ class SessionTest {
 
     @Test
     fun `closing a healthy session reports a local close`() {
+        // The falsifiable half of the phantom-STALLED question: the link is fresh, so the
+        // timeout cannot have expired, and any STALLED here would be a watchdog firing on a
+        // link that had not been quiet. Repeated, because once proves little about a race.
         val (phone, _) = pair()
         phone.session.close()
         assertTrue(awaitCondition { phone.ends.isNotEmpty() }, "the session never ended")
         assertEquals(listOf(SessionEnd.CLOSED_LOCAL), phone.ends.map { it.first })
+        cleanup()
+
+        repeat(40) {
+            val (fresh, _) = pair()
+            fresh.session.close()
+            assertTrue(awaitCondition(2_000) { fresh.ends.isNotEmpty() }, "never ended")
+            assertEquals(
+                listOf(SessionEnd.CLOSED_LOCAL),
+                fresh.ends.map { it.first },
+                "a healthy link's close was reported as ${fresh.ends.map { it.first }}",
+            )
+            cleanup()
+        }
     }
 
     @Test
     fun `a session ends exactly once, whoever gets there first`() {
+        // This asserts exactly that and nothing more. It used to also allow the reason to
+        // be CLOSED_LOCAL *or* STALLED -- permitting the outcome it was written to rule
+        // out, so it could not have failed on the phantom-STALLED claim whatever the code
+        // did. The falsifiable half of that claim is the test above: with the clock inside
+        // the timeout, a close must report CLOSED_LOCAL, and a watchdog that fired early
+        // would fail it.
         // Round 2 reported a "phantom STALLED" when close() races the watchdog. It does not
         // hold, and the reason is worth writing down: finish() is a compare-and-set, so a
         // caller that loses cannot overwrite the reason. A flag to make close() win was
@@ -1446,10 +1478,6 @@ class SessionTest {
             assertTrue(awaitCondition(2_000) { phone.ends.isNotEmpty() }, "the session never ended")
             Thread.sleep(1)   // give a losing contender room to try
             assertEquals(1, phone.ends.size, "two ends recorded: ${phone.ends.map { it.first }}")
-            assertTrue(
-                phone.ends.first().first in setOf(SessionEnd.CLOSED_LOCAL, SessionEnd.STALLED),
-                "unexpected reason ${phone.ends.first().first}",
-            )
             cleanup()
         }
     }
@@ -1725,6 +1753,176 @@ class SessionTest {
 
         // And the right direction still goes out.
         assertTrue(phone.session.sendTimeSyncPing(exchangeId = 5))
+    }
+
+
+    // -- what the earlier versions of these could not see --------------------
+
+    @Test
+    fun `the keepalive interval is the spec's one second, not merely nonzero`() {
+        // The cadence was unpinned in both directions: quartering the interval survived the
+        // whole suite, because the idle test sleeps three seconds and asserts "at least
+        // two", which anything from zero to 1.5 s satisfies. The spec says 1.0 s and Python
+        // uses a timer at that rate; a phone at four times the rate is four times the
+        // traffic on a link that also carries camera frames.
+        //
+        // Measured on an injected clock, so the assertion is about the interval the code
+        // uses rather than about wall-clock scheduling.
+        val clock = AtomicLong(0)
+        val stamps = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+        val (phone, _) = pair(
+            clock = { clock.get() },
+            onPhoneWrite = { bytes ->
+                if (String(bytes, Charsets.UTF_8).contains(Session.HEARTBEAT)) stamps.add(clock.get())
+            },
+        )
+
+        val interval = (Protocol.KEEPALIVE_INTERVAL_S * 1e9).toLong()
+        // Step the clock in tenths of an interval, so a keepalive can only fire on the
+        // boundary if the code is using the specified interval.
+        repeat(45) {
+            clock.addAndGet(interval / 10)
+            Thread.sleep(12)
+        }
+        assertTrue(phone.session.isRunning, "the session ended: ${phone.ends}")
+
+        val fired = stamps.toList()
+        assertTrue(fired.size >= 3, "no keepalive fired at all")
+        val gaps = fired.zipWithNext { a, b -> b - a }
+        // Every gap is one interval, within the granularity of the stepping.
+        val tolerance = interval / 5
+        assertTrue(
+            gaps.all { kotlin.math.abs(it - interval) <= tolerance },
+            "keepalive gaps were $gaps, not ~$interval ns apart",
+        )
+    }
+
+    @Test
+    fun `the wire stamp is strictly later than the enqueue stamp under queueing`() {
+        // The earlier test asserted `>= 0`, so setting the wire stamp equal to the enqueue
+        // stamp -- deleting the field's entire purpose -- survived, as did the interop
+        // check, which only asks that the echoed stamp is nonzero. The property is that the
+        // two differ once a frame waits, because their difference *is* the queueing delay a
+        // timebase estimate has to remove.
+        val clock = AtomicLong(1_000)
+        val release = CountDownLatch(1)
+        val wire = WireLog()
+        val (phone, _) = pair(
+            clock = { clock.get() },
+            onPhoneWrite = wire::record,
+            phoneOutputGate = release,
+        )
+
+        repeat(3) { assertTrue(phone.session.sendTimeSyncPing(exchangeId = it.toLong())) }
+        // The frames are queued at clock 1_000; the writer is held until it moves.
+        clock.set(9_000_000)
+        release.countDown()
+
+        assertTrue(
+            awaitCondition { wire.snapshot().count { f -> f.header.entries.containsKey(Session.WIRE_STAMP) } >= 3 },
+            "the stamped frames were never written",
+        )
+        val deltas = wire.snapshot()
+            .filter { it.header.entries.containsKey(Session.WIRE_STAMP) }
+            .map {
+                val mono = (it.header.entries.getValue(Framing.KEY_MONO) as JsonValue.Num).value
+                val stamp = (it.header.entries.getValue(Session.WIRE_STAMP) as JsonValue.Num).value
+                stamp - mono
+            }
+        assertTrue(
+            deltas.all { it > 0 },
+            "the wire stamp equals the enqueue stamp, so the queueing delay it exposes is zero: $deltas",
+        )
+    }
+
+    @Test
+    fun `t_wall_ns is the wall clock, not a second copy of the monotonic one`() {
+        // Never asserted anywhere: substituting monoNs for wallNs at enqueue survived the
+        // whole suite, interop included. It is the field every cross-device log join keys
+        // on, so a copy or a constant corrupts every correlation with nothing moving.
+        // The harness's own wall constant, so the assertion cannot drift from it.
+        val wallNs = HARNESS_WALL_NS
+        val (phone, jetson) = pair(clock = { 4_242 })
+        assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()))
+        assertTrue(awaitFrames(jetson, 1), "nothing arrived")
+
+        val frame = jetson.received.first { it.channel == Channels.GPS }
+        assertEquals(
+            wallNs,
+            (frame.header.entries.getValue(Framing.KEY_WALL) as JsonValue.Num).value,
+            "t_wall_ns is not the wall clock",
+        )
+        assertEquals(
+            4_242L,
+            (frame.header.entries.getValue(Framing.KEY_MONO) as JsonValue.Num).value,
+        )
+    }
+
+    @Test
+    fun `an Error from a handler is caught too, not only an Exception`() {
+        // Narrowing either reader guard from Throwable to Exception survived all 45 tests,
+        // while the comment justifying the guard cites StackOverflowError and
+        // OutOfMemoryError -- neither of which is an Exception. An AssertionError stands in
+        // for the family.
+        val (phone, jetson) = pair(onPhoneFrame = { throw AssertionError("an Error, not an Exception") })
+        repeat(2) { index ->
+            assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(index.toLong()).toExtensions()))
+        }
+        assertTrue(
+            awaitCondition { phone.session.stats().deliveryFailures >= 2 },
+            "an Error was not counted: ${phone.session.stats()}",
+        )
+        assertTrue(phone.session.isRunning, "an Error from a handler ended the session")
+    }
+
+    @Test
+    fun `an Error from the read path ends the session with the cause`() {
+        val thrown = AssertionError("an Error inside a read")
+        val armed = java.util.concurrent.atomic.AtomicBoolean(false)
+        val (phone, jetson) = pair(phoneInput = { real ->
+            object : java.io.InputStream() {
+                override fun read(): Int = real.read()
+                override fun read(b: ByteArray, off: Int, len: Int): Int {
+                    if (armed.get()) throw thrown
+                    return real.read(b, off, len)
+                }
+            }
+        })
+        armed.set(true)
+        assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()))
+
+        assertTrue(awaitCondition { !phone.session.isRunning }, "still running")
+        assertEquals(SessionEnd.TRANSPORT_ERROR, phone.ends.firstOrNull()?.first)
+        assertEquals(thrown, phone.ends.firstOrNull()?.second)
+    }
+
+    @Test
+    fun `checkInbound applies the refusal table without the reserved-key rule`() {
+        // The newest code in the module had no unit test at all -- making its body a no-op
+        // failed only one interop assertion, in the class that spawns Python and is the
+        // slowest thing in the suite.
+        val valid = GpsRecord.noFix(1).toExtensions()
+        MessageValidation.checkInbound(Frame(Framing.header(Channels.GPS, 0, 1, 2, valid), ByteArray(0)))
+
+        // A field rule still applies inbound.
+        val broken = valid + ("valid" to JsonValue.Bool(true))
+        val error = runCatching {
+            MessageValidation.checkInbound(Frame(Framing.header(Channels.GPS, 0, 1, 2, broken), ByteArray(0)))
+        }.exceptionOrNull()
+        assertTrue(error is MessageError, "a valid fix with null coordinates was accepted: $error")
+        assertEquals(RefusalReason.OUT_OF_RANGE, (error as MessageError).reason)
+
+        // And a reserved key does not, because that is a sender rule: the peer's transport
+        // adds the wire stamp, and refusing it would drop every stamped message it sends.
+        for (key in listOf(Session.WIRE_STAMP, Session.HEARTBEAT, Session.HELLO)) {
+            val stamped = valid + (key to JsonValue.Num(7))
+            MessageValidation.checkInbound(
+                Frame(
+                    Framing.header(Channels.GPS, 0, 1, 2, stamped, allowReserved = setOf(key)),
+                    ByteArray(0),
+                )
+            )
+        }
     }
 
 }
