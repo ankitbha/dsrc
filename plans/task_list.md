@@ -772,7 +772,7 @@ tunnels over USB and is unaffected.
     swallowed the `NoSuchMethodError`: on an Android 10 handset the entire
     telemetry stream produced nothing for a whole drive with no log line. Lint
     had the answer and nothing ran lint; `scripts/check.sh` does now.
-25. Local session logging on the phone, for ground truth and post-hoc analysis.
+25. ~~Local session logging on the phone, for ground truth and post-hoc analysis.~~ **DONE** — `SessionLog` writes the frame headers **verbatim**: the canonical JSON the transport encoded, one object per line, so the log cannot disagree with what the Jetson received because it is the same object. Payloads are not written (`n` already distinguishes sizes). Offers go to a bounded queue and drop rather than block, and the file stops at its cap rather than rotating — the start of a drive holds the setup and the timebase exchange, and a file that stops early and says so never claims to be complete. `Stats.complete` is the single place that says whether the artifact is whole, and validation found three ways it could say yes to a short file. **Open:** nothing prunes `filesDir/sessions`; the cap is per file and the storage is per device, and bounding it needs a retention decision that is a research question rather than an engineering one.
 
 ## F. Jetson runtime — developed over SSH
 

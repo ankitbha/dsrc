@@ -27,6 +27,14 @@ import java.util.concurrent.TimeUnit
  * with a Jetson-side recording. Without it the duplicate keys are silent, and joining on
  * them pairs the wrong frames.
  *
+ * **Nothing prunes the directory.** The cap below is per file; the handset's storage is
+ * per device, and every drive leaves another file. At roughly 20 kB/s of headers that is
+ * about 72 MB an hour of driving, accumulating until someone clears it by hand. Bounding it
+ * needs a retention decision — how long a drive's ground truth is worth keeping — which is
+ * a research question rather than an engineering one, so it is named here rather than
+ * guessed at. When the storage does fill, `appendText` throws and `failures` climbs, so the
+ * log says so; by then the app's own space is gone.
+ *
  * Nothing here blocks a sensing thread. Offers go to a bounded queue and are dropped if it
  * is full — a log that stalled the camera to keep itself complete would corrupt the very
  * measurement it exists to record.
