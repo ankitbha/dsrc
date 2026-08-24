@@ -2793,4 +2793,46 @@ class SessionTest {
             "the recorded header is not the one that went on the wire",
         )
     }
+    /** Wait for a recorded header matching [wanted]. Named apart from the peer waiters. */
+    private fun awaitRecorded(
+        recorded: java.util.concurrent.ConcurrentLinkedQueue<String>,
+        timeoutMs: Long = 4_000,
+        wanted: (String) -> Boolean,
+    ): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (recorded.any(wanted)) return true
+            Thread.sleep(20)
+        }
+        return recorded.any(wanted)
+    }
+
+    @Test
+    fun `the recorder sees the hello and the heartbeats, not only the messages`() {
+        // Both write through Framing.write directly rather than writeMessage, so a recorder
+        // fed only from that path produced a file short by the hello plus one heartbeat a
+        // second -- about 1,800 frames an hour the phone had sent and the artifact denied.
+        // It matters most where the log matters most: a stretch where the link stalled and
+        // only keepalives flowed reads as a flat gap, indistinguishable from a phone that
+        // stopped sending.
+        //
+        // The hello matters for a second reason. One file spans every session of a service
+        // run, and each reconnect restarts every channel's sequence at zero, so a file can
+        // hold `imu#0` twice with nothing else marking the seam.
+        val recorded = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val (phone, _) = pair(onPhoneSent = { recorded.add(it) })
+
+        assertTrue(
+            recorded.any { it.contains("\"hello\"") },
+            "the hello is on the wire and not in the record: $recorded",
+        )
+
+        val before = recorded.size
+        assertTrue(
+            awaitRecorded(recorded) { it.contains("\"heartbeat\"") },
+            "no heartbeat was recorded in ${recorded.size - before} frames",
+        )
+        assertTrue(phone.session.isRunning)
+    }
+
 }

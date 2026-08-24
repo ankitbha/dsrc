@@ -206,6 +206,11 @@ class Session(
         )
         try {
             Framing.write(header, ByteArray(0), output)
+            // Recorded after the write, so a hello that failed to go out is not in the log
+            // claiming it did. It is also the frame that names the session, which is what
+            // lets an analyst see where one session ends and the next begins in a file that
+            // spans a reconnect.
+            recordSent(header, 0)
         } catch (e: Exception) {
             // readPeerHello ends the session on every failure path and this did not, so a
             // hello that failed to go out left `running` true with no `onEnd` ever fired:
@@ -457,9 +462,22 @@ class Session(
         // The same header that just went out, handed to whoever is recording. Not a copy
         // built from the message -- the encoded object itself, so a local log cannot
         // disagree with what the peer received.
-        onSent?.let { record ->
-            runCatching { record(Json.encode(Framing.withPayloadLength(header, message.payload.size))) }
-        }
+        recordSent(header, message.payload.size)
+    }
+
+    /**
+     * Hand one outgoing header to the recorder.
+     *
+     * Every frame this session writes goes through here, the hello and the heartbeats
+     * included. They bypass `writeMessage` and call `Framing.write` directly, so a recorder
+     * fed only from that path produced a file short by the hello plus one heartbeat a
+     * second -- about 1,800 frames an hour the phone had sent and the artifact denied. It
+     * matters most where the log matters most: a stretch where the link stalled and only
+     * keepalives flowed reads as a flat gap, indistinguishable from a phone that stopped.
+     */
+    private fun recordSent(header: JsonValue.Obj, payloadSize: Int) {
+        val record = onSent ?: return
+        runCatching { record(Json.encode(Framing.withPayloadLength(header, payloadSize))) }
     }
 
     private fun sendHeartbeat() {
@@ -483,6 +501,7 @@ class Session(
         }
         framesSent.incrementAndGet()
         heartbeatsSent.incrementAndGet()
+        recordSent(header, 0)
     }
 
     /**

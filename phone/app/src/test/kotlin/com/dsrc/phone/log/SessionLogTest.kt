@@ -139,4 +139,34 @@ class SessionLogTest {
 
         assertTrue(log.stats.path.endsWith("drive.jsonl"))
     }
+
+    @Test
+    fun `a line offered after stop is counted, not dropped in silence`() {
+        // Teardown releases resources in an order, and the link outlives the log by several
+        // steps -- so the transport can write after the log has stopped. Returning without
+        // counting meant the file could be short and still call itself complete, which is
+        // the one thing this class has to be right about.
+        val log = log()
+        log.start()
+        log.offer("""{"seq":0}""")
+        log.stop()
+        repeat(25) { log.offer("""{"seq":$it}""") }
+
+        val stats = log.stats
+        assertEquals(1, lines().size)
+        assertEquals(25, stats.droppedNotRunning)
+        assertFalse("a short file must not call itself complete: $stats", stats.complete)
+    }
+
+    @Test
+    fun `offering before start is counted too`() {
+        val log = log()
+        repeat(3) { log.offer("""{"seq":$it}""") }
+        log.start()
+        log.stop()
+
+        assertEquals(3, log.stats.droppedNotRunning)
+        assertFalse(log.stats.complete)
+    }
+
 }

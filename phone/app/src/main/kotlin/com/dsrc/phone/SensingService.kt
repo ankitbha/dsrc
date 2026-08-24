@@ -631,14 +631,6 @@ class SensingService : LifecycleService() {
             release("imu pipeline") { imuPipeline?.stop() }
             release("here pipeline") { herePipeline?.stop() }
             release("telemetry") { telemetryReporter?.stop() }
-            // After the link, so anything the writer had queued is on disk before the log
-            // is asked to finish. The log is the artifact the drive was for.
-            release("session log") {
-                sessionLog?.let {
-                    it.stop()
-                    Log.i(TAG, "session log ${it.stats}")
-                }
-            }
             release("frame sender") { frameSender?.stop() }
             release("encoder") { encodeExecutor?.shutdown() }
             // Stats *after* the stops, and round 5 is why. `abandoned`, `refusedStopped`
@@ -691,6 +683,17 @@ class SensingService : LifecycleService() {
             }
             release("link stats") { link?.let { Log.i(TAG, "link stats ${it.stats()}") } }
             release("link") { link?.stop() }
+            // After the link, and the comment above the old position said so while sitting
+            // nine releases before it. The link is what writes to the log, so stopping the
+            // log first meant anything the transport wrote during teardown was refused --
+            // and, until the counter below, refused silently, leaving a short file that
+            // called itself complete.
+            release("session log") {
+                sessionLog?.let {
+                    it.stop()
+                    Log.i(TAG, "session log ${it.stats}")
+                }
+            }
         } finally {
             cameraSource = null
             gpsSource = null

@@ -19,6 +19,14 @@ import java.util.concurrent.TimeUnit
  * own storage inside a few minutes; the header already carries `n`, the payload length, so
  * an analysis can tell a 25 kB frame from an empty one without keeping either.
  *
+ * **One file spans every session of one service run, reconnects included.** A dropped link
+ * in a moving car is what `SessionHolder` exists for, and each reconnect restarts every
+ * channel's sequence at zero — so a file can hold `imu#0` twice with `t_mono_ns` still
+ * monotonic across the seam. The hello is logged for exactly this reason: it is the frame
+ * that names a session, so it is the marker an analyst joins on before pairing `(ch, seq)`
+ * with a Jetson-side recording. Without it the duplicate keys are silent, and joining on
+ * them pairs the wrong frames.
+ *
  * Nothing here blocks a sensing thread. Offers go to a bounded queue and are dropped if it
  * is full — a log that stalled the camera to keep itself complete would corrupt the very
  * measurement it exists to record.
@@ -34,6 +42,7 @@ class SessionLog(
     private var written = 0L
     private var bytes = 0L
     private var droppedQueueFull = 0L
+    private var droppedNotRunning = 0L
     private var droppedAtCap = 0L
     private var failures = 0L
 
@@ -62,7 +71,15 @@ class SessionLog(
      * is back-pressure onto whichever sensing thread happened to call.
      */
     fun offer(headerJson: String) {
-        if (!running) return
+        if (!running) {
+            // Counted, not dropped in silence. A frame the transport wrote after the log
+            // was stopped -- teardown releases them in an order, and the link outlives the
+            // log by several steps -- incremented nothing at all, so the file could be
+            // missing frames and still call itself complete. That is the one thing this
+            // class has to be right about.
+            synchronized(lock) { droppedNotRunning++ }
+            return
+        }
         if (!queue.offer(headerJson)) {
             synchronized(lock) { droppedQueueFull++ }
         }
@@ -124,6 +141,7 @@ class SessionLog(
                 written = written,
                 bytes = bytes,
                 droppedQueueFull = droppedQueueFull,
+                droppedNotRunning = droppedNotRunning,
                 droppedAtCap = droppedAtCap,
                 failures = failures,
                 path = file.absolutePath,
@@ -135,13 +153,17 @@ class SessionLog(
         val bytes: Long,
         /** Lines dropped because the writer was behind. */
         val droppedQueueFull: Long,
+        /** Lines offered after the log was stopped, or before it was started. */
+        val droppedNotRunning: Long,
         /** Lines dropped because the file hit its size cap. */
         val droppedAtCap: Long,
         val failures: Long,
         val path: String,
     ) {
         /** Whether the file is a complete record of the session. */
-        val complete: Boolean get() = droppedQueueFull == 0L && droppedAtCap == 0L && failures == 0L
+        val complete: Boolean
+            get() = droppedQueueFull == 0L && droppedAtCap == 0L &&
+                droppedNotRunning == 0L && failures == 0L
     }
 
     companion object {
