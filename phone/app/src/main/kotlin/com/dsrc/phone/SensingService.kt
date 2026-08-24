@@ -441,8 +441,18 @@ class SensingService : LifecycleService() {
             // frames still queued at teardown were counted as `inFlight`, so the teardown
             // log read as an encoder backlog: exactly the misreading `abandoned` was added
             // to remove, by a recorder placed where it could not record.
-            release("camera stats") { pipeline?.let { Log.i(TAG, "camera stats ${it.stats}") } }
-            release("gps stats") { gpsPipeline?.let { Log.i(TAG, "gps stats ${it.stats}") } }
+            release("camera stats") {
+                pipeline?.let {
+                    if (!it.isStopped) statsReadBeforeStop.incrementAndGet()
+                    Log.i(TAG, "camera stats ${it.stats}")
+                }
+            }
+            release("gps stats") {
+                gpsPipeline?.let {
+                    if (!it.isStopped) statsReadBeforeStop.incrementAndGet()
+                    Log.i(TAG, "gps stats ${it.stats}")
+                }
+            }
             release("link stats") { link?.let { Log.i(TAG, "link stats ${it.stats()}") } }
             release("link") { link?.stop() }
         } finally {
@@ -634,6 +644,21 @@ class SensingService : LifecycleService() {
 
         @Volatile
         internal var lastShutdownFailure: String? = null
+
+        /**
+         * Stats lines read while their pipeline was still running.
+         *
+         * The ordering is the finding, not the logging: `abandoned`, `refusedStopped` and
+         * the buffer's `discarded` can only move once the pipeline is stopped, and this log
+         * line is the only production reader of either pipeline's stats. Reading first made
+         * all three structurally zero on every call, while the frames still queued counted
+         * as `inFlight` -- so the teardown log read as an encoder backlog, which is the
+         * misreading `abandoned` was added to remove.
+         *
+         * A plain reordering leaves nothing behind for a test to see, so the ordering
+         * counts itself.
+         */
+        internal val statsReadBeforeStop = java.util.concurrent.atomic.AtomicInteger(0)
 
         /**
          * Release steps that threw, across every instance.

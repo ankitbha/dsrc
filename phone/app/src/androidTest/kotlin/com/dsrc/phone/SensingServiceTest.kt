@@ -69,6 +69,7 @@ class SensingServiceTest {
         SensingService.shutdownFailures.set(0)
         SensingService.resourcesHeldAfterTeardown = -1
         SensingService.lastShutdownFailure = null
+        SensingService.statsReadBeforeStop.set(0)
         SensingStatus.shared.listenerFailures.set(0)
         SensingStatus.shared.lastListenerFailure = null
     }
@@ -491,11 +492,27 @@ class SensingServiceTest {
             assertTrue("nothing named '$prefix' started", pollUntil(10_000) { threadsNamed(listOf(prefix)) > 0 })
         }
 
-        SensingService.stop(context)
-        await(SensingState.IDLE)
-        SensingService.start(context)
-        await(SensingState.RUNNING)
+        val path = java.util.Collections.synchronizedList(mutableListOf<SensingState>())
+        val recorder = SensingStatus.Listener { path.add(it) }
+        SensingStatus.shared.addListener(recorder)
+        try {
+            SensingService.stop(context)
+            await(SensingState.IDLE)
+            SensingService.start(context)
+            await(SensingState.RUNNING)
+        } finally {
+            SensingStatus.shared.removeListener(recorder)
+        }
         Thread.sleep(500)
+        // That a second run happened at all. Counting threads cannot see it: if the second
+        // come-up never runs, the first run's workers are still there and satisfy every
+        // bound below. That is exactly how this test used to pass with the restart deleted.
+        assertTrue(
+            "sensing never went down and back up; states were ${synchronized(path) { path.toList() }}",
+            synchronized(path) { path.toList() }
+                .dropWhile { it != SensingState.IDLE }
+                .contains(SensingState.RUNNING),
+        )
 
         for (prefix in WORKER_PREFIXES) {
             val count = threadsNamed(listOf(prefix))
@@ -706,6 +723,15 @@ class SensingServiceTest {
             "a release step threw during an ordinary stop",
             0L,
             SensingService.teardownFailures.get().toLong(),
+        )
+        // And the stats were read after the stops. Reading them first made abandoned,
+        // refusedStopped and the buffer's discarded structurally zero on every call, at the
+        // only place production reads them -- so the teardown log said "encoder backlog"
+        // for frames that had in fact been abandoned and counted.
+        assertEquals(
+            "a pipeline's stats were logged before it was stopped",
+            0L,
+            SensingService.statsReadBeforeStop.get().toLong(),
         )
     }
 

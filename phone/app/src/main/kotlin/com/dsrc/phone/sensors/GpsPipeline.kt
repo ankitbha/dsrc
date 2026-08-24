@@ -36,6 +36,16 @@ class GpsPipeline(
     @Volatile
     private var running = true
 
+    /**
+     * Whether this pipeline has been stopped.
+     *
+     * Exists so the service can assert it is reading the stats *after* the stop. Three of
+     * the counters -- `abandoned`, `refusedStopped` and the buffer's `discarded` -- can
+     * only move once this is true, so a stats line read before it is structurally all
+     * zeroes.
+     */
+    val isStopped: Boolean get() = !running
+
     private val lastFixNs = AtomicLong(Long.MIN_VALUE)
 
     fun offer(reading: GpsReading): Boolean {
