@@ -24,6 +24,8 @@ import com.dsrc.phone.ui.AdvisoryHolder
 import com.dsrc.phone.sensors.GpsLocationSource
 import com.dsrc.phone.sensors.HerePipeline
 import com.dsrc.phone.sensors.HttpHereClient
+import com.dsrc.phone.sensors.TelemetryReporter
+import com.dsrc.phone.sensors.ThermalReader
 import com.dsrc.phone.sensors.ImuPipeline
 import com.dsrc.phone.sensors.ImuSource
 import com.dsrc.phone.sensors.GpsPipeline
@@ -64,6 +66,7 @@ class SensingService : LifecycleService() {
     private var gpsSource: GpsSource? = null
     private var imuPipeline: ImuPipeline? = null
     private var herePipeline: HerePipeline? = null
+    private var telemetryReporter: TelemetryReporter? = null
 
     /**
      * Routes a command to the running modalities.
@@ -413,6 +416,47 @@ class SensingService : LifecycleService() {
         motion.start(onReading = { imu.offer(it) }, onUnpaired = { imu.offerUnpaired() })
         here.start()
 
+        val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        val reporter = TelemetryReporter(
+            monoClock = SystemClock::elapsedRealtimeNanos,
+            sample = {
+                val cameraSent = sender.stats
+                val gpsStats = gps.stats
+                val imuStats = imu.stats
+                val hereStats = here.stats
+                val camera = pipe.stats
+                TelemetryReporter.Sample(
+                    thermalStatus = ThermalReader.statusName(power.currentThermalStatus),
+                    thermalHeadroom = ThermalReader.headroomOrNull(
+                        power.getThermalHeadroom(THERMAL_FORECAST_SECONDS),
+                    ),
+                    // What each modality actually put on the wire.
+                    delivered = mapOf(
+                        "camera_hz" to cameraSent.sent,
+                        "gps_hz" to gpsStats.delivered,
+                        "imu_hz" to imuStats.delivered,
+                        "here_hz" to hereStats.delivered,
+                    ),
+                    // Involuntary losses only. `gated` is excluded deliberately: a frame
+                    // the gate rejected is the commanded rate working, not something the
+                    // phone failed to deliver, and counting it would make every healthy
+                    // drive look lossy.
+                    dropped = mapOf(
+                        "camera" to camera.buffer.dropped + camera.abandoned +
+                            camera.encodeFailures + camera.packFailures + cameraSent.refused,
+                        "gps" to gpsStats.refusedBySink,
+                        "imu" to imuStats.refusedBySink,
+                        "here" to hereStats.refusedBySink,
+                    ),
+                    hereCalls = hereStats.calls,
+                    hereErrors = hereStats.errors,
+                )
+            },
+        ) { telemetry -> holder.send(Channels.TELEMETRY, telemetry.toExtensions()) }
+        telemetryReporter = reporter
+        liveTelemetry = reporter
+        reporter.start()
+
         // Last, so no inbound frame can arrive before the thing that handles it exists.
         holder.start()
         Log.i(
@@ -565,6 +609,7 @@ class SensingService : LifecycleService() {
             release("gps pipeline") { gpsPipeline?.stop() }
             release("imu pipeline") { imuPipeline?.stop() }
             release("here pipeline") { herePipeline?.stop() }
+            release("telemetry") { telemetryReporter?.stop() }
             release("frame sender") { frameSender?.stop() }
             release("encoder") { encodeExecutor?.shutdown() }
             // Stats *after* the stops, and round 5 is why. `abandoned`, `refusedStopped`
@@ -624,6 +669,8 @@ class SensingService : LifecycleService() {
             imuSource = null
             herePipeline = null
             liveHere = null
+            telemetryReporter = null
+            liveTelemetry = null
             configApplier = null
             // A driver who stopped the session is not being advised.
             advisories.clear()
@@ -864,6 +911,18 @@ class SensingService : LifecycleService() {
         /** The running HERE pipeline, for a test that wants what it actually did. */
         @Volatile
         internal var liveHere: HerePipeline? = null
+
+        /** The running telemetry reporter. */
+        @Volatile
+        internal var liveTelemetry: TelemetryReporter? = null
+
+        /**
+         * How far ahead `getThermalHeadroom` is asked to forecast.
+         *
+         * Zero: the reading wanted is now, not a prediction. A forecast would make the
+         * number the Jetson sees a guess about a guess.
+         */
+        private const val THERMAL_FORECAST_SECONDS = 0
 
         /** Commands that arrived with nothing to apply them. Non-zero is a defect. */
         internal val commandsWithoutApplier = java.util.concurrent.atomic.AtomicLong(0)

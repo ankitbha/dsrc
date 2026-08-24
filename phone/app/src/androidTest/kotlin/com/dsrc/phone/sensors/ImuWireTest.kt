@@ -13,6 +13,7 @@ import com.dsrc.transport.ImuSample
 import com.dsrc.transport.Protocol
 import com.dsrc.phone.ui.AdvisoryHolder
 import com.dsrc.transport.AdvisoryMessage
+import com.dsrc.transport.PhoneTelemetry
 import com.dsrc.transport.RateCommand
 import com.dsrc.transport.Session
 import org.junit.After
@@ -337,6 +338,46 @@ class ImuWireTest {
             SensingService.advisories.current(android.os.SystemClock.elapsedRealtimeNanos()),
         )
     }
+
+    @Test
+    fun telemetryReachesTheJetsonWithARealThermalReading() {
+        // Task 24's deliverable, asserted where it lands. The phone reports and the Jetson
+        // decides -- so what matters is that a frame arrives, that the thermal status is a
+        // word from the wire's vocabulary rather than a stringified Android integer, and
+        // that `achieved` is a rate the far side can compare against what it commanded.
+        SensingService.start(context)
+        awaitState(SensingState.RUNNING)
+        assertTrue(pollUntil(15_000) { sessions.any { it.isRunning } })
+
+        // Two reporting periods: the first establishes the baseline and sends nothing.
+        assertTrue(
+            "no telemetry arrived: ${SensingService.liveTelemetry?.stats}",
+            pollUntil(15_000) { telemetryFrames().isNotEmpty() },
+        )
+
+        val report = PhoneTelemetry.fromWire(
+            telemetryFrames().last().header.entries,
+            telemetryFrames().last().payload,
+        )
+        assertTrue(
+            "thermal_status is '${report.thermalStatus}', not a word from the wire's set",
+            report.thermalStatus in setOf(
+                "nominal", "light", "moderate", "severe", "critical", "emergency", "shutdown",
+            ),
+        )
+        assertTrue(
+            "achieved has no imu rate: ${report.achieved}",
+            report.achieved.containsKey("imu_hz"),
+        )
+        // The IMU is running at 50 Hz by default and its frames are arriving, so the
+        // reported rate must be a real one rather than the zero a broken baseline gives.
+        assertTrue(
+            "achieved imu_hz is ${report.achieved["imu_hz"]} while imu frames are arriving",
+            report.achieved.getValue("imu_hz") > 1.0,
+        )
+    }
+
+    private fun telemetryFrames() = frames.filter { it.channel == Channels.TELEMETRY }
 
     private fun command(imuHz: Double) {
         val sent = sessions.first { it.isRunning }.send(

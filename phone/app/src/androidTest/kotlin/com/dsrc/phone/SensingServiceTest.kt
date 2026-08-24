@@ -351,11 +351,13 @@ class SensingServiceTest {
         const val IMU = "dsrc-imu"
         /** HerePipeline's call loop. */
         const val HERE = "dsrc-here"
+        /** TelemetryReporter's loop. */
+        const val TELEMETRY = "dsrc-telemetry"
 
         // Adding a prefix here is how a new resource gets teardown coverage: every test
         // that counts threads iterates this list, so the come-up, the failed start, the
         // failed teardown and the restart all cover it without a new test.
-        val WORKER_PREFIXES = listOf(POOL, LINK, SENDER, GPS, IMU, HERE)
+        val WORKER_PREFIXES = listOf(POOL, LINK, SENDER, GPS, IMU, HERE, TELEMETRY)
     }
 
     @Test
