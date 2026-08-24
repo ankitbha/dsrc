@@ -114,17 +114,27 @@ class DifferentialTest {
                 disagreements.joinToString("\n"),
         )
         // A size floor, because two tables shrinking together would otherwise pass; and a
-        // distinct-reason floor at what the table actually produces rather than two below it.
+        // distinct-*refusal* floor. The previous count was over all values, so "ACCEPTED"
+        // and any "CRASH:" spelling counted as reasons: a floor of 7 was really 6 of the
+        // nine the table defines, and a decoder that started crashing would have pushed the
+        // number *up*.
         assertTrue(ours.size >= 30, "the case table has shrunk to ${ours.size}")
+        val reasons = ours.values.filter { it != "ACCEPTED" && !it.startsWith("CRASH:") }.toSet()
+        // Seven of the nine, and the two absences are structural rather than gaps.
+        // `reserved_key` is a *sender* rule -- it lives in MessageValidation.check, which
+        // this table does not call, because it compares decoders. `no_typed_message` is
+        // raised when a channel has no decoder, and every channel has one (asserted by
+        // ALL_CHANNELS_HAVE_A_DECODER), so it cannot occur while that holds. Naming them
+        // beats a floor of 7 that looks like an arbitrary number.
         assertTrue(
-            ours.values.toSet().size >= 7,
-            "the table exercises too few distinct reasons: ${ours.values.toSet()}",
+            reasons.size >= 7,
+            "the table exercises too few distinct refusal reasons: $reasons",
         )
-        // No case may report a crash: that would match any both-sides-ACCEPTED row.
-        assertTrue(
-            ours.none { it.value.startsWith("CRASH:") },
-            "a decoder crashed rather than refusing: ${ours.filterValues { it.startsWith("CRASH:") }}",
-        )
+        // Neither side may report a crash. `theirs` was excluded, so the assertion covered
+        // Kotlin only -- and a Python decoder that blew up used to take the whole script
+        // down, which reads as "python failed to run" rather than naming the input.
+        val crashed = (ours + theirs).filterValues { it.startsWith("CRASH:") }
+        assertTrue(crashed.isEmpty(), "a decoder crashed rather than refusing: $crashed")
     }
 
     private fun pythonReasons(): Map<String, String> {
@@ -237,6 +247,13 @@ class DifferentialTest {
         val empty = ByteArray(0)
 
         return mapOf(
+            // non_finite was the one reason in this table's reach that no case exercised,
+            // and the floor did not notice because "ACCEPTED" was counted as a reason. It
+            // has to be built here rather than parsed from a header: a bare NaN on the wire
+            // is a framing error on both sides now, so a decoder only sees one from an
+            // in-process caller.
+            "gps speed is not finite" to reasonOf { GpsRecord.fromWire(gps + ("speed_mps" to JsonValue.Real(Double.NaN)), empty) },
+            "gps altitude is infinite" to reasonOf { GpsRecord.fromWire(gps + ("altitude_m" to JsonValue.Real(Double.POSITIVE_INFINITY)), empty) },
             "gps count is null" to reasonOf { GpsRecord.fromWire(gps + ("fix_quality" to JsonValue.Null), empty) },
             "gps capture stamp is null" to reasonOf { GpsRecord.fromWire(gps + (Fields.CAPTURE_KEY to JsonValue.Null), empty) },
             "camera frame id is null" to reasonOf { CameraFrameMessage.fromWire(camera + ("frame_id" to JsonValue.Null), empty) },

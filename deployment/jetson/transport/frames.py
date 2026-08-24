@@ -184,13 +184,31 @@ def decode(data: bytes) -> Frame:
     return frame
 
 
+def _reject_json_constant(name: str) -> float:
+    """Refuse `NaN`, `Infinity` and `-Infinity`, which json accepts by default.
+
+    None of the three is JSON: RFC 8259 has no such literals, and the encoder here
+    cannot produce them (`allow_nan=False`). So a bare one on the wire means a peer
+    that is not speaking the protocol, and the two implementations disagreed about
+    what that costs. Kotlin's parser has no branch for `N` or `I`, so it raises at
+    the framing layer and the session ends. Python accepted it, put a float `nan`
+    in the header, and left the decoder to refuse it as `non_finite` -- one dropped
+    message, session intact.
+
+    That is not a difference the refusal table can express: one side loses a record
+    and the other loses the link. Refusing here makes both a framing error, which
+    is the stricter of the two readings and the one that matches the spec.
+    """
+    raise ValueError(f"{name} is not JSON")
+
+
 def _frame_from_parts(header_bytes: bytes, payload: bytes, payload_len: int) -> Frame:
     try:
         text = header_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise FramingError(f"header is not UTF-8: {exc}") from None
     try:
-        header = json.loads(text)
+        header = json.loads(text, parse_constant=_reject_json_constant)
     except ValueError as exc:
         raise FramingError(f"header is not JSON: {exc}") from None
     if not isinstance(header, dict):

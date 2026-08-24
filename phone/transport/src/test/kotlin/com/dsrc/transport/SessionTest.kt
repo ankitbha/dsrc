@@ -2623,6 +2623,34 @@ class SessionTest {
     }
 
     @Test
+    fun `a handler that crashes is counted as failed, not as the peer's refusal`() {
+        // The other half of the test above, which named a crash and contained none. Both
+        // headings existed and only one was exercised, so the pair could have been swapped
+        // in the code and half the assertion would still have held.
+        val (phone, jetson) = pair(onPhoneFrame = {
+            throw IllegalStateException("a bug in the application's router")
+        })
+        assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()))
+        assertTrue(awaitCondition {
+            phone.session.stats().inboundChannels.getValue(Channels.GPS).failed >= 1
+        }, "not counted as failed: ${phone.session.stats().inboundChannels[Channels.GPS]}")
+
+        val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+        assertEquals(1, gps.failed)
+        assertEquals(0, gps.refused, "our bug was filed as the peer's bad record: $gps")
+        assertEquals(0, gps.delivered, "a handler that threw did not deliver: $gps")
+        assertTrue(gps.balances, "$gps")
+        // And the reason is carried, so the failure is diagnosable rather than a tally.
+        assertTrue(
+            phone.session.stats().lastDeliveryFailure?.contains("IllegalStateException") == true,
+            "the failure does not name what threw: ${phone.session.stats().lastDeliveryFailure}",
+        )
+        // The session survives it: a NullPointerException in an advisory handler is no
+        // reason to stop collecting GPS.
+        assertTrue(phone.session.isRunning)
+    }
+
+    @Test
     fun `an answered ping is counted as delivered`() {
         // ANSWERED is the one arm of the outcome enum no test reached: REFUSED is covered by
         // the wrong-direction test and NOT_OURS by the gps tests, while ANSWERED only

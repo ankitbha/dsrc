@@ -337,3 +337,40 @@ def test_header_one_byte_over_the_limit_is_refused():
 def test_a_header_at_the_limit_survives_a_round_trip_through_a_reader():
     frame = pad_to_header_size(MAX_HEADER_BYTES)
     assert read_frame(reader_for(encode(frame))).extensions == frame.extensions
+
+@pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+def test_a_bare_non_json_literal_in_the_header_is_a_framing_error(literal):
+    """`json` accepts all three by default and none of them is JSON.
+
+    This was an unreconcilable divergence rather than a defect on either side, and
+    the two costs were not comparable. Kotlin's parser has no branch for `N` or
+    `I`, so it raises at the framing layer and the session ends. Python accepted
+    the literal, put a float `nan` in the header, and left the decoder to refuse it
+    as `non_finite` -- one dropped message, session intact. One side loses a record
+    and the other loses the link, which is not something the refusal table can
+    express.
+
+    Refusing here makes both a framing error, which is the stricter reading and the
+    one RFC 8259 supports. The encoder cannot produce any of the three
+    (`allow_nan=False`), so a bare one means a peer that is not speaking the
+    protocol.
+    """
+    header = (
+        b'{"ch":"gps","seq":1,"n":0,"t_mono_ns":1,"t_wall_ns":2,"speed_mps":'
+        + literal.encode()
+        + b"}"
+    )
+    data = struct.pack(">IH", 0, len(header)) + header
+    with pytest.raises(FramingError, match="not JSON"):
+        read_frame(reader_for(data))
+
+
+def test_a_quoted_nan_is_still_just_a_string():
+    """The guard refuses the three *literals*, not the characters.
+
+    A field whose value happens to be the text "NaN" is an ordinary string and must
+    survive -- refusing it would be a parser that reads inside quotes.
+    """
+    header = b'{"ch":"gps","seq":1,"n":0,"t_mono_ns":1,"t_wall_ns":2,"note":"NaN"}'
+    data = struct.pack(">IH", 0, len(header)) + header
+    assert read_frame(reader_for(data)).extensions["note"] == "NaN"

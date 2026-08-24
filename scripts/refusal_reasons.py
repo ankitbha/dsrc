@@ -53,6 +53,12 @@ PING = {
 }
 
 CASES = {
+    # non_finite was the one reason in the table's reach that no case exercised, and the
+    # floor did not notice because "ACCEPTED" was being counted as a reason. It has to be
+    # built here rather than parsed from a header: a bare NaN on the wire is now a framing
+    # error on both sides, so a decoder only ever sees one from an in-process caller.
+    "gps speed is not finite": (GpsRecord, {**GPS, "speed_mps": float("nan")}, b""),
+    "gps altitude is infinite": (GpsRecord, {**GPS, "altitude_m": float("inf")}, b""),
     "gps count is null": (GpsRecord, {**GPS, "fix_quality": None}, b""),
     # require_int's own null path, which the case above does not reach: fix_quality goes
     # through check_count. A capture stamp is require_int on every message.
