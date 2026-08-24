@@ -52,6 +52,8 @@ data class SessionStats(
     val outboundFramingRefusals: Long,
     val lastOutboundFramingRefusal: String?,
     val channels: Map<String, ChannelCounters>,
+    /** Per-channel inbound counters, the mirror of [channels]. */
+    val inboundChannels: Map<String, InboundCounters>,
 ) {
     /**
      * Inbound refusals totalled across channels.
@@ -96,6 +98,17 @@ class Session(
     private val queues = OutboundQueues()
 
     /**
+     * Arriving frames, so a handler cannot stop the reader.
+     *
+     * Delivery used to happen on the reader thread itself. A handler that blocked froze
+     * `lastReadProgressNs`, and the watchdog then ended a perfectly healthy session as
+     * `STALLED` with a null cause -- the phone tearing down a working link over its own
+     * slowness, then reconnecting and displacing itself. The spec asks for these queues in
+     * so many words: "Inbound queues use the same policies and depths."
+     */
+    private val inbound = InboundQueues()
+
+    /**
      * Answers pings, for a session in the Jetson's role.
      *
      * Was reachable from nothing at all: the class existed, had tests, and no code path
@@ -135,6 +148,7 @@ class Session(
     private var readerThread: Thread? = null
     private var writerThread: Thread? = null
     private var watchdogThread: Thread? = null
+    private var deliveryThread: Thread? = null
 
     val isRunning: Boolean get() = running.get()
 
@@ -186,6 +200,10 @@ class Session(
         // exactly the case that does not matter: an idle link. A wedged peer, which is
         // what the timeout is for, blocks the writer inside output.write() and the check
         // never runs again.
+        deliveryThread = Thread({ deliveryLoop() }, "dsrc-delivery").also {
+            it.isDaemon = true
+            it.start()
+        }
         watchdogThread = Thread({ watchdogLoop() }, "dsrc-watchdog").also {
             it.isDaemon = true
             it.start()
@@ -432,8 +450,9 @@ class Session(
      *
      * @return true if the frame was consumed here and must not be delivered.
      */
-    private fun handleTimeSync(frame: Frame): Boolean {
-        val message = try {
+    private fun handleTimeSync(message: Received): Boolean {
+        val frame = message.frame
+        val decoded = try {
             TimeSyncMessage.fromWire(frame.header.entries, frame.payload)
         } catch (e: MessageError) {
             countInboundRefusal(frame.channel, e.reason.wire)
@@ -441,7 +460,7 @@ class Session(
         }
 
         if (role == ROLE_PHONE) {
-            if (message.isPing) {
+            if (decoded.isPing) {
                 // Nobody should be pinging the initiator.
                 countInboundRefusal(frame.channel, RefusalReason.UNKNOWN_VALUE.wire)
                 return true
@@ -451,7 +470,7 @@ class Session(
             return false
         }
 
-        val reply = timeSync.reply(message, monoClock(), wallClock())
+        val reply = timeSync.reply(decoded, message.recvMonoNs, message.recvWallNs)
         if (reply == null) {
             // A responder receiving a pong: the other wrong direction.
             countInboundRefusal(frame.channel, RefusalReason.UNKNOWN_VALUE.wire)
@@ -483,6 +502,72 @@ class Session(
         return send(Channels.CONTROL, ping.toExtensions(), wantsWireStamp = true)
     }
 
+    /**
+     * Deliver arriving frames on a thread of their own.
+     *
+     * Everything a handler can do slowly or wrongly happens here rather than on the reader:
+     * the typed decode, the timebase exchange, and the application callback. The reader's
+     * only job is to read and enqueue, so its progress -- which is what the stall timeout
+     * watches -- cannot be held up by anything above the transport.
+     */
+    private fun deliveryLoop() {
+        try {
+            while (running.get()) {
+                val message = inbound.poll()
+                if (message == null) {
+                    Thread.sleep(DELIVERY_IDLE_MS)
+                    continue
+                }
+                deliver(message)
+            }
+        } catch (e: InterruptedException) {
+            // Closing interrupts it; not an error.
+        } catch (t: Throwable) {
+            // The last line of defence. If this thread dies, nothing is delivered while
+            // the session still reports itself healthy -- the shape the reader and writer
+            // both had before.
+            finish(SessionEnd.TRANSPORT_ERROR, t)
+        }
+    }
+
+    private fun deliver(message: Received) {
+        val frame = message.frame
+        // The receiving half of the refusal table. Without it a malformed frame was handed
+        // to the application unchecked, and `inboundRefusals` moved only when a handler
+        // happened to throw -- so a deliberately bad record from the live Python peer
+        // crossed and was counted nowhere.
+        try {
+            MessageValidation.checkInbound(frame)
+        } catch (e: MessageError) {
+            countInboundRefusal(frame.channel, e.reason.wire)
+            inbound.countRefused(frame.channel)
+            return
+        }
+
+        if (frame.channel == Channels.CONTROL && handleTimeSync(message)) {
+            inbound.countDelivered(frame.channel)
+            return
+        }
+
+        try {
+            onFrame(frame)
+            inbound.countDelivered(frame.channel)
+        } catch (e: MessageError) {
+            // Drop and count. The session stays open: one bad record costs one record.
+            countInboundRefusal(frame.channel, e.reason.wire)
+            inbound.countRefused(frame.channel)
+        } catch (t: Throwable) {
+            // A bug in the application's router, not in the link. It must not tear the
+            // session down -- a NullPointerException in an advisory handler is no reason to
+            // stop collecting GPS -- but it must not vanish either. With no clause here it
+            // killed the delivering thread while `running` stayed true, so `isRunning`
+            // lied, `send()` kept returning true, and every later frame was consumed by
+            // nobody with no counter moving.
+            deliveryFailures.incrementAndGet()
+            lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"
+        }
+    }
+
     private fun readLoop() {
         try {
             while (running.get()) {
@@ -499,36 +584,10 @@ class Session(
                     continue
                 }
 
-                if (frame.channel == Channels.CONTROL && handleTimeSync(frame)) continue
-                // The receiving half of the refusal table. Without it a malformed frame
-                // was handed to the application unchecked, and `inboundRefusals` moved
-                // only when a handler happened to throw -- so a deliberately bad record
-                // from the live Python peer crossed and was counted nowhere.
-                try {
-                    MessageValidation.checkInbound(frame)
-                } catch (e: MessageError) {
-                    countInboundRefusal(frame.channel, e.reason.wire)
-                    continue
-                }
-
-                try {
-                    onFrame(frame)
-                } catch (e: MessageError) {
-                    // Drop and count. The session stays open: one bad record costs one
-                    // record.
-                    countInboundRefusal(frame.channel, e.reason.wire)
-                } catch (t: Throwable) {
-                    // A bug in the application's router, not in the link. It must not tear
-                    // the session down -- a NullPointerException in an advisory handler is
-                    // no reason to stop collecting GPS -- but it must not vanish either.
-                    // With no clause here it killed the reader thread while `running`
-                    // stayed true, so `isRunning` lied, `send()` kept returning true, and
-                    // every later inbound frame was consumed by nobody with no counter
-                    // moving. The session then ended as STALLED with a null cause,
-                    // blaming the network for an application fault.
-                    deliveryFailures.incrementAndGet()
-                    lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"
-                }
+                // Both clocks at one instant, here, where the frame arrived. The
+                // timebase depends on it: a receipt stamp taken when a handler got round
+                // to the message makes the responder's service interval arbitrary.
+                inbound.offer(Received(frame, monoClock(), wallClock()))
             }
         } catch (e: EOFException) {
             finish(SessionEnd.PEER_CLOSED, e)
@@ -566,11 +625,15 @@ class Session(
         runCatching { output.close() }
         writerThread?.interrupt()
         watchdogThread?.interrupt()
+        deliveryThread?.interrupt()
         // The reader too. Closing the stream is what normally unblocks it, but that is a
         // property of the stream implementation rather than of this class, and leaving one
         // of three threads to a different mechanism is an asymmetry with no reason behind
         // it.
         readerThread?.interrupt()
+        // Counted, not left to a derived `pending` on a dead session.
+        queues.abandonAll()
+        inbound.abandonAll()
         onEnd(reason, cause)
     }
 
@@ -610,6 +673,7 @@ class Session(
             lastOutboundFramingRefusal = lastOutboundFramingRefusal,
             outboundRefusals = outboundRefusals.toMap(),
             channels = queues.counters(),
+            inboundChannels = inbound.counters(),
         )
     }
 
@@ -632,6 +696,7 @@ class Session(
         const val WIDEST_LONG = Long.MIN_VALUE
 
         private const val WRITER_IDLE_MS = 2L
+        private const val DELIVERY_IDLE_MS = 2L
 
         /**
          * How often the watchdog looks.

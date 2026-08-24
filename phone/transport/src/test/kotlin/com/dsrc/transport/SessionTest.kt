@@ -98,6 +98,7 @@ class SessionTest {
     private fun pair(
         clock: () -> Long = { System.nanoTime() },
         onPhoneFrame: ((Frame) -> Unit)? = null,
+        onJetsonFrame: ((Frame) -> Unit)? = null,
         phoneOutputGate: CountDownLatch? = null,
         onPhoneWrite: ((ByteArray) -> Unit)? = null,
         phoneWriteDelayMs: Long = 0,
@@ -143,7 +144,7 @@ class SessionTest {
         }
 
         val phone = build(clientSocket, "phone", onPhoneFrame ?: {})
-        val jetson = build(serverSocket, "jetson") {}
+        val jetson = build(serverSocket, "jetson", onJetsonFrame ?: {})
 
         // Both send their hello before either reads, which is why starting them on two
         // threads cannot deadlock here.
@@ -419,13 +420,24 @@ class SessionTest {
             "sender accounting must balance: $sender",
         )
 
-        val arrived = synchronized(jetson.received) { jetson.received.size }
+        // "Arrive" now means two different things, and the distinction is the inbound
+        // queue's. Everything written reaches the peer's *transport*; what reaches its
+        // application is that minus whatever its own queue shed, and both are counted.
+        // Asserting the old single equality would blame the sender for the receiver's
+        // shedding -- it failed at 65 written against 64 delivered.
+        val receiver = jetson.session.stats().inboundChannels.getValue(Channels.GPS)
         assertEquals(
             sender.sent,
-            arrived.toLong(),
-            "everything written should arrive on a loopback socket",
+            receiver.received,
+            "everything written should reach the peer's transport on a loopback socket",
         )
-        assertTrue(arrived > 0, "nothing arrived at all")
+        val delivered = synchronized(jetson.received) { jetson.received.size }.toLong()
+        assertEquals(
+            receiver.received,
+            delivered + receiver.dropped + receiver.refused,
+            "receiver accounting must balance: delivered $delivered, $receiver",
+        )
+        assertTrue(delivered > 0, "nothing was delivered at all")
     }
 
     @Test
@@ -456,13 +468,26 @@ class SessionTest {
         // exactly what the sender dropped. That is the invariant worth asserting, and it
         // is the one the receiver can actually act on.
         assertEquals(0, sender.pending, "the burst should have fully drained: $sender")
+
+        // Loss now has two sites and both are counted, which is the point. The sender's
+        // queue drops on overflow, and the receiver's *inbound* queue sheds when delivery
+        // falls behind -- so what the application never saw is the sum of the two, not the
+        // sender's drops alone. Before the inbound queue existed this was one term, and
+        // asserting it as one term now would blame the sender for the receiver's shedding.
+        val receiver = jetson.session.stats().inboundChannels.getValue(Channels.GPS)
+        assertEquals(
+            sender.sent,
+            receiver.received,
+            "everything written must arrive: sent ${sender.sent}, arrived ${receiver.received}",
+        )
+
         val highest = sequences.last()
         val missing = (highest + 1) - sequences.size
         assertEquals(
-            sender.dropped,
+            sender.dropped + receiver.dropped + receiver.refused,
             missing,
-            "the peer must be able to see every drop as a missing sequence number: " +
-                "highest $highest, received ${sequences.size}, $sender",
+            "every sequence number the application never saw must be accounted for: " +
+                "highest $highest, delivered ${sequences.size}, sender $sender, receiver $receiver",
         )
         if (sender.dropped > 0) {
             assertTrue(missing > 0, "with ${sender.dropped} dropped there must be a visible gap")
@@ -1480,6 +1505,152 @@ class SessionTest {
             phone.ends.map { it.first },
             "the session ended: ${phone.ends}",
         )
+    }
+
+
+    // -- the inbound side ----------------------------------------------------
+
+    @Test
+    fun `a handler that blocks does not stall the session`() {
+        // Delivery used to run on the reader thread. A handler that blocked froze
+        // lastReadProgressNs, and the watchdog then ended a perfectly healthy link as
+        // STALLED with a null cause: the phone tearing itself down over its own slowness,
+        // then reconnecting and displacing itself. The peer is not at fault and the reason
+        // said it was.
+        val gate = CountDownLatch(1)
+        val clock = AtomicLong(0)
+        val (phone, jetson) = pair(clock = { clock.get() }, onPhoneFrame = { gate.await() })
+        try {
+            assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()))
+            // Wait until the handler is genuinely stuck, so the premise is active.
+            assertTrue(
+                awaitCondition { phone.received.isNotEmpty() },
+                "the handler was never reached, so nothing is blocked",
+            )
+
+            // Past the stall timeout, then keep the peer talking so the *reader* still
+            // makes progress. Under the old arrangement the reader was inside the blocked
+            // handler and could not.
+            clock.set((Protocol.STALL_TIMEOUT_S * 3e9).toLong())
+            val deadline = System.currentTimeMillis() + 1_500
+            var sent = 2L
+            while (System.currentTimeMillis() < deadline) {
+                jetson.session.send(Channels.GPS, GpsRecord.noFix(sent++).toExtensions())
+                clock.addAndGet(1_000_000)
+                Thread.sleep(20)
+            }
+
+            assertTrue(
+                phone.session.isRunning,
+                "a blocked handler ended the session as ${phone.ends.map { it.first }}",
+            )
+            assertEquals(emptyList(), phone.ends.map { it.first }, "the session ended")
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
+    fun `inbound frames shed at the channel's depth and are counted`() {
+        // The spec: "Inbound queues use the same policies and depths." There were none, so
+        // there was nothing to count and the interop test's balance assertion was checked
+        // only against Python's numbers.
+        val gate = CountDownLatch(1)
+        val (phone, jetson) = pair(onPhoneFrame = { gate.await() })
+        try {
+            val depth = Channels.policy(Channels.GPS).depth
+            val offered = depth * 4
+            repeat(offered) { i ->
+                // Paced on the *sender's* queue. Firing them unpaced filled the jetson's
+                // own depth-64 outbound queue instead, so 64 arrived and none were shed --
+                // the test was measuring outbound overflow while claiming inbound.
+                while (jetson.session.outboundPending() > 0) Thread.onSpinWait()
+                jetson.session.send(Channels.GPS, GpsRecord.noFix(i.toLong()).toExtensions())
+            }
+            assertTrue(
+                awaitCondition {
+                    val gps = phone.session.stats().inboundChannels[Channels.GPS]
+                    gps != null && gps.received >= offered.toLong()
+                },
+                "not everything arrived: ${phone.session.stats().inboundChannels}",
+            )
+            val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+            assertTrue(gps.dropped > 0, "a queue ${depth} deep took ${offered} frames: $gps")
+            assertTrue(phone.session.isRunning, "shedding ended the session")
+        } finally {
+            gate.countDown()
+        }
+    }
+
+    @Test
+    fun `the pong carries the reader's receipt stamp, not the handler's clock`() {
+        // The spec states this as a requirement rather than a check: the receipt must be
+        // the stamp the transport took on arrival. The initiator computes the responder's
+        // service interval as t3 - t2, so a t2 read when a handler got round to the message
+        // makes that difference arbitrary -- and nothing on the wire can detect it.
+        //
+        // It was equivalent only while delivery was synchronous. With a delivery queue the
+        // two instants are genuinely different, which is what this test forces.
+        val clock = AtomicLong(1_000)
+        val gate = CountDownLatch(1)
+        val pongs = java.util.concurrent.ConcurrentLinkedQueue<Frame>()
+        val (phone, _) = pair(
+            clock = { clock.get() },
+            onPhoneFrame = { pongs.add(it) },
+            // The responder's own delivery thread is blocked behind this.
+            onJetsonFrame = { gate.await() },
+        )
+
+        // A data frame first, to occupy the responder's delivery thread.
+        assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()))
+        Thread.sleep(200)
+        // The ping is read and stamped now, at this clock.
+        val stampedAt = clock.get()
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 5))
+        Thread.sleep(200)
+        // Then the clock moves before the responder gets to it -- by a second, which is
+        // enormous next to a real receipt stamp and still comfortably inside the 5 s stall
+        // timeout. A 9 s jump killed both sessions instead: `pair` gives the two peers the
+        // *same* injected clock, so advancing it past the timeout stalls them both, which
+        // is the trap that made an earlier stall test flaky.
+        val jump = 1_000_000_000L
+        clock.set(stampedAt + jump)
+        gate.countDown()
+
+        assertTrue(awaitCondition { pongs.isNotEmpty() }, "no pong arrived")
+        val decoded = TimeSyncMessage.fromWire(pongs.first().header.entries, pongs.first().payload)
+        // A handling-time reading would be the jumped value.
+        assertTrue(
+            decoded.peerRecvMonoNs!! < stampedAt + jump,
+            "the receipt was read at handling time: ${decoded.peerRecvMonoNs}, " +
+                "which is the jumped clock rather than the ~$stampedAt the reader saw",
+        )
+    }
+
+    @Test
+    fun `messages queued when the session ends are counted as abandoned`() {
+        // They were in no counter at all: an orphaned message showed up only in the derived
+        // `pending`, on a session that had ended, which is indistinguishable from a
+        // counting bug. Python's own comment for the equivalent counter says exactly that.
+        val gate = CountDownLatch(1)
+        val (phone, _) = pair(phoneOutputGate = gate)
+        repeat(40) { i ->
+            assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(i.toLong()).toExtensions()))
+        }
+        phone.session.close()
+        gate.countDown()
+
+        val gps = phone.session.stats().channels.getValue(Channels.GPS)
+        assertEquals(40, gps.enqueued)
+        assertTrue(gps.abandoned > 0, "nothing was counted as abandoned: $gps")
+        // Every message is under exactly one heading, and `pending` is no longer the only
+        // place a loss appears.
+        assertEquals(
+            gps.enqueued,
+            gps.sent + gps.dropped + gps.abandoned,
+            "the accounting does not add up: $gps",
+        )
+        assertEquals(0, gps.pending, "pending should be zero once nothing is queued: $gps")
     }
 
 }

@@ -29,8 +29,17 @@ data class ChannelCounters(
     val enqueued: Long = 0,
     val dropped: Long = 0,
     val sent: Long = 0,
+    /**
+     * Queued when the session ended, so never sent and never dropped.
+     *
+     * Its own field because it was previously nothing at all: a message orphaned by
+     * `close()` appeared only in the *derived* `pending`, on a session that had ended, and
+     * Python's own comment for the equivalent counter says why -- "deriving a loss by
+     * subtraction is how a counting bug hides".
+     */
+    val abandoned: Long = 0,
 ) {
-    val pending: Long get() = enqueued - dropped - sent
+    val pending: Long get() = enqueued - dropped - sent - abandoned
 }
 
 /**
@@ -133,7 +142,7 @@ class OutboundQueues {
      */
     fun poll(): Outbound? = synchronized(lock) {
         for (tier in Priority.entries) {
-            val tierChannels = Channels.ALL.filter { it.priority == tier }
+            val tierChannels = Channels.inTier(tier)
             if (tierChannels.isEmpty()) continue
             val start = cursor.getValue(tier)
             for (offset in tierChannels.indices) {
@@ -207,4 +216,147 @@ class OutboundQueues {
     }
 
     fun isEmpty(): Boolean = pending() == 0L
+
+    /**
+     * Discard everything queued and count it as abandoned.
+     *
+     * Called once as the session ends. Without it a queued message left no trace but a
+     * derived `pending` on a dead session, which is indistinguishable from a counting bug.
+     */
+    fun abandonAll(): Long = synchronized(lock) {
+        var total = 0L
+        for ((id, queue) in queues) {
+            if (queue.isEmpty()) continue
+            val count = queue.size.toLong()
+            queue.clear()
+            total += count
+            val previous = counters.getValue(id)
+            counters[id] = previous.copy(abandoned = previous.abandoned + count)
+        }
+        return total
+    }
+}
+
+/** One arriving frame, with the receipt stamps the reader took. */
+class Received(
+    val frame: Frame,
+    /**
+     * The reader's own clocks, both read at one instant on arrival.
+     *
+     * Carried rather than re-read at handling time because the timebase requires it: the
+     * initiator computes the responder's service interval as `t3 - t2`, and a `t2` taken
+     * when a handler got round to the message instead of when it arrived makes that
+     * difference arbitrary. Python builds the same pair in `_record_inbound` for the same
+     * reason. It was equivalent here only while delivery was synchronous.
+     */
+    val recvMonoNs: Long,
+    val recvWallNs: Long,
+)
+
+/** Per-channel inbound counters. */
+data class InboundCounters(
+    val received: Long = 0,
+    val delivered: Long = 0,
+    val dropped: Long = 0,
+    val refused: Long = 0,
+    val abandoned: Long = 0,
+)
+
+/**
+ * The inbound side: one queue per channel, same policies and depths as outbound.
+ *
+ * The spec asks for this ("Inbound queues use the same policies and depths") and there was
+ * none: `onFrame` ran on the reader thread with nothing between. A handler that blocked
+ * stopped the reader, froze the stall timer's evidence of progress, and the watchdog ended
+ * a healthy session as `STALLED` with a null cause -- the phone tearing down a working link
+ * over its own slowness and then reconnecting to displace itself.
+ */
+class InboundQueues {
+
+    private val lock = Any()
+
+    private val queues: Map<String, ArrayDeque<Received>> =
+        Channels.ALL.associate { it.id to ArrayDeque<Received>() }
+
+    private val counters: MutableMap<String, InboundCounters> =
+        Channels.ALL.associate { it.id to InboundCounters() }.toMutableMap()
+
+    private val cursor: MutableMap<Priority, Int> =
+        Priority.entries.associateWith { 0 }.toMutableMap()
+
+    /** @return the message displaced by overflow, if any. */
+    fun offer(message: Received): Received? = synchronized(lock) {
+        val channel = message.frame.channel
+        val policy = Channels.policy(channel)
+        val queue = queues.getValue(channel)
+
+        var displaced: Received? = null
+        var displacedCount = 0
+        when (policy.overflow) {
+            Overflow.RELIABLE ->
+                if (queue.size >= policy.depth) {
+                    displaced = queue.removeFirst()
+                    displacedCount = 1
+                }
+            Overflow.LATEST_WINS ->
+                while (queue.size >= policy.depth) {
+                    displaced = queue.removeFirst()
+                    displacedCount++
+                }
+        }
+        queue.addLast(message)
+        val previous = counters.getValue(channel)
+        counters[channel] = previous.copy(
+            received = previous.received + 1,
+            dropped = previous.dropped + displacedCount,
+        )
+        return displaced
+    }
+
+    /** Strict priority across tiers, round-robin within one -- the outbound rule. */
+    fun poll(): Received? = synchronized(lock) {
+        for (tier in Priority.entries) {
+            val tierChannels = Channels.inTier(tier)
+            if (tierChannels.isEmpty()) continue
+            val start = cursor.getValue(tier)
+            for (offset in tierChannels.indices) {
+                val index = (start + offset) % tierChannels.size
+                val queue = queues.getValue(tierChannels[index].id)
+                if (queue.isNotEmpty()) {
+                    cursor[tier] = (index + 1) % tierChannels.size
+                    return queue.removeFirst()
+                }
+            }
+        }
+        return null
+    }
+
+    fun countDelivered(channel: String) = synchronized(lock) {
+        val previous = counters.getValue(channel)
+        counters[channel] = previous.copy(delivered = previous.delivered + 1)
+    }
+
+    fun countRefused(channel: String) = synchronized(lock) {
+        val previous = counters.getValue(channel)
+        counters[channel] = previous.copy(refused = previous.refused + 1)
+    }
+
+    fun abandonAll(): Long = synchronized(lock) {
+        var total = 0L
+        for ((id, queue) in queues) {
+            if (queue.isEmpty()) continue
+            val count = queue.size.toLong()
+            queue.clear()
+            total += count
+            val previous = counters.getValue(id)
+            counters[id] = previous.copy(abandoned = previous.abandoned + count)
+        }
+        return total
+    }
+
+    fun counters(): Map<String, InboundCounters> = synchronized(lock) { counters.toMap() }
+
+    fun pending(): Long = synchronized(lock) { queues.values.sumOf { it.size.toLong() } }
+
+    fun depth(channel: String): Long = synchronized(lock) { queues.getValue(channel).size.toLong() }
 }

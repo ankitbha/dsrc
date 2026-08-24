@@ -64,6 +64,16 @@ object Channels {
     fun policy(id: String): ChannelPolicy =
         byId[id] ?: throw FramingError("unknown channel '$id'")
 
-    /** Channel ids in drain order: by priority tier, then as the table lists them. */
+    /**
+     * Channels in drain order: by priority tier, then as the table lists them.
+     *
+     * Read by both queue implementations. It used to be read by neither -- `poll` derived
+     * its own order from `ALL.filter { it.priority == tier }` -- so this was a public val
+     * documenting an ordering it did not control, and it could not go stale in any way a
+     * test would notice.
+     */
     val drainOrder: List<ChannelPolicy> = ALL.sortedBy { it.priority.ordinal }
+
+    /** The channels in one priority tier, in table order. */
+    fun inTier(priority: Priority): List<ChannelPolicy> = ALL.filter { it.priority == priority }
 }
