@@ -328,6 +328,7 @@ class SensingService : LifecycleService() {
             holder.send(Channels.IMU, sample.toExtensions())
         }
         imuPipeline = imu
+        liveImu = imu
         val motion = ImuSource(this, config)
         imuSource = motion
 
@@ -497,6 +498,7 @@ class SensingService : LifecycleService() {
             gpsSource = null
             imuPipeline = null
             imuSource = null
+            liveImu = null
             pipeline = null
             gpsPipeline = null
             frameSender = null
@@ -699,6 +701,22 @@ class SensingService : LifecycleService() {
          * counts itself.
          */
         internal val statsReadBeforeStop = java.util.concurrent.atomic.AtomicInteger(0)
+
+        /**
+         * The running IMU pipeline, for a test that wants to see a sample.
+         *
+         * After three validation rounds there was still no test at any level showing this
+         * modality produces anything: `ImuPairing` is well pinned, the glue is pinned by
+         * `dumpsys`, and neither observes a *sample*. That gap let the gyroscope be
+         * swapped for the magnetometer with both suites green -- the registration count
+         * stayed at two, so a test counting registrations saw nothing wrong, while
+         * `hasGyro` never became true and every event went to the unpaired branch.
+         *
+         * Counting what came out is the assertion that cannot be satisfied by the wrong
+         * sensor.
+         */
+        @Volatile
+        internal var liveImu: ImuPipeline? = null
 
         /**
          * Release steps that threw, across every instance.
