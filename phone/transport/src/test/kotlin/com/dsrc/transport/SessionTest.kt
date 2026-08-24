@@ -39,6 +39,10 @@ class SessionTest {
         val received: MutableList<Frame>,
         val ends: MutableList<Pair<SessionEnd, Throwable?>>,
         val frameLatch: () -> CountDownLatch,
+        /** The socket this side reads from, so a test can inject a raw frame at it. */
+        val socket: Socket? = null,
+        /** The socket the *other* side writes on. */
+        var peerSocket: Socket? = null,
     )
 
     /**
@@ -140,7 +144,7 @@ class SessionTest {
                 },
                 onEnd = { reason, cause -> synchronized(ends) { ends.add(reason to cause) } },
             ).also { sessions.add(it) }
-            return Peer(session, received, ends) { latch }
+            return Peer(session, received, ends, { latch }, socket)
         }
 
         val phone = build(clientSocket, "phone", onPhoneFrame ?: {})
@@ -152,9 +156,36 @@ class SessionTest {
         val jetsonStart = Thread { jetson.session.start() }
         phoneStart.start(); jetsonStart.start()
         phoneStart.join(5_000); jetsonStart.join(5_000)
+        phone.peerSocket = jetson.socket
+        jetson.peerSocket = phone.socket
         // Armed only after the handshake, so the hello is never held.
         gates.forEach { it.armed = true }
         return phone to jetson
+    }
+
+    /**
+     * Write a frame straight onto the wire, bypassing the sending session.
+     *
+     * Needed because the sender rule now refuses a wrong-direction timebase message, which
+     * is correct and which means `send` can no longer produce one. Two of these tests
+     * previously relied on that hole: they exercised the *receiver's* direction rule by
+     * having a peer send what a peer should never be able to send.
+     *
+     * Safe only with a frozen clock, so no keepalive interleaves with this write on the
+     * same stream.
+     */
+    private fun injectRaw(into: Peer, extensions: Map<String, JsonValue>, sequence: Long = 900) {
+        val socket = into.peerSocket ?: error("no peer socket recorded")
+        val header = Framing.header(
+            channel = Channels.CONTROL,
+            sequence = sequence,
+            monoNs = 1_000,
+            wallNs = 2_000,
+            extensions = extensions,
+            allowReserved = setOf(Session.WIRE_STAMP),
+        )
+        socket.getOutputStream().write(Framing.encode(header, ByteArray(0)))
+        socket.getOutputStream().flush()
     }
 
     private fun awaitFrames(peer: Peer, count: Int, timeoutMs: Long = 5_000): Boolean {
@@ -1270,10 +1301,13 @@ class SessionTest {
         // receiving a pong, or a phone receiving a ping, is a protocol error", counted as
         // unknown_value, "because the alternative is treating one as the other and
         // silently producing an offset with the sign inverted".
-        val (phone, jetson) = pair()
+        // A frozen clock, so no keepalive interleaves with the raw write.
+        val (phone, _) = pair(clock = { 1_000 })
         val before = phone.received.size
 
-        assertTrue(jetson.session.send(Channels.CONTROL, ping(exchangeId = 7), wantsWireStamp = true))
+        // Injected raw: the sender rule now refuses a Jetson sending a ping, which is
+        // correct, so a peer's `send` can no longer produce one.
+        injectRaw(phone, ping(exchangeId = 7))
         assertTrue(
             awaitCondition {
                 phone.session.stats().inboundRefusalsByReason[RefusalReason.UNKNOWN_VALUE.wire] == 1L
@@ -1287,8 +1321,7 @@ class SessionTest {
 
     @Test
     fun `a responder refuses a pong`() {
-        val clock = AtomicLong(5_000)
-        val (phone, jetson) = pair(clock = { clock.addAndGet(1_000) })
+        val (_, jetson) = pair(clock = { 1_000 })
         val pong = TimeSyncMessage(
             captureMonoNs = 1_000,
             exchangeId = 11,
@@ -1297,7 +1330,7 @@ class SessionTest {
             peerRecvWallNs = 1_755_648_000_000_000_000,
             peerWireMonoNs = 1_500,
         )
-        assertTrue(phone.session.send(Channels.CONTROL, pong.toExtensions(), wantsWireStamp = true))
+        injectRaw(jetson, pong.toExtensions())
         assertTrue(
             awaitCondition {
                 jetson.session.stats().inboundRefusalsByReason[RefusalReason.UNKNOWN_VALUE.wire] == 1L
@@ -1651,6 +1684,47 @@ class SessionTest {
             "the accounting does not add up: $gps",
         )
         assertEquals(0, gps.pending, "pending should be zero once nothing is queued: $gps")
+    }
+
+
+    @Test
+    fun `the sender rule covers exchange direction, which the table cannot state`() {
+        // The refusal table's conditions are role-blind, so nothing in it can express "a
+        // phone must not send a pong". Only the session knows its role, and the sender rule
+        // is supposed to be the same table -- so this was a message we would refuse on
+        // arrival and happily send. Two of the tests above relied on the hole.
+        val (phone, jetson) = pair()
+
+        val pong = TimeSyncMessage(
+            captureMonoNs = 1_000,
+            exchangeId = 3,
+            wireMonoNs = 0,
+            peerRecvMonoNs = 2_000,
+            peerRecvWallNs = 1_755_648_000_000_000_000,
+            peerWireMonoNs = 1_500,
+        )
+        assertFalse(
+            phone.session.send(Channels.CONTROL, pong.toExtensions(), wantsWireStamp = true),
+            "a phone sent a pong",
+        )
+        assertEquals(
+            1L,
+            phone.session.stats().outboundRefusals[RefusalReason.UNKNOWN_VALUE.wire],
+            "refused for the wrong reason: ${phone.session.stats().outboundRefusals}",
+        )
+
+        assertFalse(
+            jetson.session.send(Channels.CONTROL, ping(exchangeId = 4), wantsWireStamp = true),
+            "a jetson sent a ping",
+        )
+        assertEquals(
+            1L,
+            jetson.session.stats().outboundRefusals[RefusalReason.UNKNOWN_VALUE.wire],
+            "refused for the wrong reason: ${jetson.session.stats().outboundRefusals}",
+        )
+
+        // And the right direction still goes out.
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 5))
     }
 
 }

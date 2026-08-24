@@ -289,6 +289,13 @@ class Session(
             // went out and came back as the peer's drop counter.
             MessageValidation.check(channel, extensions, payload, allowed)
 
+            // Direction, which the table's conditions do not cover because they are
+            // role-blind and only the session knows its role. The spec makes the wrong
+            // direction a protocol error, and the sender rule is meant to be the same table
+            // -- so a phone emitting a pong, or a Jetson a ping, was a message we would
+            // refuse on arrival and happily send.
+            checkTimeSyncDirection(channel, extensions)
+
             // Then the size. Only two fields are still unknown here: the sequence
             // number, which `enqueue` assigns under its own lock a moment from now, and
             // the wire stamp, which the writer adds last. Both are substituted at their
@@ -464,6 +471,28 @@ class Session(
      *
      * @return true if the frame was consumed here and must not be delivered.
      */
+    /**
+     * Refuse a timebase message going the wrong way.
+     *
+     * The phone initiates and the Jetson only ever answers, so a pong from a phone or a
+     * ping from a Jetson is the protocol error the receiver counts as `unknown_value`. It
+     * is counted here under the same reason, because "before a message goes out, it must
+     * satisfy the same table" and this is the one condition the table cannot state on its
+     * own.
+     */
+    private fun checkTimeSyncDirection(channel: String, extensions: Map<String, JsonValue>) {
+        if (channel != Channels.CONTROL) return
+        if (HELLO in extensions || HEARTBEAT in extensions) return
+        val message = TimeSyncMessage.fromWire(extensions, ByteArray(0))
+        val wrongWay = if (role == ROLE_PHONE) !message.isPing else message.isPing
+        if (wrongWay) {
+            throw MessageError(
+                RefusalReason.UNKNOWN_VALUE,
+                "a $role must not send ${if (message.isPing) "a ping" else "a pong"}",
+            )
+        }
+    }
+
     private fun handleTimeSync(message: Received): Boolean {
         val frame = message.frame
         val decoded = try {
@@ -637,14 +666,18 @@ class Session(
         // Closing the streams is what unblocks a reader parked in a read.
         runCatching { input.close() }
         runCatching { output.close() }
+        // The writer and the watchdog both sleep, so an interrupt reaches them. The
+        // reader does not: it is parked inside a stream read, and Thread.interrupt() does
+        // not unblock a socket read at all -- the flag is set and consumed by nothing.
+        // `input.close()` above is what actually releases it.
+        //
+        // An interrupt was added here for symmetry and is removed for the same reason the
+        // phantom-STALLED guard was: the justification was tidiness rather than behaviour,
+        // deleting it survived the suite, and a line that reads as load-bearing while doing
+        // nothing is worse than its absence.
         writerThread?.interrupt()
         watchdogThread?.interrupt()
         deliveryThread?.interrupt()
-        // The reader too. Closing the stream is what normally unblocks it, but that is a
-        // property of the stream implementation rather than of this class, and leaving one
-        // of three threads to a different mechanism is an asymmetry with no reason behind
-        // it.
-        readerThread?.interrupt()
         // Counted, not left to a derived `pending` on a dead session.
         queues.abandonAll()
         inbound.abandonAll()
