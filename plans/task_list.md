@@ -729,11 +729,19 @@ tunnels over USB and is unaffected.
     platform teardown, since it never called `onSensingDown`.
 19. ~~GPS capture and forwarding, logging both fix time and receipt time.~~ **DONE** — `GpsLocationSource` (`LocationManager` + `GnssStatus`, not FusedLocation, because `num_sats` is required non-nullable) and `GpsPipeline`, plus the transport this task grew to carry: framing, the eight channels with their policies and depths, inbound queues with a delivery thread, the timebase exchange, and the typed messages for every channel. Both clocks come off `elapsedRealtime`, so the fix-to-receipt difference is a real latency rather than a latency plus an unknown offset between two clock bases. Eight validation rounds; every finding closed and mutation-pinned, and the ones worth remembering are in `plans/section_e_status.md`. Two of them were arguments of mine that a branch could not be reached, both refuted. `Session.stats()` returned self-contradictory snapshots until the per-channel maps were read before the session totals -- 18,530 in 49.8M samples, and inverting the *writes* had fixed only one field pair. `scripts/refusal_reasons.py` reconciles the Kotlin and Python refusal tables case by case; the one divergence left is check order on multi-fault records, recorded with the precedence rule to adopt in `specs/transport_protocol.md`.
 20. ~~IMU capture and forwarding.~~ **DONE** — `ImuSource` (accelerometer + gyroscope on a `dsrc-imu` thread), `ImuPairing` (the decisions, with no Android in them) and `ImuPipeline` (rate gate and accounting). The accelerometer drives and the gyroscope is paired from its latest reading, with the pairing skew carried as a statistic. `SensorEvent.timestamp` is only *documented* to share `elapsedRealtime`, so the offset is measured on the first event of either stream and a mismatch stops the modality rather than emitting a stream of confidently wrong timestamps. Four validation rounds; the behavioural defects were samples counted but never sent, the two sensor streams transposable without any suite noticing, four of six axes free to swap, and a gyroscope on a different clock still pairing. All are pinned by `ImuWireTest`, which reads the frames from a peer really listening on the port the phone dials — the physics does the work, since a stationary accelerometer reads one g and a gyroscope reads nothing.
-21. HERE client: query the road ahead at the commanded rate and in the commanded
+21. ~~HERE client: query the road ahead at the commanded rate and in the commanded
     query shape, forward the raw response with request and response timestamps,
-    no interpretation on the phone. The query shape is the Jetson's to choose,
-    not the phone's. **Unblocked:** Nash's HERE key is entitled to Traffic API
-    v7, and NY/NJ is fully covered.
+    no interpretation on the phone.~~ **DONE** — `HttpHereClient` behind an
+    interface (no test touches the network; the key is shared with Nash
+    production) and `HerePipeline` on a `dsrc-here` thread. The phone makes no
+    call until told what to query: a default shape would be the phone
+    originating a sensing decision. `rate_cmd` gained an **optional** `here`
+    object to carry the shape, receiver-tolerant from the start on both sides,
+    with twelve reconciled rows and a golden vector. A failed call is forwarded
+    rather than swallowed — status 0 means no response at all, and the one
+    validation finding was that a reply which stalled mid-body was reported that
+    way too, losing a status the phone had already seen. The key never reaches
+    `request_url`, which goes on the wire and into every artifact.
 22. Sensing-configuration handling across all four modalities -- rates and
     per-modality settings alike -- applied without restarting capture.
 23. Advisory display: the driver-facing UI.
