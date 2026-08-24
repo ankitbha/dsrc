@@ -40,16 +40,33 @@ class SensingServiceTest {
 
     @Before
     fun reset() {
-        SensingService.permissionOverride = null
-        SensingService.enterForegroundOverride = null
+        clearSeams()
         quiesce()
     }
 
     @After
     fun tearDown() {
+        clearSeams()
+        quiesce()
+    }
+
+    /**
+     * Every seam and every companion counter, in one place.
+     *
+     * Four of the six seams were left to each test's own `finally`, and the counters are
+     * process-global and were never reset -- so a test reading one was reading whatever the
+     * test before it happened to leave. Nothing leaked today, which is exactly the
+     * condition under which this stops being true silently.
+     */
+    private fun clearSeams() {
         SensingService.permissionOverride = null
         SensingService.enterForegroundOverride = null
-        quiesce()
+        SensingService.teardownFailureOverride = null
+        SensingService.comeUpFailureOverride = null
+        SensingService.startedFailureOverride = null
+        SensingService.teardownFailures.set(0)
+        SensingService.shutdownFailures.set(0)
+        SensingService.resourcesHeldAfterTeardown = -1
     }
 
     /**
@@ -597,10 +614,12 @@ class SensingServiceTest {
             Thread.sleep(1_000)
             for (prefix in WORKER_PREFIXES) {
                 val count = threadsNamed(listOf(prefix))
+                // Both bounds, for the same reason as the restart test: an upper bound
+                // alone passes for a service running nothing.
                 assertTrue(
-                    "a failure offered from RUNNING orphaned a whole set: $count threads " +
-                        "named '$prefix', more than the ${if (prefix == POOL) 2 else 1} one run needs",
-                    count <= if (prefix == POOL) 2 else 1,
+                    "a failure offered from RUNNING left $count threads named '$prefix', " +
+                        "wanted 1..${if (prefix == POOL) 2 else 1}",
+                    count in 1..(if (prefix == POOL) 2 else 1),
                 )
             }
         } finally {
