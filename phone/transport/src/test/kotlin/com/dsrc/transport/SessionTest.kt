@@ -101,6 +101,14 @@ class SessionTest {
     /** A connected pair, each side already through the handshake. */
     private fun pair(
         clock: () -> Long = { System.nanoTime() },
+        /**
+         * The wall clock, injectable for the same reason the mono clock is.
+         *
+         * It defaulted to a constant, which made the wall half of the receipt-stamp
+         * assertion unfailable: a reading taken on arrival and one taken at handling time
+         * are equal when the function ignores time.
+         */
+        wall: () -> Long = { HARNESS_WALL_NS },
         onPhoneFrame: ((Frame) -> Unit)? = null,
         onJetsonFrame: ((Frame) -> Unit)? = null,
         phoneOutputGate: CountDownLatch? = null,
@@ -136,7 +144,7 @@ class SessionTest {
                 deviceId = "test-$role",
                 role = role,
                 monoClock = clock,
-                wallClock = { HARNESS_WALL_NS },
+                wallClock = wall,
                 onFrame = { frame ->
                     synchronized(received) { received.add(frame) }
                     onFrame(frame)
@@ -1659,10 +1667,16 @@ class SessionTest {
         // It was equivalent only while delivery was synchronous. With a delivery queue the
         // two instants are genuinely different, which is what this test forces.
         val clock = AtomicLong(1_000)
+        // The wall clock advances with the mono one, because a *constant* wall clock made
+        // this test's wall assertion unfailable: reading it on arrival and reading it at
+        // handling time give the same answer when the function ignores time. Mutating the
+        // responder to take a fresh wall reading survived the whole suite.
+        val wallBase = HARNESS_WALL_NS
         val gate = CountDownLatch(1)
         val pongs = java.util.concurrent.ConcurrentLinkedQueue<Frame>()
         val (phone, _) = pair(
             clock = { clock.get() },
+            wall = { wallBase + clock.get() },
             onPhoneFrame = { pongs.add(it) },
             // The responder's own delivery thread is blocked behind this.
             onJetsonFrame = { gate.await() },
@@ -1697,7 +1711,7 @@ class SessionTest {
             "the receipt is not the reader's stamp",
         )
         assertEquals(
-            HARNESS_WALL_NS,
+            wallBase + stampedAt,
             decoded.peerRecvWallNs,
             "the wall half of the receipt is not the reader's stamp",
         )
@@ -2366,6 +2380,84 @@ class SessionTest {
             gps.delivered + gps.dropped + gps.refused + gps.failed + gps.abandoned,
             "a frame in flight at shutdown is in no counter: $gps",
         )
+    }
+
+
+    @Test
+    fun `a peer's bad record is counted as refused, never as our own bug`() {
+        // The distinction `failed` exists for -- its own KDoc says "not a refusal: a bug
+        // here, not a bad record" -- and swapping either refusal path to countFailed
+        // survived all 241 tests. `balances` cannot see it: `refused` and `failed` are both
+        // terms in the same sum, so the identity is blind to a swap between any two of its
+        // terms. That is the structural limit of using a sum as the instrument, and it needs
+        // per-heading assertions alongside it.
+        val (phone, _) = pair(clock = { 1_000 })
+
+        // Refused by checkInbound: a valid fix with null coordinates.
+        injectRaw(
+            phone,
+            GpsRecord.noFix(1).toExtensions() + ("valid" to JsonValue.Bool(true)),
+            channel = Channels.GPS,
+            allowReserved = emptySet(),
+        )
+        // Wait for an *outcome*, not for arrival: `received` is set by the reader and the
+        // outcome by the delivery thread, so waiting on the former raced the latter. Waiting
+        // for either terminal heading and then asserting which one keeps the mutation
+        // detectable -- under the swap this wait still completes and the assertion fails.
+        assertTrue(awaitCondition {
+            val c = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+            c.refused + c.failed + c.delivered >= 1
+        }, "no outcome was recorded: ${phone.session.stats().inboundChannels[Channels.GPS]}")
+
+        val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+        assertEquals(1, gps.refused, "a peer's bad record was not counted as refused: $gps")
+        assertEquals(0, gps.failed, "a peer's bad record was filed as our own bug: $gps")
+        assertEquals(0, gps.delivered)
+        assertTrue(gps.balances, "$gps")
+    }
+
+    @Test
+    fun `a handler's MessageError is counted as refused, and its crash as failed`() {
+        // The second refusal path, and the same swap survived there too. One is the peer
+        // sending a bad record; the other is our router rejecting one. They must not share
+        // a heading.
+        val (phone, jetson) = pair(onPhoneFrame = {
+            throw MessageError(RefusalReason.WRONG_TYPE, "the router rejects this")
+        })
+        assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()))
+        assertTrue(awaitCondition {
+            phone.session.stats().inboundChannels.getValue(Channels.GPS).refused >= 1
+        }, "not counted as refused: ${phone.session.stats().inboundChannels[Channels.GPS]}")
+
+        val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
+        assertEquals(1, gps.refused)
+        assertEquals(0, gps.failed, "a MessageError from the router was filed as a crash: $gps")
+        assertTrue(gps.balances, "$gps")
+    }
+
+    @Test
+    fun `an answered ping is counted as delivered`() {
+        // ANSWERED is the one arm of the outcome enum no test reached: REFUSED is covered by
+        // the wrong-direction test and NOT_OURS by the gps tests, while ANSWERED only
+        // happens on a jetson-role session, whose control counters nothing inspected.
+        // Deleting its countDelivered left the identity outright broken with 241 tests green.
+        val clock = AtomicLong(1_000)
+        val (phone, jetson) = pair(clock = { clock.addAndGet(1_000) })
+
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 11))
+        assertTrue(awaitCondition {
+            jetson.session.stats().inboundChannels.getValue(Channels.CONTROL).received >= 1
+        }, "the ping never reached the responder")
+
+        assertTrue(awaitCondition {
+            jetson.session.stats().inboundChannels.getValue(Channels.CONTROL).delivered >= 1
+        }, "an answered ping was counted under no heading: " +
+            "${jetson.session.stats().inboundChannels[Channels.CONTROL]}")
+
+        val control = jetson.session.stats().inboundChannels.getValue(Channels.CONTROL)
+        assertEquals(0, control.refused, "answering was counted as a refusal: $control")
+        assertEquals(0, control.failed)
+        assertTrue(control.balances, "$control")
     }
 
 }

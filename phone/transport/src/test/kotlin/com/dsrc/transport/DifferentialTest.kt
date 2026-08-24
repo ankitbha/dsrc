@@ -113,28 +113,67 @@ class DifferentialTest {
             "the two sides disagree on ${disagreements.size} of ${ours.size} cases:\n" +
                 disagreements.joinToString("\n"),
         )
-        // And the table is not trivially all-ACCEPTED or all-one-reason.
-        assertTrue(ours.values.toSet().size >= 5, "the table exercises too few reasons: ${ours.values.toSet()}")
+        // A size floor, because two tables shrinking together would otherwise pass; and a
+        // distinct-reason floor at what the table actually produces rather than two below it.
+        assertTrue(ours.size >= 30, "the case table has shrunk to ${ours.size}")
+        assertTrue(
+            ours.values.toSet().size >= 7,
+            "the table exercises too few distinct reasons: ${ours.values.toSet()}",
+        )
+        // No case may report a crash: that would match any both-sides-ACCEPTED row.
+        assertTrue(
+            ours.none { it.value.startsWith("CRASH:") },
+            "a decoder crashed rather than refusing: ${ours.filterValues { it.startsWith("CRASH:") }}",
+        )
     }
 
     private fun pythonReasons(): Map<String, String> {
         val root = System.getProperty("dsrc.repoRoot") ?: error("dsrc.repoRoot is not set")
-        val process = ProcessBuilder("python3", "scripts/refusal_reasons.py")
+        // The venv interpreter, not whatever `python3` resolves to. On this machine that
+        // was 3.14.6 against the project's 3.12.14 -- so the reconciliation was being
+        // measured against an interpreter the project does not ship or test with, and
+        // nothing recorded which one ran.
+        val venv = java.io.File(root, ".venv/bin/python3")
+        val interpreter = if (venv.canExecute()) venv.absolutePath else "python3"
+
+        // Streams merged, and the wait comes *first*. Reading stdout to EOF before waitFor
+        // meant the timeout could only be reached after the child had already exited: a peer
+        // sleeping 40 s made this pass after 41 rather than fail at 30. Merging also removes
+        // the deadlock where stderr fills its pipe while nothing is reading it.
+        val process = ProcessBuilder(interpreter, "scripts/refusal_reasons.py")
             .directory(java.io.File(root))
-            .redirectErrorStream(false)
+            .redirectErrorStream(true)
             .start()
-        val out = process.inputStream.bufferedReader().readText()
-        val err = process.errorStream.bufferedReader().readText()
-        require(process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) { "python did not finish" }
-        require(process.exitValue() == 0) { "python failed: $err" }
-        val decoded = (Json.decode(out.trim()) as JsonValue.Obj).entries
+        val collected = StringBuilder()
+        val drain = Thread({
+            process.inputStream.bufferedReader().forEachLine { collected.appendLine(it) }
+        }, "python-drain").also { it.isDaemon = true; it.start() }
+
+        if (!process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            error("python did not finish within 30 s using $interpreter")
+        }
+        drain.join(5_000)
+        val out = collected.toString()
+        require(process.exitValue() == 0) { "python failed ($interpreter): $out" }
+        // The last line, so a warning on stdout cannot break the parse.
+        val payload = out.trim().lines().last { it.startsWith("{") }
+        val decoded = (Json.decode(payload) as JsonValue.Obj).entries
         return decoded.mapValues { (_, value) -> (value as JsonValue.Text).value }
     }
 
-    private fun reasonOf(block: () -> Unit): String =
-        runCatching { block() }
-            .exceptionOrNull()
-            .let { (it as? MessageError)?.reason?.wire ?: "ACCEPTED" }
+    /**
+     * The reason a decoder gave, or how it failed.
+     *
+     * A non-MessageError throwable used to fall into "ACCEPTED", so a *crash* matched any
+     * case the table expects both sides to accept -- and five of them are exactly that.
+     * Making a decoder `error(...)` on zero width survived this test entirely.
+     */
+    private fun reasonOf(block: () -> Unit): String {
+        val thrown = runCatching { block() }.exceptionOrNull() ?: return "ACCEPTED"
+        return (thrown as? MessageError)?.reason?.wire
+            ?: "CRASH:${thrown.javaClass.simpleName}"
+    }
 
     private fun kotlinReasons(): Map<String, String> {
         val gps = GpsRecord.noFix(1).toExtensions()
@@ -180,7 +219,12 @@ class DifferentialTest {
         val empty = ByteArray(0)
 
         return mapOf(
-            "gps required int is null" to reasonOf { GpsRecord.fromWire(gps + ("fix_quality" to JsonValue.Null), empty) },
+            "gps count is null" to reasonOf { GpsRecord.fromWire(gps + ("fix_quality" to JsonValue.Null), empty) },
+            "gps capture stamp is null" to reasonOf { GpsRecord.fromWire(gps + (Fields.CAPTURE_KEY to JsonValue.Null), empty) },
+            "camera frame id is null" to reasonOf { CameraFrameMessage.fromWire(camera + ("frame_id" to JsonValue.Null), empty) },
+            "camera format is null" to reasonOf { CameraFrameMessage.fromWire(camera + ("format" to JsonValue.Null), empty) },
+            "advisory units is null" to reasonOf { AdvisoryMessage.fromWire(advisory() + ("units" to JsonValue.Null), empty) },
+            "rate_cmd trigger is null" to reasonOf { RateCommand.fromWire(rateCmd() + ("trigger" to JsonValue.Null), empty) },
             "gps required bool is null" to reasonOf { GpsRecord.fromWire(gps + ("valid" to JsonValue.Null), empty) },
             "gps valid fix with null coordinates" to reasonOf { GpsRecord.fromWire(gps + ("valid" to JsonValue.Bool(true)), empty) },
             "gps negative count" to reasonOf { GpsRecord.fromWire(gps + ("num_sats" to JsonValue.Num(-1)), empty) },

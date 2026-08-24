@@ -53,7 +53,15 @@ PING = {
 }
 
 CASES = {
-    "gps required int is null": (GpsRecord, {**GPS, "fix_quality": None}, b""),
+    "gps count is null": (GpsRecord, {**GPS, "fix_quality": None}, b""),
+    # require_int's own null path, which the case above does not reach: fix_quality goes
+    # through check_count. A capture stamp is require_int on every message.
+    "gps capture stamp is null": (GpsRecord, {**GPS, "t_capture_mono_ns": None}, b""),
+    "camera frame id is null": (CameraFrame, {**CAMERA, "frame_id": None}, b""),
+    # require_str's null path, which had no case and no fix.
+    "camera format is null": (CameraFrame, {**CAMERA, "format": None}, b""),
+    "advisory units is null": (AdvisoryMessage, {**ADVISORY, "units": None}, b""),
+    "rate_cmd trigger is null": (RateCommand, {**RATE_CMD, "trigger": None}, b""),
     "gps required bool is null": (GpsRecord, {**GPS, "valid": None}, b""),
     "gps valid fix with null coordinates": (GpsRecord, {**GPS, "valid": True}, b""),
     "gps negative count": (GpsRecord, {**GPS, "num_sats": -1}, b""),

@@ -196,6 +196,13 @@ def require_number(extensions: Mapping[str, Any], field: str) -> float:
 
 def require_str(extensions: Mapping[str, Any], field: str) -> str:
     value = require(extensions, field)
+    # Null before type, completing a fix that landed on require_int and require_bool and
+    # missed this one. Nine string fields diverged from Kotlin because of it: camera
+    # `format`; advisory `units`, `lane_text`, `merge_text`, `traffic_text`,
+    # `confidence_label`; rate_cmd `trigger`; here `request_url`; telemetry
+    # `thermal_status`.
+    if value is None:
+        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)
     if not isinstance(value, str):
         raise MessageError(f"{field} is {type(value).__name__}, expected str", REASON_WRONG_TYPE)
     return value
