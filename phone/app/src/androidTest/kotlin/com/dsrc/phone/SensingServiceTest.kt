@@ -564,4 +564,48 @@ class SensingServiceTest {
         }
     }
 
+
+    @Test
+    fun aFailureOfferedFromRunningDoesNotLeaveTheWholeSetLive() {
+        // The route the removed re-entrancy guard covered, and my enumeration missed it a
+        // second time. react(STARTING)'s try encloses `handle(Started)` as well as
+        // `onSensingUp()`, and `handle` publishes the state, which calls every listener. So
+        // a throw from a *listener* -- after come-up has already succeeded -- is caught as a
+        // start failure and offered as Failed while the machine is RUNNING. The machine
+        // accepts that (RUNNING + Failed -> STOPPED_ERROR) and nothing on the path tears
+        // anything down, so all seven fields and every worker stay live. STOPPED_ERROR then
+        // accepts Start, and the second come-up runs on top of the first.
+        //
+        // The listener also calls start() before throwing, because that is what makes AMS
+        // advance the last-delivered startId past the one release() passes to
+        // stopSelf(lastStartId): the stop is declined and the same instance takes the
+        // queued Start. Without it the service is destroyed and the leak is hidden behind a
+        // fresh process.
+        val thrown = java.util.concurrent.atomic.AtomicBoolean(false)
+        lateinit var listener: SensingStatus.Listener
+        listener = SensingStatus.Listener { state ->
+            if (state == SensingState.RUNNING && thrown.compareAndSet(false, true)) {
+                SensingService.start(context)
+                throw RuntimeException("a listener that throws is a UI bug, not a sensing failure")
+            }
+        }
+        SensingStatus.shared.addListener(listener)
+        try {
+            SensingService.start(context)
+            await(SensingState.RUNNING)
+            Thread.sleep(1_000)
+            for (prefix in WORKER_PREFIXES) {
+                val count = threadsNamed(listOf(prefix))
+                assertTrue(
+                    "a throwing listener orphaned a whole set: $count threads named " +
+                        "'$prefix', more than the ${if (prefix == POOL) 2 else 1} one run needs",
+                    count <= if (prefix == POOL) 2 else 1,
+                )
+            }
+        } finally {
+            SensingStatus.shared.removeListener(listener)
+            context.stopService(android.content.Intent(context, SensingService::class.java))
+        }
+    }
+
 }

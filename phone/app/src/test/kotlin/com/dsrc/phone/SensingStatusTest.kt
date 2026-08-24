@@ -1,6 +1,7 @@
 package com.dsrc.phone
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SensingStatusTest {
@@ -102,6 +103,61 @@ class SensingStatusTest {
             reader.join(2_000)
             assertEquals("the reader never saw the published state", SensingState.RUNNING, seen.get())
         }
+    }
+
+
+    @Test
+    fun `a listener that throws does not starve the listeners behind it`() {
+        // Insertion order, and the delivery loop had no guard: the first listener to throw
+        // ended the loop, so every listener added after it kept a stale state -- and for a
+        // terminal state there is no next change to correct it.
+        val status = SensingStatus()
+        val before = mutableListOf<SensingState>()
+        val after = mutableListOf<SensingState>()
+        status.addListener { before.add(it) }
+        // Throws on the change only, not on the attach. A listener that threw on both
+        // made the failure count 2 and the number stop meaning "one delivery failed".
+        status.addListener { if (it == SensingState.STARTING) throw RuntimeException("a bug in some UI") }
+        status.addListener { after.add(it) }
+
+        status.set(SensingState.STARTING)
+
+        assertEquals(listOf(SensingState.IDLE, SensingState.STARTING), before)
+        assertEquals(
+            "the listener behind the throwing one was never told",
+            listOf(SensingState.IDLE, SensingState.STARTING),
+            after,
+        )
+        assertEquals(1L, status.listenerFailures.get().toLong())
+        assertTrue(status.lastListenerFailure?.contains("a bug in some UI") == true)
+    }
+
+    @Test
+    fun `a listener that throws on being attached does not escape addListener`() {
+        // The other delivery site. A new listener is handed the current state immediately,
+        // and that call was unguarded too -- so registering a faulty listener threw at
+        // whoever registered it, which in the Activity's case is onStart.
+        val status = SensingStatus()
+        status.addListener { throw RuntimeException("throws on attach") }
+        assertEquals(1L, status.listenerFailures.get().toLong())
+        assertEquals(
+            "it stays registered; it is not the holder's job to judge",
+            1L,
+            status.listenerCount.toLong(),
+        )
+    }
+
+    @Test
+    fun `a throwing listener is not reported as a state change failure`() {
+        // The severe half. `set` is called from the service's own handle(), inside
+        // react(STARTING)'s try and after come-up has already succeeded, so an escaping
+        // listener exception was caught as a *start failure* and offered as Failed while the
+        // machine was RUNNING -- which the machine accepts, with no teardown behind it. The
+        // state must still advance and the exception must not come back out.
+        val status = SensingStatus()
+        status.addListener { throw RuntimeException("boom") }
+        status.set(SensingState.RUNNING)
+        assertEquals("the state must advance regardless", SensingState.RUNNING, status.state)
     }
 
 }

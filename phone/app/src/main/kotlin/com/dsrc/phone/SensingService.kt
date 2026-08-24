@@ -185,7 +185,23 @@ class SensingService : LifecycleService() {
             SensingState.IDLE,
             SensingState.STOPPED_ERROR,
             SensingState.STOPPED_PERMISSION_REVOKED,
-            -> release()
+            -> {
+                // Teardown belongs to *entering a stopped state*, not to the one transition
+                // that happens to pass through STOPPING. Round 4 found the hole by the door
+                // I had not enumerated: `react(STARTING)`'s try encloses `handle(Started)`
+                // too, so anything raised while publishing RUNNING is caught as a start
+                // failure and offered as `Failed` from RUNNING -- an arm the machine accepts
+                // -- and that route reaches STOPPED_ERROR without going near onSensingDown.
+                // Every worker stayed live, and the Start that STOPPED_ERROR accepts then
+                // built a second set on top.
+                //
+                // Putting it here closes the route for whatever offers `Failed` next -- a
+                // link watchdog, a camera-bind escalation -- rather than for the one trigger
+                // that exposed it. onSensingDown is idempotent and does not throw, so
+                // arriving here from STOPPING, where it has already run, costs nothing.
+                onSensingDown()
+                release()
+            }
             SensingState.RUNNING -> Unit
         }
     }
