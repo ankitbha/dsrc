@@ -228,6 +228,18 @@ milliseconds that neither the validator nor I could force.
 The two tests added alongside are named for what they do verify — a failed start leaves
 nothing running, and a restart does not accumulate threads — not for the guard.
 
+## D2 (`KEEP_ONLY_LATEST`) is unpinned, and why
+
+Swapping `STRATEGY_KEEP_ONLY_LATEST` for `STRATEGY_BLOCK_PRODUCER` survives the suite. The
+two are hard to tell apart from outside: under a slow analyser both yield a reduced frame
+rate at the pipeline, and the difference — whether the camera skipped frames or the producer
+was throttled — lives in statistics CameraX does not expose. Distinguishing them would need
+the camera's own dropped-frame counters.
+
+It stays as `KEEP_ONLY_LATEST` on the plan's reasoning (a stale frame is worth less than a
+fresh one, and blocking the producer couples the camera's rate to the encoder's), recorded
+as a choice the tests do not defend rather than one they do.
+
 ## 8. Needs sign-off
 
 1. **O1** — whether `t_capture_mono_ns` should stay `elapsedRealtimeNanos` at the

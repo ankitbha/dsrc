@@ -59,6 +59,20 @@ class CameraCaptureTest {
             owner.stop()
         }
 
+        /**
+         * Stop the source only, leaving the lifecycle alive.
+         *
+         * This is production's shape: `SensingService` is the LifecycleOwner and
+         * `onSensingDown` runs on a Stop intent with the service still alive, so nothing
+         * destroys the lifecycle. Calling `owner.stop()` as well -- which the full teardown
+         * does -- masks the source's own release entirely, because CameraX unbinds when a
+         * lifecycle is destroyed whatever the source did. That is why deleting
+         * `unbindAll()` from `stop()` survived.
+         */
+        fun stopSourceOnly() {
+            source.stop()
+        }
+
         val closeFailures: Long get() = source.closeFailures
     }
 
@@ -217,6 +231,75 @@ class CameraCaptureTest {
                 "so the setting is not reaching the encoder",
             lowFrame.jpeg.size < highBytes,
         )
+    }
+
+
+    @Test
+    fun stoppingReleasesTheCameraDevice() {
+        // Deleting unbindAll() from CameraXSource.stop() survived, because bind() calls
+        // unbindAll() itself before every bind -- so the next start released the camera and
+        // the test's stated mechanism ("a second bind gets nothing") was delivered by a
+        // different line entirely. What the line in stop() actually buys is that the camera
+        // is released *when sensing stops* rather than whenever something next binds: on a
+        // phone in a car that is the difference between the camera powering down and staying
+        // on for the rest of the drive.
+        //
+        // The platform records it, so the platform is what gets asked.
+        val harness = start(SensingConfig(cameraHz = 5.0))
+        assertNotNull("no frame arrived", awaitOneFrame(harness.pipeline, 15_000))
+        assertEquals("the camera should be connected while running", "CONNECT", lastCameraEvent())
+
+        // Only the source, so the lifecycle stays alive -- production's shape, and the only
+        // arrangement in which the source's own release is observable at all.
+        harness.stopSourceOnly()
+
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline && lastCameraEvent() != "DISCONNECT") {
+            Thread.sleep(100)
+        }
+        assertEquals(
+            "the camera was still held after stop(): ${cameraClientLog().take(3)}",
+            "DISCONNECT",
+            lastCameraEvent(),
+        )
+    }
+
+    @Test
+    fun stoppingImmediatelyAfterStartingDoesNotKillTheProcess() {
+        // CameraXSource binds asynchronously, so a stop that lands before the future
+        // completes used to bind against a destroyed lifecycle: an IllegalArgumentException
+        // on the main thread, which is unrecoverable process death rather than a failed
+        // test. The `stopped` flag guards it and deleting the flag survived the suite --
+        // nothing raced the bind.
+        //
+        // This test passing at all is the assertion: if the process dies, the run fails.
+        repeat(8) {
+            val harness = start(SensingConfig(cameraHz = 5.0))
+            // No wait: the bind future is deliberately still in flight.
+            harness.stop()
+        }
+        // And the camera still works afterwards, so the races left nothing wedged.
+        val harness = start(SensingConfig(cameraHz = 5.0))
+        assertNotNull("the camera was wedged by the start/stop races", awaitOneFrame(harness.pipeline, 15_000))
+    }
+
+    /** The camera service's own client log for this package, most recent first. */
+    private fun cameraClientLog(): List<String> {
+        val dump = shell("dumpsys media.camera")
+        return dump.lines()
+            .filter { it.contains(context.packageName) && (it.contains("CONNECT") || it.contains("DISCONNECT")) }
+            .map { it.trim() }
+    }
+
+    private fun lastCameraEvent(): String? =
+        cameraClientLog().firstOrNull()?.let { if (it.contains("DISCONNECT")) "DISCONNECT" else "CONNECT" }
+
+    private fun shell(command: String): String {
+        val descriptor = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+            .uiAutomation.executeShellCommand(command)
+        return android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use {
+            it.readBytes().toString(Charsets.UTF_8)
+        }
     }
 
 }
