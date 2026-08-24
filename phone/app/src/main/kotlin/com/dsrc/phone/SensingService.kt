@@ -205,6 +205,34 @@ class SensingService : LifecycleService() {
             }
 
     private fun onSensingUp() {
+        // Re-entrancy first. `react()` reaches the terminal-stopped states through
+        // `release()` alone, so after a throw part-way through this method the allocations
+        // above the throw stay live until `onDestroy`, and cleanup depends on
+        // `stopSelf(lastStartId)` winning -- which the startId overload exists precisely to
+        // *lose* when a start is queued behind it. A retried Start then re-enters here and
+        // overwrites all seven fields, and the first set becomes unreachable and is never
+        // stopped: a link thread reconnecting forever, a sender polling forever, and a GNSS
+        // callback still registered.
+        //
+        // Releasing anything already published makes that impossible rather than unlikely,
+        // and unlike adding `onSensingDown()` to the terminal branch it is observable: the
+        // harm is a *duplicate* thread per resource, which a census can count.
+        if (link != null || pipeline != null || gpsSource != null || frameSender != null) {
+            Log.w(TAG, "onSensingUp re-entered with resources live; releasing them first")
+            onSensingDown()
+        }
+        try {
+            allocateAndStart()
+        } catch (t: Throwable) {
+            // Whatever was published before the throw is released here rather than left to
+            // a teardown that may not come.
+            Log.e(TAG, "sensing failed to come up; releasing what was allocated", t)
+            onSensingDown()
+            throw t
+        }
+    }
+
+    private fun allocateAndStart() {
         val config = SensingConfig()
 
         // The link first, so both modalities have somewhere to send to before either can
@@ -257,6 +285,11 @@ class SensingService : LifecycleService() {
             "capture starting: camera ${config.cameraHz} Hz, gps ${config.gpsHz} Hz, " +
                 "link ${LinkConfig().host}:${LinkConfig().port}",
         )
+        // Last, so a test can fail a start with every resource already published -- which is
+        // the only shape in which the leak this guards against can happen. Unreachable in
+        // production for the same reason the other two seams are: nothing here throws on a
+        // healthy device.
+        comeUpFailureOverride?.invoke()
     }
 
     /**
@@ -433,6 +466,15 @@ class SensingService : LifecycleService() {
          */
         @Volatile
         internal var enterForegroundOverride: (() -> Unit)? = null
+
+        /**
+         * Test seam for a failure *after* everything is allocated.
+         *
+         * Null in production. The leak it exposes needs a throw with all seven fields
+         * published, and nothing on a healthy device throws there.
+         */
+        @Volatile
+        internal var comeUpFailureOverride: (() -> Unit)? = null
         private const val NOTIFICATION_ID = 1
 
         /**

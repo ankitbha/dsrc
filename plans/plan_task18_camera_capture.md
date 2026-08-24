@@ -209,6 +209,25 @@ sizes are not representative of a road.
 
 ---
 
+## An unpinnable guard, kept and not claimed
+
+`react()` reaches `STOPPED_ERROR` and `STOPPED_PERMISSION_REVOKED` through `release()`
+alone, so a throw part-way through `onSensingUp` left every allocation above it live until
+`onDestroy` — and cleanup then depended on `stopSelf(lastStartId)` winning, which the
+startId overload exists precisely to *lose* when a start is queued behind it. A retried
+Start re-entered and overwrote all seven fields, orphaning the first set: a link thread
+reconnecting forever, a sender polling forever, a GNSS callback still registered.
+
+`onSensingUp` now releases anything already published before allocating, and releases what
+it allocated if the come-up throws. **Neither change is pinned by a test, and that is
+stated rather than papered over.** Removing either leaves the instrumented suite green,
+because `onDestroy` cleans up by another route. Observing the difference needs the service
+to survive its own `stopSelf`, which needs a start queued behind it — a window of about two
+milliseconds that neither the validator nor I could force.
+
+The two tests added alongside are named for what they do verify — a failed start leaves
+nothing running, and a restart does not accumulate threads — not for the guard.
+
 ## 8. Needs sign-off
 
 1. **O1** — whether `t_capture_mono_ns` should stay `elapsedRealtimeNanos` at the

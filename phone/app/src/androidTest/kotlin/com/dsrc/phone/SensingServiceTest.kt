@@ -409,4 +409,84 @@ class SensingServiceTest {
         SensingService.start(context)
         await(SensingState.RUNNING)
     }
+
+    @Test
+    fun aFailedStartLeavesNothingRunning() {
+        // react() reaches the terminal-stopped states through release() alone, so before
+        // the guard, a throw part-way through onSensingUp left every allocation above it
+        // live until onDestroy -- and cleanup depended on stopSelf(lastStartId) winning,
+        // which the startId overload exists precisely to *lose* when a start is queued
+        // behind it. A retried Start then overwrote all seven fields and orphaned the first
+        // set: a link thread reconnecting forever, a sender polling forever, a GNSS callback
+        // still registered.
+        //
+        // **This does not pin the guard, and the name no longer claims it does.** Removing
+        // either the re-entrancy release or the failure catch leaves this green, because
+        // release() -> stopSelf() -> onDestroy() -> onSensingDown() cleans up anyway. The
+        // window the guard closes needs the service to *survive* its own stopSelf, which
+        // takes a start queued behind it -- a ~2 ms race neither the validator nor I could
+        // force from a test. What is verified here is the weaker, still-worth-having claim:
+        // a failed start leaves nothing running, by whatever route.
+        SensingService.comeUpFailureOverride = { throw IllegalStateException("a failed come-up") }
+        try {
+            SensingService.start(context)
+            await(SensingState.STOPPED_ERROR)
+
+            // Nothing may be left running after a failed start.
+            for (prefix in WORKER_PREFIXES) {
+                assertTrue(
+                    "a thread named '$prefix' survived a failed start",
+                    pollUntil(10_000) { threadsNamed(listOf(prefix)) == 0 },
+                )
+            }
+
+            // And a retry must not stack a second set on top of the first.
+            repeat(3) {
+                SensingService.start(context)
+                await(SensingState.STOPPED_ERROR)
+            }
+            for (prefix in WORKER_PREFIXES) {
+                val count = threadsNamed(listOf(prefix))
+                assertTrue(
+                    "three failed starts left $count threads named '$prefix'",
+                    count == 0,
+                )
+            }
+        } finally {
+            SensingService.comeUpFailureOverride = null
+            context.stopService(android.content.Intent(context, SensingService::class.java))
+        }
+    }
+
+    @Test
+    fun aRestartLeavesNoMoreThreadsThanOneRunDoes() {
+        // Also weaker than it looks, for the same reason: the service is destroyed between
+        // the two starts, so there is never a live set to double. It verifies that a restart
+        // does not accumulate threads, which is worth having; it does not verify the
+        // re-entrancy release.
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+        for (prefix in WORKER_PREFIXES) {
+            assertTrue("nothing named '$prefix' started", pollUntil(10_000) { threadsNamed(listOf(prefix)) > 0 })
+        }
+
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+        Thread.sleep(500)
+
+        for (prefix in WORKER_PREFIXES) {
+            val count = threadsNamed(listOf(prefix))
+            // pool- covers the encoder and CameraX's analyser, so two is its healthy count.
+            val limit = if (prefix == POOL) 2 else 1
+            assertTrue(
+                "restarting left $count threads named '$prefix', more than the $limit expected",
+                count <= limit,
+            )
+        }
+        context.stopService(android.content.Intent(context, SensingService::class.java))
+        for (prefix in WORKER_PREFIXES) {
+            assertTrue("'$prefix' outlived the service", pollUntil(10_000) { threadsNamed(listOf(prefix)) == 0 })
+        }
+    }
+
 }
