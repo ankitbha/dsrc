@@ -339,6 +339,16 @@ class DifferentialTest {
             "camera_hz" to JsonValue.Real(5.0), "gps_hz" to JsonValue.Real(1.0),
             "imu_hz" to JsonValue.Real(50.0), "here_hz" to JsonValue.Real(0.2),
         )
+        fun hereQuery(vararg overrides: Pair<String, JsonValue>, drop: String? = null): JsonValue.Obj {
+            val base = mutableMapOf<String, JsonValue>(
+                "in" to JsonValue.Text("corridor:40.7,-74.0;40.8,-74.1;r=200"),
+                "location_ref" to JsonValue.Text("shape"),
+            )
+            overrides.forEach { base[it.first] = it.second }
+            drop?.let { base.remove(it) }
+            return JsonValue.Obj(base)
+        }
+
         fun rateCmd(r: Map<String, JsonValue> = rates) = mapOf(
             Fields.CAPTURE_KEY to JsonValue.Num(1),
             "rates" to JsonValue.Obj(r),
@@ -391,6 +401,17 @@ class DifferentialTest {
             "advisory action head outside the set" to case(advisory(action + ("merge_mode" to JsonValue.Text("ram_it"))), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
             "advisory action missing a head" to case(advisory(action - "merge_mode"), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
             "advisory units outside the three" to case(advisory() + ("units" to JsonValue.Text("furlongs")), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            // The optional `here` object, added with task 21. Absent must be ACCEPTED on both
+            // sides -- that is what lets the field be added without a coordinated flag day,
+            // so it is the row worth reconciling first.
+            "rate_cmd without a here object is accepted by both" to case(rateCmd(), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd with a here object is accepted by both" to case(rateCmd() + ("here" to hereQuery()), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here is not an object" to case(rateCmd() + ("here" to JsonValue.Text("corridor")), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here missing in" to case(rateCmd() + ("here" to hereQuery(drop = "in")), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here in is null" to case(rateCmd() + ("here" to hereQuery("in" to JsonValue.Null)), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here in is not a string" to case(rateCmd() + ("here" to hereQuery("in" to JsonValue.Num(7))), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here in is blank" to case(rateCmd() + ("here" to hereQuery("in" to JsonValue.Text("   "))), empty) { e, p -> RateCommand.fromWire(e, p) },
+            "rate_cmd here location_ref is null" to case(rateCmd() + ("here" to hereQuery("location_ref" to JsonValue.Null)), empty) { e, p -> RateCommand.fromWire(e, p) },
             "rate_cmd rates is null" to case(rateCmd() + ("rates" to JsonValue.Null), empty) { e, p -> RateCommand.fromWire(e, p) },
             "rate_cmd zero rate" to case(rateCmd(rates + ("gps_hz" to JsonValue.Real(0.0))), empty) { e, p -> RateCommand.fromWire(e, p) },
             "rate_cmd rate above the ceiling" to case(rateCmd(rates + ("gps_hz" to JsonValue.Real(1000.001))), empty) { e, p -> RateCommand.fromWire(e, p) },

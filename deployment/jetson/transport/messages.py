@@ -669,11 +669,63 @@ class AdvisoryMessage:
 
 
 @dataclass(frozen=True)
+class HereQuery:
+    """The shape of the HERE traffic query, chosen here and executed by the phone.
+
+    Both fields are HERE's own parameters and are passed through verbatim. Neither
+    is parsed on the phone: validating HERE's query grammar there would mean
+    tracking their API from a device that cannot see it, and getting it wrong
+    would refuse a query this side meant.
+    """
+
+    in_: str
+    location_ref: str
+
+    def to_wire(self) -> dict[str, Any]:
+        return {"in": self.in_, "location_ref": self.location_ref}
+
+    @classmethod
+    def from_wire(cls, value: Any) -> "HereQuery | None":
+        """Decode the optional ``here`` object.
+
+        Absent is ``None`` -- "this command does not change the query" -- which is
+        what lets the field be added without a flag day. The spec spells out the
+        asymmetry: an unknown header field is ignored, so an old receiver tolerates
+        a new sender, but a new receiver that *requires* a field refuses an old
+        sender's command outright.
+
+        Present but malformed is a refusal, not a shrug. A command that names a
+        query and gets it wrong is not the same as one that says nothing, and
+        ignoring it would leave the phone querying yesterday's corridor while this
+        side believed it had moved.
+        """
+        if value is None:
+            return None
+        if not isinstance(value, Mapping):
+            raise MessageError("'here' is not an object", REASON_WRONG_TYPE)
+        return cls(in_=_here_text(value, "in"), location_ref=_here_text(value, "location_ref"))
+
+
+def _here_text(value: Mapping[str, Any], key: str) -> str:
+    if key not in value:
+        raise MessageError(f"'here.{key}' is missing", REASON_MISSING_FIELD)
+    text = value[key]
+    if text is None:
+        raise MessageError(f"'here.{key}' is null", REASON_NULL_NOT_ALLOWED)
+    if not isinstance(text, str):
+        raise MessageError(f"'here.{key}' is not a string", REASON_WRONG_TYPE)
+    if not text.strip():
+        raise MessageError(f"'here.{key}' is blank", REASON_OUT_OF_RANGE)
+    return text
+
+
+@dataclass(frozen=True)
 class RateCommand:
     t_capture_mono_ns: int
     rates: dict[str, float]
     trigger: str
     shadow: bool
+    here: "HereQuery | None" = None
 
     CHANNEL: ClassVar[Channel] = Channel.RATE_CMD
 
@@ -684,6 +736,7 @@ class RateCommand:
                 "rates": {key: to_wire_number(self.rates[key]) for key in RATE_KEYS},
                 "trigger": self.trigger,
                 "shadow": bool(self.shadow),
+                **({"here": self.here.to_wire()} if self.here is not None else {}),
             },
             b"",
         )
@@ -700,6 +753,7 @@ class RateCommand:
                     f"rates.{key} is {value}, outside (0, {MAX_RATE_HZ}]", REASON_OUT_OF_RANGE
                 )
         return cls(
+            here=HereQuery.from_wire(extensions.get("here")),
             t_capture_mono_ns=require_capture(extensions),
             rates=rates,
             trigger=require_str(extensions, "trigger"),
