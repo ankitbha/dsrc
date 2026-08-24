@@ -26,13 +26,25 @@ data class SessionStats(
     val framesReceived: Long,
     val heartbeatsSent: Long,
     val heartbeatsReceived: Long,
-    /** Messages the peer sent that we refused: a bug there. */
-    /** Frames the application's own handler threw on. Not a link failure. */
+    /**
+     * Frames the application's own handler threw on. Not a link failure, and not a bad
+     * record from the peer: a bug in our own router, which is why it is neither of the
+     * refusal maps.
+     */
     val deliveryFailures: Long,
     val lastDeliveryFailure: String?,
+    /** Messages the peer sent that we refused: a bug there. */
     val inboundRefusals: Map<String, Long>,
     /** Messages we refused to send: a bug here. */
     val outboundRefusals: Map<String, Long>,
+    /**
+     * Our own framing refusals: an over-size header, or a channel not in the table.
+     *
+     * Kept out of [outboundRefusals] because that map is the spec's closed vocabulary and
+     * a framing condition is not one of its nine reasons.
+     */
+    val outboundFramingRefusals: Long,
+    val lastOutboundFramingRefusal: String?,
     val channels: Map<String, ChannelCounters>,
 )
 
@@ -81,6 +93,11 @@ class Session(
     private val framesReceived = AtomicLong(0)
     private val heartbeatsSent = AtomicLong(0)
     private val heartbeatsReceived = AtomicLong(0)
+    private val outboundFramingRefusals = AtomicLong(0)
+
+    @Volatile
+    private var lastOutboundFramingRefusal: String? = null
+
     private val deliveryFailures = AtomicLong(0)
 
     @Volatile
@@ -228,11 +245,26 @@ class Session(
             countOutboundRefusal(e.reason.wire)
             return false
         } catch (e: FramingError) {
-            countOutboundRefusal("framing")
+            // Counted apart from the refusal reasons, not folded in as "framing". The
+            // spec calls the reasons a closed vocabulary -- "exactly the second column
+            // above" -- so an invented tenth key gives a consumer keying on
+            // RefusalReason a bucket it cannot name. These are framing conditions: an
+            // over-size header, or a channel not in the table.
+            countOutboundFramingRefusal(e)
+            return false
+        } catch (e: JsonError) {
+            // A header that cannot be encoded at all -- a lone surrogate in a string
+            // value, say. Also framing: the spec's framing table lists "header is not
+            // valid UTF-8". JsonError extends IllegalArgumentException, so without this
+            // clause it fell through to the one below and a malformed string was counted
+            // as `non_finite`, which names the wrong cause -- the entire point of
+            // counting by reason.
+            countOutboundFramingRefusal(e)
             return false
         } catch (e: IllegalArgumentException) {
-            // The JSON encoder's own refusals -- a non-finite value that slipped the
-            // check above. Counted rather than thrown at a sensor callback.
+            // Doubles.format's own refusal: a non-finite value that slipped checkAllFinite.
+            // A backstop rather than the main path, and counted rather than thrown at a
+            // sensor callback.
             countOutboundRefusal(RefusalReason.NON_FINITE.wire)
             return false
         }
@@ -485,6 +517,11 @@ class Session(
         inboundRefusals[reason] = (inboundRefusals[reason] ?: 0) + 1
     }
 
+    private fun countOutboundFramingRefusal(cause: Throwable) {
+        outboundFramingRefusals.incrementAndGet()
+        lastOutboundFramingRefusal = "${cause.javaClass.simpleName}: ${cause.message}"
+    }
+
     private fun countOutboundRefusal(reason: String) = synchronized(refusalLock) {
         outboundRefusals[reason] = (outboundRefusals[reason] ?: 0) + 1
     }
@@ -498,6 +535,8 @@ class Session(
             deliveryFailures = deliveryFailures.get(),
             lastDeliveryFailure = lastDeliveryFailure,
             inboundRefusals = inboundRefusals.toMap(),
+            outboundFramingRefusals = outboundFramingRefusals.get(),
+            lastOutboundFramingRefusal = lastOutboundFramingRefusal,
             outboundRefusals = outboundRefusals.toMap(),
             channels = queues.counters(),
         )

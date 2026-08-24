@@ -219,8 +219,13 @@ object OutboundValidation {
         payload: ByteArray,
         allowReserved: Set<String> = emptySet(),
     ) {
+        // A FramingError, not a refusal. The spec's framing table is explicit -- "`ch` not
+        // in the channel table -> framing error, session ends" -- and the read path already
+        // treats it that way. Calling it `no_typed_message` put a framing condition into
+        // the refusal vocabulary, where `no_typed_message` means something narrower: a
+        // channel that is in the table but has no typed message.
         if (!Channels.isKnown(channel)) {
-            throw MessageError(RefusalReason.NO_TYPED_MESSAGE, "unknown channel '$channel'")
+            throw FramingError("unknown channel '$channel'")
         }
         Fields.checkReserved(extensions, allowReserved)
 

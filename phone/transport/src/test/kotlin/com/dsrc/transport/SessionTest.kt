@@ -460,10 +460,78 @@ class SessionTest {
     }
 
     @Test
-    fun `an unknown channel is refused`() {
+    fun `an unknown channel is refused as a framing condition`() {
+        // The spec's framing table: "`ch` not in the channel table -> framing error,
+        // session ends", and the read path already treats it that way. On the send path it
+        // must not end our own session, but it must not be filed as `no_typed_message`
+        // either -- that reason means something narrower, a channel that is in the table
+        // and has no typed message.
+        //
+        // The previous version asserted only that *some* refusal was counted, which is
+        // blind to the reason being wrong.
         val (phone, _) = pair()
-        assertFalse(phone.session.send("nonsense", emptyMap()))
-        assertTrue(phone.session.stats().outboundRefusals.isNotEmpty())
+        assertFalse(phone.session.send("not_a_channel", emptyMap()))
+
+        assertEquals(1, phone.session.stats().outboundFramingRefusals)
+        assertTrue(
+            phone.session.stats().outboundRefusals.isEmpty(),
+            "filed under a refusal reason: ${phone.session.stats().outboundRefusals}",
+        )
+        assertTrue(phone.session.isRunning, "refusing to send ended our own session")
+    }
+
+    @Test
+    fun `a header that cannot be encoded is a framing refusal, not a non-finite one`() {
+        // A lone surrogate is not valid text, so the header cannot be encoded at all --
+        // the spec's framing table lists "header is not valid UTF-8". JsonError extends
+        // IllegalArgumentException, so before the dedicated clause it fell through to the
+        // one below and a malformed string was counted as `non_finite`: a counter naming
+        // the wrong cause, which is the entire point of counting by reason.
+        val (phone, _) = pair()
+        val lonelyHighSurrogate = "\uD800"
+
+        assertFalse(
+            phone.session.send(
+                Channels.GPS,
+                GpsRecord.noFix(1).toExtensions() + ("note" to JsonValue.Text(lonelyHighSurrogate)),
+            ),
+            "an unencodable header was accepted",
+        )
+        assertEquals(1, phone.session.stats().outboundFramingRefusals)
+        assertTrue(
+            RefusalReason.NON_FINITE.wire !in phone.session.stats().outboundRefusals,
+            "counted as non_finite: ${phone.session.stats().outboundRefusals}",
+        )
+        assertTrue(
+            phone.session.stats().outboundRefusals.isEmpty(),
+            "filed under a refusal reason: ${phone.session.stats().outboundRefusals}",
+        )
+    }
+
+    @Test
+    fun `every outbound refusal reason is in the spec's closed vocabulary`() {
+        // "The reasons are a closed vocabulary -- exactly the second column above, so an
+        // implementation reads off which to emit rather than guessing." A tenth key gives
+        // a consumer keying on RefusalReason a bucket it cannot name; "framing" was one.
+        val (phone, _) = pair()
+        val vocabulary = RefusalReason.entries.map { it.wire }.toSet()
+
+        // One of each thing a caller can get wrong, so the map is populated rather than
+        // trivially empty.
+        phone.session.send("not_a_channel", emptyMap())
+        phone.session.send(Channels.CONTROL, mapOf("probe" to JsonValue.Num(1)))
+        phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions() - "valid")
+        phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions() + ("hdop" to JsonValue.Real(Double.NaN)))
+        phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions() + (Session.HEARTBEAT to JsonValue.Bool(true)))
+        phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions(), payload = byteArrayOf(1))
+        phone.session.send(Channels.CONTROL, paddedPing(Protocol.MAX_HEADER_BYTES))
+
+        val reported = phone.session.stats().outboundRefusals.keys
+        assertTrue(reported.isNotEmpty(), "nothing was refused, so this proves nothing")
+        assertTrue(
+            reported.all { it in vocabulary },
+            "outside the vocabulary: ${reported - vocabulary}",
+        )
     }
 
     @Test
@@ -902,11 +970,23 @@ class SessionTest {
 
         // And one byte more is refused here, where the caller can see it, rather than on
         // the writer thread where it cannot.
+        // A delta, because the binary search above refuses on its way to the boundary.
+        val framingBefore = phone.session.stats().outboundFramingRefusals
         assertFalse(
             phone.session.send(Channels.CONTROL, paddedPing(fits + 1), wantsWireStamp = true),
             "a header one byte over the limit was accepted",
         )
-        assertTrue(phone.session.stats().outboundRefusals.isNotEmpty(), "the refusal was not counted")
+        // The framing counter, not the refusal map: an over-size header is a framing
+        // condition and the refusal reasons are a closed vocabulary of nine.
+        assertEquals(
+            framingBefore + 1,
+            phone.session.stats().outboundFramingRefusals,
+            "the refusal was not counted",
+        )
+        assertTrue(
+            phone.session.stats().outboundRefusals.isEmpty(),
+            "a framing condition was filed as a refusal reason: ${phone.session.stats().outboundRefusals}",
+        )
     }
 
     /** The largest padding length this session accepts on a wire-stamped control message. */
