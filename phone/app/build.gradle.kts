@@ -87,7 +87,13 @@ val verifyMergedManifest by tasks.registering {
         val manifest = manifestDir.get().asFile.walkTopDown()
             .firstOrNull { it.name == "AndroidManifest.xml" }
             ?: error("merged manifest not found under ${manifestDir.get().asFile}")
+        // Comments stripped before anything is matched. AGP preserves XML comments in the
+        // merged manifest, and every permission string here is fully qualified, so a
+        // commented-out declaration still satisfied a `contains` check -- the gate reported
+        // "13 file facts verified" for a manifest with every runtime permission disabled,
+        // which is the most natural way anyone would temporarily turn one off.
         val text = manifest.readText()
+            .replace(Regex("""<!--.*?-->""", RegexOption.DOT_MATCHES_ALL), "")
 
         // Every permission the app cannot run without. FOREGROUND_SERVICE is the one
         // that bites hardest if it goes missing: startForeground() throws
@@ -137,11 +143,33 @@ val verifyMergedManifest by tasks.registering {
             }
         }
 
+        // The activity's launchability, which the class-name fact does not cover. Deleting
+        // the intent-filter, swapping LAUNCHER for DEFAULT, or setting exported=false all
+        // passed the gate unchanged while making the app unlaunchable, so that fact's label
+        // claimed more than it checked.
+        val activityBlock = Regex(
+            """<activity\b[^>]*android:name="com\.dsrc\.phone\.MainActivity".*?</activity>""",
+            RegexOption.DOT_MATCHES_ALL,
+        ).find(text)?.value
+        if (activityBlock == null) {
+            missing["<activity> element"] = "launcher activity element"
+        } else {
+            if (!activityBlock.contains("android.intent.action.MAIN")) {
+                missing["activity MAIN"] = "launcher activity MAIN action"
+            }
+            if (!activityBlock.contains("android.intent.category.LAUNCHER")) {
+                missing["activity LAUNCHER"] = "launcher activity LAUNCHER category"
+            }
+            if (!activityBlock.contains("android:exported=\"true\"")) {
+                missing["activity exported"] = "launcher activity exported=true"
+            }
+        }
+
         if (missing.isNotEmpty()) {
             error("merged manifest is missing: ${missing.values.joinToString(", ")}\n  ${manifest.path}")
         }
         // expected.size file-wide facts, plus the two element-scoped ones.
-        logger.lifecycle("merged manifest verified: ${expected.size} file facts + 2 on the service element, ${manifest.path}")
+        logger.lifecycle("merged manifest verified: ${expected.size} file facts, 2 on the service element, 3 on the activity, ${manifest.path}")
     }
 }
 

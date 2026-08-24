@@ -21,7 +21,12 @@ class ManifestPermissionsTest {
             ?: error("dsrc.manifest is not set; the build must pass the manifest path")
         val file = File(path)
         require(file.isFile) { "manifest not found at $path" }
-        file.readText()
+        // Comments stripped, or a commented-out declaration still satisfies every
+        // `contains` below: the permission strings are fully qualified, so
+        // `<!-- <uses-permission android:name="android.permission.CAMERA" /> -->` passed
+        // three tests and the Gradle manifest gate alike, for an app with no CAMERA
+        // permission at all.
+        file.readText().replace(Regex("""<!--.*?-->""", RegexOption.DOT_MATCHES_ALL), "")
     }
 
     private fun declares(permission: String): Boolean =
