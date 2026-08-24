@@ -592,4 +592,62 @@ class SessionHolderTest {
         assertFalse("null is not usable either", SessionHolder.usable(null))
     }
 
+
+    @Test
+    fun `the send path refuses a dead session and counts it`() {
+        // Extracting the predicate pinned the helper and left both call sites uncovered:
+        // replacing `!usable(session)` with `session == null` in send() survived nine runs,
+        // and `isUp` had no coverage at all. The decision is taken against an explicit
+        // session now, so the state can be built rather than raced -- a handshaken, closed
+        // session is a non-null reference that is not alive.
+        val peer = PeerServer()
+        val socket = Socket(InetAddress.getLoopbackAddress(), peer.port).also { closers += { it.close() } }
+        val session = Session(
+            input = socket.getInputStream(),
+            output = socket.getOutputStream(),
+            deviceId = "phone-test",
+            role = Session.ROLE_PHONE,
+            monoClock = { System.nanoTime() },
+            wallClock = { 0 },
+            onFrame = {},
+        )
+        session.start()
+
+        val holder = holder(peer.port, dial = { throw IOException("not dialling in this test") })
+        val before = holder.stats().sendsWithoutSession
+
+        // Alive: the send goes through.
+        assertTrue(
+            "a live session was refused",
+            holder.sendOn(session, Channels.GPS, gpsExtensions()),
+        )
+        assertEquals(before, holder.stats().sendsWithoutSession)
+
+        session.close()
+        assertFalse("a dead session was accepted", holder.sendOn(session, Channels.GPS, gpsExtensions()))
+        assertEquals(
+            "the refusal was not counted where it happened",
+            before + 1,
+            holder.stats().sendsWithoutSession,
+        )
+        assertFalse("null was accepted", holder.sendOn(null, Channels.GPS, gpsExtensions()))
+        assertEquals(before + 2, holder.stats().sendsWithoutSession)
+    }
+
+    @Test
+    fun `isUp reports liveness, not merely that a reference exists`() {
+        // `isUp` had no coverage: reducing it to `current != null` survived six runs. It is
+        // also what makes the older window test land after the field is cleared, so the two
+        // were coupled and neither was pinned.
+        val peer = PeerServer()
+        val holder = holder(peer.port)
+        holder.start()
+        waitFor { holder.isUp }
+
+        peer.sessions.first().close()
+        // Whatever the field holds, `isUp` must be false once the session is not running.
+        waitFor { !holder.isUp }
+        assertFalse(holder.isUp)
+    }
+
 }

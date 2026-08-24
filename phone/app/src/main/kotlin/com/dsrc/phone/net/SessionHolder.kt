@@ -105,12 +105,31 @@ class SessionHolder(
         payload: ByteArray = ByteArray(0),
         wantsWireStamp: Boolean = false,
     ): Boolean {
-        // Checked for *liveness*, not merely for existence. `finish()` sets `isRunning`
-        // false before the link thread's `finally` clears this field, and in that window a
-        // send went into a dead session, came back false, and was counted by nothing --
-        // neither here nor in any refusal counter. The window is short and it is exactly
-        // when a link drops, which is when the accounting matters most.
-        val session = current
+        return sendOn(current, channel, extensions, payload, wantsWireStamp)
+    }
+
+    /**
+     * The send decision, taken against an explicit session.
+     *
+     * Split out because extracting the *predicate* was not enough: `usable` became testable
+     * and both call sites stayed uncovered, so replacing `!usable(session)` with
+     * `session == null` here survived nine runs. The defect being guarded is at the call
+     * site, not in the helper, and the window it lives in -- between `finish()` clearing
+     * `isRunning` and the link thread's `finally` clearing the field -- was caught about
+     * once in thirteen runs when driven through the live loop. Passing the session in makes
+     * that state constructible instead of raced: a handshaken, closed session is a non-null
+     * reference that is not alive.
+     */
+    internal fun sendOn(
+        session: Session?,
+        channel: String,
+        extensions: Map<String, JsonValue>,
+        payload: ByteArray = ByteArray(0),
+        wantsWireStamp: Boolean = false,
+    ): Boolean {
+        // Liveness, not merely existence. In that window a send went into a dead session,
+        // came back false, and was counted by nothing -- neither here nor in any refusal
+        // counter -- which is exactly when a link drops.
         if (!usable(session)) {
             sendsWithoutSession.incrementAndGet()
             return false

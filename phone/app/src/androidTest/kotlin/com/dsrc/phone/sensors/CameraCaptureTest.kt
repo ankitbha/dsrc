@@ -227,16 +227,26 @@ class CameraCaptureTest {
         assertNotNull("no frame at quality 30", lowFrame)
         assertEquals(30, lowFrame!!.quality)
 
-        // A margin, not a bare `<`. The two frames come from two different camera sessions,
-        // so the scene varies between them: measured same-quality noise is about +/-5% and
-        // the ordering *inverted* in 2 of 5 runs when the encoder quality was hardcoded, so
-        // a bare inequality survived the mutation 3 times in 5. The real signal is about
-        // -38%, which a 0.8 factor separates from the noise cleanly.
+        // A margin, not a bare `<`: the ordering inverted in 2 of 5 runs when the encoder
+        // quality was hardcoded, so a bare inequality survived the mutation 3 times in 5.
+        //
+        // The threshold is 0.72, and both the number and the reasoning behind the previous
+        // 0.8 were wrong. I justified 0.8 with "+/-5% scene noise", which is the
+        // *intra-session* spread (q95 within one session ranges 27398-31820, about 16%) --
+        // a figure this test never touches, because it compares the *first* frame of each
+        // session. First-frame spread at fixed quality is 0.74% at q95 and 0.57% at q30, and
+        // the true ratio is 0.65, so the real headroom was about twenty sigma rather than
+        // eight. The looser threshold was not dangerous, it was undiscriminating:
+        // `quality.coerceAtMost(85)` measures 0.77 and survived 0.8. At 0.72 it dies.
+        //
+        // The constant is specific to the 95-versus-30 pair. At 95 versus 85 the true ratio
+        // is 0.85 and this assertion would fail, so it is not portable to other qualities.
         assertTrue(
             "quality 30 produced ${lowFrame.jpeg.size} bytes against $highBytes at 95, " +
-                "which is not the ~38% smaller a real quality change gives -- " +
-                "the setting is not reaching the encoder",
-            lowFrame.jpeg.size < highBytes * 0.8,
+                "a ratio of ${"%.3f".format(lowFrame.jpeg.size.toDouble() / highBytes)} -- " +
+                "not the ~0.65 a real quality change gives, so the setting is not reaching " +
+                "the encoder",
+            lowFrame.jpeg.size < highBytes * 0.72,
         )
     }
 
@@ -291,41 +301,50 @@ class CameraCaptureTest {
     }
 
     @Test
-    fun stoppingTheSourceDeclinesAPendingBindCleanly() {
-        // The `stopped` flag and the lifecycle check are two halves of one guard, and every
-        // test that stops also destroys the lifecycle -- so the second half alone declined
-        // the bind and the flag was unpinned.
+    fun stoppingTheSourceDeclinesAPendingBind() {
+        // Third attempt, and the first two failed for different reasons -- both of which I
+        // wrote into the plan as "this cannot be observed". That record was wrong.
         //
-        // Finding the observable took two wrong guesses. A source stopped with the lifecycle
-        // still alive (production's shape, since onSensingDown runs before release()) does
-        // let the bind proceed without the flag -- but it then *fails*, because stop() has
-        // already shut down the analysis executor and setAnalyzer rejects. So the camera
-        // never connects either way, and "no CONNECT" cannot tell them apart. Confirmed from
-        // logcat: the clean run logs "camera provider resolved after teardown; not binding".
+        //   1. `bindFailures == 0` cannot discriminate, because the mutated bind *succeeds*:
+        //      setAnalyzer does not reject a shut-down executor, so nothing throws. The
+        //      docstring claiming "without it the bind is attempted and counted as a
+        //      failure" was false.
+        //   2. "no new CONNECT" was a *length* delta on a saturated ring buffer.
+        //      `dumpsys media.camera`'s event log is fixed-capacity and already full at 90
+        //      entries, so `log.size - before` is always 0 and `take(0).count { ... }` is
+        //      identically zero. The content rotates correctly; only the count was pinned.
         //
-        // What the flag actually buys is that this is a *decision* rather than an exception:
-        // without it the pending bind is attempted and counted as a failure. That is the
-        // difference worth asserting, and it is the difference a reader of bindFailures
-        // would care about.
-        val before = cameraClientLog().size
+        // Watermarking by the newest *entry* rather than by length discriminates: with the
+        // flag, logcat shows "provider resolved after teardown; not binding" and no new
+        // CONNECT; without it, the bind completes and the camera connects after the stop.
+        val watermark = cameraClientLog().firstOrNull()
         val harness = start(SensingConfig(cameraHz = 5.0))
-        // No wait at all: the provider future is deliberately still in flight, and the
-        // lifecycle stays alive so only the flag can decline it.
+        // No wait: the provider future is deliberately still in flight, and the lifecycle
+        // stays alive so only the flag can decline it.
         harness.stopSourceOnly()
         Thread.sleep(3_000)
 
-        assertEquals(
-            "the pending bind was attempted and failed instead of being declined",
-            0L,
-            harness.bindFailures,
-        )
-        val log = cameraClientLog()
-        val fresh = log.take((log.size - before).coerceAtLeast(0))
+        val fresh = entriesNewerThan(watermark)
+        val connects = fresh.count { it.contains("CONNECT") && !it.contains("DISCONNECT") }
         assertEquals(
             "a bind completed after the source was stopped: ${fresh.take(3)}",
             0,
-            fresh.count { it.contains("CONNECT") && !it.contains("DISCONNECT") },
+            connects,
         )
+    }
+
+    /**
+     * Camera-service entries newer than a watermark entry.
+     *
+     * By content, not by count. The dump's event log is a saturated fixed-capacity ring, so
+     * its length never changes and a size delta is always zero -- which made the previous
+     * version of the assertion above inert.
+     */
+    private fun entriesNewerThan(watermark: String?): List<String> {
+        val log = cameraClientLog()
+        if (watermark == null) return log
+        val index = log.indexOf(watermark)
+        return if (index < 0) log else log.take(index)
     }
 
     /** The camera service's own client log for this package, most recent first. */

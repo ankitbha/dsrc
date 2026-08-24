@@ -324,6 +324,15 @@ class CameraPipelineTest {
 
         // Accepted but not yet encoded: two frames are with the encoder right now.
         assertEquals(2, settled.copy(encoded = 3).inFlight)
+
+        // And the *base* term, which the first version of this control left free: every row
+        // used seen == accepted, and every live-pipeline test runs at 1000 Hz where nothing
+        // is gated and the two are equal again -- so `accepted - ...` could be `seen - ...`
+        // with the whole suite green. On a real 5 Hz run from a 30 Hz source that reports
+        // 1500 frames in flight on a fully-drained pipeline, growing without bound: the
+        // "teardown reads as an encoder backlog" misreading, made permanent.
+        assertEquals(0, settled.copy(seen = 50).inFlight)
+        assertEquals(2, settled.copy(seen = 50, encoded = 3).inFlight)
         // A pack failure removes a frame from flight as surely as an encode does.
         assertEquals(0, settled.copy(encoded = 3, packFailures = 2).inFlight)
         assertEquals(0, settled.copy(encoded = 3, encodeFailures = 2).inFlight)

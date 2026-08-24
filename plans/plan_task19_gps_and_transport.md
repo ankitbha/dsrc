@@ -405,21 +405,30 @@ session lies" is the failure the reader and writer both had, and one line is che
 insurance against a future edit opening a path. It is recorded as untested rather than
 claimed.
 
-**The `stopped` half of `CameraXSource`'s bind guard resists a test, and finding out why took
-two wrong attempts.** The first assumed the guard's other half (a destroyed lifecycle) was
-doing the work in every test — true, but not the whole story. The second used
-`stopSourceOnly()` so the lifecycle stayed alive, expecting the bind to proceed and connect;
-it does proceed, and then *fails*, because `stop()` has already shut the analysis executor
-and `setAnalyzer` rejects. So the camera never connects either way and "no CONNECT" cannot
-discriminate. Asserting `bindFailures == 0` should have: with the flag it is a decision, and
-without it an attempted bind that fails. That did not discriminate either — the counter
-stayed zero in both, which means the listener is not reaching `setAnalyzer` at all on this
-emulator.
+**The `stopped` half of `CameraXSource`'s bind guard: I recorded this as unpinnable and I
+was wrong.** Two attempts failed and I concluded from that there was no observable. Both
+failures had specific causes worth keeping, and neither implied what I inferred.
 
-The flag stays: it makes the decline explicit and the alternative is relying on two
-downstream accidents. It is recorded as unpinned, alongside the `onSensingUp` re-entrancy
-guard and `@Volatile` on `SensingStatus.state` — three guards kept for correctness, none
-claimed as tested.
+`bindFailures == 0` cannot discriminate because the mutated bind *succeeds* —
+`setAnalyzer` does not reject a shut-down executor, so nothing throws, and the docstring I
+wrote claiming "without it the bind is attempted and counted as a failure" was simply false.
+
+"No new CONNECT" was worse: it was a *length* delta on a saturated ring buffer.
+`dumpsys media.camera`'s event log is fixed-capacity and already full, so `log.size -
+before` is always zero and `take(0).count { … }` is identically zero. The content rotates
+correctly; only the count was pinned. That assertion could not have failed for any code.
+
+Watermarking by the newest *entry* rather than by length discriminates cleanly, three runs
+out of three: with the flag, the provider callback declines and no CONNECT follows the stop;
+without it, the bind completes and the camera connects. **The guard is pinned and the note
+retracting it belongs here, because a wrong record is worse than an absent one — it tells
+the next person not to look.**
+
+`SessionHolder.isUp`'s liveness half is unpinned. Reducing it to `current != null` survives,
+because observing the difference means catching the same microsecond window between
+`finish()` clearing `isRunning` and the link thread clearing the field. The behaviour that
+matters — never sending into a dead session — is pinned at the send path, which shares the
+same `usable` predicate, so a regression would have to change `isUp` alone.
 
 ## 8. Needs sign-off
 
