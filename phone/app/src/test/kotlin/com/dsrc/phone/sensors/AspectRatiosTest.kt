@@ -54,12 +54,35 @@ class AspectRatiosTest {
     }
 
     @Test
-    fun `the crossover sits between the two ratios`() {
-        // Below the geometric midpoint of 4:3 and 16:9 the answer is 4:3, above it 16:9.
-        val midpoint = kotlin.math.sqrt((4.0 / 3.0) * (16.0 / 9.0))
+    fun `the crossover sits at the geometric midpoint, not the arithmetic one`() {
+        // The margin has to be narrower than the thing it discriminates. It was 0.02, and
+        // the whole gap between the two candidate crossovers is 0.0159 -- geometric
+        // 1.539601 against arithmetic 1.555556 -- so the upper probe at midpoint + 0.02
+        // landed above *both* and the test passed whether the code used log distance or a
+        // plain difference. It was measuring that a crossover exists, not where.
+        val geometric = kotlin.math.sqrt((4.0 / 3.0) * (16.0 / 9.0))
+        val arithmetic = ((4.0 / 3.0) + (16.0 / 9.0)) / 2.0
+        val gap = arithmetic - geometric
+        assertTrue("the two crossovers have moved: gap $gap", gap in 0.010..0.020)
+
         val height = 1000
-        assertEquals(AspectRatios.RATIO_4_3, AspectRatios.nearest(((midpoint - 0.02) * height).toInt(), height))
-        assertEquals(AspectRatios.RATIO_16_9, AspectRatios.nearest(((midpoint + 0.02) * height).toInt(), height))
+        val margin = gap / 4.0
+        assertEquals(
+            AspectRatios.RATIO_4_3,
+            AspectRatios.nearest(((geometric - margin) * height).toInt(), height),
+        )
+        assertEquals(
+            AspectRatios.RATIO_16_9,
+            AspectRatios.nearest(((geometric + margin) * height).toInt(), height),
+        )
+        // And the discriminating case: strictly between the two crossovers, log distance
+        // says 16:9 and a plain difference says 4:3.
+        val between = (geometric + arithmetic) / 2.0
+        assertEquals(
+            "a ratio between the geometric and arithmetic crossovers must resolve by log distance",
+            AspectRatios.RATIO_16_9,
+            AspectRatios.nearest((between * height).toInt(), height),
+        )
     }
 
     @Test

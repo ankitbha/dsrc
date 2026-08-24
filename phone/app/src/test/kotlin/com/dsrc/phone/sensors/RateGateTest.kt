@@ -314,4 +314,57 @@ class RateGateTest {
         assertFalse(gate.accept(500 * ms))
         assertFalse(gate.accept(0))
     }
+
+    @Test
+    fun `a rate and the period it implies become visible together`() {
+        // `a rate change is visible to another thread` calls setter.join(), and join() itself
+        // supplies the happens-before edge the test claims to probe -- so setRate losing
+        // `synchronized` passed all 27 other cases here. accept()'s half of the lock is
+        // pinned by the 2000-round test; this is the other half.
+        //
+        // My first attempt asserted that no two accepts land closer than the shortest
+        // period. That is not a property and it failed on clean code: switching from a slow
+        // rate to a fast one re-anchors from the last accept, so a sooner accept is exactly
+        // correct. The real invariant is narrower -- once `hz` reads the new value, the
+        // period behind it must already be the new one. Unsynchronised, the fields are not
+        // volatile, so `hz` can be published while `periodNs` is still stale, and the gate
+        // then runs at the old rate while reporting the new one.
+        val fastHz = 500.0
+        val slowHz = 2.0
+        val slowPeriodNs = (1_000_000_000.0 / slowHz).toLong()
+        val step = (1_000_000_000.0 / fastHz).toLong()
+
+        var tornObservations = 0
+        repeat(400) {
+            val gate = RateGate(fastHz)
+            val clock = java.util.concurrent.atomic.AtomicLong(0)
+            // Establish a first accept, so the gate is anchored.
+            gate.accept(clock.addAndGet(step))
+
+            val setter = Thread { gate.setRate(slowHz) }
+            setter.start()
+            try {
+                // Spin until the new rate is observable, without joining.
+                val deadline = System.nanoTime() + 500_000_000L
+                while (gate.hz != slowHz && System.nanoTime() < deadline) Thread.onSpinWait()
+                if (gate.hz != slowHz) return@repeat
+
+                // From here the period must be the slow one. Anything accepted inside the
+                // slow period means the gate is still using the old value it no longer
+                // reports.
+                var accepted = 0
+                repeat(4) { if (gate.accept(clock.addAndGet(step))) accepted++ }
+                if (accepted > 0) tornObservations++
+            } finally {
+                setter.join(1_000)
+            }
+        }
+        assertEquals(
+            "the gate accepted at the old period while reporting the new rate, " +
+                "$tornObservations times in 400 rounds (slow period ${slowPeriodNs} ns)",
+            0,
+            tornObservations,
+        )
+    }
+
 }
