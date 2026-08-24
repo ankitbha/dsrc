@@ -101,6 +101,14 @@ class RateGate(hz: Double) {
          * Saturates rather than overflowing: the wire admits rates low enough that a
          * period exceeds `Long.MAX_VALUE` nanoseconds, and a saturated period means
          * "accept once, then never", which is what such a rate asks for.
+         *
+         * The saturation is `Double.toLong()`'s, not ours. There used to be an explicit
+         * `if (period >= Long.MAX_VALUE.toDouble())` here, and replacing the whole
+         * expression with a bare `period.toLong()` changed no result any test could see --
+         * because Kotlin/JVM already clamps a `Double` past the range instead of wrapping.
+         * The docstring credited the branch with preventing an overflow the language does
+         * not have. A guard nothing can reach is a claim a reader has to disprove, so it is
+         * gone and the mechanism is named instead.
          */
         fun periodNsFor(hz: Double): Long {
             // NaN fails `> 0` and an infinity fails `<= MAX_HZ`, so this one check
@@ -110,15 +118,27 @@ class RateGate(hz: Double) {
                 // instead says "never" -- the case the protocol's sender rule calls out.
                 "rate $hz is outside ($MIN_HZ_EXCLUSIVE, $MAX_HZ] Hz"
             }
-            val period = 1_000_000_000.0 / hz
-            return if (period >= Long.MAX_VALUE.toDouble()) Long.MAX_VALUE else period.toLong()
+            return (1_000_000_000.0 / hz).toLong()
         }
 
-        /** `a + b` for non-negative `b`, clamped at [Long.MAX_VALUE] instead of wrapping. */
+        /**
+         * `a + b`, clamped at [Long.MAX_VALUE] instead of wrapping.
+         *
+         * The addend is always a period from [periodNsFor], which is positive by
+         * construction, so the `b >= 0` half of the old test was unreachable -- dropping it
+         * left every test passing. But dropping it outright would silently return
+         * `Long.MAX_VALUE` for a negative addend, where the old branch returned the correct
+         * smaller sum: removing an unreachable guard must not change what happens if it
+         * ever becomes reachable. So the precondition is stated as a precondition. A
+         * negative addend now fails loudly at its caller instead of being clamped to
+         * "never" and looking like a rate.
+         *
+         * Overflow with a positive addend is exactly a sum that came out below the base.
+         */
         internal fun addSaturating(a: Long, b: Long): Long {
+            require(b >= 0) { "addSaturating takes a non-negative addend; got $b" }
             val sum = a + b
-            // Overflow with a non-negative addend shows up as a sum below the base.
-            return if (b >= 0 && sum < a) Long.MAX_VALUE else sum
+            return if (sum < a) Long.MAX_VALUE else sum
         }
     }
 }

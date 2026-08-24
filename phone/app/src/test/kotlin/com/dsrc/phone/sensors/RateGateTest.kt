@@ -367,4 +367,29 @@ class RateGateTest {
         )
     }
 
+
+    @Test
+    fun `addSaturating states its precondition instead of guessing`() {
+        // The old `b >= 0 &&` was unreachable -- every caller passes a period, which is
+        // positive by construction -- and dropping it left every test passing. But dropping
+        // it outright would have returned Long.MAX_VALUE for a negative addend where the
+        // branch returned the correct smaller sum, which is a behaviour change smuggled in
+        // as a cleanup. Removing an unreachable guard must not change what happens if it
+        // ever becomes reachable.
+        assertEquals(7L, RateGate.addSaturating(3, 4))
+        assertEquals(Long.MAX_VALUE, RateGate.addSaturating(Long.MAX_VALUE - 1, 5))
+        assertTrue(
+            "a negative addend must fail at its caller, not be clamped to 'never'",
+            runCatching { RateGate.addSaturating(10, -1) }.isFailure,
+        )
+    }
+
+    @Test
+    fun `a rate low enough to overflow a period saturates rather than wrapping`() {
+        // The explicit saturation branch was removed because Double.toLong() already
+        // clamps; this is what makes that claim checkable rather than a comment.
+        val period = RateGate.periodNsFor(RateGate.MIN_HZ_EXCLUSIVE + Double.MIN_VALUE)
+        assertTrue("a period must never come out negative: $period", period > 0)
+    }
+
 }
