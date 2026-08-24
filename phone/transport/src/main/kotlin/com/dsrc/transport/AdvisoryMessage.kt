@@ -73,8 +73,17 @@ data class AdvisoryMessage(
                 )
             }
             val action = ACTION_HEADS.associateWith { head ->
+                // unknown_value even for the wrong JSON type. The heads are a closed set and
+                // the spec gives that its own row; an integer here is outside the set as
+                // surely as a misspelled string is, and Python reports it that way. Filing
+                // it as wrong_type was correct about the type and wrong about the cause the
+                // reader needs.
                 val value = (nested.getValue(head) as? JsonValue.Text)?.value
-                    ?: throw MessageError(RefusalReason.WRONG_TYPE, "action.$head is not a string")
+                    ?: throw MessageError(
+                        RefusalReason.UNKNOWN_VALUE,
+                        "action.$head is ${nested.getValue(head)}, not one of " +
+                            "${ACTION_VALUES.getValue(head)}",
+                    )
                 if (value !in ACTION_VALUES.getValue(head)) {
                     // A value outside a closed set, exactly like `units`, which the spec
                     // gives an adjacent refusal row.

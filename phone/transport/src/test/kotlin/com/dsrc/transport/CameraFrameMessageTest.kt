@@ -47,46 +47,6 @@ class CameraFrameMessageTest {
     }
 
     @Test
-    fun `a zero dimension is refused`() {
-        for (bad in listOf(message(width = 0), message(height = 0))) {
-            val error = runCatching { CameraFrameMessage.fromWire(bad.toExtensions(), jpeg) }
-                .exceptionOrNull()
-            assertTrue("expected a MessageError, got $error", error is MessageError)
-            assertEquals(RefusalReason.OUT_OF_RANGE, (error as MessageError).reason)
-        }
-    }
-
-    @Test
-    fun `a negative dimension is refused as a count, not silently accepted`() {
-        val error = runCatching {
-            CameraFrameMessage.fromWire(message(width = -1280).toExtensions(), jpeg)
-        }.exceptionOrNull()
-        // The exception *type* is asserted because runCatching cannot tell a named
-        // refusal from an unrelated throw, which has hidden a defect here before.
-        assertTrue("expected a MessageError, got $error", error is MessageError)
-        assertEquals(RefusalReason.OUT_OF_RANGE, (error as MessageError).reason)
-    }
-
-    @Test
-    fun `a quality outside 1 to 100 is refused`() {
-        for (bad in listOf(0L, 101L, -5L)) {
-            val error = runCatching {
-                CameraFrameMessage.fromWire(message(quality = bad).toExtensions(), jpeg)
-            }.exceptionOrNull()
-            assertTrue("quality $bad was accepted", error is MessageError)
-        }
-    }
-
-    @Test
-    fun `an empty format is refused`() {
-        val error = runCatching {
-            CameraFrameMessage.fromWire(message(format = "").toExtensions(), jpeg)
-        }.exceptionOrNull()
-        assertTrue("expected a MessageError, got $error", error is MessageError)
-        assertEquals(RefusalReason.UNKNOWN_VALUE, (error as MessageError).reason)
-    }
-
-    @Test
     fun `a missing field is refused by name`() {
         for (key in listOf("frame_id", "width", "height", "format", "quality", "t_capture_mono_ns")) {
             val stripped = message().toExtensions() - key
@@ -102,15 +62,35 @@ class CameraFrameMessageTest {
     }
 
     @Test
+    fun `the four rules this decoder used to invent are gone`() {
+        // A zero dimension, a quality outside 1..100, an empty format and a negative
+        // frame_id were all refused here and are all accepted by Python, with nothing in
+        // the spec's message or refusal tables to justify either answer. A unilateral
+        // receiver rule refuses what the peer legitimately sends, and two implementations
+        // disagreeing about whether a record is acceptable is worse than either answer.
+        // DifferentialTest holds the reconciled verdicts; this states the intent locally.
+        //
+        // A bad *setting* still dies where settings enter: SensingConfig refuses a quality
+        // outside 1..100 and a zero or odd dimension on construction.
+        CameraFrameMessage.fromWire(message(width = 0).toExtensions(), jpeg)
+        CameraFrameMessage.fromWire(message(quality = 0).toExtensions(), jpeg)
+        CameraFrameMessage.fromWire(message(quality = 101).toExtensions(), jpeg)
+        CameraFrameMessage.fromWire(message(format = "").toExtensions(), jpeg)
+        CameraFrameMessage.fromWire(message(frameId = -1).toExtensions(), jpeg)
+    }
+
+    @Test
     fun `the camera channel is no longer exempt from the sender rule`() {
         // It was, and it was the one channel where an unchecked field would travel
         // thousands of times before anyone looked.
         assertTrue(MessageValidation.ALL_CHANNELS_HAVE_A_DECODER)
 
+        // A missing field, since the range rules this decoder used to invent are gone.
         val error = runCatching {
-            MessageValidation.check(Channels.CAMERA, message(width = 0).toExtensions(), jpeg)
+            MessageValidation.check(Channels.CAMERA, message().toExtensions() - "frame_id", jpeg)
         }.exceptionOrNull()
         assertTrue("an invalid frame passed outbound validation", error is MessageError)
+        assertEquals(RefusalReason.MISSING_FIELD, (error as MessageError).reason)
     }
 
     @Test

@@ -80,7 +80,7 @@ class TimeSyncTest {
             val error = assertFailsWith<MessageError>("only $present set") {
                 TimeSyncMessage.fromWire(partial, ByteArray(0))
             }
-            assertEquals(RefusalReason.MISSING_FIELD, error.reason)
+            assertEquals(RefusalReason.NULL_NOT_ALLOWED, error.reason)
         }
     }
 
@@ -90,14 +90,18 @@ class TimeSyncTest {
             (TimeSyncMessage.KEY_PEER_RECV_MONO to JsonValue.Num(1)) +
             (TimeSyncMessage.KEY_PEER_RECV_WALL to JsonValue.Num(2))
         assertEquals(
-            RefusalReason.MISSING_FIELD,
+            RefusalReason.NULL_NOT_ALLOWED,
             assertFailsWith<MessageError> { TimeSyncMessage.fromWire(partial, ByteArray(0)) }.reason,
         )
     }
 
     @Test
     fun `an absent peer field is refused, not read as a ping`() {
-        // Present-and-null is the only spelling of "not set".
+        // Present-and-null is the only spelling of "not set", so *absent* is
+        // `missing_field` -- distinct from the partially-filled pong below, whose unset
+        // stamps are present and null and so are `null_not_allowed`. The two reasons exist
+        // to separate exactly these cases, which is why the fix for one must not be
+        // applied to the other.
         val missing = pong.toExtensions() - TimeSyncMessage.KEY_PEER_WIRE
         assertEquals(
             RefusalReason.MISSING_FIELD,

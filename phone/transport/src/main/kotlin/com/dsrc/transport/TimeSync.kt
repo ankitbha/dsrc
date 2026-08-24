@@ -51,8 +51,12 @@ data class TimeSyncMessage(
             // refusing: the arithmetic would run and produce a number.
             val set = listOf(peerRecvMono, peerRecvWall, peerWire).count { it != null }
             if (set != 0 && set != 3) {
+                // null_not_allowed, not missing_field: the unset ones are *present and
+                // null*, and the spec's table gives that its own row. Python agrees, and a
+                // counter naming the wrong cause is the whole thing per-reason counting
+                // exists to avoid.
                 throw MessageError(
-                    RefusalReason.MISSING_FIELD,
+                    RefusalReason.NULL_NOT_ALLOWED,
                     "a pong needs all three peer stamps or none; $set of 3 are set",
                 )
             }

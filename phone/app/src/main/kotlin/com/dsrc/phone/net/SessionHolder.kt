@@ -103,8 +103,13 @@ class SessionHolder(
         payload: ByteArray = ByteArray(0),
         wantsWireStamp: Boolean = false,
     ): Boolean {
+        // Checked for *liveness*, not merely for existence. `finish()` sets `isRunning`
+        // false before the link thread's `finally` clears this field, and in that window a
+        // send went into a dead session, came back false, and was counted by nothing --
+        // neither here nor in any refusal counter. The window is short and it is exactly
+        // when a link drops, which is when the accounting matters most.
         val session = current
-        if (session == null) {
+        if (session == null || !session.isRunning) {
             sendsWithoutSession.incrementAndGet()
             return false
         }

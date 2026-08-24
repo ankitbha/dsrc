@@ -237,6 +237,12 @@ def _nested_object(extensions: Mapping[str, Any], field: str, keys: tuple[str, .
     specs/action_schema.md, not an extensible list.
     """
     value = require(extensions, field)
+    # Null gets its own reason, because the spec's refusal table gives it one: "null where
+    # a value is required -> null_not_allowed". Folding it into wrong_type was the one
+    # refusal disagreement with the Kotlin side where Kotlin read the table correctly, and
+    # a counter naming the wrong cause is what per-reason counting exists to avoid.
+    if value is None:
+        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)
     if not isinstance(value, Mapping):
         raise MessageError(
             f"{field} is {type(value).__name__}, expected object", REASON_WRONG_TYPE

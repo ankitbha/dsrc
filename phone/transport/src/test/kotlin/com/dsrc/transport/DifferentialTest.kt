@@ -83,4 +83,138 @@ class DifferentialTest {
         assertTrue(agreeing.values.any { !it }, "no rejecting cases")
         assertEquals(19, agreeing.size)
     }
+
+    // -- refusal reasons, message layer --------------------------------------
+
+    /**
+     * The reason each side gives for the same fault.
+     *
+     * Recorded by running `deployment/jetson/transport/messages.py`, not guessed. Round 3
+     * found three disagreements here and the spec's refusal table settled each one: the
+     * unset stamps in a partial pong are present-and-null so they are `null_not_allowed`;
+     * a null where a required object belongs is `null_not_allowed` too, which is the one
+     * where Python was wrong and was fixed; and an `action` head outside its closed set is
+     * `unknown_value` whatever its JSON type, because the set is what the reader needs to
+     * know about.
+     *
+     * The point of pinning them is that the counters are per-reason on both sides. Two
+     * implementations filing the same fault in different buckets makes a summary that
+     * cannot be added up, which is the thing per-reason counting exists to provide.
+     */
+    private fun advisory(action: Map<String, JsonValue>? = null) = mapOf(
+        Fields.CAPTURE_KEY to JsonValue.Num(1),
+        "rec_speed_mps" to JsonValue.Real(13.4),
+        "rec_speed_display" to JsonValue.Real(30.0),
+        "current_speed_display" to JsonValue.Real(28.0),
+        "units" to JsonValue.Text("mph"),
+        "headway_target_s" to JsonValue.Real(2.0),
+        "lane_text" to JsonValue.Text("keep"),
+        "merge_text" to JsonValue.Text("normal"),
+        "traffic_text" to JsonValue.Text("clear"),
+        "confidence" to JsonValue.Real(0.87),
+        "confidence_label" to JsonValue.Text("high"),
+        "action" to JsonValue.Obj(
+            action ?: mapOf(
+                "desired_speed_bin" to JsonValue.Text("nominal"),
+                "desired_headway_bin" to JsonValue.Text("normal"),
+                "lane_preference" to JsonValue.Text("keep"),
+                "merge_mode" to JsonValue.Text("normal"),
+            )
+        ),
+    )
+
+    private fun rateCmd() = mapOf(
+        Fields.CAPTURE_KEY to JsonValue.Num(1),
+        "rates" to JsonValue.Obj(
+            mapOf(
+                "camera_hz" to JsonValue.Real(5.0),
+                "gps_hz" to JsonValue.Real(1.0),
+                "imu_hz" to JsonValue.Real(50.0),
+                "here_hz" to JsonValue.Real(0.2),
+            )
+        ),
+        "trigger" to JsonValue.Text("thermal"),
+        "shadow" to JsonValue.Bool(false),
+    )
+
+    private fun reasonOf(block: () -> Unit): String =
+        runCatching { block() }
+            .exceptionOrNull()
+            .let { (it as? MessageError)?.reason?.wire ?: "ACCEPTED" }
+
+    @Test
+    fun `both sides name the same reason for the same fault`() {
+        // Expectations from running python3 against messages.py.
+        assertEquals(
+            "null_not_allowed",
+            reasonOf {
+                TimeSyncMessage.fromWire(
+                    mapOf(
+                        Fields.CAPTURE_KEY to JsonValue.Num(1),
+                        "exchange_id" to JsonValue.Num(1),
+                        Session.WIRE_STAMP to JsonValue.Num(0),
+                        "t_peer_recv_mono_ns" to JsonValue.Num(2),
+                        "t_peer_recv_wall_ns" to JsonValue.Null,
+                        "t_peer_wire_mono_ns" to JsonValue.Null,
+                    ),
+                    ByteArray(0),
+                )
+            },
+            "a partial pong's unset stamps are present-and-null",
+        )
+
+        assertEquals(
+            "null_not_allowed",
+            reasonOf { RateCommand.fromWire(rateCmd() + ("rates" to JsonValue.Null), ByteArray(0)) },
+            "a null where a required object belongs",
+        )
+        assertEquals(
+            "null_not_allowed",
+            reasonOf { AdvisoryMessage.fromWire(advisory() + ("action" to JsonValue.Null), ByteArray(0)) },
+        )
+
+        assertEquals(
+            "unknown_value",
+            reasonOf {
+                AdvisoryMessage.fromWire(
+                    advisory(
+                        mapOf(
+                            "desired_speed_bin" to JsonValue.Num(5),
+                            "desired_headway_bin" to JsonValue.Text("normal"),
+                            "lane_preference" to JsonValue.Text("keep"),
+                            "merge_mode" to JsonValue.Text("normal"),
+                        )
+                    ),
+                    ByteArray(0),
+                )
+            },
+            "an action head outside its closed set, whatever its JSON type",
+        )
+    }
+
+    @Test
+    fun `the wire contract does not police what the spec never states`() {
+        // These were refusals I invented: a zero dimension, a quality outside 1..100, an
+        // empty format, a negative frame_id. The spec's message and refusal tables mention
+        // none of them and Python accepts all five, so a unilateral receiver rule here
+        // refuses what the peer legitimately sends -- the dangerous direction of a
+        // cross-language disagreement.
+        //
+        // A bad *setting* still dies where settings enter, which is SensingConfig.
+        val base = CameraFrameMessage(1, 1, 1280, 720, "jpeg", 85).toExtensions()
+        for ((label, override) in listOf(
+            "quality 0" to ("quality" to JsonValue.Num(0)),
+            "quality 101" to ("quality" to JsonValue.Num(101)),
+            "width 0" to ("width" to JsonValue.Num(0)),
+            "frame_id -1" to ("frame_id" to JsonValue.Num(-1)),
+            "empty format" to ("format" to JsonValue.Text("")),
+        )) {
+            assertEquals(
+                "ACCEPTED",
+                reasonOf { CameraFrameMessage.fromWire(base + override, ByteArray(0)) },
+                "$label is refused here and accepted by python",
+            )
+        }
+    }
+
 }

@@ -43,25 +43,25 @@ data class CameraFrameMessage(
          */
         fun fromWire(extensions: Map<String, JsonValue>, @Suppress("UNUSED_PARAMETER") payload: ByteArray): CameraFrameMessage {
 
-            val width = Fields.requireCount(extensions, KEY_WIDTH)
-            val height = Fields.requireCount(extensions, KEY_HEIGHT)
-            if (width == 0L || height == 0L) {
-                throw MessageError(RefusalReason.OUT_OF_RANGE, "frame is ${width}x$height")
-            }
-
+            // No range rules here, deliberately. Earlier versions refused a zero dimension,
+            // a quality outside 1..100, an empty format and a negative frame_id -- none of
+            // which the spec's message table or refusal table mentions, and all of which
+            // Python accepts. A unilateral receiver rule refuses what the peer legitimately
+            // sends, which is the dangerous direction of a cross-language disagreement, and
+            // the two implementations disagreeing about whether a record is acceptable is
+            // worse than either answer.
+            //
+            // A bad *setting* still dies where settings enter: SensingConfig refuses a
+            // quality outside 1..100 and a zero or odd dimension on construction. That is
+            // the right place for a rule this contract does not carry.
+            val width = Fields.requireInt(extensions, KEY_WIDTH)
+            val height = Fields.requireInt(extensions, KEY_HEIGHT)
             val quality = Fields.optionalInt(extensions, KEY_QUALITY)
-            if (quality != null && quality !in 1..100) {
-                throw MessageError(RefusalReason.OUT_OF_RANGE, "quality is $quality, outside 1..100")
-            }
-
             val format = Fields.requireString(extensions, KEY_FORMAT)
-            if (format.isEmpty()) {
-                throw MessageError(RefusalReason.UNKNOWN_VALUE, "format is empty")
-            }
 
             return CameraFrameMessage(
                 captureMonoNs = Fields.requireInt(extensions, Fields.CAPTURE_KEY),
-                frameId = Fields.requireCount(extensions, KEY_FRAME_ID),
+                frameId = Fields.requireInt(extensions, KEY_FRAME_ID),
                 width = width,
                 height = height,
                 format = format,

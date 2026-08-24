@@ -456,6 +456,9 @@ class SessionHolderTest {
         peer.sessions.first().close()
         waitFor { !holder.isUp }
 
+        // Deliberately sent in the window between the session going down and the link
+        // thread clearing its reference, because that window is where the accounting was
+        // lost: `isRunning` goes false inside finish(), and the field is cleared later.
         assertFalse("a dead session accepted a message", holder.send(Channels.GPS, gpsExtensions()))
         assertEquals(
             "the refusal was not counted where it happened: ${holder.stats()}",
