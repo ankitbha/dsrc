@@ -515,7 +515,12 @@ real error in the mean.
 `dsrc-imu` joins `WORKER_PREFIXES`, which is how a new resource gets teardown coverage
 without new tests: deleting the source's `start()` fails four instrumented tests. That is
 not enough on its own — the census sees threads, and a thread starting proves nothing about
-what it then does. The assertion that settles it is that a sample comes *out*.
+what it then does.
+
+Nor was "a sample comes out" enough, which took a fourth round to find: it asserted the
+sample came out of the *pipeline*, and a sink that never called the transport passed it,
+because `accepted` is incremented before the sink runs. The assertion that settles it is a
+peer really listening on the port the phone dials, asserting on the frames that arrive.
 
 **Twelve of the tests written for this could not fail**, and mutation found every one. Two
 before the first validation round: the gyro ages only ever rose, so "keep the maximum" and
@@ -537,9 +542,11 @@ decisions lived in a `SensorEventListener` nothing could invoke, so thirteen mut
 them survived. Round 2: moving the decisions somewhere testable did not make the *caller*
 reachable, so fourteen mutations to the glue survived — and the commit message claimed
 otherwise, having mutated the extracted class and reported it as covering the source.
-Extracting a function only helps if the caller is reachable too. `dumpsys sensorservice`
-closed it: the platform's own record of which sensors were registered, at what rate, with
-what batching, and whether they were given back.
+Extracting a function only helps if the caller is reachable too. And round 4 found the
+same shape once more, one layer further out again — so what closed it in the end was not
+another instrument aimed at the glue but the simplest possible question, asked from where
+the Jetson sits: did a frame arrive, on the right channel, with the two sensors in their
+own fields.
 
 ## Not started
 

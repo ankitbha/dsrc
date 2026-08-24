@@ -67,14 +67,25 @@ class ImuSource(
     /**
      * The clock everything else in this app stamps on: GPS fixes, the transport's enqueue
      * stamp, the timebase exchange.
+     *
+     * **No default, deliberately.** Both clocks used to have one and the single
+     * construction site supplied neither, so nothing anywhere chose them -- and replacing
+     * this one's sibling default with `elapsedRealtimeNanos` made `clockGapNs` identically
+     * zero, the attribution branch of `verdictFor` dead code, and the vendor bug this whole
+     * class exists to detect undetectable, with both suites green.
+     *
+     * No test can catch that on an emulator: a machine that never suspends has the two
+     * clocks a few hundred nanoseconds apart, which is the same distance two sequential
+     * reads of *one* clock are apart. So the hazard is removed rather than pinned -- the
+     * wiring is now a visible decision at the call site instead of a default nobody reads.
      */
-    private val appClock: () -> Long = SystemClock::elapsedRealtimeNanos,
+    private val appClock: () -> Long,
     /**
      * The other candidate. Read at the same instant as [appClock] so the difference is the
      * device's accumulated suspend time -- which is what tells the two apart, and what a
      * wrong attribution would cost.
      */
-    private val monoClock: () -> Long = System::nanoTime,
+    private val monoClock: () -> Long,
 ) {
 
     private val manager =

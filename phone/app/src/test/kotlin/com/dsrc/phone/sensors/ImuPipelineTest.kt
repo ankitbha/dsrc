@@ -404,4 +404,34 @@ class ImuPipelineTest {
         )
     }
 
+
+    @Test
+    fun `all six axes reach the sample in their own fields`() {
+        // Only ax and gx were ever asserted, so four of the six axes were free to be
+        // transposed at will: gz = gy, az = ay, ay = ax and gy = gx each survived the whole
+        // suite. A Y/Z swap in the gyro is exactly the "arrives looking valid, lands the
+        // fusion at the wrong attitude" failure the timebase work exists to prevent, and it
+        // was invisible.
+        //
+        // Six distinct values, six assertions. Equal values would make any permutation of
+        // them pass.
+        val (p, out) = pipeline()
+        p.offer(
+            ImuReading(
+                captureMonoNs = 5,
+                ax = 1.0, ay = 2.0, az = 3.0,
+                gx = 4.0, gy = 5.0, gz = 6.0,
+                accuracy = 3, gyroAgeNs = 0,
+            )
+        )
+
+        val sample = out.single()
+        assertEquals(1.0, sample.ax, 1e-9)
+        assertEquals(2.0, sample.ay, 1e-9)
+        assertEquals(3.0, sample.az, 1e-9)
+        assertEquals(4.0, sample.gx, 1e-9)
+        assertEquals(5.0, sample.gy, 1e-9)
+        assertEquals(6.0, sample.gz, 1e-9)
+    }
+
 }

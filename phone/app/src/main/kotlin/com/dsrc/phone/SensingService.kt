@@ -329,8 +329,17 @@ class SensingService : LifecycleService() {
         }
         imuPipeline = imu
         liveImu = imu
-        val motion = ImuSource(this, config)
+        val motion = ImuSource(
+            context = this,
+            config = config,
+            // Named, and both required. These are the two clocks the timebase check
+            // attributes a sensor stamp between; wiring one of them twice disables the
+            // check silently, and no test on an emulator can see it.
+            appClock = android.os.SystemClock::elapsedRealtimeNanos,
+            monoClock = System::nanoTime,
+        )
         imuSource = motion
+        liveImuSource = motion
 
         source.start(pipe)
         locations.start { reading ->
@@ -499,6 +508,7 @@ class SensingService : LifecycleService() {
             imuPipeline = null
             imuSource = null
             liveImu = null
+            liveImuSource = null
             pipeline = null
             gpsPipeline = null
             frameSender = null
@@ -717,6 +727,19 @@ class SensingService : LifecycleService() {
          */
         @Volatile
         internal var liveImu: ImuPipeline? = null
+
+        /**
+         * The running IMU source, for a test that needs what it measured rather than what
+         * it was supposed to measure.
+         *
+         * `ImuSource` takes both clocks as constructor defaults and its one construction
+         * site supplies neither, so nothing checked they are two different clocks --
+         * replacing the monotonic default with `elapsedRealtime` made `clockGapNs`
+         * identically zero, the attribution branch dead, and the vendor bug this task
+         * exists for undetectable, with both suites green.
+         */
+        @Volatile
+        internal var liveImuSource: ImuSource? = null
 
         /**
          * Release steps that threw, across every instance.

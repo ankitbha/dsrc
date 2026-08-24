@@ -80,9 +80,11 @@ sensing continues with camera and GPS.
 This is the one piece of task 20 the emulator cannot really exercise, because its virtual
 sensors report the same clock. The check is therefore driven in tests by calling
 `ImuPairing` directly with both clock readings — there is no injected event *source*; the
-platform listener is thin glue and everything it decides lives in that class. What the
-device does pin, through `dumpsys sensorservice`, is the glue itself: which sensors were
-registered, at what rate, with what batching, and whether they were given back.
+platform listener is thin glue and everything it decides lives in that class. What the device pins is that a sample reaches **the wire**, read by a peer really
+listening on the port the service dials. A `dumpsys sensorservice` test that asserted the
+commanded rate, the batching and the give-back was written and removed, and this sentence
+went on crediting it — see the note in `ImuCaptureTest` for why it went, and the Open
+section for what it leaves unpinned.
 
 ## Shape
 

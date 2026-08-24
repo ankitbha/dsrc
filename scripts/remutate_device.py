@@ -30,8 +30,20 @@ MUTATIONS = [
     # unregistered" and "batching is turned back on". Both are still real defects and
     # neither is pinned now -- see the note in ImuCaptureTest. Leaving them here would make
     # the harness permanently red for a gap that is recorded elsewhere.
+    (SERVICE, "imu: the sink never reaches the transport",
+     "            holder.send(Channels.IMU, sample.toExtensions())",
+     "            sample.toExtensions().isEmpty()"),
+    (SERVICE, "imu: samples go out on the wrong channel",
+     "            holder.send(Channels.IMU, sample.toExtensions())",
+     "            holder.send(Channels.GPS, sample.toExtensions())"),
+    (SOURCE, "imu: the two sensor streams are transposed",
+     "                    Sensor.TYPE_GYROSCOPE -> pairing.onGyro(",
+     "                    Sensor.TYPE_ACCELEROMETER -> pairing.onGyro("),
+    (SOURCE, "imu: the accelerometer's y and z are transposed",
+     "                            y = event.values[1].toDouble(),\n                            z = event.values[2].toDouble(),",
+     "                            y = event.values[2].toDouble(),\n                            z = event.values[1].toDouble(),"),
     (SOURCE, "imu: the gyroscope is never registered",
-     "        if (manager.registerListener(callback, gyroscope, periodUs, 0, handler)) registered++", ""),
+     "        manager.registerListener(callback, gyroscope, periodUs, 0, handler)\n", ""),
     (SERVICE, "imu: the source is never started",
      "        motion.start(onReading = { imu.offer(it) }, onUnpaired = { imu.offerUnpaired() })\n", ""),
     (SERVICE, "teardown: one later release is skipped",

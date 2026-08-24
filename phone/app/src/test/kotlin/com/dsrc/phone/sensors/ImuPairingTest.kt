@@ -342,4 +342,25 @@ class ImuPairingTest {
         }
     }
 
+
+    @Test
+    fun `all six axes reach the reading in their own fields`() {
+        // The layer above `sample()`, and it had the same hole: gy = gz and ay = az both
+        // survived the suite. Pinning only the pipeline would leave this one open, which is
+        // why the axis family needs an assertion at each layer rather than one at the end.
+        val pairing = ImuPairing()
+        pairing.onGyro(0, 4.0, 5.0, 6.0)
+        val reading = (pairing.onAccelerometer(
+            captureNs = ms, x = 1.0, y = 2.0, z = 3.0,
+            accuracy = 3, appNowNs = 2 * ms, monoNowNs = 2 * ms,
+        ) as ImuOutcome.Paired).reading
+
+        assertEquals(1.0, reading.ax, 1e-9)
+        assertEquals(2.0, reading.ay, 1e-9)
+        assertEquals(3.0, reading.az, 1e-9)
+        assertEquals(4.0, reading.gx, 1e-9)
+        assertEquals(5.0, reading.gy, 1e-9)
+        assertEquals(6.0, reading.gz, 1e-9)
+    }
+
 }
