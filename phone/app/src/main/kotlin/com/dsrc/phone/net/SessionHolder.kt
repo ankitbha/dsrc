@@ -240,8 +240,17 @@ class SessionHolder(
     }
 
     companion object {
-        /** The phone's role in the hello, from the spec's handshake section. */
-        const val ROLE = "phone"
+        /**
+         * The phone's role in the hello.
+         *
+         * The constant from the transport, not a second copy of the literal. A duplicated
+         * "phone" here decided which half of the timebase protocol ran -- `Session`
+         * branches on `role == ROLE_PHONE` -- so setting this to "jetson" made the phone
+         * answer pings and refuse pongs, inverting the direction the code itself calls
+         * "an offset with the sign inverted, a plausible number that is exactly wrong",
+         * with the whole suite green.
+         */
+        const val ROLE = Session.ROLE_PHONE
 
         /**
          * A real TCP link.

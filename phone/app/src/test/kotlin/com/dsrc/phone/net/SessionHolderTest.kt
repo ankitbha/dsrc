@@ -52,9 +52,15 @@ class SessionHolderTest {
     }
 
     /** A Jetson-side listener that runs a real session per connection. */
-    private inner class PeerServer(private val version: Long = Protocol.VERSION.toLong()) {
+    private inner class PeerServer(
+        private val version: Long = Protocol.VERSION.toLong(),
+        private val delayHelloMs: Long = 0,
+        /** Drop the session this long after the handshake, to make the link flap. */
+        private val dropAfterMs: Long = 0,
+    ) {
         private val server = ServerSocket(0, 8, InetAddress.getLoopbackAddress())
         val sessions = ConcurrentLinkedQueue<Session>()
+        val rolesSeen = ConcurrentLinkedQueue<String>()
         val received = ConcurrentLinkedQueue<Frame>()
         val accepted = AtomicInteger(0)
 
@@ -81,6 +87,7 @@ class SessionHolderTest {
                     writeWrongVersionHello(client)
                     continue
                 }
+                if (delayHelloMs > 0) Thread.sleep(delayHelloMs)
                 runCatching {
                     val session = Session(
                         input = client.getInputStream(),
@@ -92,7 +99,14 @@ class SessionHolderTest {
                         onFrame = { received.add(it) },
                     )
                     session.start()
+                    session.peer?.role?.let { rolesSeen.add(it) }
                     sessions.add(session)
+                    if (dropAfterMs > 0) {
+                        Thread({
+                            Thread.sleep(dropAfterMs)
+                            runCatching { session.close() }
+                        }, "peer-drop").also { it.isDaemon = true; it.start() }
+                    }
                 }
             }
         }
@@ -353,4 +367,165 @@ class SessionHolderTest {
         }
         throw AssertionError("condition never held within $timeoutMs ms")
     }
+
+    // -- the backoff schedule ------------------------------------------------
+
+    /** The delays the holder asked for, in order. An injected sleeper records them. */
+    private fun backoffSchedule(
+        config: LinkConfig,
+        attempts: Int,
+        dial: (LinkConfig) -> Link = { throw IOException("refused") },
+    ): List<Long> {
+        val asked = java.util.concurrent.CopyOnWriteArrayList<Long>()
+        val made = SessionHolder(
+            config = config,
+            deviceId = "phone-test",
+            monoClock = { System.nanoTime() },
+            wallClock = { 0 },
+            onFrame = {},
+            dial = dial,
+            sleeper = { millis -> asked.add(millis) },
+        )
+        closers += { made.stop() }
+        made.start()
+        val deadline = System.currentTimeMillis() + 5_000
+        while (asked.size < attempts && System.currentTimeMillis() < deadline) Thread.sleep(2)
+        made.stop()
+        return asked.take(attempts)
+    }
+
+    @Test
+    fun `the backoff doubles and is capped`() {
+        // The whole schedule was unpinned. Removing the doubling reconnects every 500 ms
+        // for the entire drive when the Jetson is off, against the class's own "what it
+        // must not do is spin"; removing the cap puts the wait past an hour after about
+        // twenty-four failures.
+        val schedule = backoffSchedule(
+            LinkConfig(host = "127.0.0.1", port = 1, firstBackoffMs = 10, maxBackoffMs = 80),
+            attempts = 6,
+        )
+        assertEquals(listOf(10L, 20L, 40L, 80L, 80L, 80L), schedule)
+    }
+
+    @Test
+    fun `a handshake that completed resets the backoff`() {
+        // Documented behaviour with no test: without the reset, a link that flaps once is
+        // stuck at the ceiling for the rest of the drive.
+        // The peer drops the session shortly after the handshake, so the link flaps --
+        // which is the case the reset exists for. Without the drop the loop parks on a
+        // healthy session and never asks for another delay, so the first version of this
+        // test recorded two and proved nothing.
+        val peer = PeerServer(dropAfterMs = 30)
+        val attempt = AtomicInteger(0)
+        val schedule = backoffSchedule(
+            LinkConfig(host = "127.0.0.1", port = peer.port, firstBackoffMs = 10, maxBackoffMs = 320),
+            attempts = 5,
+            dial = { config ->
+                // Fail, fail, succeed-then-drop, then fail again. The successful handshake
+                // in the middle must send the delay back to the floor.
+                when (attempt.incrementAndGet()) {
+                    1, 2 -> throw IOException("refused")
+                    3 -> SessionHolder.dialTcp(config)
+                    else -> throw IOException("refused")
+                }
+            },
+        )
+        // 10, 20 climbing; then the third attempt handshakes, so the next wait is 10 again.
+        assertEquals(listOf(10L, 20L, 10L, 20L, 40L), schedule)
+    }
+
+    // -- what `current` points at -------------------------------------------
+
+    @Test
+    fun `a send after the session ends is refused, not routed into a dead session`() {
+        // `current` was left pointing at the ended session, so send() called into it
+        // instead of counting sendsWithoutSession, and stats().session reported a dead
+        // session's counters -- the accounting the docstring says the channel table exists
+        // to prevent. No test caught it because the down-link test never establishes a
+        // session at all.
+        val peer = PeerServer()
+        val holder = holder(peer.port, dial = { config ->
+            // One connection only: after it ends there is nothing to reconnect to.
+            if (peer.accepted.get() == 0) SessionHolder.dialTcp(config)
+            else throw IOException("no second connection in this test")
+        })
+        holder.start()
+        waitFor { holder.isUp }
+        val before = holder.stats().sendsWithoutSession
+
+        peer.sessions.first().close()
+        waitFor { !holder.isUp }
+
+        assertFalse("a dead session accepted a message", holder.send(Channels.GPS, gpsExtensions()))
+        assertEquals(
+            "the refusal was not counted where it happened: ${holder.stats()}",
+            before + 1,
+            holder.stats().sendsWithoutSession,
+        )
+        assertNull("a dead session's counters were reported as current", holder.stats().session)
+    }
+
+    @Test
+    fun `nothing is sent before the handshake completes`() {
+        // `current` is published only after start() returns. Publishing it earlier let a
+        // message go out during the handshake window, before the hello -- a protocol
+        // violation that `isUp` does not notice, because that gates on isRunning.
+        val peer = PeerServer(delayHelloMs = 400)
+        val holder = holder(peer.port)
+        holder.start()
+
+        // While the peer is deliberately slow to say hello, there is no session to send on.
+        //
+        // Successes are counted, not refusals. Asserting "some were refused" passes when the
+        // early attempts land before the link thread has even dialled and later ones sneak
+        // through -- which is exactly what let the mutation survive. Not one may be accepted.
+        val deadline = System.currentTimeMillis() + 400
+        var accepted = 0
+        var attempts = 0
+        while (System.currentTimeMillis() < deadline && !holder.isUp) {
+            attempts++
+            if (holder.send(Channels.GPS, gpsExtensions())) accepted++
+            Thread.sleep(5)
+        }
+        assertTrue("the window was never exercised", attempts > 5)
+        assertEquals(
+            "$accepted of $attempts messages went out before the handshake completed: ${holder.stats()}",
+            0,
+            accepted,
+        )
+        assertEquals(
+            "every attempt in the window must be counted as having no session",
+            attempts.toLong(),
+            holder.stats().sendsWithoutSession,
+        )
+
+        // And once the handshake completes, sends are accepted.
+        waitFor { holder.isUp }
+        assertTrue(holder.send(Channels.GPS, gpsExtensions()))
+    }
+
+
+    @Test
+    fun `the phone announces itself as a phone`() {
+        // SessionHolder.ROLE decides which half of the timebase protocol the session runs:
+        // Session branches on `role == ROLE_PHONE`, so "jetson" here makes the phone answer
+        // pings and refuse pongs -- inverting the direction the code itself calls "an
+        // offset with the sign inverted, a plausible number that is exactly wrong". Setting
+        // it to jetson passed the whole suite, because the peer never looked at the role it
+        // was told and so agreed with whatever the holder claimed.
+        val peer = PeerServer()
+        val holder = holder(peer.port)
+        holder.start()
+        waitFor { holder.isUp }
+        waitFor { peer.rolesSeen.isNotEmpty() }
+
+        assertEquals(
+            "the peer was told the wrong role",
+            Session.ROLE_PHONE,
+            peer.rolesSeen.first(),
+        )
+        // And the constant is the transport's, not a second copy of the literal.
+        assertEquals(Session.ROLE_PHONE, SessionHolder.ROLE)
+    }
+
 }

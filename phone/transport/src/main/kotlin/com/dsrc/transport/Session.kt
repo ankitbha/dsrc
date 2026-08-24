@@ -95,6 +95,14 @@ class Session(
     private val onEnd: (SessionEnd, Throwable?) -> Unit = { _, _ -> },
 ) {
 
+    init {
+        // A free string here decided which half of the timebase protocol this session runs:
+        // `handleTimeSync` branches on `role == ROLE_PHONE`, so "Phone" or "jetson " became
+        // a *responder* silently, and `sendTimeSyncPing` then threw at the caller. The spec
+        // names exactly two roles and Python has an enum.
+        require(role in ROLES) { "role '$role' is not one of $ROLES" }
+    }
+
     private val queues = OutboundQueues()
 
     /**
@@ -237,6 +245,12 @@ class Session(
             ?: throw FramingError("hello has no protocol_version").also { finish(SessionEnd.FRAMING_ERROR, it) }
         if (version != Protocol.VERSION.toLong()) {
             val error = FramingError("peer speaks version $version, we speak ${Protocol.VERSION}")
+            finish(SessionEnd.FRAMING_ERROR, error)
+            throw error
+        }
+        val peerRole = (hello.entries["role"] as? JsonValue.Text)?.value ?: ""
+        if (peerRole !in ROLES) {
+            val error = FramingError("peer claims role '$peerRole', not one of $ROLES")
             finish(SessionEnd.FRAMING_ERROR, error)
             throw error
         }
@@ -682,6 +696,10 @@ class Session(
 
     companion object {
         const val ROLE_PHONE = "phone"
+        const val ROLE_JETSON = "jetson"
+
+        /** The only two roles the spec defines. */
+        val ROLES = setOf(ROLE_PHONE, ROLE_JETSON)
         const val HELLO = "hello"
         const val HEARTBEAT = "heartbeat"
         const val WIRE_STAMP = "t_wire_mono_ns"
