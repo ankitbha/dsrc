@@ -214,12 +214,66 @@ per-channel and per-reason counters compared field by field.
 3. Loopback throughput and queueing latency by channel at a camera-like payload. This
    also produces the first measurement of what a `here` message costs on the wire, which
    tasks 14 and 16 never took — they measured latency on small frames only.
-4. `t_mono_ns − t_capture_mono_ns` for camera and GPS. This is the second operand task
-   18's O1 lacked, so it is the first honest read on that bias.
+4. `t_mono_ns − t_capture_mono_ns` for camera and GPS.
+
+   **This was described wrongly and the description mattered.** The plan called it "the
+   second operand task 18's O1 lacked, so the first honest read on that bias". It is not.
+   O1 asks how far `t_capture_mono_ns` sits from the shutter, and this subtraction *starts*
+   at `t_capture`: the shutter is on the far side of it and appears in neither operand.
+   What this measures is capture-stamp to enqueue — the pipeline's own cost, which is worth
+   having and is newly meaningful now that the stamp is genuinely taken at enqueue. The
+   shutter offset still needs a hardware timestamp the camera does not expose, so **O1
+   remains unmeasured**, and a number reported against it would have been the wrong
+   quantity wearing the right name.
 
 **Not measured:** real GNSS quality, real link behaviour, anything needing the handset.
 
 ---
+
+## Measured
+
+Run with `./gradlew :transport:test --tests '*TransportMeasurementsTest' -Ddsrc.measure=true`.
+**Loopback on the laptop, not the link** — the in-car path is `adb reverse` over USB and the
+development path is Tailscale, so these bound the transport's own cost and say nothing about
+either.
+
+| channel | bytes on the wire | frames/s | MiB/s | dropped |
+|---|---|---|---|---|
+| `gps` (depth 64, no payload) | 265 | 69,269 | 17.5 | 0 of 2,000 |
+| `camera` (depth 1, 25.7 KB JPEG) | 25,889 | 6,861 | 169.4 | 0 of 200 |
+| `here` (depth 16, 64 KiB body) | 65,884 | 10,764 | 676.3 | 0 of 200 |
+
+The `here` row is the measurement tasks 14 and 16 never took: **a 64 KiB traffic reply costs
+65,884 bytes framed**, so the header is 348 bytes of it. At the planned 0.2 Hz that is about
+13 KB/s, against the camera's 25.9 KB per frame at 5 Hz — so HERE is roughly a tenth of the
+camera's load, not the rounding error the cadence table implies.
+
+Queueing latency, `t_mono_ns − t_capture_mono_ns`, 400 samples each:
+
+| channel | p50 | p95 | max | negative |
+|---|---|---|---|---|
+| `gps` | 2 µs | 5 µs | 451 µs | 0 |
+| `camera` | <1 µs | 6 µs | 352 µs | 0 |
+
+**Zero negatives is the result worth keeping**, because it is the check on round 2's fix: the
+enqueue stamp now postdates the caller's capture stamp on every sample, where the wire stamp
+used to precede the enqueue stamp on every stamped frame.
+
+Golden conformance: **18 of 18**, counted from the vector file rather than restated.
+
+### Two numbers I had to throw away
+
+The first camera throughput read **1,692 MiB/s at 68,536 fps with one frame of two hundred
+arriving.** It divided *accepted* by elapsed time, and `send` returns true on a
+latest_wins channel even when the message it displaced is dropped — so it was a
+queue-insertion rate on a channel discarding 99.5% of its traffic, and no slowness in the
+link could have made it fall.
+
+The first camera queueing p50 read **2,995 µs**, about a thousand times the corrected value.
+The pacing wait sat between the capture stamp and the send, so the measurement contained
+this harness's own `Thread.sleep` granularity. Moving the stamp after the wait gave 3 µs;
+replacing sleep with a spin moved camera's throughput from 378 fps to 6,861, which is how
+much of the original figure was the harness.
 
 ## 7. Risks
 

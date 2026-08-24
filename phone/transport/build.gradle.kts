@@ -35,6 +35,12 @@ tasks.test {
     inputs.file(goldenFrames).withPropertyName("goldenFrames")
     systemProperty("dsrc.goldenFrames", goldenFrames.asFile.absolutePath)
 
+    // Forwarded, not read from the test JVM's own properties: a -D on the Gradle command
+    // line reaches the daemon, not the forked test process, so the measurement class
+    // silently skipped and the run passed with no output at all.
+    systemProperty("dsrc.measure", providers.systemProperty("dsrc.measure").getOrElse("false"))
+    testLogging { showStandardStreams = true }
+
     // The interop test spawns the real Python peer. Both the script and the Python
     // transport package it imports are declared inputs, so a change to either re-runs
     // the one test that can catch the two implementations drifting apart.
