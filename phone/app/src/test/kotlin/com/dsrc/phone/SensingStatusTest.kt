@@ -76,4 +76,32 @@ class SensingStatusTest {
         status.set(SensingState.STOPPED_ERROR)
         assertEquals(SensingState.STOPPED_ERROR, status.state)
     }
+
+    @Test
+    fun `a published state becomes visible to another thread`() {
+        // Losing @Volatile survived: every existing test reads the field on the thread that
+        // wrote it. The service publishes from a binder thread and the UI reads from the
+        // main one, so a stale read shows a stopped session as RUNNING with an inert Stop
+        // button -- the exact failure onDestroy's publish exists to prevent.
+        repeat(200) {
+            val status = SensingStatus()
+            status.set(SensingState.IDLE)
+            val seen = java.util.concurrent.atomic.AtomicReference<SensingState?>(null)
+            val reader = Thread {
+                val deadline = System.nanoTime() + 200_000_000L
+                while (System.nanoTime() < deadline) {
+                    if (status.state == SensingState.RUNNING) {
+                        seen.set(SensingState.RUNNING)
+                        return@Thread
+                    }
+                    Thread.onSpinWait()
+                }
+            }
+            reader.start()
+            status.set(SensingState.RUNNING)
+            reader.join(2_000)
+            assertEquals("the reader never saw the published state", SensingState.RUNNING, seen.get())
+        }
+    }
+
 }

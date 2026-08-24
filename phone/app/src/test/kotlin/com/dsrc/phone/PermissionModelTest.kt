@@ -191,4 +191,31 @@ class PermissionModelTest {
             }
         }
     }
+
+    @Test
+    fun `every branch returns its permissions in a stable order`() {
+        // The `.sorted()` on the unasked branch survived deletion: the ranking was pinned
+        // and the ordering within a branch was not. An unstable order makes the UI's request
+        // sequence depend on map iteration, which is the kind of thing that reproduces on
+        // one device and not the next.
+        val unasked = PermissionModel.next(
+            mapOf(
+                "c" to PermissionState.NEVER_ASKED,
+                "a" to PermissionState.NEVER_ASKED,
+                "b" to PermissionState.NEVER_ASKED,
+            )
+        )
+        assertEquals(listOf("a", "b", "c"), (unasked as PermissionAction.Request).permissions)
+
+        val rationale = PermissionModel.next(
+            mapOf("z" to PermissionState.DENIED_CAN_ASK, "y" to PermissionState.DENIED_CAN_ASK)
+        )
+        assertEquals(listOf("y", "z"), (rationale as PermissionAction.Rationale).permissions)
+
+        val settings = PermissionModel.next(
+            mapOf("n" to PermissionState.DENIED_PERMANENTLY, "m" to PermissionState.DENIED_PERMANENTLY)
+        )
+        assertEquals(listOf("m", "n"), (settings as PermissionAction.OpenSettings).permissions)
+    }
+
 }

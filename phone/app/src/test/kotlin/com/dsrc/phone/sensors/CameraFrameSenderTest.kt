@@ -145,4 +145,41 @@ class CameraFrameSenderTest {
     private fun assertArrayEquals(expected: ByteArray, actual: ByteArray) {
         org.junit.Assert.assertArrayEquals(expected, actual)
     }
+
+    @Test
+    fun `stop does not wait out a poll interval`() {
+        // The flag and the interrupt are individually redundant -- deleting either leaves
+        // the loop terminating -- so neither was pinned. They are not equivalent though:
+        // without the interrupt, stop() waits for the current sleep to finish, and with a
+        // long poll interval that is the difference between prompt teardown and a stall.
+        // Pinned as promptness rather than as either line.
+        val interrupted = java.util.concurrent.CountDownLatch(1)
+        val sleeping = java.util.concurrent.CountDownLatch(1)
+        val sender = CameraFrameSender(
+            drain = { null },
+            send = { _, _, _ -> true },
+            pollMs = 30_000,
+            sleeper = { millis ->
+                sleeping.countDown()
+                try {
+                    Thread.sleep(millis)
+                } catch (e: InterruptedException) {
+                    interrupted.countDown()
+                    throw e
+                }
+            },
+        )
+        sender.start()
+        assertTrue("never reached the sleep", sleeping.await(5, java.util.concurrent.TimeUnit.SECONDS))
+
+        val started = System.nanoTime()
+        sender.stop()
+        assertTrue(
+            "stop() left the loop waiting out a 30 s poll",
+            interrupted.await(5, java.util.concurrent.TimeUnit.SECONDS),
+        )
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        assertTrue("stop took $elapsedMs ms", elapsedMs < 2_000)
+    }
+
 }

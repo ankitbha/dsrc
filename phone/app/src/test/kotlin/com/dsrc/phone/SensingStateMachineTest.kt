@@ -395,4 +395,25 @@ class SensingStateMachineTest {
         assertEquals(SensingState.STOPPED_ERROR, m.state)
         assertEquals("camera busy", m.lastFailure)
     }
+
+    @Test
+    fun `an accepted transition reports the state it came from`() {
+        // `from` and `to` are only ever logged, so swapping them -- Accepted(to, to) -- and
+        // pinning Ignored's state to IDLE both survived. A log line naming the wrong prior
+        // state is how the next person reading it reconstructs the wrong sequence, which is
+        // the whole reason the field is there.
+        val machine = SensingStateMachine()
+        val start = machine.offer(SensingEvent.Start) as Transition.Accepted
+        assertEquals(SensingState.IDLE, start.from)
+        assertEquals(SensingState.STARTING, start.to)
+
+        val started = machine.offer(SensingEvent.Started) as Transition.Accepted
+        assertEquals(SensingState.STARTING, started.from)
+        assertEquals(SensingState.RUNNING, started.to)
+
+        // And an ignored event reports the state that ignored it, not a constant.
+        val ignored = machine.offer(SensingEvent.Started) as Transition.Ignored
+        assertEquals(SensingState.RUNNING, ignored.state)
+    }
+
 }

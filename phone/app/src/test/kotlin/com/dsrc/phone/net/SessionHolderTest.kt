@@ -544,4 +544,18 @@ class SessionHolderTest {
         assertFalse(stats.copy(dialFailures = 9).accountsForAttempts)
     }
 
+
+    @Test
+    fun `starting twice is refused`() {
+        // The guard survived deletion. A second start spawns a second link thread against
+        // the same `current` field, so two dial loops race to publish a session and one of
+        // them is orphaned -- reconnecting forever with nothing reading it.
+        val peer = PeerServer()
+        val holder = holder(peer.port)
+        holder.start()
+        val second = runCatching { holder.start() }
+        assertTrue("a second start was allowed", second.isFailure)
+        assertTrue(second.exceptionOrNull() is IllegalStateException)
+    }
+
 }

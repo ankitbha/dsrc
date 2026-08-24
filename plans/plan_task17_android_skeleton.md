@@ -239,6 +239,24 @@ choices rather than oversights.
   is only ever called from `onStartCommand`'s call tree; it becomes load-bearing the
   moment a capture task calls `release()` from a sensor callback or a coroutine.
 
+## `@Volatile` on `SensingStatus.state` is unpinned, and probably unpinnable here
+
+Removing it survives, including a 200-round test that publishes from one thread and spins
+on another without joining. That test is worth keeping as a behavioural net, but it cannot
+kill the mutation and it is honest to say why: without `@Volatile` a stale read is
+*permitted*, not required, and on this JVM and architecture a short spin loop still reaches
+memory. Forcing the violation would need a harness built for the memory model — jcstress or
+equivalent — not a unit test.
+
+The annotation stays. It is free, it is correct, and the failure it prevents is specific:
+the service publishes from a binder thread and the UI reads on the main one, so a stale read
+shows a stopped session as `RUNNING` with an inert Stop button — the exact thing `onDestroy`'s
+publish exists to prevent.
+
+Contrast `RateGate.setRate`, where the same class of bug *is* pinnable: there the observable
+is two fields disagreeing with each other, not one field being stale, and an inconsistent
+pair is something a test can catch.
+
 ## 7. Needs sign-off
 
 1. **O1** — the real `minSdk` for the phone in hand.

@@ -81,7 +81,9 @@ class SessionHolder(
     val isUp: Boolean get() = current?.isRunning == true
 
     fun start() {
-        require(thread == null) { "already started" }
+        // `check`, not `require`: starting twice is a state problem rather than a bad
+        // argument, and IllegalStateException is what a caller would catch for it.
+        check(thread == null) { "already started" }
         thread = Thread({ loop() }, "dsrc-link").also {
             it.isDaemon = true
             it.start()
