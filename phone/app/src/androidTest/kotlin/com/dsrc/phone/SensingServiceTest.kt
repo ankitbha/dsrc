@@ -609,4 +609,53 @@ class SensingServiceTest {
         }
     }
 
+
+    @Test
+    fun teardownLeavesTheServiceHoldingNoResourceReferences() {
+        // Round 4: deleting all seven field assignments left every teardown test green,
+        // because with each release independently guarded a stale field is behaviourally
+        // inert -- the object is stopped and the next come-up overwrites it. What it costs
+        // is memory, and a retained CameraPipeline is not small: its whole ring buffer of
+        // encoded frames, an encoder executor and a socket, held for the life of the
+        // process. Asserted as the property it is rather than through a consequence it
+        // does not have.
+        SensingService.resourcesHeldAfterTeardown = -1
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+        SensingService.stop(context)
+        await(SensingState.IDLE)
+
+        assertTrue(
+            "teardown never ran: the recorder is still at its initial value",
+            pollUntil(5_000) { SensingService.resourcesHeldAfterTeardown >= 0 },
+        )
+        assertEquals(
+            "teardown finished still holding resource references",
+            0L,
+            SensingService.resourcesHeldAfterTeardown.toLong(),
+        )
+    }
+
+    @Test
+    fun anOrdinaryStopReleasesEveryResourceWithoutOneRefusing() {
+        // Round 4 found that a release *failing* is observable only for the four
+        // thread-owning steps: making the camera pipeline throw on stop left the suite
+        // green, because nothing looks at the seven fields' objects afterwards and the
+        // thread census cannot see a pipeline. The count closes that in aggregate -- a
+        // release that starts throwing in production now fails the suite, whichever of the
+        // eleven it is, instead of being a log line nobody reads.
+        SensingService.teardownFailures.set(0)
+        SensingService.start(context)
+        await(SensingState.RUNNING)
+        SensingService.stop(context)
+        await(SensingState.IDLE)
+        Thread.sleep(300)
+
+        assertEquals(
+            "a release step threw during an ordinary stop",
+            0L,
+            SensingService.teardownFailures.get().toLong(),
+        )
+    }
+
 }

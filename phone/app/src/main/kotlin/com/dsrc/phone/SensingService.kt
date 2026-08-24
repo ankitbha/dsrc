@@ -422,6 +422,9 @@ class SensingService : LifecycleService() {
             frameSender = null
             encodeExecutor = null
             link = null
+            resourcesHeldAfterTeardown = listOfNotNull(
+                cameraSource, gpsSource, pipeline, gpsPipeline, frameSender, encodeExecutor, link,
+            ).size
         }
     }
 
@@ -570,6 +573,24 @@ class SensingService : LifecycleService() {
          */
         @Volatile
         internal var startedFailureOverride: (() -> Unit)? = null
+
+        /**
+         * How many resource fields were still set when teardown finished.
+         *
+         * Round 4 pointed out that deleting all seven assignments above left every teardown
+         * test green, and the reason it did is worth stating: once each release is
+         * independently guarded, a stale field is behaviourally inert -- the object behind
+         * it is already stopped, and the next come-up overwrites it. What a stale field
+         * actually costs is memory, and it is not small: a retained CameraPipeline holds its
+         * whole ring buffer of encoded frames, plus an encoder executor and a socket, for
+         * the life of the process.
+         *
+         * So the property is asserted directly rather than through a consequence it does
+         * not have. This does sit next to what it measures, which means one edit could
+         * remove both -- said plainly rather than left for a reader to notice.
+         */
+        @Volatile
+        internal var resourcesHeldAfterTeardown: Int = -1
 
         /**
          * Release steps that threw, across every instance.
