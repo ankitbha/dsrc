@@ -1,8 +1,10 @@
 package com.dsrc.phone.sensors
 
+import android.os.PowerManager
 import com.dsrc.transport.PhoneTelemetry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -173,6 +175,42 @@ class TelemetryReporterTest {
 
         assertEquals(30, recorder.sent.single().hereCalls)
         assertEquals(1, recorder.sent.single().hereErrors)
+    }
+
+    @Test
+    fun `the headroom call is not made below the api level that has it`() {
+        // getThermalHeadroom is API 30 and minSdk is 29 -- a guess about the handset, not a
+        // device we have. Called unguarded it raises NoSuchMethodError inside a lambda whose
+        // caller wraps it in runCatching, so the whole telemetry stream went silent for the
+        // entire drive: no status, no achieved, no drops, and nothing logged. The status is
+        // API 29 and would have been fine on its own, which is what makes losing it to the
+        // headroom call the wrong trade.
+        var called = false
+        val onAndroid10 = ThermalReader.headroomIfSupported(sdkInt = 29) {
+            called = true
+            throw NoSuchMethodError("No virtual method getThermalHeadroom(I)F")
+        }
+
+        assertNull(onAndroid10)
+        assertFalse("the call was made on a platform that does not have it", called)
+
+        // And it is made where it exists, or the guard would silence a device that works.
+        assertEquals(
+            0.42,
+            ThermalReader.headroomIfSupported(sdkInt = 30) { 0.42f }!!,
+            1e-6,
+        )
+
+        // `headroomFrom` repeats this predicate rather than calling through, because lint
+        // cannot trace a version check through a lambda. The two must agree at the
+        // boundary, or the tested guard and the shipped one are different guards.
+        assertEquals(
+            "the boundary the test pins is the boundary the platform call is behind",
+            android.os.Build.VERSION_CODES.R,
+            30,
+        )
+        assertNull(ThermalReader.headroomIfSupported(sdkInt = 29) { 0.42f })
+        assertNotNull(ThermalReader.headroomIfSupported(sdkInt = 30) { 0.42f })
     }
 
     @Test

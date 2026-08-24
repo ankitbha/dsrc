@@ -1,5 +1,6 @@
 package com.dsrc.phone.sensors
 
+import android.util.Log
 import com.dsrc.transport.PhoneTelemetry
 
 /**
@@ -44,7 +45,11 @@ class TelemetryReporter(
     fun start() {
         val worker = Thread({
             while (running) {
-                runCatching { report() }
+                // Logged, not swallowed. The sibling loop in HerePipeline logs and this one
+                // did not, which is how an unguarded API-30 call took the whole telemetry
+                // stream down on Android 10 with nothing to say so -- the counters read the
+                // same as they do one tick after come-up.
+                runCatching { report() }.onFailure { Log.e(TAG, "telemetry tick failed", it) }
                 if (!running) return@Thread
                 try {
                     Thread.sleep(PERIOD_MS)
@@ -141,6 +146,8 @@ class TelemetryReporter(
 
     companion object {
         const val THREAD_NAME = "dsrc-telemetry"
+
+        private const val TAG = "TelemetryReporter"
 
         /**
          * How often a report goes up.

@@ -756,8 +756,22 @@ tunnels over USB and is unaffected.
     non-rate setting the downlink carries is the HERE query; camera geometry and
     JPEG quality stay compile-time.
 23. ~~Advisory display: the driver-facing UI.~~ **DONE** — `AdvisoryHolder` plus a panel on `MainActivity` showing the Jetson's own strings: `rec_speed_display` and `current_speed_display` arrive already converted into `units`, and the phone formats nothing, because a phone that rounded 30.4 to 30 while the Jetson meant 30.4 would be showing a recommendation nobody made. The task's correctness content is staleness: the transport keeps only the newest, but that governs the *queue*, and once nothing arrives there is nothing to displace what is on screen. The holder expires three seconds after **arrival** (not `t_capture_mono_ns`, which is the Jetson's clock — a panel going blank because a clock estimate wandered would be a fault invented by its own safety check), and the panel redraws on a tick, because an event-driven redraw can only react to an event that happened. Validation found two more ways a stale advisory reached the driver: returning to the app repainted the old one for ~29 ms, and an advisory could land after Stop because teardown joins no delivery thread. Also closes task 17's deferred Activity harness, which is what the first of those needed.
-24. Thermal monitoring reported upstream, plus throttle-safe capture that
-    degrades rather than failing.
+24. ~~Thermal monitoring reported upstream, plus throttle-safe capture that
+    degrades rather than failing.~~ **DONE** — `ThermalReader` and
+    `TelemetryReporter`, plus the telemetry deferred from task 22. "Degrades
+    rather than fails" means the phone **reports** and the Jetson decides:
+    nothing here lowers a rate on its own, because a phone that quietly halved
+    its camera rate when warm would leave the Jetson comparing a model against
+    inputs it never asked for and cannot see it did not get. `achieved` beside
+    `rates` *is* the shortfall. `thermal_headroom` is nullable on the wire
+    because `getThermalHeadroom` returns NaN when it has no estimate, and
+    canonical JSON refuses a NaN on both sides — so a NaN would fail the whole
+    frame and take the thermal status with it, silencing the phone about being
+    hot at the moment it was hottest. Validation found that same call is **API
+    30 against a minSdk of 29**, unguarded, inside a lambda whose caller
+    swallowed the `NoSuchMethodError`: on an Android 10 handset the entire
+    telemetry stream produced nothing for a whole drive with no log line. Lint
+    had the answer and nothing ran lint; `scripts/check.sh` does now.
 25. Local session logging on the phone, for ground truth and post-hoc analysis.
 
 ## F. Jetson runtime — developed over SSH

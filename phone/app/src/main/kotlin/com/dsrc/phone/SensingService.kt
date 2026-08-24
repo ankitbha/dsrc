@@ -427,9 +427,7 @@ class SensingService : LifecycleService() {
                 val camera = pipe.stats
                 TelemetryReporter.Sample(
                     thermalStatus = ThermalReader.statusName(power.currentThermalStatus),
-                    thermalHeadroom = ThermalReader.headroomOrNull(
-                        power.getThermalHeadroom(THERMAL_FORECAST_SECONDS),
-                    ),
+                    thermalHeadroom = ThermalReader.headroomFrom(power),
                     // What each modality actually put on the wire.
                     delivered = mapOf(
                         "camera_hz" to cameraSent.sent,
@@ -916,13 +914,7 @@ class SensingService : LifecycleService() {
         @Volatile
         internal var liveTelemetry: TelemetryReporter? = null
 
-        /**
-         * How far ahead `getThermalHeadroom` is asked to forecast.
-         *
-         * Zero: the reading wanted is now, not a prediction. A forecast would make the
-         * number the Jetson sees a guess about a guess.
-         */
-        private const val THERMAL_FORECAST_SECONDS = 0
+
 
         /** Commands that arrived with nothing to apply them. Non-zero is a defect. */
         internal val commandsWithoutApplier = java.util.concurrent.atomic.AtomicLong(0)
