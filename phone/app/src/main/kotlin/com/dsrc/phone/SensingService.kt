@@ -168,13 +168,20 @@ class SensingService : LifecycleService() {
                     // RUNNING -- an arm the machine accepts, and until round 4 an arm with
                     // no teardown behind it.
                     //
-                    // A seam, because with listener failures now contained there is
-                    // nothing left in this window that throws, and the arm is still
-                    // reachable by construction: the next watchdog or bind escalation to
-                    // offer Failed from RUNNING gets here. Recording it as "unpinnable"
-                    // is what I did twice before, and both times it was wrong.
-                    startedFailureOverride?.invoke()
                     handle(SensingEvent.Started)
+                    // *After* handle, and that is the entire point of the seam. Until
+                    // handle publishes the state the machine is still STARTING, so a throw
+                    // above this line takes the STARTING + Failed arm -- the ordinary
+                    // come-up-failure route, which already has a dozen ways to happen and
+                    // was never what this is for. Round 5 proved the difference by making
+                    // RUNNING + Failed unreachable in the machine: all 53 instrumented
+                    // tests still passed, because nothing was walking it.
+                    //
+                    // A seam, because with listener failures contained there is nothing
+                    // left in this window that throws, and the arm is still reachable by
+                    // construction: the next watchdog or bind escalation to offer Failed
+                    // from RUNNING arrives exactly here.
+                    startedFailureOverride?.invoke()
                 } catch (t: Throwable) {
                     // Startup failure has to land in the machine, not just the log, or
                     // the UI would show STARTING for the rest of the drive.
@@ -183,10 +190,12 @@ class SensingService : LifecycleService() {
                 }
             }
             SensingState.STOPPING -> {
-                // Outside the try, because it does not throw: every release inside it is
-                // individually guarded, and that is the property the whole arrangement
-                // rests on. Leaving it inside implied a failure mode it does not have.
-                onSensingDown()
+                // No teardown here. It used to sit above this line, and deleting it left
+                // all 53 instrumented tests passing -- correctly, because every route
+                // through STOPPING reaches handle(Stopped) -> IDLE -> react(IDLE), where
+                // teardown now lives. A release nothing can skip is the same shape as a
+                // guard nothing can reach, which is the thing this file keeps getting
+                // wrong in the other direction.
                 try {
                     handle(SensingEvent.Stopped)
                 } catch (t: Throwable) {
@@ -421,12 +430,19 @@ class SensingService : LifecycleService() {
             release("test seam") { teardownFailureOverride?.invoke() }
             release("camera source") { cameraSource?.stop() }
             release("gps source") { gpsSource?.stop() }
-            release("camera stats") { pipeline?.let { Log.i(TAG, "camera stats ${it.stats}") } }
-            release("gps stats") { gpsPipeline?.let { Log.i(TAG, "gps stats ${it.stats}") } }
             release("camera pipeline") { pipeline?.stop() }
             release("gps pipeline") { gpsPipeline?.stop() }
             release("frame sender") { frameSender?.stop() }
             release("encoder") { encodeExecutor?.shutdown() }
+            // Stats *after* the stops, and round 5 is why. `abandoned`, `refusedStopped`
+            // and the buffer's `discarded` all require `running` to be false or the
+            // executor to be down, so logging here read every one of them as zero on every
+            // call -- and this log line is the only production reader of these stats. The
+            // frames still queued at teardown were counted as `inFlight`, so the teardown
+            // log read as an encoder backlog: exactly the misreading `abandoned` was added
+            // to remove, by a recorder placed where it could not record.
+            release("camera stats") { pipeline?.let { Log.i(TAG, "camera stats ${it.stats}") } }
+            release("gps stats") { gpsPipeline?.let { Log.i(TAG, "gps stats ${it.stats}") } }
             release("link stats") { link?.let { Log.i(TAG, "link stats ${it.stats()}") } }
             release("link") { link?.stop() }
         } finally {
@@ -459,11 +475,7 @@ class SensingService : LifecycleService() {
         }
     }
 
-    /** The frame source, while sensing is up. */
-    val frames: CameraPipeline? get() = pipeline
 
-    /** The link, while sensing is up, for a test or a status reader. */
-    val session: SessionHolder? get() = link
 
     /**
      * Entering the foreground, with a seam so its failure can be tested.
@@ -610,11 +622,13 @@ class SensingService : LifecycleService() {
         /**
          * Failures raised while publishing the stop, which the machine cannot represent.
          *
-         * The remaining door is a platform call inside `release()` -- `stopForeground` or
-         * `stopSelf` -- and I could not make either throw on this emulator, so this pair is
-         * recorded rather than pinned. Stated plainly because the alternative is the shape
-         * that has now been wrong twice here: an argument that a path cannot be reached,
-         * standing in for a test.
+         * There is no reachable producer, and that is a stronger statement than the one
+         * this said before ("a platform call I could not make throw"). With `onSensingDown`
+         * non-throwing and listener failures contained, the whole subtree of
+         * `handle(Stopped)` is `machine.offer`, which is pure, plus `Log`, `stopForeground`
+         * and `stopSelf`. So this is not an unpinned recorder -- it is a recorder waiting
+         * for a producer that does not exist yet, kept because the subtree will grow and a
+         * failure there must not be a log line nobody reads.
          */
         internal val shutdownFailures = java.util.concurrent.atomic.AtomicInteger(0)
 

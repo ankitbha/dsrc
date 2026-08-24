@@ -51,7 +51,8 @@ class SensingServiceTest {
     }
 
     /**
-     * Every seam and every companion counter, in one place.
+     * Every seam and every companion counter, in one place -- five seams, not the six
+     * this used to claim.
      *
      * Four of the six seams were left to each test's own `finally`, and the counters are
      * process-global and were never reset -- so a test reading one was reading whatever the
@@ -67,6 +68,9 @@ class SensingServiceTest {
         SensingService.teardownFailures.set(0)
         SensingService.shutdownFailures.set(0)
         SensingService.resourcesHeldAfterTeardown = -1
+        SensingService.lastShutdownFailure = null
+        SensingStatus.shared.listenerFailures.set(0)
+        SensingStatus.shared.lastListenerFailure = null
     }
 
     /**
@@ -477,16 +481,18 @@ class SensingServiceTest {
 
     @Test
     fun aRestartLeavesNoMoreThreadsThanOneRunDoes() {
-        // Also weaker than it looks, for the same reason: the service is destroyed between
-        // the two starts, so there is never a live set to double. It verifies that a restart
-        // does not accumulate threads, which is worth having; it does not verify the
-        // re-entrancy release.
+        // This was not a restart. The second Start was offered from RUNNING, which the
+        // machine ignores -- no react(STARTING), no come-up, no second allocation ever
+        // happened -- so deleting the second start and its await left the test passing. It
+        // has to stop first.
         SensingService.start(context)
         await(SensingState.RUNNING)
         for (prefix in WORKER_PREFIXES) {
             assertTrue("nothing named '$prefix' started", pollUntil(10_000) { threadsNamed(listOf(prefix)) > 0 })
         }
 
+        SensingService.stop(context)
+        await(SensingState.IDLE)
         SensingService.start(context)
         await(SensingState.RUNNING)
         Thread.sleep(500)
@@ -495,9 +501,10 @@ class SensingServiceTest {
             val count = threadsNamed(listOf(prefix))
             // pool- covers the encoder and CameraX's analyser, so two is its healthy count.
             val limit = if (prefix == POOL) 2 else 1
+            // Both bounds: an upper bound alone passes for a restart that started nothing.
             assertTrue(
-                "restarting left $count threads named '$prefix', more than the $limit expected",
-                count <= limit,
+                "restarting left $count threads named '$prefix', wanted 1..$limit",
+                count in 1..limit,
             )
         }
         context.stopService(android.content.Intent(context, SensingService::class.java))
@@ -603,6 +610,9 @@ class SensingServiceTest {
         // last-delivered startId past the one release() hands stopSelf(lastStartId): the
         // stop is declined and the same instance takes the queued Start. Without it the
         // service is destroyed and a fresh process hides the leak.
+        val path = java.util.Collections.synchronizedList(mutableListOf<SensingState>())
+        val recorder = SensingStatus.Listener { path.add(it) }
+        SensingStatus.shared.addListener(recorder)
         SensingService.startedFailureOverride = {
             SensingService.startedFailureOverride = null
             SensingService.start(context)
@@ -612,6 +622,27 @@ class SensingServiceTest {
             SensingService.start(context)
             await(SensingState.RUNNING)
             Thread.sleep(1_000)
+
+            // The route, before its aftermath. Thread counts alone cannot tell the intended
+            // path from the arm being dead: make RUNNING + Failed unreachable in the machine
+            // and the service simply stays RUNNING with its first set of workers, which
+            // satisfies every count assertion below just as well. Round 5 proved that by
+            // doing it -- all 53 tests passed. So the states are asserted as a subsequence:
+            // RUNNING, then STOPPED_ERROR, then back up through STARTING to RUNNING.
+            val wanted = listOf(
+                SensingState.RUNNING,
+                SensingState.STOPPED_ERROR,
+                SensingState.STARTING,
+                SensingState.RUNNING,
+            )
+            val seen = synchronized(path) { path.toList() }
+            var index = 0
+            for (state in seen) if (index < wanted.size && state == wanted[index]) index++
+            assertTrue(
+                "the failure never took the RUNNING -> STOPPED_ERROR -> STARTING -> RUNNING " +
+                    "route; states were $seen",
+                index == wanted.size,
+            )
             for (prefix in WORKER_PREFIXES) {
                 val count = threadsNamed(listOf(prefix))
                 // Both bounds, for the same reason as the restart test: an upper bound
@@ -623,6 +654,7 @@ class SensingServiceTest {
                 )
             }
         } finally {
+            SensingStatus.shared.removeListener(recorder)
             SensingService.startedFailureOverride = null
             context.stopService(android.content.Intent(context, SensingService::class.java))
         }

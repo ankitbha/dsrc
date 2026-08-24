@@ -88,7 +88,7 @@ class CameraPipeline(
             return false
         }
         // The submit itself, guarded. `running` is read above and the executor is shut down
-        // four release steps before the pipeline is stopped, so a frame already past that
+        // three release steps *after* the pipeline is stopped, so a frame already past that
         // check meets a dead executor and the rejection escaped `offer` entirely -- into
         // CameraXSource's analyzer catch, logged as "analyzer failed". `accepted` was
         // incremented with no outcome, so `inFlight` never returned to zero and teardown

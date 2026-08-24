@@ -160,4 +160,35 @@ class SensingStatusTest {
         assertEquals("the state must advance regardless", SensingState.RUNNING, status.state)
     }
 
+
+    @Test
+    fun `a re-entrant set does not strand the listeners behind it on a superseded state`() {
+        // `set` used to deliver the value it was called with. A listener that calls `set`
+        // re-entrantly -- which is what a reactor attached to this holder does -- runs the
+        // inner delivery to completion; the outer loop then resumes and hands the *older*
+        // value to every listener behind it, and for a terminal state that is the last
+        // thing they ever hear. The measured shape was ui=[IDLE, RUNNING, STARTING] with
+        // status.state already RUNNING: the display left one transition in the past, with
+        // nothing further coming, which is the disagreement this class exists to prevent.
+        val status = SensingStatus()
+        val ui = mutableListOf<SensingState>()
+        var reentered = false
+        status.addListener {
+            if (it == SensingState.STARTING && !reentered) {
+                reentered = true
+                status.set(SensingState.RUNNING)
+            }
+        }
+        status.addListener { ui.add(it) }
+
+        status.set(SensingState.STARTING)
+
+        assertEquals(SensingState.RUNNING, status.state)
+        assertEquals(
+            "the listener behind the re-entrant one was left on a superseded state",
+            SensingState.RUNNING,
+            ui.last(),
+        )
+    }
+
 }

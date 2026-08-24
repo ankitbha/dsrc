@@ -27,7 +27,14 @@ class SensingStatus(initial: SensingState = SensingState.IDLE) {
     fun set(next: SensingState) {
         if (next == state) return
         state = next
-        listeners.forEach { notify(it, next) }
+        // `state`, not the captured `next`, and the difference is not cosmetic. A listener
+        // that calls `set` re-entrantly -- which is what a reactor attached to this holder
+        // does -- runs the inner delivery to completion; the outer loop then resumes and
+        // hands the *superseded* value to every listener behind it, which for a terminal
+        // state is the last thing they ever hear. Reading the field means a late listener
+        // gets the current state rather than the one that was current when the outer call
+        // began.
+        listeners.forEach { notify(it, state) }
     }
 
     fun addListener(listener: Listener) {
@@ -64,7 +71,7 @@ class SensingStatus(initial: SensingState = SensingState.IDLE) {
 
     @Volatile
     var lastListenerFailure: String? = null
-        private set
+        internal set
 
     fun removeListener(listener: Listener) {
         listeners.remove(listener)
