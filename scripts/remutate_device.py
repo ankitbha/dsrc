@@ -30,6 +30,10 @@ MUTATIONS = [
     # unregistered" and "batching is turned back on". Both are still real defects and
     # neither is pinned now -- see the note in ImuCaptureTest. Leaving them here would make
     # the harness permanently red for a gap that is recorded elsewhere.
+    (SERVICE, "advisory: advisories are never routed",
+     "        if (frame.channel == Channels.ADVISORY) {", "        if (false) {"),
+    (SERVICE, "advisory: a stop leaves the advisory up",
+     "            advisories.clear()", ""),
     (SERVICE, "config: a raise never reaches the imu source",
      "                motion.setRate(hz)", ""),
     (SERVICE, "config: the rate_cmd handler is never reached",

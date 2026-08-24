@@ -11,9 +11,13 @@ import com.dsrc.transport.Channels
 import com.dsrc.transport.Frame
 import com.dsrc.transport.ImuSample
 import com.dsrc.transport.Protocol
+import com.dsrc.phone.ui.AdvisoryHolder
+import com.dsrc.transport.AdvisoryMessage
 import com.dsrc.transport.RateCommand
 import com.dsrc.transport.Session
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -267,6 +271,70 @@ class ImuWireTest {
             "commanded 200 Hz from a 50 Hz baseline and measured $raised/s against " +
                 "$baseline/s: a raise the gate cannot serve must reach the source",
             raised > baseline * 1.4,
+        )
+    }
+
+    @Test
+    fun anAdvisoryFromTheJetsonIsShownAndThenGoesStale() {
+        // The two halves of task 23 that matter: an advisory arriving on the live link
+        // reaches the display, and one that stops arriving leaves it. The second is the
+        // point -- the transport keeps only the newest, but once nothing arrives there is
+        // nothing to displace what is on screen, and a recommendation about road the driver
+        // has covered looks exactly like a current one.
+        SensingService.start(context)
+        awaitState(SensingState.RUNNING)
+        assertTrue(pollUntil(15_000) { sessions.any { it.isRunning } })
+
+        val advisory = AdvisoryMessage(
+            captureMonoNs = android.os.SystemClock.elapsedRealtimeNanos(),
+            recSpeedMps = 13.4, recSpeedDisplay = 30.0, currentSpeedDisplay = 28.0,
+            units = "mph", headwayTargetS = 2.0,
+            laneText = "keep", mergeText = "", trafficText = "moderate",
+            confidence = 0.87, confidenceLabel = "high",
+            action = mapOf(
+                "lane_preference" to "keep", "merge_mode" to "normal",
+                "desired_speed_bin" to "nominal", "desired_headway_bin" to "normal",
+            ),
+        )
+        assertTrue(
+            "the peer could not send the advisory",
+            sessions.first { it.isRunning }.send(Channels.ADVISORY, advisory.toExtensions()),
+        )
+
+        assertTrue(
+            "the advisory never reached the display",
+            pollUntil(10_000) {
+                SensingService.advisories.current(android.os.SystemClock.elapsedRealtimeNanos()) != null
+            },
+        )
+        val shown = SensingService.advisories.current(android.os.SystemClock.elapsedRealtimeNanos())!!
+        assertEquals("the Jetson's number, not one the phone made", 30.0, shown.recSpeedDisplay, 1e-9)
+        assertEquals("mph", shown.units)
+
+        // Stopping the session takes it off immediately, without waiting for the expiry.
+        // A driver who stopped is not being advised, and three seconds of a recommendation
+        // that no longer applies is three seconds too many.
+        SensingService.stop(context)
+        awaitState(SensingState.IDLE)
+        assertNull(
+            "stopping the session left the advisory on the display",
+            SensingService.advisories.current(android.os.SystemClock.elapsedRealtimeNanos()),
+        )
+
+        // And when it is not stopped, it leaves on its own because nothing more arrives.
+        SensingService.start(context)
+        awaitState(SensingState.RUNNING)
+        assertTrue(pollUntil(15_000) { sessions.any { it.isRunning } })
+        sessions.first { it.isRunning }.send(Channels.ADVISORY, advisory.toExtensions())
+        assertTrue(
+            pollUntil(10_000) {
+                SensingService.advisories.current(android.os.SystemClock.elapsedRealtimeNanos()) != null
+            },
+        )
+        Thread.sleep(AdvisoryHolder.MAX_AGE_NS / 1_000_000 + 500)
+        assertNull(
+            "a stale advisory is still on the display",
+            SensingService.advisories.current(android.os.SystemClock.elapsedRealtimeNanos()),
         )
     }
 

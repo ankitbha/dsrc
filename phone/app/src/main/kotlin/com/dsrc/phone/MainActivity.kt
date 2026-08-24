@@ -27,6 +27,25 @@ import androidx.core.content.ContextCompat
 class MainActivity : ComponentActivity() {
 
     private lateinit var stateLabel: TextView
+    private lateinit var speedLabel: TextView
+    private lateinit var adviceLabel: TextView
+    private lateinit var confidenceLabel: TextView
+
+    /**
+     * Redraws the advisory panel.
+     *
+     * On its own tick rather than only on arrival, because the panel has to go blank when
+     * *nothing* arrives -- that is the whole of the staleness rule, and an event-driven
+     * redraw can only ever react to an event that happened.
+     */
+    private val advisoryTick = object : Runnable {
+        override fun run() {
+            refreshAdvisory()
+            advisoryHandler.postDelayed(this, ADVISORY_TICK_MS)
+        }
+    }
+
+    private val advisoryHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private lateinit var asked: AskedPermissions
 
     /** Set when the user pressed Start but permissions had to be requested first. */
@@ -69,6 +88,18 @@ class MainActivity : ComponentActivity() {
         }
         stateLabel = TextView(this).apply { textSize = 20f }
         root.addView(stateLabel)
+
+        // The advisory panel. Every string on it is the Jetson's: `rec_speed_display` and
+        // `current_speed_display` arrive already converted into `units`, and the three text
+        // fields arrive as text. The phone formats nothing, because a phone that rounded
+        // 30.4 to 30 while the Jetson meant 30.4 would be showing a recommendation nobody
+        // made.
+        speedLabel = TextView(this).apply { textSize = 44f }
+        adviceLabel = TextView(this).apply { textSize = 18f }
+        confidenceLabel = TextView(this).apply { textSize = 16f }
+        root.addView(speedLabel)
+        root.addView(adviceLabel)
+        root.addView(confidenceLabel)
         root.addView(Button(this).apply {
             text = "Start sensing"
             setOnClickListener { onStartClicked() }
@@ -84,11 +115,34 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         SensingStatus.shared.addListener(listener)
         refresh()
+        advisoryHandler.post(advisoryTick)
     }
 
     override fun onStop() {
         SensingStatus.shared.removeListener(listener)
+        advisoryHandler.removeCallbacks(advisoryTick)
         super.onStop()
+    }
+
+    /**
+     * Show the current advisory, or nothing at all.
+     *
+     * "Nothing at all" is a real state and it is the safe one: an advisory that has expired
+     * is about road the driver has covered, and leaving it up would say otherwise.
+     */
+    private fun refreshAdvisory() {
+        val advisory = SensingService.advisories.current(android.os.SystemClock.elapsedRealtimeNanos())
+        if (advisory == null) {
+            speedLabel.text = ""
+            adviceLabel.text = ""
+            confidenceLabel.text = ""
+            return
+        }
+        speedLabel.text = "${advisory.recSpeedDisplay} ${advisory.units}"
+        adviceLabel.text = listOf(advisory.laneText, advisory.mergeText, advisory.trafficText)
+            .filter { it.isNotBlank() }
+            .joinToString("  \u00b7  ")
+        confidenceLabel.text = advisory.confidenceLabel
     }
 
     private fun onStartClicked() {
@@ -161,6 +215,14 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
+        /**
+         * How often the advisory panel is redrawn.
+         *
+         * Well under the three-second expiry, so a stale advisory leaves the screen within
+         * a tick of becoming stale rather than lingering until the next arrival.
+         */
+        const val ADVISORY_TICK_MS = 250L
+
         const val PREFS = "permissions"
         const val KEY_START_REQUESTED = "startRequested"
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT

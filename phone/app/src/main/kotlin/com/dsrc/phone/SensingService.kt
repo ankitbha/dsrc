@@ -20,6 +20,7 @@ import com.dsrc.phone.sensors.CameraPipeline
 import com.dsrc.phone.sensors.CameraXSource
 import com.dsrc.phone.sensors.CameraFrameSender
 import com.dsrc.phone.config.ConfigApplier
+import com.dsrc.phone.ui.AdvisoryHolder
 import com.dsrc.phone.sensors.GpsLocationSource
 import com.dsrc.phone.sensors.HerePipeline
 import com.dsrc.phone.sensors.HttpHereClient
@@ -28,6 +29,7 @@ import com.dsrc.phone.sensors.ImuSource
 import com.dsrc.phone.sensors.GpsPipeline
 import com.dsrc.phone.sensors.GpsReading
 import com.dsrc.phone.sensors.GpsSource
+import com.dsrc.transport.AdvisoryMessage
 import com.dsrc.transport.Channels
 import com.dsrc.transport.RateCommand
 import com.dsrc.transport.Frame
@@ -464,6 +466,13 @@ class SensingService : LifecycleService() {
      * That is the right heading for it.
      */
     private fun onInboundFrame(frame: Frame) {
+        if (frame.channel == Channels.ADVISORY) {
+            advisories.accept(
+                AdvisoryMessage.fromWire(frame.header.entries, frame.payload),
+                SystemClock.elapsedRealtimeNanos(),
+            )
+            return
+        }
         if (frame.channel != Channels.RATE_CMD) {
             Log.i(TAG, "inbound ${frame.channel} seq=${frame.sequence} (no handler)")
             return
@@ -612,6 +621,8 @@ class SensingService : LifecycleService() {
             herePipeline = null
             liveHere = null
             configApplier = null
+            // A driver who stopped the session is not being advised.
+            advisories.clear()
             liveImu = null
             liveImuSource = null
             pipeline = null
@@ -852,6 +863,15 @@ class SensingService : LifecycleService() {
 
         /** Commands that arrived with nothing to apply them. Non-zero is a defect. */
         internal val commandsWithoutApplier = java.util.concurrent.atomic.AtomicLong(0)
+
+        /**
+         * The advisory the driver is being shown.
+         *
+         * On the companion rather than an instance field: the UI outlives any one service
+         * instance, and an advisory that survived a stop would be a recommendation about a
+         * drive that had ended. `onSensingDown` clears it for exactly that reason.
+         */
+        val advisories = AdvisoryHolder()
 
         /**
          * Release steps that threw, across every instance.
