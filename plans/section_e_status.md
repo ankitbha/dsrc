@@ -487,12 +487,55 @@ several in my own fixes. The bar is worth more than the pace.
 
 ---
 
+## Two arguments I made, and why both were wrong
+
+Worth recording separately from the findings, because the same mistake produced both and
+it is a mistake about method rather than about Android.
+
+Twice I removed a guard on the strength of an argument that the code it protected could
+not be reached, and twice a validator reached it. The first: `onSensingUp` cannot be
+entered with live fields, because every route into `STARTING` has been through teardown.
+The enumeration was of the routes where teardown *succeeds* — `onSensingDown` ran eleven
+releases in sequence and nulled the seven fields last, so a throw part-way through
+skipped every release behind it and left them all set. The second, after that was fixed:
+`react(STARTING)`'s `try` encloses `handle(Started)` as well as `onSensingUp()`, and
+`handle` publishes the state, so anything raised while publishing `RUNNING` is caught as
+a *start* failure and offered as `Failed` while the machine is already `RUNNING` — an arm
+the machine accepts, and one no teardown stood behind.
+
+Both fixes are structural rather than trigger-specific. Each release runs under its own
+guard, and teardown belongs to **entering a stopped state** rather than to the one
+transition that happens to pass through `STOPPING`. The point is not that two guards were
+missing; it is that "this cannot happen" was doing the work a test should do, and an
+enumeration of routes is exactly the kind of argument that looks complete while missing
+one.
+
+A third instance, in the tests rather than the code: the first test for the second
+finding used a throwing status listener, which is how the validator reproduced it. But
+containing listener failures — a fix in its own right — closed that door, so with both
+fixes in place the test passed without exercising the route at all. Mutating the teardown
+away left all 51 instrumented tests green. A test can pass for the wrong reason the moment
+a *different* fix lands, and nothing announces it.
+
+## What the suites cost, and the one thing that made them lie
+
+246 transport + 236 app JVM + 53 instrumented + 942 Python. The instrumented suite is
+~2 minutes and the Python suite ~47 seconds; the JVM suites are seconds.
+
+Instrumented runs were intermittently reporting failures in tests nobody had touched,
+with no assertion message. The cause is not in the code: installing `com.dsrc.phone`
+force-stops any running process of it, so two `connectedDebugAndroidTest` runs against
+the one emulator kill each other, and whichever test was executing when the install
+landed is named as the failure. A diagnosis pointing at innocent code is worse than a
+crash. `scripts/with_device.py` takes an exclusive lock; every device-touching command
+goes through it, including from a validator's mirror.
+
 ## How to run any of it
 
 ```
 cd dsrc/phone
 JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home ./gradlew :transport:test :app:check
-JAVA_HOME=... ANDROID_HOME=/opt/homebrew/share/android-commandlinetools ./gradlew :app:connectedDebugAndroidTest
+python3 scripts/with_device.py -- env JAVA_HOME=... ./gradlew -p phone :app:connectedDebugAndroidTest
 ```
 
 `:app:check` includes lint and the merged-manifest gate; `:app:testDebugUnitTest` alone
