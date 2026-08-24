@@ -407,6 +407,37 @@ example for why the sender rule exists.
 
 ---
 
+#### What round 2 came to
+
+Thirteen findings closed and mutation-pinned; two pushed back on with counter-evidence;
+two recorded as deliberate gaps with the condition for revisiting them. **212 transport,
+213 app, 41 instrumented tests, 0 failed.**
+
+The push-backs matter as much as the fixes. F15 reported a "phantom `STALLED`" when
+`close()` races the watchdog, measured at 1 in 30. It cannot happen: `finish()` is a
+compare-and-set, so a losing caller cannot overwrite the reason. **My own fix for it was
+worse than the finding** — a flag to make `close()` win, which removing again survives 200
+rounds, because the CAS had already decided. Shipping a guard nothing can observe is the
+failure mode where dead code reads as load-bearing, so it went back out and the reasoning
+lives in `finish()`'s docstring.
+
+And F13's direction was inverted, which made the real finding worse rather than better. The
+spec says the phone initiates; the phone had the responder built, and it was reachable from
+nothing.
+
+Two things are recorded rather than built, each with the condition that forces the issue.
+**Inbound queues** — the spec describes them, Python has them, and the phone's only inbound
+channels are low-rate; the moment a handler does anything slow (a disk write in task 25, a
+UI hop in task 23) synchronous delivery couples that latency to the read loop, which is
+what the stall timeout watches. And the **ping cadence** — `sendTimeSyncPing` exists and is
+exercised, but no timer calls it, so a running app still does not perform the exchange.
+
+One thing is worse than a gap: the interop test asserts `"dropped_inbound": 0` against the
+**Python peer's** counter, so it reads as a check on our inbound accounting and is nothing
+of the kind. It goes with the F9 work.
+
+---
+
 ### One of the two open findings is now closed
 
 **F8 is closed** (`7c4b632`). The adapter, the link and the service wiring are real:
