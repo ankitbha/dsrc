@@ -33,6 +33,8 @@ MUTATIONS = [
     # the harness permanently red for a gap that is recorded elsewhere.
     (ACTIVITY, "advisory: the labels keep their text while backgrounded",
      "        blankAdvisory()\n        super.onStop()", "        super.onStop()"),
+    (SERVICE, "log: nothing is offered to the session log",
+     "            onSent = { header -> log.offer(header) },", ""),
     (SERVICE, "advisory: advisories are never routed",
      "        if (frame.channel == Channels.ADVISORY) {", "        if (false) {"),
     (SERVICE, "advisory: a stop leaves the advisory up",

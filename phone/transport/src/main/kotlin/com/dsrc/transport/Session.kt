@@ -94,6 +94,15 @@ class Session(
     private val wallClock: () -> Long,
     /** Delivered messages, minus transport traffic. Called on the reader thread. */
     private val onFrame: (Frame) -> Unit,
+    /**
+     * Called with each outgoing frame's header, as canonical JSON.
+     *
+     * For a local recorder. Given the encoded header rather than the message it came from,
+     * so a log built on it is the wire rather than a second account of it. Must not block:
+     * it runs on the writer thread, and anything slow here becomes back-pressure on every
+     * modality at once.
+     */
+    private val onSent: ((String) -> Unit)? = null,
     /** Called once, with the reason, when the session ends. */
     private val onEnd: (SessionEnd, Throwable?) -> Unit = { _, _ -> },
 ) {
@@ -445,6 +454,12 @@ class Session(
             Framing.write(header, message.payload, output)
         }
         framesSent.incrementAndGet()
+        // The same header that just went out, handed to whoever is recording. Not a copy
+        // built from the message -- the encoded object itself, so a local log cannot
+        // disagree with what the peer received.
+        onSent?.let { record ->
+            runCatching { record(Json.encode(Framing.withPayloadLength(header, message.payload.size))) }
+        }
     }
 
     private fun sendHeartbeat() {
@@ -672,7 +687,7 @@ class Session(
             // Description before counter, for the reason given above.
             lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"
             deliveryFailures.incrementAndGet()
-            inbound.countFailed(frame.channel)
+            inbound.countDelivered(frame.channel)
         }
     }
 

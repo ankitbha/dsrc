@@ -18,6 +18,7 @@ import com.dsrc.transport.RateCommand
 import com.dsrc.transport.Session
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -374,6 +375,45 @@ class ImuWireTest {
         assertTrue(
             "achieved imu_hz is ${report.achieved["imu_hz"]} while imu frames are arriving",
             report.achieved.getValue("imu_hz") > 1.0,
+        )
+    }
+
+    @Test
+    fun theSessionLogRecordsTheHeadersThatWentOnTheWire() {
+        // Ground truth, asserted against the wire rather than against itself. The log's
+        // whole design is that it records the encoded header, so a line in the file and a
+        // frame the peer received are the same object -- and the way to show that is to
+        // compare them, not to check the file is non-empty.
+        SensingService.start(context)
+        awaitState(SensingState.RUNNING)
+        assertTrue(pollUntil(15_000) { sessions.any { it.isRunning } })
+        assertTrue(pollUntil(10_000) { imuFrames().size > 20 })
+
+        val received = imuFrames().take(20).map { frame ->
+            com.dsrc.transport.Json.encode(
+                com.dsrc.transport.Framing.withPayloadLength(frame.header, frame.payload.size),
+            )
+        }
+
+        SensingService.stop(context)
+        awaitState(SensingState.IDLE)
+
+        // Every session file, not the newest by mtime. Earlier tests in this class each
+        // leave one, filenames are second-resolution so several can share a name, and
+        // picking "the newest" made this pass or fail on which file mtime happened to
+        // favour -- it failed once with all twenty frames "absent" and passed unchanged on
+        // the next run. The claim is that these frames were logged; searching every file
+        // asserts exactly that and nothing about file selection.
+        val logs = java.io.File(context.filesDir, "sessions").listFiles().orEmpty()
+        assertTrue("no session log was written", logs.isNotEmpty())
+        val lines = logs.flatMap { it.readLines() }.toSet()
+
+        assertTrue("the log is empty", lines.isNotEmpty())
+        val missing = received.filterNot { it in lines }
+        assertTrue(
+            "${missing.size} of 20 frames the peer received are absent from ${lines.size} " +
+                "logged lines across ${logs.size} files.\n  wanted: ${missing.firstOrNull()}",
+            missing.isEmpty(),
         )
     }
 

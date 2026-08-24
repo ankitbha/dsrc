@@ -52,6 +52,8 @@ class SessionHolder(
     private val wallClock: () -> Long,
     /** Delivered inbound frames. Called on a session reader thread. */
     private val onFrame: (Frame) -> Unit,
+    /** Handed each outgoing header, as canonical JSON, for a local recorder. */
+    private val onSent: ((String) -> Unit)? = null,
     private val dial: (LinkConfig) -> Link = ::dialTcp,
     /** Sleep, injectable so a test does not spend the backoff. */
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
@@ -166,6 +168,7 @@ class SessionHolder(
                     monoClock = monoClock,
                     wallClock = wallClock,
                     onFrame = onFrame,
+                    onSent = onSent,
                     onEnd = { end, error ->
                         lastEnd = end
                         lastError = error?.toString()

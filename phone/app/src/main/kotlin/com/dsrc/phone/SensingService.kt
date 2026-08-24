@@ -20,6 +20,8 @@ import com.dsrc.phone.sensors.CameraPipeline
 import com.dsrc.phone.sensors.CameraXSource
 import com.dsrc.phone.sensors.CameraFrameSender
 import com.dsrc.phone.config.ConfigApplier
+import com.dsrc.phone.log.SessionLog
+import java.io.File
 import com.dsrc.phone.ui.AdvisoryHolder
 import com.dsrc.phone.sensors.GpsLocationSource
 import com.dsrc.phone.sensors.HerePipeline
@@ -67,6 +69,7 @@ class SensingService : LifecycleService() {
     private var imuPipeline: ImuPipeline? = null
     private var herePipeline: HerePipeline? = null
     private var telemetryReporter: TelemetryReporter? = null
+    private var sessionLog: SessionLog? = null
 
     /**
      * Routes a command to the running modalities.
@@ -306,12 +309,26 @@ class SensingService : LifecycleService() {
         // The link first, so both modalities have somewhere to send to before either can
         // produce anything. It is up before it is connected -- send() refuses until the
         // handshake completes, counted where it happens.
+        // The session log, opened before the link so the first frame of the drive is in it.
+        // Named by device and wall-clock start, which is what a Jetson-side recording can be
+        // matched against -- the hello already carries the same device id.
+        val log = SessionLog(
+            File(
+                File(filesDir, "sessions"),
+                "${deviceId()}-${wallClockNanos() / 1_000_000_000}.jsonl",
+            )
+        )
+        sessionLog = log
+        liveLog = log
+        log.start()
+
         val holder = SessionHolder(
             config = LinkConfig(),
             deviceId = deviceId(),
             monoClock = SystemClock::elapsedRealtimeNanos,
             wallClock = ::wallClockNanos,
             onFrame = ::onInboundFrame,
+            onSent = { header -> log.offer(header) },
         )
         link = holder
         // Not started here. Starting the link starts the reader and delivery threads, and
@@ -600,6 +617,12 @@ class SensingService : LifecycleService() {
             // release follows it and so none can be skipped. A test built on a trailing
             // seam passed whether or not the guard it meant to pin was there.
             release("test seam") { teardownFailureOverride?.invoke() }
+            // First, and before anything that can take time. A driver who stopped the
+            // session is not being advised, and the panel should go blank when they press
+            // the button -- not after the session log has flushed, which joins for up to two
+            // seconds. Clearing it last was already racy against `IDLE` being published
+            // before teardown runs; the flush made that window wide enough to see.
+            release("advisory") { advisories.clear() }
             release("camera source") { cameraSource?.stop() }
             release("gps source") { gpsSource?.stop() }
             release("imu source") { imuSource?.stop() }
@@ -608,6 +631,14 @@ class SensingService : LifecycleService() {
             release("imu pipeline") { imuPipeline?.stop() }
             release("here pipeline") { herePipeline?.stop() }
             release("telemetry") { telemetryReporter?.stop() }
+            // After the link, so anything the writer had queued is on disk before the log
+            // is asked to finish. The log is the artifact the drive was for.
+            release("session log") {
+                sessionLog?.let {
+                    it.stop()
+                    Log.i(TAG, "session log ${it.stats}")
+                }
+            }
             release("frame sender") { frameSender?.stop() }
             release("encoder") { encodeExecutor?.shutdown() }
             // Stats *after* the stops, and round 5 is why. `abandoned`, `refusedStopped`
@@ -669,9 +700,9 @@ class SensingService : LifecycleService() {
             liveHere = null
             telemetryReporter = null
             liveTelemetry = null
+            sessionLog = null
+            liveLog = null
             configApplier = null
-            // A driver who stopped the session is not being advised.
-            advisories.clear()
             liveImu = null
             liveImuSource = null
             pipeline = null
@@ -913,6 +944,10 @@ class SensingService : LifecycleService() {
         /** The running telemetry reporter. */
         @Volatile
         internal var liveTelemetry: TelemetryReporter? = null
+
+        /** The running session log. */
+        @Volatile
+        internal var liveLog: SessionLog? = null
 
 
 

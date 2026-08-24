@@ -116,6 +116,7 @@ class SessionTest {
         onPhoneWrite: ((ByteArray) -> Unit)? = null,
         phoneWriteDelayMs: Long = 0,
         phoneInput: ((java.io.InputStream) -> java.io.InputStream)? = null,
+        onPhoneSent: ((String) -> Unit)? = null,
     ): Pair<Peer, Peer> {
         val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).also { servers.add(it) }
         val clientSocket = Socket(InetAddress.getLoopbackAddress(), server.localPort).also { sockets.add(it) }
@@ -152,6 +153,7 @@ class SessionTest {
                     latch.countDown()
                 },
                 onEnd = { reason, cause -> synchronized(ends) { ends.add(reason to cause) } },
+                onSent = if (role == "phone") onPhoneSent else null,
             ).also { sessions.add(it) }
             return Peer(session, received, ends, { latch }, socket)
         }
@@ -2764,6 +2766,31 @@ class SessionTest {
         assertTrue(
             stats.lastOutboundFramingRefusal!!.contains("FramingError"),
             "and it names the cause: ${stats.lastOutboundFramingRefusal}",
+        )
+    }
+    @Test
+    fun `the header handed to a recorder is the one the peer received`() {
+        // The whole design of the session log rests on this. A log built from the message,
+        // or from the pipelines' counters, becomes a second account of the drive -- and the
+        // first time it disagrees with what the Jetson received, nobody can say which is
+        // right. Handed the encoded header, it cannot disagree, because it is the same
+        // object that was written to the socket.
+        //
+        // Asserted by comparing against what actually arrived, not against a header this
+        // test built: a test that constructed its own expectation would pass for a recorder
+        // fed anything that happened to match the construction.
+        val recorded = java.util.concurrent.ConcurrentLinkedQueue<String>()
+        val (phone, jetson) = pair(onPhoneSent = { recorded.add(it) })
+
+        assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(1_234_567).toExtensions()))
+        assertTrue(awaitFrames(jetson, 1), "the frame never arrived")
+
+        val arrived = jetson.received.first { it.channel == Channels.GPS }
+        val asSent = recorded.first { it.contains("\"ch\":\"gps\"") }
+        assertEquals(
+            Json.encode(Framing.withPayloadLength(arrived.header, arrived.payload.size)),
+            asSent,
+            "the recorded header is not the one that went on the wire",
         )
     }
 }
