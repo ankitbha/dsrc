@@ -17,3 +17,7 @@ phone/*/build/
 phone/local.properties
 phone/.kotlin/
 .remutate-restore
+
+# Test-run output. Rewritten by every pytest invocation, so tracking it left the
+# tree dirty during mutation runs -- which is how a mutant gets committed by accident.
+build/

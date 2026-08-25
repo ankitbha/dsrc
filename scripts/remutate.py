@@ -128,10 +128,12 @@ MUTATIONS = [
      "phone/app/src/main/kotlin/com/dsrc/phone/log/SessionLog.kt",
      "        if (!queue.offer(headerJson)) {",
      "        if (!queue.offer(headerJson)) { queue.put(headerJson) } else if (false) {", "app"),
+    # Re-anchored: the three call sites were folded into one `recordSent(header, payloadSize)`,
+    # and the old anchor named `message.payload.size`, so this had been skipped silently.
     ("log: the recorded header is not the one that was sent",
      "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
-     "            runCatching { record(Json.encode(Framing.withPayloadLength(header, message.payload.size))) }",
-     '            runCatching { record("{}") }', "transport"),
+     "        runCatching { record(Json.encode(Framing.withPayloadLength(header, payloadSize))) }",
+     '        runCatching { record("{}") }', "transport"),
     ("telemetry: the api-30 guard is removed",
      "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalReader.kt",
      "        if (sdkInt < android.os.Build.VERSION_CODES.R) return null", "", "app"),
@@ -168,10 +170,24 @@ MUTATIONS = [
      "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ImuPairing.kt",
      "        const val MAX_PLAUSIBLE_DELIVERY_NS = 2_000_000_000L",
      "        const val MAX_PLAUSIBLE_DELIVERY_NS = 1_000_000_000L", "app"),
-    ("imu: the timebase gate is skipped entirely",
+    # Split in two. `checkTimebase` is called from both onGyro and onAccelerometer, and the
+    # single anchor matched both -- so this mutated whichever came first (the gyro) and the
+    # accelerometer's gate had no pin of its own at all.
+    ("imu: the gyro timebase gate is skipped entirely",
      "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ImuPairing.kt",
-     "        if (!checkTimebase(captureNs, appNowNs, monoNowNs)) {",
-     "        if (false) {",
+     "        if (!checkTimebase(captureNs, appNowNs, monoNowNs)) {\n"
+     "            refusedWrongTimebase.incrementAndGet()\n"
+     "            return\n"
+     "        }",
+     "        if (false) {\n"
+     "            refusedWrongTimebase.incrementAndGet()\n"
+     "            return\n"
+     "        }",
+     "app"),
+    ("imu: the accelerometer timebase gate is skipped entirely",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ImuPairing.kt",
+     "            return ImuOutcome.WrongTimebase\n        }",
+     "            @Suppress(\"UNREACHABLE_CODE\")\n            if (false) return ImuOutcome.WrongTimebase\n        }",
      "app"),
     ("imu: the moot branch uses the delivery bound again",
      "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ImuPairing.kt",
