@@ -212,7 +212,15 @@ class ImuSource(
      * its counters and the session are untouched, and the listener object is the same one.
      * Only the period the platform is asked for changes.
      */
+    @Synchronized
     fun setRate(hz: Double) {
+        // Synchronized against `stop()` for the same reason GpsLocationSource is: a
+        // `rate_cmd` is applied on the delivery thread while the stop runs on the main
+        // thread, and a re-registration landing after `unregisterListener` holds both
+        // sensors awake at the commanded rate for the life of the process, delivering into
+        // a looper that has been quit. `stop()` nulls `listener` under this same monitor,
+        // so the null check below is what refuses a late command; holding the monitor is
+        // what makes it decisive rather than a narrowed window.
         val callback = listener ?: return
         val sensor = accelerometer ?: return
         val gyro = gyroscope ?: return
@@ -250,6 +258,7 @@ class ImuSource(
     private var handler: Handler? = null
 
 
+    @Synchronized
     fun stop() {
         listener?.let { manager.unregisterListener(it) }
         listener = null

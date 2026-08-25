@@ -6,6 +6,7 @@ import androidx.test.rule.GrantPermissionRule
 import com.dsrc.phone.SensingService
 import com.dsrc.phone.SensingState
 import com.dsrc.phone.SensingStatus
+import com.dsrc.phone.config.SensingConfig
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -101,6 +102,38 @@ class ImuCaptureTest {
             source.refusedWrongTimebase,
         )
         assertTrue("$stats", stats.balances)
+    }
+
+    @Test
+    fun aRateCommandArrivingAfterAStopDoesNotReEngageTheSensors() {
+        // The window a combined round found. A rate_cmd is applied on the transport's
+        // delivery thread, which runs until the link stops at step 14 of teardown and is
+        // not joined even then -- while the sources stop at step 3. So a command arriving
+        // during teardown re-registered both sensors after their unregister, and since the
+        // service nulls its reference in the same breath, nothing was left that could ever
+        // switch them off: awake at the commanded rate for the life of the process,
+        // delivering into a looper that had been quit, with no counter moving.
+        //
+        // The applier is now cleared first, which closes the wide window. This pins the
+        // narrow one: even called directly, a stopped source must refuse.
+        val source = ImuSource(
+            context = context,
+            config = SensingConfig(imuHz = 50.0),
+            appClock = android.os.SystemClock::elapsedRealtimeNanos,
+            monoClock = System::nanoTime,
+        )
+        source.start(onReading = {}, onUnpaired = {})
+        assertEquals("the source did not come up at its commanded rate", 50.0, source.requestedHz, 1e-9)
+
+        source.stop()
+        source.setRate(200.0)
+
+        assertEquals(
+            "a rate command after the stop re-requested the sensors",
+            50.0,
+            source.requestedHz,
+            1e-9,
+        )
     }
 
     // Not here, and recorded rather than papered over: nothing pins that `stop()`

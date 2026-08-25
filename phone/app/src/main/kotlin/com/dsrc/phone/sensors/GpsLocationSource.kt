@@ -80,9 +80,18 @@ class GpsLocationSource(
      */
     private val satellitesInFix = AtomicInteger(0)
 
+    // Volatile because `stop()` writes them on the main thread while `setRate` reads them
+    // on the transport's delivery thread, with no other happens-before edge between the two.
+    @Volatile
     private var sink: ((GpsReading) -> Unit)? = null
+
+    @Volatile
     private var thread: HandlerThread? = null
+
+    @Volatile
     private var listener: LocationListener? = null
+
+    @Volatile
     private var gnssCallback: GnssStatus.Callback? = null
 
     @SuppressLint("MissingPermission")
@@ -137,6 +146,22 @@ class GpsLocationSource(
      * absence. Same code path and same reasoning as the IMU; said here rather than left to
      * a green suite to imply.
      */
+    /**
+     * Ask the provider for a new interval.
+     *
+     * Synchronized against [stop], and that is not decoration. A `rate_cmd` is applied on
+     * the transport's delivery thread while `stop()` runs on the main thread, and the guard
+     * used to be a plain read of two fields followed by a call. If the stop interleaved
+     * between them, the re-request landed *after* `removeUpdates` — and since the service
+     * nulls its reference in the same breath, nothing was left that could ever remove the
+     * updates again. The location indicator stays lit for the life of the process, no data
+     * flows because `sink` is null, and no counter moves: it is invisible from inside.
+     *
+     * The fields it reads are also `@Volatile` now, for the same reason `ImuSource` made
+     * its own so and said as much: this class has the identical two-thread situation and
+     * was the one that did not.
+     */
+    @Synchronized
     @SuppressLint("MissingPermission")
     fun setRate(hz: Double) {
         if (listener != null && looper != null) request(hz)
@@ -167,7 +192,10 @@ class GpsLocationSource(
     @Volatile
     private var looper: android.os.Looper? = null
 
+    @Synchronized
     override fun stop() {
+        // A rate command already waiting on this monitor gets in only after `listener` is
+        // null below, so it re-requests nothing.
         listener?.let { manager.removeUpdates(it) }
         gnssCallback?.let { manager.unregisterGnssStatusCallback(it) }
         listener = null

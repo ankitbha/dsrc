@@ -623,6 +623,15 @@ class SensingService : LifecycleService() {
             // seconds. Clearing it last was already racy against `IDLE` being published
             // before teardown runs; the flush made that window wide enough to see.
             release("advisory") { advisories.clear() }
+            // Before any release, and the field's own docstring already said "cleared with
+            // them" while it was cleared eighty lines later, in the finally. The delivery
+            // thread runs until the link stops at step 14 and is not joined even then, so
+            // for the whole of teardown a rate_cmd was still routed into the applier -- and
+            // into sources that had already been stopped three steps in. Most of what it
+            // touches is inert, but re-requesting GPS or IMU after their stop leaves the
+            // provider engaged with nothing holding a reference to switch it off again: the
+            // location indicator stays lit for the life of the process, and no counter moves.
+            release("config applier") { configApplier = null }
             release("camera source") { cameraSource?.stop() }
             release("gps source") { gpsSource?.stop() }
             release("imu source") { imuSource?.stop() }
@@ -705,7 +714,6 @@ class SensingService : LifecycleService() {
             liveTelemetry = null
             sessionLog = null
             liveLog = null
-            configApplier = null
             liveImu = null
             liveImuSource = null
             pipeline = null

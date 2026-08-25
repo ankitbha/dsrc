@@ -288,6 +288,13 @@ survived = []
 for name, rel, old, new, kind in MUTATIONS:
     path = ROOT / rel
     keep = path.read_text()
+    if keep.count(old) > 1:
+        # Whichever site comes first is a property of the file's layout, not of anything
+        # this registry chose; the device harness had an entry mutating the wrong sensor
+        # under the other one's name for exactly this reason.
+        print(f"  ANCHOR AMBIGUOUS   {name} ({keep.count(old)} sites)")
+        survived.append(name + f" [ambiguous anchor, {keep.count(old)} sites]")
+        continue
     if old not in keep:
         print(f"  SKIP  {name}  (anchor not found -- the code moved)")
         survived.append(name + " [anchor moved]")

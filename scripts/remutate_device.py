@@ -38,7 +38,7 @@ MUTATIONS = [
     (SERVICE, "advisory: advisories are never routed",
      "        if (frame.channel == Channels.ADVISORY) {", "        if (false) {"),
     (SERVICE, "advisory: a stop leaves the advisory up",
-     "            advisories.clear()", ""),
+     '            release("advisory") { advisories.clear() }\n', ""),
     (SERVICE, "config: a raise never reaches the imu source",
      "                motion.setRate(hz)", ""),
     (SERVICE, "config: the rate_cmd handler is never reached",
@@ -54,15 +54,34 @@ MUTATIONS = [
     (SOURCE, "imu: the two sensor streams are transposed",
      "                    Sensor.TYPE_GYROSCOPE -> {",
      "                    Sensor.TYPE_ACCELEROMETER -> {"),
+    # Keyed on `accuracy`, which only the accelerometer branch passes. The bare y/z pair
+    # appears in the gyroscope branch too, and an anchor that matched both took the
+    # gyroscope -- where a device sitting still reads zero on every axis, so nothing could
+    # tell the swap from the truth.
     (SOURCE, "imu: the accelerometer's y and z are transposed",
-     "                            y = event.values[1].toDouble(),\n                            z = event.values[2].toDouble(),",
-     "                            y = event.values[2].toDouble(),\n                            z = event.values[1].toDouble(),"),
+     "                            y = event.values[1].toDouble(),\n"
+     "                            z = event.values[2].toDouble(),\n"
+     "                            accuracy = event.accuracy.toLong(),",
+     "                            y = event.values[2].toDouble(),\n"
+     "                            z = event.values[1].toDouble(),\n"
+     "                            accuracy = event.accuracy.toLong(),"),
+    # No gyroscope counterpart here, deliberately. The instrumented suite asserts the
+    # gyro reads about zero on every axis, which is what a device sitting on a desk does
+    # -- so every permutation of its axes is invisible on-device. `ImuPairingTest` pins
+    # them on the JVM, where the values can be chosen.
     (SOURCE, "imu: the gyroscope is never registered",
      "        manager.registerListener(callback, gyro, periodUs, 0, worker)\n", ""),
     (SERVICE, "imu: the source is never started",
      "        motion.start(onReading = { imu.offer(it) }, onUnpaired = { imu.offerUnpaired() })\n", ""),
     (SERVICE, "teardown: one later release is skipped",
      '            release("gps source") { gpsSource?.stop() }\n', ''),
+    # The other half of that fix -- clearing `configApplier` before the sources stop -- is
+    # not here, because nothing observes the release order from outside the service. It is
+    # kept for the contract the field's own docstring states, and is unpinned; say so
+    # rather than list a mutation that would survive.
+    (SOURCE, "imu: a stopped source keeps the listener a rate command needs",
+     "        listener?.let { manager.unregisterListener(it) }\n        listener = null",
+     "        listener?.let { manager.unregisterListener(it) }"),
 ]
 
 def failures():
@@ -80,9 +99,23 @@ def failures():
 survived = []
 for path, name, old, new in MUTATIONS:
     keep = path.read_text()
-    if old not in keep:
+    hits = keep.count(old)
+    if hits == 0:
+        # Not folded into `survived` without a tag. A registry that has drifted off its
+        # anchor and a pin that a test no longer catches both end this run non-zero, but
+        # they call for opposite work -- re-anchor the mutation, or strengthen the test --
+        # and the summary line is the only line a caller reads.
         print(f"  ANCHOR MOVED       {name}")
-        survived.append(name)
+        survived.append(name + " [anchor moved]")
+        continue
+    if hits > 1:
+        # An anchor that matches twice mutates whichever site comes first, which is a
+        # property of the file's layout rather than of anything the registry chose. The
+        # accelerometer entry below spent an unknown number of runs mutating the
+        # gyroscope branch, where a stationary device reads zero on every axis and no
+        # test could have seen it, under a name that said accelerometer.
+        print(f"  ANCHOR AMBIGUOUS   {name} ({hits} sites)")
+        survived.append(name + f" [ambiguous anchor, {hits} sites]")
         continue
     try:
         path.write_text(keep.replace(old, new, 1))
