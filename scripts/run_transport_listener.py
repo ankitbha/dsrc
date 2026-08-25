@@ -31,6 +31,7 @@ from transport.endpoint import (  # noqa: E402
     TransportListener,
 )
 from transport.handshake import Hello, Role  # noqa: E402
+from transport.messages import CAPTURE_KEY, AdvisoryMessage  # noqa: E402
 from transport.session import DEFAULT_HEARTBEAT_S, DEFAULT_STALL_TIMEOUT_S  # noqa: E402
 from transport.tcp import DEFAULT_PORT, TcpAcceptor  # noqa: E402
 
@@ -47,16 +48,32 @@ def respond(session, stop: threading.Event) -> None:
     while not stop.is_set() and not session.is_closed:
         message = session.recv(Channel.CAMERA, timeout=0.25)
         if message is not None:
-            session.send(
-                Channel.ADVISORY,
-                b"cap=25.0",
-                {
-                    "echo_seq": message.seq,
-                    "echo_probe": message.extensions.get("probe"),
-                    "t_jetson_recv_mono_ns": message.t_recv_mono_ns,
-                    "t_jetson_send_mono_ns": now_mono_ns(),
+            # Built through AdvisoryMessage rather than hand-rolled, which is what went
+            # wrong before: this sent `b"cap=25.0"` as a payload with four ad-hoc header
+            # fields, and the phone refused all 64 of them as `unexpected_payload`. The
+            # spec gives `advisory` an empty payload and a fixed field list, and the
+            # model below enforces both -- bypassing it is how the reference peer drifted
+            # off the spec its own library implements.
+            extensions, payload = AdvisoryMessage(
+                t_capture_mono_ns=message.extensions.get(CAPTURE_KEY) or now_mono_ns(),
+                rec_speed_mps=11.18,
+                rec_speed_display=25.0,
+                current_speed_display=25.0,
+                units="mph",
+                headway_target_s=2.0,
+                lane_text="keep lane",
+                merge_text="no merge",
+                traffic_text="clear",
+                confidence=0.9,
+                confidence_label="high",
+                action={
+                    "desired_speed_bin": "nominal",
+                    "desired_headway_bin": "normal",
+                    "lane_preference": "keep",
+                    "merge_mode": "normal",
                 },
-            )
+            ).to_wire()
+            session.send(Channel.ADVISORY, payload, extensions)
         for channel in (Channel.GPS, Channel.IMU, Channel.HERE, Channel.TELEMETRY):
             for _ in range(DRAIN_BATCH):
                 if session.recv(channel, timeout=0.0) is None:
