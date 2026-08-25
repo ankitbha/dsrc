@@ -134,6 +134,21 @@ class ImuSource(
     @Volatile
     private var stoppedForTimebase = false
 
+    /**
+     * Holds the same monitor as `stop()`, because this class is the one source that stops
+     * itself from its own callback thread. `register()` enables the accelerometer and then
+     * the gyroscope, and an accelerometer event carrying the vendor timebase bug reaches
+     * `stopBecauseOfTimebase` -- and so `stop()` -- from the sensor thread. Landing between
+     * those two calls, the stop would unregister an accelerometer and null `listener`, and
+     * then this method would register the gyroscope against a listener nothing can hand
+     * back: the sensor stays powered for the life of the process, delivering into a looper
+     * that has been quit. The gap is two adjacent binder calls wide, which is small and is
+     * not zero.
+     *
+     * The stop blocks until this returns and then unregisters both, which is the outcome
+     * either way. Unpinned: reaching it needs a real SensorManager and a vendor bug.
+     */
+    @Synchronized
     fun start(onReading: (ImuReading) -> Unit, onUnpaired: () -> Unit) {
         val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val gyroscope = manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
