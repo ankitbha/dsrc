@@ -3,6 +3,7 @@ package com.dsrc.transport
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -300,5 +301,68 @@ class TypedMessagesTest {
         // omission rather than quietly leaving one reason untested.
         val expected = RefusalReason.entries.toSet() - RefusalReason.NO_TYPED_MESSAGE
         assertEquals(expected, reached, "unreachable outbound: ${expected - reached}")
+    }
+
+    @Test
+    fun `a phone that sends no skin temperature is still accepted`() {
+        // Absent-tolerant, not merely nullable: these fields were added after the first
+        // phones shipped, and a receiver that required them would turn every one of an
+        // older phone's telemetry frames into a missing_field refusal.
+        val extensions = telemetry().toExtensions()
+        assertFalse("skin_temp_c" in extensions)
+        assertFalse("skin_temp_zone" in extensions)
+
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+        assertNull(decoded.skinTempC)
+        assertNull(decoded.skinTempZone)
+    }
+
+    @Test
+    fun `the skin reading and its zone survive the wire in their own fields`() {
+        val extensions = telemetry().copy(skinTempC = 30.112, skinTempZone = "xo_therm").toExtensions()
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+
+        assertEquals(30.112, decoded.skinTempC!!, 1e-9)
+        assertEquals("xo_therm", decoded.skinTempZone)
+    }
+
+    @Test
+    fun `a null skin reading is omitted rather than written as null`() {
+        // A device that will never have a reading would otherwise pay two keys on every
+        // report of every drive to say so.
+        val extensions = telemetry().copy(skinTempC = null, skinTempZone = "xo_therm").toExtensions()
+
+        assertFalse("skin_temp_c" in extensions)
+        assertEquals(JsonValue.Text("xo_therm"), extensions["skin_temp_zone"])
+    }
+
+    @Test
+    fun `a present null skin reading is read as no reading`() {
+        // Absent and present-and-null encode the same fact, and a sender following the
+        // other convention must not be refused for it.
+        val extensions = telemetry().toExtensions() +
+            mapOf("skin_temp_c" to JsonValue.Null, "skin_temp_zone" to JsonValue.Null)
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+
+        assertNull(decoded.skinTempC)
+        assertNull(decoded.skinTempZone)
+    }
+
+    @Test
+    fun `a malformed skin reading is refused rather than shrugged at`() {
+        // Absent means "this handset cannot say". Present and wrong is a different claim,
+        // and ignoring it would let a broken sender pass as an old one forever.
+        assertFailsWith<MessageError> {
+            PhoneTelemetry.fromWire(
+                telemetry().toExtensions() + mapOf("skin_temp_c" to JsonValue.Text("hot")),
+                ByteArray(0),
+            )
+        }
+        assertFailsWith<MessageError> {
+            PhoneTelemetry.fromWire(
+                telemetry().toExtensions() + mapOf("skin_temp_zone" to JsonValue.Num(5)),
+                ByteArray(0),
+            )
+        }
     }
 }

@@ -28,6 +28,7 @@ import com.dsrc.phone.sensors.HerePipeline
 import com.dsrc.phone.sensors.HttpHereClient
 import com.dsrc.phone.sensors.TelemetryReporter
 import com.dsrc.phone.sensors.ThermalReader
+import com.dsrc.phone.sensors.ThermalZones
 import com.dsrc.phone.sensors.ImuPipeline
 import com.dsrc.phone.sensors.ImuSource
 import com.dsrc.phone.sensors.GpsPipeline
@@ -434,6 +435,10 @@ class SensingService : LifecycleService() {
         here.start()
 
         val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        // Built per come-up, so the zone search runs once a session rather than once a
+        // report -- and a handset that gained or lost readable zones since the last drive
+        // is re-examined rather than trusted from a previous process.
+        val thermalZones = ThermalZones()
         val reporter = TelemetryReporter(
             monoClock = SystemClock::elapsedRealtimeNanos,
             sample = {
@@ -442,9 +447,14 @@ class SensingService : LifecycleService() {
                 val imuStats = imu.stats
                 val hereStats = here.stats
                 val camera = pipe.stats
+                // Read every report rather than once: the zone is resolved once inside,
+                // but the temperature is the thing being trended and is the whole point.
+                val skin = thermalZones.read()
                 TelemetryReporter.Sample(
                     thermalStatus = ThermalReader.statusName(power.currentThermalStatus),
                     thermalHeadroom = ThermalReader.headroomFrom(power),
+                    skinTempC = skin?.celsius,
+                    skinTempZone = skin?.zone,
                     // What each modality actually put on the wire.
                     delivered = mapOf(
                         "camera_hz" to cameraSent.sent,

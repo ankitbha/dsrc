@@ -104,6 +104,36 @@ object Fields {
         }
     }
 
+    /**
+     * A field that may be absent entirely, not merely null.
+     *
+     * [optionalNumber] and [optionalString] require the key to be present, which is right
+     * for a field that has always existed and is only sometimes unavailable. A field *added*
+     * to a shipped protocol is a different case: an older sender does not write it at all,
+     * and requiring it would make every one of that sender's messages a `missing_field`
+     * refusal. `here` on a rate command is the same shape and the reason the spec calls
+     * extensions additive.
+     */
+    fun absentableNumber(extensions: Map<String, JsonValue>, key: String): Double? {
+        val value = extensions[key] ?: return null
+        return when (value) {
+            is JsonValue.Null -> null
+            is JsonValue.Real -> value.value
+            is JsonValue.Num -> value.value.toDouble()
+            else -> throw MessageError(RefusalReason.WRONG_TYPE, "'$key' is not a number or null")
+        }
+    }
+
+    /** As [absentableNumber], for a string. */
+    fun absentableString(extensions: Map<String, JsonValue>, key: String): String? {
+        val value = extensions[key] ?: return null
+        return when (value) {
+            is JsonValue.Null -> null
+            is JsonValue.Text -> value.value
+            else -> throw MessageError(RefusalReason.WRONG_TYPE, "'$key' is not a string or null")
+        }
+    }
+
     fun optionalString(extensions: Map<String, JsonValue>, key: String): String? {
         val value = require(extensions, key)
         return when (value) {

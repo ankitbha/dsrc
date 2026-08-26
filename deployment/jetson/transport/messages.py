@@ -235,6 +235,33 @@ def optional_number(extensions: Mapping[str, Any], field: str) -> float | None:
     return from_wire_number(require(extensions, field), field)
 
 
+def absentable_number(extensions: Mapping[str, Any], field: str) -> float | None:
+    """A field that may be absent entirely, not merely null.
+
+    `optional_number` requires the key to be present, which is right for a field
+    that has always existed and is only sometimes unavailable. A field *added* to a
+    shipped protocol is a different case: an older sender does not write it at all,
+    and requiring it would turn every one of that sender's messages into a
+    `missing_field` refusal. `here` on a rate command is the same shape, and the
+    reason the spec calls extensions additive.
+    """
+    if field not in extensions:
+        return None
+    return from_wire_number(extensions[field], field)
+
+
+def absentable_str(extensions: Mapping[str, Any], field: str) -> str | None:
+    """As `absentable_number`, for a string."""
+    if field not in extensions:
+        return None
+    value = extensions[field]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MessageError(f"{field!r} is not a string", REASON_WRONG_TYPE)
+    return value
+
+
 def require_capture(extensions: Mapping[str, Any]) -> int:
     return require_int(extensions, CAPTURE_KEY)
 
@@ -543,6 +570,12 @@ class PhoneTelemetry:
     here_calls: int
     here_errors: int
     thermal_headroom: float | None = None
+    #: An absolute temperature for handsets that will not compute headroom, and the
+    #: vendor-named kernel zone it came from. Null together: the number cannot be
+    #: interpreted, or compared across devices, without the zone that produced it,
+    #: because zone names do not mean what they look like.
+    skin_temp_c: float | None = None
+    skin_temp_zone: str | None = None
 
     CHANNEL: ClassVar[Channel] = Channel.TELEMETRY
 
@@ -562,6 +595,16 @@ class PhoneTelemetry:
                 "dropped": {key: self.dropped[key] for key in DROP_KEYS},
                 "here_calls": self.here_calls,
                 "here_errors": self.here_errors,
+                **(
+                    {"skin_temp_c": to_wire_number(self.skin_temp_c)}
+                    if self.skin_temp_c is not None
+                    else {}
+                ),
+                **(
+                    {"skin_temp_zone": self.skin_temp_zone}
+                    if self.skin_temp_zone is not None
+                    else {}
+                ),
             },
             b"",
         )
@@ -573,6 +616,10 @@ class PhoneTelemetry:
             t_capture_mono_ns=require_capture(extensions),
             thermal_status=require_str(extensions, "thermal_status"),
             thermal_headroom=optional_number(extensions, "thermal_headroom"),
+            # Absent-tolerant, not merely nullable: a phone built before these existed
+            # does not write them, and requiring them would refuse all of its telemetry.
+            skin_temp_c=absentable_number(extensions, "skin_temp_c"),
+            skin_temp_zone=absentable_str(extensions, "skin_temp_zone"),
             achieved=require_mapping_of_numbers(extensions, "achieved", RATE_KEYS),
             dropped=require_mapping_of_ints(extensions, "dropped", DROP_KEYS),
             here_calls=check_count(require(extensions, "here_calls"), "here_calls"),

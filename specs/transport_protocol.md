@@ -340,7 +340,7 @@ by the sender's transport rather than by the message.
 | `here` | `request_url`, `status`, `content_type`, `query_lat`, `query_lon`, `query_radius_m`, `t_request_mono_ns`, `t_response_mono_ns` | response body bytes |
 | `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `headway_target_s`, `lane_text`, `merge_text`, `traffic_text`, `confidence`, `confidence_label`, `action` | empty |
 | `rate_cmd` | `rates`, `trigger`, `shadow` | empty |
-| `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors` | empty |
+| `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors`, `skin_temp_c`*, `skin_temp_zone`* | empty |
 | `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns`, `t_peer_wire_mono_ns` | empty |
 
 Nullable fields: every numeric field of `gps` except `valid`, `fix_quality` and
@@ -361,6 +361,29 @@ values are the ones in `specs/action_schema.md`:
 counts, and a fractional one is a bug in the sender rather than something to
 truncate. `here_calls` and `here_errors` are counts on the same terms. `units` is one of `mph`, `kmh`, `mps`. `shadow` is a boolean: whether
 the command was gated for real or only recorded.
+
+`skin_temp_c` and `skin_temp_zone` are marked `*` because they are **optional and
+may be absent entirely**, not merely null. A receiver MUST accept telemetry that
+omits them: they were added after the first phones shipped, and requiring them
+would turn every older sender's telemetry into a `missing_field` refusal. Present
+but malformed is still refused -- absent means "this handset cannot say", which is
+a different claim from a broken value.
+
+They exist because `thermal_headroom` is a *normalised* number: skin temperature
+over the threshold at which the device throttles. A handset that publishes no
+threshold has no denominator and returns `NaN` forever, leaving only the six-step
+`thermal_status`, which does not move until the phone is already in trouble. The
+pair carries an absolute temperature instead, read from the kernel's thermal
+zones, which the far side can trend.
+
+**The zone name is not decoration and the temperature must not be read without
+it.** Zone names are assigned by the vendor and do not mean what they look like:
+on the moto g power this was measured against, the HAL's `skin` sensor matches
+`xo_therm` to within 0.007 °C, while `quiet_therm` -- the name Qualcomm platforms
+conventionally use for skin -- is a different sensor reading 1.2 °C lower.
+Comparing a bare `skin_temp_c` across two handsets is therefore meaningless. Both
+fields are null together, and whether they can be read at all is a per-device
+SELinux decision.
 
 **These three nested objects are additive.** Every listed key must be present,
 and an unrecognised key is **ignored, not refused**. The sensor set will grow,

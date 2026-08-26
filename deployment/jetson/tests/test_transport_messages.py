@@ -634,22 +634,67 @@ def message_table_rows() -> dict[str, str]:
     return dict(re.findall(r"^\| `(\w+)` \| (.+?) \| .+ \|$", body, re.M))
 
 
+#: What each channel's optional fields look like when the sender does have them.
+#: Keyed by channel so the exemption above can be checked rather than trusted: a
+#: starred field must be one some sample can actually emit.
+POPULATED_OPTIONALS = {
+    channel: (
+        {
+            field
+            for field in a_telemetry(skin_temp_c=30.112, skin_temp_zone="xo_therm").to_wire()[0]
+        }
+        if channel is Channel.TELEMETRY
+        else set()
+    )
+    for channel in MESSAGE_FOR_CHANNEL
+}
+
+
 @pytest.mark.parametrize("channel", sorted(MESSAGE_FOR_CHANNEL, key=lambda c: c.value),
                          ids=lambda c: c.value)
 def test_the_message_table_matches_the_encoder_in_both_directions(channel):
-    """Set equality. One-directional was blind to the spec listing a field the
-    code never sends, which is the direction that breaks Kotlin: absent is a
-    refusal condition here, so a documented-but-unsent field would have the
-    phone drop every message of that type."""
+    """Set equality, except for fields the spec marks optional with a trailing `*`.
+
+    One-directional was blind to the spec listing a field the code never sends,
+    which is the direction that breaks Kotlin: absent is a refusal condition
+    there, so a documented-but-unsent field would have the phone drop every
+    message of that type.
+
+    A starred field is exempt from that direction and only from that direction,
+    because the refusal it guards against does not exist for it: both decoders
+    treat a starred field as absent-tolerant rather than merely nullable, which
+    is what lets a field be added to a shipped protocol without a flag day. The
+    other direction still binds -- anything the encoder emits must be documented,
+    starred or not -- so a field added to the code and not the spec is still a
+    failure here.
+    """
     rows = message_table_rows()
     assert channel.value in rows, f"{channel.value} has no message row"
-    documented = set(re.findall(r"`([\w_]+)`", rows[channel.value]))
+    row = rows[channel.value]
+    documented = set(re.findall(r"`([\w_]+)`", row))
+    optional = set(re.findall(r"`([\w_]+)`\*", row))
+    assert optional <= documented
+
     extensions, _payload = SAMPLE_FOR_CHANNEL[channel]().to_wire()
     emitted = {field for field in extensions if field != CAPTURE_KEY}
-    assert documented == emitted, (
-        f"{channel.value}: spec-only {sorted(documented - emitted)}, "
+    assert documented - optional == emitted - optional, (
+        f"{channel.value}: spec-only {sorted(documented - optional - emitted)}, "
         f"code-only {sorted(emitted - documented)}"
     )
+
+    # A star exempts its field from the spec-only direction, so what may carry one is
+    # itself checked. An optional field is absent unless the sender sets it and present
+    # when it does -- both halves, because either alone lets a star land on a field that
+    # is not optional at all, and a required field wearing a star could then be dropped
+    # from the encoder with nothing to notice.
+    for field in optional:
+        assert field not in emitted, (
+            f"{channel.value}: {field} is starred but the plain sample always emits it, "
+            "so it is required and the star would exempt it from being checked"
+        )
+        assert field in POPULATED_OPTIONALS[channel], (
+            f"{channel.value}: {field} is starred but no sample can emit it"
+        )
 
 
 def test_the_message_table_covers_every_typed_channel():
@@ -1740,3 +1785,57 @@ def test_every_required_field_of_each_helper_is_covered_above():
         )
         missing = found - covered
         assert not missing, f"{helper} is called on {sorted(missing)} with no case"
+
+
+class TestSkinTemperature:
+    """The absolute temperature reported where a handset will not compute headroom.
+
+    Both fields are absent-tolerant rather than merely nullable, which is the whole
+    point of adding them this way: a phone built before they existed does not write
+    them at all, and a Jetson that required them would refuse every one of that
+    phone's telemetry frames.
+    """
+
+    def test_a_phone_that_does_not_send_them_is_still_accepted(self):
+        extensions, payload = a_telemetry().to_wire()
+        assert "skin_temp_c" not in extensions
+        assert "skin_temp_zone" not in extensions
+
+        decoded = PhoneTelemetry.from_wire(extensions, payload)
+        assert decoded.skin_temp_c is None
+        assert decoded.skin_temp_zone is None
+
+    def test_the_reading_and_its_zone_survive_the_wire(self):
+        # Distinct values, so a field decoded into the other's slot is visible.
+        extensions, payload = a_telemetry(skin_temp_c=30.112, skin_temp_zone="xo_therm").to_wire()
+        decoded = PhoneTelemetry.from_wire(extensions, payload)
+
+        assert decoded.skin_temp_c == pytest.approx(30.112)
+        assert decoded.skin_temp_zone == "xo_therm"
+
+    def test_a_null_reading_is_omitted_rather_than_written(self):
+        # Written as an explicit null it would cost bytes on every report of every
+        # drive for a device that will never have a reading, and an older receiver
+        # would see a key it has no rule for rather than no key at all.
+        extensions, _ = a_telemetry(skin_temp_c=None, skin_temp_zone="xo_therm").to_wire()
+        assert "skin_temp_c" not in extensions
+        assert extensions["skin_temp_zone"] == "xo_therm"
+
+    def test_a_present_null_is_read_as_no_reading(self):
+        # Absent and present-and-null are different encodings of the same fact, and a
+        # sender following the other convention must not be refused for it.
+        decoded = PhoneTelemetry.from_wire(
+            {**a_telemetry().to_wire()[0], "skin_temp_c": None, "skin_temp_zone": None}, b""
+        )
+        assert decoded.skin_temp_c is None
+        assert decoded.skin_temp_zone is None
+
+    def test_a_wrong_typed_reading_is_refused_rather_than_ignored(self):
+        # Absent means "this phone cannot say". A field that is present and malformed
+        # is a different claim, and shrugging at it would let a broken sender look
+        # like an old one forever.
+        for bad, field in (("hot", "skin_temp_c"), (5, "skin_temp_zone")):
+            with pytest.raises(MessageError):
+                PhoneTelemetry.from_wire(
+                    {**a_telemetry().to_wire()[0], field: bad}, b""
+                )

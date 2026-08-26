@@ -33,6 +33,16 @@ class TelemetryReporter(
         val dropped: Map<String, Long>,
         val hereCalls: Long,
         val hereErrors: Long,
+        /**
+         * A kernel temperature and its zone, where the platform will not give headroom.
+         *
+         * Last and defaulted because this class is constructed positionally: inserting a
+         * parameter in the middle rebinds every existing caller's arguments to the wrong
+         * names, and the two maps either side of here have compatible enough shapes that
+         * some of it would have compiled.
+         */
+        val skinTempC: Double? = null,
+        val skinTempZone: String? = null,
     )
 
     /**
@@ -129,6 +139,8 @@ class TelemetryReporter(
                 captureMonoNs = now,
                 thermalStatus = reading.thermalStatus,
                 thermalHeadroom = reading.thermalHeadroom,
+                skinTempC = reading.skinTempC,
+                skinTempZone = reading.skinTempZone,
                 achieved = achieved,
                 dropped = PhoneTelemetry.DROP_KEYS.associateWith { reading.dropped[it] ?: 0L },
                 hereCalls = reading.hereCalls,
