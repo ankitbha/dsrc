@@ -67,7 +67,7 @@ failing parity test with a drive's data already collected.
 | `leader_gap`, `leader_relative_speed`, lane gaps, `local_density_bin`, `local_mean_speed_bin`, `local_queue_estimate` | camera | neutral | the feed cannot see the car in front |
 | `ego_speed`, `ego_acceleration` | GPS | neutral | neither camera nor feed measures it |
 | `downstream_congestion_estimate` | **feed** | V2V peers, then neutral | the camera cannot see 2 km ahead |
-| `segment_target_speed` | V2V peers | feed's `freeFlow`, then config | peers measure it; the feed reports the road's own free-flow |
+| `segment_target_speed` | V2V peers | ~~feed's `freeFlow`~~ config | retracted in validation — see below |
 | `merge_pressure` | camera/V2V | neutral | local geometry, not a feed quantity |
 | `distance_to_downstream_bottleneck` | ~~feed~~ **nobody** | stays `sim_parity` | see below |
 
@@ -84,9 +84,23 @@ wearing a distance's units. The policy has only ever seen `{0, inf}` there. Putt
 made it in the plan after writing the paragraph warning against it. The field keeps
 its `sim_parity` provenance and the feed does not own it.
 
-`segment_target_speed` survives the same check: the simulator uses
-`ego.free_flow_speed_mps` when no AVs are near (`src/sensing/local.py:203-207`), and
-HERE's `freeFlow` is a free-flow speed in m/s. Same quantity, same units.
+`segment_target_speed` survived the units check and was **retracted in validation**,
+which is the more useful lesson of the two. The units were right — the simulator uses
+`ego.free_flow_speed_mps` when no AVs are near and HERE's `freeFlow` is a free-flow
+speed in m/s — and the check was still too shallow twice over:
+
+- The simulator fills `segment_target_speed` **and** `nearby_av_mean_speed` from that
+  one constant (`src/sensing/local.py:198,207`), and the schema states it. They are
+  perfectly correlated in every training sample, so moving one produces a pair the
+  policy has never seen. A units check compares a field to itself; it cannot see a
+  joint distribution.
+- It is the base speed the advisory decodes from, which has a floor and no ceiling
+  on this side. The simulator's safety layer clamps `min(target_speed, free_flow)`
+  — a no-op there **precisely because the two are equal**. Decoupling them removes
+  the clamp's premise, and a parser-legal 120 m/s link would advise 268 mph.
+
+So the feed owns exactly one field. `free_flow_mps` stays on `FeedOwnership` as data
+a later task may want; nothing writes it into the observation.
 
 One further parity subtlety, since it bears on task 47: in the simulator
 `downstream_congestion_estimate` is a **cooperation** quantity — it is `0.0` unless

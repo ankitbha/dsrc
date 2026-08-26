@@ -57,6 +57,10 @@ MIN_FREE_FLOW_MPS = 2.0
 #: and a reader must be able to tell that from a camera measurement.
 SOURCE_FEED = "feed_derived"
 
+#: What a builder reports before its first tick. An attribute that does not exist
+#: until `build` runs makes every reader guard for it or crash.
+NOTHING_YET = None
+
 
 class Decline:
     """Why the feed does not own a field on this tick."""
@@ -89,6 +93,17 @@ class FeedOwnership:
         return self.downstream_congestion is not None
 
 
+def _provenance(reading: FlowReading) -> dict[str, Any]:
+    """Age and how it was obtained, carried on declines as well as on ownership.
+
+    A decline used to report the age and drop the proxy flag, so `age_is_proxy`
+    came back False -- a positive claim that the age was NOT a guess -- for a
+    `feed_stale` verdict a guessed age may itself have caused. That is the question
+    the flag exists to answer, answered wrongly on the ticks where it matters most.
+    """
+    return {"age_s": reading.response_age_s, "is_proxy": reading.response_age_is_proxy}
+
+
 def _fresh(reading: FlowReading, max_age_s: float) -> bool:
     """Age charged with its own bound, symmetric about now.
 
@@ -119,27 +134,27 @@ def own(
     if reading is None:
         return FeedOwnership(declined=Decline.NO_READING)
     if reading.outcome != Outcome.OK or reading.link is None:
-        return FeedOwnership(declined=Decline.NOT_OK, age_s=reading.response_age_s)
+        return FeedOwnership(declined=Decline.NOT_OK, **_provenance(reading))
     if not _fresh(reading, max_age_s):
-        return FeedOwnership(declined=Decline.STALE, age_s=reading.response_age_s)
+        return FeedOwnership(declined=Decline.STALE, **_provenance(reading))
     if reading.link_cross_track_m is None or reading.link_cross_track_m > max_cross_track_m:
         # Geometrically ahead is not the same as on our road. The cone widens with
         # range, so without this a motorway kilometres to the side supplies the
         # congestion the driver is told about.
-        return FeedOwnership(declined=Decline.OFF_CORRIDOR, age_s=reading.response_age_s)
+        return FeedOwnership(declined=Decline.OFF_CORRIDOR, **_provenance(reading))
 
     link = reading.link
     if link.speed_mps is None or link.free_flow_mps is None:
         # No ratio without both. `jamFactor` alone is NOT a fallback here: it is a
         # different quantity, and reaching for it because it is present is exactly
         # the substitution this module refuses.
-        return FeedOwnership(declined=Decline.NO_SPEEDS, age_s=reading.response_age_s)
+        return FeedOwnership(declined=Decline.NO_SPEEDS, **_provenance(reading))
     if link.free_flow_mps < min_free_flow_mps:
-        return FeedOwnership(declined=Decline.NO_FREE_FLOW, age_s=reading.response_age_s)
+        return FeedOwnership(declined=Decline.NO_FREE_FLOW, **_provenance(reading))
 
     ratio = 1.0 - (link.speed_mps / link.free_flow_mps)
     if not math.isfinite(ratio):
-        return FeedOwnership(declined=Decline.NO_SPEEDS, age_s=reading.response_age_s)
+        return FeedOwnership(declined=Decline.NO_SPEEDS, **_provenance(reading))
     return FeedOwnership(
         downstream_congestion=max(0.0, min(1.0, ratio)),
         free_flow_mps=link.free_flow_mps,

@@ -221,3 +221,96 @@ class TestTheBuilderChain:
 
         assert math.isinf(result.obs["distance_to_downstream_bottleneck"])
         assert result.field_sources["distance_to_downstream_bottleneck"] == "sim_parity"
+
+
+class TestTheFeedDoesNotSetTheTargetSpeed:
+    """`freeFlow` is the same quantity in the same units, and still must not be used.
+
+    The units check passed and was not enough. The simulator fills
+    `segment_target_speed` AND `nearby_av_mean_speed` from the one
+    `ego.free_flow_speed_mps` whenever no AVs are near, and the schema states it, so
+    the two are perfectly correlated in every training sample. Moving one produces a
+    pair the policy has never seen.
+
+    And it is the base speed the advisory decodes from, which has a floor and no
+    ceiling here. The simulator's safety layer clamps `min(target_speed, free_flow)`
+    -- a no-op there precisely BECAUSE they are equal -- so decoupling them removes
+    the clamp's premise, and a parser-legal 120 m/s link would advise 268 mph.
+    """
+
+    def builder(self):
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        return ObservationBuilder(BuilderConfig())
+
+    def gps(self):
+        from sensors.gps_reader import GpsFix
+        return GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                      heading_deg=90.0, t_mono=100.0)
+
+    def test_the_pair_the_simulator_keeps_identical_stays_identical(self):
+        result = self.builder().build(
+            [], self.gps(), t_mono=100.0,
+            feed=reading(link=link(speed=2.0, free_flow=8.3)),
+        )
+        assert result.obs["cooperation"]["segment_target_speed"] == pytest.approx(
+            result.obs["nearby_av_mean_speed"]
+        )
+
+    def test_an_urban_links_free_flow_does_not_become_the_target_speed(self):
+        from perception.observation_builder import BuilderConfig
+        cfg = BuilderConfig()
+        result = self.builder().build(
+            [], self.gps(), t_mono=100.0,
+            feed=reading(link=link(speed=2.0, free_flow=8.3)),
+        )
+        assert result.obs["cooperation"]["segment_target_speed"] == pytest.approx(
+            cfg.free_flow_speed_mps
+        )
+
+    def test_a_parser_legal_but_absurd_free_flow_cannot_reach_the_advisory(self):
+        # 120 m/s is inside what `parse_flow` accepts, deliberately: out-of-range
+        # values are refused, not clamped, and 120 is in range. It must not become
+        # the speed a driver is advised toward.
+        from perception.observation_builder import BuilderConfig
+        result = self.builder().build(
+            [], self.gps(), t_mono=100.0,
+            feed=reading(link=link(speed=1.0, free_flow=120.0)),
+        )
+        assert result.obs["cooperation"]["segment_target_speed"] == pytest.approx(
+            BuilderConfig().free_flow_speed_mps
+        )
+
+    def test_the_provenance_does_not_claim_a_field_the_feed_did_not_set(self):
+        # It was reported as `fallback_neutral` while carrying the feed's value --
+        # the provenance actively misreporting, and `missingness` counting a
+        # feed-supplied field as missing.
+        result = self.builder().build(
+            [], self.gps(), t_mono=100.0, feed=reading(link=link(free_flow=8.3)),
+        )
+        assert result.field_sources["segment_target_speed"] == "fallback_neutral"
+        assert result.obs["cooperation"]["segment_target_speed"] != 8.3
+
+
+class TestDeclineProvenance:
+
+    def test_a_decline_does_not_claim_the_age_was_not_a_guess(self):
+        # `age_is_proxy: False` is a positive claim. Reported for a `feed_stale`
+        # verdict that a guessed age may itself have caused, it answers the
+        # question the flag exists for, wrongly, on the tick where it matters most.
+        owned = own(reading(response_age_s=feed_fusion.MAX_FEED_AGE_S + 5.0,
+                            response_age_is_proxy=True))
+        assert owned.declined == Decline.STALE
+        assert feed_fusion.to_record(owned)["age_is_proxy"] is True
+
+    def test_a_builder_reports_an_ownership_before_its_first_tick(self):
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        builder = ObservationBuilder(BuilderConfig())
+        assert builder.last_feed_ownership.declined == Decline.NO_READING
+
+    def test_the_diagnostics_carry_the_feeds_account(self):
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        from sensors.gps_reader import GpsFix
+        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                     heading_deg=90.0, t_mono=100.0)
+        result = ObservationBuilder(BuilderConfig()).build([], gps, t_mono=100.0)
+        assert result.diagnostics["feed"]["declined"] == Decline.NO_READING

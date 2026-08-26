@@ -122,6 +122,9 @@ class ObservationBuilder:
     def __init__(self, config: BuilderConfig) -> None:
         self.config = config
         self._ego = _EgoState(target_headway_s=config.target_headway_default_s)
+        # Set before the first build, so a reader does not have to guard for an
+        # attribute that only exists after a tick has run.
+        self.last_feed_ownership = feed_fusion.own(None)
 
     def set_target_headway(self, headway_s: float) -> None:
         """Feed back the last commanded headway bin (mirrors the sim loop,
@@ -263,14 +266,22 @@ class ObservationBuilder:
         if owned.owns_congestion:
             cooperation = dict(cooperation)
             cooperation["downstream_congestion_estimate"] = owned.downstream_congestion
-            if not peers:
-                # Only where peers have not already measured it: they observe the
-                # segment directly, the feed reports the road's nominal free flow.
-                cooperation["segment_target_speed"] = (
-                    owned.free_flow_mps
-                    if owned.free_flow_mps is not None
-                    else cooperation["segment_target_speed"]
-                )
+            # `segment_target_speed` is NOT taken from the feed, though its
+            # `freeFlow` is the same quantity in the same units. Two reasons, both
+            # found after the units check passed:
+            #
+            # The simulator fills `segment_target_speed` AND `nearby_av_mean_speed`
+            # from the one `ego.free_flow_speed_mps` whenever no AVs are near
+            # (`src/sensing/local.py:198,207`), and the schema states it. Moving one
+            # and leaving the other produces a pair the policy has never seen: they
+            # are perfectly correlated in every training sample.
+            #
+            # And it is the base speed the advisory decodes from
+            # (`policy/advisory.py` -> `decode_speed_bin`), which has a floor and no
+            # ceiling here. The simulator's safety layer clamps
+            # `min(target_speed, free_flow)` -- a no-op there precisely BECAUSE the
+            # two are equal. Decoupling them removes the clamp's premise, and a
+            # parser-legal 120 m/s link would advise 268 mph.
             src["downstream_congestion_estimate"] = feed_fusion.SOURCE_FEED
         else:
             src["downstream_congestion_estimate"] = (
@@ -384,6 +395,9 @@ class ObservationBuilder:
             "density_veh_per_km": round(density, 2),
             "mean_speed_mps": round(mean_speed, 2),
             "missingness": round(len(fallback_fields) / max(len(src), 1), 3),
+            # So a drive where the feed never owned a field says why, rather
+            # than the congestion column being quietly neutral throughout.
+            "feed": feed_fusion.to_record(owned),
             "fallback_fields": fallback_fields,
         }
         return ObservationResult(obs=obs, encoded=encoded, field_sources=src, diagnostics=diagnostics)
