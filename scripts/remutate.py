@@ -219,6 +219,65 @@ MUTATIONS = [
      '    if not isinstance(value, str):\n        raise MessageError(f"{field} is {type(value).__name__}, expected str", REASON_WRONG_TYPE)',
      '    if value is None or not isinstance(value, str):\n        raise MessageError(f"{field} is {type(value).__name__}, expected str", REASON_WRONG_TYPE)',
      "python"),
+    # Task 30. The first two are the round-1 and round-2 defects themselves: both
+    # shipped, both were signed off by a test that named the behaviour, and both
+    # made a live drive's log read as a pure-shadow one -- which is the reading
+    # task 35 scores from.
+    ("shadow: reference_rates_hold reads the flip it came FROM",
+     "deployment/jetson/policy/shadow_mode.py",
+     '"reference_rates_hold": not self._ever_live,',
+     '"reference_rates_hold": not any(f.was == LIVE for f in self._flips),',
+     "python"),
+    ("shadow: the absent list is emitted unconditionally",
+     "deployment/jetson/policy/shadow_mode.py",
+     '                "structurally_absent":\n                    [] if self._ever_live else list(ABSENT_IN_PURE_SHADOW),',
+     '                "structurally_absent": list(ABSENT_IN_PURE_SHADOW),',
+     "python"),
+    ("shadow: a holder constructed live does not count as ever live",
+     "deployment/jetson/policy/shadow_mode.py",
+     "self._ever_live = mode == LIVE",
+     "self._ever_live = False",
+     "python"),
+    ("shadow: flipping INTO live is not recorded",
+     "deployment/jetson/policy/shadow_mode.py",
+     "            if mode == LIVE:\n                self._ever_live = True\n",
+     "",
+     "python"),
+    # The list is a claim about the controller's inputs. Adding one that a shadow
+    # drive plainly HAS -- the camera runs at reference rates precisely because
+    # nothing is applied -- passed the check that compared it to itself.
+    ("shadow: an input that IS present is declared absent",
+     "deployment/jetson/policy/shadow_mode.py",
+     'ABSENT_IN_PURE_SHADOW = (\n    "feed_congestion",',
+     'ABSENT_IN_PURE_SHADOW = (\n    "camera_density_bin",\n    "feed_congestion",',
+     "python"),
+    # All three locks, because all three survived the test that was supposed to
+    # cover them. Deliberately absent: reordering the append past the assignment
+    # in `flip_to`. Under the lock no reader can observe the intermediate state and
+    # `was` is identical either way, so it is an equivalent mutant -- an entry that
+    # can never be caught is a permanent false SURVIVED.
+    ("shadow: the mode getter drops its lock",
+     "deployment/jetson/policy/shadow_mode.py",
+     "    @property\n    def mode(self) -> str:\n        with self._lock:\n            return self._mode",
+     "    @property\n    def mode(self) -> str:\n        return self._mode",
+     "python"),
+    ("shadow: to_record drops its lock",
+     "deployment/jetson/policy/shadow_mode.py",
+     "    def to_record(self) -> dict[str, Any]:\n        with self._lock:\n            return {",
+     "    def to_record(self) -> dict[str, Any]:\n        if True:\n            return {",
+     "python"),
+    ("shadow: flip_to drops its lock",
+     "deployment/jetson/policy/shadow_mode.py",
+     "        with self._lock:\n            if mode == self._mode:",
+     "        if True:\n            if mode == self._mode:",
+     "python"),
+    # Task 29's rule, pinned from task 30's side: the whole "a shadow drive cannot
+    # reach DISAGREEMENT" claim rests on this returning False for a missing feed.
+    ("controller: a missing feed counts as disagreement",
+     "deployment/jetson/policy/sensing_controller.py",
+     "    if feed_congestion is None or camera_density_bin is None:\n        return False",
+     "    if feed_congestion is None or camera_density_bin is None:\n        return True",
+     "python"),
 ]
 
 RESULTS = {
@@ -300,8 +359,20 @@ if SIDECAR.exists():
     target.write_text(saved[1])
     SIDECAR.unlink()
 
+# Optional kind filter: `python3 scripts/remutate.py python` runs only the Python
+# entries. The docstring says to run this after landing a batch of fixes, and a batch
+# is almost always one kind -- rebuilding both Gradle suites per mutation to check a
+# Python change is why it was reached for less often than it should have been.
+WANTED = sys.argv[1:] or None
+if WANTED:
+    unknown = [k for k in WANTED if k not in RESULTS]
+    if unknown:
+        sys.exit(f"unknown kind(s) {unknown}; known: {sorted(RESULTS)}")
+
 survived = []
 for name, rel, old, new, kind in MUTATIONS:
+    if WANTED and kind not in WANTED:
+        continue
     path = ROOT / rel
     keep = path.read_text()
     if keep.count(old) > 1:
