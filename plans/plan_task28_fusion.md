@@ -66,7 +66,7 @@ failing parity test with a drive's data already collected.
 |---|---|---|---|
 | `leader_gap`, `leader_relative_speed`, lane gaps, `local_density_bin`, `local_mean_speed_bin`, `local_queue_estimate` | camera | neutral | the feed cannot see the car in front |
 | `ego_speed`, `ego_acceleration` | GPS | neutral | neither camera nor feed measures it |
-| `downstream_congestion_estimate` | **feed** | V2V peers, then neutral | the camera cannot see 2 km ahead |
+| `downstream_congestion_estimate` | ~~feed~~ **nobody** | V2V peers, then neutral | retracted in validation — see below |
 | `segment_target_speed` | V2V peers | ~~feed's `freeFlow`~~ config | retracted in validation — see below |
 | `merge_pressure` | camera/V2V | neutral | local geometry, not a feed quantity |
 | `distance_to_downstream_bottleneck` | ~~feed~~ **nobody** | stays `sim_parity` | see below |
@@ -106,6 +106,44 @@ One further parity subtlety, since it bears on task 47: in the simulator
 `downstream_congestion_estimate` is a **cooperation** quantity — it is `0.0` unless
 local AVs are sensed (`src/sensing/local.py:204-206`). Feeding it from a traffic
 service changes where the number comes from, not just how it is computed.
+
+## What this task actually concluded
+
+**The feed owns no observation field.** That is the opposite of what the plan set
+out to do, and it is where the evidence went.
+
+`segment_target_speed` went first, on units that were right and a joint distribution
+that was not. `downstream_congestion_estimate` went second, for the same reason one
+field along: `src/sensing/local.py:203` is a **block** gate, not a congestion gate.
+With no AVs near, the simulator pins congestion, merge pressure and target speed
+together while density goes to zero, the lane distribution empties, and both AV
+counts go to zero. So `congestion > 0` implies `nearby_av_count >= 1` in every
+observation it can emit — measured at **0 of 1,095** rollout samples in the other
+cell, against 42 with congestion and 1–7 AVs.
+
+A lone instrumented car has no equipped neighbours, so `peers` is empty on every
+tick of a real drive. Writing the feed's congestion there would put the policy in
+that empty cell not occasionally but always, one field lifted out of a neutral block
+whose other five stay pinned.
+
+The three ways out, and why this one:
+
+- *Own it only when peers exist.* The feed then fires essentially never — dead code
+  wearing a feature's clothes.
+- *Accept it as a declared distribution shift.* Ships a joint with zero training
+  support to a frozen policy, in a driver-facing advisory system.
+- *Keep it beside the vector.* Chosen. The reading is on `ObservationResult.feed`
+  and in `diagnostics["feed"]`, so the sensing controller (task 29) can act on
+  traffic data without the policy seeing an input it never trained on.
+
+Making the vector legitimately feed-informed needs the **simulator's** sensing model
+to produce congestion without AVs. That is a change to the training side and outside
+section F, and it is the real blocker behind both retractions.
+
+So what task 28 delivers is the derivation, the provenance, and a defended answer to
+"which source owns which field" — where the answer for both candidates turned out to
+be "not the observation". The check that found it, and that the units question could
+not ask, is: **does this field move alone in a block the simulator moves together?**
 
 ## The staleness aging term
 

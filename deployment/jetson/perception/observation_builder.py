@@ -51,6 +51,10 @@ class ObservationResult:
     encoded: np.ndarray                # (39,) float32 actor input
     field_sources: dict[str, str]      # provenance per field
     diagnostics: dict[str, Any]        # raw values for logging/eval
+    #: What the traffic feed offered this tick. Deliberately beside the vector
+    #: rather than in it -- see the note in `build`. The sensing controller reads
+    #: this; the policy does not.
+    feed: "feed_fusion.FeedOwnership | None" = None
 
 
 @dataclass
@@ -253,40 +257,32 @@ class ObservationBuilder:
             lane_distribution: dict[str, float] = {}
             src["nearby_av_count"] = "fallback_neutral"
 
-        # --- the traffic feed, where it owns a field --------------------
+        # --- the traffic feed: derived, recorded, and NOT in the vector -----
         #
-        # Ownership, not averaging. The camera cannot see two kilometres ahead and
-        # the feed cannot see the car in front, so nothing here blends the two: the
-        # feed takes a field outright or hands it on, and `field_sources` says
-        # which. `downstream_congestion_estimate` is the one field it can inform --
-        # `distance_to_downstream_bottleneck` looks like a candidate and is not,
-        # because the simulator uses it as a 0/inf flag rather than a distance.
+        # It owns no observation field, which is the opposite of what this task
+        # set out to do and is what the evidence supports.
+        #
+        # The simulator's `if not local_av:` at `src/sensing/local.py:203` is a
+        # BLOCK gate, not a congestion gate: with no AVs near it pins
+        # downstream_congestion, merge_pressure and segment_target_speed together,
+        # while density goes to zero, lane distribution empties and both AV counts
+        # go to zero. So `congestion > 0` implies `nearby_av_count >= 1` in every
+        # observation the sim can emit -- measured at 0 of 1,095 rollout samples in
+        # the other cell, against 42 with congestion and 1..7 AVs.
+        #
+        # A lone instrumented car has no equipped neighbours, so `peers` is empty on
+        # every tick of a real drive. Writing the feed's congestion here would put
+        # the policy in that empty cell not occasionally but always -- one field
+        # lifted out of a neutral block whose other five stay pinned.
+        #
+        # Owning it only when peers exist would make the feed fire essentially
+        # never. Making the vector legitimately feed-informed needs the simulator's
+        # sensing model to produce congestion without AVs, which is a change to the
+        # training side and outside section F. Until then the reading is published
+        # on the result for the sensing controller and written to the record, where
+        # it informs decisions without becoming an input the policy never saw.
         owned = feed_fusion.own(feed)
         self.last_feed_ownership = owned
-        if owned.owns_congestion:
-            cooperation = dict(cooperation)
-            cooperation["downstream_congestion_estimate"] = owned.downstream_congestion
-            # `segment_target_speed` is NOT taken from the feed, though its
-            # `freeFlow` is the same quantity in the same units. Two reasons, both
-            # found after the units check passed:
-            #
-            # The simulator fills `segment_target_speed` AND `nearby_av_mean_speed`
-            # from the one `ego.free_flow_speed_mps` whenever no AVs are near
-            # (`src/sensing/local.py:198,207`), and the schema states it. Moving one
-            # and leaving the other produces a pair the policy has never seen: they
-            # are perfectly correlated in every training sample.
-            #
-            # And it is the base speed the advisory decodes from
-            # (`policy/advisory.py` -> `decode_speed_bin`), which has a floor and no
-            # ceiling here. The simulator's safety layer clamps
-            # `min(target_speed, free_flow)` -- a no-op there precisely BECAUSE the
-            # two are equal. Decoupling them removes the clamp's premise, and a
-            # parser-legal 120 m/s link would advise 268 mph.
-            src["downstream_congestion_estimate"] = feed_fusion.SOURCE_FEED
-        else:
-            src["downstream_congestion_estimate"] = (
-                "measured" if peers else "fallback_neutral"
-            )
 
         # --- etiquette flag (mirrors src/safety/etiquette.py) ----------
         uncongested_low_speed = bool(
@@ -400,7 +396,8 @@ class ObservationBuilder:
             "feed": feed_fusion.to_record(owned),
             "fallback_fields": fallback_fields,
         }
-        return ObservationResult(obs=obs, encoded=encoded, field_sources=src, diagnostics=diagnostics)
+        return ObservationResult(obs=obs, encoded=encoded, field_sources=src,
+                                 diagnostics=diagnostics, feed=owned)
 
     # ------------------------------------------------------------------
 

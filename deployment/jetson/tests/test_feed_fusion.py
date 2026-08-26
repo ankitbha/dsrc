@@ -184,7 +184,15 @@ class TestTheBuilderChain:
         assert without.field_sources == with_none.field_sources
         assert with_none.obs["downstream_congestion_estimate"] == 0.0
 
-    def test_a_feed_reading_supplies_the_congestion_field_and_names_itself(self):
+    def test_the_feed_does_not_write_the_congestion_field_either(self):
+        # The retraction this task ended on. The simulator's `if not local_av:` is
+        # a BLOCK gate: with no AVs near it pins congestion, merge_pressure and
+        # target speed together while density, lane distribution and both AV counts
+        # go to zero. So congestion > 0 implies nearby_av_count >= 1 in every
+        # observation it can emit -- 0 of 1,095 rollout samples in the other cell.
+        # A lone instrumented car has no equipped neighbours, so writing the feed's
+        # value here would put the policy in that empty cell on every tick, one
+        # field lifted out of a neutral block whose other five stay pinned.
         from sensors.gps_reader import GpsFix
 
         gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
@@ -192,10 +200,44 @@ class TestTheBuilderChain:
         result = self.builder().build([], gps, t_mono=100.0,
                                       feed=reading(link=link(speed=6.0, free_flow=30.0)))
 
-        assert result.obs["downstream_congestion_estimate"] == pytest.approx(0.8)
-        # Not "measured": it is derived from a service's estimate of something this
-        # vehicle cannot see, and a reader must be able to tell those apart.
-        assert result.field_sources["downstream_congestion_estimate"] == feed_fusion.SOURCE_FEED
+        assert result.obs["downstream_congestion_estimate"] == 0.0
+        assert result.obs["cooperation"]["downstream_congestion_estimate"] == 0.0
+        assert result.field_sources["downstream_congestion_estimate"] == "fallback_neutral"
+
+    def test_the_reading_is_still_available_beside_the_vector(self):
+        # Not in the observation is not the same as thrown away: the sensing
+        # controller reads it, and the record keeps it, so a drive can still act on
+        # traffic data without the policy seeing an input it never trained on.
+        from sensors.gps_reader import GpsFix
+
+        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                     heading_deg=90.0, t_mono=100.0)
+        result = self.builder().build([], gps, t_mono=100.0,
+                                      feed=reading(link=link(speed=6.0, free_flow=30.0)))
+
+        assert result.feed is not None
+        assert result.feed.owns_congestion is True
+        assert result.feed.downstream_congestion == pytest.approx(0.8)
+        assert result.diagnostics["feed"]["downstream_congestion"] == pytest.approx(0.8)
+
+    def test_the_no_av_block_stays_whole(self):
+        # Every field the simulator pins together when no AVs are near must move
+        # together or not at all. This is the check the units question could not
+        # ask, generalised past the one pair that failed it.
+        from sensors.gps_reader import GpsFix
+
+        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                     heading_deg=90.0, t_mono=100.0)
+        result = self.builder().build([], gps, t_mono=100.0,
+                                      feed=reading(link=link(speed=2.0, free_flow=30.0)))
+
+        assert result.obs["nearby_av_count"] == 0
+        assert result.obs["downstream_congestion_estimate"] == 0.0
+        assert result.obs["merge_pressure"] == 0.0
+        assert result.obs["nearby_av_density"] == 0.0
+        assert result.obs["cooperation"]["segment_target_speed"] == pytest.approx(
+            result.obs["nearby_av_mean_speed"]
+        )
 
     def test_a_declined_reading_leaves_the_field_where_it_was(self):
         from sensors.gps_reader import GpsFix

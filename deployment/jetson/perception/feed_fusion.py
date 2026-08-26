@@ -57,10 +57,6 @@ MIN_FREE_FLOW_MPS = 2.0
 #: and a reader must be able to tell that from a camera measurement.
 SOURCE_FEED = "feed_derived"
 
-#: What a builder reports before its first tick. An attribute that does not exist
-#: until `build` runs makes every reader guard for it or crash.
-NOTHING_YET = None
-
 
 class Decline:
     """Why the feed does not own a field on this tick."""
