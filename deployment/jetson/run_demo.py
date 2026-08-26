@@ -218,6 +218,24 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
 
     phone = None
     if args.phone:
+        if gps_sim_spec is not None:
+            # `--phone` takes BOTH sensors from the handset, so a simulated GPS
+            # beside it is the very thing the one-flag design exists to prevent:
+            # two halves of one run from two devices on two clocks. Refused here,
+            # before the detector engine and policy bundle load, because the old
+            # behaviour was to print "GPS: SIMULATED", wait for the phone, warm
+            # everything up and then die on `gps.sim` -- which a PhoneGpsReader
+            # does not have -- outside the try/finally, tearing nothing down.
+            print("[run] --phone takes camera and gps from the handset; "
+                  "--sim-gps and a scenario gps profile cannot apply to it",
+                  file=sys.stderr)
+            return 2
+        if args.no_gps or args.require_gps:
+            # Both are decisions about a local GPS this run does not have.
+            # Ignoring them silently let a run ask for no GPS and get one.
+            print("[run] --no-gps and --require-gps do not apply under --phone",
+                  file=sys.stderr)
+            return 2
         from sensors.phone_link import PhoneLink
 
         phone = PhoneLink(host=args.phone_host, port=args.phone_port)
@@ -378,6 +396,12 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             "camera_file_recoveries": camera.file_recoveries,
             "policy_trained": actor.is_trained,
         }
+        if phone is not None:
+            # Which clock produced the stamps and how the offset was obtained.
+            # Without it a run where every stamp took the proxy path and one where
+            # conversion worked write the same summary, and an offline reader
+            # cannot tell a measured drive from a fictional one.
+            summary["phone"] = phone.to_record()
         camera.stop()
         if gps is not None:
             gps.stop()
@@ -395,6 +419,13 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             telemetry.close()
         if window is not None:
             window.close()
+        if phone is not None:
+            # Last, after the sources that read from it. Stopping the link first
+            # would close the session under two live reader threads. Only the
+            # failure path used to do this at all, so a successful run left the
+            # accept socket bound, the session open until the phone timed itself
+            # out, and the responder thread running.
+            phone.stop()
         print(summary_line(summary, camera.dropped_frames))
     return 0
 

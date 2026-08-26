@@ -966,16 +966,44 @@ class OneWayEstimator:
         with self._lock:
             return self._current
 
+    def _gated(self) -> tuple[str | None, TimebaseEstimate | None]:
+        """Why this estimate should not be used, or None.
+
+        The same three questions the round-trip estimator asks, for the same
+        reasons, because the answers are no better here for being harder to get.
+        Read under one lock so a caller cannot be told `usable` beside a reason it
+        is not.
+        """
+        with self._lock:
+            current = self._current
+            now = self._mono()
+            newest = max((s.t2_local_recv_ns for s in self._samples), default=None)
+        if current is None:
+            return "no samples", None
+        if current.offset_samples < MIN_OFFSET_SAMPLES:
+            # One packet gives a spread of zero, which reads downstream as a
+            # perfectly known offset: `PhoneClockAdapter.stamp` puts the bound in
+            # `TimebaseStamp.bound_s` and the observation builder charges it as
+            # `uncertainty_s`. Maximum trust from a single arrival is exactly the
+            # claim the round-trip path refuses to make below this many samples.
+            return f"only {current.offset_samples} samples in the offset window", current
+        if newest is None or now - newest > int(MAX_SAMPLE_AGE_S * NS_PER_S):
+            age_s = "never" if newest is None else f"{(now - newest) / NS_PER_S:.1f}s"
+            return f"newest sample is {age_s} old", current
+        return None, current
+
     def to_local(self, t_remote_mono_ns: int) -> ConvertedInstant:
         """Convert a peer instant to this device's clock.
 
         No skew term, so this is the plain inverse rather than the closed form
-        the round-trip estimator needs.
+        the round-trip estimator needs. The bound does widen with age, because an
+        offset measured a while ago is worth less than one measured now whether or
+        not anyone fitted a slope to it.
         """
-        with self._lock:
-            estimate = self._current
-        if estimate is None:
-            raise TimebaseNotReady("cannot convert: no one-way samples yet", "no estimate")
+        reason, estimate = self._gated()
+        if reason is not None:
+            raise TimebaseNotReady(f"cannot convert: {reason}", reason)
+        assert estimate is not None
         t_local = t_remote_mono_ns - estimate.offset_ns
         reach_ns = abs(t_local - estimate.t_reference_ns)
         if reach_ns > int(MAX_EXTRAPOLATION_S * NS_PER_S):
@@ -984,9 +1012,14 @@ class OneWayEstimator:
                 f"{MAX_EXTRAPOLATION_S:.0f}s the samples support",
                 "beyond extrapolation limit",
             )
+        # Spread, plus what the clocks may have drifted apart since the estimate
+        # was taken. Without the second term the bound was frozen at the moment of
+        # measurement and a stamp converted five seconds later claimed the same
+        # certainty as one converted immediately.
+        drift_ns = int(abs(t_local - estimate.t_reference_ns) * ASSUMED_SKEW_PPM / 1e6)
         return ConvertedInstant(
             t_remote_mono_ns=t_local,
-            bound_ns=estimate.rtt_min_ns,
+            bound_ns=estimate.rtt_min_ns + drift_ns,
             estimate_id=estimate.estimate_id,
         )
 

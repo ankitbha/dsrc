@@ -266,3 +266,64 @@ class TestStartIsIdempotent:
         finally:
             link.stop()
             phone.close()
+
+
+class TestSessionEndPropagates:
+    """What happens when the phone goes away.
+
+    `Session.recv` returns immediately once it has an end reason, so the poll
+    timeouts stop throttling and every reader spins. Measured before the fix:
+    ~660k polls a second across the three threads and a full core taken from the
+    perception pipeline. Worse, nothing set `end_of_stream`, and `run_demo`'s
+    worker breaks only on that -- its `--duration-s` and `--max-ticks` checks sit
+    after a frame it will never get again -- so the run never ended at all.
+    """
+
+    def test_a_closed_session_ends_the_camera_stream(self):
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            assert link.camera.end_of_stream is False
+
+            phone.close()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and not link.camera.end_of_stream:
+                time.sleep(0.02)
+
+            assert link.camera.end_of_stream, "a dead session left the consumer waiting forever"
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_a_closed_session_stops_the_reader_thread_rather_than_spinning(self):
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            reader = link.camera._thread
+            phone.close()
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and reader.is_alive():
+                time.sleep(0.02)
+            assert not reader.is_alive(), "the reader kept polling a dead session"
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_a_closed_session_stops_the_responder_thread(self):
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            responder = link._responder
+            phone.close()
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and responder.is_alive():
+                time.sleep(0.02)
+            assert not responder.is_alive()
+        finally:
+            link.stop()
+            phone.close()

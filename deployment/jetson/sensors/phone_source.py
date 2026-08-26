@@ -164,10 +164,30 @@ class _PhoneSource:
             self._on_reader_ended()
             raise
 
+    def _session_ended(self) -> bool:
+        """Whether the transport under us has finished.
+
+        Read through the router rather than held separately, so a source cannot
+        outlive the session it reads and cannot disagree with it.
+        """
+        session = getattr(self._router, "_session", None)
+        return bool(getattr(session, "is_closed", False))
+
     def _read_until_stopped(self) -> None:
         while not self._stop.is_set():
             received = self._router.recv_with_receipt(self._channel, timeout=self._poll_s)
             if received is None:
+                # A closed session is the phone's equivalent of a file source
+                # running out, and it was the one ending that raised no signal.
+                # `Session.recv` returns immediately once it has an end reason,
+                # so the poll timeout stops throttling and this loop spins a core
+                # at ~660k polls a second -- taken from the perception pipeline --
+                # while `run_demo`'s worker, which breaks only on `end_of_stream`,
+                # never ends the run at all: its `--duration-s` and `--max-ticks`
+                # checks sit after a frame it will now never get.
+                if self._session_ended():
+                    self._on_reader_ended()
+                    return
                 continue
             message, receipt = received
             # Arrival from the transport's own reader, not a clock read here: a

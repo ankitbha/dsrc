@@ -11,6 +11,9 @@ from __future__ import annotations
 import pytest
 
 from transport.timebase import (
+    ASSUMED_SKEW_PPM,
+    MAX_SAMPLE_AGE_S,
+    MIN_OFFSET_SAMPLES,
     OFFSET_WINDOW_S,
     ConvertedInstant,
     OneWayEstimator,
@@ -43,6 +46,15 @@ def arrival(clock: Clock, exchange_id: int, delay_s: float,
     t2 = clock.now_ns
     t1 = t2 + offset_ns - int(delay_s * NS)
     return OneWaySample(exchange_id, t1_remote_send_ns=t1, t2_local_recv_ns=t2)
+
+
+def converged(clock: Clock, delay_s: float = 0.030) -> OneWayEstimator:
+    """An estimator past its admission gate, which conversion now requires."""
+    estimator = OneWayEstimator(mono_clock=clock)
+    for i in range(MIN_OFFSET_SAMPLES):
+        estimator.add(arrival(clock, i, delay_s=delay_s))
+        clock.advance(0.25)
+    return estimator
 
 
 class TestWhereTheEstimateSits:
@@ -112,8 +124,7 @@ class TestWhatTheBoundCovers:
 
     def test_the_record_says_one_way_so_a_reader_cannot_mistake_it(self):
         clock = Clock()
-        estimator = OneWayEstimator(mono_clock=clock)
-        estimator.add(arrival(clock, 1, delay_s=0.01))
+        estimator = converged(clock, delay_s=0.01)
 
         record = estimator.to_record()
         assert record["one_way"] is True
@@ -130,8 +141,7 @@ class TestConversion:
         # offset is under the truth, so a converted capture lands LATER than it
         # really was, and a reading looks fresher than it is by the delay floor.
         clock = Clock()
-        estimator = OneWayEstimator(mono_clock=clock)
-        estimator.add(arrival(clock, 1, delay_s=0.030))
+        estimator = converged(clock, delay_s=0.030)
 
         captured_local_truth = clock.now_ns - int(0.5 * NS)
         captured_remote = captured_local_truth + PLANTED_OFFSET_NS
@@ -146,8 +156,7 @@ class TestConversion:
         # drive and ego speed silently falls back to neutral while the loop
         # keeps producing advisories that look fine.
         clock = Clock()
-        estimator = OneWayEstimator(mono_clock=clock)
-        estimator.add(arrival(clock, 1, delay_s=0.01))
+        estimator = converged(clock, delay_s=0.01)
 
         fixed_remote = clock.now_ns + PLANTED_OFFSET_NS - int(0.4 * NS)
         age_s = (clock.now_ns - estimator.to_local(fixed_remote).t_remote_mono_ns) / NS
@@ -158,13 +167,56 @@ class TestConversion:
         with pytest.raises(TimebaseNotReady):
             estimator.to_local(PLANTED_OFFSET_NS)
 
+    def test_one_packet_is_not_enough_to_convert(self):
+        # A single arrival gives a spread of zero, which reads downstream as a
+        # perfectly known offset: the adapter puts it in `TimebaseStamp.bound_s`
+        # and the observation builder charges it as `uncertainty_s`. Maximum trust
+        # from one packet is the claim the round-trip path refuses to make, and
+        # this one has no business making it either.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        for i in range(MIN_OFFSET_SAMPLES - 1):
+            estimator.add(arrival(clock, i, delay_s=0.01))
+            clock.advance(0.25)
+
+        with pytest.raises(TimebaseNotReady):
+            estimator.to_local(clock.now_ns + PLANTED_OFFSET_NS)
+
+        estimator.add(arrival(clock, 99, delay_s=0.01))
+        assert estimator.to_local(clock.now_ns + PLANTED_OFFSET_NS) is not None
+
+    def test_an_offset_nobody_has_refreshed_stops_being_used(self):
+        # If the phone's sync stops while camera and GPS keep streaming, the
+        # offset freezes. Converting on it anyway would go on producing confident
+        # stamps from a measurement nothing has confirmed for minutes.
+        clock = Clock()
+        estimator = converged(clock)
+        assert estimator.to_local(clock.now_ns + PLANTED_OFFSET_NS) is not None
+
+        clock.advance(MAX_SAMPLE_AGE_S + 1.0)
+        with pytest.raises(TimebaseNotReady):
+            estimator.to_local(clock.now_ns + PLANTED_OFFSET_NS)
+
+    def test_the_bound_widens_as_the_estimate_ages(self):
+        # An offset measured a while ago is worth less than one measured now,
+        # whether or not anyone fitted a slope to it. Frozen, the bound claimed
+        # the same certainty seconds later as at the instant of measurement.
+        clock = Clock()
+        estimator = converged(clock, delay_s=0.01)
+        reference = clock.now_ns + PLANTED_OFFSET_NS
+
+        near = estimator.to_local(reference).bound_ns
+        far = estimator.to_local(reference + int(4.0 * NS)).bound_ns
+
+        assert far > near
+        assert far - near == pytest.approx(int(4.0 * NS * ASSUMED_SKEW_PPM / 1e6), rel=0.05)
+
     def test_an_instant_beyond_the_samples_is_refused(self):
         # The same guard the round-trip estimator has. An offset measured now
         # says nothing about an instant hours away, and converting anyway would
         # produce a confident number with no support under it.
         clock = Clock()
-        estimator = OneWayEstimator(mono_clock=clock)
-        estimator.add(arrival(clock, 1, delay_s=0.01))
+        estimator = converged(clock, delay_s=0.01)
 
         far = clock.now_ns + PLANTED_OFFSET_NS + int((OFFSET_WINDOW_S + 100_000) * NS)
         with pytest.raises(TimebaseNotReady):

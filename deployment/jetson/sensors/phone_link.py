@@ -145,6 +145,10 @@ class PhoneLink:
         while not self._stop.is_set():
             received = self.router.recv_with_receipt(Channel.CONTROL, timeout=0.05)
             if received is None:
+                # Same spin as the sensor readers: once the session has an end
+                # reason `recv` returns at once and the timeout throttles nothing.
+                if getattr(self.session, "is_closed", False):
+                    return
                 continue
             message, receipt = received
             ping = getattr(message, "t_peer_recv_mono_ns", None) is None
