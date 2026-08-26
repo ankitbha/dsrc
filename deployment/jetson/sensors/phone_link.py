@@ -28,6 +28,7 @@ import threading
 import time
 from typing import Any
 
+from sensors.here_feed import HereFeed
 from sensors.phone_source import PhoneCameraStream, PhoneClockAdapter, PhoneGpsReader
 from transport.channels import Channel
 from transport.endpoint import SessionRefused, SessionStarted, TransportListener
@@ -97,6 +98,10 @@ class PhoneLink:
         self.router: MessageRouter | None = None
         self.camera: PhoneCameraStream | None = None
         self.gps: PhoneGpsReader | None = None
+        #: Filled from the `here` channel. Not a sensor backend: nothing polls it
+        #: on a thread, because a query is answered against the caller's own
+        #: position at the moment it asks, not at the moment the bytes arrived.
+        self.here = HereFeed()
         self.peer_device_id: str | None = None
         self.pings_answered = 0
         #: Why a connection did not become a session. The diagnosis exists --
@@ -106,6 +111,7 @@ class PhoneLink:
         self.refusals: list[str] = []
         self._stop = threading.Event()
         self._responder: threading.Thread | None = None
+        self._here_reader: threading.Thread | None = None
 
     @property
     def host(self) -> str:
@@ -145,6 +151,10 @@ class PhoneLink:
             target=self._answer_pings, name="phone-timesync", daemon=True
         )
         self._responder.start()
+        self._here_reader = threading.Thread(
+            target=self._read_here, name="phone-here", daemon=True
+        )
+        self._here_reader.start()
 
     def _answer_pings(self) -> None:
         """Answer every ping, and take the arrival as a one-way sample.
@@ -174,11 +184,35 @@ class PhoneLink:
             self.router.send(answer_ping((message, receipt)))
             self.pings_answered += 1
 
+    def _read_here(self) -> None:
+        """Hand every HERE response to the feed, with its arrival stamp.
+
+        The arrival is the reader's, converted like every other phone stamp, so
+        response age is measured on the same clock the pipeline asks freshness
+        questions on. Taking the time here instead would fold this thread's queue
+        wait into the age of the traffic data.
+        """
+        assert self.router is not None
+        while not self._stop.is_set():
+            received = self.router.recv_with_receipt(Channel.HERE, timeout=0.05)
+            if received is None:
+                if getattr(self.session, "is_closed", False):
+                    return
+                continue
+            message, receipt = received
+            stamp = self.adapter.stamp(message.t_capture_mono_ns, receipt.t_recv_mono_ns / 1e9)
+            self.here.offer(
+                status=message.status,
+                body=message.body,
+                received_t_mono=stamp.t_capture_mono,
+            )
+
     def stop(self) -> None:
         """Reverse of coming up, and safe to call when it never came up."""
         self._stop.set()
-        if self._responder is not None:
-            self._responder.join(timeout=2.0)
+        for worker in (self._responder, self._here_reader):
+            if worker is not None:
+                worker.join(timeout=2.0)
         for source in (self.camera, self.gps):
             if source is not None:
                 source.stop()
@@ -215,4 +249,5 @@ class PhoneLink:
             "clock": self.adapter.to_record(),
             "camera": None if self.camera is None else self.camera.to_record(),
             "gps": None if self.gps is None else self.gps.to_record(),
+            "here": self.here.to_record(),
         }

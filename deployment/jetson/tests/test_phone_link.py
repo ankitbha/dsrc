@@ -312,6 +312,26 @@ class TestSessionEndPropagates:
             link.stop()
             phone.close()
 
+    def test_a_closed_session_stops_the_here_reader(self):
+        # The same defect F1 was about, in the thread task 27 added. Session.recv
+        # returns at once once it has an end reason, so without this the reader
+        # spins a core on a dead link -- and it is a new thread, so the tests that
+        # cover the camera, gps and responder threads say nothing about it.
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            reader = link._here_reader
+            phone.close()
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and reader.is_alive():
+                time.sleep(0.02)
+            assert not reader.is_alive(), "the here reader kept polling a dead session"
+        finally:
+            link.stop()
+            phone.close()
+
     def test_a_closed_session_stops_the_responder_thread(self):
         phone, jetson, up, down = phone_and_jetson()
         link = PhoneLink()
@@ -374,6 +394,60 @@ class TestRefusalsAreReported:
             assert record["sessions_accepted"] == 2
             assert record["sessions_displaced"] == 1
             assert record["sessions_refused"] == 3
+        finally:
+            link.stop()
+            phone.close()
+
+
+class TestHereIngestion:
+    """The `here` channel reaching the feed.
+
+    Nothing on this side had ever opened a HERE body; the phone fetched and
+    forwarded and the bytes stopped at the transport.
+    """
+
+    def test_a_here_response_crossing_the_wire_reaches_the_feed(self):
+        import json as _json
+
+        from transport.messages import HereResponse
+
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            shape = {"links": [{"points": [{"lat": 51.49, "lng": -0.20}]}]}
+            payload = _json.dumps({"results": [
+                {"location": {"shape": shape}, "currentFlow": {"jamFactor": 7.5}}
+            ]}).encode()
+            assert up.send(HereResponse(
+                t_capture_mono_ns=now_mono_ns() + TRUE_OFFSET_NS,
+                request_url="https://data.traffic.hereapi.com/v7/flow",
+                status=200, content_type="application/json",
+                query_lat=51.49, query_lon=-0.20, query_radius_m=1500.0,
+                t_request_mono_ns=1, t_response_mono_ns=2, body=payload,
+            ))
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and link.here.responses_parsed == 0:
+                time.sleep(0.02)
+
+            assert link.here.responses_parsed == 1
+            assert link.to_record()["here"]["links_cached"] == 1
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_the_record_carries_the_feed_even_before_anything_arrives(self):
+        # A drive that received no traffic data must say so as a number rather
+        # than by the key being absent.
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            here = link.to_record()["here"]
+            assert here["responses_received"] == 0
+            assert here["last_outcome"] == "no_response_yet"
+            assert here["feed_lag_s"] is None
         finally:
             link.stop()
             phone.close()
