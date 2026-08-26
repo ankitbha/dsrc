@@ -17,7 +17,7 @@ from sensors.phone_link import PhoneLink
 from transport.channels import Channel
 from transport.handshake import Hello, Role
 from transport.loopback import LoopbackAcceptor, loopback_pair
-from transport.messages import GpsRecord, InvalidMessage, MessageRouter, RateCommand
+from transport.messages import CameraFrame, GpsRecord, InvalidMessage, MessageRouter, RateCommand
 from transport.session import Session
 from transport.timebase import OneWaySample, now_mono_ns
 
@@ -1052,6 +1052,113 @@ class TestWhatANewDeviceInherits:
             # And the live fields describe the CURRENT session, not the old one.
             assert record["timebase"]["samples_accepted"] == 0
             assert record["peer_device_id"] == "phone-two"
+            second.hang_up()
+        finally:
+            link.stop()
+
+
+def a_jpeg() -> bytes:
+    import cv2
+    import numpy as np
+
+    ok, buf = cv2.imencode(".jpg", np.zeros((16, 16, 3), dtype=np.uint8))
+    assert ok
+    return buf.tobytes()
+
+
+class TestTheSecondPhoneStartsClean:
+    """What preserving the sensors' identity across a rebind carried with it."""
+
+    def test_a_second_phone_low_frame_ids_are_not_refused_forever(self):
+        # `wait_for_fresh` gates on `frame_id <= _last_consumed_id`, and frame ids
+        # come from the peer -- `CameraPipeline` holds an AtomicLong(0) built per
+        # sensing service, so a different handset counts from 1 again. Keeping the
+        # camera object across a rebind, which is what makes the run survive a
+        # redial, carried the previous phone's high-water mark with it: a run that
+        # consumed frame 5000 refused every frame the second phone ever sent.
+        #
+        # Silent in every health field: reader_alive True, end_of_stream False,
+        # frames arriving, and the drop counter flat -- it fires on
+        # `frame_id > _last_consumed_id`, exactly the condition that is false here.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            camera = link.camera
+
+            assert MessageRouter(first.session).send(CameraFrame(
+                t_capture_mono_ns=now_mono_ns(), frame_id=5000, width=16, height=16,
+                format="jpeg", quality=85, jpeg=a_jpeg()))
+            assert wait_until(lambda: camera.wait_for_fresh(0.05) is not None), \
+                "the first phone's frame never arrived"
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert MessageRouter(second.session).send(CameraFrame(
+                t_capture_mono_ns=now_mono_ns(), frame_id=1, width=16, height=16,
+                format="jpeg", quality=85, jpeg=a_jpeg()))
+            assert wait_until(lambda: camera.wait_for_fresh(0.05) is not None), \
+                "the second phone's frames were refused; the run goes blind and " \
+                "never ends, because end_of_stream is False"
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_the_rebind_entry_means_the_rebind_finished(self):
+        # Anything waiting on `len(rebinds)` is waiting for the link to be usable.
+        # Appending before `_begin()` published it one statement into the camera's
+        # rebind -- before the gps had been touched or a reader thread existed --
+        # so every test using it raced, and one failed 3 times in 40 idle runs.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+            # No further waiting. If the entry means anything, all of this holds now.
+            assert link.camera._router is link.router
+            assert link.gps._router is link.router
+            assert link.camera.health()["reader_alive"] is True
+            assert link.gps.health()["reader_alive"] is True
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_each_sessions_record_counts_only_that_session(self):
+        # The sensors' counters are cumulative on the object, and the object now
+        # survives the rebind -- so a per-session record reading them straight
+        # reported session two's frames as session one's plus session two's, next to
+        # a clock that had counted only session two. An offline reader summing the
+        # sessions double-counts.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            up = MessageRouter(first.session)
+            for i in range(3):
+                assert up.send(GpsRecord(
+                    t_capture_mono_ns=now_mono_ns() + i, valid=True, fix_quality=1,
+                    num_sats=9, lat=40.0, lon=-74.0, speed_mps=27.0,
+                    heading_deg=90.0, hdop=0.9, altitude_m=10.0))
+            assert wait_until(lambda: link.gps.messages_received == 3)
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert link.to_record()["sessions"][0]["gps"]["fixes_received"] == 3
+            # And the new session starts from zero rather than inheriting the total.
+            assert link.gps.messages_received == 0
             second.hang_up()
         finally:
             link.stop()

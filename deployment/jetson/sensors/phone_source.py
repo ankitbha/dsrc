@@ -160,12 +160,28 @@ class _PhoneSource:
         camera with no consumer.
 
         Identity is the whole point of this method. Everything below the object
-        changes; the object does not.
+        changes; the object does not -- but everything the object counted about the
+        PREVIOUS peer does, which is what `_on_rebound` clears. Preserving identity
+        without clearing that state moves the failure one layer down instead of
+        removing it.
         """
         self.stop()
+        if self._thread is not None and self._thread.is_alive():
+            # `stop()` joins with a timeout and discards the result, and `start()`
+            # refuses while a thread is alive -- so swapping the router here would
+            # leave the old reader on the old session with `_router` pointing at the
+            # new one and no live reader for it, silently.
+            self.failure = "reader did not stop in time for the rebind"
+            self._on_reader_ended()
+            return
         self._router = router
         self._adapter = adapter
+        self._on_rebound()
         self.start()
+
+    def _on_rebound(self) -> None:
+        """Forget what belonged to the previous peer. Default: the message count."""
+        self.messages_received = 0
 
     def _loop(self) -> None:
         try:
@@ -277,6 +293,27 @@ class PhoneCameraStream(_PhoneSource):
     def _on_reader_restarted(self) -> None:
         with self._cond:
             self.end_of_stream = False
+
+    def _on_rebound(self) -> None:
+        """Drop the previous phone's frames and its id high-water mark.
+
+        Frame ids come from the peer -- `CameraPipeline` holds an `AtomicLong(0)`
+        built per sensing service -- so a different handset, or the same one whose
+        service restarted, counts from 1 again. `wait_for_fresh` refuses anything
+        at or below `_last_consumed_id`, so a run that consumed frame 5000 from the
+        first phone rejected every frame the second one ever sent, forever, with
+        `reader_alive` True, `end_of_stream` False, frames arriving, and even the
+        drop counter flat -- it fires on `frame_id > _last_consumed_id`, which is
+        exactly the condition that is false here.
+
+        `_drop_counter` is deliberately kept: frames dropped unconsumed are a fact
+        about the RUN, not about one session.
+        """
+        super()._on_rebound()
+        with self._cond:
+            self._latest = None
+            self._last_consumed_id = -1
+        self.decode_failures = 0
 
     def stop(self) -> None:
         super().stop()

@@ -197,7 +197,19 @@ class PerceptionPolicyPipeline:
         peers: list[PeerState] | None = None,
         detections_override: list[Detection] | None = None,
         run_detector_with_override: bool = False,
+        feed: Any = None,
     ) -> Tick:
+        """One tick. `feed` is the traffic reading this tick asked for, or None.
+
+        Threaded through rather than held: `HereFeed.at` answers against the caller's
+        position at the moment it asks, so a reading fetched here would be about
+        wherever the pipeline happened to be, not about the frame being processed.
+        Without it `ObservationBuilder.build` defaulted `feed` to None on every tick,
+        `feed_fusion.own(None)` declined with `no_reading`, and the entire HERE
+        ingestion path -- parse, associate, age, publish -- terminated in a log
+        record. `Trigger.DISAGREEMENT`, one of the controller's three raise rules,
+        could not fire on any drive.
+        """
         t0 = time.monotonic()
         if detections_override is None:
             detections = self.detector.infer(frame.image)
@@ -214,7 +226,7 @@ class PerceptionPolicyPipeline:
         t2 = time.monotonic()
 
         obs_result: ObservationResult = self.builder.build(
-            vehicles, gps, time.monotonic(), peers
+            vehicles, gps, time.monotonic(), peers, feed
         )
         t3 = time.monotonic()
 

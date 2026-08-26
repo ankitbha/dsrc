@@ -372,6 +372,31 @@ MUTATIONS = [
      "if self._last_sent_at is not None and now - self._last_sent_at >= self.heartbeat_s:",
      "if self._last_sent_at is not None and now - self._last_sent_at > self.heartbeat_s:",
      "python"),
+    # Task 31 round 2. The first is the round-1 fix's own defect: preserving the
+    # camera's identity across a rebind, which is what lets the run survive a
+    # redial, carried the previous phone's frame-id high-water mark with it.
+    ("source: a rebind keeps the previous phone's frame high-water mark",
+     "deployment/jetson/sensors/phone_source.py",
+     "            self._latest = None\n            self._last_consumed_id = -1",
+     "            pass",
+     "python"),
+    ("source: a rebind keeps the previous phone's message count",
+     "deployment/jetson/sensors/phone_source.py",
+     '"""Forget what belonged to the previous peer. Default: the message count."""\n        self.messages_received = 0',
+     '"""Forget what belonged to the previous peer. Default: the message count."""',
+     "python"),
+    # The feed had no route into the pipeline at all, so the entire HERE ingestion
+    # path terminated in a log record and DISAGREEMENT was dead on every drive.
+    ("pipeline: the traffic reading never reaches the observation builder",
+     "deployment/jetson/pipeline.py",
+     "            vehicles, gps, time.monotonic(), peers, feed",
+     "            vehicles, gps, time.monotonic(), peers",
+     "python"),
+    # Deliberately absent: the rebind-entry ordering, and the worker's `finally:
+    # stop.set()`. Reverting the first makes its test FLAKY rather than failing --
+    # a pin that reports SURVIVED on the runs where the race does not land is worse
+    # than none. The second is inside a closure in `run_live` with no test harness;
+    # `test_no_undefined_names` covers the NameError class and nothing covers this.
     # Task 29's rule, pinned from task 30's side: the whole "a shadow drive cannot
     # reach DISAGREEMENT" claim rests on this returning False for a missing feed.
     ("controller: a missing feed counts as disagreement",

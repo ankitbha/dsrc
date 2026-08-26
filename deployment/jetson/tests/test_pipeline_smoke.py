@@ -182,3 +182,58 @@ def test_the_sensing_loop_reads_a_real_tick(pipeline) -> None:
     assert outcome.decision.rates
     assert outcome.command.shadow is True
     assert outcome.command.t_capture_mono_ns == int(tick.t_capture_mono * 1e9)
+
+
+def jammed_reading():
+    """A feed reading the fusion layer will actually take ownership of."""
+    from sensors.here_feed import FlowLink, FlowReading, Outcome
+
+    return FlowReading(
+        outcome=Outcome.OK,
+        link=FlowLink(
+            points=((40.0, -74.0), (40.01, -74.0)),
+            speed_mps=3.0, free_flow_mps=30.0, jam_factor=9.0,
+            confidence=0.9, traversability="open", length_m=1000.0,
+        ),
+        response_age_s=1.0, response_age_bound_s=0.05,
+        link_distance_m=400.0, link_cross_track_m=5.0,
+    )
+
+
+def test_the_feed_reaches_the_controller_through_the_real_pipeline(pipeline) -> None:
+    """Task 31's other half, and the one a fake tick cannot check.
+
+    `pipeline.step` had no `feed` parameter, so `ObservationBuilder.build` defaulted
+    it to None on every tick, `feed_fusion.own(None)` declined with `no_reading`, and
+    the whole HERE ingestion path -- parse, associate, age, publish -- terminated in
+    a log record. `Trigger.DISAGREEMENT`, one of the controller's three raise rules,
+    could not fire on any drive. The test that was supposed to pin this passed over a
+    tick shape the pipeline does not build.
+    """
+    from policy.sensing_loop import inputs_from
+
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    base_mono = time.monotonic() - 2.0
+    tick = None
+    for i in range(45):
+        t = i / 30
+        frame = Frame(image=image, frame_id=i, t_mono=base_mono + t,
+                      t_wall=time.time() - 2.0 + t)
+        fix = GpsFix(valid=True, lat=40.0, lon=-74.0, speed_mps=27.0,
+                     heading_deg=0.0, fix_quality=1, num_sats=9, hdop=0.9,
+                     altitude_m=3.0, t_mono=base_mono + t, t_wall=time.time())
+        tick = pipeline.step(frame, fix, detections_override=scene_detections(t),
+                             feed=jammed_reading())
+
+    assert tick.obs_result.feed is not None
+    assert tick.obs_result.feed.declined is None, tick.obs_result.feed
+    # 1 - 3/30
+    assert tick.obs_result.feed.downstream_congestion == pytest.approx(0.9, abs=1e-6)
+    assert inputs_from(tick, None, now=time.monotonic()).feed_congestion == pytest.approx(0.9)
+
+
+def test_no_feed_still_builds_a_tick(pipeline) -> None:
+    # The local-camera path, which passes nothing. Declining is the ordinary case.
+    tick = run_ticks(pipeline, 10)
+    assert tick.obs_result.feed is not None
+    assert tick.obs_result.feed.downstream_congestion is None

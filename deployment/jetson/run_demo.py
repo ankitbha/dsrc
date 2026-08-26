@@ -364,6 +364,20 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
 
     def worker() -> None:
         nonlocal last_print
+        try:
+            _tick_loop()
+        finally:
+            # `stop.set()` used to be the last statement of the body, so anything
+            # that raised took the thread out without it. The main loop is
+            # `while not stop.is_set(): sleep(0.2)`, so the run hung with the whole
+            # teardown unreached: no summary, no `phone.stop()`, and up to a
+            # megabyte of buffered tick records lost, since MetadataLogger flushes
+            # only in `close()`. `pipeline.step` could always raise; task 31 added a
+            # second call site whose documented contract IS to raise.
+            stop.set()
+
+    def _tick_loop() -> None:
+        nonlocal last_print
         while not stop.is_set():
             frame = camera.wait_for_fresh(timeout=1.0)
             if frame is None:
@@ -375,7 +389,13 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             if v2v is not None:
                 v2v.update_ego(fix, assumed_lane)
                 peers = v2v.peers(fix)
-            tick = pipeline.step(frame, fix, peers)
+            # Asked here, against this tick's own fix. `HereFeed.at` answers from
+            # geometry against the position it is handed, not from a cached answer,
+            # so asking anywhere else would describe a different piece of road.
+            feed = None
+            if phone is not None:
+                feed = phone.here.at(fix, time.monotonic())
+            tick = pipeline.step(frame, fix, peers, feed=feed)
             outcome = None
             if sensing is not None:
                 # After the tick, because the decision reads the policy margin and
@@ -414,7 +434,6 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 budget = 1.0 / target_hz - (time.monotonic() - frame.t_mono)
                 if budget > 0:
                     time.sleep(budget)
-        stop.set()
 
     worker_thread = threading.Thread(target=worker, name="pipeline", daemon=True)
     worker_thread.start()

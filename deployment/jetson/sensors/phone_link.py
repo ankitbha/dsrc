@@ -276,6 +276,8 @@ class PhoneLink:
             if not getattr(self.session, "is_closed", False):
                 self._stop.wait(0.1)
                 continue
+            if self._stop.is_set():
+                break
             ended = _end_reason_of(self.session)
             down_from = time.monotonic()
             self._stop_session_workers()
@@ -287,6 +289,7 @@ class PhoneLink:
                 ended, self.rebind_timeout_s,
             )
             if not self._rebind(down_from=down_from, previous_end_reason=ended):
+                # Falls through to the give-up branch below.
                 # Now it really is over. Said out loud, and to the camera, because a
                 # consumer that only ever sees "no frame right now" waits forever.
                 self.supervisor_ended = (
@@ -296,6 +299,10 @@ class PhoneLink:
                 if self.camera is not None:
                     self.camera.expect_redial(False)
                 return
+        # Left the loop because the run is stopping, not because a redial failed.
+        # Without this the field stays None after a clean stop, and its documented
+        # meaning -- None while still watching -- is false for the whole teardown.
+        self.supervisor_ended = self.supervisor_ended or "stopped"
 
     def _rebind(self, *, down_from: float, previous_end_reason: str | None) -> bool:
         """Wait for the next dial-in and bind it. False when none came."""
@@ -328,17 +335,21 @@ class PhoneLink:
             self.here_failure = None
             self.session = event.session
             self.peer_device_id = event.handshake.remote.device_id
+            # Through `_begin`, not `_start_session_workers`. The single-supervisor
+            # guard lives in `_begin`, and calling past it left the guard unreachable
+            # on the only path that could ever need it -- so the test asserting one
+            # supervisor was passing because `wait_for_phone` is called once.
+            self._begin()
+            # Appended AFTER the workers are up, so the entry means the rebind
+            # finished. Appending first published it one statement into the camera's
+            # rebind, before the gps had been touched or the reader thread existed --
+            # which anything waiting on `len(rebinds)` then raced.
             self.rebinds.append({
                 "down_s": time.monotonic() - down_from,
                 "previous_end_reason": previous_end_reason,
                 "peer_device_id": self.peer_device_id,
                 "session_id": self.session.session_id,
             })
-            # Through `_begin`, not `_start_session_workers`. The single-supervisor
-            # guard lives in `_begin`, and calling past it left the guard unreachable
-            # on the only path that could ever need it -- so the test asserting one
-            # supervisor was passing because `wait_for_phone` is called once.
-            self._begin()
             logging.getLogger(__name__).warning(
                 "phone link back after %.1fs on %s",
                 self.rebinds[-1]["down_s"], self.peer_device_id,
@@ -489,13 +500,15 @@ class PhoneLink:
     def stop(self) -> None:
         """Reverse of coming up, and safe to call when it never came up."""
         self._stop.set()
-        # A deliberate stop is not a gap. Without this the camera would report the
-        # stream still open after teardown and a consumer would wait out its whole
-        # timeout on every run.
-        if self.camera is not None:
-            self.camera.expect_redial(False)
         if self._supervisor is not None:
             self._supervisor.join(timeout=3.0)
+        # After the join, not before. `_rebind` can already be past its own `_stop`
+        # check, and it finishes by calling `_on_reader_restarted` (which clears
+        # `end_of_stream`) and `expect_redial(True)` -- so a clear taken first was
+        # undone by a redial landing during teardown, leaving a stopped link
+        # reporting an open stream. A deliberate stop is not a gap.
+        if self.camera is not None:
+            self.camera.expect_redial(False)
         for worker in (self._responder, self._here_reader, self._telemetry_reader):
             if worker is not None:
                 worker.join(timeout=2.0)
