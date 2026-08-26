@@ -23,10 +23,16 @@ one of the controller's three raise rules -- cannot fire at all. A shadow log
 therefore cannot credit or debit any candidate policy for that rule. This is not a
 degraded input; it is a missing one.
 
-*Reference rates are only reference until the first live segment.* After a
-live -> shadow flip the phone keeps the last live rates and the last live query --
-`setQuery(null)` is a deliberate no-op there -- so the shadow segment that follows is
-not a full-rate one. The flip log is what lets a reader tell.
+*Reference rates are only reference until the first live segment.* Once a live
+command has been applied the phone is running whatever it was told, and it keeps
+running it across a live -> shadow flip: the last live rates and the last live query
+both survive, because `setQuery(null)` is a deliberate no-op there. So the
+discriminator is whether this drive has **ever** been live, not whether it has left
+live -- a drive that is still live has not held the reference rates either. Both
+`reference_rates_hold` and `structurally_absent` therefore key on that one fact, and
+on a mixed drive the flip log gives the boundary: the feed cannot exist before the
+first flip to live, and cannot be assumed to exist immediately after it, since the
+phone still has to place the call and the response still has to arrive.
 
 *And the trajectory diverges.* In shadow nothing is applied, so the controller
 decides from whatever the phone is currently running. In live, dropping the camera to
@@ -60,6 +66,10 @@ MODES = (SHADOW, LIVE)
 #: query, and a shadow command never reaches `setHereQuery`, so nothing about the
 #: traffic feed exists in such a log -- a candidate policy cannot be scored on a
 #: rule that never had the chance to fire.
+#:
+#: This lists what is absent *when the condition holds*. `to_record` emits it only
+#: for a drive that has never been live, because on a live drive every one of these
+#: is present and naming them absent is the pure-shadow reading of a live log.
 ABSENT_IN_PURE_SHADOW = (
     "feed_congestion",
     "source_disagreement",
@@ -96,6 +106,11 @@ class ModeHolder:
         self._lock = threading.Lock()
         self._mode = mode
         self._flips: list[Flip] = []
+        # Entering live is what contaminates a log, and a flip records the mode it
+        # came FROM -- so no predicate over `_flips` alone sees a drive that started
+        # live, and one over `f.was == LIVE` sees only drives that have LEFT live.
+        # Held as a fact instead: set here, set on the way in, never cleared.
+        self._ever_live = mode == LIVE
 
     @property
     def mode(self) -> str:
@@ -115,6 +130,8 @@ class ModeHolder:
                 return False
             self._flips.append(Flip(at_mono=self._now(), was=self._mode, now=mode))
             self._mode = mode
+            if mode == LIVE:
+                self._ever_live = True
             return True
 
     def to_record(self) -> dict[str, Any]:
@@ -128,8 +145,14 @@ class ModeHolder:
                 # Named rather than left to a reader to discover from an empty
                 # column. A shadow log's gaps are structural, not incidental.
                 "shadow_predicts": "the decision function, not the trajectory",
-                "absent_in_pure_shadow": list(ABSENT_IN_PURE_SHADOW),
-                "reference_rates_hold": not any(f.was == LIVE for f in self._flips),
+                # What is missing from THIS log, not what would be missing from a
+                # pure shadow one. A live drive has the feed on every tick, so
+                # emitting the list there asserted the pure-shadow reading of a live
+                # log -- and did it alongside `reference_rates_hold: True`, so both
+                # fields agreed on the wrong answer.
+                "structurally_absent":
+                    [] if self._ever_live else list(ABSENT_IN_PURE_SHADOW),
+                "reference_rates_hold": not self._ever_live,
             }
 
 
