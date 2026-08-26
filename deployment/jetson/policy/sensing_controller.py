@@ -21,6 +21,7 @@ attribute rate changes afterwards and free text makes that a text-mining problem
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -161,6 +162,32 @@ class Decision:
         }
 
 
+def _usable_position(lat: float | None, lon: float | None) -> bool:
+    """Whether there is a fix worth building a query around.
+
+    `None` is not how this codebase says "no position" -- `GpsFix.lat` and `.lon`
+    default to NaN and `PhoneGpsReader` writes `_or_nan(...)` for every field the
+    phone omits, so a dropout, a cold start or a tunnel arrives as NaN. A `is None`
+    guard let that straight through and produced `circle:nan,nan;r=1333`.
+
+    The cost is not the wasted call. `to_wire_number(nan)` encodes as null,
+    `HereQuery.from_wire` refuses a null lat, and `MessageRouter.send` validates by
+    round-tripping and RAISES rather than dropping -- deliberately, so a consumer
+    cannot swallow its own bug. So one NaN fix takes all four rates down with it and
+    the controller stops commanding anything at all for the length of the dropout.
+    """
+    if lat is None or lon is None:
+        return False
+    # NaN and the infinities need no separate check: every comparison against NaN
+    # is False, so a chained `-90 <= lat <= 90` rejects them along with anything off
+    # the globe. Written this way round on purpose -- the negated form
+    # `not (lat < -90 or lat > 90)` is the same for real numbers and TRUE for NaN,
+    # which would put `circle:nan,nan` back on the wire. An explicit isfinite() was
+    # here and mutation testing showed it could not fire; a comment that survives a
+    # rewrite is worth more than a guard that does nothing.
+    return -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
+
+
 def _clamp(hz: float) -> float:
     """Into the wire's range. A rate that would be refused is a bug here, not there."""
     return max(MIN_RATE_HZ, min(MAX_RATE_HZ, hz))
@@ -232,8 +259,28 @@ class SensingController:
             self._raised_since = None
             dwelled = False
 
-        active = dwelled or holding
+        # A dwell already in progress bridges the end of a hold. Without it,
+        # evidence that reappears in the last RAISE_DWELL_S of a hold keeps the rate
+        # up via `holding`, then drops to idle the moment the hold lapses -- two
+        # camera rebinds with the evidence continuously present, measured at 69 such
+        # ticks in a 3,000-drive sweep, and routine in stop-and-go traffic.
+        #
+        # `last_active` and not `_holding_until = now + HOLD_S`: refreshing the hold
+        # on evidence that has not dwelled latches the rate high forever. A single
+        # blip every four seconds -- evidence that never dwells -- held the camera at
+        # 5 Hz indefinitely under that version. This bridges an in-progress dwell and
+        # decays to idle the moment the evidence stops.
+        last_active = self._last is not None and self._last.rates["camera_hz"] > IDLE_RATES["camera_hz"]
+        active = dwelled or holding or (wants_more and last_active)
         rates = dict(ACTIVE_RATES if active else IDLE_RATES)
+        # Kept before the backoff, because the query's radius is sized from it. Cut
+        # the rate AND grow the radius by the same factor and the backoff cancels
+        # itself: at `critical` the call count fell 6.7x while the area covered rose
+        # 45x, so the phone's cellular bytes, decode work and heat -- the axis the
+        # backoff exists to relieve -- were left unchanged or worse. Backing off
+        # means seeing less of the road, which is the honest trade; it does not mean
+        # asking one enormous question instead of several small ones.
+        intended_here_hz = rates["here_hz"]
 
         scale = self._thermal_scale(inputs, reasons)
         if scale < 1.0:
@@ -250,10 +297,11 @@ class SensingController:
         return self._record(
             rates=rates, fired=fired, reasons=reasons, scale=scale, clamped=clamped,
             active=active, dwelled=dwelled, holding=holding, inputs=inputs, now=now,
+            intended_here_hz=intended_here_hz,
         )
 
     def _record(self, *, rates, fired, reasons, scale, clamped, active, dwelled,
-                holding, inputs, now) -> Decision:
+                holding, inputs, now, intended_here_hz) -> Decision:
         """Name the decision in one word, without letting that word mislead.
 
         `trigger` used to be whichever rule was checked last, which produced two
@@ -280,7 +328,7 @@ class SensingController:
         decision = Decision(
             rates=rates, trigger=trigger, reasons=reasons, thermal_scale=scale,
             rules_fired=fired, clamped=clamped,
-            here_query=self._here_query(inputs, rates["here_hz"]),
+            here_query=self._here_query(inputs, intended_here_hz),
         )
         self._last = decision
         return decision
@@ -293,7 +341,7 @@ class SensingController:
         responses. None without a fix -- a query centred on a position we do not
         have describes nowhere, and the phone would spend a cellular call on it.
         """
-        if inputs.lat is None or inputs.lon is None:
+        if not _usable_position(inputs.lat, inputs.lon):
             return None
         from transport.messages import HereQuery
 
@@ -313,11 +361,17 @@ class SensingController:
             reasons.append("thermal unknown: no telemetry received")
             return THERMAL_SCALE["unknown"]
 
-        if inputs.telemetry_age_s is not None and inputs.telemetry_age_s > MAX_TELEMETRY_AGE_S:
+        # abs(), because `PhoneGpsReader.is_stale` states the rule outright and
+        # there are now four such predicates in this codebase: a stamp from this
+        # clock's future is not fresh. Not reachable through PhoneLink today --
+        # the age comes from the Jetson's own monotonic clock -- but a predicate
+        # that disagrees with its siblings is one caller away from mattering.
+        age = inputs.telemetry_age_s
+        if age is not None and (not math.isfinite(age) or abs(age) > MAX_TELEMETRY_AGE_S):
             # A report that has aged out is no report. The phone's telemetry thread
             # can die while the session stays healthy, and one `nominal` from
             # minutes ago would otherwise pin full rates for the rest of the drive.
-            reasons.append(f"thermal stale: {inputs.telemetry_age_s:.1f}s old")
+            reasons.append(f"thermal stale: {age}s old")
             return THERMAL_SCALE["unknown"]
 
         scale = THERMAL_SCALE.get(inputs.thermal_status or "unknown", THERMAL_SCALE["unknown"])

@@ -447,3 +447,128 @@ class TestTheQueryGoesDownWithTheRate:
         assert query.in_.startswith("circle:")
         assert ";r=" in query.in_
         assert query.location_ref == "shape"
+
+
+class TestNoPositionIsSpelledNaN:
+    """`GpsFix` says "no fix" with NaN, not None.
+
+    `GpsFix.lat`/`.lon` default to NaN and `PhoneGpsReader` writes `_or_nan(...)`
+    for every field the phone omits, so a dropout, a cold start or a tunnel arrives
+    as NaN. A `is None` guard let it through and built `circle:nan,nan`.
+
+    The cost is not the wasted call: the encoder turns NaN into null, the decoder
+    refuses a null lat, and `MessageRouter.send` validates by round-tripping and
+    RAISES rather than dropping -- so one NaN fix takes all four rates down with it
+    and the controller stops commanding anything for the length of the dropout.
+    """
+
+    def controller(self):
+        return SensingController(clock=Clock())
+
+    def test_a_nan_fix_builds_no_query(self):
+        decision = self.controller().decide(calm(lat=float("nan"), lon=float("nan")))
+        assert decision.here_query is None
+
+    def test_an_infinite_or_out_of_range_fix_builds_no_query(self):
+        for lat, lon in ((float("inf"), 0.0), (0.0, float("-inf")),
+                         (91.0, 0.0), (0.0, 181.0)):
+            assert self.controller().decide(calm(lat=lat, lon=lon)).here_query is None
+
+    def test_every_query_this_controller_builds_survives_the_wire(self):
+        # The property that matters, asserted against the real codec rather than
+        # against my idea of it.
+        from transport.channels import Channel
+        from transport.messages import RateCommand, decode_message
+
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        for lat, lon in ((51.49, -0.20), (float("nan"), float("nan")),
+                         (0.0, 0.0), (-89.9, 179.9), (float("inf"), 2.0)):
+            clock.advance(HOLD_S + 1.0)
+            decision = settled(controller, clock, calm(lat=lat, lon=lon))
+            command = RateCommand(t_capture_mono_ns=1, rates=decision.rates,
+                                  trigger=decision.trigger, shadow=True,
+                                  here=decision.here_query)
+            extensions, payload = command.to_wire()
+            decode_message(Channel.RATE_CMD, extensions, payload)
+
+
+class TestBackoffDoesNotCancelItself:
+
+    def test_the_query_does_not_grow_as_the_rate_is_cut(self):
+        # Cut the call count 6.7x and grow the area 45x and the phone's cellular
+        # bytes, decode work and heat are unchanged or worse -- the axis the backoff
+        # exists to relieve. Backing off means seeing less of the road, not asking
+        # one enormous question instead of several small ones.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        radii = {}
+        for status in ("nominal", "moderate", "severe", "critical"):
+            clock.advance(HOLD_S + 1.0)
+            decision = settled(controller, clock, calm(lat=51.49, lon=-0.20,
+                                                       ego_speed=25.0,
+                                                       thermal_status=status))
+            radii[status] = decision.here_query.radius_m
+
+        assert len(set(radii.values())) == 1, f"the radius grew with the backoff: {radii}"
+
+
+class TestTheHoldBoundary:
+
+    def test_evidence_returning_late_in_a_hold_does_not_drop_the_rate(self):
+        # Same class as the round-1 defect, narrowed to the last RAISE_DWELL_S of
+        # every hold: the rate stayed up via `holding`, then fell to idle the moment
+        # the hold lapsed, with the evidence continuously present.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        settled(controller, clock, calm(ego_acceleration=9.0))
+
+        clock.advance(HOLD_S - 0.4)
+        controller.decide(calm())
+        seen = set()
+        for _ in range(5):
+            clock.advance(0.2)
+            seen.add(controller.decide(calm(ego_acceleration=9.0)).rates["camera_hz"])
+        assert seen == {ACTIVE_RATES["camera_hz"]}, f"the rate moved across {seen}"
+
+    def test_a_blip_that_never_dwells_does_not_latch_the_rate_high(self):
+        # The trap in the obvious repair. Refreshing the hold on evidence that has
+        # not dwelled holds the camera at 5 Hz forever on one blip every four
+        # seconds; the bridge has to decay instead.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        seen = set()
+        for i in range(300):
+            clock.advance(0.2)
+            seen.add(controller.decide(
+                calm(ego_acceleration=9.0 if i % 20 == 0 else 0.0)
+            ).rates["camera_hz"])
+        assert seen == {IDLE_RATES["camera_hz"]}, f"a blip lifted the rates: {seen}"
+
+
+def test_a_future_telemetry_stamp_is_not_fresh(monkeypatch):
+    # The fourth freshness predicate in this codebase. `PhoneGpsReader.is_stale`
+    # states the rule and the other three follow it.
+    from policy.sensing_controller import MAX_TELEMETRY_AGE_S
+
+    clock = Clock()
+    controller = SensingController(clock=clock)
+    decision = settled(controller, clock,
+                       calm(thermal_status="nominal",
+                            telemetry_age_s=-(MAX_TELEMETRY_AGE_S + 5.0)))
+    assert decision.thermal_scale < 1.0
+
+
+def test_a_rate_pulled_up_by_the_floor_is_recorded(monkeypatch):
+    # `clamped` is structurally unreachable with today's constants -- the lowest
+    # producible rate is 7.5x the floor -- so the bookkeeping is exercised against a
+    # raised floor rather than asserted to be a list and left to rot.
+    import policy.sensing_controller as sc
+
+    monkeypatch.setattr(sc, "MIN_RATE_HZ", 1.0)
+    clock = Clock()
+    controller = sc.SensingController(clock=clock)
+    decision = settled(controller, clock, calm(thermal_status="shutdown"))
+
+    assert "here_hz" in decision.clamped
+    assert decision.rates["here_hz"] == 1.0
