@@ -125,6 +125,15 @@ class _PhoneSource:
         self.failure: str | None = None
 
     def start(self):
+        # Idempotent. `PhoneLink` starts both sources as it builds them, and
+        # `run_demo` then calls `start()` on whatever camera it was handed --
+        # so an unguarded start put a SECOND reader thread on the same source,
+        # splitting arrivals between two consumers of one router while `_thread`
+        # tracked only the later one, leaving the first running after `stop()`.
+        # A restart after the reader has ended still works: the guard is on the
+        # thread being alive, not on having ever started.
+        if self._thread is not None and self._thread.is_alive():
+            return self
         self._stop.clear()
         # Cleared on restart. Without this a restarted source is permanently
         # "ended" with a live reader thread, and health() publishes the

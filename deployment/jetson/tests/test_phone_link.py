@@ -220,3 +220,49 @@ class TestArrivalStamping:
         # And it is genuinely earlier than reading the clock here would give, so
         # the assertion above is not satisfiable by a fresh read.
         assert sample.t2_local_recv_ns < now_mono_ns() - 40_000_000
+
+
+class TestStartIsIdempotent:
+    """PhoneLink starts both sources; run_demo then starts whatever it was handed.
+
+    Unguarded, the second call put another reader thread on the same source:
+    arrivals split between two consumers of one router, and `_thread` tracking only
+    the later one so `stop()` left the first running for the life of the process.
+    """
+
+    def test_starting_an_already_running_source_does_not_add_a_reader(self):
+        import threading
+
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            before = {t for t in threading.enumerate() if t.name == "phone-camera"}
+            assert len(before) == 1
+
+            link.camera.start()
+            link.camera.start()
+
+            after = {t for t in threading.enumerate() if t.name == "phone-camera"}
+            assert after == before, "start() spawned another reader on a live source"
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_a_source_whose_reader_has_ended_can_still_be_restarted(self):
+        # The guard is on the thread being alive, not on having ever started, so
+        # the reconnect path is untouched.
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            link.camera.stop()
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline and link.camera._thread.is_alive():
+                time.sleep(0.01)
+
+            link.camera.start()
+            assert link.camera._thread.is_alive()
+        finally:
+            link.stop()
+            phone.close()

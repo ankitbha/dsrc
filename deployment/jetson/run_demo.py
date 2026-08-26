@@ -35,6 +35,8 @@ from pathlib import Path
 JETSON_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(JETSON_DIR))
 
+from transport.tcp import DEFAULT_PORT as PHONE_DEFAULT_PORT  # noqa: E402
+
 import yaml  # noqa: E402
 
 from perception.detector import TrtYoloDetector  # noqa: E402
@@ -66,8 +68,18 @@ def build_components(
     source_override: str | None = None,
     use_gps: bool = True,
     gps_sim_spec: str | dict | None = None,
+    phone: "PhoneLink | None" = None,
 ):
     cam_cfg = config["camera"]
+    if phone is not None:
+        # Both, or neither. The two backends are channels of one session, so a
+        # run cannot take its camera from a phone and its GPS from somewhere
+        # else -- and letting the flags express that would invite a run whose
+        # two halves came from different devices and different clocks.
+        camera = phone.camera
+        gps = phone.gps
+        return camera, gps, *_build_rest(config)
+
     camera = CameraStream(
         source=source_override or str(cam_cfg["source"]),
         width=cam_cfg["width"],
@@ -91,6 +103,11 @@ def build_components(
             stale_after_s=g["stale_after_s"],
         )
 
+    return camera, gps, *_build_rest(config)
+
+
+def _build_rest(config: dict):
+    """Everything downstream of the two sensors, which does not care where they came from."""
     d = config["detector"]
     detector = TrtYoloDetector(
         engine_path=resolve_model_path(config, "detector.engine"),
@@ -143,7 +160,7 @@ def build_components(
     )
 
     pipeline = PerceptionPolicyPipeline(detector, tracker, distance, builder, actor, decoder)
-    return camera, gps, pipeline, actor
+    return pipeline, actor
 
 
 def telemetry_record(tick) -> dict:
@@ -198,8 +215,28 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
     from ui.dashboard import DashboardWindow, TickSlot, render_dashboard
 
     gps_sim_spec = args.sim_gps or (scenario or {}).get("gps")
+
+    phone = None
+    if args.phone:
+        from sensors.phone_link import PhoneLink
+
+        phone = PhoneLink(host=args.phone_host, port=args.phone_port)
+        print(f"[run] waiting up to {args.phone_wait_s:.0f}s for a phone on "
+              f"{phone.host}:{phone.port} (the phone dials; the Jetson cannot)", flush=True)
+        if not phone.wait_for_phone(timeout_s=args.phone_wait_s):
+            # Hard failure, deliberately. Falling back to the local camera and a
+            # simulated GPS would produce a clean-looking run whose data never
+            # went near a handset, and nothing downstream distinguishes the two.
+            phone.stop()
+            print("[run] no phone dialled in; refusing to run on local sources instead",
+                  file=sys.stderr)
+            return 2
+        print(f"[run] phone {phone.peer_device_id} on session {phone.session.session_id}",
+              flush=True)
+
     camera, gps, pipeline, actor = build_components(
-        config, args.source, use_gps=not args.no_gps, gps_sim_spec=gps_sim_spec
+        config, args.source, use_gps=not args.no_gps, gps_sim_spec=gps_sim_spec,
+        phone=phone,
     )
     if gps_sim_spec is not None:
         print(f"[run] GPS: SIMULATED ({args.sim_gps or 'scenario profile'})")
@@ -496,6 +533,19 @@ def main() -> int:
     parser.add_argument("--headless", action="store_true", help="no display window")
     parser.add_argument("--no-log", action="store_true")
     parser.add_argument("--no-gps", action="store_true")
+    # One flag for both sensors, because they are two channels of one session.
+    # A `--phone-camera` that could be given without a `--phone-gps` would let a
+    # run take its two sensors from different devices on different clocks.
+    parser.add_argument(
+        "--phone", action="store_true",
+        help="take camera AND gps from a phone over the transport, instead of local devices",
+    )
+    parser.add_argument("--phone-host", default="0.0.0.0", help="address to accept the phone on")
+    parser.add_argument("--phone-port", type=int, default=PHONE_DEFAULT_PORT)
+    parser.add_argument(
+        "--phone-wait-s", type=float, default=60.0,
+        help="how long to wait for the phone to dial in before giving up",
+    )
     parser.add_argument("--require-gps", action="store_true", help="fail instead of degrading without GPS")
     parser.add_argument("--duration-s", type=float, default=0.0)
     parser.add_argument("--max-ticks", type=int, default=0)
