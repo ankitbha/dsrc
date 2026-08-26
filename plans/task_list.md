@@ -777,8 +777,29 @@ tunnels over USB and is unaffected.
 ## F. Jetson runtime — developed over SSH
 
 26. ~~Phone backends for `CameraStream` and `GpsReader`, fed from the transport.~~ **DONE** — the backends already existed; nothing could use them. `run_demo.py`, `replay_demo.py`, `bench_latency.py`, `pipeline.py` and `eval_run.py` mentioned `phone_source` zero times between them. `PhoneLink` is the assembly from socket to the two backends, and `--phone` selects it — both sensors or neither, since they are channels of one session, and a hard failure if no phone dials in rather than a silent fall back to local sources. The clock was the real problem: the spec makes the phone initiate time sync and the Jetson only answer, and a responder never learns t4, so **the side that must convert is structurally the side that cannot measure**. `OneWayEstimator` forms the offset from arrivals alone — `t1 - t2` sits below the truth by exactly the one-way delay, so the largest gap in a window is the fastest crossing. Its bound is a delay *spread*, not half a round trip: a constant 80 ms delay reports a spread of zero while every stamp is 80 ms wrong, which is why it is fit for a 2 s freshness threshold and unfit for latency attribution. **The experiment is what found the defect that mattered**: `Session.sendTimeSyncPing` was called only from tests, so no drive ever sent one, the Jetson saw `samples_accepted: 0`, and every frame proxied while the run looked perfectly healthy. `TimeSyncDriver` sends them at the spec's cadence; after it, 270 of 274 ticks convert and the offset reproduces across runs to 247 µs. **Open:** a redial still ends the run rather than rebinding — the supervisor for that belongs to task 31. Full four-stamp samples need a new wire field (the phone carrying `t4` on its next ping) and should be settled before task 33, which cannot attribute latency honestly without them.
-27. HERE response ingestion: link association from GPS, caching, staleness
-    tracking, explicit failure semantics.
+27. ~~HERE response ingestion: link association from GPS, caching, staleness
+    tracking, explicit failure semantics.~~ **DONE** — nothing on this side had
+    ever opened a HERE body; `downstream_congestion_estimate` came from V2V peers
+    as a hardcoded `0.0` or a neutral fallback, so a field the advisory partly
+    rests on had never been informed by traffic data. `HereFeed` parses,
+    associates against the vehicle's fix, caches links (not answers — between
+    responses the query is re-answered from geometry against a fresh position),
+    and ages. **No failure returns a congestion number**: eight named outcomes,
+    because `0.0` there does not read as "unknown", it reads as "clear road
+    ahead". **Two ages and only one knowable** — response age is measured, and
+    HERE v7 flow carries no per-result observation time, so the feed's own lag is
+    recorded as null with a note rather than summed into a figure that would look
+    measured. Validation found seven defects in round 1, one of which killed the
+    reader for the whole drive on a single malformed body (`OverflowError` out of
+    `float()` on an oversized JSON integer). Round 2 found that my round-1 fix had
+    turned a fail-safe race into a fail-dangerous one — one wrongly-fresh reading
+    in 396,380 queries, reporting a 1.0 s age for links 46 s old — now one frozen
+    snapshot published in a single store. Round 3 found the distance and lateral
+    offset I had just added were computed from two different points, inverting the
+    very judgement they exist to support. **Open:** the parse is written from the
+    v7 documentation and has never met a real body — the experiment used synthetic
+    responses over the real transport, which proves the wiring and not the schema.
+    One captured response committed as a fixture is the only thing that would.
 28. Fusion / estimator: per-field source ownership between the wide-lagging feed
     and the narrow-current camera, with a staleness aging term. The sources
     observe different parts of the state and are not substitutable.
