@@ -76,6 +76,11 @@ MAX_TELEMETRY_AGE_S = 10.0
 MIN_QUERY_RADIUS_M = 500.0
 MAX_QUERY_RADIUS_M = 10_000.0
 
+#: How old a fix may be and still centre a query. Matches `PhoneGpsReader`'s own
+#: staleness window, because the two are answering the same question about the same
+#: reading, and symmetric for the same reason the other three predicates here are.
+MAX_POSITION_AGE_S = 2.0
+
 #: Policy margin below which the advice is one input change from flipping.
 NARROW_MARGIN = 0.15
 
@@ -128,6 +133,15 @@ class Inputs:
     #: Where we are, for the HERE query that goes down with `here_hz`.
     lat: float | None = None
     lon: float | None = None
+    #: `GpsFix.valid`. The wire deliberately lets an invalid fix carry whatever the
+    #: receiver had -- `GpsRecord.from_wire` range-checks lat/lon only when `valid`
+    #: is true, "an invalid fix is allowed to carry whatever the receiver had,
+    #: including nothing" -- so coordinates alone do not mean there is a position.
+    position_valid: bool = True
+    #: How old that fix is. A tunnel leaves the last one in place, and without this
+    #: every query for its length is centred on the entrance: at 20 m/s a 30 s
+    #: dropout is 600 m, further than the smallest radius this controller asks for.
+    position_age_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -162,7 +176,8 @@ class Decision:
         }
 
 
-def _usable_position(lat: float | None, lon: float | None) -> bool:
+def _usable_position(lat: float | None, lon: float | None, *,
+                     valid: bool = True, age_s: float | None = None) -> bool:
     """Whether there is a fix worth building a query around.
 
     `None` is not how this codebase says "no position" -- `GpsFix.lat` and `.lon`
@@ -177,6 +192,14 @@ def _usable_position(lat: float | None, lon: float | None) -> bool:
     the controller stops commanding anything at all for the length of the dropout.
     """
     if lat is None or lon is None:
+        return False
+    if not valid:
+        # `HereFeed.at` already refuses exactly this, as `Outcome.UNUSABLE_FIX`.
+        # This guard implemented two of that predicate's three conditions, so a fix
+        # the protocol calls meaningless still bought a cellular call about a real
+        # place -- the same shape as the NaN defect, one layer up.
+        return False
+    if age_s is not None and (not math.isfinite(age_s) or abs(age_s) > MAX_POSITION_AGE_S):
         return False
     # NaN and the infinities need no separate check: every comparison against NaN
     # is False, so a chained `-90 <= lat <= 90` rejects them along with anything off
@@ -223,6 +246,8 @@ class SensingController:
         self._raised_since: float | None = None
         self._holding_until: float = 0.0
         self._last: Decision | None = None
+        self._last_active = False
+        self._last_at: float | None = None
 
     def decide(self, inputs: Inputs) -> Decision:
         now = self._now()
@@ -270,8 +295,21 @@ class SensingController:
         # blip every four seconds -- evidence that never dwells -- held the camera at
         # 5 Hz indefinitely under that version. This bridges an in-progress dwell and
         # decays to idle the moment the evidence stops.
-        last_active = self._last is not None and self._last.rates["camera_hz"] > IDLE_RATES["camera_hz"]
-        active = dwelled or holding or (wants_more and last_active)
+        # The stored fact, not a value the thermal multiplier has already mangled.
+        # Re-deriving it as `camera_hz > IDLE_RATES["camera_hz"]` was exact only
+        # while the scale stayed above 0.2: at `critical` an ACTIVE camera is
+        # 5.0 x 0.15 = 0.75, BELOW the unscaled idle of 1.0, so the proxy read False
+        # and the hold-boundary defect came back -- on a phone at critical, which is
+        # the one moment a spurious camera rebind is least affordable.
+        #
+        # Bounded in time as well. `_last_active` is the previous DECISION, however
+        # old, so after a stalled or event-driven caller one tick of evidence raised
+        # the camera with no dwell at all. A regular tick loop never sees it because
+        # `holding` covers everything inside HOLD_S, but the bridge should not
+        # depend on the caller's cadence to be correct.
+        recent = self._last_at is not None and (now - self._last_at) <= RAISE_DWELL_S
+        bridged = wants_more and self._last_active and recent
+        active = dwelled or holding or bridged
         rates = dict(ACTIVE_RATES if active else IDLE_RATES)
         # Kept before the backoff, because the query's radius is sized from it. Cut
         # the rate AND grow the radius by the same factor and the backoff cancels
@@ -297,11 +335,11 @@ class SensingController:
         return self._record(
             rates=rates, fired=fired, reasons=reasons, scale=scale, clamped=clamped,
             active=active, dwelled=dwelled, holding=holding, inputs=inputs, now=now,
-            intended_here_hz=intended_here_hz,
+            intended_here_hz=intended_here_hz, bridged=bridged,
         )
 
     def _record(self, *, rates, fired, reasons, scale, clamped, active, dwelled,
-                holding, inputs, now, intended_here_hz) -> Decision:
+                holding, inputs, now, intended_here_hz, bridged) -> Decision:
         """Name the decision in one word, without letting that word mislead.
 
         `trigger` used to be whichever rule was checked last, which produced two
@@ -315,7 +353,10 @@ class SensingController:
         backoff is the whole story. Everything that fired is in `rules_fired`.
         """
         raises = [rule for rule in fired if rule != Trigger.THERMAL]
-        if active and dwelled and raises:
+        # `bridged` included, or a bridged tick matches none of these branches and
+        # falls through to `idle` -- an idle-level word on rates that are raised,
+        # which is the round-2 defect inverted, in the field task 34 attributes on.
+        if active and (dwelled or bridged) and raises:
             trigger = raises[0]
         elif active and holding:
             trigger = Trigger.HOLD
@@ -331,6 +372,8 @@ class SensingController:
             here_query=self._here_query(inputs, intended_here_hz),
         )
         self._last = decision
+        self._last_active = active
+        self._last_at = now
         return decision
 
     def _here_query(self, inputs: Inputs, here_hz: float) -> Any:
@@ -341,7 +384,9 @@ class SensingController:
         responses. None without a fix -- a query centred on a position we do not
         have describes nowhere, and the phone would spend a cellular call on it.
         """
-        if not _usable_position(inputs.lat, inputs.lon):
+        if not _usable_position(inputs.lat, inputs.lon,
+                                valid=inputs.position_valid,
+                                age_s=inputs.position_age_s):
             return None
         from transport.messages import HereQuery
 

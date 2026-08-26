@@ -572,3 +572,127 @@ def test_a_rate_pulled_up_by_the_floor_is_recorded(monkeypatch):
 
     assert "here_hz" in decision.clamped
     assert decision.rates["here_hz"] == 1.0
+
+
+class TestTheBridgeSurvivesThermalScaling:
+    """The bridge must not stop working because the phone is hot.
+
+    Deriving "was active" from `camera_hz > IDLE_RATES["camera_hz"]` was exact only
+    while the thermal scale stayed above 0.2: at `critical` an ACTIVE camera is
+    5.0 x 0.15 = 0.75, BELOW the unscaled idle of 1.0, so the proxy read False and
+    the hold-boundary defect returned -- on a phone at critical, which is the one
+    moment a spurious rebind is least affordable.
+    """
+
+    def drive_across_the_hold_boundary(self, status):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        settled(controller, clock, calm(ego_acceleration=9.0, thermal_status=status))
+        clock.advance(HOLD_S - 0.4)
+        controller.decide(calm(thermal_status=status))
+        seen = []
+        for _ in range(5):
+            clock.advance(0.2)
+            seen.append(controller.decide(
+                calm(ego_acceleration=9.0, thermal_status=status)).rates["camera_hz"])
+        return seen
+
+    @pytest.mark.parametrize("status", ["nominal", "moderate", "severe",
+                                        "critical", "emergency", "shutdown"])
+    def test_the_rate_holds_across_the_boundary_at_every_thermal_level(self, status):
+        seen = self.drive_across_the_hold_boundary(status)
+        assert len(set(seen)) == 1, f"{status}: the rate moved across {seen}"
+
+
+class TestABridgedTickNamesItself:
+
+    def test_a_bridged_tick_does_not_report_idle_at_five_hertz(self):
+        # The round-2 statement inverted: then a raise word sat on idle rates, now
+        # an idle word would sit on raised ones. Task 34 attributes on this field
+        # either way.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        settled(controller, clock, calm(ego_acceleration=9.0))
+        clock.advance(HOLD_S - 0.4)
+        controller.decide(calm())
+
+        for _ in range(5):
+            clock.advance(0.2)
+            decision = controller.decide(calm(ego_acceleration=9.0))
+            if decision.rates["camera_hz"] > IDLE_RATES["camera_hz"]:
+                assert decision.trigger != Trigger.IDLE, (
+                    f"idle word on {decision.rates['camera_hz']} Hz"
+                )
+
+    def test_the_word_and_the_rates_agree_across_a_long_mixed_drive(self):
+        # Both directions, since checking only one is how the inverse shape got in.
+        import random
+
+        rng = random.Random(11)
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        for _ in range(4000):
+            clock.advance(rng.choice([0.1, 0.2, 0.5, 1.0]))
+            decision = controller.decide(calm(
+                ego_acceleration=rng.choice([0.0, 0.5, 9.0]),
+                policy_margin=rng.choice([0.9, 0.01]),
+                thermal_status=rng.choice(["nominal", "moderate", "critical"]),
+            ))
+            raised = decision.rates["camera_hz"] > IDLE_RATES["camera_hz"] * decision.thermal_scale
+            if raised:
+                assert decision.trigger != Trigger.IDLE
+            else:
+                assert decision.trigger not in {Trigger.EVENT, Trigger.NARROW_MARGIN,
+                                                Trigger.DISAGREEMENT, Trigger.HOLD}
+            assert decision.trigger in Trigger.ALL
+
+
+class TestAFixTheProtocolCallsMeaningless:
+
+    def test_an_invalid_fix_buys_no_cellular_call(self):
+        # The wire lets an invalid fix carry whatever the receiver had, so
+        # coordinates alone do not mean there is a position. `HereFeed.at` already
+        # refuses exactly this as UNUSABLE_FIX; this guard had two of its three
+        # conditions.
+        controller = SensingController(clock=Clock())
+        decision = controller.decide(calm(lat=52.5, lon=13.4, position_valid=False))
+        assert decision.here_query is None
+
+    def test_a_stale_fix_does_not_centre_a_query_on_the_tunnel_entrance(self):
+        from policy.sensing_controller import MAX_POSITION_AGE_S
+
+        controller = SensingController(clock=Clock())
+        fresh = controller.decide(calm(lat=52.5, lon=13.4, position_age_s=0.5))
+        assert fresh.here_query is not None
+
+        stale = controller.decide(
+            calm(lat=52.5, lon=13.4, position_age_s=MAX_POSITION_AGE_S + 1.0))
+        assert stale.here_query is None
+
+    def test_a_fix_from_this_clocks_future_is_not_fresh(self):
+        from policy.sensing_controller import MAX_POSITION_AGE_S
+
+        controller = SensingController(clock=Clock())
+        decision = controller.decide(
+            calm(lat=52.5, lon=13.4, position_age_s=-(MAX_POSITION_AGE_S + 5.0)))
+        assert decision.here_query is None
+
+
+def test_the_bridge_does_not_span_a_gap_between_ticks():
+    # `_last_active` is the previous DECISION, however old. After a stalled or
+    # event-driven caller, one tick of evidence would otherwise raise the camera
+    # with no dwell at all.
+    clock = Clock()
+    controller = SensingController(clock=clock)
+    settled(controller, clock, calm(ego_acceleration=9.0))
+
+    # Evidence stops, which clears the dwell but leaves the last decision active.
+    clock.advance(0.2)
+    assert controller.decide(calm()).rates["camera_hz"] == ACTIVE_RATES["camera_hz"]
+
+    # An hour passes with no ticks at all, then evidence returns for one tick. The
+    # dwell restarts from here, so nothing has held for long enough -- and the
+    # bridge must not treat an hour-old decision as "the previous tick".
+    clock.advance(3600.0)
+    assert controller.decide(calm(ego_acceleration=9.0)).rates["camera_hz"] == \
+        IDLE_RATES["camera_hz"]
