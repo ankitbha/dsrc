@@ -230,7 +230,7 @@ MUTATIONS = [
      "python"),
     ("shadow: the absent list is emitted unconditionally",
      "deployment/jetson/policy/shadow_mode.py",
-     '                "structurally_absent":\n                    [] if self._ever_live else list(ABSENT_IN_PURE_SHADOW),',
+     '                "structurally_absent":\n                    [] if self._born_live else list(ABSENT_IN_PURE_SHADOW),',
      '                "structurally_absent": list(ABSENT_IN_PURE_SHADOW),',
      "python"),
     ("shadow: a holder constructed live does not count as ever live",
@@ -238,10 +238,15 @@ MUTATIONS = [
      "self._ever_live = mode == LIVE",
      "self._ever_live = False",
      "python"),
+    # Mutated to a no-op assignment rather than deleted. Deleting the two lines
+    # orphaned the nested `_feed_possible_from` guard beneath them, so the module
+    # failed to import and the "catch" was the Python parser -- the same thing the
+    # BUILD_ERROR path exists to stop on the Kotlin side, and the harness said so by
+    # naming a module instead of a test as the catcher.
     ("shadow: flipping INTO live is not recorded",
      "deployment/jetson/policy/shadow_mode.py",
-     "            if mode == LIVE:\n                self._ever_live = True\n",
-     "",
+     "                self._ever_live = True",
+     "                self._ever_live = self._ever_live",
      "python"),
     # The list is a claim about the controller's inputs. Adding one that a shadow
     # drive plainly HAS -- the camera runs at reference rates precisely because
@@ -252,10 +257,14 @@ MUTATIONS = [
      'ABSENT_IN_PURE_SHADOW = (\n    "camera_density_bin",\n    "feed_congestion",',
      "python"),
     # All three locks, because all three survived the test that was supposed to
-    # cover them. Deliberately absent: reordering the append past the assignment
-    # in `flip_to`. Under the lock no reader can observe the intermediate state and
-    # `was` is identical either way, so it is an equivalent mutant -- an entry that
-    # can never be caught is a permanent false SURVIVED.
+    # cover them.
+    #
+    # This block used to carry a note excluding the append/assignment reorder as an
+    # equivalent mutant, on the grounds that "`was` is identical either way". That was
+    # true only of the particular rewrite I tested, which captured `was` into a local
+    # first. The natural reorder does not: it reads `self._mode` after the assignment
+    # and writes `was == now` on every flip, destroying the only field that says which
+    # side the drive started on. It is below, as an entry.
     ("shadow: the mode getter drops its lock",
      "deployment/jetson/policy/shadow_mode.py",
      "    @property\n    def mode(self) -> str:\n        with self._lock:\n            return self._mode",
@@ -270,6 +279,42 @@ MUTATIONS = [
      "deployment/jetson/policy/shadow_mode.py",
      "        with self._lock:\n            if mode == self._mode:",
      "        if True:\n            if mode == self._mode:",
+     "python"),
+    ("shadow: a flip records the mode it went TO",
+     "deployment/jetson/policy/shadow_mode.py",
+     "            self._flips.append(Flip(at_mono=self._now(), was=self._mode, now=mode))\n            self._mode = mode",
+     "            self._mode = mode\n            self._flips.append(Flip(at_mono=self._now(), was=self._mode, now=mode))",
+     "python"),
+    # The mixed drive. `[]` for a drive promoted mid-way says nothing is missing from
+    # a log whose leading segment had no feed at all, which is the unsafe direction:
+    # task 35 would credit a policy on a rule that could not have fired there.
+    ("shadow: a mid-drive promotion reports nothing absent",
+     "deployment/jetson/policy/shadow_mode.py",
+     "[] if self._born_live else list(ABSENT_IN_PURE_SHADOW),",
+     "[] if self._ever_live else list(ABSENT_IN_PURE_SHADOW),",
+     "python"),
+    ("shadow: the feed boundary re-dates on every promotion",
+     "deployment/jetson/policy/shadow_mode.py",
+     "                if self._feed_possible_from is None:\n                    self._feed_possible_from = self._flips[-1].at_mono",
+     "                self._feed_possible_from = self._flips[-1].at_mono",
+     "python"),
+    # The query is the sole mechanism by which the feed comes to exist, so a
+    # `command_for` that drops it produces a pure-shadow log in LIVE mode. The test
+    # that looked like it covered this compared two references to one object.
+    ("shadow: command_for drops the here query",
+     "deployment/jetson/policy/shadow_mode.py",
+     "        here=decision.here_query,",
+     "        here=None,",
+     "python"),
+    ("shadow: command_for drops the capture stamp",
+     "deployment/jetson/policy/shadow_mode.py",
+     "        t_capture_mono_ns=t_capture_mono_ns,",
+     "        t_capture_mono_ns=0,",
+     "python"),
+    ("shadow: is_live always says no",
+     "deployment/jetson/policy/shadow_mode.py",
+     "        return self.mode == LIVE",
+     "        return False",
      "python"),
     # Task 29's rule, pinned from task 30's side: the whole "a shadow drive cannot
     # reach DISAGREEMENT" claim rests on this returning False for a missing feed.
@@ -310,6 +355,19 @@ def failing_tests(kind):
 
 
 BUILD_ERROR = ["<the mutation did not compile>"]
+
+
+def is_collection_error(names):
+    """Whether the run failed to import a module rather than failing a test.
+
+    pytest files a collection error as a testcase whose `name` is the file path, so a
+    mutation that leaves the source unparseable shows up as every test in that module
+    "failing" -- and a harness that only asks whether something failed reports a pin.
+    That is the Python spelling of the compiler-measuring failure BUILD_ERROR exists
+    for, and one entry here was doing it: deleting a two-line block orphaned the
+    nested `if` beneath it.
+    """
+    return any(name.endswith(".py") or name.endswith(".py]") for name in names)
 
 
 def run(kind):
@@ -399,12 +457,14 @@ for name, rel, old, new, kind in MUTATIONS:
     finally:
         path.write_text(keep)
         SIDECAR.unlink(missing_ok=True)
+    if failed and failed is not BUILD_ERROR and is_collection_error(failed):
+        failed = BUILD_ERROR
     if failed == BUILD_ERROR:
-        # Distinct from both verdicts. A mutation that does not compile proves nothing
-        # about any test, and reporting it as CAUGHT is how one of these entries came to
-        # measure the compiler for weeks.
-        survived.append(name + " [did not compile]")
-        print(f"  DID NOT COMPILE    {name}")
+        # Distinct from both verdicts. A mutation that does not compile -- or, in
+        # Python, does not import -- proves nothing about any test, and reporting it
+        # as CAUGHT is how one of these entries came to measure the compiler for weeks.
+        survived.append(name + " [did not build/import]")
+        print(f"  DID NOT BUILD      {name}")
     elif failed:
         print(f"  CAUGHT ({len(failed)})         {name}")
         print(f"                     by {failed[0]}")

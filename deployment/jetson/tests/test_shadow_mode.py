@@ -64,6 +64,14 @@ class TestTheDecisionCannotSeeTheMode:
             assert shadowed.trigger == live.trigger
             assert shadowed.here == live.here
             assert shadowed.shadow is True and live.shadow is False
+            # Carried, not merely equal. `shadowed.here == live.here` is two
+            # references to one object and holds just as well when `command_for`
+            # drops the query entirely -- and the query is the sole mechanism by
+            # which the feed comes to exist, so dropping it produces a pure-shadow
+            # log in live mode. Same for the capture stamp, which is the only thing
+            # tying the command to the tick that produced it.
+            assert shadowed.here is decision.here_query
+            assert shadowed.t_capture_mono_ns == 1
 
     def test_decide_takes_no_mode_argument(self):
         # Structural, and deliberately so: the moment `decide` can be handed a mode,
@@ -104,6 +112,8 @@ class TestFlipping:
         # the wrong failure to have.
         assert ModeHolder().mode == SHADOW
         assert ModeHolder().is_live is False
+        # Both branches. `is_live` returning a constant False passed everything.
+        assert ModeHolder(LIVE).is_live is True
 
     def test_a_flip_changes_the_flag_and_not_the_decision(self):
         clock = Clock()
@@ -267,18 +277,48 @@ class TestTheRecordNamesWhatShadowCannotSee:
         born_live = ModeHolder(LIVE, clock=clock)
         assert born_live.to_record()["reference_rates_hold"] is False
 
-    def test_a_live_drive_does_not_report_the_feed_as_absent(self):
-        # The two fields used to agree on the wrong answer: a wholly live drive, in
-        # which ConfigApplier reached setHereQuery on every tick, claimed to hold the
-        # reference rates AND named the feed absent. Task 35 would have read it as a
-        # pure shadow log.
+    def test_only_a_drive_that_was_live_from_the_first_tick_reports_nothing_absent(self):
+        # Three shapes, because two of them were being collapsed into one. The version
+        # this replaces called `ModeHolder(clock=...)` then `flip_to(LIVE)` a drive "in
+        # which ConfigApplier reached setHereQuery on every tick" -- but that fixture
+        # BEGINS in shadow, so it did not, and the test asserted the reading meant for
+        # a born-live drive against a mixed one.
+        clock = Clock()
+
+        never = ModeHolder(clock=clock).to_record()
+        assert never["structurally_absent"] == ["feed_congestion", "source_disagreement"]
+        assert never["feed_possible_from_mono"] is None
+
+        born_live = ModeHolder(LIVE, clock=clock).to_record()
+        assert born_live["structurally_absent"] == []
+        assert born_live["feed_possible_from_mono"] == clock.now
+
+        # Promoted mid-drive. Its leading segment had no feed at all, so the inputs are
+        # still named -- reporting `[]` here would credit a candidate policy on a rule
+        # that could not have fired for that stretch.
+        promoted = ModeHolder(clock=clock)
+        clock.advance(600.0)
+        promoted.flip_to(LIVE)
+        record = promoted.to_record()
+        assert record["structurally_absent"] == ["feed_congestion", "source_disagreement"]
+        assert record["feed_possible_from_mono"] == clock.now
+        assert record["reference_rates_hold"] is False
+
+    def test_the_feed_boundary_is_the_first_promotion_not_the_last(self):
+        # A drive that flips in and out must date the feed from when it FIRST became
+        # possible: the query survives a live -> shadow flip, so the feed does not go
+        # away again, and re-dating it would blank the ticks in between.
         clock = Clock()
         holder = ModeHolder(clock=clock)
+        clock.advance(10.0)
+        holder.flip_to(LIVE)
+        first = clock.now
+        clock.advance(10.0)
+        holder.flip_to(SHADOW)
+        clock.advance(10.0)
         holder.flip_to(LIVE)
 
-        record = holder.to_record()
-        assert record["structurally_absent"] == []
-        assert record["reference_rates_hold"] is False
+        assert holder.to_record()["feed_possible_from_mono"] == first
 
     def test_the_disagreement_rule_really_is_unreachable_without_a_feed(self):
         # Asserted on `rules_fired`, not on `trigger`. `trigger` is `raises[0]` and
@@ -342,51 +382,64 @@ class TestTheRecordNamesWhatShadowCannotSee:
         holder.to_record()
         assert entered, "to_record read the mode and the flip log without the lock"
 
-    def test_the_record_is_never_read_mid_flip(self):
-        # What the lock buys, on the state a reader actually sees. Not the pin for the
-        # lock itself -- see above -- but it would catch a gross error, and it is what
-        # makes the invariants explicit: the mode and the flip log are one state.
+    def test_a_reader_cannot_see_the_state_mid_flip(self):
+        # The invariant, forced rather than raced for. The version this replaces ran a
+        # flipper thread and read the record in a `while worker.is_alive()` loop -- and
+        # `Thread.start()` releases the GIL, so 400 flips finished before the main
+        # thread was rescheduled and the loop body executed ZERO times in every trial.
+        # Four assertions were dead, and the surviving one's failure message read "the
+        # flipper did not finish, so the reader raced nothing" while passing on a run
+        # where the reader raced nothing.
+        #
+        # `flip_to` calls the clock inside its critical section, so an injected clock
+        # IS the middle of the flip. A reader started from there must not complete
+        # while it runs.
+        holder = ModeHolder(clock=lambda: 1000.0)
+        seen: list[dict] = []
+        readers: list[threading.Thread] = []
+
+        def clock_inside_the_flip() -> float:
+            reader = threading.Thread(
+                target=lambda: seen.append(holder.to_record()), daemon=True
+            )
+            readers.append(reader)
+            reader.start()
+            reader.join(timeout=0.25)
+            return 1000.0
+
+        holder._now = clock_inside_the_flip
+        try:
+            holder.flip_to(LIVE)
+            # Read while the flip was in progress. Empty because the reader blocked --
+            # not because it was never started, which the join above waited out.
+            assert seen == [], f"a reader completed mid-flip and saw {seen}"
+            assert readers and readers[0].is_alive()
+        finally:
+            for reader in readers:
+                reader.join(timeout=3.0)
+
+        assert len(seen) == 1, "the blocked reader never completed after the flip"
+        record = seen[0]
+        assert record["mode"] == LIVE
+        assert [f["now"] for f in record["flips"]] == [LIVE]
+
+    def test_a_flip_records_the_mode_it_came_FROM(self):
+        # `was` is the only thing in the record that says which side a drive started
+        # on, and the module hands the mixed drive to the flip log entirely. Nothing
+        # pinned it: writing `was` from the mode being flipped TO gives was == now on
+        # every entry, and the whole suite stayed green.
         clock = Clock()
         holder = ModeHolder(clock=clock)
-        stop = threading.Event()
-        # Bounded, because the flip log grows without bound and `to_record` copies
-        # all of it: an unbounded flipper made each read O(flips so far) against a
-        # writer that never yields, and the test took minutes instead of a second.
-        # The deadline is inside the loop, so it holds however the thread ends.
-        flips_to_make = 400
-        deadline = time.monotonic() + 10.0
+        for target in (LIVE, SHADOW, LIVE):
+            clock.advance(1.0)
+            holder.flip_to(target)
 
-        def flipper() -> None:
-            target = LIVE
-            for _ in range(flips_to_make):
-                if stop.is_set() or time.monotonic() > deadline:
-                    return
-                clock.advance(0.001)
-                holder.flip_to(target)
-                target = SHADOW if target == LIVE else LIVE
-
-        worker = threading.Thread(target=flipper, daemon=True)
-        worker.start()
-        try:
-            while worker.is_alive() and time.monotonic() < deadline:
-                record = holder.to_record()
-                flips = record["flips"]
-                assert record["flip_count"] == len(flips)
-                # The mode and the flip log are one state, so the last flip's
-                # destination is the current mode.
-                expected = flips[-1]["now"] if flips else SHADOW
-                assert record["mode"] == expected, (
-                    f"mode {record['mode']} with a flip log ending in {expected}"
-                )
-                # A transition logged twice is a flip that never happened.
-                for earlier, later in zip(flips, flips[1:]):
-                    assert earlier["now"] == later["was"], f"{earlier} then {later}"
-                assert record["reference_rates_hold"] is not any(
-                    f["now"] == LIVE for f in flips
-                )
-            assert holder.to_record()["flip_count"] == flips_to_make, (
-                "the flipper did not finish, so the reader raced nothing"
-            )
-        finally:
-            stop.set()
-            worker.join(timeout=3.0)
+        flips = holder.to_record()["flips"]
+        assert [(f["was"], f["now"]) for f in flips] == [
+            (SHADOW, LIVE), (LIVE, SHADOW), (SHADOW, LIVE)
+        ]
+        # The chain is what makes the log replayable: each flip leaves the mode the
+        # next one starts from, and the first `was` is the mode the drive began in.
+        for earlier, later in zip(flips, flips[1:]):
+            assert earlier["now"] == later["was"]
+        assert flips[0]["was"] == SHADOW

@@ -29,10 +29,16 @@ running it across a live -> shadow flip: the last live rates and the last live q
 both survive, because `setQuery(null)` is a deliberate no-op there. So the
 discriminator is whether this drive has **ever** been live, not whether it has left
 live -- a drive that is still live has not held the reference rates either. Both
-`reference_rates_hold` and `structurally_absent` therefore key on that one fact, and
-on a mixed drive the flip log gives the boundary: the feed cannot exist before the
-first flip to live, and cannot be assumed to exist immediately after it, since the
-phone still has to place the call and the response still has to arrive.
+`reference_rates_hold` therefore keys on that one fact.
+
+`structurally_absent` asks a different question and must not be merged with it. A
+drive that began in shadow has a leading segment with no feed however live it later
+became, so reporting nothing absent for it would credit a candidate policy on a rule
+that could not have fired for that segment. Only a drive that was live from its very
+first tick reports nothing absent; every other shape names the inputs and publishes
+`feed_possible_from_mono` beside them. That boundary is a lower bound -- the query
+goes down at the flip, the phone still has to place the call, and the response still
+has to arrive -- so it says when the feed became *possible*, not when it appeared.
 
 *And the trajectory diverges.* In shadow nothing is applied, so the controller
 decides from whatever the phone is currently running. In live, dropping the camera to
@@ -109,8 +115,14 @@ class ModeHolder:
         # Entering live is what contaminates a log, and a flip records the mode it
         # came FROM -- so no predicate over `_flips` alone sees a drive that started
         # live, and one over `f.was == LIVE` sees only drives that have LEFT live.
-        # Held as a fact instead: set here, set on the way in, never cleared.
+        # Held as facts instead: set here, set on the way in, never cleared.
         self._ever_live = mode == LIVE
+        #: Whether the feed could exist from the very first tick. Not the same
+        #: question as `_ever_live`, and merging them loses the leading shadow
+        #: segment of every drive that was promoted rather than started live.
+        self._born_live = mode == LIVE
+        #: When the feed first became possible, or None if it never did.
+        self._feed_possible_from: float | None = self._now() if mode == LIVE else None
 
     @property
     def mode(self) -> str:
@@ -132,6 +144,8 @@ class ModeHolder:
             self._mode = mode
             if mode == LIVE:
                 self._ever_live = True
+                if self._feed_possible_from is None:
+                    self._feed_possible_from = self._flips[-1].at_mono
             return True
 
     def to_record(self) -> dict[str, Any]:
@@ -145,13 +159,13 @@ class ModeHolder:
                 # Named rather than left to a reader to discover from an empty
                 # column. A shadow log's gaps are structural, not incidental.
                 "shadow_predicts": "the decision function, not the trajectory",
-                # What is missing from THIS log, not what would be missing from a
-                # pure shadow one. A live drive has the feed on every tick, so
-                # emitting the list there asserted the pure-shadow reading of a live
-                # log -- and did it alongside `reference_rates_hold: True`, so both
-                # fields agreed on the wrong answer.
+                # What is missing from THIS log, and from when it stops being
+                # missing. Keyed on being live from the FIRST tick: `[]` for a drive
+                # promoted mid-way said nothing was missing from a log whose leading
+                # segment had no feed at all.
                 "structurally_absent":
-                    [] if self._ever_live else list(ABSENT_IN_PURE_SHADOW),
+                    [] if self._born_live else list(ABSENT_IN_PURE_SHADOW),
+                "feed_possible_from_mono": self._feed_possible_from,
                 "reference_rates_hold": not self._ever_live,
             }
 
