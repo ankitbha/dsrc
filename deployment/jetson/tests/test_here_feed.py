@@ -471,3 +471,60 @@ class TestSpaceProvenance:
         reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0)
         assert reading.ok
         assert reading.link_cross_track_m < 50.0
+
+
+class TestTheReportedPairDescribesOnePlace:
+    """`link_distance_m` and `link_cross_track_m` must come from the same point.
+
+    They did not: distance was min-over-all-points and the bearing came from
+    `points[0]`, so the product was a magnitude from one place and an angle from
+    another and described nowhere. On a curving link it inverted the very decision
+    the pair was added to enable.
+    """
+
+    def test_a_curving_link_reports_the_offset_of_the_point_it_measured(self):
+        # Starts near the heading ray 2.9 km ahead and sweeps 2 km east. The
+        # nearest ahead point is the far-east end; reporting `points[0]`'s offset
+        # called a 2 km lateral match an 80 m one.
+        curve = [
+            {"lat": offset(*HOME, 2900.0, 100.0)[0], "lng": offset(*HOME, 2900.0, 100.0)[1]},
+            {"lat": offset(*HOME, 2600.0, 900.0)[0], "lng": offset(*HOME, 2600.0, 900.0)[1]},
+            {"lat": offset(*HOME, 2000.0, 1600.0)[0], "lng": offset(*HOME, 2000.0, 1600.0)[1]},
+            {"lat": offset(*HOME, 1200.0, 2000.0)[0], "lng": offset(*HOME, 1200.0, 2000.0)[1]},
+        ]
+        ours = [
+            {"lat": offset(*HOME, 0.0, -820.0)[0], "lng": offset(*HOME, 0.0, -820.0)[1]},
+            {"lat": offset(*HOME, 0.0, -20.0)[0], "lng": offset(*HOME, 0.0, -20.0)[1]},
+        ]
+        feed = HereFeed()
+        feed.offer(status=200, body=json.dumps({"results": [
+            {"location": {"shape": {"links": [{"points": ours}]}},
+             "currentFlow": {"jamFactor": 1.0, "speed": 20.0, "freeFlow": 25.0}},
+            {"location": {"shape": {"links": [{"points": curve}]}},
+             "currentFlow": {"jamFactor": 9.9, "speed": 2.0, "freeFlow": 25.0}},
+        ]}).encode(), received_t_mono=100.0)
+
+        reading = feed.at(fix(*HOME, heading_deg=0.0), t_mono=100.0)
+        assert reading.ok
+        # The pair must be consistent: a match this far off the ray cannot report a
+        # lateral offset of tens of metres.
+        assert reading.link_cross_track_m > 1000.0, (
+            f"reported {reading.link_cross_track_m:.0f} m of offset for a match at "
+            f"{reading.link_distance_m:.0f} m -- the angle came from another point"
+        )
+
+    def test_the_offset_never_exceeds_the_cone_so_sin_cannot_fold(self):
+        # `angle_between` returns 0-180 and sin is symmetric about 90, so an angle
+        # taken from a point BEHIND folded onto a cross-track of zero -- reading as
+        # a perfect on-axis match for a point directly astern. Taking the angle
+        # from the matched point bounds it by the half-angle, where sin is
+        # monotonic, so the fold is unreachable rather than merely unlikely.
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=2000.0)), received_t_mono=100.0)
+
+        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0)
+        assert reading.ok
+        implied = math.degrees(math.asin(
+            min(1.0, reading.link_cross_track_m / max(reading.link_distance_m, 1e-9))
+        ))
+        assert implied <= 60.0 + 1e-6

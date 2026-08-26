@@ -94,16 +94,24 @@ class FlowLink:
         """How far this link's shape passes from a point."""
         return min(haversine_m(lat, lon, plat, plon) for plat, plon in self.points)
 
-    def extends_ahead(self, gps_lat: float, gps_lon: float, heading_deg: float,
-                      half_angle_deg: float, horizon_m: float) -> bool:
-        """Whether any part of this link lies ahead, within the horizon.
+    def ahead_point(self, gps_lat: float, gps_lon: float, heading_deg: float,
+                    half_angle_deg: float, horizon_m: float) -> tuple[float, float, float] | None:
+        """The nearest point of this link that lies ahead: (distance, offset, point index).
 
-        Any part, not the nearest: the link we are driving ON has its nearest
-        point beside us, where the bearing is arbitrary and often backwards, while
-        the stretch that matters runs out in front. Testing only the nearest point
-        rejected the road under the wheels.
+        Returns the matched point rather than a bool, so distance and lateral
+        offset are computed from ONE place. They were not: distance was
+        min-over-all-points and the bearing came from `points[0]`, so a curving
+        link whose polyline starts near the heading ray and sweeps away reported
+        2329 m of range with 80 m of lateral offset while the point that range
+        described was 1997 m aside -- the field inverted in exactly the case it
+        exists to catch.
+
+        Any part of the link, not the nearest overall: the link we are driving ON
+        has its nearest point beside us, where the bearing is arbitrary and often
+        backwards, while the stretch that matters runs out in front.
         """
-        for plat, plon in self.points:
+        best: tuple[float, float, int] | None = None
+        for index, (plat, plon) in enumerate(self.points):
             distance = haversine_m(gps_lat, gps_lon, plat, plon)
             if distance > horizon_m:
                 continue
@@ -113,13 +121,14 @@ class FlowLink:
                 # north, so a link running due WEST was called "ahead" for any
                 # northerly heading. With realistic GPS-vs-map offset the bearing
                 # from such a point is decided by noise, and a link passing within
-                # that noise was admitted for about a third of the compass -- the
-                # fraction the cone covers. Skipped, so a link is judged by the
-                # parts of it that are actually somewhere relative to us.
+                # that noise was admitted for about a third of the compass.
                 continue
-            if angle_between(bearing_deg(gps_lat, gps_lon, plat, plon), heading_deg) <= half_angle_deg:
-                return True
-        return False
+            offset = angle_between(bearing_deg(gps_lat, gps_lon, plat, plon), heading_deg)
+            if offset > half_angle_deg:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, offset, index)
+        return best
 
     @property
     def usable(self) -> bool:
@@ -446,25 +455,30 @@ class HereFeed:
             return FlowReading(outcome=Outcome.NO_LINK_MATCHED, **provenance,
                                detail="nearest link beyond the association radius")
 
-        ahead = [
-            (d, link) for d, link in near
-            if link.extends_ahead(gps.lat, gps.lon, gps.heading_deg,
-                                  self._half_angle_deg, self._horizon_m)
-        ]
+        ahead = []
+        for _, link in near:
+            matched = link.ahead_point(gps.lat, gps.lon, gps.heading_deg,
+                                       self._half_angle_deg, self._horizon_m)
+            if matched is not None:
+                ahead.append((matched[0], matched[1], link))
         if not ahead:
             return FlowReading(outcome=Outcome.NO_LINK_AHEAD, **provenance)
 
-        distance, nearest = min(ahead, key=lambda pair: pair[0])
-        # Cross-track: how far the match sits off the heading ray. The cone is a
-        # fixed half-angle, so at the 3 km horizon it admits 2.6 km of lateral
-        # offset, and `ok` alone cannot tell a road under the wheels from one that
-        # far to the side. Reported rather than refused, because a downstream link
-        # IS legitimately far -- the caller is the one placed to weight it.
-        bearing = bearing_deg(gps.lat, gps.lon, nearest.points[0][0], nearest.points[0][1])
-        offset_rad = math.radians(angle_between(bearing, gps.heading_deg))
+        distance, offset_deg, nearest = min(ahead, key=lambda triple: triple[0])
+        # Both from the one matched point, so the pair describes a single place.
+        # `link_distance_m` therefore means "to the nearest point of this link that
+        # is ahead", not "to the link" -- the honest reading when the two differ.
+        #
+        # Cross-track says how far that place sits off the heading ray. The cone is
+        # a fixed half-angle, so at the 3 km horizon it admits 2.6 km of offset and
+        # `ok` alone cannot tell a road under the wheels from one that far aside.
+        # Reported rather than refused, because a downstream link IS legitimately
+        # far -- the caller is the one placed to weight it. The offset is at most
+        # the half-angle by construction, so `sin` is monotonic over its range and
+        # cannot fold a point behind us onto a cross-track of zero.
         return FlowReading(outcome=Outcome.OK, link=nearest, **provenance,
                            link_distance_m=distance,
-                           link_cross_track_m=abs(distance * math.sin(offset_rad)))
+                           link_cross_track_m=abs(distance * math.sin(math.radians(offset_deg))))
 
     def to_record(self) -> dict[str, Any]:
         """What the feed did this run.
