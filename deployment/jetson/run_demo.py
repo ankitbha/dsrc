@@ -346,6 +346,22 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
     deadline = time.monotonic() + args.duration_s if args.duration_s else None
     last_print = 0.0
 
+    # Constructed for a phone run only. Deciding rates for a local camera would
+    # produce a command with nowhere to go, and the `here` query would describe a
+    # road nobody is asking about.
+    sensing = None
+    if phone is not None:
+        from policy.sensing_loop import SensingLoop
+        from policy.shadow_mode import LIVE, SHADOW, ModeHolder
+
+        sensing = SensingLoop(
+            modes=ModeHolder(LIVE if args.live_rates else SHADOW),
+            heartbeat_s=args.rate_heartbeat_s,
+        )
+        print("[run] sensing control: " + ("LIVE -- rates are applied on the phone"
+              if args.live_rates else
+              "shadow -- decisions recorded, nothing applied"), flush=True)
+
     def worker() -> None:
         nonlocal last_print
         while not stop.is_set():
@@ -360,8 +376,23 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 v2v.update_ego(fix, assumed_lane)
                 peers = v2v.peers(fix)
             tick = pipeline.step(frame, fix, peers)
+            outcome = None
+            if sensing is not None:
+                # After the tick, because the decision reads the policy margin and
+                # the density bin this tick produced -- and before the log, so the
+                # record carries what was decided from it.
+                outcome = sensing.on_tick(tick, phone)
             if logger is not None:
-                logger.write(tick.to_record())
+                record = tick.to_record()
+                if outcome is not None:
+                    record["sensing"] = {
+                        **outcome.decision.to_record(),
+                        "shadow": outcome.command.shadow,
+                        "advisory_sent": outcome.advisory_sent,
+                        "command_sent": outcome.command_sent,
+                        "send_reason": outcome.send_reason,
+                    }
+                logger.write(record)
             if video_logger is not None:
                 video_logger.write(frame.image)
             if telemetry is not None:
@@ -420,6 +451,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             "camera_file_recoveries": camera.file_recoveries,
             "policy_trained": actor.is_trained,
         }
+        if sensing is not None:
+            # What was decided and how much of it reached the phone. A drive whose
+            # commands were all refused and one where nothing needed sending write
+            # the same tick log otherwise.
+            summary["sensing"] = sensing.to_record()
         if phone is not None:
             # Which clock produced the stamps and how the offset was obtained.
             # Without it a run where every stamp took the proxy path and one where
@@ -600,6 +636,18 @@ def main() -> int:
     parser.add_argument(
         "--phone-wait-s", type=float, default=60.0,
         help="how long to wait for the phone to dial in before giving up",
+    )
+    # Shadow is the default and live is chosen. A drive that gates for real because
+    # nobody passed a flag is the wrong failure to have.
+    parser.add_argument(
+        "--live-rates", action="store_true",
+        help="apply the sensing controller's rates on the phone; without it the "
+             "decisions are recorded and nothing is applied",
+    )
+    parser.add_argument(
+        "--rate-heartbeat-s", type=float, default=5.0,
+        help="resend an unchanged rate command after this long, so a phone that "
+             "reconnected mid-drive is not left on whatever it had",
     )
     parser.add_argument("--require-gps", action="store_true", help="fail instead of degrading without GPS")
     parser.add_argument("--duration-s", type=float, default=0.0)

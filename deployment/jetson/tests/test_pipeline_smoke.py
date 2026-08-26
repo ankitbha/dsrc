@@ -149,3 +149,36 @@ def test_stage_timings_recorded(pipeline) -> None:
     assert tick.e2e_ms >= 0.0
     snapshot = pipeline.stats.snapshot()
     assert snapshot["e2e_ms"]["p95"] >= snapshot["e2e_ms"]["p50"] >= 0.0
+
+
+def test_the_sensing_loop_reads_a_real_tick(pipeline) -> None:
+    """Task 31's wiring, against a Tick the pipeline actually built.
+
+    Every other test of `inputs_from` uses a fake tick, and a fake agrees with the
+    code that reads it rather than with the object the pipeline produces. If a field
+    were renamed -- `obs_result.feed`, `policy.head_probs`, `diagnostics["gps_age_s"]`
+    -- those tests would keep passing while the live loop decided from Nones.
+    """
+    from policy.sensing_loop import SensingLoop, inputs_from
+
+    tick = run_ticks(pipeline, 45)
+    inputs = inputs_from(tick, None, now=time.monotonic())
+
+    # The free tier and the camera's own view: present, not defaulted away.
+    assert inputs.ego_speed == pytest.approx(27.0)
+    assert inputs.ego_acceleration is not None
+    assert inputs.camera_density_bin in (0, 1, 2, 3)
+    assert inputs.policy_margin is not None and 0.0 <= inputs.policy_margin <= 1.0
+    assert inputs.lat == pytest.approx(40.0) and inputs.lon == pytest.approx(-74.0)
+    assert inputs.position_valid is True
+    assert inputs.position_age_s is not None
+    # No phone in this run, so no feed and no telemetry -- and silence is not
+    # nominal, so these must be None rather than a comfortable default.
+    assert inputs.feed_congestion is None
+    assert inputs.thermal_status is None and inputs.telemetry_age_s is None
+
+    loop = SensingLoop()
+    outcome = loop.on_tick(tick, None)
+    assert outcome.decision.rates
+    assert outcome.command.shadow is True
+    assert outcome.command.t_capture_mono_ns == int(tick.t_capture_mono * 1e9)
