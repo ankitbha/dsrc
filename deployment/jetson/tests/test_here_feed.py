@@ -9,6 +9,7 @@ disagree with the schema it was written against.
 from __future__ import annotations
 
 import json
+import time
 import math
 
 from sensors.gps_reader import GpsFix
@@ -371,3 +372,102 @@ class TestStampProvenance:
         assert reading.response_age_is_proxy is True
         assert reading.response_age_bound_s == 0.004
         assert feed.to_record()["proxied_stamps"] == 1
+
+
+class TestOneStore:
+    """A reader sees one whole response or the other, never a mix.
+
+    Every field of a response was published as a separate attribute, and no
+    ordering of independent stores is safe. Links-then-stamp over-stated age and
+    returned `stale`, which is harmless. Stamp-then-links -- introduced while
+    claiming to fix the first -- under-stated it and returned `ok`, handing back a
+    live congestion number for a road already behind: one wrongly-fresh reading in
+    396,380 queries, reporting an age of 1.0 s for links 46 s old.
+    """
+
+    def test_a_reading_never_pairs_one_response_with_another_ones_stamp(self):
+        import threading
+
+        feed = HereFeed()
+        near = stretch(*HOME, east_m=800.0)
+        far = stretch(*offset(*HOME, north_m=0.0, east_m=2000.0), east_m=800.0)
+        stop = threading.Event()
+        seen: list[tuple[str, float]] = []
+
+        def writer():
+            i = 0
+            deadline = time.monotonic() + 2.0
+            while not stop.is_set() and time.monotonic() < deadline:
+                i += 1
+                if i % 2:
+                    # Under us, but stamped long ago: every correct reading is stale.
+                    feed.offer(status=200, body=body(near), received_t_mono=1000.0 - 45.0)
+                else:
+                    # Fresh, but 2 km away: every correct reading is no_link_matched.
+                    feed.offer(status=200, body=body(far), received_t_mono=1000.0)
+
+        worker = threading.Thread(target=writer, daemon=True)
+        worker.start()
+        try:
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                r = feed.at(fix(*HOME, heading_deg=90.0), t_mono=1000.0)
+                seen.append((r.outcome, r.response_age_s or 0.0))
+        finally:
+            stop.set()
+            worker.join(timeout=3.0)
+
+        wrong = [s for s in seen if s[0] == Outcome.OK]
+        assert not wrong, f"{len(wrong)} of {len(seen)} readings mixed two responses: {wrong[:3]}"
+
+    def test_provenance_belongs_to_the_response_it_came_with(self):
+        # `bound_s` and `proxy` were stored after the links, so a query in that gap
+        # paired a new response with the previous one's provenance -- reporting a
+        # 4 ms bound for a stamp that was actually a proxy with none, which defeats
+        # the proxy flag exactly where it matters, in the opening seconds.
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)),
+                   received_t_mono=100.0, bound_s=0.004, proxy=False)
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)),
+                   received_t_mono=101.0, bound_s=None, proxy=True)
+
+        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=101.0)
+        assert reading.response_age_is_proxy is True
+        assert reading.response_age_bound_s is None
+
+
+class TestSpaceProvenance:
+    """`ok` alone cannot say whether the match is under the wheels or kilometres aside.
+
+    The cone is a fixed half-angle, so its lateral tolerance grows with range: at
+    the 3 km horizon it admits 2.6 km of offset. The radius is not the fix -- a
+    downstream link is legitimately far -- so the distance travels with the reading
+    and the caller weights it.
+    """
+
+    def test_a_match_far_off_the_heading_ray_reports_how_far(self):
+        feed = HereFeed()
+        ours = stretch(*offset(*HOME, 0.0, -825.0), east_m=800.0)   # behind, matches the radius
+        # Inside the 3 km horizon and on the cone's edge: bearing ~56 deg against a
+        # heading of 0, so geometrically 'ahead' and 2.4 km to the side.
+        aside = stretch(*offset(*HOME, north_m=1600.0, east_m=2400.0), east_m=800.0)
+        feed.offer(status=200, body=json.dumps({"results": [
+            {"location": {"shape": {"links": [{"points": ours}]}},
+             "currentFlow": {"jamFactor": 1.0, "speed": 20.0, "freeFlow": 25.0}},
+            {"location": {"shape": {"links": [{"points": aside}]}},
+             "currentFlow": {"jamFactor": 9.9, "speed": 2.0, "freeFlow": 25.0}},
+        ]}).encode(), received_t_mono=100.0)
+
+        reading = feed.at(fix(*HOME, heading_deg=0.0), t_mono=100.0)
+        assert reading.ok
+        # Reported, not refused -- but the caller can now see it is not our road.
+        assert reading.link_cross_track_m > 1000.0
+        assert reading.link_distance_m > 2000.0
+
+    def test_a_match_under_the_wheels_reports_a_small_offset(self):
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
+
+        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0)
+        assert reading.ok
+        assert reading.link_cross_track_m < 50.0

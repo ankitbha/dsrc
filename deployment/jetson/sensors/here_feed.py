@@ -133,6 +133,29 @@ class FlowLink:
 
 
 @dataclass(frozen=True)
+class _Snapshot:
+    """One response, published in a single store.
+
+    Every field here was a separate attribute, and no ordering of independent
+    stores is safe. Links-then-stamp let a concurrent reader see new links against
+    the old arrival time: age over-stated, outcome `stale`, harmless.
+    Stamp-then-links -- which an earlier comment introduced while claiming to fix
+    the first -- let it see OLD links against the NEW time: age under-stated,
+    outcome `ok`, and a live congestion number handed back for a road already
+    behind. Measured at one wrongly-fresh reading in 396,380, reporting
+    `response_age_s: 1.0` for links 46 s old.
+
+    Rebinding one frozen object is a single attribute store, so a reader sees
+    either the whole previous response or the whole new one.
+    """
+
+    links: tuple[FlowLink, ...]
+    received_t_mono: float
+    bound_s: float | None
+    proxy: bool
+
+
+@dataclass(frozen=True)
 class FlowReading:
     """The answer, or the reason there is not one."""
 
@@ -145,6 +168,14 @@ class FlowReading:
     #: way the observation builder charges `uncertainty_s` against staleness.
     response_age_bound_s: float | None = None
     response_age_is_proxy: bool = False
+    #: How far the reported link is, and how far it sits off the heading ray. The
+    #: cone is a fixed half-angle, so its lateral tolerance grows with range --
+    #: 2.6 km at the 3 km horizon -- and `ok` alone cannot distinguish the tarmac
+    #: under the wheels from a motorway that far to the side. After the age bound
+    #: the reading carried provenance for the time axis and none for the space
+    #: axis; a caller weighting a match needs both.
+    link_distance_m: float | None = None
+    link_cross_track_m: float | None = None
     #: Always None, and deliberately so -- see the module docstring. Present as a
     #: field so a consumer reads absence rather than never thinking to ask.
     feed_lag_s: float | None = None
@@ -306,8 +337,7 @@ class HereFeed:
         self._half_angle_deg = downstream_half_angle_deg
         self._horizon_m = downstream_horizon_m
         self._max_age_s = max_response_age_s
-        self._links: list[FlowLink] = []
-        self._received_t_mono: float | None = None
+        self._current: _Snapshot | None = None
         #: Why nothing usable has arrived, when nothing has. Distinct from the
         #: outcome of a query: an HTTP error says nothing about the road and must
         #: not overwrite what the last actual question was answered with.
@@ -320,8 +350,6 @@ class HereFeed:
         self.responses_received = 0
         self.responses_parsed = 0
         self.proxied_stamps = 0
-        self._bound_s: float | None = None
-        self._proxy = False
         self.refused_by_reason: dict[str, int] = {}
 
     def offer(self, status: int, body: bytes, received_t_mono: float,
@@ -346,12 +374,11 @@ class HereFeed:
             return False
         # Accepted even when empty: the response was understood, and it supersedes
         # an older one that describes a road we have since left.
-        # Arrival time before links, so a concurrent `at()` cannot see new links
-        # against the previous arrival stamp and call them stale.
-        self._received_t_mono = received_t_mono
-        self._links = links
-        self._bound_s = bound_s
-        self._proxy = proxy
+        # One store. See `_Snapshot`.
+        self._current = _Snapshot(
+            links=tuple(links), received_t_mono=received_t_mono,
+            bound_s=bound_s, proxy=proxy,
+        )
         self.responses_parsed += 1
         return True
 
@@ -362,21 +389,23 @@ class HereFeed:
 
     def at(self, gps: GpsFix, t_mono: float) -> FlowReading:
         """What the feed says about the road ahead of this fix, or why it cannot."""
-        reading = self._at(gps, t_mono)
+        # Read once. Everything below sees one response or the other, never a
+        # stamp from one and links from another.
+        snapshot = self._current
+        reading = self._at(gps, t_mono, snapshot)
         self._last_query = reading.outcome
-        if reading.response_age_s is None:
-            return reading
-        import dataclasses
-        reading = dataclasses.replace(
-            reading, response_age_bound_s=self._bound_s, response_age_is_proxy=self._proxy
-        )
         return reading
 
-    def _at(self, gps: GpsFix, t_mono: float) -> FlowReading:
-        if self._received_t_mono is None:
+    def _at(self, gps: GpsFix, t_mono: float, snapshot: "_Snapshot | None") -> FlowReading:
+        if snapshot is None:
             return FlowReading(outcome=self._last_refusal, detail="nothing usable has arrived")
 
-        age_s = t_mono - self._received_t_mono
+        age_s = t_mono - snapshot.received_t_mono
+        provenance = {
+            "response_age_s": age_s,
+            "response_age_bound_s": snapshot.bound_s,
+            "response_age_is_proxy": snapshot.proxy,
+        }
         # Symmetric, because `PhoneGpsReader.is_stale` says the freshness
         # predicates in this codebase must not disagree about it and this is the
         # third one. A one-sided `>` called a stamp from this clock's future fresh
@@ -384,25 +413,25 @@ class HereFeed:
         # and the future side is the biased one here, since `OneWayEstimator`
         # documents that its conversion makes every stamp look newer than it is.
         if abs(age_s) > self._max_age_s:
-            return FlowReading(outcome=Outcome.STALE, response_age_s=age_s,
+            return FlowReading(outcome=Outcome.STALE, **provenance,
                                detail=f"{age_s:.1f}s since the response")
 
         if not gps.valid or not math.isfinite(gps.lat) or not math.isfinite(gps.lon):
-            return FlowReading(outcome=Outcome.UNUSABLE_FIX, response_age_s=age_s,
+            return FlowReading(outcome=Outcome.UNUSABLE_FIX, **provenance,
                                detail="no position")
         if not math.isfinite(gps.heading_deg):
             # Without a course, "ahead" is undefined. Treating every link as ahead
             # would let the queue we just cleared describe the road in front.
-            return FlowReading(outcome=Outcome.UNUSABLE_FIX, response_age_s=age_s,
+            return FlowReading(outcome=Outcome.UNUSABLE_FIX, **provenance,
                                detail="no heading")
 
         near = [
             (link.distance_m(gps.lat, gps.lon), link)
-            for link in self._links
+            for link in snapshot.links
             if link.usable
         ]
         if not near:
-            return FlowReading(outcome=Outcome.NO_LINK_MATCHED, response_age_s=age_s,
+            return FlowReading(outcome=Outcome.NO_LINK_MATCHED, **provenance,
                                detail="no usable link in the response")
 
         # The radius answers "are we on a road this response covers at all". If the
@@ -414,7 +443,7 @@ class HereFeed:
         # which is just the horizon since it is fifty times larger, so the radius
         # decided nothing at all.
         if min(d for d, _ in near) > self._radius_m:
-            return FlowReading(outcome=Outcome.NO_LINK_MATCHED, response_age_s=age_s,
+            return FlowReading(outcome=Outcome.NO_LINK_MATCHED, **provenance,
                                detail="nearest link beyond the association radius")
 
         ahead = [
@@ -423,10 +452,19 @@ class HereFeed:
                                   self._half_angle_deg, self._horizon_m)
         ]
         if not ahead:
-            return FlowReading(outcome=Outcome.NO_LINK_AHEAD, response_age_s=age_s)
+            return FlowReading(outcome=Outcome.NO_LINK_AHEAD, **provenance)
 
-        _, nearest = min(ahead, key=lambda pair: pair[0])
-        return FlowReading(outcome=Outcome.OK, link=nearest, response_age_s=age_s)
+        distance, nearest = min(ahead, key=lambda pair: pair[0])
+        # Cross-track: how far the match sits off the heading ray. The cone is a
+        # fixed half-angle, so at the 3 km horizon it admits 2.6 km of lateral
+        # offset, and `ok` alone cannot tell a road under the wheels from one that
+        # far to the side. Reported rather than refused, because a downstream link
+        # IS legitimately far -- the caller is the one placed to weight it.
+        bearing = bearing_deg(gps.lat, gps.lon, nearest.points[0][0], nearest.points[0][1])
+        offset_rad = math.radians(angle_between(bearing, gps.heading_deg))
+        return FlowReading(outcome=Outcome.OK, link=nearest, **provenance,
+                           link_distance_m=distance,
+                           link_cross_track_m=abs(distance * math.sin(offset_rad)))
 
     def to_record(self) -> dict[str, Any]:
         """What the feed did this run.
@@ -441,7 +479,7 @@ class HereFeed:
             "refused_by_reason": dict(self.refused_by_reason),
             "last_outcome": self._last_query,
             "last_refusal": self._last_refusal,
-            "links_cached": len(self._links),
+            "links_cached": 0 if self._current is None else len(self._current.links),
             "proxied_stamps": self.proxied_stamps,
             "feed_lag_s": None,
             "feed_lag_note": "not reported by HERE v7 flow; minutes, and unmeasurable here",

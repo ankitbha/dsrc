@@ -103,6 +103,11 @@ class PhoneLink:
         #: position at the moment it asks, not at the moment the bytes arrived.
         self.here = HereFeed()
         self.here_failure: str | None = None
+        #: Counted, not just named. `refused_by_reason` exists so refusals are
+        #: counted rather than inferred, and the guard path was the one outcome
+        #: countable only by subtraction -- one string cannot tell one bad body
+        #: from six hundred.
+        self.here_failures = 0
         self.peer_device_id: str | None = None
         self.pings_answered = 0
         #: Why a connection did not become a session. The diagnosis exists --
@@ -224,6 +229,7 @@ class PhoneLink:
                 # OverflowError out of `float()` did. Recorded so a dead-quiet feed
                 # is visible rather than inferred.
                 self.here_failure = f"{type(exc).__name__}: {exc}"
+                self.here_failures += 1
 
 
     def stop(self) -> None:
@@ -270,5 +276,6 @@ class PhoneLink:
             "gps": None if self.gps is None else self.gps.to_record(),
             "here": {**self.here.to_record(),
                      "reader_alive": bool(self._here_reader and self._here_reader.is_alive()),
-                     "failure": self.here_failure},
+                     "failure": self.here_failure,
+                     "failures": self.here_failures},
         }
