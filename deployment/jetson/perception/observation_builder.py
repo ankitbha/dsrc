@@ -36,9 +36,11 @@ from typing import Any
 
 import numpy as np
 
+from perception import feed_fusion
 from perception.distance import TrackedVehicle
 from policy import sim_contract
 from sensors.gps_reader import GpsFix
+from sensors.here_feed import FlowReading
 
 INF = float("inf")
 
@@ -134,6 +136,7 @@ class ObservationBuilder:
         gps: GpsFix,
         t_mono: float,
         peers: list[PeerState] | None = None,
+        feed: FlowReading | None = None,
     ) -> ObservationResult:
         cfg = self.config
         peers = peers or []
@@ -246,6 +249,33 @@ class ObservationBuilder:
             cooperation = sim_contract.neutral_cooperation(cfg.free_flow_speed_mps)
             lane_distribution: dict[str, float] = {}
             src["nearby_av_count"] = "fallback_neutral"
+
+        # --- the traffic feed, where it owns a field --------------------
+        #
+        # Ownership, not averaging. The camera cannot see two kilometres ahead and
+        # the feed cannot see the car in front, so nothing here blends the two: the
+        # feed takes a field outright or hands it on, and `field_sources` says
+        # which. `downstream_congestion_estimate` is the one field it can inform --
+        # `distance_to_downstream_bottleneck` looks like a candidate and is not,
+        # because the simulator uses it as a 0/inf flag rather than a distance.
+        owned = feed_fusion.own(feed)
+        self.last_feed_ownership = owned
+        if owned.owns_congestion:
+            cooperation = dict(cooperation)
+            cooperation["downstream_congestion_estimate"] = owned.downstream_congestion
+            if not peers:
+                # Only where peers have not already measured it: they observe the
+                # segment directly, the feed reports the road's nominal free flow.
+                cooperation["segment_target_speed"] = (
+                    owned.free_flow_mps
+                    if owned.free_flow_mps is not None
+                    else cooperation["segment_target_speed"]
+                )
+            src["downstream_congestion_estimate"] = feed_fusion.SOURCE_FEED
+        else:
+            src["downstream_congestion_estimate"] = (
+                "measured" if peers else "fallback_neutral"
+            )
 
         # --- etiquette flag (mirrors src/safety/etiquette.py) ----------
         uncongested_low_speed = bool(

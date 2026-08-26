@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sensors.gps_reader import GpsFix
-from v2v.beacon import haversine_m
+from geo import haversine_m
 
 #: How far off the road a link's nearest point may be and still be our road. A
 #: motorway and the service road beside it are tens of metres apart, and reporting
