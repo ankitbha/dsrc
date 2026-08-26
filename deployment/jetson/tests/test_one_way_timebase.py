@@ -1,0 +1,213 @@
+"""The offset a responder can form, and what it is worth.
+
+The Jetson answers time-sync pings and never initiates one, so it never learns
+when its pong landed and cannot build a `TimeSyncSample`. These cover the
+estimate it can build instead: where it sits relative to the truth, which way it
+is wrong, and what its bound does and does not cover.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from transport.timebase import (
+    OFFSET_WINDOW_S,
+    ConvertedInstant,
+    OneWayEstimator,
+    OneWaySample,
+    TimebaseNotReady,
+)
+
+NS = 1_000_000_000
+# The real one, measured between this Mac and the Jetson: both count from their
+# own boot and they are 67.57 hours apart.
+PLANTED_OFFSET_NS = int(67.57 * 3600 * NS)
+
+
+class Clock:
+    """A local clock the test drives, so windows can be stepped deliberately."""
+
+    def __init__(self, now_ns: int = 1_000 * NS) -> None:
+        self.now_ns = now_ns
+
+    def __call__(self) -> int:
+        return self.now_ns
+
+    def advance(self, seconds: float) -> None:
+        self.now_ns += int(seconds * NS)
+
+
+def arrival(clock: Clock, exchange_id: int, delay_s: float,
+            offset_ns: int = PLANTED_OFFSET_NS) -> OneWaySample:
+    """A ping that left the peer at `offset_ns` ahead and took `delay_s` to land."""
+    t2 = clock.now_ns
+    t1 = t2 + offset_ns - int(delay_s * NS)
+    return OneWaySample(exchange_id, t1_remote_send_ns=t1, t2_local_recv_ns=t2)
+
+
+class TestWhereTheEstimateSits:
+
+    def test_a_single_arrival_underestimates_the_offset_by_its_delay(self):
+        # The property the whole design rests on. Not "approximately right" --
+        # wrong in a known direction by a known amount.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        estimator.add(arrival(clock, 1, delay_s=0.030))
+
+        estimate = estimator.estimate()
+        assert estimate.offset_ns == PLANTED_OFFSET_NS - int(0.030 * NS)
+        assert estimate.offset_ns < PLANTED_OFFSET_NS
+
+    def test_the_fastest_arrival_wins_not_the_latest_or_the_mean(self):
+        # The analogue of min-RTT selection. A mean would drag the estimate down
+        # by the average delay instead of the smallest one, and taking the most
+        # recent would let one slow arrival undo every good sample.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        for i, delay in enumerate([0.200, 0.008, 0.140, 0.400]):
+            estimator.add(arrival(clock, i, delay_s=delay))
+            clock.advance(1.0)
+
+        assert estimator.estimate().offset_ns == PLANTED_OFFSET_NS - int(0.008 * NS)
+
+    def test_the_estimate_is_never_above_the_truth(self):
+        # One-sidedness is what makes this usable: it does not wander around the
+        # offset, it sits under it. A consumer can reason about the direction of
+        # its error, which it could not do with a two-sided estimate.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        for i, delay in enumerate([0.005, 0.001, 0.050, 0.0001, 0.3]):
+            estimator.add(arrival(clock, i, delay_s=delay))
+            clock.advance(0.5)
+            assert estimator.estimate().offset_ns <= PLANTED_OFFSET_NS
+
+
+class TestWhatTheBoundCovers:
+
+    def test_the_bound_is_the_delay_spread_not_half_a_round_trip(self):
+        # The number is reused from the round-trip estimator's field, so this
+        # pins what it MEANS here. Spread of observed delays: 200 ms - 8 ms.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        for i, delay in enumerate([0.200, 0.008]):
+            estimator.add(arrival(clock, i, delay_s=delay))
+            clock.advance(1.0)
+
+        assert estimator.estimate().rtt_min_ns == pytest.approx(int(0.192 * NS), abs=NS // 1000)
+
+    def test_a_constant_delay_reports_no_spread_while_still_being_wrong(self):
+        # The failure a spread cannot see. Every arrival delayed by exactly the
+        # same 80 ms gives a spread of zero -- looking perfect -- while every
+        # converted stamp is 80 ms off. This is why the bound is documented as
+        # covering variation only, and why this is unfit for latency work.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        for i in range(5):
+            estimator.add(arrival(clock, i, delay_s=0.080))
+            clock.advance(1.0)
+
+        estimate = estimator.estimate()
+        assert estimate.rtt_min_ns == 0
+        assert PLANTED_OFFSET_NS - estimate.offset_ns == int(0.080 * NS)
+
+    def test_the_record_says_one_way_so_a_reader_cannot_mistake_it(self):
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        estimator.add(arrival(clock, 1, delay_s=0.01))
+
+        record = estimator.to_record()
+        assert record["one_way"] is True
+        assert "delay_spread_ns" in record
+        # Named for what it is. A key called `rtt_min_ns` in a one-way record
+        # would invite exactly the comparison this estimator cannot support.
+        assert "rtt_min_ns" not in record
+
+
+class TestConversion:
+
+    def test_conversion_makes_a_peer_stamp_local_and_slightly_too_recent(self):
+        # The end-to-end consequence, in the direction a consumer feels it: the
+        # offset is under the truth, so a converted capture lands LATER than it
+        # really was, and a reading looks fresher than it is by the delay floor.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        estimator.add(arrival(clock, 1, delay_s=0.030))
+
+        captured_local_truth = clock.now_ns - int(0.5 * NS)
+        captured_remote = captured_local_truth + PLANTED_OFFSET_NS
+        converted = estimator.to_local(captured_remote)
+
+        assert isinstance(converted, ConvertedInstant)
+        assert converted.t_remote_mono_ns - captured_local_truth == int(0.030 * NS)
+
+    def test_a_67_hour_offset_is_what_conversion_removes(self):
+        # Unconverted, `gps_age` comes out at -243,264 s against a 2.0 s
+        # staleness threshold, so `gps_fresh` is False on every tick of every
+        # drive and ego speed silently falls back to neutral while the loop
+        # keeps producing advisories that look fine.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        estimator.add(arrival(clock, 1, delay_s=0.01))
+
+        fixed_remote = clock.now_ns + PLANTED_OFFSET_NS - int(0.4 * NS)
+        age_s = (clock.now_ns - estimator.to_local(fixed_remote).t_remote_mono_ns) / NS
+        assert 0.0 < age_s < 2.0
+
+    def test_converting_before_any_sample_is_refused_not_guessed(self):
+        estimator = OneWayEstimator(mono_clock=Clock())
+        with pytest.raises(TimebaseNotReady):
+            estimator.to_local(PLANTED_OFFSET_NS)
+
+    def test_an_instant_beyond_the_samples_is_refused(self):
+        # The same guard the round-trip estimator has. An offset measured now
+        # says nothing about an instant hours away, and converting anyway would
+        # produce a confident number with no support under it.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        estimator.add(arrival(clock, 1, delay_s=0.01))
+
+        far = clock.now_ns + PLANTED_OFFSET_NS + int((OFFSET_WINDOW_S + 100_000) * NS)
+        with pytest.raises(TimebaseNotReady):
+            estimator.to_local(far)
+
+
+class TestWindowing:
+
+    def test_samples_older_than_the_window_stop_counting(self):
+        # Without pruning, one lucky arrival sets the estimate for the whole
+        # drive and a clock that has since drifted is never re-measured.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        estimator.add(arrival(clock, 1, delay_s=0.001))
+
+        clock.advance(OFFSET_WINDOW_S + 1.0)
+        estimator.add(arrival(clock, 2, delay_s=0.100))
+
+        assert estimator.estimate().offset_samples == 1
+        assert estimator.estimate().offset_ns == PLANTED_OFFSET_NS - int(0.100 * NS)
+
+    def test_an_unstamped_arrival_is_refused_and_counted(self):
+        estimator = OneWayEstimator(mono_clock=Clock())
+        assert estimator.add(OneWaySample(1, t1_remote_send_ns=5, t2_local_recv_ns=0)) is False
+        assert estimator.samples_refused == 1
+        assert estimator.refused_by_reason == {"local_recv_not_stamped": 1}
+        assert estimator.estimate() is None
+
+
+class TestNoSkewFit:
+
+    def test_a_one_way_estimate_never_claims_a_skew(self):
+        # Fitting a slope through points each displaced by an unknown delay
+        # produces a confident-looking number whose error nobody can state. The
+        # round-trip estimator earns its skew term; this one does not have one,
+        # and `to_local` must not silently apply a stale or zero one as though
+        # it had been measured.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+        for i in range(10):
+            estimator.add(arrival(clock, i, delay_s=0.01))
+            clock.advance(1.0)
+
+        estimate = estimator.estimate()
+        assert estimate.skew_ppm is None
+        assert estimate.skew_samples == 0

@@ -842,3 +842,165 @@ class TimeSyncInitiator:
             "awaiting_reply": len(self._pending),
             "estimator": self.estimator.to_record(),
         }
+
+
+@dataclass(frozen=True)
+class OneWaySample:
+    """One arrival, seen from the side that only ever answers.
+
+    `TimeSyncSample` needs four stamps and the **initiator** is the only side
+    that has them: it knows when it sent, when the peer received, when the peer
+    replied and when the reply landed. The responder learns three of those and
+    never the fourth, because nobody tells it when its pong arrived.
+
+    The spec settles which side we are. "The phone initiates and the Jetson only
+    ever answers" -- and the phone enforces it, refusing a ping. So the Jetson,
+    which is the side that must convert incoming stamps to its own clock, is
+    structurally the side that cannot form a round-trip sample. This is what it
+    can form instead.
+    """
+
+    exchange_id: int
+    #: The peer's monotonic clock when it put the ping on the wire.
+    t1_remote_send_ns: int
+    #: Our monotonic clock when the reader took it off the wire.
+    t2_local_recv_ns: int
+
+    @property
+    def gap_ns(self) -> int:
+        """The offset, underestimated by exactly the one-way delay.
+
+        With `remote = local + offset`, a ping stamped `t1` leaves at local time
+        `t1 - offset` and lands at `t2 = t1 - offset + d` for a one-way delay
+        `d > 0`. So `offset = t1 - t2 + d`, and this quantity is always **below**
+        the true offset, by `d`.
+
+        The error is therefore one-sided, which is the property that makes a
+        one-way estimate usable at all: it does not wander either way around the
+        truth, it sits under it, and the largest gap seen is the one that came
+        by the fastest path.
+        """
+        return self.t1_remote_send_ns - self.t2_local_recv_ns
+
+
+class OneWayEstimator:
+    """An offset from arrivals alone, for the side that cannot round-trip.
+
+    Same consumer surface as `TimebaseEstimator` -- `to_local`, `estimate`,
+    `to_record` -- so `PhoneClockAdapter` takes either without knowing which.
+    That is deliberate and it is also the risk: a number from here must never be
+    mistaken for one from a completed exchange, so `to_record` says `one_way`
+    and every estimate it publishes carries a bound that means something
+    different from the round-trip one. Read `bound_ns` below before using it.
+
+    **What it cannot do.** No skew fit. Skew needs a lever arm across samples
+    whose individual errors are bounded, and these are not: fitting a slope
+    through points each displaced by an unknown delay would produce a
+    confident-looking number whose error nobody can state. The round-trip
+    estimator earns its skew term; this one does not, so it does not have one.
+    """
+
+    def __init__(self, *, mono_clock: MonoClock = now_mono_ns) -> None:
+        self._mono = mono_clock
+        self._lock = threading.Lock()
+        self._samples: list[OneWaySample] = []
+        self._ids = itertools.count(1)
+        self._current: TimebaseEstimate | None = None
+        self.samples_accepted = 0
+        self.samples_refused = 0
+        self.estimates_published = 0
+        self.refused_by_reason: dict[str, int] = {}
+        #: Read by anything recording provenance. See the class docstring.
+        self.one_way = True
+
+    def add(self, sample: OneWaySample) -> bool:
+        """Take an arrival, or refuse and count it."""
+        if sample.t2_local_recv_ns <= 0:
+            self._refuse("local_recv_not_stamped")
+            return False
+        with self._lock:
+            self._samples.append(sample)
+            self.samples_accepted += 1
+            self._prune_locked()
+            self._recompute_locked()
+        return True
+
+    def _refuse(self, reason: str) -> None:
+        with self._lock:
+            self.samples_refused += 1
+            self.refused_by_reason[reason] = self.refused_by_reason.get(reason, 0) + 1
+
+    def _prune_locked(self) -> None:
+        horizon = self._mono() - int(OFFSET_WINDOW_S * NS_PER_S)
+        self._samples = [s for s in self._samples if s.t2_local_recv_ns >= horizon]
+
+    def _recompute_locked(self) -> None:
+        if not self._samples:
+            self._current = None
+            return
+        # The LARGEST gap, for the same reason the round-trip estimator takes the
+        # smallest round trip: `gap = offset - d`, so the biggest gap is the one
+        # whose packet crossed fastest, and it is the closest to the truth that
+        # was actually observed. A mean would average in every slow arrival and
+        # sit further below the offset than the best single sample.
+        best = max(self._samples, key=lambda s: s.gap_ns)
+        worst = min(self._samples, key=lambda s: s.gap_ns)
+        self._current = TimebaseEstimate(
+            estimate_id=next(self._ids),
+            offset_ns=best.gap_ns,
+            t_reference_ns=best.t2_local_recv_ns,
+            # NOT half a round trip, and not comparable to the round-trip
+            # estimator's bound. This is the spread of one-way delays actually
+            # seen, so it covers how much delivery VARIED and says nothing about
+            # the delay floor -- an unobservable, one-sided component that makes
+            # every converted stamp look newer than it is by the fastest delay
+            # in the window. On this pair that floor is a few tens of
+            # milliseconds, which is why this is fit for a 2 s freshness
+            # threshold and unfit for attributing latency.
+            rtt_min_ns=best.gap_ns - worst.gap_ns,
+            offset_samples=len(self._samples),
+        )
+        self.estimates_published += 1
+
+    def estimate(self) -> TimebaseEstimate | None:
+        with self._lock:
+            return self._current
+
+    def to_local(self, t_remote_mono_ns: int) -> ConvertedInstant:
+        """Convert a peer instant to this device's clock.
+
+        No skew term, so this is the plain inverse rather than the closed form
+        the round-trip estimator needs.
+        """
+        with self._lock:
+            estimate = self._current
+        if estimate is None:
+            raise TimebaseNotReady("cannot convert: no one-way samples yet", "no estimate")
+        t_local = t_remote_mono_ns - estimate.offset_ns
+        reach_ns = abs(t_local - estimate.t_reference_ns)
+        if reach_ns > int(MAX_EXTRAPOLATION_S * NS_PER_S):
+            raise TimebaseNotReady(
+                f"instant is {reach_ns / NS_PER_S:.1f}s from the reference, beyond the "
+                f"{MAX_EXTRAPOLATION_S:.0f}s the samples support",
+                "beyond extrapolation limit",
+            )
+        return ConvertedInstant(
+            t_remote_mono_ns=t_local,
+            bound_ns=estimate.rtt_min_ns,
+            estimate_id=estimate.estimate_id,
+        )
+
+    def to_record(self) -> dict[str, Any]:
+        estimate = self.estimate()
+        return {
+            # First, and named this, because it is the thing a reader must not
+            # miss: a bound from here is a delay spread, not half a round trip.
+            "one_way": True,
+            "samples_accepted": self.samples_accepted,
+            "samples_refused": self.samples_refused,
+            "refused_by_reason": dict(self.refused_by_reason),
+            "estimates_published": self.estimates_published,
+            "offset_ns": None if estimate is None else estimate.offset_ns,
+            "delay_spread_ns": None if estimate is None else estimate.rtt_min_ns,
+            "offset_samples": 0 if estimate is None else estimate.offset_samples,
+        }
