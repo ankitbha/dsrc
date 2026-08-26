@@ -109,6 +109,7 @@ class PhoneLink:
         #: dropped on the floor, so the one input that argues for LOWER rates was
         #: the one the Jetson could not see.
         self.telemetry: Any = None
+        self.telemetry_at_mono: float | None = None
         self.telemetry_received = 0
         #: Counted, not just named. `refused_by_reason` exists so refusals are
         #: counted rather than inferred, and the guard path was the one outcome
@@ -258,8 +259,13 @@ class PhoneLink:
                 if getattr(self.session, "is_closed", False):
                     return
                 continue
-            message, _ = received
+            message, receipt = received
+            # Stamped, like every other remote value here. Without an arrival time
+            # a report from forty minutes ago is indistinguishable from one from
+            # 200 ms ago, and the controller's "silence is not nominal" rule would
+            # cover only a phone that never spoke -- not one that went quiet.
             self.telemetry = message
+            self.telemetry_at_mono = receipt.t_recv_mono_ns / 1e9
             self.telemetry_received += 1
 
     def stop(self) -> None:
@@ -312,6 +318,7 @@ class PhoneLink:
                 "thermal_headroom": getattr(self.telemetry, "thermal_headroom", None),
                 "skin_temp_c": getattr(self.telemetry, "skin_temp_c", None),
                 "skin_temp_zone": getattr(self.telemetry, "skin_temp_zone", None),
+                "at_mono": self.telemetry_at_mono,
                 "reader_alive": bool(self._telemetry_reader and self._telemetry_reader.is_alive()),
             },
             "here": {**self.here.to_record(),

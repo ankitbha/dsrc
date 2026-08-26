@@ -219,8 +219,14 @@ class TestThermalWins:
         decision = settled(controller, clock,
                            calm(ego_acceleration=9.0, thermal_status="severe"))
 
-        assert decision.trigger == Trigger.THERMAL
+        # The rates are what "beats" means, and they are cut.
         assert decision.rates["camera_hz"] < ACTIVE_RATES["camera_hz"]
+        # But the one word does not say `thermal_backoff` while the camera tripled.
+        # It names the rule that moved the rates off idle; both are in rules_fired,
+        # which is what task 34 attributes on.
+        assert decision.trigger == Trigger.EVENT
+        assert Trigger.THERMAL in decision.rules_fired
+        assert Trigger.EVENT in decision.rules_fired
 
     def test_skin_temperature_backs_off_before_the_status_moves(self):
         # Measured on the handset: it warmed 5.4 C under camera load while
@@ -271,3 +277,173 @@ class TestTheRecord:
         assert record["trigger"] == Trigger.EVENT
         assert record["reasons"]
         assert set(record["rates"]) == set(RATE_KEYS)
+
+
+class TestEvidenceNeverLowersRates:
+    """More evidence must never produce lower rates.
+
+    Re-arming the dwell on fresh evidence cancelled a hold that was already
+    running, so a hard-braking event 1.4 s into a valid 5 s hold took the camera
+    from 5 Hz to 1 Hz. With a signal straddling the threshold it produced a camera
+    rebind per tick -- the exact thrash the dwell and hold were built to prevent,
+    produced by them.
+    """
+
+    def test_a_fresh_event_during_a_hold_does_not_drop_the_rates(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        settled(controller, clock, calm(ego_acceleration=9.0))
+        assert controller.decide(calm()).rates["camera_hz"] == ACTIVE_RATES["camera_hz"]
+
+        clock.advance(1.2)
+        during_hold = controller.decide(calm(ego_acceleration=9.0))
+        assert during_hold.rates["camera_hz"] == ACTIVE_RATES["camera_hz"], (
+            "a new event mid-hold lowered the rates it should have kept up"
+        )
+
+    def test_a_straddling_signal_does_not_rebind_the_camera_every_tick(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        settled(controller, clock, calm(ego_acceleration=9.0))
+
+        seen = set()
+        for i in range(40):
+            clock.advance(0.1)
+            accel = 9.0 if i % 2 else 0.0
+            seen.add(controller.decide(calm(ego_acceleration=accel)).rates["camera_hz"])
+        assert seen == {ACTIVE_RATES["camera_hz"]}, f"camera rate oscillated across {seen}"
+
+
+class TestTheTriggerDescribesTheDecision:
+
+    def test_a_raise_rule_is_not_reported_while_the_rates_are_idle(self):
+        # During the dwell the rates are the idle set. Naming a raise rule there
+        # made a drive log show an event on the tick the camera did not move.
+        controller = SensingController(clock=Clock())
+        first = controller.decide(calm(ego_acceleration=9.0))
+
+        assert first.rates["camera_hz"] == IDLE_RATES["camera_hz"]
+        assert first.trigger == Trigger.IDLE
+        # The rule still fired, and is not lost.
+        assert Trigger.EVENT in first.rules_fired
+
+    def test_every_rule_that_fired_is_recorded_not_just_the_last(self):
+        # Several rules fire at once and the wire carries one word. Resolving by
+        # source order silently masked two of three, leaving them in free text --
+        # which is what the closed vocabulary was introduced to avoid.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock, calm(
+            ego_acceleration=9.0, policy_margin=0.01,
+            feed_congestion=0.9, camera_density_bin=0, thermal_status="moderate",
+        ))
+
+        for rule in (Trigger.EVENT, Trigger.NARROW_MARGIN,
+                     Trigger.DISAGREEMENT, Trigger.THERMAL):
+            assert rule in decision.rules_fired
+        assert all(r in Trigger.ALL for r in decision.rules_fired)
+
+    def test_thermal_claims_the_word_only_when_it_is_the_whole_story(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        assert settled(controller, clock, calm(thermal_status="severe")).trigger == Trigger.THERMAL
+
+
+class TestBackoffReachesTheModalityItIsFor:
+
+    def test_here_backs_off_at_idle_rather_than_being_clamped_up(self):
+        # HERE's sample is a cellular HTTP call, so it is the modality backoff most
+        # wants to cut -- and the floor sat exactly at its idle rate, so every
+        # backoff was clamped straight back up and here_hz was byte-identical
+        # across all eight thermal statuses.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        seen = {}
+        for status in ("nominal", "moderate", "severe", "shutdown"):
+            clock.advance(HOLD_S + 1.0)
+            seen[status] = settled(controller, clock, calm(thermal_status=status)).rates["here_hz"]
+
+        assert len(set(seen.values())) == 4, f"here_hz did not vary with thermal: {seen}"
+        assert seen["shutdown"] < seen["severe"] < seen["moderate"] < seen["nominal"]
+
+    def test_the_scale_reproduces_the_emitted_rates(self):
+        # Otherwise `thermal_scale` is a false statement about what was sent.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock, calm(thermal_status="severe"))
+
+        for key in ("camera_hz", "here_hz"):
+            if key not in decision.clamped:
+                assert decision.rates[key] == pytest.approx(
+                    IDLE_RATES[key] * decision.thermal_scale
+                )
+
+    def test_a_bound_floor_is_recorded_rather_than_silent(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock, calm(thermal_status="shutdown"))
+        assert isinstance(decision.clamped, list)
+
+
+class TestStaleTelemetry:
+
+    def test_a_report_that_has_aged_out_is_no_report(self):
+        # The phone's telemetry thread can die while the session stays healthy -- it
+        # has, on Android 10. One `nominal` from minutes ago would otherwise pin
+        # full rates for the rest of the drive, which is the "no news is cool news"
+        # reading this controller refuses.
+        from policy.sensing_controller import MAX_TELEMETRY_AGE_S
+
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        fresh = settled(controller, clock,
+                        calm(thermal_status="nominal", telemetry_age_s=1.0))
+        assert fresh.thermal_scale == 1.0
+
+        clock.advance(HOLD_S + 1.0)
+        stale = settled(controller, clock,
+                        calm(thermal_status="nominal",
+                             telemetry_age_s=MAX_TELEMETRY_AGE_S + 1.0))
+        assert stale.thermal_scale < 1.0
+        assert any("stale" in r for r in stale.reasons)
+
+    def test_a_backoff_always_says_why(self):
+        # A 40% rate cut with an empty reasons list is not a decision anyone can
+        # audit. Reachable when a skin reading arrives without a status.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock,
+                           Inputs(thermal_status=None, skin_temp_c=20.0))
+        assert decision.thermal_scale < 1.0
+        assert decision.reasons
+
+
+class TestTheQueryGoesDownWithTheRate:
+
+    def test_a_slower_rate_asks_about_more_road(self):
+        # Asking less often means each answer has to cover more of the road ahead,
+        # because the vehicle travels further between responses.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        idle = settled(controller, clock, calm(lat=51.49, lon=-0.20, ego_speed=25.0))
+        clock.advance(HOLD_S + 1.0)
+        active = settled(controller, clock,
+                         calm(lat=51.49, lon=-0.20, ego_speed=25.0, ego_acceleration=9.0))
+
+        assert idle.here_query is not None and active.here_query is not None
+        assert idle.rates["here_hz"] < active.rates["here_hz"]
+        assert idle.here_query.radius_m > active.here_query.radius_m
+
+    def test_no_fix_means_no_query_rather_than_a_query_about_nowhere(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        assert settled(controller, clock, calm(lat=None, lon=None)).here_query is None
+
+    def test_the_query_is_the_shape_the_phone_turns_into_a_url(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        query = settled(controller, clock, calm(lat=51.49, lon=-0.20)).here_query
+
+        assert query.in_.startswith("circle:")
+        assert ";r=" in query.in_
+        assert query.location_ref == "shape"

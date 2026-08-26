@@ -583,3 +583,33 @@ class TestTelemetryIngestion:
         finally:
             link.stop()
             phone.close()
+
+
+def test_telemetry_carries_its_arrival_time():
+    # Every other remote value in this tree is stamped and age-gated
+    # (`PhoneGpsReader.is_stale`, `HereFeed`'s response age). Telemetry was the one
+    # that was not, so a report from forty minutes ago looked like a fresh one and
+    # a phone that went quiet read as a cool phone for the rest of the drive.
+    from transport.messages import PhoneTelemetry
+
+    phone, jetson, up, down = phone_and_jetson()
+    link = PhoneLink()
+    try:
+        attach(link, jetson, down)
+        assert link.telemetry_at_mono is None
+        up.send(PhoneTelemetry(
+            t_capture_mono_ns=now_mono_ns() + TRUE_OFFSET_NS,
+            thermal_status="nominal", thermal_headroom=None,
+            achieved={"camera_hz": 1.0, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.2},
+            dropped={"camera": 0, "gps": 0, "imu": 0, "here": 0},
+            here_calls=0, here_errors=0,
+        ))
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and link.telemetry_received == 0:
+            time.sleep(0.02)
+
+        assert link.telemetry_at_mono is not None
+        assert link.to_record()["telemetry"]["at_mono"] == link.telemetry_at_mono
+    finally:
+        link.stop()
+        phone.close()

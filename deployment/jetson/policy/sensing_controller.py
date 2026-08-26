@@ -24,8 +24,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-#: The wire's own bounds. Zero is not a rate; see the module docstring.
-MIN_RATE_HZ = 0.05
+#: The wire refuses anything outside `(0, 1000]`, so zero is not a rate. The FLOOR
+#: below is this module's own and is deliberately far under the idle rates: an
+#: earlier 0.05 sat exactly at `here_hz`'s idle value, so every thermal backoff was
+#: clamped straight back up and HERE -- the one modality whose sample is a cellular
+#: HTTP call, and therefore the one backoff most wants to cut -- never backed off at
+#: all. 0.0075 Hz is legal end to end; the wire was never the constraint.
+MIN_RATE_HZ = 0.001
 MAX_RATE_HZ = 1000.0
 
 #: What each modality costs and therefore how it idles. IMU and GPS are the free
@@ -57,6 +62,18 @@ THERMAL_SCALE = {
 #: the phone is already in trouble.
 SKIN_WARM_C = 40.0
 SKIN_HOT_C = 45.0
+
+#: How old a thermal report may be and still describe the phone. Telemetry runs on
+#: its own 1 Hz thread on the handset, guarded so a failing tick is logged and
+#: skipped, so the stream can die while the session stays healthy -- it has done, on
+#: Android 10. Without this, one `nominal` report pins full rates for the rest of a
+#: drive, which is the "no news is cool news" reading the controller refuses.
+MAX_TELEMETRY_AGE_S = 10.0
+
+#: Bounds on the query radius. The lower keeps a stationary car asking about a
+#: useful stretch; the upper keeps a slow rate from asking about a county.
+MIN_QUERY_RADIUS_M = 500.0
+MAX_QUERY_RADIUS_M = 10_000.0
 
 #: Policy margin below which the advice is one input change from flipping.
 NARROW_MARGIN = 0.15
@@ -103,6 +120,13 @@ class Inputs:
     #: The phone's last self-report. None means never heard from.
     thermal_status: str | None = None
     skin_temp_c: float | None = None
+    #: How long ago that report arrived. None means never. A report that has aged
+    #: out is treated as no report at all -- a phone that said `nominal` once and
+    #: then went quiet is not a cool phone.
+    telemetry_age_s: float | None = None
+    #: Where we are, for the HERE query that goes down with `here_hz`.
+    lat: float | None = None
+    lon: float | None = None
 
 
 @dataclass(frozen=True)
@@ -113,13 +137,27 @@ class Decision:
     trigger: str
     reasons: list[str] = field(default_factory=list)
     thermal_scale: float = 1.0
+    #: EVERY rule that fired, from the closed vocabulary. `trigger` is one word
+    #: because the wire carries one; this is what task 34 attributes on, so a
+    #: decision where three rules fired does not lose two of them to free text.
+    rules_fired: list[str] = field(default_factory=list)
+    #: Rates the floor pulled back up. Without this, `thermal_scale` is a false
+    #: statement about the emitted rates: `IDLE_RATES x scale` would not reproduce
+    #: them and nothing would say why.
+    clamped: list[str] = field(default_factory=list)
+    #: The query that goes down with `here_hz`. None when there is no position to
+    #: ask about -- a query centred on a fix we do not have describes nowhere.
+    here_query: Any = None
 
     def to_record(self) -> dict[str, Any]:
         return {
             "rates": dict(self.rates),
             "trigger": self.trigger,
+            "rules_fired": list(self.rules_fired),
             "reasons": list(self.reasons),
             "thermal_scale": self.thermal_scale,
+            "clamped": list(self.clamped),
+            "here_radius_m": None if self.here_query is None else self.here_query.radius_m,
         }
 
 
@@ -162,59 +200,112 @@ class SensingController:
     def decide(self, inputs: Inputs) -> Decision:
         now = self._now()
         reasons: list[str] = []
-
-        wants_more = False
-        trigger = Trigger.IDLE
+        fired: list[str] = []
 
         if inputs.ego_acceleration is not None and abs(inputs.ego_acceleration) >= EVENT_ACCEL_MPS2:
-            wants_more = True
-            trigger = Trigger.EVENT
+            fired.append(Trigger.EVENT)
             reasons.append(f"|accel| {abs(inputs.ego_acceleration):.1f} >= {EVENT_ACCEL_MPS2}")
         if inputs.policy_margin is not None and inputs.policy_margin <= NARROW_MARGIN:
-            wants_more = True
-            trigger = Trigger.NARROW_MARGIN
+            fired.append(Trigger.NARROW_MARGIN)
             reasons.append(f"policy margin {inputs.policy_margin:.3f} <= {NARROW_MARGIN}")
         if disagreement(inputs.feed_congestion, inputs.camera_density_bin):
-            wants_more = True
-            trigger = Trigger.DISAGREEMENT
+            fired.append(Trigger.DISAGREEMENT)
             reasons.append("feed says jammed, camera sees empty road")
 
-        # Dwell before raising: a single tick of evidence is noise, and paying a
-        # camera rebind for it costs more than the tick was worth.
+        wants_more = bool(fired)
+
+        # Dwell before raising, and a hold after -- but a hold already running is
+        # NOT cancelled by fresh evidence. Re-arming the dwell on every new event
+        # dropped the rates back to idle mid-hold, so strictly more evidence gave
+        # strictly lower rates: a hard-braking event 1.4 s into a valid 5 s hold
+        # took the camera from 5 Hz to 1 Hz. With a signal straddling the
+        # threshold it produced a camera rebind per tick, which is the exact
+        # thrash the dwell and the hold exist to prevent.
+        holding = now < self._holding_until
         if wants_more:
             if self._raised_since is None:
                 self._raised_since = now
-            active = (now - self._raised_since) >= RAISE_DWELL_S
-            if active:
+            dwelled = (now - self._raised_since) >= RAISE_DWELL_S
+            if dwelled:
                 self._holding_until = now + HOLD_S
         else:
             self._raised_since = None
-            active = now < self._holding_until
-            if active:
-                trigger = Trigger.HOLD
-                reasons.append(f"holding {self._holding_until - now:.1f}s after the last event")
+            dwelled = False
 
+        active = dwelled or holding
         rates = dict(ACTIVE_RATES if active else IDLE_RATES)
 
-        # Thermal last, so it composes with whatever the rules above decided rather
-        # than overwriting their reasoning -- and so it always wins.
         scale = self._thermal_scale(inputs, reasons)
         if scale < 1.0:
-            trigger = Trigger.THERMAL
+            fired.append(Trigger.THERMAL)
             # The free tier is not scaled. It is what notices the next event, and
             # backing it off to save a tenth of a percent of the stream would blind
             # the controller exactly when it has decided to look less.
             for key in ("camera_hz", "here_hz"):
                 rates[key] = rates[key] * scale
 
+        clamped = [k for k, v in rates.items() if _clamp(v) != v]
+        rates = {k: _clamp(v) for k, v in rates.items()}
+
+        return self._record(
+            rates=rates, fired=fired, reasons=reasons, scale=scale, clamped=clamped,
+            active=active, dwelled=dwelled, holding=holding, inputs=inputs, now=now,
+        )
+
+    def _record(self, *, rates, fired, reasons, scale, clamped, active, dwelled,
+                holding, inputs, now) -> Decision:
+        """Name the decision in one word, without letting that word mislead.
+
+        `trigger` used to be whichever rule was checked last, which produced two
+        wrong statements. During the dwell it named a raise rule on a decision whose
+        rates were the idle set. And when a raise and a backoff both fired it said
+        `thermal_backoff` while the camera had tripled -- the rule that actually
+        moved the rates surviving only in free text, which is what the closed
+        vocabulary was introduced to avoid.
+
+        So the word describes the RATE LEVEL, and thermal claims it only when the
+        backoff is the whole story. Everything that fired is in `rules_fired`.
+        """
+        raises = [rule for rule in fired if rule != Trigger.THERMAL]
+        if active and dwelled and raises:
+            trigger = raises[0]
+        elif active and holding:
+            trigger = Trigger.HOLD
+            reasons.append(f"holding {self._holding_until - now:.1f}s after the last event")
+        elif scale < 1.0:
+            trigger = Trigger.THERMAL
+        else:
+            trigger = Trigger.IDLE
+
         decision = Decision(
-            rates={k: _clamp(v) for k, v in rates.items()},
-            trigger=trigger,
-            reasons=reasons,
-            thermal_scale=scale,
+            rates=rates, trigger=trigger, reasons=reasons, thermal_scale=scale,
+            rules_fired=fired, clamped=clamped,
+            here_query=self._here_query(inputs, rates["here_hz"]),
         )
         self._last = decision
         return decision
+
+    def _here_query(self, inputs: Inputs, here_hz: float) -> Any:
+        """The query that goes down with `here_hz`.
+
+        Radius follows the rate: asking less often means each answer has to cover
+        more of the road ahead, because the vehicle travels further between
+        responses. None without a fix -- a query centred on a position we do not
+        have describes nowhere, and the phone would spend a cellular call on it.
+        """
+        if inputs.lat is None or inputs.lon is None:
+            return None
+        from transport.messages import HereQuery
+
+        speed = inputs.ego_speed if inputs.ego_speed and inputs.ego_speed > 0 else 20.0
+        # What the vehicle covers before the next answer, with headroom, floored so
+        # a stationary car still asks about a useful stretch.
+        radius_m = max(MIN_QUERY_RADIUS_M, min(MAX_QUERY_RADIUS_M, speed / max(here_hz, 1e-6) * 2.0))
+        return HereQuery(
+            in_=f"circle:{inputs.lat:.5f},{inputs.lon:.5f};r={int(radius_m)}",
+            location_ref="shape",
+            lat=float(inputs.lat), lon=float(inputs.lon), radius_m=float(radius_m),
+        )
 
     def _thermal_scale(self, inputs: Inputs, reasons: list[str]) -> float:
         """How much to back off. Silence is not nominal."""
@@ -222,9 +313,20 @@ class SensingController:
             reasons.append("thermal unknown: no telemetry received")
             return THERMAL_SCALE["unknown"]
 
+        if inputs.telemetry_age_s is not None and inputs.telemetry_age_s > MAX_TELEMETRY_AGE_S:
+            # A report that has aged out is no report. The phone's telemetry thread
+            # can die while the session stays healthy, and one `nominal` from
+            # minutes ago would otherwise pin full rates for the rest of the drive.
+            reasons.append(f"thermal stale: {inputs.telemetry_age_s:.1f}s old")
+            return THERMAL_SCALE["unknown"]
+
         scale = THERMAL_SCALE.get(inputs.thermal_status or "unknown", THERMAL_SCALE["unknown"])
-        if inputs.thermal_status is not None and scale < 1.0:
+        if scale < 1.0 and inputs.thermal_status is not None:
             reasons.append(f"thermal status {inputs.thermal_status}")
+        elif scale < 1.0:
+            # Reachable when a status is absent but a skin reading is not. A 40%
+            # rate cut with nothing saying why is not a decision anyone can audit.
+            reasons.append("thermal status unknown")
 
         # Skin temperature moves before the status does. Measured on the handset:
         # 5.4 C of warming under camera load with the status `nominal` throughout.
