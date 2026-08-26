@@ -828,10 +828,36 @@ tunnels over USB and is unaffected.
     vector legitimately feed-informed needs the **simulator's** sensing model to
     produce congestion without AVs — a training-side change, outside section F,
     and the real blocker behind both retractions.
-29. Sensing controller producing four independent rates and the per-modality
+29. ~~Sensing controller producing four independent rates and the per-modality
     settings that go down with them. Inputs: the free always-on IMU/GPS tier as
     a trigger proxy, advisory bin-boundary proximity, disagreement between
-    sources, and thermal backoff from the phone.
+    sources, and thermal backoff from the phone.~~ **DONE** — nothing in
+    `deployment/jetson/` had ever constructed a `RateCommand`, and one of the four
+    named inputs was invisible: `PhoneLink` never read the `telemetry` channel, so
+    thermal status, headroom and skin temperature arrived and were dropped. Bin
+    proximity is the policy's own `top1 - top2` margin, since the policy emits
+    discrete bins and has no continuous value to sit near a boundary. Thermal is a
+    trailing multiplier so it wins by construction, skin temperature backs off
+    before the status moves (measured: 5.4 °C of warming with the status
+    `nominal` throughout), the free tier is never scaled because it is what
+    notices the next event, and silence is not nominal. Rates cannot express
+    "off" — the wire refuses zero — so every combination is swept against its
+    bounds. **Validation found nine defects in three rounds, four of them in code
+    written to fix the previous round's.** The pattern worth keeping: *more
+    evidence produced lower rates* (a fresh event mid-hold took the camera 5 Hz →
+    1 Hz, and a straddling signal caused a rebind per tick — the exact thrash the
+    dwell existed to prevent); the *backoff cancelled itself* (call rate ÷6.7,
+    query area ×45, so cellular bytes and heat were unchanged); a *GPS dropout
+    stopped every rate command* (this codebase spells "no position" NaN, not
+    None, and `MessageRouter.send` raises rather than drops, so one NaN fix took
+    all four rates with it); and the round-2 bridge *reinstated the round-2
+    defect* at `critical`, because it re-derived "was active" from a thermally
+    scaled rate. Experiment: a 220-tick scripted drive, **0 commands refused by
+    the wire**, no query through the tunnel, radius flat under backoff. **Open:**
+    `MAX_QUERY_RADIUS_M = 10 km` has never been checked against what HERE v7
+    accepts for `in=circle;r=` — nothing in the repo documents a bound and the API
+    must not be called, so if their ceiling is lower the largest radii are refused
+    by HERE rather than by the codec, and neither side would catch it.
 30. Shadow / live mode flag. In shadow mode the controller emits the decisions it
     would make without gating; in live mode it gates for real. Both paths
     implemented, flag flippable at runtime.
