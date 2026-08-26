@@ -356,3 +356,16 @@ class TestDeclineProvenance:
                      heading_deg=90.0, t_mono=100.0)
         result = ObservationBuilder(BuilderConfig()).build([], gps, t_mono=100.0)
         assert result.diagnostics["feed"]["declined"] == Decline.NO_READING
+
+
+def test_the_record_carries_every_value_a_controller_can_act_on():
+    # `free_flow_mps` is the one value a task-29 controller can use live that the
+    # artifact could not otherwise reproduce: a per-link speed the config constant
+    # cannot supply. A decision taken on it has to be explicable afterwards.
+    record = feed_fusion.to_record(own(reading(link=link(free_flow=8.3))))
+    assert record["free_flow_mps"] == pytest.approx(8.3)
+
+    owned = own(reading(link=link(free_flow=8.3)))
+    for name in vars(owned):
+        assert name in {"downstream_congestion", "free_flow_mps", "declined",
+                        "age_s", "is_proxy"}, f"{name} is on the object and unrecorded"

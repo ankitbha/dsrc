@@ -15,8 +15,16 @@ ratio below is used instead -- the fraction of free-flow speed lost, which is a
 proportion of the same kind, computed from two fields the response already carries.
 
 It is still an approximation of something the live system cannot observe: a phone has
-no segment-wide view. So it carries its own provenance value rather than `measured`,
-and **task 47's parity check for this field has to compare behaviour, not equality.**
+no segment-wide view.
+
+**And it does not reach the observation at all.** Validation established that the
+simulator moves this field only as part of a block -- with no AVs near it pins
+congestion, merge pressure and target speed together, and 0 of 1,095 rollout samples
+have congestion above zero without AVs. A lone instrumented car never has equipped
+neighbours, so writing it would put the policy in that empty cell on every tick.
+The value is published beside the vector instead, for the sensing controller.
+`SOURCE_FEED` is kept as the reserved provenance name for whatever does eventually
+own a field; nothing emits it today.
 
 Two fields were considered and refused, both for the same reason:
 
@@ -171,4 +179,10 @@ def to_record(ownership: FeedOwnership) -> dict[str, Any]:
         "age_s": None if ownership.age_s is None else round(ownership.age_s, 3),
         "age_is_proxy": ownership.is_proxy,
         "downstream_congestion": ownership.downstream_congestion,
+        # The one value a controller can act on live that the artifact could not
+        # otherwise reproduce -- a per-link speed the config constant cannot
+        # supply. Recorded before task 29 has a decision to explain, rather than
+        # after: this project has already paid once for a measurement that was
+        # taken, acted on, and never written down.
+        "free_flow_mps": ownership.free_flow_mps,
     }
