@@ -858,9 +858,60 @@ tunnels over USB and is unaffected.
     accepts for `in=circle;r=` — nothing in the repo documents a bound and the API
     must not be called, so if their ceiling is lower the largest radii are refused
     by HERE rather than by the codec, and neither side would catch it.
-30. Shadow / live mode flag. In shadow mode the controller emits the decisions it
+30. ~~Shadow / live mode flag. In shadow mode the controller emits the decisions it
     would make without gating; in live mode it gates for real. Both paths
-    implemented, flag flippable at runtime.
+    implemented, flag flippable at runtime.~~ **DONE** — half of it already existed
+    and was right: `ConfigApplier` on the phone treats a shadow command as changing
+    "nothing at all", and counts what it shadowed. What was missing was the Jetson
+    deciding which it is sending. The property the whole thing rests on is that
+    **the mode never reaches the decision** — task 43 checks that logged shadow
+    decisions match what live gating produces on the same input, and a `decide()`
+    that could see the mode would make that check compare a function against itself
+    and pass whatever the code did. So the mode is applied strictly on the way out,
+    selecting one boolean, and `decide`'s signature is asserted structurally rather
+    than left to review. **All three validation rounds found the same defect one
+    step further in: the record read a live drive as a pure-shadow one.** Round 1:
+    a pure shadow drive has no traffic feed at all, because `ConfigApplier.apply`
+    returns on the shadow branch *before* `setHereQuery`, so the phone never calls
+    HERE, `feed_congestion` is None on every tick, and `Trigger.DISAGREEMENT` — one
+    of three raise rules — cannot fire; task 35 would have credited every candidate
+    policy equally for a rule none of them had the chance to use. Round 2: the fix
+    keyed on `f.was == LIVE`, and **a flip records the mode it came from**, so it
+    asked "has this drive *left* live?" — a drive promoted and left there, the
+    normal shape, still claimed the reference rates *and* still named the feed
+    absent. Not monotone in live exposure either: False on leaving live, never on
+    entering. Round 3: keying on "ever live" then collapsed a **mid-drive
+    promotion** into a born-live drive, reporting nothing absent for a log whose
+    leading segment had no feed — the unsafe direction, for the same reason. It now
+    keys on being live from the first tick and publishes `feed_possible_from_mono`
+    beside it, a lower bound because the query goes down at the flip and the
+    response arrives later. **Four tests pinned nothing they were named for.** The
+    unreachability test read `trigger`, which is `raises[0]`, so a co-firing event
+    hid the rule; the absent list was compared against the constant it came from,
+    so declaring `camera_density_bin` absent passed; `command_for` could drop the
+    HERE query or the capture stamp with the suite green, because
+    `shadowed.here == live.here` is two references to one object; and a concurrency
+    test **executed its loop body zero times** — `Thread.start()` releases the GIL,
+    so 400 flips finished before the main thread was rescheduled, leaving four dead
+    assertions and one whose failure message read "the flipper did not finish, so
+    the reader raced nothing" while passing on a run where the reader raced
+    nothing. Replaced by forcing the interleave: `flip_to` calls the injected clock
+    inside its critical section, so the clock *is* the middle of the flip.
+    Experiment: a 120-tick drive replayed in both modes — **120/120 decisions
+    identical, 120/120 commands differing by exactly the flag, 0 refused by the
+    wire**, and four mode histories each recording itself. **The method lesson cost
+    more than any single defect.** A throwaway mutation harness scored on
+    `returncode != 0` reported nine of nine CAUGHT having run no tests, because
+    `pytest-timeout` is absent and `--timeout=60` exits 4 on a usage error;
+    rescored, three had survived. `scripts/remutate.py` already scores on *which*
+    test failed for exactly that reason — the reason I did not reach for it is that
+    it rebuilt both Gradle suites per mutation, so it now takes a kind filter. It
+    then caught a bad pin of mine by naming a module instead of a test: deleting a
+    two-line block orphaned the `if` beneath it, so the "catch" was the Python
+    parser. Collection errors are refused as verdicts now. 17 pins, 0 survived.
+    **Open:** making the feed available in shadow would mean letting a shadow
+    command carry a query into effect, which changes what `shadow` means on the
+    wire — a protocol decision, raised rather than taken.
 31. Integration into the existing tick loop, advisory returned to the phone.
 32. End-to-end run over the network backend, phone and Jetson apart, exercising
     the whole loop before any USB work.
