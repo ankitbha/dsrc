@@ -197,7 +197,10 @@ class TestTheCommandCadence:
         clock.advance(4.9)
         loop.on_tick(tick(), phone)
         assert len(phone.commands) == 1
-        clock.advance(0.2)
+        # Exactly on the boundary, not past it: stepping 4.9 then 0.2 straddles it
+        # and cannot tell `>=` from `>`, which is the difference between resending
+        # at the heartbeat and resending one tick later, forever.
+        clock.advance(0.1)
         loop.on_tick(tick(), phone)
         assert len(phone.commands) == 2
         assert loop.sends_by_reason.get("heartbeat") == 1
@@ -236,6 +239,22 @@ class TestTheQueryGoesStaleInSpace:
         loop.on_tick(tick(lat=51.49 + _degrees_north(moved * 1.1)), phone)
         assert len(phone.commands) == 2
         assert loop.sends_by_reason.get("query_moved") == 1
+
+    def test_a_drive_with_no_fix_at_all_does_not_resend_every_tick(self):
+        # The None guard in `_query_moved` had no test, so the module's central
+        # property -- a command does not go down every tick -- was unpinned for
+        # exactly the drive where GPS is absent, which is when the phone can least
+        # afford the traffic.
+        clock = Clock()
+        loop = SensingLoop(clock=clock, heartbeat_s=1000.0)
+        phone = Phone()
+        for _ in range(40):
+            clock.advance(0.02)
+            blind = tick()
+            blind.gps.valid = False
+            loop.on_tick(blind, phone)
+        assert [c.here for c in phone.commands] == [None]
+        assert len(phone.commands) == 1
 
     def test_losing_the_fix_is_a_change_not_a_move(self):
         # Reporting a distance from a position that does not exist is how the two
@@ -307,6 +326,35 @@ class TestTheWireIsTheArbiter:
             for command in phone.commands:
                 decoded = decode_message(Channel.RATE_CMD, *command.to_wire())
                 assert decoded.shadow is (mode != LIVE)
+
+
+class TestTheFeedReachesTheController:
+    """The only wiring that makes `Trigger.DISAGREEMENT` reachable at all."""
+
+    def test_the_feeds_congestion_is_handed_to_the_controller(self):
+        # `inputs_from` reading `feed.downstream_congestion` had no test: the helper
+        # took a `feed=` nothing passed, and the smoke test runs without a phone. So
+        # replacing the whole expression with None left the suite green while one of
+        # the controller's three raise rules could never fire on a real drive.
+        from perception.feed_fusion import FeedOwnership
+        from policy.sensing_controller import Trigger
+
+        jammed = FeedOwnership(downstream_congestion=0.9, free_flow_mps=30.0,
+                               age_s=1.0)
+        inputs = inputs_from(tick(feed=jammed, density=0), None, now=1000.0)
+        assert inputs.feed_congestion == pytest.approx(0.9)
+
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        clock.advance(10.0)
+        loop.on_tick(tick(feed=jammed, density=0), None)
+        clock.advance(1.0)
+        outcome = loop.on_tick(tick(feed=jammed, density=0), None)
+        assert Trigger.DISAGREEMENT in outcome.decision.rules_fired
+
+    def test_no_feed_is_not_a_clear_road(self):
+        inputs = inputs_from(tick(feed=None), None, now=1000.0)
+        assert inputs.feed_congestion is None
 
 
 class TestInputsFromATick:

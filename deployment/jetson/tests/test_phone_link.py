@@ -17,7 +17,7 @@ from sensors.phone_link import PhoneLink
 from transport.channels import Channel
 from transport.handshake import Hello, Role
 from transport.loopback import LoopbackAcceptor, loopback_pair
-from transport.messages import InvalidMessage, MessageRouter, RateCommand
+from transport.messages import GpsRecord, InvalidMessage, MessageRouter, RateCommand
 from transport.session import Session
 from transport.timebase import OneWaySample, now_mono_ns
 
@@ -284,19 +284,33 @@ class TestSessionEndPropagates:
     after a frame it will never get again -- so the run never ended at all.
     """
 
-    def test_a_closed_session_ends_the_camera_stream(self):
+    def test_a_closed_session_ends_the_camera_stream_once_the_redial_is_given_up_on(self):
+        # This used to assert the stream ended as soon as the session did. It no
+        # longer does, and that is the point of the supervisor: a phone that hangs
+        # up may redial, and ending the stream in the first 5 ms terminated the drive
+        # before anyone looked. The concern behind the old assertion survives
+        # unchanged -- the consumer must not wait FOREVER -- so it is now a bounded
+        # wait, and the bound is the one the supervisor is working to.
         phone, jetson, up, down = phone_and_jetson()
         link = PhoneLink()
+        link.rebind_timeout_s = 0.3
         try:
             attach(link, jetson, down)
             assert link.camera.end_of_stream is False
 
             phone.close()
+            # Not immediately: a redial is still possible for as long as the
+            # supervisor is looking.
+            time.sleep(0.1)
+            assert link.camera.end_of_stream is False, \
+                "the drive would have stopped before the redial was looked for"
+
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline and not link.camera.end_of_stream:
                 time.sleep(0.02)
 
             assert link.camera.end_of_stream, "a dead session left the consumer waiting forever"
+            assert link.supervisor_ended == "gave_up_after_0.3s"
         finally:
             link.stop()
             phone.close()
@@ -858,5 +872,186 @@ class TestRedial:
             assert sum(1 for t in threading.enumerate()
                        if t.name == "phone-supervisor") == 1
             phones[-1].hang_up()
+        finally:
+            link.stop()
+
+
+class TestTheRunKeepsItsSensors:
+    """A redial reconnects the link. It must reconnect the RUN.
+
+    `run_demo.build_components` binds `camera = phone.camera` and `gps = phone.gps`
+    once, and the pipeline worker closes over both for the life of the drive. A
+    rebind that constructed new backends left the run polling the previous session's
+    corpse while the new session's frames arrived at objects nobody read -- and every
+    test in `TestRedial` passed either way, because none of them held a reference the
+    way the run does.
+    """
+
+    def _rebound(self, acceptor, link):
+        dialling = dial(acceptor, "phone-one")
+        assert link.wait_for_phone(timeout_s=5.0) is True
+        first = dialling.result(timeout=5.0)
+        held_camera, held_gps = link.camera, link.gps
+        first.hang_up()
+        second = LoopbackPhone(acceptor, "phone-two")
+        assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+        return held_camera, held_gps, second
+
+    def test_the_object_the_run_is_holding_is_the_one_that_gets_rebound(self):
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            camera, gps, second = self._rebound(acceptor, link)
+            assert link.camera is camera, "the run's camera was replaced"
+            assert link.gps is gps, "the run's gps was replaced"
+            # And it is reading the NEW session, not still polling the dead one.
+            assert wait_until(lambda: camera._router is link.router)
+            assert gps._router is link.router
+            assert camera.health()["reader_alive"] is True
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_data_from_the_second_phone_reaches_the_object_the_run_holds(self):
+        # Identity alone is not enough: a rebound object that never restarted its
+        # reader is the same object and just as useless.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            _, gps, second = self._rebound(acceptor, link)
+            before = gps.messages_received
+            assert MessageRouter(second.session).send(GpsRecord(
+                t_capture_mono_ns=now_mono_ns(), valid=True, fix_quality=1,
+                num_sats=9, lat=40.744, lon=-74.032, speed_mps=27.0,
+                heading_deg=90.0, hdop=0.9, altitude_m=10.0,
+            ))
+            assert wait_until(lambda: gps.messages_received > before), \
+                "the second phone's fixes reached nothing the run can see"
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_the_camera_does_not_end_the_stream_while_a_redial_is_expected(self):
+        # `run_demo`'s worker breaks on `end_of_stream`, and the reader notices the
+        # closed session within one 5 ms poll -- so the drive used to terminate
+        # before the supervisor had even begun looking for the next dial-in.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            camera = link.camera
+
+            first.hang_up()
+            # Through the whole gap, not merely at the end of it.
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                assert camera.end_of_stream is False, "the run would have stopped here"
+                time.sleep(0.01)
+
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+            assert camera.end_of_stream is False
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_giving_up_ends_the_stream_and_says_so(self):
+        # The inverse. A consumer that only ever sees "no frame right now" waits for
+        # a phone that is never coming, and the run hangs instead of finishing.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        link.rebind_timeout_s = 0.3
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            camera = link.camera
+            first.hang_up()
+
+            assert wait_until(lambda: link.supervisor_ended is not None), "never gave up"
+            assert link.supervisor_ended == "gave_up_after_0.3s"
+            assert camera.end_of_stream is True
+            assert link.to_record()["supervisor_ended"] == "gave_up_after_0.3s"
+        finally:
+            link.stop()
+
+
+class TestWhatANewDeviceInherits:
+    """The estimator is reset because a new session is a new peer. So is everything
+    else the peer reported."""
+
+    def test_the_previous_phones_thermal_report_is_not_applied_to_the_new_one(self):
+        # The controller's telemetry age gate is 10 s and a rebind takes seconds, so
+        # a `nominal` reading from the handset that just hung up licensed full camera
+        # and HERE rates on the one that replaced it -- and a `critical` one would
+        # have cut a healthy handset by 6.7x.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            link.telemetry = type("T", (), {"thermal_status": "nominal",
+                                            "skin_temp_c": 28.0})()
+            link.telemetry_at_mono = time.monotonic()
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert link.telemetry is None, "phone-two inherited phone-one's temperature"
+            assert link.telemetry_at_mono is None
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_the_previous_phones_traffic_feed_is_not_kept(self):
+        # Its readings describe where the OTHER device was, for up to the feed's
+        # 30 s staleness window.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            stale_feed = link.here
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert link.here is not stale_feed, "phone-two inherited phone-one's road"
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_the_finished_sessions_record_is_kept_not_overwritten(self):
+        # `to_record` reads live objects and a rebind replaces them, so a run whose
+        # first session proxied every frame published `proxied: 0` afterwards --
+        # exactly the failure this record's docstring exists to prevent.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            link.estimator.add(OneWaySample(exchange_id=1, t1_remote_send_ns=10,
+                                            t2_local_recv_ns=20))
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            record = link.to_record()
+            assert len(record["sessions"]) == 1
+            kept = record["sessions"][0]
+            assert kept["peer_device_id"] == "phone-one"
+            assert kept["timebase"]["samples_accepted"] == 1
+            assert kept["end_reason"] is not None
+            # And the live fields describe the CURRENT session, not the old one.
+            assert record["timebase"]["samples_accepted"] == 0
+            assert record["peer_device_id"] == "phone-two"
+            second.hang_up()
         finally:
             link.stop()

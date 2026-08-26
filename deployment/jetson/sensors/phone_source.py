@@ -149,6 +149,24 @@ class _PhoneSource:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 
+    def rebind(self, router: Any, adapter: PhoneClockAdapter) -> None:
+        """Point this source at a new session, keeping its identity.
+
+        The consumers hold these objects for the life of the run -- `run_demo`
+        binds `camera` and `gps` once, at build time, and the pipeline worker
+        closes over both. So a redial that CONSTRUCTED new sources reconnected
+        the link to objects nobody was reading: the run went on polling the
+        previous session's corpse while the new session's frames arrived at a
+        camera with no consumer.
+
+        Identity is the whole point of this method. Everything below the object
+        changes; the object does not.
+        """
+        self.stop()
+        self._router = router
+        self._adapter = adapter
+        self.start()
+
     def _loop(self) -> None:
         try:
             self._read_until_stopped()
@@ -232,6 +250,13 @@ class PhoneCameraStream(_PhoneSource):
         self._last_consumed_id = -1
         self._drop_counter = 0
         self.end_of_stream = False
+        #: Set by `PhoneLink` for as long as a lost session may be replaced. The
+        #: reader still ends -- the session under it is gone -- but the STREAM has
+        #: not, and `run_demo`'s worker breaks on `end_of_stream`. Without this the
+        #: drive terminated within one 5 ms poll of the phone hanging up, before the
+        #: supervisor had even begun looking for the next dial-in, and the rebind
+        #: then succeeded into a run that had already stopped.
+        self.awaiting_link = False
         self.decode_failures = 0
         # Read by every camera consumer in the tree. `run_demo` reads
         # `file_recoveries` unconditionally in its summary block, so without it a
@@ -243,7 +268,10 @@ class PhoneCameraStream(_PhoneSource):
 
     def _on_reader_ended(self) -> None:
         with self._cond:
-            self.end_of_stream = True
+            # Woken either way: a consumer blocked in `wait_for_fresh` must find out
+            # that nothing is coming right now, whether or not anything will later.
+            if not self.awaiting_link:
+                self.end_of_stream = True
             self._cond.notify_all()
 
     def _on_reader_restarted(self) -> None:
@@ -255,7 +283,27 @@ class PhoneCameraStream(_PhoneSource):
         # A stopped source is an ended source. `run_demo` breaks on this, so
         # leaving it False turned a dead link into an infinite wait_for_fresh
         # loop where a file camera exits cleanly.
+        #
+        # `rebind` goes through here too, which is why it is `awaiting_link` and
+        # not the caller that decides: during a redial the stop is a step in
+        # reconnecting, not the end of anything.
         self._on_reader_ended()
+
+    def expect_redial(self, expected: bool) -> None:
+        """Whether a lost session will be replaced by another one.
+
+        Standing state, set by whoever supervises the link -- NOT something to set
+        when the session drops. The reader notices a closed session within one 5 ms
+        poll and the supervisor sees it on a 100 ms one, so a flag raised at teardown
+        loses that race every time and the stream ends before anyone can say it
+        should not have.
+
+        Clearing it ends the stream immediately, because by then the consumer is
+        waiting on something that is not coming.
+        """
+        self.awaiting_link = expected
+        if not expected:
+            self._on_reader_ended()
 
     def _accept(self, message, receipt, stamp: TimebaseStamp) -> None:
         try:

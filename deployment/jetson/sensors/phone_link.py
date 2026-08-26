@@ -33,6 +33,7 @@ is this module's own stated failure mode one level up.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any
@@ -151,6 +152,16 @@ class PhoneLink:
         #: not the same drive as one that never lost it, and `session_id` alone cannot
         #: tell them apart afterwards.
         self.rebinds: list[dict[str, Any]] = []
+        #: The finished sessions' records, in order. `to_record` reads live objects,
+        #: and a rebind replaces them -- so a run whose first session proxied every
+        #: frame recorded `proxied: 0` afterwards, which is precisely the failure
+        #: this record's own docstring exists to prevent, reintroduced by the redial
+        #: path. Kept rather than overwritten.
+        self.sessions: list[dict[str, Any]] = []
+        #: How the supervisor finished, or None while it is still watching. A run
+        #: that gave up waiting and one still hoping look identical otherwise:
+        #: no camera, no gps, no rebind entry.
+        self.supervisor_ended: str | None = None
         #: Why a connection did not become a session. The diagnosis exists --
         #: "protocol version mismatch: local 2, remote 1" -- and was being pulled
         #: off the queue and dropped, so a phone that dialled in and was refused
@@ -206,10 +217,25 @@ class PhoneLink:
             self._supervisor.start()
 
     def _start_session_workers(self) -> None:
-        """Everything that belongs to one session, in the order it comes up."""
+        """Everything that belongs to one session, in the order it comes up.
+
+        The two sensor backends are built once and REBOUND afterwards. `run_demo`
+        binds `camera` and `gps` at build time and the pipeline worker closes over
+        both for the life of the run, so replacing the objects here reconnected the
+        link to sensors nothing was reading.
+        """
         self.router = MessageRouter(self.session)
-        self.camera = PhoneCameraStream(self.router, self.adapter).start()
-        self.gps = PhoneGpsReader(self.router, self.adapter).start()
+        if self.camera is None or self.gps is None:
+            self.camera = PhoneCameraStream(self.router, self.adapter).start()
+            self.gps = PhoneGpsReader(self.router, self.adapter).start()
+        else:
+            self.camera.rebind(self.router, self.adapter)
+            self.gps.rebind(self.router, self.adapter)
+        # This link supervises, so a closed session is a gap until the supervisor
+        # says otherwise. Set here rather than at teardown: the reader sees the close
+        # on a 5 ms poll and the supervisor on a 100 ms one, so a flag raised when
+        # the session drops arrives after the stream has already ended.
+        self.camera.expect_redial(True)
         self._responder = threading.Thread(
             target=self._answer_pings, name="phone-timesync", daemon=True
         )
@@ -233,14 +259,11 @@ class PhoneLink:
         for worker in (self._responder, self._here_reader, self._telemetry_reader):
             if worker is not None:
                 worker.join(timeout=2.0)
-        for source in (self.camera, self.gps):
-            if source is not None:
-                source.stop()
         if self.session is not None:
             self.session.close()
         self._responder = self._here_reader = self._telemetry_reader = None
-        self.camera = self.gps = None
-        self.router = None
+        # The sensors are NOT stopped or dropped here. `rebind` stops and restarts
+        # them, and the run is holding them by identity.
 
     def _supervise(self) -> None:
         """Rebind to the next phone rather than ending the run.
@@ -256,7 +279,22 @@ class PhoneLink:
             ended = _end_reason_of(self.session)
             down_from = time.monotonic()
             self._stop_session_workers()
+            # Said out loud. The drive now stalls for up to `rebind_timeout_s` with a
+            # camera that reports no frame and no end, which is the right behaviour
+            # and an alarming silence to sit through without a word.
+            logging.getLogger(__name__).warning(
+                "phone link down (%s); waiting up to %.0fs for a redial",
+                ended, self.rebind_timeout_s,
+            )
             if not self._rebind(down_from=down_from, previous_end_reason=ended):
+                # Now it really is over. Said out loud, and to the camera, because a
+                # consumer that only ever sees "no frame right now" waits forever.
+                self.supervisor_ended = (
+                    "stopped" if self._stop.is_set()
+                    else f"gave_up_after_{self.rebind_timeout_s:g}s"
+                )
+                if self.camera is not None:
+                    self.camera.expect_redial(False)
                 return
 
     def _rebind(self, *, down_from: float, previous_end_reason: str | None) -> bool:
@@ -269,11 +307,25 @@ class PhoneLink:
                 continue
             if not isinstance(event, SessionStarted):
                 continue
+            # Everything the previous DEVICE said, kept before it is dropped.
+            self.sessions.append(self._session_record())
             # A new session is a new peer clock. Carrying the old estimate over
             # would convert the new session's first stamps against the previous
             # phone's offset and report them as healthy.
             self.estimator = OneWayEstimator()
             self.adapter = PhoneClockAdapter(self.estimator)
+            # And a new device is a new thermal state and a new position. The
+            # estimator was reset on the argument that a new session is a new peer;
+            # the same argument applies to everything else the peer reported. A
+            # `nominal` reading from the phone that just hung up licensed full rates
+            # on the handset that replaced it -- and a `critical` one cut a healthy
+            # handset by 6.7x -- because the 10 s telemetry age gate does not cover a
+            # rebind that takes seconds. `here` goes the same way: its readings
+            # describe where the previous device was, for up to its 30 s window.
+            self.telemetry = None
+            self.telemetry_at_mono = None
+            self.here = HereFeed()
+            self.here_failure = None
             self.session = event.session
             self.peer_device_id = event.handshake.remote.device_id
             self.rebinds.append({
@@ -282,7 +334,15 @@ class PhoneLink:
                 "peer_device_id": self.peer_device_id,
                 "session_id": self.session.session_id,
             })
-            self._start_session_workers()
+            # Through `_begin`, not `_start_session_workers`. The single-supervisor
+            # guard lives in `_begin`, and calling past it left the guard unreachable
+            # on the only path that could ever need it -- so the test asserting one
+            # supervisor was passing because `wait_for_phone` is called once.
+            self._begin()
+            logging.getLogger(__name__).warning(
+                "phone link back after %.1fs on %s",
+                self.rebinds[-1]["down_s"], self.peer_device_id,
+            )
             return True
         return False
 
@@ -429,6 +489,11 @@ class PhoneLink:
     def stop(self) -> None:
         """Reverse of coming up, and safe to call when it never came up."""
         self._stop.set()
+        # A deliberate stop is not a gap. Without this the camera would report the
+        # stream still open after teardown and a consumer would wait out its whole
+        # timeout on every run.
+        if self.camera is not None:
+            self.camera.expect_redial(False)
         if self._supervisor is not None:
             self._supervisor.join(timeout=3.0)
         for worker in (self._responder, self._here_reader, self._telemetry_reader):
@@ -440,6 +505,21 @@ class PhoneLink:
         if self.session is not None:
             self.session.close()
         self._listener.stop()
+
+    def _session_record(self) -> dict[str, Any]:
+        """What one session did, snapshotted before its objects are replaced."""
+        return {
+            "session_id": None if self.session is None else self.session.session_id,
+            "peer_device_id": self.peer_device_id,
+            "end_reason": _end_reason_of(self.session),
+            "pings_answered": self.pings_answered,
+            "timebase": self.estimator.to_record(),
+            "clock": self.adapter.to_record(),
+            "camera": None if self.camera is None else self.camera.to_record(),
+            "gps": None if self.gps is None else self.gps.to_record(),
+            "here": self.here.to_record(),
+            "telemetry_received": self.telemetry_received,
+        }
 
     def to_record(self) -> dict[str, Any]:
         """Provenance for the run.
@@ -466,6 +546,14 @@ class PhoneLink:
             # `peer_closed` matched neither.
             "end_reason": _end_reason_of(self.session),
             "pings_answered": self.pings_answered,
+            # Every session before the current one. The fields below read live
+            # objects, and a rebind replaces them -- so without this a run whose
+            # first session proxied every frame published `proxied: 0` afterwards.
+            "sessions": list(self.sessions),
+            # None while the supervisor is still watching. A run that gave up waiting
+            # and one still hoping otherwise look identical: no camera, no gps, and
+            # no rebind entry.
+            "supervisor_ended": self.supervisor_ended,
             # What went down the link, and what could not. `sends_without_a_session`
             # being nonzero with an empty `rebinds` means the drive was sending into a
             # link that never came back, which reads nothing like a clean run.
