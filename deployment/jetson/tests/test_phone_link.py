@@ -519,3 +519,67 @@ class TestHereResponseAge:
         finally:
             link.stop()
             phone.close()
+
+
+class TestTelemetryIngestion:
+    """The channel the Jetson never read.
+
+    thermal_status, thermal_headroom and skin_temp_c arrived and were dropped on the
+    floor, so the one input that argues for LOWER rates was the one this side could
+    not see.
+    """
+
+    def test_a_telemetry_frame_reaches_the_link(self):
+        from transport.messages import PhoneTelemetry
+
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            assert up.send(PhoneTelemetry(
+                t_capture_mono_ns=now_mono_ns() + TRUE_OFFSET_NS,
+                thermal_status="moderate", thermal_headroom=None,
+                achieved={"camera_hz": 4.9, "gps_hz": 1.0, "imu_hz": 49.8, "here_hz": 0.2},
+                dropped={"camera": 0, "gps": 0, "imu": 0, "here": 0},
+                here_calls=0, here_errors=0, skin_temp_c=41.5, skin_temp_zone="xo_therm",
+            ))
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and link.telemetry_received == 0:
+                time.sleep(0.02)
+
+            assert link.telemetry_received == 1
+            record = link.to_record()["telemetry"]
+            assert record["thermal_status"] == "moderate"
+            assert record["skin_temp_c"] == 41.5
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_a_drive_that_heard_nothing_says_so_rather_than_reading_cool(self):
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            record = link.to_record()["telemetry"]
+            assert record["received"] == 0
+            assert record["thermal_status"] is None
+            assert record["skin_temp_c"] is None
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_a_closed_session_stops_the_telemetry_reader(self):
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            reader = link._telemetry_reader
+            phone.close()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and reader.is_alive():
+                time.sleep(0.02)
+            assert not reader.is_alive()
+        finally:
+            link.stop()
+            phone.close()

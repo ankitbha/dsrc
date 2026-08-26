@@ -103,6 +103,13 @@ class PhoneLink:
         #: position at the moment it asks, not at the moment the bytes arrived.
         self.here = HereFeed()
         self.here_failure: str | None = None
+        #: The phone's last self-report. Read because the sensing controller backs
+        #: off on thermal, and until now nothing on this side read the channel at
+        #: all -- thermal_status, thermal_headroom and skin_temp_c arrived and were
+        #: dropped on the floor, so the one input that argues for LOWER rates was
+        #: the one the Jetson could not see.
+        self.telemetry: Any = None
+        self.telemetry_received = 0
         #: Counted, not just named. `refused_by_reason` exists so refusals are
         #: counted rather than inferred, and the guard path was the one outcome
         #: countable only by subtraction -- one string cannot tell one bad body
@@ -118,6 +125,7 @@ class PhoneLink:
         self._stop = threading.Event()
         self._responder: threading.Thread | None = None
         self._here_reader: threading.Thread | None = None
+        self._telemetry_reader: threading.Thread | None = None
 
     @property
     def host(self) -> str:
@@ -161,6 +169,10 @@ class PhoneLink:
             target=self._read_here, name="phone-here", daemon=True
         )
         self._here_reader.start()
+        self._telemetry_reader = threading.Thread(
+            target=self._read_telemetry, name="phone-telemetry", daemon=True
+        )
+        self._telemetry_reader.start()
 
     def _answer_pings(self) -> None:
         """Answer every ping, and take the arrival as a one-way sample.
@@ -232,10 +244,28 @@ class PhoneLink:
                 self.here_failures += 1
 
 
+    def _read_telemetry(self) -> None:
+        """Keep the phone's latest self-report.
+
+        Latest only, not a history: the controller asks "how hot is it now", and a
+        queue of old thermal states would answer a question nobody asked while
+        growing without bound on a long drive.
+        """
+        assert self.router is not None
+        while not self._stop.is_set():
+            received = self.router.recv_with_receipt(Channel.TELEMETRY, timeout=0.05)
+            if received is None:
+                if getattr(self.session, "is_closed", False):
+                    return
+                continue
+            message, _ = received
+            self.telemetry = message
+            self.telemetry_received += 1
+
     def stop(self) -> None:
         """Reverse of coming up, and safe to call when it never came up."""
         self._stop.set()
-        for worker in (self._responder, self._here_reader):
+        for worker in (self._responder, self._here_reader, self._telemetry_reader):
             if worker is not None:
                 worker.join(timeout=2.0)
         for source in (self.camera, self.gps):
@@ -274,6 +304,16 @@ class PhoneLink:
             "clock": self.adapter.to_record(),
             "camera": None if self.camera is None else self.camera.to_record(),
             "gps": None if self.gps is None else self.gps.to_record(),
+            "telemetry": {
+                "received": self.telemetry_received,
+                # Absent rather than assumed nominal. A drive that never heard from
+                # the phone must not read as a cool one.
+                "thermal_status": getattr(self.telemetry, "thermal_status", None),
+                "thermal_headroom": getattr(self.telemetry, "thermal_headroom", None),
+                "skin_temp_c": getattr(self.telemetry, "skin_temp_c", None),
+                "skin_temp_zone": getattr(self.telemetry, "skin_temp_zone", None),
+                "reader_alive": bool(self._telemetry_reader and self._telemetry_reader.is_alive()),
+            },
             "here": {**self.here.to_record(),
                      "reader_alive": bool(self._here_reader and self._here_reader.is_alive()),
                      "failure": self.here_failure,
