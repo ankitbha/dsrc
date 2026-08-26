@@ -11,16 +11,33 @@ gating produces on the same input, and if the decision could see the mode that c
 would compare a function against itself and pass whatever the code did. So the mode
 is applied strictly on the way out, selecting one boolean on the command.
 
-**What a shadow log is and is not.** In shadow the phone keeps running the reference
-rates, because nothing is applied, so a shadow drive samples at full rate throughout
--- which is what makes one drive scorable against several candidate policies. But
-the controller is then deciding from full-rate inputs. In live, dropping the camera
-to 1 Hz changes what the next tick sees: fewer frames, a different density bin,
-perhaps a different policy margin. So a shadow log predicts the **decision function**
-exactly, tick for tick against the same inputs, and does **not** predict the
-**trajectory** -- a live drive feeds its own reduced observations back in and a
-shadow drive never does. The two diverge after the first change, and no amount of
-shadow logging closes that.
+**What a shadow log is and is not.** Three limits, and the first is the one that
+bites hardest because it is present from the first tick rather than accumulating.
+
+*The traffic feed is structurally absent from a pure shadow drive.* The phone makes
+no HERE call until the Jetson tells it what to ask, and `ConfigApplier` returns on
+the shadow branch **before** it reaches `setHereQuery`. So a drive that has only ever
+been in shadow has no query, makes no call, and sends no `here` frame; `HereFeed`
+stays empty, `feed_congestion` is None on every tick, and `Trigger.DISAGREEMENT` --
+one of the controller's three raise rules -- cannot fire at all. A shadow log
+therefore cannot credit or debit any candidate policy for that rule. This is not a
+degraded input; it is a missing one.
+
+*Reference rates are only reference until the first live segment.* After a
+live -> shadow flip the phone keeps the last live rates and the last live query --
+`setQuery(null)` is a deliberate no-op there -- so the shadow segment that follows is
+not a full-rate one. The flip log is what lets a reader tell.
+
+*And the trajectory diverges.* In shadow nothing is applied, so the controller
+decides from whatever the phone is currently running. In live, dropping the camera to
+1 Hz changes what the next tick sees: fewer frames, a different density bin, perhaps
+a different margin. So a shadow log predicts the **decision function** exactly, tick
+for tick against the same inputs, and does **not** predict the **trajectory** -- a
+live drive feeds its own reduced observations back in and a shadow drive never does.
+
+Making the feed available in shadow would mean letting a shadow command carry a query
+into effect, which changes what `shadow` means on the wire and is a protocol
+decision, not one this module may take on its own.
 """
 
 from __future__ import annotations
@@ -37,6 +54,16 @@ SHADOW = "shadow"
 LIVE = "live"
 
 MODES = (SHADOW, LIVE)
+
+#: Inputs a drive that has only ever been in shadow cannot produce, and the rules
+#: they make unreachable. The phone makes no HERE call until the Jetson sends a
+#: query, and a shadow command never reaches `setHereQuery`, so nothing about the
+#: traffic feed exists in such a log -- a candidate policy cannot be scored on a
+#: rule that never had the chance to fire.
+ABSENT_IN_PURE_SHADOW = (
+    "feed_congestion",
+    "source_disagreement",
+)
 
 
 @dataclass(frozen=True)
@@ -98,7 +125,11 @@ class ModeHolder:
                 # final mode cannot say which decisions were gated.
                 "flips": [{"at_mono": f.at_mono, "was": f.was, "now": f.now} for f in self._flips],
                 "flip_count": len(self._flips),
+                # Named rather than left to a reader to discover from an empty
+                # column. A shadow log's gaps are structural, not incidental.
                 "shadow_predicts": "the decision function, not the trajectory",
+                "absent_in_pure_shadow": list(ABSENT_IN_PURE_SHADOW),
+                "reference_rates_hold": not any(f.was == LIVE for f in self._flips),
             }
 
 

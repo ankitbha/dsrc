@@ -207,3 +207,51 @@ class TestTheCommandIsSendable:
                 command = command_for(controller.decide(inputs), mode, t_capture_mono_ns=7)
                 decoded = decode_message(Channel.RATE_CMD, *command.to_wire())
                 assert decoded.shadow is (mode != LIVE)
+
+
+class TestTheRecordNamesWhatShadowCannotSee:
+    """A shadow drive's gaps are structural, and the record must say so.
+
+    The phone makes no HERE call until the Jetson sends a query, and
+    `ConfigApplier` returns on the shadow branch before reaching `setHereQuery`. So
+    a drive that has only ever been in shadow has no traffic feed at all:
+    `feed_congestion` is None on every tick and `source_disagreement` -- one of the
+    controller's three raise rules -- cannot fire. Task 35 scores candidate policies
+    from these logs, so a reader who does not know that would credit every policy
+    equally for a rule none of them could have used.
+    """
+
+    def test_the_record_names_the_inputs_a_shadow_drive_cannot_have(self):
+        from policy.shadow_mode import ABSENT_IN_PURE_SHADOW
+
+        record = ModeHolder(clock=Clock()).to_record()
+        assert "feed_congestion" in record["absent_in_pure_shadow"]
+        assert "source_disagreement" in record["absent_in_pure_shadow"]
+        assert set(record["absent_in_pure_shadow"]) == set(ABSENT_IN_PURE_SHADOW)
+
+    def test_a_drive_that_has_been_live_no_longer_claims_reference_rates(self):
+        # After a live segment the phone keeps the last live rates and query, so the
+        # shadow segment that follows is not a full-rate one.
+        clock = Clock()
+        holder = ModeHolder(clock=clock)
+        assert holder.to_record()["reference_rates_hold"] is True
+
+        holder.flip_to(LIVE)
+        clock.advance(5.0)
+        holder.flip_to(SHADOW)
+        assert holder.to_record()["reference_rates_hold"] is False
+
+    def test_the_disagreement_rule_really_is_unreachable_without_a_feed(self):
+        # The claim above, asserted against the controller rather than described.
+        from policy.sensing_controller import Trigger
+
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        seen = set()
+        for density in (0, 1, 2, 3):
+            clock.advance(10.0)
+            controller.decide(drive_inputs(feed_congestion=None, camera_density_bin=density))
+            clock.advance(1.0)
+            seen.add(controller.decide(
+                drive_inputs(feed_congestion=None, camera_density_bin=density)).trigger)
+        assert Trigger.DISAGREEMENT not in seen
