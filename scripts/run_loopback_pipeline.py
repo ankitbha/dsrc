@@ -52,6 +52,7 @@ from pipeline import PerceptionPolicyPipeline  # noqa: E402
 from policy.actor_runtime import ActorRuntime  # noqa: E402
 from policy.advisory import AdvisoryDecoder  # noqa: E402
 from policy.export_policy import build_random, export  # noqa: E402
+from sensors.phone_link import PhoneLink  # noqa: E402
 from sensors.phone_source import PhoneCameraStream, PhoneClockAdapter, PhoneGpsReader  # noqa: E402
 from transport.channels import Channel  # noqa: E402
 from transport.clock import now_mono_ns, now_wall_ns  # noqa: E402
@@ -263,6 +264,13 @@ def run(duration_s: float, offset_ns: int, sync_hz: float) -> dict:
 
     # The Jetson initiates: it is the side that converts, so it is the side that
     # needs the estimate. See the module docstring.
+    # In-process, so both halves are Python and `transport/timebase.py` is
+    # role-symmetric: the Jetson can initiate here and the synthetic phone answers
+    # without complaint. A real handset would not -- the spec has the phone
+    # initiate and `Session.checkTimeSyncDirection` drops a ping arriving at a
+    # phone -- so THIS mode does not exercise the direction rule and must not be
+    # read as evidence about it. `--role jetson` does, on `PhoneLink`, which is
+    # the assembly `run_demo --phone` ships.
     initiator = TimeSyncInitiator(jetson_router)
     adapter = PhoneClockAdapter(initiator.estimator)
     camera = PhoneCameraStream(jetson_router, adapter).start()
@@ -687,44 +695,37 @@ def run_link_phone(args) -> dict:
 
 
 def run_link_jetson(args) -> dict:
-    """The Jetson role: accept, then run the real pipeline on what arrives."""
-    acceptor = TcpAcceptor(args.host, args.port)
-    listener = TransportListener(
-        acceptor, Hello(device_id="jetson-loopback-pipeline", role=Role.JETSON),
+    """The Jetson role: accept, then run the real pipeline on what arrives.
+
+    Built on `PhoneLink`, which is the same assembly `run_demo --phone` uses, so
+    this harness exercises the arrangement that ships rather than one of its own.
+
+    It used to run `TimeSyncInitiator` here -- the Jetson asking and the phone
+    answering. That works when this script owns both ends, because
+    `transport/timebase.py` is role-symmetric, and it cannot work against a
+    handset: the spec has the phone initiate, and `Session.checkTimeSyncDirection`
+    drops a ping arriving at a phone as `unknown_value`. So the one end-to-end
+    harness in the repo was exercising a path a real phone refuses, which is the
+    opposite of what an end-to-end harness is for.
+    """
+    link = PhoneLink(
+        host=args.host, port=args.port, device_id="jetson-loopback-pipeline",
         heartbeat_s=1.0, stall_timeout_s=10.0, handshake_timeout_s=10.0,
-        accept_poll_s=0.2,
-    ).start()
-    print(f"listening on {acceptor.host}:{acceptor.port} for {args.duration}s", flush=True)
+    )
+    print(f"listening on {link.host}:{link.port} for {args.duration}s", flush=True)
 
-    session = None
-    deadline = time.monotonic() + args.duration
-    while time.monotonic() < deadline and session is None:
-        event = listener.next_event(timeout=0.1)
-        if isinstance(event, SessionStarted):
-            session = event.session
-            print(f"session {session.session_id} from "
-                  f"{event.handshake.remote.device_id}", flush=True)
-    if session is None:
-        listener.stop()
-        return {"role": "jetson", "usable": False, "why": "no session was established"}
+    if not link.wait_for_phone(timeout_s=args.duration):
+        for refusal in link.refusals:
+            print(f"refused a connection -- {refusal}", flush=True)
+        link.stop()
+        return {"role": "jetson", "usable": False, "why": "no session was established",
+                "refusals": list(link.refusals)}
 
-    router = MessageRouter(session)
-    initiator = TimeSyncInitiator(router)
-    adapter = PhoneClockAdapter(initiator.estimator)
-    camera = PhoneCameraStream(router, adapter).start()
-    gps = PhoneGpsReader(router, adapter).start()
+    session = link.session
+    print(f"session {session.session_id} from {link.peer_device_id}", flush=True)
+    adapter = link.adapter
+    camera, gps = link.camera, link.gps
     stop = threading.Event()
-
-    def syncer():
-        period = 1.0 / args.sync_hz
-        while not stop.is_set():
-            initiator.send_ping()
-            inner = time.monotonic() + period
-            while time.monotonic() < inner and not stop.is_set():
-                initiator.pump(timeout=0.005)
-
-    sync_thread = threading.Thread(target=syncer, name="jetson-sync", daemon=True)
-    sync_thread.start()
 
     with tempfile.TemporaryDirectory() as tmp:
         prefix = str(Path(tmp) / "actor_policy")
@@ -748,7 +749,6 @@ def run_link_jetson(args) -> dict:
             ticks.append(_tick_row(tick, elapsed))
             router.send(_advisory_message(tick))
         stop.set()
-        sync_thread.join(timeout=3.0)
         camera.stop()
         gps.stop()
 
@@ -761,7 +761,7 @@ def run_link_jetson(args) -> dict:
         )
         report = _report(
             ticks, args.duration, 0, {"frames": 0}, advisories, adapter, camera, gps,
-            initiator, pipeline, first_converted_at,
+            link.estimator, pipeline, first_converted_at,
             phone_stats=session.stats(), jetson_stats=session.stats(), account=account,
         )
     # Over a real link the advisory return path is measured on the phone side,
@@ -773,7 +773,7 @@ def run_link_jetson(args) -> dict:
         and report["gate_detail"]["converted_and_fresh"]
         == report["gate_detail"]["converted_ticks"]
     )
-    listener.stop()
+    link.stop()
     return report
 
 
