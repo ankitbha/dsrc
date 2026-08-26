@@ -327,3 +327,53 @@ class TestSessionEndPropagates:
         finally:
             link.stop()
             phone.close()
+
+
+class TestRefusalsAreReported:
+    """A phone that dialled in and was turned away is not a phone that never called.
+
+    `wait_for_phone` consumed SessionRefused events and dropped them, so a version
+    mismatch -- whose diagnosis the event already carries -- reached the operator
+    as "no phone dialled in", sending them to look at the network during exactly
+    the bring-up where a mismatch is likeliest.
+    """
+
+    def test_a_refused_connection_is_kept_and_named(self):
+        from transport.endpoint import SessionRefused
+
+        link = PhoneLink(port=0)
+        try:
+            # Injected on the listener's own queue, which is where a real refusal
+            # arrives; the loop must keep it rather than eat it.
+            link._listener._events.put(
+                SessionRefused(peer="100.75.142.126:5555",
+                               error="protocol version mismatch: local 2, remote 1")
+            )
+            assert link.wait_for_phone(timeout_s=0.5) is False
+
+            assert len(link.refusals) == 1
+            assert "protocol version mismatch" in link.refusals[0]
+            assert "100.75.142.126" in link.refusals[0]
+        finally:
+            link.stop()
+
+    def test_the_record_separates_a_displaced_run_from_a_finished_one(self):
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            # Values, not just keys. Asserting presence alone let a mutation
+            # hardcode the counter to zero and still pass, which is precisely the
+            # reading -- "nothing was displaced" -- that would be wrong.
+            link._listener.accepted = 2
+            link._listener.displaced = 1
+            link._listener.refused = 3
+            record = link.to_record()
+
+            # session_id alone cannot say whether a second device took the socket.
+            assert record["sessions_accepted"] == 2
+            assert record["sessions_displaced"] == 1
+            assert record["sessions_refused"] == 3
+        finally:
+            link.stop()
+            phone.close()

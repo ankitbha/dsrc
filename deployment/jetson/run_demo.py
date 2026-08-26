@@ -108,6 +108,12 @@ def build_components(
 
 def _build_rest(config: dict):
     """Everything downstream of the two sensors, which does not care where they came from."""
+    # Read here rather than inherited. Split out of `build_components`, this body
+    # kept referring to that function's local `cam_cfg`, which made it a free
+    # global that does not exist -- a NameError on every call, in live mode,
+    # bench_latency and replay_demo alike. `--selfcheck` never calls it, which is
+    # how it shipped.
+    cam_cfg = config["camera"]
     d = config["detector"]
     detector = TrtYoloDetector(
         engine_path=resolve_model_path(config, "detector.engine"),
@@ -236,6 +242,18 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             print("[run] --no-gps and --require-gps do not apply under --phone",
                   file=sys.stderr)
             return 2
+        if args.source or (scenario or {}).get("camera"):
+            # The camera half of the same door. Refusing only the GPS side left
+            # this open, and it is the worse one: a scenario's `camera` block
+            # rewrites fx_px, cx_px and horizon_y_px, which reach
+            # `DistanceEstimator` -- so a clip's intrinsics get applied to the
+            # phone's frames and every range comes out scaled by the ratio of the
+            # two focal lengths, silently, into the observation builder and the
+            # policy. The scenario's `video` would be discarded at the same time,
+            # which is the inert-flag failure the GPS guard already refuses.
+            print("[run] --phone supplies the camera; --source and a scenario "
+                  "camera block cannot apply to it", file=sys.stderr)
+            return 2
         from sensors.phone_link import PhoneLink
 
         phone = PhoneLink(host=args.phone_host, port=args.phone_port)
@@ -245,6 +263,12 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # Hard failure, deliberately. Falling back to the local camera and a
             # simulated GPS would produce a clean-looking run whose data never
             # went near a handset, and nothing downstream distinguishes the two.
+            for refusal in phone.refusals:
+                # A dialled-in phone we turned away is a different problem from a
+                # phone that never called, and it is the likelier one during
+                # bring-up. Sending the operator to look at the network when the
+                # answer was a version mismatch costs an afternoon.
+                print(f"[run] refused a connection -- {refusal}", file=sys.stderr)
             phone.stop()
             print("[run] no phone dialled in; refusing to run on local sources instead",
                   file=sys.stderr)

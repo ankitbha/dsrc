@@ -30,7 +30,7 @@ from typing import Any
 
 from sensors.phone_source import PhoneCameraStream, PhoneClockAdapter, PhoneGpsReader
 from transport.channels import Channel
-from transport.endpoint import SessionStarted, TransportListener
+from transport.endpoint import SessionRefused, SessionStarted, TransportListener
 from transport.handshake import Hello, Role
 from transport.messages import MessageRouter
 from transport.tcp import DEFAULT_PORT, TcpAcceptor
@@ -93,6 +93,11 @@ class PhoneLink:
         self.gps: PhoneGpsReader | None = None
         self.peer_device_id: str | None = None
         self.pings_answered = 0
+        #: Why a connection did not become a session. The diagnosis exists --
+        #: "protocol version mismatch: local 2, remote 1" -- and was being pulled
+        #: off the queue and dropped, so a phone that dialled in and was refused
+        #: was reported to the operator as a phone that never dialled at all.
+        self.refusals: list[str] = []
         self._stop = threading.Event()
         self._responder: threading.Thread | None = None
 
@@ -117,6 +122,8 @@ class PhoneLink:
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             event = self._listener.next_event(timeout=0.1)
+            if isinstance(event, SessionRefused):
+                self.refusals.append(f"{event.peer}: {event.error}")
             if isinstance(event, SessionStarted):
                 self.session = event.session
                 self.peer_device_id = event.handshake.remote.device_id
@@ -184,6 +191,17 @@ class PhoneLink:
         return {
             "peer_device_id": self.peer_device_id,
             "session_id": None if self.session is None else self.session.session_id,
+            # Accepted/displaced separate a run the phone left from one a second
+            # device took over: with `--phone-host 0.0.0.0` any tailnet peer that
+            # speaks the hello can displace a session, and `session_id` alone
+            # cannot tell those apart afterwards.
+            "sessions_accepted": self._listener.accepted,
+            "sessions_displaced": self._listener.displaced,
+            "sessions_refused": self._listener.refused,
+            "refusals": list(self.refusals),
+            "end_reason": None if self.session is None else str(
+                getattr(self.session, "end_reason", None)
+            ),
             "pings_answered": self.pings_answered,
             "timebase": self.estimator.to_record(),
             "clock": self.adapter.to_record(),

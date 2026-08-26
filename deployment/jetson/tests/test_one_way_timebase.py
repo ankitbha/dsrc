@@ -263,3 +263,28 @@ class TestNoSkewFit:
         estimate = estimator.estimate()
         assert estimate.skew_ppm is None
         assert estimate.skew_samples == 0
+
+
+class TestRefusalReasonsAreBounded:
+    """`PhoneClockAdapter` keys `proxy_reasons` on the refusal reason.
+
+    A reason carrying a formatted age made every tenth of a second its own bucket,
+    so a run summary meant to say "proxied N frames because the sync died" said N
+    buckets of one instead -- unbounded, and never pruned, because `newest` stops
+    moving the moment the pings stop.
+    """
+
+    def test_a_stalled_sync_produces_one_reason_not_one_per_conversion(self):
+        clock = Clock()
+        estimator = converged(clock, delay_s=0.01)
+        clock.advance(MAX_SAMPLE_AGE_S + 1.0)
+
+        seen = set()
+        for _ in range(40):
+            clock.advance(0.1)
+            try:
+                estimator.to_local(clock.now_ns + PLANTED_OFFSET_NS)
+            except TimebaseNotReady as exc:
+                seen.add(exc.reason)
+
+        assert len(seen) == 1, f"one stalled sync produced {len(seen)} distinct reasons: {seen}"

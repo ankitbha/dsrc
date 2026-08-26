@@ -988,8 +988,16 @@ class OneWayEstimator:
             # claim the round-trip path refuses to make below this many samples.
             return f"only {current.offset_samples} samples in the offset window", current
         if newest is None or now - newest > int(MAX_SAMPLE_AGE_S * NS_PER_S):
-            age_s = "never" if newest is None else f"{(now - newest) / NS_PER_S:.1f}s"
-            return f"newest sample is {age_s} old", current
+            # A constant, not the age. `PhoneClockAdapter.stamp` keys
+            # `proxy_reasons` on this string and the dict goes into the run
+            # summary, so a formatted float made every tenth of a second its own
+            # bucket: measured 36 distinct keys from 40 conversions during one
+            # stalled sync, growing about ten a second and never pruned, because
+            # `newest` stops moving once the pings do. The histogram then destroys
+            # the signal it exists to carry -- "proxied N frames because the sync
+            # died" becomes N buckets of one. The extrapolation branch below
+            # already does this correctly.
+            return "samples too old", current
         return None, current
 
     def to_local(self, t_remote_mono_ns: int) -> ConvertedInstant:
