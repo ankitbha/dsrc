@@ -49,6 +49,11 @@ DOWNSTREAM_HALF_ANGLE_DEG = 60.0
 #: How far ahead is still about where we are going.
 DOWNSTREAM_HORIZON_M = 3_000.0
 
+#: Nearer than this, a shape point has no usable bearing from the vehicle: the
+#: fix's own error is metres, so the direction to a point a metre away is noise.
+#: Sized above typical GPS-vs-map lateral offset.
+BEARING_FLOOR_M = 15.0
+
 #: Past this, the feed describes a road we may no longer be on. Chosen against the
 #: phone's own `here_hz` default of 0.2 Hz -- five seconds between fetches -- so this
 #: tolerates several missed responses without tolerating a stale minute.
@@ -99,7 +104,18 @@ class FlowLink:
         rejected the road under the wheels.
         """
         for plat, plon in self.points:
-            if haversine_m(gps_lat, gps_lon, plat, plon) > horizon_m:
+            distance = haversine_m(gps_lat, gps_lon, plat, plon)
+            if distance > horizon_m:
+                continue
+            if distance < BEARING_FLOOR_M:
+                # A point essentially under the vehicle has no meaningful bearing:
+                # `bearing_deg` to a coincident point is atan2(0, 0) == 0.0, due
+                # north, so a link running due WEST was called "ahead" for any
+                # northerly heading. With realistic GPS-vs-map offset the bearing
+                # from such a point is decided by noise, and a link passing within
+                # that noise was admitted for about a third of the compass -- the
+                # fraction the cone covers. Skipped, so a link is judged by the
+                # parts of it that are actually somewhere relative to us.
                 continue
             if angle_between(bearing_deg(gps_lat, gps_lon, plat, plon), heading_deg) <= half_angle_deg:
                 return True
@@ -124,6 +140,11 @@ class FlowReading:
     link: FlowLink | None = None
     #: Seconds since the phone received the bytes. Measured.
     response_age_s: float | None = None
+    #: What the cross-device conversion of that stamp is worth, and whether it was
+    #: converted at all. A caller charging age against a threshold needs both, the
+    #: way the observation builder charges `uncertainty_s` against staleness.
+    response_age_bound_s: float | None = None
+    response_age_is_proxy: bool = False
     #: Always None, and deliberately so -- see the module docstring. Present as a
     #: field so a consumer reads absence rather than never thinking to ask.
     feed_lag_s: float | None = None
@@ -143,7 +164,15 @@ def _number(value: Any, low: float | None = None, high: float | None = None) -> 
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        # A JSON integer too large for a double is a number Python will hold and
+        # float() will not take. Uncaught it left parse_flow, killed the reader
+        # thread for the rest of the drive, and counted nothing -- one malformed
+        # body and the feed goes quiet while still serving its last links until
+        # they age out.
+        return None
     if not math.isfinite(number):
         return None
     if low is not None and number < low:
@@ -197,7 +226,11 @@ def parse_flow(body: bytes) -> list[FlowLink] | None:
     """
     try:
         document = json.loads(body.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        # RecursionError included: a deeply nested body raises it out of
+        # json.loads, and it is not a ValueError. Everything a remote body can do
+        # to this parser has to end as "not understood", never as an exception --
+        # the one failure that is not a named outcome is a hard kill.
         return None
     if not isinstance(document, dict):
         return None
@@ -275,14 +308,35 @@ class HereFeed:
         self._max_age_s = max_response_age_s
         self._links: list[FlowLink] = []
         self._received_t_mono: float | None = None
-        self._last_outcome: str = Outcome.NO_RESPONSE_YET
+        #: Why nothing usable has arrived, when nothing has. Distinct from the
+        #: outcome of a query: an HTTP error says nothing about the road and must
+        #: not overwrite what the last actual question was answered with.
+        self._last_refusal: str = Outcome.NO_RESPONSE_YET
+        #: The outcome of the most recent `at()`. This is what the record reports.
+        #: Writing only `ok` and refusals into one field made the run artifact
+        #: claim `ok` for a drive whose every later query failed, and report a
+        #: recovered-from `http_error` for one where the calls came good again.
+        self._last_query: str = Outcome.NO_RESPONSE_YET
         self.responses_received = 0
         self.responses_parsed = 0
+        self.proxied_stamps = 0
+        self._bound_s: float | None = None
+        self._proxy = False
         self.refused_by_reason: dict[str, int] = {}
 
-    def offer(self, status: int, body: bytes, received_t_mono: float) -> bool:
-        """Take one `here` response. False when it was refused, and why is counted."""
+    def offer(self, status: int, body: bytes, received_t_mono: float,
+              *, bound_s: float | None = None, proxy: bool = False) -> bool:
+        """Take one `here` response. False when it was refused, and why is counted.
+
+        `bound_s` and `proxy` describe the arrival stamp, not the traffic. A stamp
+        that took the proxy path -- normal in the opening seconds of a drive, before
+        the timebase converges -- ages the response against arrival rather than
+        against the phone's own clock, and a run artifact that cannot tell those
+        apart cannot say how much of its feed was aged on a guess.
+        """
         self.responses_received += 1
+        if proxy:
+            self.proxied_stamps += 1
         if not 200 <= status < 300:
             self._refuse(Outcome.HTTP_ERROR, f"status {status}")
             return False
@@ -292,24 +346,44 @@ class HereFeed:
             return False
         # Accepted even when empty: the response was understood, and it supersedes
         # an older one that describes a road we have since left.
-        self._links = links
+        # Arrival time before links, so a concurrent `at()` cannot see new links
+        # against the previous arrival stamp and call them stale.
         self._received_t_mono = received_t_mono
+        self._links = links
+        self._bound_s = bound_s
+        self._proxy = proxy
         self.responses_parsed += 1
         return True
 
     def _refuse(self, reason: str, detail: str | None = None) -> None:
-        self._last_outcome = reason
+        self._last_refusal = reason
         key = reason if detail is None else f"{reason}:{detail}"
         self.refused_by_reason[key] = self.refused_by_reason.get(key, 0) + 1
 
     def at(self, gps: GpsFix, t_mono: float) -> FlowReading:
         """What the feed says about the road ahead of this fix, or why it cannot."""
+        reading = self._at(gps, t_mono)
+        self._last_query = reading.outcome
+        if reading.response_age_s is None:
+            return reading
+        import dataclasses
+        reading = dataclasses.replace(
+            reading, response_age_bound_s=self._bound_s, response_age_is_proxy=self._proxy
+        )
+        return reading
+
+    def _at(self, gps: GpsFix, t_mono: float) -> FlowReading:
         if self._received_t_mono is None:
-            return FlowReading(outcome=self._last_outcome
-                               if self._last_outcome != Outcome.OK else Outcome.NO_RESPONSE_YET)
+            return FlowReading(outcome=self._last_refusal, detail="nothing usable has arrived")
 
         age_s = t_mono - self._received_t_mono
-        if age_s > self._max_age_s:
+        # Symmetric, because `PhoneGpsReader.is_stale` says the freshness
+        # predicates in this codebase must not disagree about it and this is the
+        # third one. A one-sided `>` called a stamp from this clock's future fresh
+        # and handed back a live congestion number with `response_age_s: -500.0` --
+        # and the future side is the biased one here, since `OneWayEstimator`
+        # documents that its conversion makes every stamp look newer than it is.
+        if abs(age_s) > self._max_age_s:
             return FlowReading(outcome=Outcome.STALE, response_age_s=age_s,
                                detail=f"{age_s:.1f}s since the response")
 
@@ -331,15 +405,14 @@ class HereFeed:
             return FlowReading(outcome=Outcome.NO_LINK_MATCHED, response_age_s=age_s,
                                detail="no usable link in the response")
 
-        # The two thresholds do different jobs and are not interchangeable. The
-        # radius answers "are we on a road this response covers at all" -- if the
+        # The radius answers "are we on a road this response covers at all". If the
         # NEAREST link of any kind is further than that, we are off the covered
-        # network and every link in the body describes somewhere else. The horizon
-        # answers "is this link near enough ahead to be where we are going". An
-        # earlier version tested `d <= radius or d <= horizon`, which is just the
-        # horizon, because it is fifty times larger -- so the radius decided
-        # nothing and a run on an uncovered road reported the motorway a kilometre
-        # away as its own.
+        # network and every link in the body describes somewhere else. It does not
+        # bound the ANSWER: a downstream link is legitimately kilometres away, and
+        # bounding the answer by a lateral tolerance would be a different check
+        # from this one. An earlier version tested `d <= radius or d <= horizon`,
+        # which is just the horizon since it is fifty times larger, so the radius
+        # decided nothing at all.
         if min(d for d, _ in near) > self._radius_m:
             return FlowReading(outcome=Outcome.NO_LINK_MATCHED, response_age_s=age_s,
                                detail="nearest link beyond the association radius")
@@ -353,7 +426,6 @@ class HereFeed:
             return FlowReading(outcome=Outcome.NO_LINK_AHEAD, response_age_s=age_s)
 
         _, nearest = min(ahead, key=lambda pair: pair[0])
-        self._last_outcome = Outcome.OK
         return FlowReading(outcome=Outcome.OK, link=nearest, response_age_s=age_s)
 
     def to_record(self) -> dict[str, Any]:
@@ -367,8 +439,10 @@ class HereFeed:
             "responses_received": self.responses_received,
             "responses_parsed": self.responses_parsed,
             "refused_by_reason": dict(self.refused_by_reason),
-            "last_outcome": self._last_outcome,
+            "last_outcome": self._last_query,
+            "last_refusal": self._last_refusal,
             "links_cached": len(self._links),
+            "proxied_stamps": self.proxied_stamps,
             "feed_lag_s": None,
             "feed_lag_note": "not reported by HERE v7 flow; minutes, and unmeasurable here",
         }

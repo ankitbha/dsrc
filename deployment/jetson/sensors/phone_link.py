@@ -102,6 +102,7 @@ class PhoneLink:
         #: on a thread, because a query is answered against the caller's own
         #: position at the moment it asks, not at the moment the bytes arrived.
         self.here = HereFeed()
+        self.here_failure: str | None = None
         self.peer_device_id: str | None = None
         self.pings_answered = 0
         #: Why a connection did not become a session. The diagnosis exists --
@@ -200,12 +201,30 @@ class PhoneLink:
                     return
                 continue
             message, receipt = received
-            stamp = self.adapter.stamp(message.t_capture_mono_ns, receipt.t_recv_mono_ns / 1e9)
-            self.here.offer(
-                status=message.status,
-                body=message.body,
-                received_t_mono=stamp.t_capture_mono,
-            )
+            # `t_response_mono_ns`, not `t_capture_mono_ns`. The phone sets capture
+            # to the moment it ISSUED the call -- `HerePipeline` passes
+            # `call.requestMonoNs`, stamped before `openConnection` -- so using it
+            # charged the whole HTTP round trip to the age of the traffic data. An
+            # 8 s cellular fetch made a body that arrived 50 ms ago report an age
+            # of 8.05 s, and ate most of the 30 s staleness limit. Both stamps exist
+            # so a receiver can tell a slow road from a slow API without guessing.
+            stamp = self.adapter.stamp(message.t_response_mono_ns, receipt.t_recv_mono_ns / 1e9)
+            try:
+                self.here.offer(
+                    status=message.status,
+                    body=message.body,
+                    received_t_mono=stamp.t_capture_mono,
+                    bound_s=stamp.bound_s,
+                    proxy=stamp.proxy,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Last resort. Every remote body is meant to end as a named outcome
+                # inside the feed, and one that does not must still not take the
+                # reader down for the rest of the drive -- which is what an
+                # OverflowError out of `float()` did. Recorded so a dead-quiet feed
+                # is visible rather than inferred.
+                self.here_failure = f"{type(exc).__name__}: {exc}"
+
 
     def stop(self) -> None:
         """Reverse of coming up, and safe to call when it never came up."""
@@ -249,5 +268,7 @@ class PhoneLink:
             "clock": self.adapter.to_record(),
             "camera": None if self.camera is None else self.camera.to_record(),
             "gps": None if self.gps is None else self.gps.to_record(),
-            "here": self.here.to_record(),
+            "here": {**self.here.to_record(),
+                     "reader_alive": bool(self._here_reader and self._here_reader.is_alive()),
+                     "failure": self.here_failure},
         }

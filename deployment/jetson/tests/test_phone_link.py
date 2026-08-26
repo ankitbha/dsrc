@@ -451,3 +451,71 @@ class TestHereIngestion:
         finally:
             link.stop()
             phone.close()
+
+
+class TestHereResponseAge:
+    """Which of the phone's two stamps ages a HERE body.
+
+    The phone sets `t_capture_mono_ns` to the moment it ISSUED the call --
+    `HerePipeline` passes `call.requestMonoNs`, taken before `openConnection` -- so
+    ageing from it charges the whole HTTP round trip to the traffic data. Both
+    stamps are on the wire precisely so a receiver can tell a slow road from a slow
+    API without guessing.
+
+    Needs a converged timebase: on the proxy path the adapter ignores the peer
+    stamp and returns arrival, so the two are indistinguishable and a mutation
+    swapping them survives.
+    """
+
+    def test_the_age_comes_from_the_response_stamp_not_the_request(self):
+        import json as _json
+
+        from transport.messages import HereResponse
+        from transport.timebase import MIN_OFFSET_SAMPLES, OneWaySample
+
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink()
+        try:
+            attach(link, jetson, down)
+            # Converge the one-way estimator on the fixture's planted offset.
+            for i in range(MIN_OFFSET_SAMPLES + 1):
+                local = now_mono_ns()
+                link.estimator.add(OneWaySample(
+                    i, t1_remote_send_ns=local + TRUE_OFFSET_NS, t2_local_recv_ns=local))
+            assert link.estimator.estimate() is not None
+
+            # A fetch issued 8 s before the bytes came back.
+            responded = now_mono_ns() + TRUE_OFFSET_NS
+            requested = responded - 8 * NS
+            shape = {"links": [{"points": [{"lat": 51.49, "lng": -0.20}]}]}
+            payload = _json.dumps({"results": [
+                {"location": {"shape": shape}, "currentFlow": {"jamFactor": 3.0}}
+            ]}).encode()
+            assert up.send(HereResponse(
+                t_capture_mono_ns=requested,
+                request_url="https://data.traffic.hereapi.com/v7/flow",
+                status=200, content_type="application/json",
+                query_lat=51.49, query_lon=-0.20, query_radius_m=1500.0,
+                t_request_mono_ns=requested, t_response_mono_ns=responded, body=payload,
+            ))
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and link.here.responses_parsed == 0:
+                time.sleep(0.02)
+            assert link.here.responses_parsed == 1
+
+            from sensors.gps_reader import GpsFix
+            reading = link.here.at(
+                GpsFix(valid=True, lat=51.49, lon=-0.20, heading_deg=90.0, speed_mps=20.0),
+                t_mono=now_mono_ns() / 1e9,
+            )
+            # Aged from the response: a second or two. From the request it would be
+            # eight seconds older, which also eats most of the 30 s staleness limit.
+            assert reading.response_age_s is not None
+            assert reading.response_age_s < 4.0, (
+                f"aged {reading.response_age_s:.1f}s -- the HTTP round trip was "
+                "charged to the traffic data"
+            )
+        finally:
+            link.stop()
+            phone.close()

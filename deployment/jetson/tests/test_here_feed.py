@@ -267,3 +267,107 @@ class TestRecord:
         assert feed.to_record()["responses_received"] == 2
         assert feed.to_record()["responses_parsed"] == 0
         assert sum(feed.refused_by_reason.values()) == 2
+
+
+class TestNothingInABodyMayRaise:
+    """A remote body must always end as a named outcome.
+
+    An OverflowError out of `float()` left the parser, killed the reader thread for
+    the rest of the drive, counted nothing, and left the feed serving pre-poison
+    links until they aged out. One malformed response and the feed goes quiet.
+    """
+
+    def test_an_integer_too_large_for_a_double_is_refused_not_raised(self):
+        huge = b'{"results":[{"location":{"shape":{"links":[{"points":[{"lat":51.49,"lng":-0.2}]}]}},' \
+               b'"currentFlow":{"jamFactor":' + b"9" * 400 + b'}}]}'
+        parsed = parse_flow(huge)
+        assert parsed is not None
+        assert parsed[0].jam_factor is None
+
+    def test_a_huge_integer_in_the_geometry_is_refused_not_raised(self):
+        huge = b'{"results":[{"location":{"shape":{"links":[{"points":[{"lat":' + b"9" * 400 + \
+               b',"lng":-0.2}]}]}},"currentFlow":{"jamFactor":4.2}}]}'
+        assert parse_flow(huge) == []
+
+    def test_a_deeply_nested_body_is_not_understood_rather_than_fatal(self):
+        deep = b"[" * 60_000 + b"]" * 60_000
+        assert parse_flow(deep) is None
+
+
+class TestBearingFloor:
+    """A point under the wheels has no bearing.
+
+    `bearing_deg` to a coincident point is atan2(0, 0) == 0.0 -- due north -- so a
+    link running due west was "ahead" for any northerly heading, and with realistic
+    GPS-vs-map offset the bearing from such a point is noise.
+    """
+
+    def test_a_link_running_west_is_never_ahead_whatever_the_heading(self):
+        feed = HereFeed()
+        # Ends exactly under the fix, which is what the earlier fixture produced.
+        west = stretch(*offset(*HOME, 0.0, -800.0), east_m=800.0)
+        feed.offer(status=200, body=body(west), received_t_mono=100.0)
+
+        for heading in range(0, 360, 15):
+            reading = feed.at(fix(*HOME, heading_deg=float(heading)), t_mono=100.0)
+            if 200.0 <= heading <= 340.0:
+                continue  # driving back down it: legitimately ahead
+            assert reading.outcome != Outcome.OK, (
+                f"a link entirely west was called ahead at heading {heading}"
+            )
+
+
+class TestStalenessIsSymmetric:
+    """`PhoneGpsReader.is_stale` states the rule: the freshness predicates in this
+    codebase must not disagree about a stamp from this clock's future. This is the
+    third such predicate, and it was the one that disagreed."""
+
+    def test_a_stamp_from_the_future_is_not_fresh(self):
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=1000.0)
+
+        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=500.0)
+        assert reading.outcome == Outcome.STALE
+        assert reading.link is None
+
+
+class TestTheRecordReportsTheLastQuery:
+
+    def test_ok_does_not_survive_a_later_failed_query(self):
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
+        assert feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0).ok
+
+        feed.offer(status=200, body=b'{"results": []}', received_t_mono=105.0)
+        feed.at(fix(*HOME, heading_deg=90.0), t_mono=105.0)
+
+        assert feed.to_record()["last_outcome"] == Outcome.NO_LINK_MATCHED
+
+    def test_a_recovered_from_http_error_is_not_reported_as_the_outcome(self):
+        # An operator reading "the HERE calls were failing" for a drive where they
+        # came good again is being told the wrong thing about the drive.
+        feed = HereFeed()
+        feed.offer(status=503, body=b"", received_t_mono=100.0)
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=101.0)
+        feed.at(fix(*HOME, heading_deg=90.0), t_mono=101.0)
+
+        record = feed.to_record()
+        assert record["last_outcome"] == Outcome.OK
+        assert record["last_refusal"] == Outcome.HTTP_ERROR
+
+
+class TestStampProvenance:
+
+    def test_a_proxied_arrival_stamp_is_visible_in_the_reading_and_the_record(self):
+        # Every response in the opening seconds of a drive is aged on a proxy,
+        # before the timebase converges. A run that cannot tell those apart cannot
+        # say how much of its feed was aged on a guess.
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)),
+                   received_t_mono=100.0, bound_s=0.004, proxy=True)
+
+        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.5)
+        assert reading.ok
+        assert reading.response_age_is_proxy is True
+        assert reading.response_age_bound_s == 0.004
+        assert feed.to_record()["proxied_stamps"] == 1
