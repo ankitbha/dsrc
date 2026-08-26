@@ -454,6 +454,46 @@ def _advisory_message(tick):
     return advisory_message_from_advisory(marked, now_mono_ns())
 
 
+def _why_not_usable(*, ticks, advisories, converted, converted_fresh,
+                    converted_fraction, ceiling_ms, link_max_ms, link_min_ms,
+                    bound_p95_ms, first_converted_at) -> list[str]:
+    """Every gate condition that did not hold, in the gate's own order.
+
+    The gate is a conjunction of nine things and published one boolean, so a
+    False said nothing about which. On a real handset run that converted 285 of
+    287 ticks with a fresh fraction of 1.0 after convergence, the answer was two
+    conditions -- a 133 ms worst segment against a 46 ms ceiling, and an advisory
+    count this role cannot observe -- and neither was visible in the report.
+    """
+    reasons: list[str] = []
+    if not ticks:
+        reasons.append("no ticks")
+    if advisories["received"] <= 0:
+        reasons.append("no advisories received (counted on the phone side in the jetson role)")
+    if not converted:
+        reasons.append("no tick converted")
+    elif converted_fresh != len(converted):
+        reasons.append(f"{len(converted) - converted_fresh} converted ticks were not fresh")
+    if converted and converted_fraction < MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE:
+        reasons.append(
+            f"converted fraction {converted_fraction:.3f} below "
+            f"{MIN_CONVERTED_FRACTION_AFTER_CONVERGENCE}"
+        )
+    if ceiling_ms is None or link_max_ms is None:
+        reasons.append("no link segment measured")
+    elif link_max_ms > ceiling_ms:
+        reasons.append(f"worst link segment {link_max_ms:.1f} ms exceeds the {ceiling_ms:.1f} ms ceiling")
+    if link_min_ms is not None and link_min_ms < -(bound_p95_ms or 0.0):
+        reasons.append(f"best link segment {link_min_ms:.1f} ms is impossibly negative")
+    if first_converted_at is None:
+        reasons.append("never converged")
+    elif first_converted_at > CONVERGENCE_BUDGET_S:
+        reasons.append(
+            f"converged at {first_converted_at:.1f}s, past the {CONVERGENCE_BUDGET_S}s budget"
+        )
+    return reasons
+
+
 def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps,
             initiator, pipeline, first_converted_at, phone_stats, jetson_stats,
             account) -> dict:
@@ -529,6 +569,17 @@ def _report(ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps
         # usable=true and exit 0 while reporting a 67.6-HOUR link segment and a
         # fresh fraction of 0.12. A gate that cannot fail on the defect the task
         # exists to prevent is not a gate.
+        # Named beside the verdict, because a False with no reason is not a
+        # result anyone can act on -- and in the jetson role the advisory
+        # condition is one this side structurally cannot satisfy, since the
+        # return path is counted on the phone. A run that converts perfectly
+        # was reported as simply unusable.
+        "why_not_usable": _why_not_usable(
+            ticks=ticks, advisories=advisories, converted=converted,
+            converted_fresh=converted_fresh, converted_fraction=converted_fraction,
+            ceiling_ms=ceiling_ms, link_max_ms=link_max_ms, link_min_ms=link_min_ms,
+            bound_p95_ms=bound_p95_ms, first_converted_at=first_converted_at,
+        ),
         "usable": bool(
             ticks
             and advisories["received"] > 0

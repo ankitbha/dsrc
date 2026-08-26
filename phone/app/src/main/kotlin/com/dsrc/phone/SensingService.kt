@@ -16,6 +16,7 @@ import android.util.Log
 import com.dsrc.phone.config.LinkConfig
 import com.dsrc.phone.config.SensingConfig
 import com.dsrc.phone.net.SessionHolder
+import com.dsrc.phone.net.TimeSyncDriver
 import com.dsrc.phone.sensors.CameraPipeline
 import com.dsrc.phone.sensors.CameraXSource
 import com.dsrc.phone.sensors.CameraFrameSender
@@ -80,6 +81,7 @@ class SensingService : LifecycleService() {
      */
     @Volatile
     private var configApplier: ConfigApplier? = null
+    private var timeSync: TimeSyncDriver? = null
     private var imuSource: ImuSource? = null
 
     override fun onBind(intent: Intent): IBinder? {
@@ -484,6 +486,10 @@ class SensingService : LifecycleService() {
 
         // Last, so no inbound frame can arrive before the thing that handles it exists.
         holder.start()
+        // After the link, because it has nothing to send until there is a session,
+        // and the spec makes this the phone's job: nothing drove it before, so the
+        // Jetson saw no samples on any real drive and converted no stamps at all.
+        timeSync = TimeSyncDriver(holder::sendTimeSyncPing).start()
         Log.i(
             TAG,
             "capture starting: camera ${config.cameraHz} Hz, gps ${config.gpsHz} Hz, " +
@@ -701,6 +707,8 @@ class SensingService : LifecycleService() {
                 }
             }
             release("link stats") { link?.let { Log.i(TAG, "link stats ${it.stats()}") } }
+            // Before the link it pings on, so it cannot send into a closing session.
+            release("time sync") { timeSync?.stop(); timeSync = null }
             release("link") { link?.stop() }
             // After the link, and the comment above the old position said so while sitting
             // nine releases before it. The link is what writes to the log, so stopping the

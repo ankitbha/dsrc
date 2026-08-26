@@ -122,6 +122,31 @@ class SessionHolder(
      * that state constructible instead of raced: a handshaken, closed session is a non-null
      * reference that is not alive.
      */
+    /**
+     * Send one time-sync ping on the live session, if there is one.
+     *
+     * The spec makes the phone the initiator -- "The phone initiates and the Jetson
+     * only ever answers" -- and `Session` has implemented that half since task 15.
+     * Nothing outside the tests ever called it, so no ping was ever sent on a real
+     * drive: the Jetson accumulated zero samples, its estimate never formed, and
+     * every camera and GPS stamp fell back to arrival-time proxy for the whole
+     * session. That run looks healthy -- the proxy is wrong only by the link
+     * segment, tens of milliseconds against a 2 s staleness threshold -- which is
+     * why it survived a full device test without anyone noticing.
+     *
+     * False when the link is down, counted the same way a refused send is, because
+     * a drive that never syncs should be visible as a number rather than as an
+     * absence.
+     */
+    fun sendTimeSyncPing(exchangeId: Long): Boolean {
+        val live = current
+        if (!usable(live)) {
+            sendsWithoutSession.incrementAndGet()
+            return false
+        }
+        return runCatching { live!!.sendTimeSyncPing(exchangeId) }.getOrDefault(false)
+    }
+
     internal fun sendOn(
         session: Session?,
         channel: String,
