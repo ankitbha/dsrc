@@ -800,9 +800,34 @@ tunnels over USB and is unaffected.
     v7 documentation and has never met a real body — the experiment used synthetic
     responses over the real transport, which proves the wiring and not the schema.
     One captured response committed as a fixture is the only thing that would.
-28. Fusion / estimator: per-field source ownership between the wide-lagging feed
+28. ~~Fusion / estimator: per-field source ownership between the wide-lagging feed
     and the narrow-current camera, with a staleness aging term. The sources
-    observe different parts of the state and are not substitutable.
+    observe different parts of the state and are not substitutable.~~ **DONE** —
+    and it concluded that **the feed owns no observation field**, which is the
+    opposite of what the plan set out to do. Fusion here is ownership, not
+    averaging: the camera cannot see 2 km ahead and the feed cannot see the car in
+    front, so nothing blends them. Two candidates were taken and both retracted
+    under validation, for the same reason one field apart. `segment_target_speed`
+    passed a units check — HERE's `freeFlow` is a free-flow speed in m/s, exactly
+    the simulator's quantity — and the check was too shallow: the simulator fills
+    it *and* `nearby_av_mean_speed` from one constant, so they are perfectly
+    correlated in every training sample, and the sim's `min(target_speed,
+    free_flow)` safety clamp is a no-op only *because* they are equal. Decoupling
+    them advised **268 mph** on a parser-legal 120 m/s link.
+    `downstream_congestion_estimate` went the same way: `src/sensing/local.py:203`
+    is a **block** gate, pinning congestion, merge pressure and target speed
+    together when no AVs are near — **0 of 1,095** rollout samples have congestion
+    above zero without AVs, and a lone instrumented car never has equipped
+    neighbours, so writing it would put the policy in that empty cell on every
+    tick. The reading is published beside the vector instead
+    (`ObservationResult.feed`, `diagnostics["feed"]`) for the task-29 controller.
+    Experiment: 20 ticks owning a reading over the real transport, congestion
+    0.067–0.9, **0 observation differences** against the identical no-feed run.
+    The check that found both, which a units question cannot ask: *does this field
+    move alone in a block the simulator moves together?* **Open:** making the
+    vector legitimately feed-informed needs the **simulator's** sensing model to
+    produce congestion without AVs — a training-side change, outside section F,
+    and the real blocker behind both retractions.
 29. Sensing controller producing four independent rates and the per-modality
     settings that go down with them. Inputs: the free always-on IMU/GPS tier as
     a trigger proxy, advisory bin-boundary proximity, disagreement between
