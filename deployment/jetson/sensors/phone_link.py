@@ -20,6 +20,15 @@ harness -- it is the only arrangement that works against the device.
 Answering means we never learn when our pong landed, so we cannot build a
 `TimeSyncSample`. `OneWayEstimator` is what a responder can build instead, and what
 its bound does and does not cover is written on it.
+
+**A phone that hangs up does not end the drive.** The listener keeps accepting, so a
+redial is a new session on the same socket, and the supervisor tears the old one's
+workers down and binds the new one in place. What it must not do is pretend the gap
+did not happen: the timebase does NOT carry across. A new session is a new peer
+clock, and `OneWayEstimator`'s samples from the old one are not comparable to the new
+one's -- reattaching without resetting would let the first ticks of the second
+session convert against the first session's offset and look perfectly healthy, which
+is this module's own stated failure mode one level up.
 """
 
 from __future__ import annotations
@@ -33,7 +42,7 @@ from sensors.phone_source import PhoneCameraStream, PhoneClockAdapter, PhoneGpsR
 from transport.channels import Channel
 from transport.endpoint import SessionRefused, SessionStarted, TransportListener
 from transport.handshake import Hello, Role
-from transport.messages import MessageRouter
+from transport.messages import MessageRouter, advisory_message_from_advisory
 from transport.tcp import DEFAULT_PORT, TcpAcceptor
 from transport.timebase import OneWayEstimator, OneWaySample, answer_ping
 
@@ -82,8 +91,13 @@ class PhoneLink:
         heartbeat_s: float = 1.0,
         stall_timeout_s: float = 5.0,
         handshake_timeout_s: float = 5.0,
+        acceptor: Any = None,
     ) -> None:
-        self._acceptor = TcpAcceptor(host, port)
+        # Injectable so a rebind can be driven end to end. Everything a redial
+        # exercises -- the second handshake, the estimator reset, the workers coming
+        # back up on a different session -- happens below the socket, and a test that
+        # cannot supply a second connection cannot reach any of it.
+        self._acceptor = acceptor if acceptor is not None else TcpAcceptor(host, port)
         self._listener = TransportListener(
             self._acceptor,
             Hello(device_id=device_id, role=Role.JETSON),
@@ -118,6 +132,25 @@ class PhoneLink:
         self.here_failures = 0
         self.peer_device_id: str | None = None
         self.pings_answered = 0
+        #: What went DOWN the link. Until now nothing did: `run_demo.py --phone` took
+        #: camera and GPS off the handset and sent nothing back, so the driver's panel
+        #: stayed blank for the whole drive and the phone sampled at whatever it had
+        #: last been set to by hand.
+        self.advisories_sent = 0
+        self.rate_commands_sent = 0
+        #: Sends attempted with no session to send on. Counted rather than raised: a
+        #: drive whose phone has dropped must keep ticking until the supervisor
+        #: reattaches it, and a raise per tick would take the run down for the one
+        #: condition the supervisor exists to survive.
+        self.sends_without_a_session = 0
+        #: Sends the session refused -- a closed or backed-up link. Distinct from
+        #: having no session at all, because they mean different things about the run.
+        self.sends_refused = 0
+        #: One entry per session after the first: how long the link was down, and how
+        #: the previous session ended. A drive that lost its phone and got it back is
+        #: not the same drive as one that never lost it, and `session_id` alone cannot
+        #: tell them apart afterwards.
+        self.rebinds: list[dict[str, Any]] = []
         #: Why a connection did not become a session. The diagnosis exists --
         #: "protocol version mismatch: local 2, remote 1" -- and was being pulled
         #: off the queue and dropped, so a phone that dialled in and was refused
@@ -127,6 +160,9 @@ class PhoneLink:
         self._responder: threading.Thread | None = None
         self._here_reader: threading.Thread | None = None
         self._telemetry_reader: threading.Thread | None = None
+        self._supervisor: threading.Thread | None = None
+        #: How long the supervisor waits for a redial before giving up on the run.
+        self.rebind_timeout_s = 120.0
 
     @property
     def host(self) -> str:
@@ -159,6 +195,18 @@ class PhoneLink:
         return False
 
     def _begin(self) -> None:
+        self._start_session_workers()
+        # One supervisor for the whole run, not one per session: it outlives the
+        # session it was started under, and starting another on every rebind would
+        # leave a thread per redial all watching the same field.
+        if self._supervisor is None:
+            self._supervisor = threading.Thread(
+                target=self._supervise, name="phone-supervisor", daemon=True
+            )
+            self._supervisor.start()
+
+    def _start_session_workers(self) -> None:
+        """Everything that belongs to one session, in the order it comes up."""
         self.router = MessageRouter(self.session)
         self.camera = PhoneCameraStream(self.router, self.adapter).start()
         self.gps = PhoneGpsReader(self.router, self.adapter).start()
@@ -174,6 +222,69 @@ class PhoneLink:
             target=self._read_telemetry, name="phone-telemetry", daemon=True
         )
         self._telemetry_reader.start()
+
+    def _stop_session_workers(self) -> None:
+        """Reverse of `_start_session_workers`, leaving the listener running.
+
+        The three readers return on their own once the session reports closed, so
+        this joins rather than signals -- `self._stop` belongs to the run, and setting
+        it here would take the supervisor down with the session it is supervising.
+        """
+        for worker in (self._responder, self._here_reader, self._telemetry_reader):
+            if worker is not None:
+                worker.join(timeout=2.0)
+        for source in (self.camera, self.gps):
+            if source is not None:
+                source.stop()
+        if self.session is not None:
+            self.session.close()
+        self._responder = self._here_reader = self._telemetry_reader = None
+        self.camera = self.gps = None
+        self.router = None
+
+    def _supervise(self) -> None:
+        """Rebind to the next phone rather than ending the run.
+
+        A redial used to end the drive: `wait_for_phone` ran once, the readers
+        returned for good on the first close, and the backends went quiet with
+        nothing to restart them.
+        """
+        while not self._stop.is_set():
+            if not getattr(self.session, "is_closed", False):
+                self._stop.wait(0.1)
+                continue
+            ended = _end_reason_of(self.session)
+            down_from = time.monotonic()
+            self._stop_session_workers()
+            if not self._rebind(down_from=down_from, previous_end_reason=ended):
+                return
+
+    def _rebind(self, *, down_from: float, previous_end_reason: str | None) -> bool:
+        """Wait for the next dial-in and bind it. False when none came."""
+        deadline = down_from + self.rebind_timeout_s
+        while not self._stop.is_set() and time.monotonic() < deadline:
+            event = self._listener.next_event(timeout=0.1)
+            if isinstance(event, SessionRefused):
+                self.refusals.append(f"{event.peer}: {event.error}")
+                continue
+            if not isinstance(event, SessionStarted):
+                continue
+            # A new session is a new peer clock. Carrying the old estimate over
+            # would convert the new session's first stamps against the previous
+            # phone's offset and report them as healthy.
+            self.estimator = OneWayEstimator()
+            self.adapter = PhoneClockAdapter(self.estimator)
+            self.session = event.session
+            self.peer_device_id = event.handshake.remote.device_id
+            self.rebinds.append({
+                "down_s": time.monotonic() - down_from,
+                "previous_end_reason": previous_end_reason,
+                "peer_device_id": self.peer_device_id,
+                "session_id": self.session.session_id,
+            })
+            self._start_session_workers()
+            return True
+        return False
 
     def _answer_pings(self) -> None:
         """Answer every ping, and take the arrival as a one-way sample.
@@ -268,9 +379,58 @@ class PhoneLink:
             self.telemetry_at_mono = receipt.t_recv_mono_ns / 1e9
             self.telemetry_received += 1
 
+    def send_advisory(self, advisory: Any, *, t_capture_mono_ns: int) -> bool:
+        """Send the advisory back to the phone. False when there is nothing to send on.
+
+        `t_capture_mono_ns` is the capture stamp of the frame this advisory is ABOUT,
+        on our clock -- not the moment of sending. `AdvisoryMessage` carries no frame
+        id, so that stamp is the only thing tying a recommendation to the frame that
+        produced it, and a log in which every advisory claims to be about a frame
+        captured at the instant it was sent joins to nothing afterwards.
+
+        The phone does not read it: `AdvisoryHolder` expires on local arrival and says
+        why -- "relating the two takes the timebase exchange, and a display that goes
+        blank because a clock estimate wandered would be a fault invented by its own
+        safety check". So this is provenance, and nothing here may come to depend on
+        the phone reading it.
+        """
+        return self._send(advisory_message_from_advisory(advisory, t_capture_mono_ns),
+                          counter="advisories_sent")
+
+    def send_rate_command(self, command: Any) -> bool:
+        """Send a rate command to the phone. False when there is nothing to send on."""
+        return self._send(command, counter="rate_commands_sent")
+
+    def _send(self, message: Any, *, counter: str) -> bool:
+        """One place that knows there may be no session.
+
+        Returning False rather than raising, and per reason. A drive whose phone has
+        dropped keeps ticking while the supervisor reattaches it, so "no session" is
+        an expected state for as long as the rebind takes -- but a session that
+        REFUSED a message is a different fact about the run, and one counter cannot
+        say which happened.
+        """
+        router = self.router
+        if router is None or getattr(self.session, "is_closed", True):
+            self.sends_without_a_session += 1
+            return False
+        # Nothing is caught here. `Session.send` returns False for a closed or full
+        # link and raises only for our own mistakes -- InvalidMessage from the router
+        # and FramingError from the codec, both by design so a caller cannot swallow
+        # its own bug with the drop-and-count idiom meant for the peer's. A broad
+        # `except Exception` here turned a KeyError on a malformed rates dict into a
+        # link refusal, which is the same mistake one layer up.
+        if not router.send(message):
+            self.sends_refused += 1
+            return False
+        setattr(self, counter, getattr(self, counter) + 1)
+        return True
+
     def stop(self) -> None:
         """Reverse of coming up, and safe to call when it never came up."""
         self._stop.set()
+        if self._supervisor is not None:
+            self._supervisor.join(timeout=3.0)
         for worker in (self._responder, self._here_reader, self._telemetry_reader):
             if worker is not None:
                 worker.join(timeout=2.0)
@@ -306,6 +466,16 @@ class PhoneLink:
             # `peer_closed` matched neither.
             "end_reason": _end_reason_of(self.session),
             "pings_answered": self.pings_answered,
+            # What went down the link, and what could not. `sends_without_a_session`
+            # being nonzero with an empty `rebinds` means the drive was sending into a
+            # link that never came back, which reads nothing like a clean run.
+            "sent": {
+                "advisories": self.advisories_sent,
+                "rate_commands": self.rate_commands_sent,
+                "without_a_session": self.sends_without_a_session,
+                "refused": self.sends_refused,
+            },
+            "rebinds": list(self.rebinds),
             "timebase": self.estimator.to_record(),
             "clock": self.adapter.to_record(),
             "camera": None if self.camera is None else self.camera.to_record(),

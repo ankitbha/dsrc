@@ -7,12 +7,17 @@ time-sync pings and never sends one. A mock would answer whatever it was asked.
 
 from __future__ import annotations
 
+import threading
 import time
 
+import pytest
+
+from policy.advisory import Advisory
 from sensors.phone_link import PhoneLink
 from transport.channels import Channel
-from transport.loopback import loopback_pair
-from transport.messages import MessageRouter
+from transport.handshake import Hello, Role
+from transport.loopback import LoopbackAcceptor, loopback_pair
+from transport.messages import InvalidMessage, MessageRouter, RateCommand
 from transport.session import Session
 from transport.timebase import OneWaySample, now_mono_ns
 
@@ -613,3 +618,245 @@ def test_telemetry_carries_its_arrival_time():
     finally:
         link.stop()
         phone.close()
+
+
+class LoopbackPhone:
+    """A loopback client that speaks the protocol, standing in for the app."""
+
+    def __init__(self, acceptor, device_id="moto-g-power"):
+        from transport.handshake import perform_handshake
+
+        self.connection = acceptor.connect(device_id)
+        self.handshake = perform_handshake(
+            self.connection, Hello(device_id, Role.PHONE)
+        )
+        self.session = Session(self.connection, session_id=99, heartbeat_s=None,
+                               stall_timeout_s=None).start()
+
+    def hang_up(self):
+        self.session.close()
+
+
+def dial(acceptor, device_id):
+    """Dial in from another thread, and hand back the phone once it is up.
+
+    The handshake is synchronous on the client side, so calling `LoopbackPhone`
+    inline before `wait_for_phone` deadlocks: nothing has started the listener that
+    would answer it. Off-thread, the dial waits for the listener to come up the way
+    a real handset does.
+    """
+    import concurrent.futures
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(LoopbackPhone, acceptor, device_id)
+    pool.shutdown(wait=False)
+    return future
+
+
+def wait_until(predicate, timeout=3.0, interval=0.005):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return False
+
+
+class TestTheReturnPath:
+    """Until now nothing went down the link at all."""
+
+    def test_an_advisory_carries_the_frames_capture_stamp_not_now(self):
+        # `AdvisoryMessage` has no frame id, so `t_capture_mono_ns` is the only thing
+        # tying a recommendation to the frame that produced it. Sending `now` instead
+        # would make every advisory claim to be about a frame captured at the instant
+        # it was sent, and the log would join to nothing.
+        phone, jetson, phone_router, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            capture = 1_234_567_890
+            assert link.send_advisory(_advisory(), t_capture_mono_ns=capture) is True
+            received = phone_router.recv(Channel.ADVISORY, timeout=2.0)
+            assert received is not None
+            assert received.t_capture_mono_ns == capture
+            assert link.advisories_sent == 1
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_a_rate_command_reaches_the_phone(self):
+        phone, jetson, phone_router, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            assert link.send_rate_command(_rate_command()) is True
+            received = phone_router.recv(Channel.RATE_CMD, timeout=2.0)
+            assert received is not None
+            assert received.trigger == "idle"
+            assert link.rate_commands_sent == 1
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_sending_with_no_session_is_false_and_not_an_exception(self):
+        # The drive keeps ticking while the supervisor reattaches the phone. A raise
+        # per tick would take the run down for the one condition it exists to survive.
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        assert link.send_advisory(_advisory(), t_capture_mono_ns=1) is False
+        assert link.send_rate_command(_rate_command()) is False
+        assert link.sends_without_a_session == 2
+        assert link.advisories_sent == 0 and link.rate_commands_sent == 0
+        assert link.to_record()["sent"]["without_a_session"] == 2
+
+    def test_a_closed_session_counts_as_having_none_rather_than_as_a_refusal(self):
+        # Two different facts about a run: a link that is down between sessions, and
+        # a session that turned a message away. One counter could not say which.
+        phone, jetson, _, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            jetson.close()
+            assert link.send_advisory(_advisory(), t_capture_mono_ns=1) is False
+            assert link.sends_without_a_session == 1
+            assert link.sends_refused == 0
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_our_own_bad_message_is_raised_not_counted(self):
+        # The router raises InvalidMessage precisely so a caller cannot swallow its
+        # own bug with the drop-and-count idiom meant for the peer's mistakes.
+        phone, jetson, _, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            with pytest.raises(InvalidMessage):
+                link.send_rate_command(_rate_command(rates={
+                    "camera_hz": 0.0, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.05}))
+            assert link.sends_refused == 0
+            assert link.rate_commands_sent == 0
+        finally:
+            link.stop()
+            phone.close()
+
+
+def _advisory(**over):
+    fields = dict(recommended_speed_mps=13.4, recommended_speed_display=30.0,
+                  current_speed_display=28.0, units="mph", headway_target_s=2.0,
+                  lane_text="keep lane", merge_text="no merge", traffic_text="moderate",
+                  confidence=0.8, confidence_label="high",
+                  action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
+                          "lane_preference": "keep", "merge_mode": "normal"})
+    fields.update(over)
+    return Advisory(**fields)
+
+
+def _rate_command(**over):
+    fields = dict(t_capture_mono_ns=7, trigger="idle", shadow=False,
+                  rates={"camera_hz": 5.0, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.05})
+    fields.update(over)
+    return RateCommand(**fields)
+
+
+class TestRedial:
+    """A phone that hangs up used to end the drive."""
+
+    def test_a_second_phone_is_bound_without_restarting_the_run(self):
+        # `wait_for_phone` ran once, the three readers returned for good on the first
+        # close, and the backends went quiet with nothing to restart them. The
+        # listener was still accepting the whole time.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            assert link.peer_device_id == "phone-one"
+            first_session_id = link.session.session_id
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+            assert link.peer_device_id == "phone-two"
+            assert link.session.session_id != first_session_id
+            # The workers came back up on the new session, not just the field.
+            assert wait_until(lambda: link.camera is not None and link.gps is not None)
+            assert link.router is not None and link.router.session is link.session
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_the_timebase_does_not_carry_across_a_rebind(self):
+        # A new session is a new peer clock. Samples from the old one are not
+        # comparable to the new one's, so reattaching without resetting would let the
+        # second session's first ticks convert against the first session's offset --
+        # and look perfectly healthy while doing it, which is this module's own
+        # stated failure mode one level up.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            link.estimator.add(OneWaySample(exchange_id=1, t1_remote_send_ns=10,
+                                            t2_local_recv_ns=20))
+            stale = link.estimator
+            assert stale.to_record()["samples_accepted"] == 1
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert link.estimator is not stale, "the old estimator survived the rebind"
+            assert link.estimator.to_record()["samples_accepted"] == 0
+            # The adapter must follow it. Keeping the old one would leave the new
+            # session's stamps converting through the previous phone's offset with a
+            # fresh estimator sitting unused beside it.
+            assert link.adapter._estimator is link.estimator
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_the_rebind_names_how_the_previous_session_ended(self):
+        # "The phone lost the link" and "the phone was displaced by another device"
+        # are different drives, and `session_id` alone cannot tell them apart later.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            entry = link.rebinds[0]
+            assert entry["previous_end_reason"] is not None
+            assert entry["peer_device_id"] == "phone-two"
+            assert entry["down_s"] >= 0.0
+            assert link.to_record()["rebinds"] == link.rebinds
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_only_one_supervisor_exists_however_many_rebinds(self):
+        # One per session would leave a thread per redial, all watching one field and
+        # all racing to tear the same session down.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            phones = [dialling.result(timeout=5.0)]
+            supervisor = link._supervisor
+            for n in range(2, 4):
+                phones[-1].hang_up()
+                phones.append(LoopbackPhone(acceptor, f"phone-{n}"))
+                assert wait_until(lambda n=n: len(link.rebinds) == n - 1), f"rebind {n}"
+            assert link._supervisor is supervisor
+            assert sum(1 for t in threading.enumerate()
+                       if t.name == "phone-supervisor") == 1
+            phones[-1].hang_up()
+        finally:
+            link.stop()
