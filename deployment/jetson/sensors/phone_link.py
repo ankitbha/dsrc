@@ -57,6 +57,12 @@ def sample_from(message: Any, receipt: Any) -> OneWaySample:
     )
 
 
+def _end_reason_of(session: Any) -> str | None:
+    """How a session ended, spelled as the rest of the repo spells it."""
+    reason = getattr(session, "end_reason", None) if session is not None else None
+    return getattr(reason, "value", None) if reason is not None else None
+
+
 class PhoneLink:
     """One phone session, and the camera and GPS backends it feeds.
 
@@ -199,9 +205,11 @@ class PhoneLink:
             "sessions_displaced": self._listener.displaced,
             "sessions_refused": self._listener.refused,
             "refusals": list(self.refusals),
-            "end_reason": None if self.session is None else str(
-                getattr(self.session, "end_reason", None)
-            ),
+            # The wire's spelling, or a real null. `str()` recorded the string
+            # "None" while the session was open and "SessionEndReason.PEER_CLOSED"
+            # once it ended, so a reader filtering on the transport's own
+            # `peer_closed` matched neither.
+            "end_reason": _end_reason_of(self.session),
             "pings_answered": self.pings_answered,
             "timebase": self.estimator.to_record(),
             "clock": self.adapter.to_record(),

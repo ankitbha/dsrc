@@ -25,12 +25,22 @@ from pathlib import Path
 import pytest
 
 JETSON = Path(__file__).resolve().parents[1]
+REPO = JETSON.parents[1]
 
 #: Every module that is an entry point or is imported by one. A NameError in any
 #: of these is a defect that reaches a run.
+#:
+#: The whole repository, not `deployment/jetson/`. Scoped to the jetson tree, this
+#: covered 46 of 121 modules -- and the very next extract-a-function commit broke
+#: `scripts/run_loopback_pipeline.py`, which is one directory outside that glob.
+#: The guard passed, the full suite passed, and the defect it exists to prevent
+#: sat in the blind spot. A check is only worth what it looks at.
 MODULES = sorted(
-    p for p in JETSON.rglob("*.py")
-    if "__pycache__" not in p.parts and "tests" not in p.parts
+    p for p in REPO.rglob("*.py")
+    if "__pycache__" not in p.parts
+    and "tests" not in p.parts
+    and ".venv" not in p.parts
+    and "build" not in p.parts
 )
 
 
@@ -53,7 +63,7 @@ def module_names(table: symtable.SymbolTable) -> set[str]:
     return {s.get_name() for s in table.get_symbols() if s.is_assigned() or s.is_imported()}
 
 
-@pytest.mark.parametrize("path", MODULES, ids=lambda p: str(p.relative_to(JETSON)))
+@pytest.mark.parametrize("path", MODULES, ids=lambda p: str(p.relative_to(REPO)))
 def test_every_function_reads_only_names_that_exist(path: Path):
     table = symtable.symtable(path.read_text(encoding="utf-8"), str(path), "exec")
     visible = module_names(table) | set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
@@ -73,4 +83,4 @@ def test_every_function_reads_only_names_that_exist(path: Path):
             if name not in visible:
                 offenders.append(f"{scope.get_name()}() reads undefined {name!r}")
 
-    assert not offenders, f"{path.relative_to(JETSON)}: " + "; ".join(sorted(set(offenders)))
+    assert not offenders, f"{path.relative_to(REPO)}: " + "; ".join(sorted(set(offenders)))

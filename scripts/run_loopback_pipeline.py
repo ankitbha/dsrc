@@ -721,9 +721,23 @@ def run_link_jetson(args) -> dict:
         return {"role": "jetson", "usable": False, "why": "no session was established",
                 "refusals": list(link.refusals)}
 
+    try:
+        return _run_link_jetson_session(args, link)
+    finally:
+        link.stop()
+
+
+def _run_link_jetson_session(args, link) -> dict:
+    """The run itself, with the link's teardown guaranteed by the caller."""
     session = link.session
     print(f"session {session.session_id} from {link.peer_device_id}", flush=True)
     adapter = link.adapter
+    # Dropped when this moved onto PhoneLink, while both uses stayed: the
+    # advisory send in the tick loop and `router.stats()` in the accounting. So
+    # every path that got as far as a frame -- or as far as the duration expiring
+    # -- raised NameError, and the only path that returned was "no phone dialled
+    # in". The harness could not produce a usable report at all.
+    router = link.router
     camera, gps = link.camera, link.gps
     stop = threading.Event()
 
@@ -773,7 +787,6 @@ def run_link_jetson(args) -> dict:
         and report["gate_detail"]["converted_and_fresh"]
         == report["gate_detail"]["converted_ticks"]
     )
-    link.stop()
     return report
 
 
