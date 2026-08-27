@@ -60,6 +60,9 @@ class GoldenFramesTest {
 
     private fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
 
+    private fun hexToBytes(text: String) =
+        ByteArray(text.length / 2) { text.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+
     private fun sha256(bytes: ByteArray) = hex(MessageDigest.getInstance("SHA-256").digest(bytes))
 
     @Test
@@ -152,6 +155,39 @@ class GoldenFramesTest {
                 case.obj("payload").num("length").toInt(),
             )
             assertEquals(Json.encode(expected), Json.encode(decoded), "case ${case.text("name")}")
+        }
+    }
+
+    @Test
+    fun `every message case decodes through this side's typed decoder`() {
+        // The file is described as what keeps the two codecs honest, and until now this
+        // side never took it past the framing layer: no `fromWire` was called anywhere in
+        // this class, so at the typed-message layer the frozen vectors bound Python alone.
+        // Python has the twin of this test; this is the half that was missing.
+        //
+        // Decoded from the file's own recorded bytes rather than from anything this
+        // implementation just produced -- otherwise a bug symmetric across encode and
+        // decode passes.
+        val framing = setOf("ch", "seq", "t_mono_ns", "t_wall_ns", "n")
+        val messageCases = cases.filter { it.text("name").startsWith("message_") }
+        assertTrue(messageCases.isNotEmpty(), "no message cases in the vector file")
+
+        for (case in messageCases) {
+            val header = Json.decode(
+                String(hexToBytes(case.text("header_hex")), Charsets.UTF_8)
+            ) as JsonValue.Obj
+            val channel = (header.entries.getValue("ch") as JsonValue.Text).value
+            val extensions = header.entries.filterKeys { it !in framing }
+            val payload = payloadFor(case.obj("payload"))
+
+            // The receive path's own entry point, so this asserts what an arriving frame
+            // would actually meet rather than a decoder chosen by the test.
+            MessageValidation.check(
+                channel = channel,
+                extensions = extensions,
+                payload = payload,
+                checkReservedKeys = false,
+            )
         }
     }
 

@@ -545,6 +545,46 @@
       "header_len": 319,
       "frame_len": 325,
       "frame_sha256": "827e57ef1904472c3ab9a823b38d290cf3e41ea9bf99750f5fb4011205b1b278"
+    },
+    {
+      "name": "message_telemetry_with_skin",
+      "why": "phone telemetry carrying an absolute temperature and the zone it came from",
+      "frame": {
+        "ch": "telemetry",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000009,
+          "thermal_status": "moderate",
+          "thermal_headroom": 0.11,
+          "achieved": {
+            "camera_hz": 5.0,
+            "gps_hz": 1.0,
+            "imu_hz": 50.0,
+            "here_hz": 0.05
+          },
+          "dropped": {
+            "camera": 0,
+            "gps": 0,
+            "imu": 0,
+            "here": 0
+          },
+          "here_calls": 7,
+          "here_errors": 0,
+          "skin_temp_c": 41.5,
+          "skin_temp_zone": "xo_therm"
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "00000000016f",
+      "header_hex": "7b226163686965766564223a7b2263616d6572615f687a223a352e302c226770735f687a223a312e302c22686572655f687a223a302e30352c22696d755f687a223a35302e307d2c226368223a2274656c656d65747279222c2264726f70706564223a7b2263616d657261223a302c22677073223a302c2268657265223a302c22696d75223a307d2c22686572655f63616c6c73223a372c22686572655f6572726f7273223a302c226e223a302c22736571223a312c22736b696e5f74656d705f63223a34312e352c22736b696e5f74656d705f7a6f6e65223a22786f5f746865726d222c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303030392c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c22746865726d616c5f68656164726f6f6d223a302e31312c22746865726d616c5f737461747573223a226d6f646572617465227d",
+      "header_len": 367,
+      "frame_len": 373,
+      "frame_sha256": "78b81efae03932d8f263ea24575ed58ff33a22fa2783de513aa3a1e9d8a79942"
     }
   ]
 }

@@ -647,6 +647,16 @@ class SensingService : LifecycleService() {
             // touches is inert, but re-requesting GPS or IMU after their stop leaves the
             // provider engaged with nothing holding a reference to switch it off again: the
             // location indicator stays lit for the life of the process, and no counter moves.
+            // Logged before it is dropped, like every other component here. Without
+            // this the whole Stats surface was unobservable in production -- `applied`,
+            // `shadowed`, `lastTrigger`, `currentRates`, `hereConfigured` incremented
+            // and discarded -- so a pure-shadow drive and a fully live one left
+            // identical phone-side evidence. The Jetson's `shadow_mode.py` credits this
+            // side with "counting what it shadowed"; that count has to leave the process
+            // for the claim to mean anything, and task 35 scores from these drives.
+            release("config applier stats") {
+                configApplier?.let { Log.i(TAG, "config applier stats ${it.stats}") }
+            }
             release("config applier") { configApplier = null }
             release("camera source") { cameraSource?.stop() }
             release("gps source") { gpsSource?.stop() }

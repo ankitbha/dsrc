@@ -128,9 +128,30 @@ class ConfigApplierTest {
     fun `the trigger is recorded for both kinds`() {
         // The Jetson asks "what would you have done"; knowing which command prompted it is
         // the point of recording a shadow at all.
+        //
+        // Both kinds, as the name says. This applied only a shadow command, so moving the
+        // write inside the shadow branch left the whole suite green while a live drive
+        // recorded no trigger at all -- or kept whatever the last shadow command left.
         val applier = ConfigApplier(Recorder())
+
         applier.apply(command(shadow = true, trigger = "advisory_bin_boundary"))
         assertEquals("advisory_bin_boundary", applier.stats.lastTrigger)
+
+        applier.apply(command(shadow = false, trigger = "event_from_free_tier"))
+        assertEquals("event_from_free_tier", applier.stats.lastTrigger)
+    }
+
+    @Test
+    fun `the counters separate what was applied from what was only recorded`() {
+        // The Jetson's shadow_mode credits this side with "counting what it shadowed", and
+        // task 35 scores from these drives. A pure-shadow drive and a fully live one have
+        // to be distinguishable from what this side reports.
+        val applier = ConfigApplier(Recorder())
+        repeat(3) { applier.apply(command(shadow = true, trigger = "idle")) }
+        repeat(2) { applier.apply(command(shadow = false, trigger = "idle")) }
+
+        assertEquals(3L, applier.stats.shadowed)
+        assertEquals(2L, applier.stats.applied)
     }
 
     @Test

@@ -263,6 +263,25 @@ MESSAGES = [
             here_calls=30, here_errors=1,
         ),
     ),
+    # A second telemetry case rather than an edit to the one above, because that one
+    # is frozen and a frozen vector that moves is not a vector. `skin_temp_c` and
+    # `skin_temp_zone` postdate it, so until now the two codecs had never been frozen
+    # against each other on either field -- and they are the pair the sensing
+    # controller backs off on before the status moves.
+    (
+        "message_telemetry_with_skin",
+        "phone telemetry carrying an absolute temperature and the zone it came from",
+        PhoneTelemetry(
+            t_capture_mono_ns=1_000_000_009, thermal_status="moderate",
+            thermal_headroom=0.11,
+            achieved={"camera_hz": 5.0, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.05},
+            dropped={"camera": 0, "gps": 0, "imu": 0, "here": 0},
+            here_calls=7, here_errors=0,
+            # Null together or set together: the number cannot be interpreted, or
+            # compared across devices, without the zone that produced it.
+            skin_temp_c=41.5, skin_temp_zone="xo_therm",
+        ),
+    ),
 ]
 
 
