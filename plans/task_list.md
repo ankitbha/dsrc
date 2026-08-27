@@ -912,7 +912,50 @@ tunnels over USB and is unaffected.
     **Open:** making the feed available in shadow would mean letting a shadow
     command carry a query into effect, which changes what `shadow` means on the
     wire — a protocol decision, raised rather than taken.
-31. Integration into the existing tick loop, advisory returned to the phone.
+31. ~~Integration into the existing tick loop, advisory returned to the phone.~~
+    **DONE** — `run_demo.py --phone` took camera and GPS off the handset and sent
+    **nothing back**: no advisory, no rate command. Everything sections E and F
+    built — `SensingController`, `ModeHolder`, `HereFeed`, `FeedFusion`, the
+    telemetry reader — had never been constructed by a live path, and the traffic
+    feed reached no consumer at all: `pipeline.step` had no `feed` parameter, so the
+    whole HERE ingestion path terminated in a log record and `Trigger.DISAGREEMENT`
+    could not fire on any drive. **Two cadences, because the two channels fail
+    differently**: `advisory` is latest_wins at depth one and goes every tick;
+    `rate_cmd` is reliable at depth 16 and the loop runs at camera rate, so a
+    command per tick would make the channel designed never to lose a record lose
+    records continuously. Commands go on changed content, on the query going stale
+    **in space** (it is centred on the vehicle and formatted to ~1 m, so it differs
+    almost every tick and cannot be part of the changed test), or on a heartbeat.
+    Shadow is the default; `--live-rates` opts in. **Sixteen defects across three
+    validation rounds, and each round found its defect inside the previous round's
+    fix.** Round 1: `build_components` binds `camera = phone.camera` once and the
+    worker closes over it, so a rebind that built new backends reconnected the link
+    to objects nobody read — and the run was already dead, because the camera's
+    `end_of_stream` fires within one 5 ms poll and the worker breaks on exactly
+    that. Round 2: the identity fix for that carried the previous phone's **frame-id
+    high-water mark**, so a run surviving a redial refused every frame the second
+    phone sent — silently, with `reader_alive` True, `end_of_stream` False, and even
+    the drop counter flat, because it fires on the one condition that is false here.
+    Round 3: the camera's fix was **absent from the GPS reader**, which served the
+    previous handset's position — valid, fresh, stamped `measured` — to every tick
+    until the new phone spoke; and the V2V beacon gates on `fix.valid` with no age
+    test at all. The estimator reset was justified as "a new session is a new peer
+    clock"; the same argument covers thermal state, the traffic feed and the
+    position, and each round found one more field it had not been applied to.
+    **Experiment** (`scripts/run_phone_drive.py`): 586 ticks over 20.3 s at 30 Hz
+    through a real 0.73 s outage — the run did not end, 14 ticks passed with no
+    camera, **280 of 280** advisories the phone saw matched a frame this side
+    actually processed (0 unmatched), **13 rate commands against 586 ticks** — a
+    ratio of 0.022, 45× fewer than per-tick — and **0 refused by the wire**. Pacing
+    was not cosmetic: run flat out the same code reports a cadence that is an
+    artefact of the harness. **The method lesson:** a round-2 pin mutated two lines
+    as one anchor, so deleting just `_latest = None` restored the defect in full and
+    the pin still read CAUGHT — *a pin whose granularity is coarser than the defect
+    is not a pin*. Nineteen tests also bound a real fixed TCP port and flaked 6 in
+    40; I had reverted that fix once for lack of justification, and the measured
+    rate was the justification. **Open:** the loop does not attempt a send during an
+    outage — the camera yields no frame, so `on_tick` is never reached — so the
+    no-session path is covered by unit tests and not by the drive.
 32. End-to-end run over the network backend, phone and Jetson apart, exercising
     the whole loop before any USB work.
 
