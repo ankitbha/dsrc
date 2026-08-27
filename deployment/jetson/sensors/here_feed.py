@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sensors.gps_reader import GpsFix
-from geo import haversine_m
+from geo import haversine_m, point_to_segment_m
 
 #: How far off the road a link's nearest point may be and still be our road. A
 #: motorway and the service road beside it are tens of metres apart, and reporting
@@ -113,8 +113,21 @@ class FlowLink:
     length_m: float | None
 
     def distance_m(self, lat: float, lon: float) -> float:
-        """How far this link's shape passes from a point."""
-        return min(haversine_m(lat, lon, plat, plon) for plat, plon in self.points)
+        """How far this link's shape passes from a point.
+
+        To the SHAPE, which means to its segments and not only to its vertices.
+        Keeping every point of the shape -- which `_points` does, and its docstring
+        explains why -- was necessary and not sufficient: this still measured to the
+        nearest vertex, so a vehicle sitting exactly on the carriageway between two
+        of them was reported at half their spacing. On this repo's own fixture the
+        spacing is 199.8 m against a 60 m association radius, so 40% of a link the
+        vehicle is certainly on came back `no_link_matched` -- which is the failure
+        `_points` says it fixed, one function further along.
+        """
+        best = min(haversine_m(lat, lon, plat, plon) for plat, plon in self.points)
+        for start, end in zip(self.points, self.points[1:]):
+            best = min(best, point_to_segment_m(lat, lon, *start, *end))
+        return best
 
     def ahead_point(self, gps_lat: float, gps_lon: float, heading_deg: float,
                     half_angle_deg: float, horizon_m: float) -> tuple[float, float, float] | None:
@@ -505,11 +518,32 @@ class HereFeed:
             matched = link.ahead_point(gps.lat, gps.lon, gps.heading_deg,
                                        self._half_angle_deg, self._horizon_m)
             if matched is not None:
-                ahead.append((matched[0], matched[1], link))
+                distance_m, offset_deg = matched[0], matched[1]
+                ahead.append((abs(distance_m * math.sin(math.radians(offset_deg))),
+                              distance_m, offset_deg, link))
         if not ahead:
             return FlowReading(outcome=Outcome.NO_LINK_AHEAD, **provenance)
 
-        distance, offset_deg, nearest = min(ahead, key=lambda triple: triple[0])
+        # Chosen by cross-track first and distance second, not by distance alone.
+        #
+        # The cone is a fixed half-angle, so at any real range it admits roads that
+        # are not ours: at the 3 km horizon it takes 2.6 km of lateral offset. Picking
+        # the nearest ahead point therefore let a parallel road evict our own
+        # carriageway from the same response -- and only ONE link survives to the
+        # caller, so the on-corridor link it would have weighted was already gone.
+        # Measured on a road 100 m to the side and jammed while ours was clear: the
+        # feed reported congestion 0.92 instead of 0.04, over `disagreement`'s 0.5
+        # threshold, so the controller raised the camera 1 -> 5 Hz on another road's
+        # traffic.
+        #
+        # Cross-track in METRES is what discriminates, and it needs no threshold from
+        # the consumer: a link 2 km along our own road subtends a small offset and so
+        # sits nearer the heading ray than a side road a hundred metres away. Distance
+        # breaks the tie, which is what picks the nearest piece of our own road when
+        # several stretches of it are ahead. `feed_fusion` still applies
+        # `MAX_CROSS_TRACK_M` -- this decides which link it gets to judge, not whether
+        # the link is acceptable.
+        _, distance, offset_deg, nearest = min(ahead, key=lambda c: (c[0], c[1]))
         # Both from the one matched point, so the pair describes a single place.
         # `link_distance_m` therefore means "to the nearest point of this link that
         # is ahead", not "to the link" -- the honest reading when the two differ.

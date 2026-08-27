@@ -288,3 +288,30 @@ class TestRefusalReasonsAreBounded:
                 seen.add(exc.reason)
 
         assert len(seen) == 1, f"one stalled sync produced {len(seen)} distinct reasons: {seen}"
+
+
+def test_the_published_bound_is_the_one_the_estimator_computed():
+    # `test_the_bound_is_the_delay_spread_not_half_a_round_trip` asserts on
+    # `estimate().rtt_min_ns`, the raw field, and never on what `to_local` actually
+    # publishes -- so halving the bound on its way out survived the whole suite.
+    #
+    # That value is not decorative. It becomes `TimebaseStamp.bound_s`, which
+    # `ObservationBuilder` charges against `gps_stale_after_s` before deciding
+    # `timebase_unresolved`, so a halved bound turns a fix that should be refused
+    # into one that reads as measured.
+    clock = Clock()
+    estimator = OneWayEstimator(mono_clock=clock)
+    for i in range(MIN_OFFSET_SAMPLES):
+        # A spread of observed delays, so the bound is not trivially zero.
+        estimator.add(arrival(clock, i, delay_s=0.200 if i % 2 else 0.008))
+        clock.advance(1.0)
+
+    estimate = estimator.estimate()
+    assert estimate is not None
+    # A REMOTE instant -- the peer's clock runs `PLANTED_OFFSET_NS` ahead of ours.
+    stamped = estimator.to_local(clock.now_ns + PLANTED_OFFSET_NS)
+    assert stamped is not None
+    assert stamped.bound_ns >= estimate.rtt_min_ns, (
+        f"the published bound {stamped.bound_ns} is below the spread "
+        f"{estimate.rtt_min_ns} the estimator computed"
+    )

@@ -197,8 +197,10 @@ class ObservationBuilder:
             # hold last known speed rather than reporting 0 (= "stopped")
             ego_speed = self._ego.last_speed_mps if self._ego.ever_had_fix else 0.0
             src["ego_speed"] = "fallback_neutral"
-        ego_accel = self._speed_slope()
-        src["ego_acceleration"] = "derived" if len(self._ego.speed_samples) >= 3 else "fallback_neutral"
+        # From the branch actually taken, not from the sample count -- the count
+        # cannot see the window-span guard below it.
+        ego_accel, accel_derived = self._speed_slope()
+        src["ego_acceleration"] = "derived" if accel_derived else "fallback_neutral"
 
         # --- lane assignment from lateral offsets --------------------
         in_range = [v for v in vehicles if v.distance_m <= cfg.effective_range_m]
@@ -406,16 +408,32 @@ class ObservationBuilder:
         lane = int(round(offset))
         return max(-2, min(2, lane))
 
-    def _speed_slope(self) -> float:
+    def _speed_slope(self) -> tuple[float, bool]:
+        """The ego acceleration and whether it was actually derived.
+
+        Two ways to fall back and they used to be reported as one: the caller set
+        the provenance from the sample COUNT alone, so a window too short to fit a
+        slope returned the neutral 0.0 tagged `derived`. At the shipped 30 fps the
+        ten-sample slice spans exactly 9/30 = 0.3 s, landing on the guard, so which
+        branch ran was decided by frame-timing noise -- measured at 533 of 888 ticks
+        under a constant -3.0 m/s^2 deceleration.
+
+        That matters twice over. `SensingController` raises rates on
+        `abs(ego_acceleration) >= EVENT_ACCEL_MPS2`, so the free tier -- the thing
+        that says when to spend the expensive modalities -- was silent on more than
+        half the ticks of a braking event. And `field_sources` is what this module's
+        docstring calls the basis for the observation-missingness metric, so the
+        missingness was under-counted by the same margin.
+        """
         samples = list(self._ego.speed_samples)[-10:]
         if len(samples) < 3:
-            return 0.0
+            return 0.0, False
         t = np.array([s[0] for s in samples])
         v = np.array([s[1] for s in samples])
         if t[-1] - t[0] < 0.3:
-            return 0.0
+            return 0.0, False
         t = t - t.mean()
-        return float((t * (v - v.mean())).sum() / max((t * t).sum(), 1e-9))
+        return float((t * (v - v.mean())).sum() / max((t * t).sum(), 1e-9)), True
 
     @staticmethod
     def _peer_lane_distribution(peers: list[PeerState]) -> dict[str, float]:

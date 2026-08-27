@@ -134,3 +134,84 @@ def test_target_headway_feedback(builder: ObservationBuilder) -> None:
     builder.set_target_headway(2.2)
     result = builder.build([], fresh_fix(20.0), time.monotonic())
     assert result.obs["target_headway_s"] == 2.2
+
+
+class TestTheFreshnessPredicateIsWhollyPinned:
+    """Half of it was not, and the deleted half is what the comment above it defends."""
+
+    def _fix_with_bound(self, *, age_s: float, bound_s: float):
+        from sensors.gps_reader import GpsFix
+        from sensors.phone_source import TimebaseStamp
+
+        now = 1000.0
+        return now, GpsFix(
+            valid=True, lat=51.49, lon=-0.20, speed_mps=20.0, heading_deg=90.0,
+            fix_quality=1, num_sats=9, hdop=0.9, t_mono=now - age_s, t_wall=0.0,
+            timebase=TimebaseStamp(t_capture_mono=now - age_s, t_arrival_mono=now,
+                                   bound_s=bound_s, proxy=False, estimate_id=1))
+
+    def test_a_bound_too_wide_to_resolve_refuses_the_fix(self):
+        # `timebase_unresolved` -> False survived the whole suite. The comment above
+        # it names the case: "at a 10 s bound a stamp nine seconds into this clock's
+        # future read as measured".
+        builder = ObservationBuilder(BuilderConfig())
+        now, gps = self._fix_with_bound(age_s=0.1, bound_s=10.0)
+        result = builder.build([], gps, now)
+        assert result.diagnostics["gps_fresh"] is False
+        assert result.field_sources["ego_speed"] == "fallback_neutral"
+
+    def test_the_bound_is_charged_before_the_staleness_comparison(self):
+        # `gps_age + uncertainty_s <= stale_after` -> `gps_age <= stale_after` also
+        # survived. A fix inside the window on its own is outside it once the cost of
+        # not knowing when it arrived is charged -- which is the whole point of
+        # carrying a bound rather than a bare age.
+        builder = ObservationBuilder(BuilderConfig())
+        stale_after = BuilderConfig().gps_stale_after_s
+
+        now, inside = self._fix_with_bound(age_s=stale_after * 0.6, bound_s=0.0)
+        assert builder.build([], inside, now).diagnostics["gps_fresh"] is True
+
+        builder = ObservationBuilder(BuilderConfig())
+        now, borderline = self._fix_with_bound(age_s=stale_after * 0.6,
+                                               bound_s=stale_after * 0.5)
+        assert builder.build([], borderline, now).diagnostics["gps_fresh"] is False, (
+            "the fix is inside the window only if the bound costs nothing"
+        )
+
+
+class TestTheAccelerationProvenanceMatchesTheBranchTaken:
+    """Two ways to fall back, reported as one."""
+
+    def _drive(self, builder, *, samples: int, dt: float, start: float = 1000.0):
+        from sensors.gps_reader import GpsFix
+
+        result = None
+        for i in range(samples):
+            now = start + i * dt
+            gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0 - 3.0 * i * dt,
+                         heading_deg=90.0, fix_quality=1, num_sats=9, hdop=0.9,
+                         t_mono=now, t_wall=0.0)
+            result = builder.build([], gps, now)
+        return result
+
+    def test_a_window_too_short_to_fit_a_slope_is_not_called_derived(self):
+        # The provenance was read off the sample COUNT, which cannot see the
+        # window-span guard below it -- so a neutral 0.0 was tagged `derived`. At the
+        # shipped 30 fps the ten-sample slice spans exactly the 0.3 s guard, so which
+        # branch ran was decided by frame-timing noise: measured at 533 of 888 ticks
+        # under constant braking.
+        result = self._drive(ObservationBuilder(BuilderConfig()), samples=5, dt=0.01)
+        assert result.obs["ego_acceleration"] == pytest.approx(0.0)
+        assert result.field_sources["ego_acceleration"] == "fallback_neutral", (
+            "a window too short to fit a slope was reported as derived"
+        )
+
+    def test_a_window_long_enough_is_derived_and_carries_the_slope(self):
+        # The other side, so the fix is not just "always say fallback".
+        result = self._drive(ObservationBuilder(BuilderConfig()), samples=8, dt=0.2)
+        assert result.field_sources["ego_acceleration"] == "derived"
+        assert result.obs["ego_acceleration"] == pytest.approx(-3.0, abs=0.2)
+
+    def test_too_few_samples_is_also_a_fallback(self):
+        result = self._drive(ObservationBuilder(BuilderConfig()), samples=2, dt=1.0)
+        assert result.field_sources["ego_acceleration"] == "fallback_neutral"

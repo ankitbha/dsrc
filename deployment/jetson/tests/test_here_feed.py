@@ -13,6 +13,8 @@ import time
 import math
 from dataclasses import replace
 
+import pytest
+
 from sensors.gps_reader import GpsFix
 from sensors.here_feed import (
     ASSOCIATION_RADIUS_M,
@@ -608,3 +610,100 @@ class TestTheFixHasAnAgeToo:
             t_capture_mono=borderline.t_mono, t_arrival_mono=100.0,
             bound_s=1.0, proxy=False, estimate_id=1))
         assert feed.at(with_bound, t_mono=100.0).outcome == Outcome.STALE_FIX
+
+
+def northward(lat: float, lon: float, north_m: float, points: int = 5) -> list[dict]:
+    """A link running due north from a point, sampled evenly."""
+    return [{"lat": offset(lat, lon, north_m * i / (points - 1), 0.0)[0], "lng": lon}
+            for i in range(points)]
+
+
+class TestDistanceIsToTheShapeNotItsVertices:
+    """Keeping the shape was necessary and not sufficient."""
+
+    def test_a_vehicle_on_the_road_between_two_vertices_matches_it(self):
+        # `_points`' docstring says a vehicle "driving along a link it is certainly
+        # on" must not come back unmatched, and keeping every point was its fix. The
+        # distance function still measured to the nearest VERTEX, so on this file's
+        # own fixture -- 199.8 m spacing against a 60 m association radius -- 40% of
+        # the link was refused while the vehicle sat exactly on the carriageway.
+        points = stretch(*HOME, east_m=800.0)
+        coords = [(p["lat"], p["lng"]) for p in points]
+        midway = ((coords[0][0] + coords[1][0]) / 2, (coords[0][1] + coords[1][1]) / 2)
+
+        feed = HereFeed()
+        feed.offer(status=200, body=body(points), received_t_mono=100.0)
+        reading = feed.at(fix(*midway, heading_deg=90.0, t_mono=100.0), t_mono=100.0)
+        assert reading.outcome == Outcome.OK, (
+            "the vehicle is on the road and the feed did not match it"
+        )
+
+    def test_the_distance_is_zero_on_the_segment_and_grows_off_it(self):
+        from sensors.here_feed import FlowLink
+
+        link = FlowLink(points=tuple((p["lat"], p["lng"])
+                                     for p in stretch(*HOME, east_m=800.0)),
+                        speed_mps=10.0, free_flow_mps=25.0, jam_factor=1.0,
+                        confidence=0.9, traversability="open", length_m=800.0)
+        coords = link.points
+        midway = ((coords[0][0] + coords[1][0]) / 2, (coords[0][1] + coords[1][1]) / 2)
+        assert link.distance_m(*midway) == pytest.approx(0.0, abs=1.0)
+        # 50 m north of that same spot: measured off the segment, not to a vertex.
+        aside = offset(*midway, north_m=50.0, east_m=0.0)
+        assert link.distance_m(*aside) == pytest.approx(50.0, abs=2.0)
+
+
+class TestWhichLinkIsChosen:
+    """Only one link survives to the caller, so the choice is the whole answer."""
+
+    def test_a_jammed_road_alongside_does_not_evict_our_own(self):
+        # The cone is a fixed half-angle and at any real range admits roads that are
+        # not ours. Choosing the nearest ahead POINT let a parallel road 100 m aside
+        # replace our own carriageway -- and `feed_fusion` only ever sees the one
+        # link, so the on-corridor link it would have weighted was already gone.
+        # Measured before the fix: congestion 0.92 from the side road's jam instead
+        # of 0.04 from our clear one, over `disagreement`'s 0.5 threshold.
+        # The side road has to be NEARER than ours or the old distance-only rule
+        # picks ours anyway and the test proves nothing.
+        #
+        # Ours runs UNDER the vehicle and on ahead, sampled sparsely -- which is the
+        # ordinary case, and why `distance_m` measures to the shape: the association
+        # gate sees 0 m, while the nearest point AHEAD is the next vertex at 400 m.
+        # The side road starts 150 m ahead and 100 m east, so it is ~180 m away:
+        # nearer on distance, 100 m off the corridor.
+        ours = northward(*offset(*HOME, north_m=-400.0, east_m=0.0),
+                         north_m=1200.0, points=4)
+        aside = northward(*offset(*HOME, north_m=150.0, east_m=100.0), north_m=600.0)
+
+        both = json.loads(body(ours, speed=24.0, freeFlow=25.0).decode("utf-8"))
+        both["results"].extend(
+            json.loads(body(aside, speed=2.0, freeFlow=25.0).decode("utf-8"))["results"])
+
+        feed = HereFeed()
+        feed.offer(status=200, body=json.dumps(both).encode("utf-8"),
+                   received_t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=0.0, t_mono=100.0), t_mono=100.0)
+
+        assert reading.ok
+        assert reading.link.speed_mps == pytest.approx(24.0), (
+            f"chose the road aside at {reading.link.speed_mps} m/s over ours at 24.0"
+        )
+        assert reading.link_cross_track_m == pytest.approx(0.0, abs=5.0)
+
+    def test_the_nearer_stretch_of_our_own_road_wins_the_tie(self):
+        # Cross-track first, distance second. With two stretches of our own road
+        # ahead, both on the heading, the nearer one is the answer.
+        start = offset(*HOME, north_m=50.0, east_m=0.0)
+        near = northward(*start, north_m=200.0)
+        far = northward(*offset(*start, north_m=1000.0, east_m=0.0), north_m=200.0)
+
+        both = json.loads(body(near, speed=20.0, freeFlow=25.0).decode("utf-8"))
+        both["results"].extend(
+            json.loads(body(far, speed=5.0, freeFlow=25.0).decode("utf-8"))["results"])
+
+        feed = HereFeed()
+        feed.offer(status=200, body=json.dumps(both).encode("utf-8"),
+                   received_t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=0.0, t_mono=100.0), t_mono=100.0)
+        assert reading.ok
+        assert reading.link.speed_mps == pytest.approx(20.0)

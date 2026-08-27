@@ -14,6 +14,10 @@ from policy.sensing_controller import (
     EVENT_ACCEL_MPS2,
     HOLD_S,
     IDLE_RATES,
+    MAX_POSITION_AGE_S,
+    MAX_TELEMETRY_AGE_S,
+    MIN_QUERY_RADIUS_M,
+    MAX_QUERY_RADIUS_M,
     MAX_EVIDENCE_GAP_S,
     MAX_RATE_HZ,
     MIN_RATE_HZ,
@@ -745,3 +749,84 @@ class TestAStallIsNotDwellTime:
         # moment either input changes, silently.
         slowest_tick_s = 1.0 / (IDLE_RATES["camera_hz"] * min(THERMAL_SCALE.values()))
         assert MAX_EVIDENCE_GAP_S > slowest_tick_s
+
+
+class TestBrakingIsAnEvent:
+    """Every acceleration in this file was positive, so half the rule was untested."""
+
+    def test_hard_braking_raises_the_rates(self):
+        # `abs(ego_acceleration) >= EVENT_ACCEL_MPS2`. Dropping the `abs()` left the
+        # whole suite green, because no test ever planted a negative value -- and
+        # braking is the event this module's own comments are written about. 9.0 m/s2
+        # appears throughout as "an event"; it is ~0.9 g, outside any real vehicle's
+        # envelope and on the wrong side of zero.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        braking = Inputs(ego_acceleration=-3.5, ego_speed=20.0, policy_margin=0.9,
+                         camera_density_bin=2, thermal_status="nominal",
+                         skin_temp_c=30.0, lat=51.49, lon=-0.20,
+                         position_age_s=0.4, telemetry_age_s=1.0)
+        controller.decide(braking)
+        clock.advance(1.0)
+        decision = controller.decide(braking)
+
+        assert decision.rates["camera_hz"] == ACTIVE_RATES["camera_hz"]
+        assert Trigger.EVENT in decision.rules_fired
+
+    def test_braking_and_accelerating_are_treated_alike(self):
+        # The magnitude is the signal; the sign is not.
+        for accel in (-EVENT_ACCEL_MPS2 - 0.1, EVENT_ACCEL_MPS2 + 0.1):
+            clock = Clock()
+            controller = SensingController(clock=clock)
+            inputs = Inputs(ego_acceleration=accel, ego_speed=20.0, policy_margin=0.9,
+                            camera_density_bin=2, thermal_status="nominal",
+                            skin_temp_c=30.0, lat=51.49, lon=-0.20,
+                            position_age_s=0.4, telemetry_age_s=1.0)
+            controller.decide(inputs)
+            clock.advance(1.0)
+            assert Trigger.EVENT in controller.decide(inputs).rules_fired, (
+                f"acceleration {accel} did not fire the event rule"
+            )
+
+
+class TestTheConstantsAreValuesNotSelfReferences:
+    """A threshold compared only against itself can be changed by 10x in silence."""
+
+    def test_each_gate_is_pinned_to_its_value(self):
+        # Every one of these survived a ~10x change with the suite green, because the
+        # tests that mention them compare against `module.CONSTANT +/- 1` rather than
+        # against a number. `test_every_timebase_constant_in_the_spec_matches_the_code`
+        # is the counter-example that shows the fix is cheap.
+        #
+        # These are decisions, not arithmetic: how stale a fix may be before a query
+        # is refused, how long a hold lasts, how far ahead a query reaches. Changing
+        # one is a change of behaviour and should have to be written down twice.
+        assert MAX_TELEMETRY_AGE_S == 10.0
+        assert MAX_POSITION_AGE_S == 2.0
+        assert RAISE_DWELL_S == 0.5
+        assert HOLD_S == 5.0
+        assert EVENT_ACCEL_MPS2 == 1.5
+        assert NARROW_MARGIN == 0.15
+        assert SKIN_WARM_C == 40.0
+        assert SKIN_HOT_C == 45.0
+        assert MIN_RATE_HZ == 0.001
+        assert MAX_RATE_HZ == 1000.0
+        assert MIN_QUERY_RADIUS_M == 500.0
+        assert MAX_QUERY_RADIUS_M == 10_000.0
+        assert IDLE_RATES == {"camera_hz": 1.0, "gps_hz": 1.0,
+                              "imu_hz": 50.0, "here_hz": 0.05}
+        assert ACTIVE_RATES == {"camera_hz": 5.0, "gps_hz": 1.0,
+                                "imu_hz": 50.0, "here_hz": 0.2}
+        assert THERMAL_SCALE == {"nominal": 1.0, "light": 1.0, "moderate": 0.6,
+                                 "severe": 0.3, "critical": 0.15, "emergency": 0.15,
+                                 "shutdown": 0.15, "unknown": 0.6}
+
+    def test_the_position_gate_agrees_with_the_reader_that_produces_it(self):
+        # `MAX_POSITION_AGE_S`'s docstring says it and `PhoneGpsReader.is_stale` are
+        # "answering the same question about the same reading". Asserted, so the two
+        # cannot drift apart silently.
+        from sensors.phone_source import PhoneGpsReader
+
+        import inspect
+        default = inspect.signature(PhoneGpsReader.__init__).parameters["stale_after_s"]
+        assert default.default == MAX_POSITION_AGE_S
