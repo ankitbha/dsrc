@@ -444,6 +444,46 @@ MUTATIONS = [
     # a pin that reports SURVIVED on the runs where the race does not land is worse
     # than none. The second is inside a closure in `run_live` with no test harness;
     # `test_no_undefined_names` covers the NameError class and nothing covers this.
+    # Joint round 1. Both sit on a SEAM, which is why three rounds of per-task
+    # validation each missed them: the producer's contract and the consumer's
+    # assumption were each self-consistent.
+    #
+    # `at()` answers from geometry against the position it is handed, so an old fix
+    # relocates the answer rather than degrading it -- while every other consumer of
+    # that same fix refuses it. Three entries, because the gate has three halves and
+    # a coarse anchor is how a pin comes to be satisfied by the defect it names.
+    ("here: the fix's own age is not checked at all",
+     "deployment/jetson/sensors/here_feed.py",
+     "        if (fix_age_s + fix_bound_s > self._max_fix_age_s\n                or fix_age_s < -fix_bound_s):",
+     "        if False:",
+     "python"),
+    ("here: a fix from this clock's future is fresh",
+     "deployment/jetson/sensors/here_feed.py",
+     "                or fix_age_s < -fix_bound_s):",
+     "                or False):",
+     "python"),
+    ("here: the timebase bound is not charged against the fix age",
+     "deployment/jetson/sensors/here_feed.py",
+     "        if gps.timebase is not None and gps.timebase.bound_s is not None:\n            fix_bound_s = float(gps.timebase.bound_s)",
+     "        pass",
+     "python"),
+    ("here: a stale fix is reported as an absent one",
+     "deployment/jetson/sensors/here_feed.py",
+     "            return FlowReading(outcome=Outcome.STALE_FIX, **provenance,\n                               detail=f\"fix is {fix_age_s:.1f}s old\")",
+     "            return FlowReading(outcome=Outcome.UNUSABLE_FIX, **provenance,\n                               detail=f\"fix is {fix_age_s:.1f}s old\")",
+     "python"),
+    # A gap in the tick stream credited as dwell time. Nothing resets the controller
+    # on a redial, and the worker stops calling it for as long as the rebind takes.
+    ("controller: a stall between two evidence ticks counts as dwell",
+     "deployment/jetson/policy/sensing_controller.py",
+     "            if self._raised_since is None or gapped:",
+     "            if self._raised_since is None:",
+     "python"),
+    ("controller: the evidence gap is bounded by the dwell instead of the cadence",
+     "deployment/jetson/policy/sensing_controller.py",
+     'MAX_EVIDENCE_GAP_S = 2.0 / (IDLE_RATES["camera_hz"] * min(THERMAL_SCALE.values()))',
+     "MAX_EVIDENCE_GAP_S = RAISE_DWELL_S",
+     "python"),
     # Task 29's rule, pinned from task 30's side: the whole "a shadow drive cannot
     # reach DISAGREEMENT" claim rests on this returning False for a missing feed.
     ("controller: a missing feed counts as disagreement",

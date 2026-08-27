@@ -14,12 +14,14 @@ from policy.sensing_controller import (
     EVENT_ACCEL_MPS2,
     HOLD_S,
     IDLE_RATES,
+    MAX_EVIDENCE_GAP_S,
     MAX_RATE_HZ,
     MIN_RATE_HZ,
     NARROW_MARGIN,
     RAISE_DWELL_S,
     SKIN_HOT_C,
     SKIN_WARM_C,
+    THERMAL_SCALE,
     Decision,
     Inputs,
     SensingController,
@@ -696,3 +698,50 @@ def test_the_bridge_does_not_span_a_gap_between_ticks():
     clock.advance(3600.0)
     assert controller.decide(calm(ego_acceleration=9.0)).rates["camera_hz"] == \
         IDLE_RATES["camera_hz"]
+
+
+class TestAStallIsNotDwellTime:
+    """The dwell measures whether evidence PERSISTED, across a stretch we watched."""
+
+    def evidence(self):
+        return Inputs(ego_acceleration=9.0, ego_speed=20.0, policy_margin=0.9,
+                      camera_density_bin=2, thermal_status="nominal",
+                      skin_temp_c=30.0, lat=51.49, lon=-0.20,
+                      position_age_s=0.4, telemetry_age_s=1.0)
+
+    def test_a_redial_length_gap_is_not_credited_as_dwell(self):
+        # One tick of hard braking, a 120 s rebind, one more tick. Nothing resets the
+        # controller on a redial and `run_demo`'s worker `continue`s without calling
+        # it for as long as the rebind takes, so a 120 s absence of evidence was read
+        # as 120 s of held evidence and raised the camera outright -- and armed a 5 s
+        # hold behind it.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        controller.decide(self.evidence())
+        clock.advance(120.0)
+
+        decision = controller.decide(self.evidence())
+        assert decision.rates["camera_hz"] == IDLE_RATES["camera_hz"]
+        assert decision.trigger == Trigger.IDLE
+
+    def test_the_guard_does_not_fire_on_a_normal_tick_at_any_rate(self):
+        # The bound cannot be `RAISE_DWELL_S`: an idle tick is already 1 s apart, so
+        # resetting on any gap wider than the dwell resets on every normal tick and
+        # the rates can never rise at all. These are the two slowest cadences this
+        # controller can itself command.
+        for gap in (1.0 / IDLE_RATES["camera_hz"],
+                    1.0 / (IDLE_RATES["camera_hz"] * min(THERMAL_SCALE.values()))):
+            clock = Clock()
+            controller = SensingController(clock=clock)
+            controller.decide(self.evidence())
+            clock.advance(gap)
+            decision = controller.decide(self.evidence())
+            assert decision.rates["camera_hz"] == ACTIVE_RATES["camera_hz"], (
+                f"a normal {gap:.1f}s tick was treated as a stall"
+            )
+
+    def test_the_bound_covers_the_slowest_rate_this_controller_can_command(self):
+        # Derived, not typed. A typed constant stops covering the idle rate the
+        # moment either input changes, silently.
+        slowest_tick_s = 1.0 / (IDLE_RATES["camera_hz"] * min(THERMAL_SCALE.values()))
+        assert MAX_EVIDENCE_GAP_S > slowest_tick_s

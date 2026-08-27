@@ -94,6 +94,27 @@ EVENT_ACCEL_MPS2 = 1.5
 #: misses the event that justified it, coming down early re-pays the cost of going
 #: up again.
 RAISE_DWELL_S = 0.5
+
+#: How long a gap between two `decide` calls has to be before the evidence either
+#: side of it stops counting as the same evidence.
+#:
+#: The dwell measures whether evidence PERSISTED, and persistence cannot be
+#: established across a stretch where nothing was observed. Without this, one tick of
+#: hard braking, a 120 s redial, and one more tick satisfied the dwell outright and
+#: raised the camera to 5 Hz -- a 120 s absence of evidence read as 120 s of held
+#: evidence. `run_demo`'s worker `continue`s without calling the controller for as
+#: long as a rebind takes, and nothing resets the controller on a redial.
+#:
+#: The bound cannot be `RAISE_DWELL_S`. At the idle camera rate a tick is already
+#: 1 s apart, so resetting on any gap wider than the dwell resets on every normal
+#: tick and the rates can never rise at all -- 22 tests fail. It is derived instead
+#: from the slowest tick this controller can itself cause: the idle camera rate under
+#: the deepest thermal backoff. A gap wider than that did not come from a rate this
+#: controller chose, so it is the stream stopping rather than the controller slowing
+#: down. Derived rather than typed, because a typed constant silently stops covering
+#: the idle rate the moment either input changes; the factor is headroom for a tick
+#: the Jetson itself was late for.
+MAX_EVIDENCE_GAP_S = 2.0 / (IDLE_RATES["camera_hz"] * min(THERMAL_SCALE.values()))
 HOLD_S = 5.0
 
 
@@ -274,8 +295,13 @@ class SensingController:
         # threshold it produced a camera rebind per tick, which is the exact
         # thrash the dwell and the hold exist to prevent.
         holding = now < self._holding_until
+        # A gap in the tick stream is not dwell time. Checked before the dwell is
+        # read, so evidence resumes its dwell from now rather than being credited
+        # with the silence.
+        gapped = (self._last_at is not None
+                  and (now - self._last_at) > MAX_EVIDENCE_GAP_S)
         if wants_more:
-            if self._raised_since is None:
+            if self._raised_since is None or gapped:
                 self._raised_since = now
             dwelled = (now - self._raised_since) >= RAISE_DWELL_S
             if dwelled:

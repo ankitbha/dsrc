@@ -59,6 +59,23 @@ BEARING_FLOOR_M = 15.0
 #: tolerates several missed responses without tolerating a stale minute.
 MAX_RESPONSE_AGE_S = 30.0
 
+#: How old the FIX may be. A separate axis from the response age and it was missing
+#: entirely: `at()` answers from geometry against the position it is handed, so a
+#: fresh response against a five-minute-old fix produced `ok`, a distance, and a live
+#: congestion number describing road the vehicle left minutes ago -- while
+#: `PhoneGpsReader.is_stale`, `ObservationBuilder.build` and
+#: `SensingController._usable_position` all refused that same fix. Two seconds,
+#: matching `stale_after_s` and `MAX_POSITION_AGE_S`, because it is the same question
+#: about the same reading; at 20 m/s it is 40 m, well inside the 150 m corridor.
+#:
+#: It does not self-correct. `HerePipeline.setQuery` is `if (next != null) query =
+#: next`, so a command carrying no query leaves the phone fetching against the last
+#: position it was told about -- responses stay fresh indefinitely while the fix does
+#: not. Reachable whenever the handset's location half goes quiet with the session
+#: healthy: a revoked permission, a disabled provider, a partial service failure.
+#: None of those close the session, so the rebind path never runs.
+MAX_FIX_AGE_S = 2.0
+
 
 class Outcome:
     """Why there is, or is not, an answer. A caller branches on these."""
@@ -71,6 +88,11 @@ class Outcome:
     NO_LINK_AHEAD = "no_link_ahead"
     STALE = "stale"
     UNUSABLE_FIX = "unusable_fix"
+    #: The fix is old, as opposed to absent. Its own value rather than folded into
+    #: `UNUSABLE_FIX`: a dead GPS and a stalled one need opposite investigations,
+    #: and this project has already paid for a code that hid seven causes under one
+    #: name.
+    STALE_FIX = "stale_fix"
 
 
 @dataclass(frozen=True)
@@ -341,11 +363,13 @@ class HereFeed:
         downstream_half_angle_deg: float = DOWNSTREAM_HALF_ANGLE_DEG,
         downstream_horizon_m: float = DOWNSTREAM_HORIZON_M,
         max_response_age_s: float = MAX_RESPONSE_AGE_S,
+        max_fix_age_s: float = MAX_FIX_AGE_S,
     ) -> None:
         self._radius_m = association_radius_m
         self._half_angle_deg = downstream_half_angle_deg
         self._horizon_m = downstream_horizon_m
         self._max_age_s = max_response_age_s
+        self._max_fix_age_s = max_fix_age_s
         self._current: _Snapshot | None = None
         #: Why nothing usable has arrived, when nothing has. Distinct from the
         #: outcome of a query: an HTTP error says nothing about the road and must
@@ -433,6 +457,27 @@ class HereFeed:
             # would let the queue we just cleared describe the road in front.
             return FlowReading(outcome=Outcome.UNUSABLE_FIX, **provenance,
                                detail="no heading")
+
+        # The fix's own age, which is a different axis from the response's and was
+        # not checked at all. Everything below this line is geometry against
+        # `gps.lat/lon`, so an old fix does not degrade the answer -- it relocates
+        # it, and the corridor test that exists to reject a road off to the side is
+        # applied to a position the vehicle left minutes ago.
+        #
+        # Charged the way `ObservationBuilder` charges it, bound included and
+        # symmetric about now, because the alternative is a fourth convention on one
+        # axis. `PhoneGpsReader.is_stale` states the rule the symmetry follows: a
+        # stamp from this clock's future is not fresh either, and the future side is
+        # the biased one, since `OneWayEstimator` makes every converted stamp look
+        # newer than it is.
+        fix_age_s = t_mono - gps.t_mono
+        fix_bound_s = 0.0
+        if gps.timebase is not None and gps.timebase.bound_s is not None:
+            fix_bound_s = float(gps.timebase.bound_s)
+        if (fix_age_s + fix_bound_s > self._max_fix_age_s
+                or fix_age_s < -fix_bound_s):
+            return FlowReading(outcome=Outcome.STALE_FIX, **provenance,
+                               detail=f"fix is {fix_age_s:.1f}s old")
 
         near = [
             (link.distance_m(gps.lat, gps.lon), link)

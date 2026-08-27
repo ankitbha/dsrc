@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 import math
+from dataclasses import replace
 
 from sensors.gps_reader import GpsFix
 from sensors.here_feed import (
@@ -69,8 +70,18 @@ def one_point(lat: float, lon: float) -> list[dict]:
     return [{"lat": lat, "lng": lon}]
 
 
-def fix(lat: float, lon: float, heading_deg: float = 90.0, valid: bool = True) -> GpsFix:
-    return GpsFix(valid=valid, lat=lat, lon=lon, heading_deg=heading_deg, speed_mps=20.0)
+def fix(lat: float, lon: float, heading_deg: float = 90.0, valid: bool = True,
+        t_mono: float = 0.0) -> GpsFix:
+    """A fix, stamped at the moment the query asks about it unless told otherwise.
+
+    `t_mono` used to default to zero while every caller queried at 100 s or later,
+    so every fix in this file was already minutes old and nothing noticed -- which
+    is exactly how `at()` came to have no fix-age gate at all. Passing the query's
+    own time makes freshness the default and staleness something a test has to ask
+    for.
+    """
+    return GpsFix(valid=valid, lat=lat, lon=lon, heading_deg=heading_deg,
+                  speed_mps=20.0, t_mono=t_mono)
 
 
 class TestParsing:
@@ -132,25 +143,25 @@ class TestOutcomes:
 
     def test_nothing_received_yet_says_so(self):
         feed = HereFeed()
-        assert feed.at(fix(*HOME), t_mono=100.0).outcome == Outcome.NO_RESPONSE_YET
+        assert feed.at(fix(*HOME, t_mono=100.0), t_mono=100.0).outcome == Outcome.NO_RESPONSE_YET
 
     def test_an_http_error_is_named_and_counted_not_swallowed(self):
         feed = HereFeed()
         assert feed.offer(status=503, body=b"", received_t_mono=100.0) is False
-        assert feed.at(fix(*HOME), t_mono=100.0).outcome == Outcome.HTTP_ERROR
+        assert feed.at(fix(*HOME, t_mono=100.0), t_mono=100.0).outcome == Outcome.HTTP_ERROR
         assert feed.refused_by_reason == {"http_error:status 503": 1}
 
     def test_an_unparseable_body_is_named(self):
         feed = HereFeed()
         assert feed.offer(status=200, body=b"<html>", received_t_mono=100.0) is False
-        assert feed.at(fix(*HOME), t_mono=100.0).outcome == Outcome.UNPARSEABLE
+        assert feed.at(fix(*HOME, t_mono=100.0), t_mono=100.0).outcome == Outcome.UNPARSEABLE
 
     def test_a_link_ahead_is_reported_with_its_flow_and_a_measured_age(self):
         feed = HereFeed()
         road = stretch(*HOME, east_m=800.0)
         assert feed.offer(status=200, body=body(road), received_t_mono=100.0) is True
 
-        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=102.5)
+        reading = feed.at(fix(*HOME, heading_deg=90.0, t_mono=102.5), t_mono=102.5)
         assert reading.ok
         assert reading.link.jam_factor == 4.2
         assert reading.response_age_s == 2.5
@@ -164,7 +175,7 @@ class TestOutcomes:
         behind = stretch(*offset(*HOME, 0.0, -800.0), east_m=800.0)
         feed.offer(status=200, body=body(behind), received_t_mono=100.0)
 
-        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0), t_mono=100.0)
         assert reading.outcome == Outcome.NO_LINK_AHEAD
         assert reading.link is None
 
@@ -176,7 +187,7 @@ class TestOutcomes:
         far = stretch(*offset(*HOME, north_m=1200.0, east_m=0.0), east_m=800.0)
         feed.offer(status=200, body=body(far), received_t_mono=100.0)
 
-        reading = feed.at(fix(*HOME, heading_deg=0.0), t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=0.0, t_mono=100.0), t_mono=100.0)
         assert reading.outcome == Outcome.NO_LINK_MATCHED
 
     def test_the_radius_and_the_horizon_are_not_the_same_threshold(self):
@@ -189,7 +200,7 @@ class TestOutcomes:
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
 
-        reading = feed.at(fix(*HOME, heading_deg=float("nan")), t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=float("nan"), t_mono=100.0), t_mono=100.0)
         assert reading.outcome == Outcome.UNUSABLE_FIX
         assert reading.detail == "no heading"
 
@@ -197,14 +208,14 @@ class TestOutcomes:
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
 
-        assert feed.at(fix(*HOME, valid=False), t_mono=100.0).outcome == Outcome.UNUSABLE_FIX
+        assert feed.at(fix(*HOME, valid=False, t_mono=100.0), t_mono=100.0).outcome == Outcome.UNUSABLE_FIX
 
     def test_a_response_past_its_age_is_stale_not_the_last_answer(self):
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
-        assert feed.at(fix(*HOME), t_mono=100.0).ok
+        assert feed.at(fix(*HOME, t_mono=100.0), t_mono=100.0).ok
 
-        reading = feed.at(fix(*HOME), t_mono=100.0 + MAX_RESPONSE_AGE_S + 1.0)
+        reading = feed.at(fix(*HOME, t_mono=100.0 + MAX_RESPONSE_AGE_S + 1.0), t_mono=100.0 + MAX_RESPONSE_AGE_S + 1.0)
         assert reading.outcome == Outcome.STALE
         assert reading.link is None
 
@@ -217,12 +228,12 @@ class TestCaching:
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=500.0)), received_t_mono=100.0)
 
-        assert feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0).ok
+        assert feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0), t_mono=100.0).ok
         # Driven to the end of that link. Still on it, so it still matches -- but
         # none of it is in front any more, answered from the same cached response
         # rather than by repeating the previous answer.
         end = offset(*HOME, north_m=0.0, east_m=500.0)
-        assert feed.at(fix(*end, heading_deg=90.0), t_mono=101.0).outcome == Outcome.NO_LINK_AHEAD
+        assert feed.at(fix(*end, heading_deg=90.0, t_mono=101.0), t_mono=101.0).outcome == Outcome.NO_LINK_AHEAD
 
     def test_a_newer_response_that_matched_nothing_still_supersedes(self):
         # Superseding is by arrival, not by content: the older body describes a
@@ -230,10 +241,10 @@ class TestCaching:
         # than having nothing.
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
-        assert feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0).ok
+        assert feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0), t_mono=100.0).ok
 
         feed.offer(status=200, body=b'{"results": []}', received_t_mono=105.0)
-        assert feed.at(fix(*HOME, heading_deg=90.0), t_mono=105.0).outcome == Outcome.NO_LINK_MATCHED
+        assert feed.at(fix(*HOME, heading_deg=90.0, t_mono=105.0), t_mono=105.0).outcome == Outcome.NO_LINK_MATCHED
 
     def test_a_refused_response_does_not_replace_a_usable_one(self):
         # An HTTP error says nothing about the road, so it must not throw away
@@ -242,7 +253,7 @@ class TestCaching:
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
         feed.offer(status=500, body=b"", received_t_mono=101.0)
 
-        assert feed.at(fix(*HOME, heading_deg=90.0), t_mono=101.0).ok
+        assert feed.at(fix(*HOME, heading_deg=90.0, t_mono=101.0), t_mono=101.0).ok
 
 
 class TestRecord:
@@ -310,7 +321,7 @@ class TestBearingFloor:
         feed.offer(status=200, body=body(west), received_t_mono=100.0)
 
         for heading in range(0, 360, 15):
-            reading = feed.at(fix(*HOME, heading_deg=float(heading)), t_mono=100.0)
+            reading = feed.at(fix(*HOME, heading_deg=float(heading), t_mono=100.0), t_mono=100.0)
             if 200.0 <= heading <= 340.0:
                 continue  # driving back down it: legitimately ahead
             assert reading.outcome != Outcome.OK, (
@@ -327,7 +338,7 @@ class TestStalenessIsSymmetric:
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=1000.0)
 
-        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=500.0)
+        reading = feed.at(fix(*HOME, heading_deg=90.0, t_mono=500.0), t_mono=500.0)
         assert reading.outcome == Outcome.STALE
         assert reading.link is None
 
@@ -337,10 +348,10 @@ class TestTheRecordReportsTheLastQuery:
     def test_ok_does_not_survive_a_later_failed_query(self):
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
-        assert feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0).ok
+        assert feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0), t_mono=100.0).ok
 
         feed.offer(status=200, body=b'{"results": []}', received_t_mono=105.0)
-        feed.at(fix(*HOME, heading_deg=90.0), t_mono=105.0)
+        feed.at(fix(*HOME, heading_deg=90.0, t_mono=105.0), t_mono=105.0)
 
         assert feed.to_record()["last_outcome"] == Outcome.NO_LINK_MATCHED
 
@@ -350,7 +361,7 @@ class TestTheRecordReportsTheLastQuery:
         feed = HereFeed()
         feed.offer(status=503, body=b"", received_t_mono=100.0)
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=101.0)
-        feed.at(fix(*HOME, heading_deg=90.0), t_mono=101.0)
+        feed.at(fix(*HOME, heading_deg=90.0, t_mono=101.0), t_mono=101.0)
 
         record = feed.to_record()
         assert record["last_outcome"] == Outcome.OK
@@ -367,7 +378,7 @@ class TestStampProvenance:
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)),
                    received_t_mono=100.0, bound_s=0.004, proxy=True)
 
-        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.5)
+        reading = feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.5), t_mono=100.5)
         assert reading.ok
         assert reading.response_age_is_proxy is True
         assert reading.response_age_bound_s == 0.004
@@ -411,7 +422,7 @@ class TestOneStore:
         try:
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
-                r = feed.at(fix(*HOME, heading_deg=90.0), t_mono=1000.0)
+                r = feed.at(fix(*HOME, heading_deg=90.0, t_mono=1000.0), t_mono=1000.0)
                 seen.append((r.outcome, r.response_age_s or 0.0))
         finally:
             stop.set()
@@ -431,7 +442,7 @@ class TestOneStore:
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)),
                    received_t_mono=101.0, bound_s=None, proxy=True)
 
-        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=101.0)
+        reading = feed.at(fix(*HOME, heading_deg=90.0, t_mono=101.0), t_mono=101.0)
         assert reading.response_age_is_proxy is True
         assert reading.response_age_bound_s is None
 
@@ -458,7 +469,7 @@ class TestSpaceProvenance:
              "currentFlow": {"jamFactor": 9.9, "speed": 2.0, "freeFlow": 25.0}},
         ]}).encode(), received_t_mono=100.0)
 
-        reading = feed.at(fix(*HOME, heading_deg=0.0), t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=0.0, t_mono=100.0), t_mono=100.0)
         assert reading.ok
         # Reported, not refused -- but the caller can now see it is not our road.
         assert reading.link_cross_track_m > 1000.0
@@ -468,7 +479,7 @@ class TestSpaceProvenance:
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)), received_t_mono=100.0)
 
-        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0), t_mono=100.0)
         assert reading.ok
         assert reading.link_cross_track_m < 50.0
 
@@ -504,7 +515,7 @@ class TestTheReportedPairDescribesOnePlace:
              "currentFlow": {"jamFactor": 9.9, "speed": 2.0, "freeFlow": 25.0}},
         ]}).encode(), received_t_mono=100.0)
 
-        reading = feed.at(fix(*HOME, heading_deg=0.0), t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=0.0, t_mono=100.0), t_mono=100.0)
         assert reading.ok
         # The pair must be consistent: a match this far off the ray cannot report a
         # lateral offset of tens of metres.
@@ -522,9 +533,78 @@ class TestTheReportedPairDescribesOnePlace:
         feed = HereFeed()
         feed.offer(status=200, body=body(stretch(*HOME, east_m=2000.0)), received_t_mono=100.0)
 
-        reading = feed.at(fix(*HOME, heading_deg=90.0), t_mono=100.0)
+        reading = feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0), t_mono=100.0)
         assert reading.ok
         implied = math.degrees(math.asin(
             min(1.0, reading.link_cross_track_m / max(reading.link_distance_m, 1e-9))
         ))
         assert implied <= 60.0 + 1e-6
+
+
+class TestTheFixHasAnAgeToo:
+    """The axis `at()` did not have, and every consumer of the same fix did.
+
+    `at()` answers from geometry against the position it is handed, so an old fix
+    does not degrade the answer -- it relocates it. A fresh response against a
+    five-minute-old fix produced `ok`, a distance, and a live congestion number about
+    road the vehicle had left, while `PhoneGpsReader.is_stale`,
+    `ObservationBuilder.build` and `SensingController._usable_position` all refused
+    that same fix.
+
+    It does not self-correct either. `HerePipeline.setQuery` is
+    `if (next != null) query = next`, so a command carrying no query leaves the phone
+    fetching against the last position it was told about: responses stay fresh
+    indefinitely while the fix does not.
+    """
+
+    def stale_and_fresh(self):
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=800.0)),
+                   received_t_mono=100.0)
+        return feed
+
+    def test_an_old_fix_does_not_get_a_live_congestion_number(self):
+        feed = self.stale_and_fresh()
+        reading = feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0 - 300.0),
+                          t_mono=100.0)
+        assert reading.outcome == Outcome.STALE_FIX
+        assert reading.link is None
+        assert "300.0s" in (reading.detail or "")
+
+    def test_a_fresh_fix_against_the_same_response_still_answers(self):
+        # The gate must not be the whole feed switched off.
+        feed = self.stale_and_fresh()
+        assert feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0), t_mono=100.0).ok
+
+    def test_a_stale_fix_is_not_reported_as_an_absent_one(self):
+        # A dead GPS and a stalled one need opposite investigations. Folded under
+        # `unusable_fix` the operator cannot tell which they have -- the mistake a
+        # single code hiding seven causes has already cost this project once.
+        feed = self.stale_and_fresh()
+        absent = feed.at(fix(*HOME, valid=False, t_mono=100.0), t_mono=100.0)
+        stalled = feed.at(fix(*HOME, heading_deg=90.0, t_mono=40.0), t_mono=100.0)
+        assert absent.outcome == Outcome.UNUSABLE_FIX
+        assert stalled.outcome == Outcome.STALE_FIX
+
+    def test_a_fix_from_this_clocks_future_is_not_fresh_either(self):
+        # The rule `PhoneGpsReader.is_stale` states, and the side the timebase
+        # actually biases: `OneWayEstimator` makes every converted stamp look newer
+        # than it is.
+        feed = self.stale_and_fresh()
+        ahead = feed.at(fix(*HOME, heading_deg=90.0, t_mono=100.0 + 60.0), t_mono=100.0)
+        assert ahead.outcome == Outcome.STALE_FIX
+
+    def test_the_bound_is_charged_the_way_the_observation_builder_charges_it(self):
+        # One convention on this axis, not a fourth. A fix inside the window on its
+        # own, whose arrival time is known only to within a second, is outside it
+        # once the bound is charged.
+        from sensors.phone_source import TimebaseStamp
+
+        feed = self.stale_and_fresh()
+        borderline = fix(*HOME, heading_deg=90.0, t_mono=100.0 - 1.5)
+        assert feed.at(borderline, t_mono=100.0).ok
+
+        with_bound = replace(borderline, timebase=TimebaseStamp(
+            t_capture_mono=borderline.t_mono, t_arrival_mono=100.0,
+            bound_s=1.0, proxy=False, estimate_id=1))
+        assert feed.at(with_bound, t_mono=100.0).outcome == Outcome.STALE_FIX
