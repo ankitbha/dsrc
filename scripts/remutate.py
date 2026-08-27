@@ -332,7 +332,7 @@ MUTATIONS = [
     # A new device inherits nothing the old one said.
     ("link: the new phone inherits the old phone's temperature",
      "deployment/jetson/sensors/phone_link.py",
-     "            self.telemetry = None\n            self.telemetry_at_mono = None",
+     "            self._telemetry = None",
      "            pass",
      "python"),
     ("link: the new phone inherits the old phone's road",
@@ -503,13 +503,39 @@ MUTATIONS = [
      "python"),
     ("link: nothing drains the imu channel",
      "deployment/jetson/sensors/phone_link.py",
-     "            self.imu = message\n            self.imu_at_mono = receipt.t_recv_mono_ns / 1e9\n            self.imu_received += 1",
+     "            self._imu = (message, receipt.t_recv_mono_ns / 1e9)\n            self.imu_received += 1",
      "            pass",
      "python"),
     ("link: the imu record implies something consumes it",
      "deployment/jetson/sensors/phone_link.py",
      '                "feeds_the_controller": False,',
      '                "feeds_the_controller": True,',
+     "python"),
+    # Joint round 4: concurrency. Two senders on one channel is the NORMAL
+    # arrangement here -- the heartbeat timer and the ping responder share CONTROL.
+    ("session: the sequence is drawn outside the lock that orders the queue",
+     "deployment/jetson/transport/session.py",
+     "        with self._send_order[channel]:",
+     "        if True:",
+     "python"),
+    # A reader that outlived its join does not linger, it follows the rebind onto the
+    # next session: two readers on one channel, compounding per redial.
+    ("link: a rebind proceeds over a reader that would not stop",
+     "deployment/jetson/sensors/phone_link.py",
+     "                if worker.is_alive():\n                    stopped = False",
+     "                pass",
+     "python"),
+    ("link: the refusal to rebind over a live reader is not recorded",
+     "deployment/jetson/sensors/phone_link.py",
+     '                self.supervisor_ended = "readers_would_not_stop"',
+     "                pass",
+     "python"),
+    # The report and its arrival time as two stores. A read between them yields a
+    # status with a None age, and the controller's staleness gate SKIPS a None.
+    ("link: the telemetry report and its age can be read apart",
+     "deployment/jetson/sensors/phone_link.py",
+     "    @property\n    def telemetry_at_mono(self) -> float | None:\n        \"\"\"When that report arrived. Never None while `telemetry` is not.\"\"\"\n        held = self._telemetry\n        return None if held is None else held[1]",
+     "    @property\n    def telemetry_at_mono(self) -> float | None:\n        return None",
      "python"),
     # Task 29's rule, pinned from task 30's side: the whole "a shadow drive cannot
     # reach DISAGREEMENT" claim rests on this returning False for a missing feed.

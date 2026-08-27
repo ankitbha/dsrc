@@ -201,6 +201,25 @@ class Session:
         self._stats = {c: ChannelStats(channel=c) for c in Channel}
         self._last_rx_seq: dict[Channel, int] = {}
 
+        # One per channel, held across draw-seq -> encode -> append so those three
+        # cannot interleave between two senders on the same channel. Without it the
+        # seq was drawn, then the frame encoded -- a JSON build and a payload concat,
+        # real work -- and only then was the queue lock taken, so a sender descheduled
+        # inside `encode` could be overtaken by one that drew a LATER seq. Wire order
+        # is append order, so the frames left out of sequence and the receiver counted
+        # a `seq_gap` and a `missing_seq` for a message nobody dropped: this module's
+        # docstring says "a gap the receiver sees is how it learns the sender dropped
+        # something", and it was reporting loss on a healthy link.
+        #
+        # Two senders on one channel is the normal arrangement, not a contrived one:
+        # `_run_timer` puts a heartbeat on CONTROL every second while `PhoneLink`'s
+        # responder answers pings on the same channel from another thread.
+        #
+        # Per channel, and NOT `_out_cond`, so a 4 MiB camera encode neither blocks the
+        # writer draining the queue nor serialises against control traffic. The order
+        # is always this lock then `_out_cond`; nothing anywhere takes them the other
+        # way round.
+        self._send_order = {channel: threading.Lock() for channel in Channel}
         self._out_cond = threading.Condition()
         self._in_cond = threading.Condition()
         self._state_lock = threading.Lock()
@@ -384,17 +403,21 @@ class Session:
             # true instead of being re-taken in another thread after the caller
             # has already been told the frame was accepted.
             prepared[WIRE_STAMP_KEY] = WIRE_STAMP_RESERVE
-        frame = Frame(
-            channel=channel,
-            seq=next(self._seq[channel]),
-            t_mono_ns=self._mono(),
-            t_wall_ns=self._wall(),
-            payload=payload,
-            extensions=prepared,
-        )
-        encoded = encode(frame)  # raises FramingError in the caller's thread
-
         stats = self._stats[channel]
+        with self._send_order[channel]:
+            frame = Frame(
+                channel=channel,
+                seq=next(self._seq[channel]),
+                t_mono_ns=self._mono(),
+                t_wall_ns=self._wall(),
+                payload=payload,
+                extensions=prepared,
+            )
+            encoded = encode(frame)  # raises FramingError in the caller's thread
+            return self._append(channel, frame, encoded, stats, policy)
+
+    def _append(self, channel, frame, encoded, stats, policy) -> bool:
+        """Queue an already-sequenced frame. Called with `_send_order[channel]` held."""
         with self._out_cond:
             # Re-checked inside the lock. Shutdown drains the queues under this
             # same lock, so a check outside it lets a message be appended after

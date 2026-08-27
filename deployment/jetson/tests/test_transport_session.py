@@ -1855,3 +1855,69 @@ def test_the_re_stamp_re_encodes_rather_than_splicing_the_header():
     finally:
         sender.close()
         reader.close()
+
+
+class TestOneChannelTwoSenders:
+    """The normal arrangement, not a contrived one.
+
+    `_run_timer` puts a heartbeat on CONTROL every second while `PhoneLink`'s
+    responder answers pings on the same channel from another thread.
+    """
+
+    def test_a_healthy_link_does_not_report_messages_it_never_lost(self):
+        # `seq` was drawn, then the frame encoded -- a JSON build and a payload
+        # concat, real work -- and only then was the queue lock taken. A sender
+        # descheduled inside `encode` could be overtaken by one that drew a LATER
+        # seq, so frames left in the wrong order and the receiver counted a gap for a
+        # message nobody dropped. This module's docstring says a gap is how the
+        # receiver learns the sender dropped something.
+        #
+        # Forced, not raced: the first sender is blocked inside `encode` until the
+        # second has been through the whole of `send`.
+        import transport.session as session_module
+
+        a_conn, b_conn = loopback_pair()
+        a = Session(a_conn, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+        b = Session(b_conn, session_id=2, heartbeat_s=None, stall_timeout_s=None).start()
+
+        real_encode = session_module.encode
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocking_encode(frame):
+            if frame.payload == b"first" and not entered.is_set():
+                entered.set()
+                # Bounded, and it is the fix that makes this wait return: with the
+                # order lock held, the second sender cannot run until this one is
+                # done, so nothing sets `release` and the timeout is the exit.
+                release.wait(1.0)
+            return real_encode(frame)
+
+        session_module.encode = blocking_encode
+        try:
+            # A baseline, so the receiver has a sequence to be a gap from.
+            assert a.send(Channel.CONTROL, b"baseline")
+            wait_until(lambda: b.stats().channels[Channel.CONTROL].received == 1)
+
+            slow = threading.Thread(target=lambda: a.send(Channel.CONTROL, b"first"),
+                                    daemon=True)
+            slow.start()
+            assert entered.wait(3.0), "the first sender never reached encode"
+            a.send(Channel.CONTROL, b"second")
+            release.set()
+            slow.join(3.0)
+
+            wait_until(lambda: b.stats().channels[Channel.CONTROL].received == 3)
+            sender = a.stats().channels[Channel.CONTROL]
+            receiver = b.stats().channels[Channel.CONTROL]
+            assert sender.dropped_outbound == 0
+            assert receiver.received == 3
+            assert receiver.seq_gaps == 0, (
+                f"the receiver reports {receiver.missing_seqs} lost on a link that "
+                f"dropped {sender.dropped_outbound}"
+            )
+            assert receiver.missing_seqs == 0
+        finally:
+            session_module.encode = real_encode
+            a.close()
+            b.close()

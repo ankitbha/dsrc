@@ -1002,9 +1002,12 @@ class TestWhatANewDeviceInherits:
             dialling = dial(acceptor, "phone-one")
             assert link.wait_for_phone(timeout_s=5.0) is True
             first = dialling.result(timeout=5.0)
-            link.telemetry = type("T", (), {"thermal_status": "nominal",
-                                            "skin_temp_c": 28.0})()
-            link.telemetry_at_mono = time.monotonic()
+            # Set as the pair, because that is the invariant: the report and its
+            # arrival time are one value, so a reader cannot see a status without an
+            # age -- which the controller's staleness gate would have skipped.
+            link._telemetry = (type("T", (), {"thermal_status": "nominal",
+                                              "skin_temp_c": 28.0})(),
+                               time.monotonic())
 
             first.hang_up()
             second = LoopbackPhone(acceptor, "phone-two")
@@ -1457,3 +1460,85 @@ class TestFailureDoesNotLookLikeSuccess:
         finally:
             link.stop()
             phone.close()
+
+
+class TestTheReportAndItsAgeAreOneValue:
+    """Two stores could be read between, and the consumer treats absence as fresh."""
+
+    def test_a_reader_can_never_see_a_report_without_its_arrival_time(self):
+        # The dangerous half is asymmetric: `SensingController._thermal_scale` gates
+        # on `if age is not None`, so a torn read does not merely misstate the age --
+        # it removes it, and the staleness check never runs. A 40 s old `critical`
+        # would then cut a healthy handset by 6.7x.
+        #
+        # `here_feed`'s `_Snapshot` exists for exactly this: "no ordering of
+        # independent stores is safe". Asserted structurally, because the window is
+        # one bytecode wide and racing for it is what this repo retired a pin for.
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        assert link.telemetry is None and link.telemetry_at_mono is None
+
+        link._telemetry = (object(), 1234.5)
+        assert link.telemetry is not None
+        assert link.telemetry_at_mono == 1234.5
+
+        # Neither half can be assigned on its own.
+        for attribute in ("telemetry", "telemetry_at_mono", "imu", "imu_at_mono"):
+            with pytest.raises(AttributeError):
+                setattr(link, attribute, object())
+
+    def test_the_imu_pair_is_published_the_same_way(self):
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        link._imu = (object(), 99.0)
+        assert link.imu is not None and link.imu_at_mono == 99.0
+
+
+class TestTeardownOrdering:
+
+    def test_the_redial_flag_is_cleared_after_the_supervisor_is_joined(self):
+        # Asserted on the source, because the behavioural version cannot be trusted:
+        # whether a redial lands inside the window is decided by two unsynchronised
+        # threads, so a test that races for it reports SURVIVED on one run and CAUGHT
+        # on the next -- and this repo has already retired one pin for that.
+        #
+        # The ordering is load-bearing and the comment says why: `_rebind` can already
+        # be past its own `_stop` check, and it finishes by restarting the readers and
+        # setting `expect_redial(True)`, so a clear taken FIRST is undone by a redial
+        # landing during teardown and the stopped link reports an open stream.
+        import inspect
+
+        source = inspect.getsource(PhoneLink.stop)
+        join = source.index("self._supervisor.join(")
+        clear = source.index("expect_redial(False)")
+        assert join < clear, (
+            "expect_redial(False) is taken before the supervisor join again, so a "
+            "redial in flight undoes it and a stopped link reports an open stream"
+        )
+
+    def test_a_reader_that_will_not_stop_ends_the_run_rather_than_doubling_up(self):
+        # Every reader re-reads `self.router` on each iteration, so one that outlived
+        # its join binds itself to the NEXT session rather than exiting: two readers
+        # on one channel, compounding per redial, and on CONTROL that is two senders
+        # on one channel -- the precondition for a phantom sequence gap.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+
+            # A reader that cannot be joined, which is the only way into the branch.
+            stuck = threading.Event()
+            link._here_reader = threading.Thread(
+                target=lambda: stuck.wait(30.0), name="stuck-here", daemon=True)
+            link._here_reader.start()
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: link.supervisor_ended is not None, timeout=10.0), \
+                "the supervisor neither rebound nor refused"
+            assert link.supervisor_ended == "readers_would_not_stop"
+            assert link.rebinds == [], "it rebound over a reader that never stopped"
+            stuck.set()
+            second.hang_up()
+        finally:
+            link.stop()

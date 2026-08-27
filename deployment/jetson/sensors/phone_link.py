@@ -123,8 +123,9 @@ class PhoneLink:
         #: all -- thermal_status, thermal_headroom and skin_temp_c arrived and were
         #: dropped on the floor, so the one input that argues for LOWER rates was
         #: the one the Jetson could not see.
-        self.telemetry: Any = None
-        self.telemetry_at_mono: float | None = None
+        #: The report and the instant it arrived, as ONE value. Read through the
+        #: `telemetry` and `telemetry_at_mono` properties.
+        self._telemetry: tuple[Any, float] | None = None
         self.telemetry_received = 0
         #: The fourth modality. The phone streams `imu` at 50 Hz for the whole drive
         #: and nothing on this side read the channel, so the inbound deque sat
@@ -138,8 +139,7 @@ class PhoneLink:
         #: finite difference of 1 Hz GPS speed, so the `EVENT_ACCEL_MPS2` trigger has
         #: never seen an IMU sample. Wiring that changes what the controller reads,
         #: not what this class collects, and is left named rather than done.
-        self.imu: Any = None
-        self.imu_at_mono: float | None = None
+        self._imu: tuple[Any, float] | None = None
         self.imu_received = 0
         #: Counted, not just named. `refused_by_reason` exists so refusals are
         #: counted rather than inferred, and the guard path was the one outcome
@@ -190,6 +190,28 @@ class PhoneLink:
         self._supervisor: threading.Thread | None = None
         #: How long the supervisor waits for a redial before giving up on the run.
         self.rebind_timeout_s = 120.0
+
+    @property
+    def telemetry(self) -> Any:
+        """The phone's last self-report, or None."""
+        held = self._telemetry
+        return None if held is None else held[0]
+
+    @property
+    def telemetry_at_mono(self) -> float | None:
+        """When that report arrived. Never None while `telemetry` is not."""
+        held = self._telemetry
+        return None if held is None else held[1]
+
+    @property
+    def imu(self) -> Any:
+        held = self._imu
+        return None if held is None else held[0]
+
+    @property
+    def imu_at_mono(self) -> float | None:
+        held = self._imu
+        return None if held is None else held[1]
 
     @property
     def host(self) -> str:
@@ -279,21 +301,37 @@ class PhoneLink:
         self._imu_reader.start()
         return True
 
-    def _stop_session_workers(self) -> None:
+    def _stop_session_workers(self) -> bool:
         """Reverse of `_start_session_workers`, leaving the listener running.
 
-        The three readers return on their own once the session reports closed, so
-        this joins rather than signals -- `self._stop` belongs to the run, and setting
-        it here would take the supervisor down with the session it is supervising.
+        The readers return on their own once the session reports closed, so this
+        joins rather than signals -- `self._stop` belongs to the run, and setting it
+        here would take the supervisor down with the session it is supervising.
+
+        False when a reader did not stop, and the caller must not rebind over it.
+        Every reader re-reads `self.router` and `self.session` on each iteration, so
+        one that outlived its join did not merely linger: it bound itself to the NEXT
+        session and stayed there. Two readers on one channel, compounding per redial,
+        splitting arrivals between two consumers of a single `HereFeed` whose counters
+        are unguarded -- and on CONTROL, two `_answer_pings` threads, which is exactly
+        the two-senders-on-one-channel arrangement that produces phantom sequence
+        gaps. `to_record` tracks only the later thread, so the extra one is invisible.
+
+        `_PhoneSource.rebind` guards precisely this case one layer down and calls it
+        "a silent split brain". Same hazard, same answer.
         """
+        stopped = True
         for worker in (self._responder, self._here_reader, self._telemetry_reader,
                        self._imu_reader):
             if worker is not None:
                 worker.join(timeout=2.0)
+                if worker.is_alive():
+                    stopped = False
         if self.session is not None:
             self.session.close()
         self._responder = self._here_reader = self._telemetry_reader = None
         self._imu_reader = None
+        return stopped
         # The sensors are NOT stopped or dropped here. `rebind` stops and restarts
         # them, and the run is holding them by identity.
 
@@ -312,7 +350,15 @@ class PhoneLink:
                 break
             ended = _end_reason_of(self.session)
             down_from = time.monotonic()
-            self._stop_session_workers()
+            drained = self._stop_session_workers()
+            if not drained:
+                # A reader from the old session is still running and will follow the
+                # rebind onto the next one. Ending the run beats doubling up on every
+                # channel for the rest of the drive.
+                self.supervisor_ended = "readers_would_not_stop"
+                if self.camera is not None:
+                    self.camera.expect_redial(False)
+                return
             # Said out loud. The drive now stalls for up to `rebind_timeout_s` with a
             # camera that reports no frame and no end, which is the right behaviour
             # and an alarming silence to sit through without a word.
@@ -364,16 +410,14 @@ class PhoneLink:
             # handset by 6.7x -- because the 10 s telemetry age gate does not cover a
             # rebind that takes seconds. `here` goes the same way: its readings
             # describe where the previous device was, for up to its 30 s window.
-            self.telemetry = None
-            self.telemetry_at_mono = None
+            self._telemetry = None
             # Reset because `_session_record` reads them straight. Left running they
             # reported the run total inside a dict labelled "what one session did",
             # so summing the sessions double-counted -- the same defect round 2 fixed
             # for the sensors' own counters and did not follow through on here.
             self.telemetry_received = 0
             self.pings_answered = 0
-            self.imu = None
-            self.imu_at_mono = None
+            self._imu = None
             self.imu_received = 0
             self.here = HereFeed()
             self.here_failure = None
@@ -497,8 +541,14 @@ class PhoneLink:
             # a report from forty minutes ago is indistinguishable from one from
             # 200 ms ago, and the controller's "silence is not nominal" rule would
             # cover only a phone that never spoke -- not one that went quiet.
-            self.telemetry = message
-            self.telemetry_at_mono = receipt.t_recv_mono_ns / 1e9
+            # ONE store, not two. `here_feed`'s `_Snapshot` exists because "no
+            # ordering of independent stores is safe", and this pair is worse than
+            # the one that motivated it: a reader straddling two stores does not
+            # merely misstate the age, it gets None -- and the controller's staleness
+            # gate is `if age is not None`, so a None skips it. A 40 s old `critical`
+            # would then cut a healthy handset by 6.7x with the gate never running.
+            # Published as a single tuple, so a reader sees both or neither.
+            self._telemetry = (message, receipt.t_recv_mono_ns / 1e9)
             self.telemetry_received += 1
 
     def send_advisory(self, advisory: Any, *, t_capture_mono_ns: int) -> bool:
@@ -563,8 +613,7 @@ class PhoneLink:
                     return
                 continue
             message, receipt = received
-            self.imu = message
-            self.imu_at_mono = receipt.t_recv_mono_ns / 1e9
+            self._imu = (message, receipt.t_recv_mono_ns / 1e9)
             self.imu_received += 1
 
     def stop(self) -> None:
