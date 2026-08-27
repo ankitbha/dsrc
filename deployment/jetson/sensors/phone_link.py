@@ -205,8 +205,8 @@ class PhoneLink:
                 return True
         return False
 
-    def _begin(self) -> None:
-        self._start_session_workers()
+    def _begin(self) -> bool:
+        started = self._start_session_workers()
         # One supervisor for the whole run, not one per session: it outlives the
         # session it was started under, and starting another on every rebind would
         # leave a thread per redial all watching the same field.
@@ -215,9 +215,13 @@ class PhoneLink:
                 target=self._supervise, name="phone-supervisor", daemon=True
             )
             self._supervisor.start()
+        return started
 
-    def _start_session_workers(self) -> None:
+    def _start_session_workers(self) -> bool:
         """Everything that belongs to one session, in the order it comes up.
+
+        False when a sensor could not be rebound, in which case the link is not
+        usable and the caller must not pretend it is.
 
         The two sensor backends are built once and REBOUND afterwards. `run_demo`
         binds `camera` and `gps` at build time and the pipeline worker closes over
@@ -229,8 +233,13 @@ class PhoneLink:
             self.camera = PhoneCameraStream(self.router, self.adapter).start()
             self.gps = PhoneGpsReader(self.router, self.adapter).start()
         else:
-            self.camera.rebind(self.router, self.adapter)
-            self.gps.rebind(self.router, self.adapter)
+            # Both, and both checked. A source that refused to rebind is not a source
+            # that rebound quietly: the caller used to go on to record a clean redial
+            # and re-raise the redial-expected flag over it, so the run polled a dead
+            # camera forever with `end_of_stream` False and nothing ever set `stop`.
+            if not all((self.camera.rebind(self.router, self.adapter),
+                        self.gps.rebind(self.router, self.adapter))):
+                return False
         # This link supervises, so a closed session is a gap until the supervisor
         # says otherwise. Set here rather than at teardown: the reader sees the close
         # on a 5 ms poll and the supervisor on a 100 ms one, so a flag raised when
@@ -248,6 +257,7 @@ class PhoneLink:
             target=self._read_telemetry, name="phone-telemetry", daemon=True
         )
         self._telemetry_reader.start()
+        return True
 
     def _stop_session_workers(self) -> None:
         """Reverse of `_start_session_workers`, leaving the listener running.
@@ -292,7 +302,10 @@ class PhoneLink:
                 # Falls through to the give-up branch below.
                 # Now it really is over. Said out loud, and to the camera, because a
                 # consumer that only ever sees "no frame right now" waits forever.
-                self.supervisor_ended = (
+                # `or`, because `_rebind` may already have said something more
+                # specific -- "rebind_failed" is a sensor that would not come back,
+                # not a phone that never called, and overwriting it loses which.
+                self.supervisor_ended = self.supervisor_ended or (
                     "stopped" if self._stop.is_set()
                     else f"gave_up_after_{self.rebind_timeout_s:g}s"
                 )
@@ -331,6 +344,12 @@ class PhoneLink:
             # describe where the previous device was, for up to its 30 s window.
             self.telemetry = None
             self.telemetry_at_mono = None
+            # Reset because `_session_record` reads them straight. Left running they
+            # reported the run total inside a dict labelled "what one session did",
+            # so summing the sessions double-counted -- the same defect round 2 fixed
+            # for the sensors' own counters and did not follow through on here.
+            self.telemetry_received = 0
+            self.pings_answered = 0
             self.here = HereFeed()
             self.here_failure = None
             self.session = event.session
@@ -339,7 +358,14 @@ class PhoneLink:
             # guard lives in `_begin`, and calling past it left the guard unreachable
             # on the only path that could ever need it -- so the test asserting one
             # supervisor was passing because `wait_for_phone` is called once.
-            self._begin()
+            if not self._begin():
+                # The sensors did not come back. Ended rather than left hanging: the
+                # camera reports no frame and no end otherwise, so `run_demo`'s
+                # worker loops forever and its teardown never runs.
+                self.supervisor_ended = "rebind_failed"
+                if self.camera is not None:
+                    self.camera.expect_redial(False)
+                return False
             # Appended AFTER the workers are up, so the entry means the rebind
             # finished. Appending first published it one statement into the camera's
             # rebind, before the gps had been touched or the reader thread existed --

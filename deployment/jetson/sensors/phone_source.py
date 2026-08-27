@@ -149,7 +149,7 @@ class _PhoneSource:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 
-    def rebind(self, router: Any, adapter: PhoneClockAdapter) -> None:
+    def rebind(self, router: Any, adapter: PhoneClockAdapter) -> bool:
         """Point this source at a new session, keeping its identity.
 
         The consumers hold these objects for the life of the run -- `run_demo`
@@ -164,6 +164,8 @@ class _PhoneSource:
         PREVIOUS peer does, which is what `_on_rebound` clears. Preserving identity
         without clearing that state moves the failure one layer down instead of
         removing it.
+
+        False when the old reader would not stop, in which case nothing was swapped.
         """
         self.stop()
         if self._thread is not None and self._thread.is_alive():
@@ -171,13 +173,20 @@ class _PhoneSource:
             # refuses while a thread is alive -- so swapping the router here would
             # leave the old reader on the old session with `_router` pointing at the
             # new one and no live reader for it, silently.
+            #
+            # Reported rather than absorbed. Returning quietly let the caller go on
+            # to record a clean redial over a dead source and re-raise the
+            # redial-expected flag, so `end_of_stream` stayed False and the run
+            # polled a source that would never produce a frame, forever -- trading a
+            # silent split brain for a silent hang.
             self.failure = "reader did not stop in time for the rebind"
             self._on_reader_ended()
-            return
+            return False
         self._router = router
         self._adapter = adapter
         self._on_rebound()
         self.start()
+        return True
 
     def _on_rebound(self) -> None:
         """Forget what belonged to the previous peer. Default: the message count."""
@@ -306,13 +315,18 @@ class PhoneCameraStream(_PhoneSource):
         drop counter flat -- it fires on `frame_id > _last_consumed_id`, which is
         exactly the condition that is false here.
 
-        `_drop_counter` is deliberately kept: frames dropped unconsumed are a fact
-        about the RUN, not about one session.
+        `_drop_counter` goes too, and the reasoning that kept it was wrong. It IS a
+        fact about the run -- but `to_record` is reused verbatim as the per-session
+        record, so keeping one cumulative counter beside reset ones put two scopes in
+        a dict labelled "what one session did": a session that received 2 frames
+        reported dropping 4. Everything here is per-session now, and the run total is
+        the sum over `sessions` plus the live one.
         """
         super()._on_rebound()
         with self._cond:
             self._latest = None
             self._last_consumed_id = -1
+        self._drop_counter = 0
         self.decode_failures = 0
 
     def stop(self) -> None:
@@ -426,6 +440,29 @@ class PhoneGpsReader(_PhoneSource):
         )
         with self._lock:
             self._fix = fix
+
+    def _on_rebound(self) -> None:
+        """Drop the previous handset's position.
+
+        The camera clears its last frame; this held the last FIX and did not, so
+        after a redial `latest()` served the previous device's position -- valid,
+        fresh by its own age test, and stamped `measured` by the observation builder
+        -- until the new phone's first record arrived. `messages_received` said the
+        new phone had sent nothing while the fix said it was doing 27 m/s.
+
+        The same argument the rebind already applies to thermal state and to the
+        traffic feed: a new device is a new position. This was the one field it was
+        not applied to, and the one the other two are derived from -- the V2V beacon
+        gates on `fix.valid` alone with no age test, so it would have broadcast the
+        previous device's position for as long as the new phone stayed quiet.
+        """
+        super()._on_rebound()
+        with self._lock:
+            self._fix = GpsFix()
+        # The cumulative twin of `messages_received`, and an error string that
+        # otherwise reads "reader stopped" beside a healthy rebound reader.
+        self.diagnostics.sentences_parsed = 0
+        self.diagnostics.last_error = None
 
     def latest(self) -> GpsFix:
         with self._lock:

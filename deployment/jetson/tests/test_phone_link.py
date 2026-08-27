@@ -1,5 +1,13 @@
 """The assembly between a socket and the two backends.
 
+Every `PhoneLink` here is given a `LoopbackAcceptor`. The default binds
+`0.0.0.0:47811`, and nothing in this file uses the socket -- each test either
+attaches an existing loopback session or drives a loopback client -- but the bind
+still happens, and four of these tests failed 6 times in 40 runs with
+`OSError: Address already in use`. A concurrent pytest run, a leftover process, or a
+real `run_demo.py --phone` on the same machine breaks them, and the noise lands in
+mutation verdicts as false catches.
+
 Driven over a real loopback session pair rather than a mock router, because the
 thing most worth pinning here is a direction the wire enforces: the Jetson answers
 time-sync pings and never sends one. A mock would answer whatever it was asked.
@@ -66,7 +74,7 @@ class TestTimeSyncDirection:
         from transport.messages import TimeSyncMessage
 
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             up.send(TimeSyncMessage(t_capture_mono_ns=0, exchange_id=7))
@@ -94,7 +102,7 @@ class TestTimeSyncDirection:
         from transport.timebase import TimeSyncInitiator
 
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             initiator = TimeSyncInitiator(up)
@@ -119,7 +127,7 @@ class TestTimeSyncDirection:
         # responder's departure, not an initiator's send. Fed to the estimator it
         # would produce an offset built from the wrong pair of clocks.
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             link.estimator.add(OneWaySample(1, t1_remote_send_ns=now_mono_ns() + TRUE_OFFSET_NS,
@@ -168,7 +176,7 @@ class TestComeUpAndTeardown:
         # is present and the other is not. Selecting them separately is the bug
         # this asserts against.
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             assert link.camera is not None
@@ -185,7 +193,7 @@ class TestProvenance:
         # otherwise indistinguishable. The record has to name which clock produced
         # the stamps and how the offset was obtained.
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             record = link.to_record()
@@ -239,7 +247,7 @@ class TestStartIsIdempotent:
         import threading
 
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             before = {t for t in threading.enumerate() if t.name == "phone-camera"}
@@ -258,7 +266,7 @@ class TestStartIsIdempotent:
         # The guard is on the thread being alive, not on having ever started, so
         # the reconnect path is untouched.
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             link.camera.stop()
@@ -292,7 +300,7 @@ class TestSessionEndPropagates:
         # unchanged -- the consumer must not wait FOREVER -- so it is now a bounded
         # wait, and the bound is the one the supervisor is working to.
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         link.rebind_timeout_s = 0.3
         try:
             attach(link, jetson, down)
@@ -317,7 +325,7 @@ class TestSessionEndPropagates:
 
     def test_a_closed_session_stops_the_reader_thread_rather_than_spinning(self):
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             reader = link.camera._thread
@@ -337,7 +345,7 @@ class TestSessionEndPropagates:
         # spins a core on a dead link -- and it is a new thread, so the tests that
         # cover the camera, gps and responder threads say nothing about it.
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             reader = link._here_reader
@@ -353,7 +361,7 @@ class TestSessionEndPropagates:
 
     def test_a_closed_session_stops_the_responder_thread(self):
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             responder = link._responder
@@ -398,7 +406,7 @@ class TestRefusalsAreReported:
 
     def test_the_record_separates_a_displaced_run_from_a_finished_one(self):
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             # Values, not just keys. Asserting presence alone let a mutation
@@ -431,7 +439,7 @@ class TestHereIngestion:
         from transport.messages import HereResponse
 
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             shape = {"links": [{"points": [{"lat": 51.49, "lng": -0.20}]}]}
@@ -460,7 +468,7 @@ class TestHereIngestion:
         # A drive that received no traffic data must say so as a number rather
         # than by the key being absent.
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             here = link.to_record()["here"]
@@ -493,7 +501,7 @@ class TestHereResponseAge:
         from transport.timebase import MIN_OFFSET_SAMPLES, OneWaySample
 
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             # Converge the one-way estimator on the fixture's planted offset.
@@ -552,7 +560,7 @@ class TestTelemetryIngestion:
         from transport.messages import PhoneTelemetry
 
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             assert up.send(PhoneTelemetry(
@@ -577,7 +585,7 @@ class TestTelemetryIngestion:
 
     def test_a_drive_that_heard_nothing_says_so_rather_than_reading_cool(self):
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             record = link.to_record()["telemetry"]
@@ -590,7 +598,7 @@ class TestTelemetryIngestion:
 
     def test_a_closed_session_stops_the_telemetry_reader(self):
         phone, jetson, up, down = phone_and_jetson()
-        link = PhoneLink()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
         try:
             attach(link, jetson, down)
             reader = link._telemetry_reader
@@ -612,7 +620,7 @@ def test_telemetry_carries_its_arrival_time():
     from transport.messages import PhoneTelemetry
 
     phone, jetson, up, down = phone_and_jetson()
-    link = PhoneLink()
+    link = PhoneLink(acceptor=LoopbackAcceptor())
     try:
         attach(link, jetson, down)
         assert link.telemetry_at_mono is None
@@ -1098,12 +1106,25 @@ class TestTheSecondPhoneStartsClean:
             second = LoopbackPhone(acceptor, "phone-two")
             assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
 
+            # Nothing is served before phone-two speaks. Asserting only that SOME
+            # frame arrives is satisfied by phone-one's, re-served: clearing the
+            # high-water mark without clearing `_latest` hands back frame 5000, which
+            # raises the mark to 5000 again and refuses frame 1 forever -- the whole
+            # defect, past a green test.
+            assert camera.wait_for_fresh(0.05) is None, \
+                "a frame from the phone that hung up was served to the new session"
+
             assert MessageRouter(second.session).send(CameraFrame(
                 t_capture_mono_ns=now_mono_ns(), frame_id=1, width=16, height=16,
                 format="jpeg", quality=85, jpeg=a_jpeg()))
-            assert wait_until(lambda: camera.wait_for_fresh(0.05) is not None), \
+            served = None
+            deadline = time.monotonic() + 3.0
+            while served is None and time.monotonic() < deadline:
+                served = camera.wait_for_fresh(0.05)
+            assert served is not None, \
                 "the second phone's frames were refused; the run goes blind and " \
                 "never ends, because end_of_stream is False"
+            assert served.frame_id == 1, f"served frame {served.frame_id}, not phone-two's"
             second.hang_up()
         finally:
             link.stop()
@@ -1162,3 +1183,187 @@ class TestTheSecondPhoneStartsClean:
             second.hang_up()
         finally:
             link.stop()
+
+
+class TestTheGpsStartsCleanToo:
+    """The camera's defect, in the sensor everything else is derived from."""
+
+    def test_the_previous_handsets_position_is_not_served_to_the_new_session(self):
+        # `PhoneCameraStream` clears its last frame on a rebind; the gps reader held
+        # the last FIX and did not. After a redial `latest()` returned the previous
+        # device's position -- `valid`, fresh by its own age test, and stamped
+        # `measured` by the observation builder -- while `messages_received` said the
+        # new phone had sent nothing. The V2V beacon gates on `fix.valid` alone with
+        # no age test, so it would have broadcast that position for as long as the
+        # new phone stayed quiet.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            gps = link.gps
+            assert MessageRouter(first.session).send(GpsRecord(
+                t_capture_mono_ns=now_mono_ns(), valid=True, fix_quality=1,
+                num_sats=9, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+                hdop=0.9, altitude_m=10.0))
+            assert wait_until(lambda: gps.latest().valid)
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            after = gps.latest()
+            assert after.valid is False, (
+                f"phone-two inherited phone-one's position: {after.lat}, {after.lon}"
+            )
+            assert gps.messages_received == 0
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_the_new_session_does_not_inherit_the_old_ones_parse_count(self):
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            assert MessageRouter(first.session).send(GpsRecord(
+                t_capture_mono_ns=now_mono_ns(), valid=True, fix_quality=1,
+                num_sats=9, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+                hdop=0.9, altitude_m=10.0))
+            assert wait_until(lambda: link.gps.diagnostics.sentences_parsed == 1)
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert link.gps.diagnostics.sentences_parsed == 0
+            # And not still reporting why the PREVIOUS reader stopped.
+            assert link.gps.diagnostics.last_error is None
+            second.hang_up()
+        finally:
+            link.stop()
+
+
+class TestOneRecordOneScope:
+    """`to_record` is reused verbatim as the per-session record."""
+
+    def test_a_sessions_dropped_frames_are_that_sessions(self):
+        # Round 2 made `frames_received` per-session and deliberately kept
+        # `_drop_counter` cumulative, so one dict labelled "what one session did"
+        # carried two scopes: a session that received 2 frames reported dropping 4,
+        # and summing the sessions double-counted the drops it had just stopped
+        # double-counting for the frames.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            up = MessageRouter(first.session)
+            # Never consumed, so each one displaces the last and counts as a drop.
+            # Sent one at a time and waited for: `camera` is latest_wins at depth
+            # one, so a burst is collapsed by the TRANSPORT and never reaches the
+            # reader that does the counting.
+            for i in range(4):
+                assert up.send(CameraFrame(
+                    t_capture_mono_ns=now_mono_ns() + i, frame_id=i, width=16,
+                    height=16, format="jpeg", quality=85, jpeg=a_jpeg()))
+                assert wait_until(lambda n=i: link.camera.messages_received == n + 1)
+            dropped_in_session_one = link.camera.to_record()["frames_dropped_unconsumed"]
+            assert dropped_in_session_one >= 1
+            # And one body the decoder cannot read, so `decode_failures` is nonzero
+            # going into the rebind rather than trivially already zero.
+            assert up.send(CameraFrame(
+                t_capture_mono_ns=now_mono_ns() + 9, frame_id=9, width=16,
+                height=16, format="jpeg", quality=85, jpeg=b"not a jpeg at all"))
+            assert wait_until(lambda: link.camera.decode_failures == 1)
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            record = link.to_record()
+            assert record["sessions"][0]["camera"]["frames_dropped_unconsumed"] == \
+                dropped_in_session_one
+            live = link.camera.to_record()
+            assert live["frames_received"] == 0
+            assert live["frames_dropped_unconsumed"] == 0, \
+                "the new session inherited the old session's drops"
+            # Every counter in the dict, not the two that were noticed. This one
+            # survived its own pin: nothing asserted it, in either direction.
+            assert live["decode_failures"] == 0, \
+                "the new session inherited the old session's decode failures"
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_pings_and_telemetry_are_counted_per_session_too(self):
+        # The same two-scopes-in-one-dict defect, two fields further on: both are
+        # read straight into `_session_record`.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            link.pings_answered = 2
+            link.telemetry_received = 5
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert link.to_record()["sessions"][0]["pings_answered"] == 2
+            assert link.to_record()["sessions"][0]["telemetry_received"] == 5
+            assert link.pings_answered == 0
+            assert link.telemetry_received == 0
+            second.hang_up()
+        finally:
+            link.stop()
+
+
+class TestARebindThatCouldNotHappen:
+
+    def test_a_sensor_that_refuses_to_rebind_ends_the_run_rather_than_hanging_it(self):
+        # The failed-stop guard used to return quietly, and the caller went on to
+        # record a clean redial and re-raise the redial-expected flag over a dead
+        # camera -- so `end_of_stream` stayed False, `run_demo`'s worker looped
+        # forever, and its teardown never ran. A silent split brain traded for a
+        # silent hang.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            camera = link.camera
+            # A reader that will not stop, which is the only way into the branch.
+            camera.rebind = lambda *a, **k: False
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+
+            assert wait_until(lambda: link.supervisor_ended is not None), \
+                "the supervisor neither rebound nor gave up"
+            assert link.supervisor_ended == "rebind_failed"
+            assert link.rebinds == [], "a failed rebind was recorded as a redial"
+            assert camera.end_of_stream is True, "the run would hang here forever"
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_a_clean_stop_says_the_supervisor_stopped(self):
+        # Its documented meaning is "None while still watching", which was false for
+        # the whole teardown: the field was only ever written on the give-up path.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        dialling = dial(acceptor, "phone-one")
+        assert link.wait_for_phone(timeout_s=5.0) is True
+        phone = dialling.result(timeout=5.0)
+        assert link.supervisor_ended is None
+        link.stop()
+        assert link.supervisor_ended == "stopped"
+        phone.hang_up()
