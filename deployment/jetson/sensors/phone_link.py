@@ -126,6 +126,21 @@ class PhoneLink:
         self.telemetry: Any = None
         self.telemetry_at_mono: float | None = None
         self.telemetry_received = 0
+        #: The fourth modality. The phone streams `imu` at 50 Hz for the whole drive
+        #: and nothing on this side read the channel, so the inbound deque sat
+        #: permanently at its 256 depth and every later sample was discarded -- ~50 a
+        #: second, each one waking all five reader threads through the shared
+        #: condition. Drained and counted here so the queue does not thrash, and so a
+        #: phone whose IMU never registered is distinguishable from one streaming.
+        #:
+        #: NOT yet an input to the controller. `plan_task29` names the IMU as half of
+        #: "the free always-on tier", but `Inputs.ego_acceleration` still comes from a
+        #: finite difference of 1 Hz GPS speed, so the `EVENT_ACCEL_MPS2` trigger has
+        #: never seen an IMU sample. Wiring that changes what the controller reads,
+        #: not what this class collects, and is left named rather than done.
+        self.imu: Any = None
+        self.imu_at_mono: float | None = None
+        self.imu_received = 0
         #: Counted, not just named. `refused_by_reason` exists so refusals are
         #: counted rather than inferred, and the guard path was the one outcome
         #: countable only by subtraction -- one string cannot tell one bad body
@@ -171,6 +186,7 @@ class PhoneLink:
         self._responder: threading.Thread | None = None
         self._here_reader: threading.Thread | None = None
         self._telemetry_reader: threading.Thread | None = None
+        self._imu_reader: threading.Thread | None = None
         self._supervisor: threading.Thread | None = None
         #: How long the supervisor waits for a redial before giving up on the run.
         self.rebind_timeout_s = 120.0
@@ -257,6 +273,10 @@ class PhoneLink:
             target=self._read_telemetry, name="phone-telemetry", daemon=True
         )
         self._telemetry_reader.start()
+        self._imu_reader = threading.Thread(
+            target=self._read_imu, name="phone-imu", daemon=True
+        )
+        self._imu_reader.start()
         return True
 
     def _stop_session_workers(self) -> None:
@@ -266,12 +286,14 @@ class PhoneLink:
         this joins rather than signals -- `self._stop` belongs to the run, and setting
         it here would take the supervisor down with the session it is supervising.
         """
-        for worker in (self._responder, self._here_reader, self._telemetry_reader):
+        for worker in (self._responder, self._here_reader, self._telemetry_reader,
+                       self._imu_reader):
             if worker is not None:
                 worker.join(timeout=2.0)
         if self.session is not None:
             self.session.close()
         self._responder = self._here_reader = self._telemetry_reader = None
+        self._imu_reader = None
         # The sensors are NOT stopped or dropped here. `rebind` stops and restarts
         # them, and the run is holding them by identity.
 
@@ -350,6 +372,9 @@ class PhoneLink:
             # for the sensors' own counters and did not follow through on here.
             self.telemetry_received = 0
             self.pings_answered = 0
+            self.imu = None
+            self.imu_at_mono = None
+            self.imu_received = 0
             self.here = HereFeed()
             self.here_failure = None
             self.session = event.session
@@ -523,11 +548,32 @@ class PhoneLink:
         setattr(self, counter, getattr(self, counter) + 1)
         return True
 
+    def _read_imu(self) -> None:
+        """Drain the IMU channel, keeping the latest sample and the count.
+
+        Latest only, like telemetry: a queue of old motion would answer a question
+        nobody asks while growing without bound on a long drive. The reason to read
+        at all is that nothing did -- see `self.imu`.
+        """
+        assert self.router is not None
+        while not self._stop.is_set():
+            received = self.router.recv_with_receipt(Channel.IMU, timeout=0.05)
+            if received is None:
+                if getattr(self.session, "is_closed", False):
+                    return
+                continue
+            message, receipt = received
+            self.imu = message
+            self.imu_at_mono = receipt.t_recv_mono_ns / 1e9
+            self.imu_received += 1
+
     def stop(self) -> None:
         """Reverse of coming up, and safe to call when it never came up."""
         self._stop.set()
         if self._supervisor is not None:
             self._supervisor.join(timeout=3.0)
+        if self._imu_reader is not None:
+            self._imu_reader.join(timeout=2.0)
         # After the join, not before. `_rebind` can already be past its own `_stop`
         # check, and it finishes by calling `_on_reader_restarted` (which clears
         # `end_of_stream`) and `expect_redial(True)` -- so a clear taken first was
@@ -545,6 +591,43 @@ class PhoneLink:
             self.session.close()
         self._listener.stop()
 
+    def _wire_record(self) -> dict[str, Any]:
+        """What the transport itself did, per channel. Two blindnesses, one place.
+
+        **Messages the channel threw away.** `Session._enqueue` evicts the oldest on
+        overflow and returns True, so `_send` counts an enqueue as a send and
+        `sends_refused` -- whose docstring says "a closed OR BACKED-UP link" -- could
+        only ever see a closed one. A drive that lost eight rate commands to a
+        16-deep queue and one that delivered all twenty-four wrote byte-identical
+        records, on the channel whose policy is `reliable` precisely because no later
+        message repeats what it said. `dropped_outbound` is a counted field, not a
+        difference: this codebase's own rule is that deriving a loss by subtraction
+        is how a counting bug hides.
+
+        **Messages the decoder refused.** `MessageRouter` counts `decode_errors`,
+        `errors_by_reason` and `last_error` per channel and nothing read them, so a
+        phone whose every camera frame was rejected -- one missing header key, which
+        is what a version skew produces -- was indistinguishable from a phone that
+        sent nothing. `frames_received` counts only decodable arrivals, so it reads
+        zero either way, and `decode_failures` is the JPEG counter one layer below
+        the decoder that actually refused them.
+        """
+        record: dict[str, Any] = {}
+        if self.router is not None:
+            record["messages"] = self.router.to_record()
+        if self.session is not None:
+            record["channels"] = {
+                channel.value: {
+                    "sent": stats.sent,
+                    "dropped_outbound": stats.dropped_outbound,
+                    "received": stats.received,
+                    "delivered": stats.delivered,
+                    "dropped_inbound": stats.dropped_inbound,
+                }
+                for channel, stats in self.session.stats().channels.items()
+            }
+        return record
+
     def _session_record(self) -> dict[str, Any]:
         """What one session did, snapshotted before its objects are replaced."""
         return {
@@ -558,6 +641,8 @@ class PhoneLink:
             "gps": None if self.gps is None else self.gps.to_record(),
             "here": self.here.to_record(),
             "telemetry_received": self.telemetry_received,
+            "imu_received": self.imu_received,
+            "wire": self._wire_record(),
         }
 
     def to_record(self) -> dict[str, Any]:
@@ -617,6 +702,16 @@ class PhoneLink:
                 "skin_temp_zone": getattr(self.telemetry, "skin_temp_zone", None),
                 "at_mono": self.telemetry_at_mono,
                 "reader_alive": bool(self._telemetry_reader and self._telemetry_reader.is_alive()),
+            },
+            # What the transport did, as opposed to what the readers made of it.
+            "wire": self._wire_record(),
+            "imu": {
+                "received": self.imu_received,
+                "at_mono": self.imu_at_mono,
+                "reader_alive": bool(self._imu_reader and self._imu_reader.is_alive()),
+                # Named, because the count alone reads as though something consumes
+                # it. Nothing does yet -- see `self.imu`.
+                "feeds_the_controller": False,
             },
             "here": {**self.here.to_record(),
                      "reader_alive": bool(self._here_reader and self._here_reader.is_alive()),

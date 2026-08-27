@@ -749,9 +749,22 @@ class SensingService : LifecycleService() {
             frameSender = null
             encodeExecutor = null
             link = null
+            // Every field the block above nulls, not the ten it happened to list.
+            // Seven were missing -- `liveHere`, `telemetryReporter`, `liveTelemetry`,
+            // `sessionLog`, `liveLog`, `liveImu`, `liveImuSource` -- so deleting
+            // `sessionLog = null` (a file handle and a writer thread) or
+            // `telemetryReporter = null` (a thread) left the count at zero and the
+            // test green, which is the exact regression this census exists to close.
+            //
+            // The five `live*` fields matter more than the instance fields it did
+            // list: they are companion-object statics, so a stale one is held for the
+            // life of the PROCESS rather than until the next come-up, and
+            // `liveImuSource` carries a SensorManager registration with it.
             resourcesHeldAfterTeardown = listOfNotNull(
-                cameraSource, gpsSource, pipeline, gpsPipeline, frameSender, encodeExecutor, link,
-                imuPipeline, imuSource, herePipeline,
+                cameraSource, gpsSource, imuPipeline, imuSource, herePipeline,
+                liveHere, telemetryReporter, liveTelemetry, sessionLog, liveLog,
+                liveImu, liveImuSource, pipeline, gpsPipeline, frameSender,
+                encodeExecutor, link,
             ).size
         }
     }

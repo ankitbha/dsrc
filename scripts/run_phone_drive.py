@@ -81,7 +81,7 @@ class Peer:
         self.session = Session(self.conn, session_id=99, heartbeat_s=None,
                                stall_timeout_s=None).start()
         self.router = MessageRouter(self.session)
-        self.advisories, self.commands, self.refused = [], [], 0
+        self.advisories, self.commands = [], []
         self.advisory_stamps = []
         self.frame_id = 0
         self._stop = threading.Event()
@@ -92,11 +92,13 @@ class Peer:
         while not self._stop.is_set():
             for ch, sink in ((Channel.ADVISORY, self.advisories),
                              (Channel.RATE_CMD, self.commands)):
-                try:
-                    m = self.router.recv(ch, timeout=0.0)
-                except Exception:
-                    self.refused += 1
-                    continue
+                # No try/except. `MessageRouter.recv` returns None on an empty queue,
+                # on a closed session, and on a message it cannot decode -- which it
+                # counts internally instead of raising. A counter fed by an
+                # unreachable `except` reports zero on every run including the broken
+                # ones, which is worse than not counting at all. The real figure is
+                # `refused_by_the_decoder` below, read from the router itself.
+                m = self.router.recv(ch, timeout=0.0)
                 if m is not None:
                     sink.append(m)
                     if ch == Channel.ADVISORY:
@@ -235,7 +237,12 @@ def main():
             "ratio": None if not ticks else round(record["sent"]["rate_commands"] / ticks, 4),
             "by_reason": loop.sends_by_reason,
         },
-        "refused_by_the_wire": peer.refused,
+        # From the router's own per-channel counters, which can be nonzero. The
+        # figure this replaces came from an `except` around a call that does not
+        # raise, so it was a constant dressed as a measurement.
+        "refused_by_the_decoder": sum(
+            v.get("decode_errors", 0) for v in peer.router.to_record().values()
+        ),
         "sends_without_a_session": record["sent"]["without_a_session"],
         "sends_refused": record["sent"]["refused"],
         "sessions_recorded": len(record["sessions"]),

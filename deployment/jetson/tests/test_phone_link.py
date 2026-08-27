@@ -25,7 +25,8 @@ from sensors.phone_link import PhoneLink
 from transport.channels import Channel
 from transport.handshake import Hello, Role
 from transport.loopback import LoopbackAcceptor, loopback_pair
-from transport.messages import CameraFrame, GpsRecord, InvalidMessage, MessageRouter, RateCommand
+from transport.messages import (CameraFrame, GpsRecord, ImuSample, InvalidMessage,
+                                MessageRouter, RateCommand)
 from transport.session import Session
 from transport.timebase import OneWaySample, now_mono_ns
 
@@ -1367,3 +1368,92 @@ class TestARebindThatCouldNotHappen:
         link.stop()
         assert link.supervisor_ended == "stopped"
         phone.hang_up()
+
+
+class TestFailureDoesNotLookLikeSuccess:
+    """Three records that could not tell a drive that failed from one that worked."""
+
+    def test_a_rate_command_the_queue_threw_away_is_visible(self):
+        # `Session._enqueue` evicts the oldest on overflow and returns True, so a send
+        # into a backed-up link is counted as a send. `sends_refused` says "closed OR
+        # backed-up" and could only ever see closed. On `rate_cmd` -- `reliable`,
+        # depth 16, chosen precisely because no later message repeats what an earlier
+        # one said -- a drive that lost commands wrote the same record as one that
+        # did not.
+        # A tiny buffer so the writer blocks and the queue actually BACKS UP. Closing
+        # the far end instead would exercise the closed-link path, which the counter
+        # could already see -- and would prove nothing about the one it could not.
+        phone_conn, jetson_conn = loopback_pair(max_buffer_bytes=256)
+        phone = Session(phone_conn, session_id=1, heartbeat_s=None,
+                        stall_timeout_s=None).start()
+        jetson = Session(jetson_conn, session_id=2, heartbeat_s=None,
+                         stall_timeout_s=None).start()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            for i in range(200):
+                link.send_rate_command(_rate_command(t_capture_mono_ns=i + 1))
+
+            channels = link.to_record()["wire"]["channels"]
+            dropped = channels[Channel.RATE_CMD.value]["dropped_outbound"]
+            assert dropped > 0, (
+                "the queue threw commands away and the record does not say so"
+            )
+            # Counted, not derived. Deriving the loss by subtraction is how a counting
+            # bug hides, which is this transport's own stated rule.
+            assert "dropped_outbound" in channels[Channel.RATE_CMD.value]
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_a_phone_whose_frames_are_all_refused_is_not_a_silent_phone(self):
+        # One missing header key -- what a version skew produces -- and every frame is
+        # refused by the decoder. `frames_received` counts only decodable arrivals, so
+        # it reads zero either way, and `decode_failures` is the JPEG counter one
+        # layer BELOW the decoder that actually refused them.
+        phone, jetson, up, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            for i in range(5):
+                # A camera frame with `quality` absent rather than null: legal to
+                # send, refused on arrival.
+                extensions, payload = CameraFrame(
+                    t_capture_mono_ns=now_mono_ns() + i, frame_id=i, width=16,
+                    height=16, format="jpeg", quality=85, jpeg=a_jpeg()).to_wire()
+                extensions.pop("quality")
+                assert phone.send(Channel.CAMERA, payload, extensions)
+            assert wait_until(
+                lambda: link.to_record()["wire"]["messages"]
+                .get(Channel.CAMERA.value, {}).get("decode_errors", 0) > 0
+            ), "the refused frames reached no counter anything reads"
+
+            camera = link.to_record()["wire"]["messages"][Channel.CAMERA.value]
+            assert camera["decode_errors"] > 0
+            assert camera["errors_by_reason"]
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_the_imu_channel_is_drained_and_counted(self):
+        # The phone streams it at 50 Hz for the whole drive and nothing read it, so
+        # the inbound deque sat at its 256 depth and every later sample was discarded.
+        phone, jetson, up, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            for i in range(5):
+                assert up.send(ImuSample(
+                    t_capture_mono_ns=now_mono_ns() + i,
+                    ax=0.1, ay=0.2, az=9.8, gx=0.0, gy=0.0, gz=0.01))
+            assert wait_until(lambda: link.imu_received == 5), \
+                "nothing on this side reads the IMU channel"
+
+            record = link.to_record()["imu"]
+            assert record["received"] == 5
+            assert record["reader_alive"] is True
+            # Said out loud: the count alone reads as though something consumes it.
+            assert record["feeds_the_controller"] is False
+        finally:
+            link.stop()
+            phone.close()

@@ -379,6 +379,21 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
     def _tick_loop() -> None:
         nonlocal last_print
         while not stop.is_set():
+            # At the TOP, so it governs every iteration rather than only the ones that
+            # got a frame. It used to sit below the `continue`, and a camera that is
+            # connected and silent therefore ran the drive forever: in headless mode
+            # nothing else sets `stop`, so no summary was written and MetadataLogger,
+            # which flushes only in `close()`, lost the whole tick log.
+            #
+            # Three states reach a silent camera. A JPEG that will not decode is
+            # swallowed per frame, so a wrong `format` or a broken codec is permanent.
+            # A handset whose camera pipeline has died while GPS and telemetry keep
+            # the session healthy never trips the supervisor. And the redial gap lasts
+            # up to `rebind_timeout_s`, which is 120 s -- that one is deliberate and
+            # survivable, which is exactly why the run has to be able to reach its own
+            # deadline while it lasts.
+            if deadline and time.monotonic() >= deadline:
+                break
             frame = camera.wait_for_fresh(timeout=1.0)
             if frame is None:
                 if camera.end_of_stream:
@@ -427,8 +442,6 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                     f"jetson {tick.jetson_ms:5.1f} ms{link}"
                 )
             if args.max_ticks and tick.tick_id + 1 >= args.max_ticks:
-                break
-            if deadline and now >= deadline:
                 break
             if target_hz > 0:
                 budget = 1.0 / target_hz - (time.monotonic() - frame.t_mono)
