@@ -469,8 +469,26 @@ class SensingService : LifecycleService() {
                     // phone failed to deliver, and counting it would make every healthy
                     // drive look lossy.
                     dropped = mapOf(
+                        // The channel eviction is in here now. `camera` is
+                        // LATEST_WINS at depth one, so an enqueue behind an unsent
+                        // frame DESTROYS it -- and `Session.send` discards the
+                        // displacement and returns true, so `CameraFrameSender`
+                        // recorded it as sent. An involuntary loss, which is exactly
+                        // what this map is for, and it was in none of the five terms.
+                        //
+                        // Per session, where the other terms are per run: the
+                        // session's counters reset on a redial and the modality's do
+                        // not. Under-reported after a redial rather than
+                        // over-reported, which is the direction to be wrong in here.
+                        // `achieved["camera_hz"]` still derives from the enqueue
+                        // count and so still overstates the rate the phone is really
+                        // managing; fixing that needs `Session.send` to surface the
+                        // displacement it already computes, which is a transport API
+                        // change and not this one.
                         "camera" to camera.buffer.dropped + camera.abandoned +
-                            camera.encodeFailures + camera.packFailures + cameraSent.refused,
+                            camera.encodeFailures + camera.packFailures +
+                            cameraSent.refused +
+                            (holder.stats().session?.channels?.get(Channels.CAMERA)?.dropped ?: 0L),
                         "gps" to gpsStats.refusedBySink,
                         "imu" to imuStats.refusedBySink,
                         "here" to hereStats.refusedBySink,
@@ -682,6 +700,12 @@ class SensingService : LifecycleService() {
                 }
             }
             release("advisory stats") { Log.i(TAG, "advisory stats ${advisories.stats}") }
+            // Telemetry was the one modality whose stats never left the process, so a
+            // drive whose reports the link refused wrote the same evidence as one
+            // whose reports all landed.
+            release("telemetry stats") {
+                telemetryReporter?.let { Log.i(TAG, "telemetry stats ${it.stats}") }
+            }
             release("here stats") {
                 herePipeline?.let {
                     if (!it.isStopped) statsReadBeforeStop.incrementAndGet()

@@ -52,20 +52,30 @@ GATE_VEHICLE_TICK_FRACTION = 0.50
 DROPOUT_RECOVERY_MARGIN_S = 2.5  # stale_after_s + one fix interval
 
 
-def load_records(metadata_path: Path) -> tuple[list[dict], dict | None]:
+def load_records(metadata_path: Path) -> tuple[list[dict], dict | None, int]:
+    """Records, the scenario, and how many lines would not parse.
+
+    The count is returned rather than swallowed. `MetadataLogger` buffers a mebibyte
+    and flushes only in `close()`, and there is a path where `close()` never runs --
+    so the last line of a run is routinely a half-written record, and at ~1.5 KB each
+    an unflushed buffer is some seven hundred ticks, not one. A reader that skips
+    them silently analyses a truncated run as a complete one.
+    """
     ticks: list[dict] = []
     scenario: dict | None = None
+    unparseable = 0
     with open(metadata_path) as f:
         for line in f:
             try:
                 record = json.loads(line)  # Python json accepts Infinity literals
             except ValueError:
+                unparseable += 1
                 continue
             if record.get("type") == "tick":
                 ticks.append(record)
             elif record.get("type") == "scenario":
                 scenario = record
-    return ticks, scenario
+    return ticks, scenario, unparseable
 
 
 def pctl(values: list[float]) -> dict[str, float]:
@@ -115,13 +125,32 @@ def in_dropout_affected(elapsed_s: float, dropouts: list[tuple[float, float]]) -
 
 def analyze(run_dir: Path) -> dict[str, Any]:
     """All metrics + gates as a JSON-able dict (report rendering is separate)."""
-    ticks, scenario = load_records(run_dir / "metadata.jsonl")
+    ticks, scenario, unparseable = load_records(run_dir / "metadata.jsonl")
     if not ticks:
         raise SystemExit(f"no tick records in {run_dir / 'metadata.jsonl'}")
     summary = {}
     summary_path = run_dir / "summary.json"
     if summary_path.exists():
         summary = json.loads(summary_path.read_text())
+
+    # What the run said it produced against what survived to be read. The summary is
+    # written by `write_summary` before `close()` flushes the log, so a run that lost
+    # its buffer states its own tick count beside a file that is short of it -- and
+    # the gap went unread, so the report certified a run whose records were missing
+    # with the evidence sitting in the same directory. Counted from the records, never
+    # by subtraction, and reported whether or not it is zero.
+    expected_ticks = summary.get("ticks")
+    shortfall = None
+    if isinstance(expected_ticks, int) and expected_ticks > 0:
+        shortfall = expected_ticks - len(ticks)
+    integrity = {
+        "ticks_read": len(ticks),
+        "ticks_the_run_reported": expected_ticks,
+        "missing_ticks": shortfall,
+        "unparseable_lines": unparseable,
+        # The one gate. A short or truncated log is not a run that passed.
+        "log_complete": bool(unparseable == 0 and (shortfall is None or shortfall == 0)),
+    }
 
     t_wall = np.array([t["t_wall"] for t in ticks])
     duration_s = float(t_wall[-1] - t_wall[0]) if len(ticks) > 1 else 0.0
@@ -300,13 +329,17 @@ def analyze(run_dir: Path) -> dict[str, Any]:
         "duration_s": round(duration_s, 1),
         "tick_rate_hz_median": round(rate_hz, 2),
         "camera_dropped_frames": summary.get("camera_dropped_frames"),
+        "log_integrity": integrity,
         "latency_ms": latency,
         "perception": perception,
         "observation": observation,
         "gps": gps_metrics,
         "advisory": advisory,
         "gates": gates,
-        "overall_pass": overall,
+        # A run whose log is short did not pass; it was not fully read. Folded into
+        # the verdict rather than reported beside it, because a field nobody looks at
+        # is the failure this whole check exists to close.
+        "overall_pass": overall and integrity["log_complete"],
         "_sim_truth": sim_truth,  # stripped before JSON dump
         "_ticks": ticks,
     }
@@ -416,6 +449,14 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
     for name, g in r["gates"].items():
         verdict = "n/a" if g["pass"] is None else ("PASS" if g["pass"] else "**FAIL**")
         lines.append(f"| {name} | {g['value']} | {g['threshold']} | {verdict} |")
+    integrity = r.get("log_integrity", {})
+    if not integrity.get("log_complete", True):
+        lines.append(
+            f"| log complete | read {integrity.get('ticks_read')} of "
+            f"{integrity.get('ticks_the_run_reported')} ticks, "
+            f"{integrity.get('unparseable_lines')} unparseable lines | 0 missing | "
+            f"**FAIL** |"
+        )
     lines += [
         "",
         f"**Overall: {'PASS' if r['overall_pass'] else 'FAIL'}**",

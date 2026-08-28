@@ -4,6 +4,7 @@ import android.os.PowerManager
 import com.dsrc.transport.PhoneTelemetry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -222,4 +223,36 @@ class TelemetryReporterTest {
         // integer, so a receiver keying on these need not guess whether "7" is a status.
         assertEquals("unknown", ThermalReader.statusName(99))
     }
+    @Test
+    fun `a report the link refused is not counted as one that landed`() {
+        // `reports++` ran whether or not the transport took the frame, so a drive
+        // where the link refused every report and one where all of them landed wrote
+        // an identical Stats. Every sibling modality -- camera, gps, imu, here --
+        // counts its sink's refusals explicitly; this was the one that did not.
+        val (r, recorder) = reporter(listOf(sample(), sample(), sample(), sample()))
+        r.report()                       // the first is skipped: a rate needs two
+        assertTrue(r.report())
+        recorder.accept = false
+        assertFalse(r.report())
+        assertFalse(r.report())
+
+        val stats = r.stats
+        assertEquals(3L, stats.reports)
+        assertEquals(2L, stats.refusedBySink)
+        assertEquals(1L, stats.delivered)
+    }
+
+    @Test
+    fun `a drive whose reports all landed is distinguishable from one whose did not`() {
+        val (landed, _) = reporter(listOf(sample(), sample(), sample()))
+        landed.report(); landed.report(); landed.report()
+
+        val (refused, recorder) = reporter(listOf(sample(), sample(), sample()))
+        recorder.accept = false
+        refused.report(); refused.report(); refused.report()
+
+        assertEquals(landed.stats.reports, refused.stats.reports)
+        assertNotEquals(landed.stats.delivered, refused.stats.delivered)
+    }
+
 }

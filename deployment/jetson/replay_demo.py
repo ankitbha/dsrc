@@ -92,6 +92,7 @@ def main() -> int:
     speed_deltas: list[float] = []
     action_matches = 0
     compared = 0
+    peer_informed_ticks = 0
     i = 0
     while True:
         ok, image = video.read()
@@ -107,6 +108,8 @@ def main() -> int:
             )
         if live.get("action") == tick.policy.action:
             action_matches += 1
+        if live.get("n_peers"):
+            peer_informed_ticks += 1
         compared += 1
         i += 1
         if args.max_ticks and i >= args.max_ticks:
@@ -117,17 +120,40 @@ def main() -> int:
         print("[replay] nothing compared - empty video or metadata mismatch")
         return 1
     stats = pipeline.stats.snapshot()
+    # V2V peers are NOT replayable: `Tick.to_record` logs `n_peers`, a count, and not
+    # the peer states themselves, so `pipeline.step` is called here without them. On a
+    # run recorded with peers the divergence that follows is this tool's own missing
+    # argument, and reporting it as "agreement" says the opposite of what it means --
+    # the label promises that divergence indicates nondeterminism or a code change.
+    # Measured on an otherwise identical pipeline: 3.3% agreement, max encoded delta
+    # 0.59, and `downstream_congestion_estimate` falling from `measured` to
+    # `fallback_neutral`. So the number is withheld rather than qualified.
+    # Guarded the way the record below guards the same list. An empty one is a run
+    # whose ticks carried no advisory, not a run with a delta of nan.
+    speed_delta_line = (
+        f"mean {np.mean(speed_deltas):.3f} m/s, max {np.max(speed_deltas):.3f} m/s"
+        if speed_deltas else "no advisory in any replayed tick"
+    )
+    comparable = peer_informed_ticks == 0
+    agreement = f"{action_matches / compared * 100:.1f}%" if comparable else (
+        f"not comparable -- {peer_informed_ticks} of {compared} ticks were recorded "
+        f"with V2V peers, which the record does not carry, so replay runs without them"
+    )
     print(
         f"[replay] {compared} ticks replayed\n"
-        f"  action agreement (all 4 heads): {action_matches / compared * 100:.1f}%\n"
-        f"  |recommended speed delta|: mean {np.mean(speed_deltas):.3f} m/s, "
-        f"max {np.max(speed_deltas):.3f} m/s\n"
+        f"  action agreement (all 4 heads): {agreement}\n"
+        f"  |recommended speed delta|: {speed_delta_line}\n"
         f"  replay detect p50 {stats['detect_ms']['p50']:.1f} ms, "
         f"e2e p50 {stats['e2e_ms']['p50']:.1f} ms (replay clock)"
     )
     out = {
         "replayed_ticks": compared,
-        "action_agreement": action_matches / compared,
+        # None, not a number, when the comparison cannot be made. A fraction here
+        # would be read as a measurement of determinism and it would be a measurement
+        # of what replay does not reconstruct.
+        "action_agreement": (action_matches / compared) if comparable else None,
+        "action_matches": action_matches,
+        "peer_informed_ticks": peer_informed_ticks,
         "speed_delta_mean_mps": float(np.mean(speed_deltas)) if speed_deltas else None,
         "speed_delta_max_mps": float(np.max(speed_deltas)) if speed_deltas else None,
         "stats": stats,

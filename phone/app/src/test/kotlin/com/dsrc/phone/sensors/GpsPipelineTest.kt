@@ -206,6 +206,25 @@ class GpsPipelineTest {
     }
 
     @Test
+    fun `a reversal between two gated fixes is counted too`() {
+        // Every other test here runs at 1000 Hz, where the gate never gates -- so
+        // whether the baseline advanced before or after it was unobservable, and it
+        // advanced after. A reversal entirely inside a gated stretch counted nothing.
+        //
+        // The rate gate can only ever LOWER a rate: it drops fixes the provider has
+        // already delivered. So on any drive where the commanded gps_hz is below what
+        // the platform produces -- the normal case -- this is the only shape a
+        // reversal can take. What is being detected is a property of the delivery, and
+        // the gate has no business in it.
+        val (pipe, _) = pipeline(hz = 1.0)
+        pipe.offer(reading(fixNs = 0))            // accepted, opens the gate's period
+        pipe.offer(reading(fixNs = 500 * ms))     // gated
+        pipe.offer(reading(fixNs = 400 * ms))     // gated, and out of order
+        assertEquals(2, pipe.stats.gated)
+        assertEquals(1, pipe.stats.nonMonotonicFixes)
+    }
+
+    @Test
     fun `a stopped pipeline forwards nothing`() {
         val (pipe, sent) = pipeline(hz = 1000.0)
         pipe.stop()

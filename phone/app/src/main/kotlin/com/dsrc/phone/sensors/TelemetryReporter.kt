@@ -91,6 +91,7 @@ class TelemetryReporter(
     private var lastDelivered = mapOf<String, Long>()
     private var reports = 0L
     private var skipped = 0L
+    private var refusedBySink = 0L
 
     /**
      * Build and send one report, or skip it.
@@ -147,14 +148,28 @@ class TelemetryReporter(
                 hereErrors = reading.hereErrors,
             )
         )
-        synchronized(lock) { reports++ }
+        // Counted apart. `reports++` alone said a report was made whether or not the
+        // transport took it, so a drive where the link refused all three hundred and
+        // one where all three hundred landed wrote the same Stats. Every sibling
+        // modality -- camera, gps, imu, here -- counts its sink's refusals explicitly;
+        // this was the one that did not, and the one whose stats the service never
+        // logged, so neither half of the fact left the process.
+        synchronized(lock) {
+            reports++
+            if (!sent) refusedBySink++
+        }
         return sent
     }
 
     val stats: Stats
-        get() = synchronized(lock) { Stats(reports = reports, skipped = skipped) }
+        get() = synchronized(lock) {
+            Stats(reports = reports, skipped = skipped, refusedBySink = refusedBySink)
+        }
 
-    data class Stats(val reports: Long, val skipped: Long)
+    data class Stats(val reports: Long, val skipped: Long, val refusedBySink: Long) {
+        /** Reports the transport actually took. */
+        val delivered: Long get() = reports - refusedBySink
+    }
 
     companion object {
         const val THREAD_NAME = "dsrc-telemetry"

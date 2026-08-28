@@ -205,3 +205,45 @@ def test_the_link_segment_reports_its_count_and_its_negatives(tmp_path):
     assert link["n"] == 120
     assert link["negative"] == 10
     assert link["min"] == pytest.approx(-2.0, abs=0.01)
+
+
+class TestATruncatedLogIsNotACompleteRun:
+    """A run that lost records must not certify as one that did not."""
+
+    def _truncate_last_record(self, run_dir):
+        path = run_dir / "metadata.jsonl"
+        lines = path.read_text().splitlines()
+        # A half-written final record, which is what an unflushed 1 MiB buffer leaves
+        # behind -- at ~1.5 KB a record that is some seven hundred ticks, not one.
+        lines[-1] = lines[-1][: len(lines[-1]) // 2]
+        path.write_text("\n".join(lines) + "\n")
+
+    def test_a_truncated_final_record_is_counted_and_fails_the_run(self, tmp_path):
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(40)])
+        self._truncate_last_record(run_dir)
+        result = analyze(run_dir)
+
+        integrity = result["log_integrity"]
+        assert integrity["unparseable_lines"] >= 1
+        assert integrity["log_complete"] is False
+        assert result["overall_pass"] is False, (
+            "a run whose log was truncated certified as a complete one"
+        )
+
+    def test_a_log_short_of_the_count_the_run_reported_fails(self, tmp_path):
+        # The evidence was sitting in summary.json the whole time, unread.
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(30)],
+                            summary={"ticks": 90, "camera_dropped_frames": 0,
+                                     "policy_trained": False})
+        result = analyze(run_dir)
+
+        assert result["log_integrity"]["missing_ticks"] == 60
+        assert result["log_integrity"]["log_complete"] is False
+        assert result["overall_pass"] is False
+
+    def test_an_intact_log_still_passes_its_integrity_check(self, tmp_path):
+        # The fix must not fail every run: a complete log reports complete.
+        integrity = analyze(write_run(tmp_path, [make_tick(i) for i in range(40)]))["log_integrity"]
+        assert integrity["log_complete"] is True
+        assert integrity["missing_ticks"] == 0
+        assert integrity["unparseable_lines"] == 0

@@ -58,7 +58,16 @@ class GpsPipeline(
         // A fix stamp that goes backwards is worth counting rather than hiding: it means
         // the platform handed us an out-of-order update, and the receiver's freshness
         // arithmetic is built on these stamps being monotonic.
-        val previous = lastFixNs.get()
+        //
+        // Against the previous *delivery*, and advanced on every one, not only on the
+        // fixes the gate kept. The baseline used to advance after the gate, so a
+        // reversal between two gated fixes was invisible: at 1 Hz, offers at 0, 500 ms
+        // and 400 ms counted nothing, though the platform had plainly handed us 500
+        // before 400. What is being detected is a property of the delivery, and the
+        // gate has no business in it. `ImuPipeline` says it counts this "for the same
+        // reason GPS counts it" and carries the corrected form; this is the original it
+        // was crediting.
+        val previous = lastFixNs.getAndSet(reading.fixMonoNs)
         if (previous != Long.MIN_VALUE && reading.fixMonoNs < previous) {
             nonMonotonic.incrementAndGet()
         }
@@ -67,7 +76,6 @@ class GpsPipeline(
             gated.incrementAndGet()
             return false
         }
-        lastFixNs.set(reading.fixMonoNs)
         accepted.incrementAndGet()
         if (!reading.record.valid) invalidFixes.incrementAndGet()
 
