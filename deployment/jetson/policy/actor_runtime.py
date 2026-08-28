@@ -85,6 +85,21 @@ class ActorRuntime:
                 f"bundle was exported for obs dim {self.manifest['contract_dim']} but the "
                 f"vendored contract is {sim_contract.local_obs_dim()}; re-export the policy."
             )
+        # The dimension does not move when the contract does. Reordering two fields or
+        # changing a scale leaves it at 39, so an old module loaded silently against a
+        # new contract and every value landed in the wrong slot -- silent and total.
+        #
+        # Absent on bundles exported before this existed, and those are accepted: the
+        # check is here to catch a contract that MOVED, and refusing every older bundle
+        # would be a different and much more disruptive rule than the one intended.
+        exported = self.manifest.get("contract_fingerprint")
+        current = sim_contract.contract_fingerprint()
+        if exported is not None and exported != current:
+            raise RuntimeError(
+                f"bundle was exported against contract {exported} and the vendored "
+                f"contract is {current} -- same dimension, different fields or scales; "
+                f"re-export the policy."
+            )
         self.module = torch.jit.load(str(module_path), map_location="cpu")
         self.module.eval()
         self.deterministic = deterministic

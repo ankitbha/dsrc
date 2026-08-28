@@ -143,3 +143,42 @@ def test_inf_encoding_known_values() -> None:
     encoded = sim_contract.encode_local_observation(obs)
     idx = sim_contract.LOCAL_OBS_FIELDS.index("ego_headway_s")
     assert math.isclose(encoded[idx], 5.0, rel_tol=1e-6)
+
+
+class TestTheBundleGuardSeesMoreThanTheDimension:
+    """A reorder leaves the dimension at 39 and puts every value in the wrong slot."""
+
+    def test_the_fingerprint_moves_when_the_field_order_does(self):
+        from policy import sim_contract as sc
+
+        before = sc.contract_fingerprint()
+        original = sc.LOCAL_OBS_FIELDS
+        try:
+            swapped = list(original)
+            swapped[0], swapped[1] = swapped[1], swapped[0]
+            sc.LOCAL_OBS_FIELDS = tuple(swapped)
+            assert len(sc.LOCAL_OBS_FIELDS) == len(original), "the dimension is unchanged"
+            assert sc.contract_fingerprint() != before, (
+                "two fields swapped and the guard cannot tell"
+            )
+        finally:
+            sc.LOCAL_OBS_FIELDS = original
+        assert sc.contract_fingerprint() == before
+
+    def test_the_fingerprint_moves_when_a_scale_does(self):
+        from policy import sim_contract as sc
+
+        before = sc.contract_fingerprint()
+        key = next(iter(sc.FIELD_SCALES))
+        original = sc.FIELD_SCALES[key]
+        try:
+            sc.FIELD_SCALES[key] = original * 2.0
+            assert sc.contract_fingerprint() != before
+        finally:
+            sc.FIELD_SCALES[key] = original
+        assert sc.contract_fingerprint() == before
+
+    def test_the_fingerprint_is_stable_across_calls(self):
+        from policy import sim_contract as sc
+
+        assert sc.contract_fingerprint() == sc.contract_fingerprint()

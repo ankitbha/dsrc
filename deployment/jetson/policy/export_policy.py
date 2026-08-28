@@ -129,6 +129,8 @@ def export(actor: VendoredActor, info: dict, out_prefix: str) -> None:
         **info,
         "contract_dim": sim_contract.local_obs_dim(),
         "sim_commit": sim_contract.SIM_COMMIT,
+        # What the dimension cannot see: the field order and the scales.
+        "contract_fingerprint": sim_contract.contract_fingerprint(),
         "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "action_heads": list(sim_contract.ACTION_HEADS),
     }

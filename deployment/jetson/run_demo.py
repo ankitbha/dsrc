@@ -151,6 +151,11 @@ def _build_rest(config: dict):
 
     obs_cfg = dict(config["observation"])
     obs_cfg["gps_stale_after_s"] = config["gps"]["stale_after_s"]
+    # The same number the beacon admits peers at. `nearby_av_density` divides by it,
+    # and it used to divide by a literal 150 while the transceiver honoured the
+    # config -- so raising `v2v.range_m` left the density reporting twice the
+    # vehicles per km the admission range implied.
+    obs_cfg["peer_range_m"] = config["v2v"]["range_m"]
     builder = ObservationBuilder(BuilderConfig.from_dict(obs_cfg))
 
     p = config["policy"]

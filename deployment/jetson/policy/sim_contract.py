@@ -231,3 +231,30 @@ def neutral_cooperation(free_flow_speed_mps: float) -> dict[str, float]:
 def bin_index(value: float, edges: tuple[float, ...] | list[float]) -> int:
     """Mirror of src.sensing.local._bin: count of edges <= value."""
     return int(sum(float(value) >= edge for edge in edges))
+
+
+def contract_fingerprint() -> str:
+    """A short hash over everything a bundle's inputs depend on.
+
+    The dimension alone was the only thing guarding a loaded bundle, and it does not
+    move when the contract does: reordering two `LOCAL_OBS_FIELDS` entries or changing
+    a `FIELD_SCALES` value leaves it at 39, so an old module loads silently against a
+    new contract and every field lands in the wrong slot -- which is exactly the class
+    of change the dimension check's own error message names.
+
+    Field NAMES in order and their scales, because those two decide what the encoder
+    puts where and how far it stretches it. `SIM_COMMIT` is deliberately not in here:
+    the sim moves for reasons that do not touch this contract, and a guard that fires
+    on every unrelated commit would be turned off within a week.
+    """
+    import hashlib
+    import json as _json
+
+    payload = _json.dumps(
+        {
+            "fields": list(LOCAL_OBS_FIELDS),
+            "scales": {k: FIELD_SCALES[k] for k in sorted(FIELD_SCALES)},
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

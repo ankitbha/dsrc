@@ -69,6 +69,10 @@ class BuilderConfig:
     density_bin_edges_veh_per_km: tuple[float, ...] = (12.0, 30.0)
     mean_speed_bin_edges_mps: tuple[float, ...] = (8.0, 18.0)
     uncongested_density_threshold_veh_per_km: float = 12.0
+    #: The range peers are admitted at, which `nearby_av_density` divides by. Must
+    #: match `v2v.range_m` -- `run_demo` routes that to `BeaconTransceiver` for
+    #: admission and this is the other half of the same number.
+    peer_range_m: float = 150.0
     low_speed_free_flow_delta_mps: float = 8.0
     gps_stale_after_s: float = 2.0
     # How far into this clock's future a reading may sit and still be believed,
@@ -230,9 +234,16 @@ class ObservationBuilder:
         density = n_local / max((2.0 * cfg.effective_range_m) / 1000.0, 1e-9)
         src["active_vehicle_count_local"] = "derived" if cfg.symmetrize_counts else "measured"
 
+        # Only vehicles whose relative speed the tracker could measure have a usable
+        # absolute speed, so this population is a subset of `in_range` -- where the
+        # simulator counts the queue and the vehicle count over ONE population
+        # (`src/sensing/local.py:181-188`: `measured` feeds both). The edge cannot
+        # close that gap by inventing a speed for a track it has not measured; what it
+        # can do is stop reporting the shortfall as a measurement.
         abs_speeds = [
             max(0.0, ego_speed + v.rel_speed_mps) for v in in_range if v.rel_speed_valid
         ]
+        measured_fraction = len(abs_speeds) / len(in_range) if in_range else 1.0
         mean_speed = float(np.mean(abs_speeds)) if abs_speeds else ego_speed
         src["local_mean_speed_bin"] = "derived" if abs_speeds else "fallback_neutral"
         queue_count = sum(1 for s in abs_speeds if s < cfg.queue_speed_mps)
@@ -242,7 +253,12 @@ class ObservationBuilder:
         # --- cooperation / nearby AVs (V2V beacons, else neutral) ------
         if peers:
             av_count = len(peers)
-            av_density = av_count / max((2.0 * 150.0) / 1000.0, 1e-9)  # radio range +-150 m, sim default
+            # The admission range peers were actually accepted at, not a literal.
+            # `config.yaml`'s `v2v.range_m` reaches `BeaconTransceiver`, which admits
+            # peers out to it, and nothing carried it here -- so raising it to 300 m
+            # left the density computed over 150 and reporting twice the vehicles per
+            # km the admission range implies.
+            av_density = av_count / max((2.0 * cfg.peer_range_m) / 1000.0, 1e-9)
             av_mean_speed = float(np.mean([p.speed_mps for p in peers]))
             cooperation = {
                 "segment_target_speed": av_mean_speed,
@@ -287,6 +303,9 @@ class ObservationBuilder:
         self.last_feed_ownership = owned
 
         # --- etiquette flag (mirrors src/safety/etiquette.py) ----------
+        # `density` here is the locally sensed one; the simulator uses the segment
+        # density it gets from `segment_metrics` (`src/sensing/local.py:214-221`).
+        # Different quantities, same threshold -- see the provenance below.
         uncongested_low_speed = bool(
             density < cfg.uncongested_density_threshold_veh_per_km
             and ego_speed < cfg.free_flow_speed_mps - cfg.low_speed_free_flow_delta_mps
@@ -363,9 +382,24 @@ class ObservationBuilder:
             "downstream_congestion_estimate": "fallback_neutral" if not peers else "measured",
             "merge_pressure": "fallback_neutral",
             "segment_target_speed": "fallback_neutral" if not peers else "measured",
-            "uncongested_low_speed_flag": "derived",
+            # `approximated`, not `derived`. The formula mirrors
+            # `src/safety/etiquette.py`, but the simulator feeds it a SEGMENT density
+            # from `segment_metrics` and this feeds it the locally sensed +-range
+            # density -- the same 12.0 threshold applied to a different quantity. A
+            # single instrumented car has no segment-level view, so the edge cannot
+            # produce the sim's input; substituting one that moves differently is the
+            # unit substitution task 28 retracted two fields for. Marked rather than
+            # silently equated, so the missingness metric and anyone reading the
+            # vector can see which it is.
+            "uncongested_low_speed_flag": "approximated",
             "local_density_bin": "derived",
             "local_queue_estimate": "derived",
+            # From the same list as `local_mean_speed_bin`, which already reports
+            # `fallback_neutral` on an empty one. An unconditional "derived" here let
+            # "six vehicles, none queued" and "six vehicles, none measurable" write
+            # the same record -- and `field_sources` is what the missingness metric
+            # is computed from.
+            "local_queue_estimate": "derived" if abs_speeds else "fallback_neutral",
             "active_av_count_local": src["nearby_av_count"],
             "nearby_av_density": src["nearby_av_count"],
             "nearby_av_mean_speed": src["nearby_av_count"],
