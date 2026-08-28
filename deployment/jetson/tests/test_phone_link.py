@@ -1542,3 +1542,65 @@ class TestTeardownOrdering:
             second.hang_up()
         finally:
             link.stop()
+
+
+class TestTheRecordBalancesAndIsBounded:
+
+    def test_the_inbound_account_balances(self, ):
+        # The transport pins `received == delivered + dropped_inbound +
+        # abandoned_inbound` and this row published the first three, so a reader
+        # could not tell a message policy dropped from one nobody collected -- the
+        # distinction the counter was added for. Not derivable from the rest either,
+        # because `queued` was absent too.
+        phone, jetson, up, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            for i in range(6):
+                assert up.send(GpsRecord(
+                    t_capture_mono_ns=now_mono_ns() + i, valid=True, fix_quality=1,
+                    num_sats=9, lat=40.0, lon=-74.0, speed_mps=27.0,
+                    heading_deg=90.0, hdop=0.9, altitude_m=10.0))
+            assert wait_until(lambda: link.gps.messages_received == 6)
+            phone.close()
+            wait_until(lambda: getattr(jetson, "is_closed", False))
+
+            row = link.to_record()["wire"]["channels"][Channel.GPS.value]
+            for term in ("queued", "dropped_outbound", "abandoned_outbound",
+                         "received", "delivered", "dropped_inbound",
+                         "abandoned_inbound"):
+                assert term in row, f"{term} is missing, so the account cannot balance"
+            assert row["received"] == (row["delivered"] + row["dropped_inbound"]
+                                       + row["abandoned_inbound"]), row
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_the_leaked_handshake_workers_reach_the_summary(self):
+        # `endpoint.py` says the count exists so a misbehaving backend "shows up in
+        # the summary instead of quietly accumulating threads across a drive". The
+        # only summary a drive produces is this one.
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        try:
+            assert "handshake_workers_leaked" in link.to_record()
+        finally:
+            link.stop()
+
+    def test_the_refusal_list_is_bounded_and_says_what_it_dropped(self):
+        # Every other refusal account here is a bounded histogram over a closed
+        # vocabulary. This one kept every string, and nothing drains the listener's
+        # events during a live session -- so one failed dial a second put 10,800
+        # entries and half a megabyte into a three-hour run's summary.
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        try:
+            refusal = type("E", (), {"peer": "1.2.3.4:5", "error": "version mismatch"})()
+            for _ in range(link.MAX_REFUSALS + 25):
+                link._note_refusal(refusal)
+
+            record = link.to_record()
+            assert len(record["refusals"]) == link.MAX_REFUSALS
+            assert record["refusals_not_kept"] == 25, (
+                "a run that turned away 75 dial-ins reads like one that turned away 50"
+            )
+        finally:
+            link.stop()

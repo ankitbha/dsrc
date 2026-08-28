@@ -48,6 +48,10 @@ class MetadataLogger:
             shutil.copy(config_path, self.run_dir / "run_config.yaml")
         self._queue: queue.Queue[str | None] = queue.Queue(maxsize=50_000)
         self.dropped_records = 0
+        #: Why the writer stopped, if it stopped for a reason. None while healthy.
+        #: A drive that lost its log to a full card and one that wrote every record
+        #: are otherwise indistinguishable in the artifact.
+        self.writer_failure: str | None = None
         self._file = open(self.path, "a", buffering=1024 * 1024)
         self._thread = threading.Thread(target=self._loop, name="metadata-log", daemon=True)
         self._thread.start()
@@ -63,17 +67,50 @@ class MetadataLogger:
             json.dump(summary, f, indent=2, default=_json_default)
 
     def close(self) -> None:
-        self._queue.put(None)
-        self._thread.join(timeout=5.0)
-        self._file.flush()
-        self._file.close()
+        """Stop the writer and flush. Returns even when the writer is already dead.
+
+        This used to begin with a blocking `put(None)`. If the writer thread had
+        died -- which an unguarded `write` to a full disk did, silently -- the queue
+        filled to its cap and nothing drained it, so `close()` blocked forever. In
+        `run_demo` everything after it is then unreachable: the telemetry close, the
+        window close, the summary line, and `phone.stop()` -- which that file says
+        must run, because without it a successful run leaves the accept socket bound,
+        the session open and the responder thread running.
+        """
+        if self._thread.is_alive():
+            try:
+                self._queue.put(None, timeout=2.0)
+            except queue.Full:
+                # The writer is not draining. Nothing to be gained by waiting on it.
+                self.writer_failure = self.writer_failure or "queue full at close"
+            self._thread.join(timeout=5.0)
+        # Whatever the writer did, this side flushes and closes its own handle.
+        try:
+            self._file.flush()
+        except OSError as exc:
+            self.writer_failure = self.writer_failure or f"flush failed: {exc}"
+        finally:
+            self._file.close()
+        # Records that never reached the file: the ones refused at the door plus the
+        # ones still queued when the writer stopped. Counting only the first
+        # under-reported by exactly the queue depth -- fifty thousand records, some
+        # 250 MB of ticks, reported as zero dropped.
+        self.dropped_records += self._queue.qsize()
 
     def _loop(self) -> None:
         while True:
             item = self._queue.get()
             if item is None:
                 return
-            self._file.write(item + "\n")
+            try:
+                self._file.write(item + "\n")
+            except (OSError, ValueError) as exc:
+                # A full card, a closed handle, a read-only mount. Unguarded, the
+                # first one killed this thread and took `close()` with it. Recorded
+                # and the loop ends deliberately, so `close()` sees a dead thread and
+                # says so rather than waiting on it.
+                self.writer_failure = f"{type(exc).__name__}: {exc}"
+                return
 
 
 def _json_default(value: Any) -> Any:

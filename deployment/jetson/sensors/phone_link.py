@@ -181,7 +181,17 @@ class PhoneLink:
         #: "protocol version mismatch: local 2, remote 1" -- and was being pulled
         #: off the queue and dropped, so a phone that dialled in and was refused
         #: was reported to the operator as a phone that never dialled at all.
+        #: Why a connection did not become a session, capped. Every other refusal
+        #: account in this section is a bounded histogram over a closed vocabulary --
+        #: `HereFeed.refused_by_reason`, `MessageRouter.errors_by_reason`,
+        #: `TcpAcceptor.accept_errors_by_errno`, `PhoneClockAdapter.proxy_reasons`.
+        #: This one kept every string, and nothing drains the listener's event queue
+        #: during a live session, so a peer failing to handshake once a second put
+        #: 10,800 entries and half a megabyte into a three-hour run's summary.json.
+        #: The first `MAX_REFUSALS` are kept because the first ones are the
+        #: diagnostic; the rest are counted.
         self.refusals: list[str] = []
+        self.refusals_not_kept = 0
         self._stop = threading.Event()
         self._responder: threading.Thread | None = None
         self._here_reader: threading.Thread | None = None
@@ -221,6 +231,16 @@ class PhoneLink:
     def port(self) -> int:
         return self._acceptor.port
 
+    #: How many refusal strings to keep. The diagnosis is in the first few -- a
+    #: version mismatch says the same thing the six hundredth time.
+    MAX_REFUSALS = 50
+
+    def _note_refusal(self, event: Any) -> None:
+        if len(self.refusals) < self.MAX_REFUSALS:
+            self.refusals.append(f"{event.peer}: {event.error}")
+        else:
+            self.refusals_not_kept += 1
+
     def wait_for_phone(self, timeout_s: float) -> bool:
         """Listen until a phone dials in, or give up and say so.
 
@@ -235,7 +255,7 @@ class PhoneLink:
         while time.monotonic() < deadline:
             event = self._listener.next_event(timeout=0.1)
             if isinstance(event, SessionRefused):
-                self.refusals.append(f"{event.peer}: {event.error}")
+                self._note_refusal(event)
             if isinstance(event, SessionStarted):
                 self.session = event.session
                 self.peer_device_id = event.handshake.remote.device_id
@@ -391,7 +411,7 @@ class PhoneLink:
         while not self._stop.is_set() and time.monotonic() < deadline:
             event = self._listener.next_event(timeout=0.1)
             if isinstance(event, SessionRefused):
-                self.refusals.append(f"{event.peer}: {event.error}")
+                self._note_refusal(event)
                 continue
             if not isinstance(event, SessionStarted):
                 continue
@@ -668,10 +688,25 @@ class PhoneLink:
             record["channels"] = {
                 channel.value: {
                     "sent": stats.sent,
+                    "queued": stats.queued,
                     "dropped_outbound": stats.dropped_outbound,
+                    "abandoned_outbound": stats.abandoned_outbound,
                     "received": stats.received,
                     "delivered": stats.delivered,
                     "dropped_inbound": stats.dropped_inbound,
+                    # The term without which the inbound account cannot balance. The
+                    # transport pins `received == delivered + dropped_inbound +
+                    # abandoned_inbound`, and this row published the first three, so
+                    # a reader could not tell whether the difference was a message
+                    # policy dropped or one nobody collected -- the very distinction
+                    # `session.py` added the counter for. It is not derivable from
+                    # the rest either, because `queued` was absent too.
+                    #
+                    # Reachable on the normal path, not a corner: `_rebind` snapshots
+                    # this on a session that has ALREADY closed, so `_abandon_outbound`
+                    # has run, and every per-session record in a drive with a redial
+                    # has the property.
+                    "abandoned_inbound": stats.abandoned_inbound,
                 }
                 for channel, stats in self.session.stats().channels.items()
             }
@@ -712,7 +747,16 @@ class PhoneLink:
             "sessions_accepted": self._listener.accepted,
             "sessions_displaced": self._listener.displaced,
             "sessions_refused": self._listener.refused,
+            # `endpoint.py` says this count "is here so that a backend which does not
+            # [honour the contract] shows up in the summary instead of quietly
+            # accumulating threads across a drive". The only summary a drive produces
+            # is this one, and it was not in it -- the counter was read by two bench
+            # harnesses and nothing else.
+            "handshake_workers_leaked": self._listener.handshake_workers_leaked,
             "refusals": list(self.refusals),
+            # Counted, not silently truncated. A run that turned away six hundred
+            # dial-ins and one that turned away fifty must not read alike.
+            "refusals_not_kept": self.refusals_not_kept,
             # The wire's spelling, or a real null. `str()` recorded the string
             # "None" while the session was open and "SessionEndReason.PEER_CLOSED"
             # once it ended, so a reader filtering on the transport's own
