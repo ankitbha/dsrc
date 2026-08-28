@@ -41,12 +41,19 @@ def make_run_dir(log_root: str) -> Path:
 
 
 class MetadataLogger:
-    def __init__(self, run_dir: Path, config_path: str | None = None) -> None:
+    #: How many records may wait for the writer. Injectable so the full-queue case
+    #: -- the one where `close()` used to block forever -- is reachable in a test
+    #: without queueing fifty thousand records to get there.
+    QUEUE_DEPTH = 50_000
+
+    def __init__(self, run_dir: Path, config_path: str | None = None, *,
+                 queue_depth: int | None = None) -> None:
         self.run_dir = Path(run_dir)
         self.path = self.run_dir / "metadata.jsonl"
         if config_path:
             shutil.copy(config_path, self.run_dir / "run_config.yaml")
-        self._queue: queue.Queue[str | None] = queue.Queue(maxsize=50_000)
+        self._queue: queue.Queue[str | None] = queue.Queue(
+            maxsize=queue_depth if queue_depth is not None else self.QUEUE_DEPTH)
         self.dropped_records = 0
         #: Why the writer stopped, if it stopped for a reason. None while healthy.
         #: A drive that lost its log to a full card and one that wrote every record

@@ -55,17 +55,33 @@ class TestCloseAlwaysReturns:
         assert "No space left" in logger.writer_failure
 
     def test_a_full_queue_does_not_block_close(self, tmp_path):
-        # The queue at its 50k cap with a dead writer is the state the hang needed.
-        logger = _logger(tmp_path)
-
+        # A FULL queue with a dead writer is the exact state the hang needed, and a
+        # short queue is the only way to reach it without writing fifty thousand
+        # records. Filling it partway proves nothing: `put(None)` on a queue with
+        # room returns at once whether or not it has a timeout, so a fixture that
+        # does not fill the queue cannot tell the fix from the defect.
+        run_dir = tmp_path / "full"
+        run_dir.mkdir()
+        logger = MetadataLogger(run_dir, queue_depth=4)
         logger._file = BrokenFile()
-        for i in range(200):
+
+        # Kill the writer first and wait for it, so filling the queue afterwards
+        # cannot race a thread that is still draining.
+        logger.write({"type": "tick", "tick_id": -1})
+        logger._thread.join(timeout=5.0)
+        assert not logger._thread.is_alive(), "the writer should have stopped"
+
+        for i in range(40):
             logger.write({"type": "tick", "tick_id": i})
+        assert logger._queue.full(), "the queue never filled, so the case is not reached"
 
         done = threading.Event()
         threading.Thread(target=lambda: (logger.close(), done.set()),
                          daemon=True).start()
-        assert done.wait(10.0), "close() blocked"
+        assert done.wait(10.0), (
+            "close() blocked on a full queue with no writer draining it"
+        )
+        assert logger.dropped_records >= 4
 
     def test_records_still_queued_when_the_writer_stopped_are_counted(self, tmp_path):
         # Counting only the offers refused at the door under-reported by exactly the
