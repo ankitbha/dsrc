@@ -32,18 +32,31 @@ from transport.timebase import OneWaySample, now_mono_ns
 
 NS = 1_000_000_000
 PLANTED_OFFSET_NS = int(67.57 * 3600 * NS)
-#: The fixture runs the phone's clock *behind* by the planted amount, so the
-#: offset a receiver measures -- remote minus local -- is negative. Named rather
-#: than negated inline, because a sign error here is the failure the whole
-#: conversion exists to prevent and it should not hide in an expression.
-TRUE_OFFSET_NS = -PLANTED_OFFSET_NS
+#: The fixture runs the phone's clock *ahead* by the planted amount, so the offset a
+#: receiver measures -- remote minus local -- is positive. Named rather than written
+#: inline, because a sign error here is the failure the whole conversion exists to
+#: prevent and it should not hide in an expression.
+#:
+#: Ahead and not behind, because behind depends on the machine. The fixture used to
+#: build the phone's clock as `now_mono_ns() - PLANTED_OFFSET_NS`, which is negative
+#: whenever the process monotonic clock is below 67.57 hours -- and the transport
+#: correctly refuses a negative `t_wire_mono_ns`, so two tests here failed on any
+#: machine that had not been awake for three days. macOS excludes sleep from
+#: `time.monotonic()`, so a laptop reads far below its wall uptime: measured at 12.39
+#: hours against 1 day 12:51 of uptime, giving a phone clock of -55.18 hours.
+#:
+#: Adding keeps both clocks positive on every machine and leaves everything in the
+#: real monotonic domain, so arrival stamps still compare against `time.monotonic()`
+#: elsewhere. The negative direction is still covered, by planting a sample directly
+#: rather than by displacing a whole session.
+TRUE_OFFSET_NS = PLANTED_OFFSET_NS
 
 
 def phone_and_jetson(offset_ns: int = PLANTED_OFFSET_NS):
     """Two sessions on one loopback pair, the phone's on a displaced clock."""
     phone_conn, jetson_conn = loopback_pair()
     phone = Session(phone_conn, session_id=1, heartbeat_s=None, stall_timeout_s=None,
-                    mono_clock=lambda: now_mono_ns() - offset_ns).start()
+                    mono_clock=lambda: now_mono_ns() + offset_ns).start()
     jetson = Session(jetson_conn, session_id=2, heartbeat_s=None,
                      stall_timeout_s=None).start()
     return phone, jetson, MessageRouter(phone), MessageRouter(jetson)
