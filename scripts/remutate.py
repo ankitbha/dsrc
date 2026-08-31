@@ -700,9 +700,12 @@ MUTATIONS = [
      '    if not status.get("available"):',
      "    if False:",
      "python"),
+    # The anchor here was the old one-line disambiguation and it stopped matching when
+    # that became a loop, so the harness SKIPPED it for several rounds. A skipped entry
+    # prints differently from a caught one and is not a pin either way.
     ("tailnet: two peers sharing a hostname collapse into one",
      "deployment/jetson/tailnet.py",
-     '            name = f"{name} [{(peer.get(\'TailscaleIPs\') or [\'?\'])[0]}]"',
+     "            name = candidate",
      "            pass",
      "python"),
     ("tailnet: a hostname collision is not recorded",
@@ -744,11 +747,12 @@ MUTATIONS = [
      "            attempt = 0\n            while candidate in peers:\n                attempt += 1\n                candidate = f\"{name} [{suffix} #{attempt}]\"",
      "            while candidate in peers:\n                candidate = f\"{name} [{suffix} #{len(peers)}]\"",
      "python"),
-    ("tailnet: a third peer on one hostname overwrites the second",
-     "deployment/jetson/tailnet.py",
-     '            suffix = addresses[0] if addresses else f"#{len(peers)}"',
-     '            suffix = addresses[0] if addresses else "?"',
-     "python"),
+    # Deleted, not moved: `suffix = ... else "?"` is now an equivalent mutant. It lost a
+    # peer only while the disambiguating loop could not advance; with the counter in
+    # place, seven peers sharing one hostname and no addresses all survive under either
+    # suffix (checked, rather than argued: 7 of 7 both ways, named `[#1]..[#6]` and
+    # `[? #1]..[? #6]`). The property it was written for is pinned by the entry above,
+    # which mutates the loop itself.
     ("tailnet: a collision is counted once per peer instead of once per name",
      "deployment/jetson/tailnet.py",
      "            if name not in collisions:\n                collisions.append(name)",
