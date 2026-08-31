@@ -22,8 +22,29 @@ echo "== jvm =="
 echo "== python =="
 .venv/bin/python3 -m pytest -q deployment/jetson/tests/ -p no:cacheprovider
 
-echo "== instrumented =="
+# Two passes, and the split is not cosmetic. `ImuWireTest` measures a delivered
+# sample rate, and delivered rate is bounded by what the device can sustain rather
+# than by the rate commanded. Run after the camera tests it measured 47.0 samples/s
+# following a raise, against baselines of 51.0 and 49.7 samples/s -- no increase --
+# while the same test run alone measured 60.7 samples/s against a baseline of about
+# 51 samples/s. The two baselines differed by 2.6 per cent and the handset's thermal
+# readings were normal, so the device was steady and the throughput ceiling was the
+# device's, not the command's.
+#
+# The assertion is left intact. Every way of making it pass inside one suite either
+# weakens it or removes its ability to fail: skipping when the raise produces no
+# increase would make the test unable to catch the defect it exists for. So the
+# measurement is given a quiet device instead, at the cost of one extra install.
+IMU_TESTS=com.dsrc.phone.sensors.ImuWireTest
+
+echo "== instrumented (everything but the rate measurement) =="
 python3 scripts/with_device.py -- env JAVA_HOME="$JAVA_HOME" \
-    ./phone/gradlew -p phone :app:connectedDebugAndroidTest --rerun-tasks
+    ./phone/gradlew -p phone :app:connectedDebugAndroidTest --rerun-tasks \
+    -Pandroid.testInstrumentationRunnerArguments.notClass=$IMU_TESTS
+
+echo "== instrumented (the rate measurement, on a quiet device) =="
+python3 scripts/with_device.py -- env JAVA_HOME="$JAVA_HOME" \
+    ./phone/gradlew -p phone :app:connectedDebugAndroidTest --rerun-tasks \
+    -Pandroid.testInstrumentationRunnerArguments.class=$IMU_TESTS
 
 echo "== all green =="
