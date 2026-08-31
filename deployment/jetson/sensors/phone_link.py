@@ -709,6 +709,16 @@ class PhoneLink:
             # iterating only the per-channel counters.
             stats = session.stats()
             record["peer"] = stats.peer
+            # The term that closes the inbound account on the control channel. The
+            # transport generates keepalives and also consumes them: `_record_inbound`
+            # counts a heartbeat in `received` and returns before the queue, so it is
+            # never delivered, never dropped and never abandoned. This record
+            # published the other four terms and not this one, so a reader applying
+            # the identity below found 241 received against 121 delivered on a run
+            # that lost nothing, and could not tell that from a run that lost 120
+            # messages. `SessionStats` carried both counters the whole time.
+            record["heartbeats_received"] = stats.heartbeats_received
+            record["heartbeats_sent"] = stats.heartbeats_sent
             # The session this row describes, so a reader can tell a record taken
             # before a redial from one taken after.
             record["session_id"] = stats.session_id
@@ -721,9 +731,12 @@ class PhoneLink:
                     "received": stats.received,
                     "delivered": stats.delivered,
                     "dropped_inbound": stats.dropped_inbound,
-                    # The term without which the inbound account cannot balance. The
-                    # transport pins `received == delivered + dropped_inbound +
-                    # abandoned_inbound`, and this row published the first three, so
+                    # The term without which the inbound account cannot balance. On
+                    # every channel but control the transport pins `received ==
+                    # delivered + dropped_inbound + abandoned_inbound`; on control the
+                    # identity carries `+ heartbeats_received`, published above,
+                    # because the transport eats its own keepalives. This row
+                    # published the first three, so
                     # a reader could not tell whether the difference was a message
                     # policy dropped or one nobody collected -- the very distinction
                     # `session.py` added the counter for. It is not derivable from
@@ -740,11 +753,20 @@ class PhoneLink:
         return record
 
     def _session_record(self) -> dict[str, Any]:
-        """What one session did, snapshotted before its objects are replaced."""
+        """What one session did, snapshotted before its objects are replaced.
+
+        One read of `self.session` for the whole record, for the same reason
+        `to_record` binds one: a record assembled from several reads can name two
+        sessions. Only `_rebind` calls this, on the supervisor thread, which is the
+        only writer of the field once the run is up -- so the disagreement is not
+        reachable here today. The single read is what makes that a property of the
+        code rather than of an argument about which threads run when.
+        """
+        session = self.session
         return {
-            "session_id": None if self.session is None else self.session.session_id,
+            "session_id": None if session is None else session.session_id,
             "peer_device_id": self.peer_device_id,
-            "end_reason": _end_reason_of(self.session),
+            "end_reason": _end_reason_of(session),
             "pings_answered": self.pings_answered,
             "timebase": self.estimator.to_record(),
             "clock": self.adapter.to_record(),
@@ -753,7 +775,7 @@ class PhoneLink:
             "here": self.here.to_record(),
             "telemetry_received": self.telemetry_received,
             "imu_received": self.imu_received,
-            "wire": self._wire_record(),
+            "wire": self._wire_record(session),
         }
 
     def to_record(self) -> dict[str, Any]:

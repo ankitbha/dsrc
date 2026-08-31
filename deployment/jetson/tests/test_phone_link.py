@@ -1710,3 +1710,74 @@ class TestOneRecordDescribesOneSession:
             link.stop()
             phone.close()
             other_phone.close()
+
+
+class TestTheSessionSnapshotDescribesOneSession:
+
+    def test_the_snapshot_taken_at_a_rebind_names_one_session(self):
+        # `_session_record` is the row `_rebind` writes before replacing a session,
+        # and it read `self.session` three times. Only the supervisor thread writes
+        # that field once a run is up, so the disagreement is not reachable today --
+        # which is an argument about which threads run when, not a property of the
+        # code. This asserts the property.
+        phone, jetson, _, _ = phone_and_jetson()
+        other_phone_conn, other_jetson_conn = loopback_pair(
+            labels=("second-phone", "jetson"))
+        other_phone = Session(other_phone_conn, session_id=20, heartbeat_s=None,
+                              stall_timeout_s=None).start()
+        other_jetson = Session(other_jetson_conn, session_id=21, heartbeat_s=None,
+                               stall_timeout_s=None).start()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        original = link.__class__
+        try:
+            link.__class__ = _SessionThatChangesUnderYou
+            link.install(jetson, other_jetson)
+            record = link._session_record()
+            assert jetson.session_id != other_jetson.session_id
+            assert record["session_id"] == record["wire"]["session_id"], record
+        finally:
+            link.__class__ = original
+            link.session = jetson
+            link.stop()
+            phone.close()
+            other_phone.close()
+
+
+class TestTheInboundAccountBalances:
+
+    def test_a_consumed_heartbeat_is_published_not_just_subtracted(self):
+        # `_record_inbound` counts a keepalive in `received` and returns before the
+        # queue: never delivered, never dropped, never abandoned. The record published
+        # the other four terms and not this one, so the first real run over the
+        # tailnet reported 241 received against 121 delivered on the control channel
+        # having lost nothing -- indistinguishable from a run that lost 120 messages.
+        phone_conn, jetson_conn = loopback_pair()
+        phone = Session(phone_conn, session_id=1, heartbeat_s=0.05,
+                        stall_timeout_s=None).start()
+        jetson = Session(jetson_conn, session_id=2, heartbeat_s=None,
+                         stall_timeout_s=None).start()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if jetson.stats().heartbeats_received >= 3:
+                    break
+                time.sleep(0.02)
+            wire = link.to_record()["wire"]
+            control = wire["channels"][Channel.CONTROL.value]
+            assert wire["heartbeats_received"] >= 3, (
+                "the heartbeats never arrived, so this test proves nothing"
+            )
+            # Every inbound frame on the channel is in exactly one of these terms.
+            assert control["received"] == (
+                control["delivered"] + control["dropped_inbound"]
+                + control["abandoned_inbound"] + wire["heartbeats_received"]
+            ), control
+            # And the gap is not zero, or the identity would hold with the term absent
+            # and the test would pass against the code it was written to catch.
+            assert control["received"] > control["delivered"]
+        finally:
+            link.stop()
+            phone.close()

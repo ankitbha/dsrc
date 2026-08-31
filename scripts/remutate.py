@@ -772,6 +772,21 @@ MUTATIONS = [
      '            "wire": self._wire_record(session),',
      '            "wire": self._wire_record(),',
      "python"),
+    # Found by reading the first real run's record rather than by a test: the control
+    # channel showed 241 received against 121 delivered, with dropped and abandoned
+    # both zero, on a run that lost nothing. The transport eats its own keepalives --
+    # `_record_inbound` counts one in `received` and returns before the queue -- and
+    # the record published every term of the inbound account except that one.
+    ("link: a consumed heartbeat is left out of the inbound account",
+     "deployment/jetson/sensors/phone_link.py",
+     '            record["heartbeats_received"] = stats.heartbeats_received',
+     '            record["heartbeats_received"] = 0',
+     "python"),
+    ("link: the rebind snapshot is assembled from two separate session reads",
+     "deployment/jetson/sensors/phone_link.py",
+     '            "imu_received": self.imu_received,\n            "wire": self._wire_record(session),',
+     '            "imu_received": self.imu_received,\n            "wire": self._wire_record(),',
+     "python"),
     # Found by running the Jetson's own selfcheck on the Jetson with its own
     # receiver attached, indoors. The reader thread ended on the first RMC sentence
     # carrying a time and no date, which is what a searching receiver sends.
