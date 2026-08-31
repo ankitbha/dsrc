@@ -956,8 +956,95 @@ tunnels over USB and is unaffected.
     rate was the justification. **Open:** the loop does not attempt a send during an
     outage — the camera yields no frame, so `on_tick` is never reached — so the
     no-session path is covered by unit tests and not by the drive.
-32. End-to-end run over the network backend, phone and Jetson apart, exercising
-    the whole loop before any USB work.
+32. ~~End-to-end run over the network backend, phone and Jetson apart, exercising
+    the whole loop before any USB work.~~
+    The address the phone dials comes from a `link.json` pushed to the app's
+    external files directory and read once at service start, with the source
+    (`file` or `default`) carried into the record. `SensingService` had built two
+    `LinkConfig` instances, one for the link and one for the status line, which
+    agreed only because both were defaults. A port at or above 2^32 was truncated
+    into range and accepted — `Long.toInt()` keeps the low 32 bits, so 4295015107
+    became 47811 and 4294967297 became 1 — and no test distinguished the truncating
+    implementation from the correct one. **Three validation rounds, and each round
+    found its defect inside the previous round's fix.** Round 1 (seven findings):
+    `summary["network"]` recorded how this machine *would* reach each online peer,
+    which is the same whether or not a session used that route, so a run carried
+    over `adb reverse` — phone dials 127.0.0.1, data crosses USB — wrote the same
+    network record as one that crossed the tailnet. The fact that settles it was
+    already computed and already dropped: the accepted socket's own remote address,
+    which `_wire_record` iterated past. A second line looked the phone up by
+    `Settings.Secure.ANDROID_ID` in a dict keyed on Tailscale's `HostName` —
+    different namespaces, never equal — and replacing that lookup with `started =
+    {}` survived the whole suite, which is the finding. Round 2 (six findings, four
+    inside round 1's fix): `path_for_address` returned a relay region for a direct
+    connection, because Tailscale sets `Relay` on a direct connection too, charging
+    a relay hop of tens of milliseconds to a connection that made none; and a
+    tailnet address whose peer had gone offline — the case the redial timeout exists
+    for — was recorded exactly as a USB run. Round 3 (three findings, all inside
+    round 2's fix): membership was then tested against `100.64.0.0/10`, which is the
+    shared CGNAT block rather than a Tailscale allocation, so it also matched
+    `100.100.100.100`, Tailscale's own resolver; and `to_record` read `self.session`
+    four times, so one record could carry two `session_id` values and two handsets'
+    channel counters, with nothing in it to say which was which.
+    **Experiment** (`run_demo.py --phone`, phone dialling 100.90.108.88:47811 over
+    the tailnet, `adb reverse` empty so no USB is in the data path): **786 ticks
+    over 180 s across one forced redial** — the link down 9.3 s on `peer_closed` and
+    back on the same handset, 2 sessions accepted, 0 displaced, 0 refused. **786
+    advisories sent, 0 refused by the wire**; 34 rate commands, one per 23.1 ticks.
+    The path was **direct, not relayed**, taken from the accepted socket's remote
+    address 100.75.142.126:37458 rather than from reachability. **Link segment mean
+    106.1 ms, p50 87.7 ms, p95 223.4 ms; Jetson segment mean 31.9 ms, p50 31.7 ms,
+    p95 32.9 ms** — end-to-end is the sum of the two by construction, so the split
+    is the information and not the total. Two prior fixes were confirmed against
+    live data rather than fixtures: the hostname disambiguation fired on a real
+    tailnet, where two peers share the hostname `device-of-shared-to-user` and one
+    carries `Relay: nyc` on a direct path; and from the first tick after the redial
+    the position read `valid: false, lat: null, num_sats: 0` rather than the
+    previous session's fix, which is task 31 round 3's defect.
+    **The finding the run itself produced, from reading the record and not from a
+    test.** On the control channel the first run reported **241 frames received
+    against 121 delivered**, with `dropped_inbound` and `abandoned_inbound` both
+    zero, having lost nothing. The transport generates keepalives and also consumes
+    them — `_record_inbound` counts one in `received` and returns before the inbound
+    queue — and the record published every term of the inbound account except
+    `heartbeats_received`, which `SessionStats` had carried all along, while the
+    comment beside those fields asserted an identity the control channel does not
+    satisfy. A reader applying it would have read 120 consumed keepalives as 120
+    lost messages, indistinguishable from a run that really lost 120. Every channel
+    balances in the second run.
+    **The method lesson:** two entries in the mutation table pinned nothing, and the
+    harness reported both in a form that reads like progress. One printed SKIP for
+    several rounds because its anchor named code that had since been rewritten — a
+    skipped entry is not a pin, and the code it named was edited three times
+    underneath it. The other had become an equivalent mutant, which was settled by
+    running seven colliding peers through both versions (7 of 7 kept either way)
+    rather than by arguing from the code.
+    **Open:** the phone evicted **61 of 655 camera frames** on its outbound queue
+    (9.3 per cent) and the Jetson's record cannot see that, because the eviction
+    happens on the sender; the policy bundle is random-init, so advisory values are
+    placeholders and the run establishes wiring rather than decision quality; and
+    the two machines sat on one desk, so the link segment is a tailnet path within
+    one building and says nothing about a cellular link or a moving vehicle.
+    **Also open, and blocking the gate:**
+    `ImuWireTest.aCommandRaisingTheRateIsHonouredOnTheWire` fails on handset
+    ZY227VV4XC — commanded 200 Hz from baselines of 51.7/s and 50.3/s, measured
+    53.0/s against a 56.8/s floor, and again at 53.3/s on a second run. Neither the
+    production code nor that test has changed since the gate was last green on this
+    handset (`8b4811a`); the only edit under `phone/` is to this file's gravity
+    assertion. **The raise does reach the source.** The service's own teardown line
+    for that test reads `rateHz=200.0`, with `seen=765`, `delivered=756`,
+    `refusedBySink=0`, and mean gyro age falling from 13.9 ms at baseline to 8.3 ms
+    under the raise. What does not reach the wire is the sample: the same session
+    records `imu=ChannelCounters(enqueued=756, dropped=0, sent=525, abandoned=0)`,
+    so 231 samples were still queued when the session ended and the socket drained
+    about 50 frames per second. The test measures the peer-received rate, so on this
+    handset it measures the transport's throughput rather than whether the command
+    reached the source, and no threshold on the wire can separate the two. Both
+    sensors advertise a 500 Hz maximum, so the hardware is not the cap. The
+    assertion is left as it is, because `8b4811a` established that every way of
+    making it pass inside the suite removes its ability to fail; what needs deciding
+    is whether the quantity it asserts on should be the source's rate, which the
+    stats above already carry, rather than the wire's.
 
 ## G. Instrumentation
 
