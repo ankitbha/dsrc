@@ -81,6 +81,18 @@ class SensingService : LifecycleService() {
      */
     @Volatile
     private var configApplier: ConfigApplier? = null
+
+    /**
+     * The link address, read once at start, and the only instance of it.
+     *
+     * There used to be two: one handed to `SessionHolder` and a second constructed
+     * purely to print. Both were the defaults, so they agreed. The moment the address
+     * became configurable the status line would have reported `127.0.0.1` while the
+     * link used the pushed file -- a display that is wrong about the one thing it
+     * exists to show.
+     */
+    private var linkAddress: LinkConfig.Loaded =
+        LinkConfig.Loaded(LinkConfig(), LinkConfig.Source.DEFAULT)
     private var timeSync: TimeSyncDriver? = null
     private var imuSource: ImuSource? = null
 
@@ -325,8 +337,15 @@ class SensingService : LifecycleService() {
         liveLog = log
         log.start()
 
+        // Read once, here, before anything dials. A malformed file throws rather than
+        // falling back, so a mistyped address fails the start with its reason instead of
+        // connecting to loopback and presenting as a link failure.
+        linkAddress = LinkConfig.load(getExternalFilesDir(null))
+        Log.i(TAG, "link address ${linkAddress.config.host}:${linkAddress.config.port} " +
+                   "from ${linkAddress.source.name.lowercase()}")
+
         val holder = SessionHolder(
-            config = LinkConfig(),
+            config = linkAddress.config,
             deviceId = deviceId(),
             monoClock = SystemClock::elapsedRealtimeNanos,
             wallClock = ::wallClockNanos,
@@ -512,7 +531,8 @@ class SensingService : LifecycleService() {
             TAG,
             "capture starting: camera ${config.cameraHz} Hz, gps ${config.gpsHz} Hz, " +
                 "imu ${config.imuHz} Hz, " +
-                "link ${LinkConfig().host}:${LinkConfig().port}",
+                "link ${linkAddress.config.host}:${linkAddress.config.port} " +
+                    "(${linkAddress.source.name.lowercase()})",
         )
         // Last, so a test can fail a start with every resource already published -- which is
         // the only shape in which the leak this guards against can happen. Unreachable in

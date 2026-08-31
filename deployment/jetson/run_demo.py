@@ -278,6 +278,17 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             print("[run] no phone dialled in; refusing to run on local sources instead",
                   file=sys.stderr)
             return 2
+        # Captured as soon as the phone is on, and again at the end. A relayed hop puts
+        # tens of milliseconds into the link segment, and `link_ms` alone cannot say
+        # whether it was a slow link or a relay. A previous measurement in this project
+        # is unattributable for exactly that reason.
+        from tailnet import peer_paths
+
+        network_at_start = peer_paths()
+        started = network_at_start.get("peers", {}).get(phone.peer_device_id or "", {})
+        print(f"[run] network path to {phone.peer_device_id}: "
+              f"{started.get('path', 'unknown')}"
+              f"{' via ' + started['relay'] if started.get('relay') else ''}", flush=True)
         print(f"[run] phone {phone.peer_device_id} on session {phone.session.session_id}",
               flush=True)
 
@@ -488,6 +499,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             "camera_file_recoveries": camera.file_recoveries,
             "policy_trained": actor.is_trained,
         }
+        if phone is not None:
+            # Both ends of the run, because a path can change mid-drive: Tailscale
+            # upgrades a relayed connection to a direct one when it manages to, and the
+            # link segment measured before and after that are different quantities.
+            summary["network"] = {"at_start": network_at_start, "at_end": peer_paths()}
         if sensing is not None:
             # What was decided and how much of it reached the phone. A drive whose
             # commands were all refused and one where nothing needed sending write

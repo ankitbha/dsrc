@@ -1,5 +1,10 @@
 package com.dsrc.phone.config
 
+import com.dsrc.transport.Json
+import com.dsrc.transport.JsonValue
+import java.io.File
+import java.io.IOException
+
 /**
  * Where the phone connects, and how hard it tries.
  *
@@ -46,5 +51,78 @@ data class LinkConfig(
     companion object {
         /** Matches `DEFAULT_PORT` in `deployment/jetson/transport/tcp.py`. */
         const val DEFAULT_PORT = 47811
+
+        /**
+         * The file a link address is pushed to, in the app's external files directory:
+         *
+         *     adb push link.json /sdcard/Android/data/com.dsrc.phone/files/link.json
+         *
+         * A file rather than a build-config value, because the address is a property of
+         * how the two machines are connected on a given day and a value that changes per
+         * drive should not require a build. A file rather than an intent extra, because
+         * an extra means exporting a service that is deliberately `exported="false"`.
+         */
+        const val FILE_NAME = "link.json"
+
+        /**
+         * Read the pushed address, or the defaults when no file is present.
+         *
+         * Read once, at service start. An address that changes during a session is a
+         * reconnect, not a configuration edit.
+         *
+         * A malformed file is refused rather than defaulted. A mistyped address that
+         * quietly became `127.0.0.1` would connect to nothing and present as a link
+         * failure, which is the one reading that sends the search in the wrong
+         * direction.
+         */
+        fun load(directory: File?): Loaded {
+            val file = directory?.let { File(it, FILE_NAME) }
+            if (file == null || !file.exists()) {
+                return Loaded(LinkConfig(), Source.DEFAULT)
+            }
+            val text = try {
+                file.readText()
+            } catch (e: IOException) {
+                throw IllegalArgumentException("${file.path} could not be read: ${e.message}")
+            }
+            val root = try {
+                Json.decode(text)
+            } catch (e: Exception) {
+                throw IllegalArgumentException("${file.path} is not JSON: ${e.message}")
+            }
+            if (root !is JsonValue.Obj) {
+                throw IllegalArgumentException(
+                    "${file.path} is ${root::class.simpleName}, expected a JSON object"
+                )
+            }
+            val host = when (val h = root.entries["host"]) {
+                null -> throw IllegalArgumentException("${file.path} has no `host`")
+                is JsonValue.Text -> h.value
+                else -> throw IllegalArgumentException(
+                    "${file.path} `host` is ${h::class.simpleName}, expected a string"
+                )
+            }
+            val port = when (val p = root.entries["port"]) {
+                null -> DEFAULT_PORT
+                is JsonValue.Num -> p.value.toInt()
+                else -> throw IllegalArgumentException(
+                    "${file.path} `port` is ${p::class.simpleName}, expected a number"
+                )
+            }
+            // Through the same `init` requirements as any other instance, so a pushed
+            // file cannot reach a state a constructed one could not.
+            return Loaded(LinkConfig(host = host, port = port), Source.FILE)
+        }
     }
+
+    /** Where an address came from. */
+    enum class Source { FILE, DEFAULT }
+
+    /**
+     * A config and its provenance.
+     *
+     * The source travels with the value because a run that silently used loopback and
+     * one that was pointed at a Jetson must not read alike in the record.
+     */
+    data class Loaded(val config: LinkConfig, val source: Source)
 }
