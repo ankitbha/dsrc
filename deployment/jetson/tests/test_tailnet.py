@@ -10,6 +10,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+
+import pytest
 
 import tailnet
 
@@ -186,10 +189,18 @@ class TestATailnetAddressWhosePeerWentOffline:
         # `not_tailnet` -- the same two field values an `adb reverse` run writes.
         # Belonging to the tailnet is a property of the address; having an online peer
         # is not.
-        empty = {"available": True, "self": "laptop", "peers": {},
-                 "hostname_collisions": []}
-        gone = tailnet.path_for_address(empty, "100.75.142.126:41234")
-        usb = tailnet.path_for_address(empty, "127.0.0.1:47811")
+        # The peer is known to the tailnet and is not online: no entry in `peers`,
+        # but its address is still in `known_addresses`. That is the state a run ends
+        # in when the phone leaves the tailnet, and it is answered from the peer list
+        # rather than from an address range -- 100.64.0.0/10 is the shared CGNAT
+        # block, not a Tailscale allocation, so a range test called Tailscale's own
+        # resolver at 100.100.100.100 a tailnet peer.
+        offline = {"available": True, "self": "laptop", "peers": {},
+                   "hostname_collisions": [],
+                   "known_addresses": {"100.75.142.126": "moto g power"},
+                   "self_addresses": []}
+        gone = tailnet.path_for_address(offline, "100.75.142.126:41234")
+        usb = tailnet.path_for_address(offline, "127.0.0.1:47811")
 
         assert gone["over_tailnet"] is True
         assert gone["path"] == "peer_offline"
@@ -197,16 +208,24 @@ class TestATailnetAddressWhosePeerWentOffline:
         assert usb["path"] == "not_tailnet"
         assert (gone["over_tailnet"], gone["path"]) != (usb["over_tailnet"], usb["path"])
 
-    def test_the_ula_prefix_counts_as_the_tailnet_too(self):
-        empty = {"available": True, "self": "laptop", "peers": {},
-                 "hostname_collisions": []}
-        assert tailnet.path_for_address(empty, "fd7a:115c:a1e0::9601:f9c4:41234")["path"] \
-            in ("peer_offline", "not_tailnet")  # parsing aside, it must not claim direct
+    def test_an_address_in_the_cgnat_block_that_is_not_a_peer_is_not_the_tailnet(self):
+        # The false-positive class an address-range test creates. 100.64.0.0/10 is the
+        # shared CGNAT block; 100.100.100.100 in particular is Tailscale's own DNS
+        # resolver and not a peer at all. Asserting these is the whole reason the
+        # answer now comes from the peer list.
+        known = {"available": True, "self": "laptop", "peers": {},
+                 "hostname_collisions": [],
+                 "known_addresses": {"100.75.142.126": "moto g power"},
+                 "self_addresses": []}
+        for address in ("100.100.100.100:1", "100.64.0.0:1", "100.127.255.255:1"):
+            result = tailnet.path_for_address(known, address)
+            assert result["over_tailnet"] is False, address
+            assert result["path"] == "not_tailnet", address
 
     def test_an_ordinary_public_address_is_not_the_tailnet(self):
-        empty = {"available": True, "self": "laptop", "peers": {},
-                 "hostname_collisions": []}
-        assert tailnet.path_for_address(empty, "216.165.95.173:41641")["path"] == "not_tailnet"
+        known = {"available": True, "self": "laptop", "peers": {},
+                 "hostname_collisions": [], "known_addresses": {}, "self_addresses": []}
+        assert tailnet.path_for_address(known, "216.165.95.173:41641")["path"] == "not_tailnet"
 
 
 class TestThreePeersOnOneHostname:
@@ -234,3 +253,43 @@ class TestThreePeersOnOneHostname:
         # And every path is still represented.
         assert sorted(p["path"] for p in result["peers"].values()) == \
             ["direct", "direct", "relay"]
+
+    def test_a_hostname_that_collides_with_a_generated_name_still_terminates(self):
+        # The pre-fix loop recomputed one string -- `f"{name} [{suffix} #{len(peers)}]"`
+        # -- and `len(peers)` does not change inside the loop, so once that string was
+        # already a key the loop tested the same name forever. What makes the loop end
+        # now is a counter that advances on every pass.
+        #
+        # Reaching it takes a `HostName` equal to a name the function itself generates.
+        # Peers are keyed by `HostName` and that string is whatever the parsed status
+        # says it is, so the fixture below is admissible input: the first peer is named
+        # `moto g power [100.75.142.126 #3]`, which is exactly what the fourth peer's
+        # loop computes on its first pass.
+        #
+        # Run on a thread with a deadline. A function that does not return cannot be
+        # caught by an assertion on its return value. Under the defect the thread keeps
+        # spinning after the deadline; it is a daemon, so it ends with the process.
+        status = json.dumps({
+            "Self": {"HostName": "laptop"},
+            "Peer": {
+                "a": {"HostName": "moto g power [100.75.142.126 #3]", "Online": True,
+                      "TailscaleIPs": [], "CurAddr": "1.2.3.4:1"},
+                "b": {"HostName": "moto g power [100.75.142.126]", "Online": True,
+                      "TailscaleIPs": [], "CurAddr": "1.2.3.4:2"},
+                "c": {"HostName": "moto g power", "Online": True,
+                      "TailscaleIPs": ["100.75.142.126"], "CurAddr": "1.2.3.4:3"},
+                "d": {"HostName": "moto g power", "Online": True,
+                      "TailscaleIPs": ["100.75.142.126"], "CurAddr": "1.2.3.4:4"},
+            },
+        })
+        done: list[dict] = []
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(subprocess, "run", _fake_run(status))
+            worker = threading.Thread(target=lambda: done.append(tailnet.peer_paths()),
+                                      daemon=True)
+            worker.start()
+            worker.join(timeout=5.0)
+        assert done, "peer_paths did not return within 5 seconds"
+        # All four kept, which is the point of disambiguating at all.
+        assert len(done[0]["peers"]) == 4, done[0]["peers"]
+        assert done[0]["hostname_collisions"] == ["moto g power"]

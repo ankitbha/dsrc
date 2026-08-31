@@ -68,6 +68,11 @@ def sample_from(message: Any, receipt: Any) -> OneWaySample:
     )
 
 
+#: Distinguishes "the caller did not supply a session" from "the caller supplied
+#: None", which is a real state: a link that never came up has no session at all.
+_UNSET = object()
+
+
 def _end_reason_of(session: Any) -> str | None:
     """How a session ended, spelled as the rest of the repo spells it."""
     reason = getattr(session, "end_reason", None) if session is not None else None
@@ -660,7 +665,7 @@ class PhoneLink:
             self.session.close()
         self._listener.stop()
 
-    def _wire_record(self) -> dict[str, Any]:
+    def _wire_record(self, session: Any = _UNSET) -> dict[str, Any]:
         """What the transport itself did, per channel. Two blindnesses, one place.
 
         **Messages the channel threw away.** `Session._enqueue` evicts the oldest on
@@ -684,12 +689,17 @@ class PhoneLink:
         record: dict[str, Any] = {}
         if self.router is not None:
             record["messages"] = self.router.to_record()
-        # Read ONCE. Two loads of `self.session` let a rebind land between them and
-        # pair one handset's peer address with another handset's channel counters --
-        # and the address is the field that says which handset the counters belong to.
-        # `to_record` is called from the tick loop's thread while the supervisor is
-        # still alive, so the window is reachable.
-        session = self.session
+        # Read ONCE, and taken from the caller when it has already read it. Two loads
+        # of `self.session` let a rebind land between them and pair one handset's peer
+        # address with another handset's channel counters -- and the address is the
+        # field that says which handset the counters belong to.
+        #
+        # Binding it inside this function alone was not enough: `to_record` read the
+        # session three more times, so one returned record could carry two different
+        # `session_id` values with nothing to say which was right -- and telling a row
+        # taken before a redial from one taken after is what the field was added for.
+        if session is _UNSET:
+            session = self.session
         if session is not None:
             # The address the phone actually dialled from, off the accepted socket.
             # This is the only fact in the record that says which route the bytes
@@ -754,9 +764,12 @@ class PhoneLink:
         so which clock produced the stamps and how the offset was obtained is
         recorded rather than assumed.
         """
+        # One read for the whole record, passed down, so every field in it describes
+        # the same session.
+        session = self.session
         return {
             "peer_device_id": self.peer_device_id,
-            "session_id": None if self.session is None else self.session.session_id,
+            "session_id": None if session is None else session.session_id,
             # Accepted/displaced separate a run the phone left from one a second
             # device took over: with `--phone-host 0.0.0.0` any tailnet peer that
             # speaks the hello can displace a session, and `session_id` alone
@@ -778,7 +791,7 @@ class PhoneLink:
             # "None" while the session was open and "SessionEndReason.PEER_CLOSED"
             # once it ended, so a reader filtering on the transport's own
             # `peer_closed` matched neither.
-            "end_reason": _end_reason_of(self.session),
+            "end_reason": _end_reason_of(session),
             "pings_answered": self.pings_answered,
             # Every session before the current one. The fields below read live
             # objects, and a rebind replaces them -- so without this a run whose
@@ -814,7 +827,7 @@ class PhoneLink:
                 "reader_alive": bool(self._telemetry_reader and self._telemetry_reader.is_alive()),
             },
             # What the transport did, as opposed to what the readers made of it.
-            "wire": self._wire_record(),
+            "wire": self._wire_record(session),
             "imu": {
                 "received": self.imu_received,
                 "at_mono": self.imu_at_mono,

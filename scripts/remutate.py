@@ -723,13 +723,26 @@ MUTATIONS = [
      "python"),
     ("tailnet: a tailnet address whose peer went offline reads as a usb run",
      "deployment/jetson/tailnet.py",
-     "    if _in_tailnet_range(host):",
-     "    if False:",
+     "    known = (status.get(\"known_addresses\") or {}).get(host)",
+     "    known = None",
      "python"),
-    ("tailnet: the CGNAT range is not recognised as the tailnet",
+    # Replaced the two entries that mutated `_in_tailnet_range`. That function is gone:
+    # membership is answered from the peer list, because 100.64.0.0/10 is the shared
+    # CGNAT block rather than a Tailscale allocation, so a range test called every
+    # address in it a peer -- including 100.100.100.100, Tailscale's own resolver.
+    # Restoring a range test is therefore the mutation worth making.
+    ("tailnet: membership is guessed from the address instead of the peer list",
      "deployment/jetson/tailnet.py",
-     '        return parsed in ipaddress.ip_network("100.64.0.0/10")',
-     "        return False",
+     "    known = (status.get(\"known_addresses\") or {}).get(host)",
+     "    known = \"a peer\" if host.startswith(\"100.\") else None",
+     "python"),
+    # The loop that disambiguates two peers sharing one hostname. Not a wrong answer:
+    # the pre-fix form does not return at all, in a function called from a run's
+    # teardown, so the pinning test runs it on a thread with a deadline.
+    ("tailnet: the disambiguating loop tests one name forever",
+     "deployment/jetson/tailnet.py",
+     "            attempt = 0\n            while candidate in peers:\n                attempt += 1\n                candidate = f\"{name} [{suffix} #{attempt}]\"",
+     "            while candidate in peers:\n                candidate = f\"{name} [{suffix} #{len(peers)}]\"",
      "python"),
     ("tailnet: a third peer on one hostname overwrites the second",
      "deployment/jetson/tailnet.py",
@@ -745,6 +758,15 @@ MUTATIONS = [
      "deployment/jetson/sensors/phone_link.py",
      '            record["session_id"] = stats.session_id',
      "            pass",
+     "python"),
+    # Having the field is not the same as the field being consistent. `to_record`
+    # read `self.session` once per block, and the redial supervisor replaces it
+    # between reads, so one record could carry two session ids and two handsets'
+    # counters with nothing in it to say which was which.
+    ("link: one record is assembled from two separate session reads",
+     "deployment/jetson/sensors/phone_link.py",
+     '            "wire": self._wire_record(session),',
+     '            "wire": self._wire_record(),',
      "python"),
     # Found by running the Jetson's own selfcheck on the Jetson with its own
     # receiver attached, indoors. The reader thread ended on the first RMC sentence
@@ -864,7 +886,13 @@ if SIDECAR.exists():
 # entries. The docstring says to run this after landing a batch of fixes, and a batch
 # is almost always one kind -- rebuilding both Gradle suites per mutation to check a
 # Python change is why it was reached for less often than it should have been.
-WANTED = sys.argv[1:] or None
+# And an optional name filter, `--name=SUBSTR`, repeatable. Re-running one batch of
+# fixes against 95 Python entries costs about an hour and a half of full pytest runs
+# to check four of them, which is why the entries touched by a round were often left
+# unverified. Kind and name compose: both must match.
+ARGV = sys.argv[1:]
+NAME_FILTERS = [a.split("=", 1)[1] for a in ARGV if a.startswith("--name=")]
+WANTED = [a for a in ARGV if not a.startswith("--name=")] or None
 if WANTED:
     unknown = [k for k in WANTED if k not in RESULTS]
     if unknown:
@@ -873,6 +901,8 @@ if WANTED:
 survived = []
 for name, rel, old, new, kind in MUTATIONS:
     if WANTED and kind not in WANTED:
+        continue
+    if NAME_FILTERS and not any(f in name for f in NAME_FILTERS):
         continue
     path = ROOT / rel
     keep = path.read_text()

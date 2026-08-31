@@ -43,7 +43,15 @@ def peer_paths(timeout_s: float = 10.0) -> dict[str, Any]:
 
     peers = {}
     collisions: list[str] = []
+    # Every peer's addresses, online or not. Offline peers are excluded from `peers`
+    # -- a path to them is not a thing that exists -- but their ADDRESSES are still
+    # facts about this tailnet, and a session that ended because its peer went offline
+    # needs them to be recognised. Dropping them was what forced a guess from the
+    # CGNAT range, which is a shared block and not a Tailscale allocation.
+    known_addresses: dict[str, str] = {}
     for peer in (status.get("Peer") or {}).values():
+        for address in peer.get("TailscaleIPs") or []:
+            known_addresses[address] = peer.get("HostName", "?")
         if not peer.get("Online"):
             continue
         cur_addr = peer.get("CurAddr") or ""
@@ -92,6 +100,11 @@ def peer_paths(timeout_s: float = 10.0) -> dict[str, Any]:
         # crossed the tailnet to reach it. `path_for_address` answers that question.
         "peers": peers,
         "hostname_collisions": collisions,
+        # Address -> hostname, for every peer this tailnet knows about, including the
+        # ones that are not online now. Membership of the tailnet is a property of the
+        # address; being reachable is not.
+        "known_addresses": known_addresses,
+        "self_addresses": (status.get("Self") or {}).get("TailscaleIPs", []),
     }
 
 
@@ -131,16 +144,24 @@ def path_for_address(status: dict[str, Any], address: str) -> dict[str, Any]:
                 "relay": peer.get("relay") if path == "relay" else "",
             }
     # Belonging to the tailnet and having an online peer are different questions, and
-    # only the first is a property of the address. `peer_paths` lists online peers
-    # only, so a run that ended BECAUSE the phone left the tailnet -- which is the case
-    # the redial timeout exists for -- looked up its own peer after it went offline and
-    # recorded `not_tailnet`: the same two field values an `adb reverse` run writes.
-    if _in_tailnet_range(host):
+    # only the first is a property of the address. A run that ended BECAUSE the phone
+    # left the tailnet -- the case the redial timeout exists for -- looks its own peer
+    # up after it has gone, and must not then record what an `adb reverse` run records.
+    #
+    # Answered from the peer list itself, which carries every peer's addresses whether
+    # or not it is online. An earlier form tested membership of `100.64.0.0/10`
+    # instead: that is the shared CGNAT block rather than a Tailscale allocation, so
+    # any address in it was called a tailnet address -- including `100.100.100.100`,
+    # which is Tailscale's own DNS resolver and not a peer at all. The exact answer was
+    # in the document already being parsed.
+    known = (status.get("known_addresses") or {}).get(host)
+    if known is not None:
         return {
             "session_peer": address,
             "over_tailnet": True,
+            "peer": known,
             "path": "peer_offline",
-            "detail": f"{host} is a tailnet address and no online peer holds it now",
+            "detail": f"{host} belongs to {known}, which is not online now",
         }
     return {
         "session_peer": address,
@@ -148,23 +169,5 @@ def path_for_address(status: dict[str, Any], address: str) -> dict[str, Any]:
         "path": "not_tailnet",
         # Named, because this is the case that matters: it is what an `adb reverse`
         # run looks like, and the whole point of task 32 is not to be that run.
-        "detail": f"{host} is not a tailnet address of any online peer",
+        "detail": f"{host} is not an address of any peer on this tailnet",
     }
-
-
-def _in_tailnet_range(host: str) -> bool:
-    """Whether an address is in the range Tailscale assigns from.
-
-    100.64.0.0/10, the CGNAT block, and the `fd7a:115c:a1e0::/48` ULA prefix. Address
-    membership does not depend on any peer being online, which is the point: it
-    separates "this was not the tailnet" from "this was, and the peer has since gone".
-    """
-    import ipaddress
-
-    try:
-        parsed = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    if parsed.version == 4:
-        return parsed in ipaddress.ip_network("100.64.0.0/10")
-    return parsed in ipaddress.ip_network("fd7a:115c:a1e0::/48")

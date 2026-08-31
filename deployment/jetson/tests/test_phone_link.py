@@ -1639,3 +1639,74 @@ class TestTheRecordSaysWhichRouteTheBytesTook:
         finally:
             link.stop()
             phone.close()
+
+
+class _SessionThatChangesUnderYou(PhoneLink):
+    """A link whose `.session` yields a different session on each read.
+
+    That is what the redial supervisor does: it replaces `self.session` while the
+    rest of the object carries on. A record assembled from several independent
+    reads can therefore describe two handsets at once, and no field in it says so.
+    Rotating on every read makes the window certain instead of nanoseconds wide.
+    """
+
+    def install(self, first, second) -> None:
+        self._rotation = [first, second]
+        self._reads = 0
+
+    @property
+    def session(self):
+        index = min(self._reads, len(self._rotation) - 1)
+        self._reads += 1
+        return self._rotation[index]
+
+    @session.setter
+    def session(self, value) -> None:
+        self._rotation = [value]
+        self._reads = 0
+
+
+class TestOneRecordDescribesOneSession:
+
+    def test_a_redial_mid_record_cannot_split_it_across_two_sessions(self):
+        phone, jetson, _, _ = phone_and_jetson()
+        # `phone_and_jetson` numbers every Jetson-side session 2, so the second one is
+        # built here. A redial does raise the id, and if the two sessions shared one
+        # the test would pass while reading two different objects.
+        # Labelled, so the two sessions report different peer addresses. Both pairs
+        # default to `loopback:phone`, and an assertion between two equal values
+        # cannot detect the swap it is written to detect.
+        other_phone_conn, other_jetson_conn = loopback_pair(
+            labels=("second-phone", "jetson"))
+        other_phone = Session(other_phone_conn, session_id=10, heartbeat_s=None,
+                              stall_timeout_s=None).start()
+        other_jetson = Session(other_jetson_conn, session_id=11, heartbeat_s=None,
+                               stall_timeout_s=None).start()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        original = link.__class__
+        try:
+            link.__class__ = _SessionThatChangesUnderYou
+            link.install(jetson, other_jetson)
+            record = link.to_record()
+            # Distinct by construction, so the two reads cannot agree by accident.
+            assert jetson.session_id != other_jetson.session_id
+            assert record["session_id"] == record["wire"]["session_id"], (
+                "one record names two sessions: the top-level id is "
+                f"{record['session_id']} and the wire block's is "
+                f"{record['wire']['session_id']}"
+            )
+            # The peer address is the field that says which handset the channel
+            # counters belong to, so it must come from the same session as the id.
+            assert jetson.stats().peer != other_jetson.stats().peer
+            assert record["wire"]["peer"] == (
+                jetson.stats().peer
+                if record["session_id"] == jetson.session_id
+                else other_jetson.stats().peer
+            )
+        finally:
+            link.__class__ = original
+            link.session = jetson
+            link.stop()
+            phone.close()
+            other_phone.close()
