@@ -746,6 +746,19 @@ MUTATIONS = [
      '            record["session_id"] = stats.session_id',
      "            pass",
      "python"),
+    # Found by running the Jetson's own selfcheck on the Jetson with its own
+    # receiver attached, indoors. The reader thread ended on the first RMC sentence
+    # carrying a time and no date, which is what a searching receiver sends.
+    ("gps: the datetime property is read through a guard that cannot catch it",
+     "deployment/jetson/sensors/gps_reader.py",
+     "                stamp = None\n                if (getattr(msg, \"datestamp\", None) is not None\n                        and getattr(msg, \"timestamp\", None) is not None):\n                    try:\n                        stamp = msg.datetime\n                    except (TypeError, ValueError):\n                        stamp = None",
+     '                stamp = getattr(msg, "datetime", None)',
+     "python"),
+    ("gps: one sentence the reader cannot handle ends the reader",
+     "deployment/jetson/sensors/gps_reader.py",
+     "                self.diagnostics.ingest_errors += 1",
+     "                pass",
+     "python"),
     # Task 29's rule, pinned from task 30's side: the whole "a shadow drive cannot
     # reach DISAGREEMENT" claim rests on this returning False for a missing feed.
     ("controller: a missing feed counts as disagreement",

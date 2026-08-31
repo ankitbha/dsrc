@@ -65,8 +65,14 @@ def peer_paths(timeout_s: float = 10.0) -> dict[str, Any]:
             addresses = peer.get("TailscaleIPs") or []
             suffix = addresses[0] if addresses else f"#{len(peers)}"
             candidate = f"{name} [{suffix}]"
+            # The counter is what advances. An earlier form recomputed the same string
+            # from `len(peers)`, which does not change inside the loop, so a candidate
+            # that was already present made it spin forever -- in a function called
+            # from a run's teardown.
+            attempt = 0
             while candidate in peers:
-                candidate = f"{name} [{suffix} #{len(peers)}]"
+                attempt += 1
+                candidate = f"{name} [{suffix} #{attempt}]"
             name = candidate
         peers[name] = {
             "addresses": peer.get("TailscaleIPs", []),

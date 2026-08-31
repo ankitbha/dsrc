@@ -55,6 +55,10 @@ class GpsFix:
 class GpsDiagnostics:
     sentences_parsed: int = 0
     parse_errors: int = 0
+    #: Sentences that parsed but could not be ingested. Separate from `parse_errors`
+    #: because a sentence this code cannot handle and a sentence the sender malformed
+    #: are different faults with different owners.
+    ingest_errors: int = 0
     rate_configured: bool = False
     port_open: bool = False
     last_error: str = ""
@@ -177,7 +181,16 @@ class GpsReader:
             except pynmea2.ParseError:
                 self.diagnostics.parse_errors += 1
                 continue
-            self._ingest(msg, t_mono, t_wall)
+            try:
+                self._ingest(msg, t_mono, t_wall)
+            except Exception as exc:  # noqa: BLE001
+                # One sentence must not end the reader. Without this the thread
+                # unwound on the first sentence it could not handle and the run went
+                # on with `sentences_parsed` frozen and no fix -- a dead GPS that
+                # reads like a GPS with nothing to say. Counted so the difference is
+                # visible rather than inferred from a counter that stopped moving.
+                self.diagnostics.ingest_errors += 1
+                self.diagnostics.last_error = f"{type(exc).__name__}: {exc}"
 
     def _ingest(self, msg: pynmea2.NMEASentence, t_mono: float, t_wall: float) -> None:
         self.diagnostics.sentences_parsed += 1
@@ -188,9 +201,26 @@ class GpsReader:
                 speed_knots = getattr(msg, "spd_over_grnd", None)
                 course = getattr(msg, "true_course", None)
                 utc = float("nan")
-                if getattr(msg, "datetime", None) is not None:
+                # `msg.datetime` is a property that combines `datestamp` with
+                # `timestamp`, and raises TypeError when either is absent -- which is
+                # the ordinary state of a receiver that has not got a fix. A receiver
+                # sends RMC with a time and no date for as long as it is searching.
+                #
+                # `getattr(msg, "datetime", None)` cannot guard that: the default
+                # applies only to AttributeError, so the raise came out of the guard
+                # itself, before the try below it, and ended the reader thread for the
+                # rest of the run on the first dateless sentence. Observed on the
+                # Jetson's own receiver, indoors, during selfcheck.
+                stamp = None
+                if (getattr(msg, "datestamp", None) is not None
+                        and getattr(msg, "timestamp", None) is not None):
                     try:
-                        utc = msg.datetime.timestamp()
+                        stamp = msg.datetime
+                    except (TypeError, ValueError):
+                        stamp = None
+                if stamp is not None:
+                    try:
+                        utc = stamp.timestamp()
                         self.utc_offset.update(utc, t_wall)
                     except (ValueError, OSError, OverflowError):
                         pass
