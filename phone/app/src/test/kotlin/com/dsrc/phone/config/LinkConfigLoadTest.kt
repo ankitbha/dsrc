@@ -83,6 +83,25 @@ class LinkConfigLoadTest {
     }
 
     @Test
+    fun `a port beyond the width of an Int is refused, not truncated`() {
+        // `Long.toInt()` keeps the low 32 bits rather than saturating, so these two
+        // landed inside 1..65535 and were accepted: 4295015107 became 47811 and
+        // 4294967297 became 1. A mistyped value silently becoming a different valid
+        // one is the failure this load path exists to avoid.
+        for (bad in listOf(4295015107L, 4294967297L, 2147483648L, -4294967295L)) {
+            val dir = write("""{"host": "100.90.108.88", "port": $bad}""")
+            val thrown = assertThrows(
+                "port $bad should not have loaded",
+                IllegalArgumentException::class.java,
+            ) { LinkConfig.load(dir) }
+            assertTrue(
+                "the reason does not report the value that was given: ${thrown.message}",
+                (thrown.message ?: "").contains(bad.toString()),
+            )
+        }
+    }
+
+    @Test
     fun `the file goes through the same validation as a constructed instance`() {
         // A pushed file must not reach a state the constructor would refuse.
         for (bad in listOf(

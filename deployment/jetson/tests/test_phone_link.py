@@ -1617,3 +1617,25 @@ class TestTheRecordBalancesAndIsBounded:
             )
         finally:
             link.stop()
+
+
+class TestTheRecordSaysWhichRouteTheBytesTook:
+
+    def test_the_sessions_own_peer_address_is_in_the_record(self):
+        # The only fact in the record that distinguishes a run whose bytes crossed the
+        # tailnet from one whose bytes crossed USB via `adb reverse`: the phone dials
+        # 127.0.0.1 on the second and a 100.x address on the first. `SessionStats.peer`
+        # carried it all along and `_wire_record` dropped it, iterating only the
+        # per-channel counters.
+        phone, jetson, _, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            record = link.to_record()["wire"]
+            assert "peer" in record, (
+                "the record cannot say where the phone dialled from"
+            )
+            assert record["peer"] == jetson.stats().peer
+        finally:
+            link.stop()
+            phone.close()

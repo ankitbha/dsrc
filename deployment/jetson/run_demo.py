@@ -282,13 +282,19 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         # tens of milliseconds into the link segment, and `link_ms` alone cannot say
         # whether it was a slow link or a relay. A previous measurement in this project
         # is unattributable for exactly that reason.
-        from tailnet import peer_paths
+        from tailnet import path_for_address, peer_paths
 
         network_at_start = peer_paths()
-        started = network_at_start.get("peers", {}).get(phone.peer_device_id or "", {})
-        print(f"[run] network path to {phone.peer_device_id}: "
-              f"{started.get('path', 'unknown')}"
-              f"{' via ' + started['relay'] if started.get('relay') else ''}", flush=True)
+        # Looked up by the SESSION's peer address, not by the phone's device id. The
+        # device id is `Settings.Secure.ANDROID_ID` and the peer dict is keyed on
+        # Tailscale's `HostName`: different namespaces, never equal, so the lookup
+        # matched nothing and the line read `unknown` on every run.
+        session_path = path_for_address(network_at_start, phone.session.stats().peer)
+        print(f"[run] session peer {session_path['session_peer']}: "
+              f"{session_path['path']}"
+              f"{' via ' + session_path['relay'] if session_path.get('relay') else ''}"
+              f"{'' if session_path['over_tailnet'] else ' -- NOT over the tailnet'}",
+              flush=True)
         print(f"[run] phone {phone.peer_device_id} on session {phone.session.session_id}",
               flush=True)
 
@@ -503,7 +509,21 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # Both ends of the run, because a path can change mid-drive: Tailscale
             # upgrades a relayed connection to a direct one when it manages to, and the
             # link segment measured before and after that are different quantities.
-            summary["network"] = {"at_start": network_at_start, "at_end": peer_paths()}
+            end = peer_paths()
+            summary["network"] = {
+                # What route the session's bytes actually took, at both ends of the
+                # run. Without this the block recorded only how this machine WOULD
+                # reach each online peer, which is the same whether or not the session
+                # used that route -- so a run carried over USB wrote the same network
+                # record as one carried over the tailnet.
+                "session_at_start": session_path,
+                "session_at_end": path_for_address(end, phone.session.stats().peer)
+                if phone.session is not None else None,
+                # Reachability, as context. Named separately so it is not read as the
+                # session's path.
+                "reachability_at_start": network_at_start,
+                "reachability_at_end": end,
+            }
         if sensing is not None:
             # What was decided and how much of it reached the phone. A drive whose
             # commands were all refused and one where nothing needed sending write

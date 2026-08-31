@@ -74,6 +74,13 @@ data class LinkConfig(
          * quietly became `127.0.0.1` would connect to nothing and present as a link
          * failure, which is the one reading that sends the search in the wrong
          * direction.
+         *
+         * [Loaded.source] is for the operator, in the log and on the status line. It is
+         * deliberately not carried to the Jetson: the run record answers the same
+         * question from the other end and from a harder fact, because the session's
+         * peer address is `127.0.0.1` when the phone dialled loopback and a 100.x
+         * address when it crossed the tailnet. A second channel saying the same thing
+         * could disagree with the first.
          */
         fun load(directory: File?): Loaded {
             val file = directory?.let { File(it, FILE_NAME) }
@@ -104,7 +111,19 @@ data class LinkConfig(
             }
             val port = when (val p = root.entries["port"]) {
                 null -> DEFAULT_PORT
-                is JsonValue.Num -> p.value.toInt()
+                // Range-checked as a Long before narrowing. `Long.toInt()` keeps the
+                // low 32 bits rather than saturating, so 4295015107 became 47811 and
+                // 4294967297 became 1, and both were then accepted by `init` -- a
+                // mistyped value silently becoming a different valid one, which is the
+                // failure this whole load path is written to avoid.
+                is JsonValue.Num -> {
+                    if (p.value < 1 || p.value > 65535) {
+                        throw IllegalArgumentException(
+                            "${file.path} `port` is ${p.value}, outside 1..65535"
+                        )
+                    }
+                    p.value.toInt()
+                }
                 else -> throw IllegalArgumentException(
                     "${file.path} `port` is ${p::class.simpleName}, expected a number"
                 )

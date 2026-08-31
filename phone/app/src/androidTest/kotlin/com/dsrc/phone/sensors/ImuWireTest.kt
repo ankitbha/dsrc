@@ -196,9 +196,19 @@ class ImuWireTest {
                       direct)
         val (dx, dy, dz) = direct!!
         // Generous per-axis tolerance: the two readings are taken at different instants
-        // and a handheld device is never perfectly still. A transposition moves a whole
-        // g between axes, which is far outside it.
+        // and a handheld device is never perfectly still.
         val tolerance = 3.0
+        // A Y/Z transposition is invisible wherever the two axes read alike, which is a
+        // lean-back band from 33 to 57 degrees off flat -- at 45 degrees both read
+        // 6.94 and the swap changes nothing. The device's attitude is not this test's
+        // to choose, so the precondition is stated and the numbers are recorded rather
+        // than the test passing on an attitude where it cannot discriminate.
+        assumeTrue(
+            "this device is lying at an attitude where Y and Z read alike " +
+                "(y=$dy z=$dz), so a transposition of values[1] and values[2] is not " +
+                "detectable; stand it flatter or more upright",
+            abs(dy - dz) >= tolerance,
+        )
         assertTrue(
             "the wire's axes do not match the platform's: wire ax=$ax ay=$ay az=$az, " +
                 "sensor x=$dx y=$dy z=$dz",

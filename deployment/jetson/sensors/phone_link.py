@@ -685,6 +685,13 @@ class PhoneLink:
         if self.router is not None:
             record["messages"] = self.router.to_record()
         if self.session is not None:
+            # The address the phone actually dialled from, off the accepted socket.
+            # This is the only fact in the record that says which route the bytes
+            # took: `127.0.0.1` means the phone dialled loopback and the data crossed
+            # USB via `adb reverse`; a 100.x address means it crossed the tailnet.
+            # `SessionStats.peer` carried it all along and this record dropped it,
+            # iterating only the per-channel counters.
+            record["peer"] = self.session.stats().peer
             record["channels"] = {
                 channel.value: {
                     "sent": stats.sent,

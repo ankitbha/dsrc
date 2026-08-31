@@ -236,6 +236,19 @@ class CameraCaptureTest {
         val repeatBytes = repeatFrame!!.jpeg.size
         repeat.stop()
 
+        // A third session at quality 85, which is what makes this ceiling-sensitive.
+        // The mutation this assertion is named for -- `quality.coerceAtMost(85)` at the
+        // compress call, leaving the reported quality at 95 so the equality assertion
+        // above still passes -- reduces the 95 and the repeat session equally, so a
+        // comparison between 95 and 30 alone keeps a large ratio and survives it. If
+        // the encoder is clamped at 85 then 95 and 85 produce the same bytes, and that
+        // is a difference no scene noise explains.
+        val ceiling = start(SensingConfig(cameraHz = 5.0, jpegQuality = 85))
+        val ceilingFrame = awaitOneFrame(ceiling.pipeline, 15_000)
+        assertNotNull("no frame at quality 85", ceilingFrame)
+        val ceilingBytes = ceilingFrame!!.jpeg.size
+        ceiling.stop()
+
         val low = start(SensingConfig(cameraHz = 5.0, jpegQuality = 30))
         val lowFrame = awaitOneFrame(low.pipeline, 15_000)
         assertNotNull("no frame at quality 30", lowFrame)
@@ -269,6 +282,18 @@ class CameraCaptureTest {
                 "($repeatBytes bytes): the quality change is not distinguishable from " +
                 "the scene changing, so the setting is not reaching the encoder",
             qualityChange > maxOf(3.0 * sameQualitySpread, 0.10),
+        )
+
+        // And 95 is not being served as 85. Compared against the same-quality spread,
+        // so it needs no constant calibrated on one device.
+        val ceilingChange = (highBytes - ceilingBytes).toDouble() / highBytes
+        assertTrue(
+            "quality 95 produced $highBytes bytes and quality 85 produced " +
+                "$ceilingBytes, a difference of ${"%.3f".format(ceilingChange)}, while " +
+                "repeating quality 95 moved the size by " +
+                "${"%.3f".format(sameQualitySpread)}: 95 and 85 are not being " +
+                "distinguished, so the encoder is working to a ceiling below 95",
+            ceilingChange > 3.0 * sameQualitySpread,
         )
     }
 
