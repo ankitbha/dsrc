@@ -1,5 +1,9 @@
 package com.dsrc.phone.sensors
 
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.rule.GrantPermissionRule
@@ -20,6 +24,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assume.assumeTrue
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -172,15 +177,38 @@ class ImuWireTest {
         // `values[1]` and `values[2]` in the listener survived every assertion above --
         // the last of the three layers where the axis family was free.
         //
-        // The expected axis is this AVD's fixed orientation. A device lying differently
-        // fails here loudly, with the readings in the message, rather than passing on a
-        // magnitude that never noticed.
+        // Against the platform's OWN reading, not against a fixed orientation. The
+        // assertion used to require gravity on Y, which is where the emulator holds it;
+        // a handset lying on a desk reports it on Z, so the test failed on the target
+        // hardware while the code under test was correct. Measured on moto g power:
+        // ax=0.005 ay=-0.034 az=9.740.
+        //
+        // Reading the sensor directly and comparing axis for axis keeps what the
+        // assertion was for -- a transposition of values[1] and values[2] in the
+        // listener survives a magnitude check -- and drops what it was not for, which
+        // is the orientation the device happens to be in.
         val ax = samples.map { it.ax }.sorted()[samples.size / 2]
         val ay = samples.map { it.ay }.sorted()[samples.size / 2]
         val az = samples.map { it.az }.sorted()[samples.size / 2]
+
+        val direct = readAccelerometerDirectly()
+        assertNotNull("the platform produced no accelerometer reading to compare against",
+                      direct)
+        val (dx, dy, dz) = direct!!
+        // Generous per-axis tolerance: the two readings are taken at different instants
+        // and a handheld device is never perfectly still. A transposition moves a whole
+        // g between axes, which is far outside it.
+        val tolerance = 3.0
         assertTrue(
-            "gravity is not on the axis this AVD reports it on: ax=$ax ay=$ay az=$az",
-            abs(ay - GRAVITY) < 2.0 && abs(ax) < 5.0 && abs(az) < 5.0,
+            "the wire's axes do not match the platform's: wire ax=$ax ay=$ay az=$az, " +
+                "sensor x=$dx y=$dy z=$dz",
+            abs(ax - dx) < tolerance && abs(ay - dy) < tolerance && abs(az - dz) < tolerance,
+        )
+        // And gravity is on exactly one axis, wherever the device is lying, so a reading
+        // that lost a component does not pass by agreeing with an equally lost one.
+        assertTrue(
+            "no axis carries gravity: ax=$ax ay=$ay az=$az",
+            listOf(ax, ay, az).any { abs(abs(it) - GRAVITY) < 3.0 },
         )
 
         // And the stamps are the ones this task is about: on the app's clock, not the
@@ -259,20 +287,51 @@ class ImuWireTest {
         // discriminates. Commanding down and then back up does not: the source began at
         // 50 Hz, so a version that never re-requests is still sitting at 50 when the raise
         // arrives and produces the same answer. Both mutations survived that sequence.
-        val baselineFrom = imuFrames().size
+        // Two baseline windows, so the noise floor is measured on this device rather
+        // than assumed. The delivered rate is bounded by the slower of the two sensors
+        // and by the pairing, not by the commanded rate alone, so how big a raise looks
+        // is a property of the handset.
+        val firstFrom = imuFrames().size
         Thread.sleep(3_000)
-        val baseline = (imuFrames().size - baselineFrom) / 3.0
+        val first = (imuFrames().size - firstFrom) / 3.0
+        val secondFrom = imuFrames().size
+        Thread.sleep(3_000)
+        val second = (imuFrames().size - secondFrom) / 3.0
+        val baseline = maxOf(first, second)
+        val noise = abs(first - second)
 
-        command(imuHz = 200.0)
+        // Commanded at what this device can actually deliver. 200 Hz is above the
+        // accelerometer's maximum on some handsets -- on moto g power the raise produced
+        // 51.3 samples/s against a 50 Hz baseline, so the test failed on hardware that
+        // was behaving correctly. The sensor's `minDelay` is the platform's own
+        // statement of its fastest rate, so ask it rather than assume.
+        val maxHz = fastestAccelerometerHz()
+        assumeTrue(
+            "this device's accelerometer tops out at ${"%.0f".format(maxHz)} Hz, which " +
+                "is not enough above the ${"%.0f".format(baseline)}/s baseline for a " +
+                "raise to be distinguishable",
+            maxHz > baseline * 1.8,
+        )
+        val commanded = minOf(200.0, maxHz)
+
+        command(imuHz = commanded)
         Thread.sleep(1_000)
         val raisedFrom = imuFrames().size
         Thread.sleep(3_000)
         val raised = (imuFrames().size - raisedFrom) / 3.0
 
+        // Above the noise this device actually shows, not above a fixed multiple. The
+        // emulator's raise is large and the handset's is not: measured 51.7/s to 60.7/s,
+        // a 17 per cent increase, which the previous 1.4x threshold rejected while the
+        // code under test was doing its job. The floor is the larger of three times the
+        // baseline-to-baseline variation and ten per cent, so a raise has to clear the
+        // measurement rather than merely exceed it.
+        val floor = baseline + maxOf(3.0 * noise, 0.10 * baseline)
         assertTrue(
-            "commanded 200 Hz from a 50 Hz baseline and measured $raised/s against " +
-                "$baseline/s: a raise the gate cannot serve must reach the source",
-            raised > baseline * 1.4,
+            "commanded ${"%.0f".format(commanded)} Hz from baselines $first/s and " +
+                "$second/s and measured $raised/s, which does not clear $floor/s: " +
+                "a raise the gate cannot serve must reach the source",
+            raised > floor,
         )
     }
 
@@ -456,4 +515,41 @@ class ImuWireTest {
         /** One g, near enough for a check that only has to separate 9.8 from 0. */
         const val GRAVITY = 9.81
     }
+    /** The accelerometer's fastest rate, as the platform states it. */
+    private fun fastestAccelerometerHz(): Double {
+        val manager = InstrumentationRegistry.getInstrumentation().targetContext
+            .getSystemService(SensorManager::class.java)
+        val sensor = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return 0.0
+        // `minDelay` is the shortest interval the sensor supports, in microseconds. Zero
+        // means on-change only, which cannot serve a rate at all.
+        return if (sensor.minDelay <= 0) 0.0 else 1_000_000.0 / sensor.minDelay
+    }
+
+    /** One accelerometer reading straight from the platform, or null on timeout. */
+    private fun readAccelerometerDirectly(timeoutMs: Long = 4_000): Triple<Double, Double, Double>? {
+        val manager = InstrumentationRegistry.getInstrumentation().targetContext
+            .getSystemService(SensorManager::class.java)
+        val sensor = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) ?: return null
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var reading: Triple<Double, Double, Double>? = null
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                if (reading == null) {
+                    reading = Triple(event.values[0].toDouble(),
+                                     event.values[1].toDouble(),
+                                     event.values[2].toDouble())
+                    latch.countDown()
+                }
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+        }
+        manager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_FASTEST)
+        try {
+            latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } finally {
+            manager.unregisterListener(listener)
+        }
+        return reading
+    }
+
 }

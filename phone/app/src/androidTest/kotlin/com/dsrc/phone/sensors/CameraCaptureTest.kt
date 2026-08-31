@@ -14,6 +14,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import kotlin.math.abs
 import org.junit.runner.RunWith
 
 /**
@@ -222,6 +223,19 @@ class CameraCaptureTest {
         val highBytes = highFrame.jpeg.size
         high.stop()
 
+        // A second session at the SAME quality, to measure what this device's
+        // first-frame size does when nothing changes. The previous threshold was 0.72,
+        // derived from an emulator whose true q30/q95 ratio is 0.65 against a
+        // first-frame spread of 0.74 per cent. A real camera points at a real scene with
+        // auto-exposure and sensor noise, so its spread is larger and its ratio is
+        // higher: measured 0.829 on moto g power, which the 0.72 threshold rejected
+        // while the quality was reaching the encoder correctly.
+        val repeat = start(SensingConfig(cameraHz = 5.0, jpegQuality = 95))
+        val repeatFrame = awaitOneFrame(repeat.pipeline, 15_000)
+        assertNotNull("no second frame at quality 95", repeatFrame)
+        val repeatBytes = repeatFrame!!.jpeg.size
+        repeat.stop()
+
         val low = start(SensingConfig(cameraHz = 5.0, jpegQuality = 30))
         val lowFrame = awaitOneFrame(low.pipeline, 15_000)
         assertNotNull("no frame at quality 30", lowFrame)
@@ -241,12 +255,20 @@ class CameraCaptureTest {
         //
         // The constant is specific to the 95-versus-30 pair. At 95 versus 85 the true ratio
         // is 0.85 and this assertion would fail, so it is not portable to other qualities.
+        // The quality change has to move the size by more than repeating the same
+        // quality does. That is the invariant the test is for, and unlike a fixed ratio
+        // it holds on any camera pointed at any scene: `quality.coerceAtMost(85)`, the
+        // mutation this assertion exists to kill, moves the size by far less than a
+        // 95-to-30 change does on either device.
+        val sameQualitySpread = abs(repeatBytes - highBytes).toDouble() / highBytes
+        val qualityChange = (highBytes - lowFrame.jpeg.size).toDouble() / highBytes
         assertTrue(
             "quality 30 produced ${lowFrame.jpeg.size} bytes against $highBytes at 95, " +
-                "a ratio of ${"%.3f".format(lowFrame.jpeg.size.toDouble() / highBytes)} -- " +
-                "not the ~0.65 a real quality change gives, so the setting is not reaching " +
-                "the encoder",
-            lowFrame.jpeg.size < highBytes * 0.72,
+                "a reduction of ${"%.3f".format(qualityChange)}, while repeating quality " +
+                "95 moved the size by ${"%.3f".format(sameQualitySpread)} " +
+                "($repeatBytes bytes): the quality change is not distinguishable from " +
+                "the scene changing, so the setting is not reaching the encoder",
+            qualityChange > maxOf(3.0 * sameQualitySpread, 0.10),
         )
     }
 
