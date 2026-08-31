@@ -55,8 +55,19 @@ def peer_paths(timeout_s: float = 10.0) -> dict[str, Any]:
             # alone dropped one of them and which one survived was dictionary order.
             # Recorded rather than overwritten: a lost peer that nothing mentions is
             # the failure this whole module exists to avoid one level up.
-            collisions.append(name)
-            name = f"{name} [{(peer.get('TailscaleIPs') or ['?'])[0]}]"
+            if name not in collisions:
+                collisions.append(name)
+            # Unique by construction. Suffixing the first address alone was not: an
+            # online peer with an empty `TailscaleIPs` -- a shape this suite already
+            # constructs -- produced the constant suffix `[?]`, so a third peer on the
+            # same name overwrote the second and one was still lost. Counting the
+            # survivors then disagreed with the collision list.
+            addresses = peer.get("TailscaleIPs") or []
+            suffix = addresses[0] if addresses else f"#{len(peers)}"
+            candidate = f"{name} [{suffix}]"
+            while candidate in peers:
+                candidate = f"{name} [{suffix} #{len(peers)}]"
+            name = candidate
         peers[name] = {
             "addresses": peer.get("TailscaleIPs", []),
             "direct_addr": cur_addr,
@@ -99,8 +110,32 @@ def path_for_address(status: dict[str, Any], address: str) -> dict[str, Any]:
                 "detail": f"tailscale status unavailable: {status.get('reason')}"}
     for name, peer in (status.get("peers") or {}).items():
         if host in (peer.get("addresses") or []):
-            return {"session_peer": address, "over_tailnet": True,
-                    "peer": name, "path": peer.get("path"), "relay": peer.get("relay")}
+            path = peer.get("path")
+            return {
+                "session_peer": address,
+                "over_tailnet": True,
+                "peer": name,
+                "path": path,
+                # Only on a relayed path. Tailscale sets `Relay` on a direct connection
+                # too -- it names the region that WOULD be used -- which is why `path`
+                # keys on `CurAddr`. Returning it unconditionally made `run_demo` print
+                # "direct via nyc", attributing a relay hop of tens of milliseconds to a
+                # connection that made none, which is the one thing this module exists
+                # to get right.
+                "relay": peer.get("relay") if path == "relay" else "",
+            }
+    # Belonging to the tailnet and having an online peer are different questions, and
+    # only the first is a property of the address. `peer_paths` lists online peers
+    # only, so a run that ended BECAUSE the phone left the tailnet -- which is the case
+    # the redial timeout exists for -- looked up its own peer after it went offline and
+    # recorded `not_tailnet`: the same two field values an `adb reverse` run writes.
+    if _in_tailnet_range(host):
+        return {
+            "session_peer": address,
+            "over_tailnet": True,
+            "path": "peer_offline",
+            "detail": f"{host} is a tailnet address and no online peer holds it now",
+        }
     return {
         "session_peer": address,
         "over_tailnet": False,
@@ -109,3 +144,21 @@ def path_for_address(status: dict[str, Any], address: str) -> dict[str, Any]:
         # run looks like, and the whole point of task 32 is not to be that run.
         "detail": f"{host} is not a tailnet address of any online peer",
     }
+
+
+def _in_tailnet_range(host: str) -> bool:
+    """Whether an address is in the range Tailscale assigns from.
+
+    100.64.0.0/10, the CGNAT block, and the `fd7a:115c:a1e0::/48` ULA prefix. Address
+    membership does not depend on any peer being online, which is the point: it
+    separates "this was not the tailnet" from "this was, and the peer has since gone".
+    """
+    import ipaddress
+
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if parsed.version == 4:
+        return parsed in ipaddress.ip_network("100.64.0.0/10")
+    return parsed in ipaddress.ip_network("fd7a:115c:a1e0::/48")

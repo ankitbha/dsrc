@@ -684,14 +684,24 @@ class PhoneLink:
         record: dict[str, Any] = {}
         if self.router is not None:
             record["messages"] = self.router.to_record()
-        if self.session is not None:
+        # Read ONCE. Two loads of `self.session` let a rebind land between them and
+        # pair one handset's peer address with another handset's channel counters --
+        # and the address is the field that says which handset the counters belong to.
+        # `to_record` is called from the tick loop's thread while the supervisor is
+        # still alive, so the window is reachable.
+        session = self.session
+        if session is not None:
             # The address the phone actually dialled from, off the accepted socket.
             # This is the only fact in the record that says which route the bytes
             # took: `127.0.0.1` means the phone dialled loopback and the data crossed
             # USB via `adb reverse`; a 100.x address means it crossed the tailnet.
             # `SessionStats.peer` carried it all along and this record dropped it,
             # iterating only the per-channel counters.
-            record["peer"] = self.session.stats().peer
+            stats = session.stats()
+            record["peer"] = stats.peer
+            # The session this row describes, so a reader can tell a record taken
+            # before a redial from one taken after.
+            record["session_id"] = stats.session_id
             record["channels"] = {
                 channel.value: {
                     "sent": stats.sent,
@@ -715,7 +725,7 @@ class PhoneLink:
                     # has the property.
                     "abandoned_inbound": stats.abandoned_inbound,
                 }
-                for channel, stats in self.session.stats().channels.items()
+                for channel, stats in stats.channels.items()
             }
         return record
 

@@ -198,17 +198,39 @@ class ImuWireTest {
         // Generous per-axis tolerance: the two readings are taken at different instants
         // and a handheld device is never perfectly still.
         val tolerance = 3.0
-        // A Y/Z transposition is invisible wherever the two axes read alike, which is a
-        // lean-back band from 33 to 57 degrees off flat -- at 45 degrees both read
-        // 6.94 and the swap changes nothing. The device's attitude is not this test's
-        // to choose, so the precondition is stated and the numbers are recorded rather
-        // than the test passing on an attitude where it cannot discriminate.
-        assumeTrue(
-            "this device is lying at an attitude where Y and Z read alike " +
-                "(y=$dy z=$dz), so a transposition of values[1] and values[2] is not " +
-                "detectable; stand it flatter or more upright",
-            abs(dy - dz) >= tolerance,
+        // A transposition of two axes is invisible wherever those two axes read alike:
+        // swapping them moves each by their difference, and a per-axis comparison
+        // cannot see a move smaller than its own tolerance. That is a property of the
+        // attitude, not of the code, and no single assertion escapes it.
+        //
+        // So the pairs are named. Y/Z is the one this test exists for -- the listener's
+        // `values[1]`/`values[2]` -- and it is required. X/Y and X/Z are reported
+        // rather than required, because on a phone lying flat, which is the attitude
+        // this test was recalibrated for, X and Y both read near zero: measured
+        // ax=0.005 ay=-0.034, a difference of 0.039 against a tolerance of 3.0. An
+        // assertion that claimed to cover that pair there would be one that cannot
+        // fail.
+        val pairs = mapOf(
+            "values[1]/values[2] (Y/Z)" to abs(dy - dz),
+            "values[0]/values[1] (X/Y)" to abs(dx - dy),
+            "values[0]/values[2] (X/Z)" to abs(dx - dz),
         )
+        val undetectable = pairs.filterValues { it < tolerance }.keys
+        assumeTrue(
+            "at this attitude Y and Z read alike (y=$dy z=$dz), so the transposition " +
+                "this test exists for is not detectable; stand the device flatter or " +
+                "more upright",
+            pairs.getValue("values[1]/values[2] (Y/Z)") >= tolerance,
+        )
+        // Said out loud rather than left for a reader to work out from the attitude:
+        // which swaps this run could not have caught.
+        if (undetectable.isNotEmpty()) {
+            android.util.Log.i(
+                "ImuWireTest",
+                "attitude ax=$dx ay=$dy az=$dz leaves these transpositions " +
+                    "undetectable: ${undetectable.joinToString()}",
+            )
+        }
         assertTrue(
             "the wire's axes do not match the platform's: wire ax=$ax ay=$ay az=$az, " +
                 "sensor x=$dx y=$dy z=$dz",

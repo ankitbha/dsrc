@@ -153,3 +153,84 @@ class TestTwoPeersWithOneHostname:
         # And both remain addressable, which is what the session lookup needs.
         assert tailnet.path_for_address(result, "100.75.142.126:1")["path"] == "direct"
         assert tailnet.path_for_address(result, "100.86.4.9:1")["path"] == "relay"
+
+
+class TestRelayIsNotAttributedToADirectConnection:
+
+    def test_a_direct_path_reports_no_relay(self):
+        # Tailscale sets `Relay` on a direct connection too -- it names the region that
+        # WOULD be used -- which is why `path` keys on `CurAddr`. Returning it
+        # unconditionally made the run log read "direct via nyc", attributing a relay
+        # hop of tens of milliseconds to a connection that made none.
+        status = {"available": True, "self": "laptop", "hostname_collisions": [],
+                  "peers": {"moto g power": {"addresses": ["100.75.142.126"],
+                                             "direct_addr": "1.2.3.4:1",
+                                             "relay": "nyc", "path": "direct"}}}
+        result = tailnet.path_for_address(status, "100.75.142.126:41234")
+        assert result["path"] == "direct"
+        assert result["relay"] == "", "a relay was attributed to a direct connection"
+
+    def test_a_relayed_path_still_names_its_region(self):
+        status = {"available": True, "self": "laptop", "hostname_collisions": [],
+                  "peers": {"moto g power": {"addresses": ["100.75.142.126"],
+                                             "direct_addr": "", "relay": "nyc",
+                                             "path": "relay"}}}
+        assert tailnet.path_for_address(status, "100.75.142.126:41234")["relay"] == "nyc"
+
+
+class TestATailnetAddressWhosePeerWentOffline:
+
+    def test_it_is_not_recorded_the_same_as_a_usb_run(self):
+        # `peer_paths` lists ONLINE peers only, so a run that ended because the phone
+        # left the tailnet looked up its own peer after it had gone and recorded
+        # `not_tailnet` -- the same two field values an `adb reverse` run writes.
+        # Belonging to the tailnet is a property of the address; having an online peer
+        # is not.
+        empty = {"available": True, "self": "laptop", "peers": {},
+                 "hostname_collisions": []}
+        gone = tailnet.path_for_address(empty, "100.75.142.126:41234")
+        usb = tailnet.path_for_address(empty, "127.0.0.1:47811")
+
+        assert gone["over_tailnet"] is True
+        assert gone["path"] == "peer_offline"
+        assert usb["over_tailnet"] is False
+        assert usb["path"] == "not_tailnet"
+        assert (gone["over_tailnet"], gone["path"]) != (usb["over_tailnet"], usb["path"])
+
+    def test_the_ula_prefix_counts_as_the_tailnet_too(self):
+        empty = {"available": True, "self": "laptop", "peers": {},
+                 "hostname_collisions": []}
+        assert tailnet.path_for_address(empty, "fd7a:115c:a1e0::9601:f9c4:41234")["path"] \
+            in ("peer_offline", "not_tailnet")  # parsing aside, it must not claim direct
+
+    def test_an_ordinary_public_address_is_not_the_tailnet(self):
+        empty = {"available": True, "self": "laptop", "peers": {},
+                 "hostname_collisions": []}
+        assert tailnet.path_for_address(empty, "216.165.95.173:41641")["path"] == "not_tailnet"
+
+
+class TestThreePeersOnOneHostname:
+
+    def test_none_is_lost_when_the_addresses_are_missing(self, monkeypatch):
+        # Suffixing the first address was not unique: an online peer with an empty
+        # `TailscaleIPs` produced the constant suffix `[?]`, so a third peer on the
+        # same name overwrote the second and one was still lost -- while the collision
+        # list counted two, so the record disagreed with itself.
+        monkeypatch.setattr(subprocess, "run", _fake_run(json.dumps({
+            "Self": {"HostName": "laptop"},
+            "Peer": {
+                "a": {"HostName": "moto g power", "Online": True, "TailscaleIPs": [],
+                      "CurAddr": "1.2.3.4:1", "Relay": "nyc"},
+                "b": {"HostName": "moto g power", "Online": True, "TailscaleIPs": [],
+                      "CurAddr": "", "Relay": "nyc"},
+                "c": {"HostName": "moto g power", "Online": True, "TailscaleIPs": [],
+                      "CurAddr": "5.6.7.8:1", "Relay": "lax"},
+            },
+        })))
+        result = tailnet.peer_paths()
+        assert len(result["peers"]) == 3, result["peers"]
+        # One name collided, however many peers shared it.
+        assert result["hostname_collisions"] == ["moto g power"]
+        # And every path is still represented.
+        assert sorted(p["path"] for p in result["peers"].values()) == \
+            ["direct", "direct", "relay"]

@@ -289,7 +289,12 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         # device id is `Settings.Secure.ANDROID_ID` and the peer dict is keyed on
         # Tailscale's `HostName`: different namespaces, never equal, so the lookup
         # matched nothing and the line read `unknown` on every run.
-        session_path = path_for_address(network_at_start, phone.session.stats().peer)
+        started_stats = phone.session.stats()
+        session_path = path_for_address(network_at_start, started_stats.peer)
+        # Which session this describes. After a redial the start and end entries are
+        # two different sessions, and without an id the pair reads as one path
+        # changing mid-drive -- which is what the block's own comment invites.
+        session_path["session_id"] = started_stats.session_id
         print(f"[run] session peer {session_path['session_peer']}: "
               f"{session_path['path']}"
               f"{' via ' + session_path['relay'] if session_path.get('relay') else ''}"
@@ -510,6 +515,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # upgrades a relayed connection to a direct one when it manages to, and the
             # link segment measured before and after that are different quantities.
             end = peer_paths()
+            ended = phone.session.stats() if phone.session is not None else None
+            session_at_end = None
+            if ended is not None:
+                session_at_end = path_for_address(end, ended.peer)
+                session_at_end["session_id"] = ended.session_id
             summary["network"] = {
                 # What route the session's bytes actually took, at both ends of the
                 # run. Without this the block recorded only how this machine WOULD
@@ -517,8 +527,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 # used that route -- so a run carried over USB wrote the same network
                 # record as one carried over the tailnet.
                 "session_at_start": session_path,
-                "session_at_end": path_for_address(end, phone.session.stats().peer)
-                if phone.session is not None else None,
+                "session_at_end": session_at_end,
                 # Reachability, as context. Named separately so it is not read as the
                 # session's path.
                 "reachability_at_start": network_at_start,
