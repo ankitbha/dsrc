@@ -301,15 +301,31 @@ class ImuWireTest {
     }
 
     @Test
-    fun aCommandRaisingTheRateIsHonouredOnTheWire() {
+    fun aCommandRaisingTheRateReachesTheSource() {
         // The direction the gate cannot serve. A RateGate only ever *drops* samples the
         // platform already produced, so raising imu_hz above what was requested at start
-        // changed nothing on the wire while the pipeline reported the new rate as in force
-        // -- commanded 200 Hz, measured 50, reported 200, with nothing on either side of
-        // the link recording the difference. The source re-requests its period now.
+        // changed nothing while the pipeline reported the new rate as in force --
+        // commanded 200 Hz, measured 50, reported 200, with nothing on either side of the
+        // link recording the difference. The source re-requests its period now.
         //
-        // Measured by counting frames the peer actually received, because the pipeline's
-        // own rateHz is exactly the number that was lying.
+        // Measured on `seen`, the count incremented in the sensor callback, so the
+        // quantity is what the platform delivered to this process. Two quantities were
+        // rejected for this, for opposite reasons.
+        //
+        // `stats.rateHz` is `gate.hz`, the value `setRate` stored. It is the number that
+        // was lying in the original defect, so asserting on it would restore the exact
+        // blindness this test exists to escape. The same goes for `ImuSource.requestedHz`.
+        //
+        // Frames the peer received -- what this test used to measure -- is bounded by the
+        // smaller of the source rate and the socket's drain rate. On handset ZY227VV4XC
+        // the socket drains about 50 frames/s and the 50 Hz baseline already sits there,
+        // so a raise cannot show: measured 53.0/s and 53.3/s against a 56.8/s floor while
+        // the source was running at the raised rate, with the session recording
+        // `enqueued=756, sent=525, dropped=0` -- 231 samples were queued, not lost. That
+        // makes the wire rate fail under two different conditions, a command that never
+        // reached the source and a socket that cannot carry the result, with no way to
+        // say which. The peer-received rate is still measured and logged below, because
+        // the transport's ceiling is worth seeing; it is not what the assertion turns on.
         SensingService.start(context)
         awaitState(SensingState.RUNNING)
         assertTrue(pollUntil(15_000) { sessions.any { it.isRunning } })
@@ -323,14 +339,22 @@ class ImuWireTest {
         // than assumed. The delivered rate is bounded by the slower of the two sensors
         // and by the pairing, not by the commanded rate alone, so how big a raise looks
         // is a property of the handset.
-        val firstFrom = imuFrames().size
+        fun sourceSeen() = requireNotNull(SensingService.liveImu).stats.seen
+        fun refusedBySink() = requireNotNull(SensingService.liveImu).stats.refusedBySink
+
+        val firstFrom = sourceSeen()
+        val firstWireFrom = imuFrames().size
         Thread.sleep(3_000)
-        val first = (imuFrames().size - firstFrom) / 3.0
-        val secondFrom = imuFrames().size
+        val first = (sourceSeen() - firstFrom) / 3.0
+        val firstWire = (imuFrames().size - firstWireFrom) / 3.0
+        val secondFrom = sourceSeen()
+        val secondWireFrom = imuFrames().size
         Thread.sleep(3_000)
-        val second = (imuFrames().size - secondFrom) / 3.0
+        val second = (sourceSeen() - secondFrom) / 3.0
+        val secondWire = (imuFrames().size - secondWireFrom) / 3.0
         val baseline = maxOf(first, second)
         val noise = abs(first - second)
+        val refusedBefore = refusedBySink()
 
         // Commanded at what this device can actually deliver. 200 Hz is above the
         // accelerometer's maximum on some handsets -- on moto g power the raise produced
@@ -348,9 +372,11 @@ class ImuWireTest {
 
         command(imuHz = commanded)
         Thread.sleep(1_000)
-        val raisedFrom = imuFrames().size
+        val raisedFrom = sourceSeen()
+        val raisedWireFrom = imuFrames().size
         Thread.sleep(3_000)
-        val raised = (imuFrames().size - raisedFrom) / 3.0
+        val raised = (sourceSeen() - raisedFrom) / 3.0
+        val raisedWire = (imuFrames().size - raisedWireFrom) / 3.0
 
         // Above the noise this device actually shows, not above a fixed multiple. The
         // emulator's raise is large and the handset's is not: measured 51.7/s to 60.7/s,
@@ -359,11 +385,32 @@ class ImuWireTest {
         // baseline-to-baseline variation and ten per cent, so a raise has to clear the
         // measurement rather than merely exceed it.
         val floor = baseline + maxOf(3.0 * noise, 0.10 * baseline)
+        // Recorded rather than asserted: how much of the raise the link carried. The two
+        // rates diverging is the transport's ceiling, not a fault in the rate command,
+        // and a reader of this output should be able to see it without running anything.
+        android.util.Log.i(
+            "ImuWireTest",
+            "source $first/s and $second/s -> $raised/s; " +
+                "wire $firstWire/s and $secondWire/s -> $raisedWire/s",
+        )
         assertTrue(
-            "commanded ${"%.0f".format(commanded)} Hz from baselines $first/s and " +
-                "$second/s and measured $raised/s, which does not clear $floor/s: " +
-                "a raise the gate cannot serve must reach the source",
+            "commanded ${"%.0f".format(commanded)} Hz from source baselines $first/s " +
+                "and $second/s and measured $raised/s, which does not clear $floor/s: " +
+                "a raise the gate cannot serve must reach the source (the wire carried " +
+                "$raisedWire/s, which this assertion does not turn on)",
             raised > floor,
+        )
+        // Bought back from the wire measurement, which did cover it: the sink refusing
+        // what the source produced. This does NOT cover the channel evicting a sample --
+        // `Session.enqueue` drops the oldest and returns true, so an eviction is not a
+        // refusal -- and the phone-side channel counters are not reachable from an
+        // instrumented test, so that case is uncovered here and named rather than implied.
+        assertEquals(
+            "the sink refused ${refusedBySink() - refusedBefore} samples across the " +
+                "raise; a raise that reaches the source and is then refused is not a " +
+                "raise that took effect",
+            refusedBefore,
+            refusedBySink(),
         )
     }
 

@@ -1025,26 +1025,40 @@ tunnels over USB and is unaffected.
     placeholders and the run establishes wiring rather than decision quality; and
     the two machines sat on one desk, so the link segment is a tailnet path within
     one building and says nothing about a cellular link or a moving vehicle.
-    **Also open, and blocking the gate:**
-    `ImuWireTest.aCommandRaisingTheRateIsHonouredOnTheWire` fails on handset
-    ZY227VV4XC — commanded 200 Hz from baselines of 51.7/s and 50.3/s, measured
-    53.0/s against a 56.8/s floor, and again at 53.3/s on a second run. Neither the
-    production code nor that test has changed since the gate was last green on this
-    handset (`8b4811a`); the only edit under `phone/` is to this file's gravity
-    assertion. **The raise does reach the source.** The service's own teardown line
-    for that test reads `rateHz=200.0`, with `seen=765`, `delivered=756`,
-    `refusedBySink=0`, and mean gyro age falling from 13.9 ms at baseline to 8.3 ms
-    under the raise. What does not reach the wire is the sample: the same session
-    records `imu=ChannelCounters(enqueued=756, dropped=0, sent=525, abandoned=0)`,
-    so 231 samples were still queued when the session ended and the socket drained
-    about 50 frames per second. The test measures the peer-received rate, so on this
-    handset it measures the transport's throughput rather than whether the command
-    reached the source, and no threshold on the wire can separate the two. Both
-    sensors advertise a 500 Hz maximum, so the hardware is not the cap. The
-    assertion is left as it is, because `8b4811a` established that every way of
-    making it pass inside the suite removes its ability to fail; what needs deciding
-    is whether the quantity it asserts on should be the source's rate, which the
-    stats above already carry, rather than the wire's.
+    **A test that measured the transport and reported it as the command.**
+    `aCommandRaisingTheRateIsHonouredOnTheWire` failed on handset ZY227VV4XC at
+    53.0/s and 53.3/s against a 56.8/s floor, on production code that had not
+    changed since the gate was last green (`8b4811a`). The raise did reach the
+    source: that session recorded `rateHz=200.0`, `seen=765`, `delivered=756`,
+    `refusedBySink=0`, with mean gyro age falling from 13.9 ms to 8.3 ms. What did
+    not reach the wire was the sample —
+    `imu=ChannelCounters(enqueued=756, dropped=0, sent=525, abandoned=0)`, so 231
+    samples were queued and the socket drained about 50 frames per second, while
+    the 50 Hz baseline already sat at that ceiling. **The wire rate is bounded by
+    the smaller of the source rate and the socket's drain rate, so it failed under
+    two different conditions — a command that never reached the source, and a socket
+    that could not carry the result — with nothing to say which.** Both sensors
+    advertise a 500 Hz maximum, so the hardware was not the cap.
+    The assertion now reads `ImuPipeline.seen`, incremented in the sensor callback,
+    so the quantity is what the platform delivered to the process; the windows,
+    the noise-derived floor and the command are unchanged, and the method is
+    `aCommandRaisingTheRateReachesTheSource`. Two quantities were rejected, for
+    opposite reasons: `stats.rateHz` is `gate.hz`, the stored command, and is the
+    number that was lying in the original defect; the wire rate is the one that
+    cannot see a raise on this handset. **Measured on both sides of the change:**
+    with the source re-requesting its period the source rate went 50.3/s to
+    114.3/s, a factor of 2.27, while the wire went 50.3/s to 51.7/s, a factor of
+    1.03; with `ImuSource.setRate` returning without re-registering — the pre-fix
+    behaviour — the source rate went 50.7/s to 50.3/s and the test failed. So the
+    source rate separates the defect from the fix by a factor of 2.27 and the wire
+    rate by 2.6 per cent, which is inside its own noise. The wire rate is still
+    measured and logged, because the transport's ceiling is worth seeing.
+    Coverage given up, named rather than implied: this test no longer covers the
+    segment from pipeline to peer. Half of that is bought back by requiring
+    `refusedBySink` not to increase across the raise. The other half is not — a
+    channel eviction is not a sink refusal, since `Session.enqueue` drops the oldest
+    and returns true, and the phone-side channel counters are not reachable from an
+    instrumented test.
 
 ## G. Instrumentation
 
