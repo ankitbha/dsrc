@@ -1,15 +1,25 @@
-"""Task 36's two central claims, proved end to end: a real `ObservationResult`
-through `inputs_from` into `SensingController.decide`, not a hand-built
-`Inputs`.
+"""Two claims about the accelerometer path, proved end to end: a real
+`ObservationResult` through `inputs_from` into `SensingController.decide`,
+not a hand-built `Inputs`.
 
-1. The accelerometer path provably changes no rate: a substituted
-   acceleration and a measured calm one are different records with
-   identical rates.
-2. The stale-window guard (D6) is the one change in this task that can
-   remove a rate raise, and only there: a dropout entered with a frozen
+1. Through the sensing controller, a substituted acceleration changes no
+   rate: a substituted acceleration and a measured calm one are different
+   records with identical rates.
+2. The stale-window guard is the change that lets a dropout release a raise
+   it would otherwise have held forever: a dropout entered with a frozen
    window whose slope exceeds the event threshold latches the active rates
    before the guard applies, and returns to idle once it does and the hold
    elapses.
+
+Neither claim is "this substitution can only ever lower a rate" -- it is
+not. `ego_acceleration` is also an encoder slot the actor's own policy
+reads, so replacing a frozen slope with 0.0 changes `encoded` and can move
+`policy_margin`, which feeds a SEPARATE raise rule
+(`advisory_margin_narrow`) in either direction. That mechanism is pinned in
+`test_observation_builder.py` (the guard boundary changes the encoded
+vector, not only the label); no threshold crossing has been observed
+against a random-init policy, and nothing here claims one has been ruled
+out for a trained one.
 """
 
 from __future__ import annotations
@@ -126,10 +136,12 @@ class TestTheAccelerometerPathChangesNoRate:
 
 
 class TestTheStaleWindowGuardIsTheOneRateChange:
-    """The one behaviour change in this task, asserted directly: a dropout
-    entered with a frozen window whose slope exceeds `EVENT_ACCEL_MPS2`
-    latches `ACTIVE_RATES` before the guard applies and returns to
-    `IDLE_RATES` after `HOLD_S` once it does.
+    """A dropout entered with a frozen window whose slope exceeds
+    `EVENT_ACCEL_MPS2` latches `ACTIVE_RATES` on real evidence, and the
+    staleness guard is what lets that latch release rather than holding it
+    on a frozen value forever: once the guard refuses the window, the rate
+    returns to `IDLE_RATES` after `HOLD_S` elapses with no other raise rule
+    firing.
     """
 
     def test_the_camera_latches_then_releases_across_the_dropout(self):
@@ -156,26 +168,25 @@ class TestTheStaleWindowGuardIsTheOneRateChange:
         assert decision.attribution.rules[Trigger.EVENT].status == RULE_FIRED
         assert decision.rates["camera_hz"] == ACTIVE_RATES["camera_hz"]
 
-        # Phase 2: GPS drops out entirely. Within `gps_stale_after_s` of the
-        # last fresh fix the window is frozen, not invented -- it is still
-        # `derived`, the event rule still correctly fires on it, and the
-        # camera stays latched.
+        # Phase 2: GPS is lost outright (not aging in place -- an abrupt
+        # `valid=False`), so `gps_fresh` is false on this very tick and
+        # `ego_acceleration` is refused on the SAME tick `ego_speed` is,
+        # with no grace period of its own. The camera stays latched only
+        # because the earlier real event is still within its `HOLD_S` hold,
+        # not because the frozen slope is still being reported as evidence.
         dead_gps = GpsFix(valid=False)
         decision, obs_result = step(dead_gps, 1.0)
-        assert obs_result.field_sources["ego_acceleration"] == "derived"
-        assert decision.attribution.rules[Trigger.EVENT].status == RULE_FIRED
-        assert decision.rates["camera_hz"] == ACTIVE_RATES["camera_hz"]
-
-        # Phase 3: past `gps_stale_after_s` (cumulative 2.5 s into the
-        # dropout), the guard refuses the frozen window -- this is the one
-        # rate-affecting change in the task.
-        decision, obs_result = step(dead_gps, 1.5)
+        assert obs_result.field_sources["ego_speed"] == "fallback_neutral"
         assert obs_result.field_sources["ego_acceleration"] == "fallback_neutral"
         assert decision.attribution.rules[Trigger.EVENT].status == RULE_NOT_EVALUABLE
         assert decision.attribution.rules[Trigger.EVENT].missing == ("ego_acceleration",)
+        assert decision.rates["camera_hz"] == ACTIVE_RATES["camera_hz"]
 
-        # Phase 4: once the hold from the last true evidence elapses with no
-        # other raise rule firing, the rate returns to idle.
+        # Phase 3: once the hold from that last real event elapses with no
+        # other raise rule firing, the rate returns to idle -- this release
+        # is the guard's actual effect: without it, a frozen window whose
+        # slope still exceeds the threshold would keep re-arming the hold on
+        # every tick of the dropout instead of ever letting it lapse.
         decision, obs_result = step(dead_gps, HOLD_S + 1.0)
         assert decision.rates["camera_hz"] == IDLE_RATES["camera_hz"]
         assert decision.trigger == Trigger.IDLE
