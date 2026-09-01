@@ -1351,6 +1351,15 @@ MUTATIONS = [
      '    born_live = bool(sensing_ticks) and sensing_ticks[0]["sensing"]["shadow"] is False',
      '    born_live = any(t["sensing"]["shadow"] is False for t in sensing_ticks)',
      "python"),
+    # `first_live_tick_id` exists so a reader can find the tick in the log, not
+    # to restate how many ticks preceded it -- the two only coincide on a log
+    # whose ids happen to equal their own position. Caught by a drive whose
+    # logged ids do not start at 0.
+    ("score_shadow: first_live_tick_id reports the tick's position instead of its logged id",
+     "deployment/jetson/score_shadow.py",
+     '            first_live_tick_id = t.get("tick_id")',
+     "            first_live_tick_id = i",
+     "python"),
 ]
 
 RESULTS = {

@@ -129,6 +129,7 @@ def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(
               telemetry_at: frozenset[int] | None = None,
               accel_ticks: frozenset = frozenset(),
               thermal_status_at: Callable[[int], str] | None = None,
+              tick_id_base: int = 1000,
               name: str = "run") -> Path:
     """A run directory built from a real `SensingLoop`, so every `sensing`
     block scored here is byte-for-byte what `TickOutcome.to_record()` emits.
@@ -138,6 +139,11 @@ def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(
     assigned stays in place, exactly as `PhoneLink.telemetry` behaves when
     the reporting thread has died. `telemetry=True` with `telemetry_at=None`
     keeps the old behaviour: a fresh report on every tick.
+
+    Logged `tick_id`s start at `tick_id_base`, not 0: a reader that reported
+    a tick's position in the log in place of its logged id would be
+    indistinguishable from a correct one on ids that happen to equal their
+    own index, which every drive built here used to be.
     """
     clock = Clock()
     modes = ModeHolder(SHADOW, clock=clock)
@@ -157,7 +163,7 @@ def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(
         density = 0 if i in feed_ticks else 2
         accel = 3.0 if i in accel_ticks else 0.0
         outcome = loop.on_tick(_tick(i, accel=accel, feed=feed, density=density), phone)
-        lines.append({"type": "tick", "tick_id": i, "sensing": outcome.to_record()})
+        lines.append({"type": "tick", "tick_id": tick_id_base + i, "sensing": outcome.to_record()})
 
     run_dir = tmp_path / name
     run_dir.mkdir()
@@ -289,7 +295,7 @@ class TestReplayIdentityGate:
         result = score_shadow.score(run_dir, {"copy": lambda clock: SensingController(clock=clock)})
         assert result["replay_identity"]["status"] == "failed"
         assert result["replay_identity"]["mismatched"] >= 1
-        assert result["replay_identity"]["first_mismatch"]["tick_id"] == 5
+        assert result["replay_identity"]["first_mismatch"]["tick_id"] == 1005
         assert "keys" in result["replay_identity"]["first_mismatch"]
         assert "candidates" not in result
 
@@ -356,9 +362,20 @@ class TestSegments:
         run_dir = write_run(tmp_path, n=10, live_from=4)
         result = score_shadow.score(run_dir)
         assert result["segments"] == {
-            "reference_ticks": 4, "contaminated_ticks": 6, "first_live_tick_id": 4,
+            "reference_ticks": 4, "contaminated_ticks": 6, "first_live_tick_id": 1004,
         }
         assert result["limits"]["reference_rates_hold"] is False
+
+    def test_first_live_tick_id_is_the_logged_id_not_the_index(self, tmp_path):
+        # Every drive `write_run` builds numbers its ticks from a non-zero
+        # base, so an index reported in place of the logged id would already
+        # be caught above -- this drives the same point through a log with no
+        # `summary.json`, where `_limits` and `_segments` both read straight
+        # off the ticks, and with an offset chosen to be unmistakable.
+        run_dir = _promoted_drive(tmp_path, live_from=10, tick_id_base=5000, name="offset")
+        seg = score_shadow.score(run_dir)["segments"]
+        assert seg["reference_ticks"] == 10
+        assert seg["first_live_tick_id"] == 5010
 
 
 class TestLimitsDerivedFromTicks:
