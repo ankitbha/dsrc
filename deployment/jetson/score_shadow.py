@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""Score candidate sensing controllers against one drive's logged decisions.
+
+Task 30 recorded the decision, task 31 sent it, task 34 gave every rule a
+three-state status instead of a silent absence. What none of them built is
+the *scorable* half: a way to replay the logged decisions exactly and then ask
+what a different controller would have decided against the same inputs. That
+is what this tool does, and it refuses before it misleads.
+
+**"Identical traffic" does not mean identical traffic.** A pure shadow drive
+never queries HERE at all -- `shadow_mode.py`'s module docstring states this as
+a structural fact, not a degraded input -- so `Trigger.DISAGREEMENT` cannot
+fire on such a drive and no candidate can be credited or debited on it. What
+this tool CAN promise is that every candidate is scored against the same
+recorded per-tick inputs, tick for tick, from one drive. It cannot promise the
+traffic feed existed, and it cannot promise a candidate's own trajectory --
+only the decision function, against inputs the incumbent actually produced.
+
+**The scorer refuses before it misleads.** It first replays the incumbent
+`SensingController` from the log alone and requires its output to match the
+log byte-for-byte. A log that fails that identity check scores nobody: no
+candidate can be refereed by a record that cannot reproduce its own author's
+decisions. A log recorded before this task carries no `decision_inputs` at
+all and is refused by name rather than approximated from rounded evidence.
+
+    python3 deployment/jetson/score_shadow.py <run_dir> \\
+        [--candidate label=module:factory ...] [--no-json]
+
+Exit code: 0 = the log replayed exactly (with or without candidates scored),
+2 = the log refused to score at all.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib
+import json
+import sys
+from pathlib import Path
+from typing import Any, Callable, Mapping
+
+JETSON_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(JETSON_DIR))
+
+from eval_run import load_records  # noqa: E402
+from policy.sensing_controller import (  # noqa: E402
+    RULE_FIRED,
+    RULE_NOT_EVALUABLE,
+    RULE_QUIET,
+    RULES,
+    Inputs,
+    SensingController,
+    Trigger,
+)
+from policy.shadow_mode import ABSENT_IN_PURE_SHADOW  # noqa: E402
+from transport.messages import DROP_KEYS, RATE_KEYS  # noqa: E402
+
+#: The raise rules `activity.raises` counts. `Trigger.THERMAL` is excluded: it
+#: backs rates off rather than asking for more, so it is not a "raise" in the
+#: sense this counts.
+RAISE_RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT)
+
+#: Echoed verbatim from `shadow_mode.ModeHolder.to_record` when `summary.json`
+#: carries the mode block. When it does not, this is the fallback -- the claim
+#: is a fixed fact about what a shadow log can predict, not a per-drive
+#: measurement, so deriving it from ticks would mean re-deriving a constant.
+SHADOW_PREDICTS = "the decision function, not the trajectory"
+
+#: Named refusals. Each means the log cannot be scored at all -- not "scored
+#: with a caveat" -- because the thing that failed is the log's ability to
+#: referee anyone, including its own incumbent.
+REFUSAL_NO_TICKS = "no_tick_records"
+REFUSAL_PHONELESS = "phoneless_run"
+REFUSAL_PRE_TASK_35 = "decision_inputs_absent"
+
+#: Why a candidate's own score is refused rather than emitted on rates alone.
+#: A candidate that cannot report the same three-state attribution the
+#: incumbent does cannot be held to the discipline this task exists for.
+CANDIDATE_WITHOUT_ATTRIBUTION = "candidate_without_attribution"
+
+
+class ReplayClock:
+    """A clock fed by the log instead of by time.
+
+    Set once per tick to that tick's `decided_at_mono`, and held rather than
+    popped: a candidate may read its clock more than once inside one `decide`
+    call, and every such read within a tick must see the same recorded instant.
+    """
+
+    def __init__(self) -> None:
+        self._current: float | None = None
+
+    def set(self, instant: float) -> None:
+        self._current = instant
+
+    def __call__(self) -> float:
+        if self._current is None:
+            raise RuntimeError("ReplayClock read before the first tick was set")
+        return self._current
+
+
+def _sensing_ticks(ticks: list[dict]) -> list[dict]:
+    """Ticks that carry a `sensing` block, in log order."""
+    return [t for t in ticks if "sensing" in t]
+
+
+def _log_refusal(ticks: list[dict], sensing_ticks: list[dict]) -> str | None:
+    """Whether this log can be scored at all, before anything is replayed."""
+    if not ticks:
+        return REFUSAL_NO_TICKS
+    if not sensing_ticks:
+        return REFUSAL_PHONELESS
+    for t in sensing_ticks:
+        sensing = t["sensing"]
+        if "decision_inputs" not in sensing or "decided_at_mono" not in sensing:
+            return REFUSAL_PRE_TASK_35
+    return None
+
+
+def _replay_incumbent(sensing_ticks: list[dict]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Replay the incumbent from the log alone; report whether it matches.
+
+    Returns the `replay_identity` record and, when it matches, the incumbent's
+    own replayed `to_record()` per tick -- reused for `vs_incumbent` rather
+    than replayed a second time, so the comparison is against literally the
+    run the identity check just certified.
+    """
+    clock = ReplayClock()
+    controller = SensingController(clock=clock)
+    replayed: list[dict[str, Any]] = []
+    mismatched = 0
+    first_mismatch: dict[str, Any] | None = None
+    for t in sensing_ticks:
+        sensing = t["sensing"]
+        inputs = Inputs.from_record(sensing["decision_inputs"])
+        clock.set(sensing["decided_at_mono"])
+        record = controller.decide(inputs).to_record()
+        replayed.append(record)
+        differing = [k for k, v in record.items() if sensing.get(k) != v]
+        if differing:
+            mismatched += 1
+            if first_mismatch is None:
+                first_mismatch = {"tick_id": t.get("tick_id"), "keys": differing}
+    status = "ok" if mismatched == 0 else "failed"
+    return (
+        {
+            "status": status,
+            "ticks": len(sensing_ticks),
+            "mismatched": mismatched,
+            "first_mismatch": first_mismatch,
+        },
+        replayed,
+    )
+
+
+def _segments(sensing_ticks: list[dict]) -> dict[str, Any]:
+    """`reference` = ticks strictly before the first live one; the rest is
+    `contaminated` (D9). A drive that never went live is reference throughout.
+    """
+    first_live_index = None
+    first_live_tick_id = None
+    for i, t in enumerate(sensing_ticks):
+        if t["sensing"]["shadow"] is False:
+            first_live_index = i
+            first_live_tick_id = t.get("tick_id")
+            break
+    if first_live_index is None:
+        return {
+            "reference_ticks": len(sensing_ticks),
+            "contaminated_ticks": 0,
+            "first_live_tick_id": None,
+        }
+    return {
+        "reference_ticks": first_live_index,
+        "contaminated_ticks": len(sensing_ticks) - first_live_index,
+        "first_live_tick_id": first_live_tick_id,
+    }
+
+
+def _limits(sensing_ticks: list[dict], summary: dict[str, Any] | None) -> dict[str, Any]:
+    """What this log can and cannot say about identical traffic, echoed from
+    `summary.json` when it exists, or derived from the per-tick flags when it
+    does not -- `summary.json` is written only at `close()`, so a truncated
+    run may have ticks and no summary, and that must not be a hard dependency.
+    """
+    mode = None
+    if summary is not None:
+        mode = summary.get("sensing", {}).get("mode")
+    if mode is not None:
+        return {
+            "shadow_predicts": mode["shadow_predicts"],
+            "structurally_absent": list(mode["structurally_absent"]),
+            "reference_rates_hold": mode["reference_rates_hold"],
+        }
+    born_live = bool(sensing_ticks) and sensing_ticks[0]["sensing"]["shadow"] is False
+    ever_live = any(t["sensing"]["shadow"] is False for t in sensing_ticks)
+    return {
+        "shadow_predicts": SHADOW_PREDICTS,
+        "structurally_absent": [] if born_live else list(ABSENT_IN_PURE_SHADOW),
+        "reference_rates_hold": not ever_live,
+        "mode_derived_from_ticks": True,
+    }
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _reference_witness(sensing_ticks: list[dict]) -> dict[str, Any]:
+    """The full-rate reference, witnessed rather than assumed: how many ticks
+    the phone actually reported on, and what it reported.
+    """
+    with_achieved = [t["sensing"]["reference"] for t in sensing_ticks
+                      if t["sensing"]["reference"]["absent"] is None]
+    no_telemetry = sum(1 for t in sensing_ticks if t["sensing"]["reference"]["absent"] is not None)
+    achieved_mean = (
+        {key: _mean([r["achieved"][key] for r in with_achieved]) for key in RATE_KEYS}
+        if with_achieved else None
+    )
+    dropped_final = with_achieved[-1]["dropped"] if with_achieved else None
+    return {
+        "ticks_with_achieved": len(with_achieved),
+        "ticks_no_telemetry": no_telemetry,
+        "achieved_mean": achieved_mean,
+        "dropped_final": dropped_final,
+    }
+
+
+def _rules_never_exercised(records: list[dict[str, Any]], total: int) -> list[dict[str, Any]]:
+    """Rules `not_evaluable` on every tick -- named, not folded into agreement.
+
+    A rule missing its input on 100% of a drive is not the same fact as a
+    candidate agreeing with the incumbent on it, and this is what keeps the
+    two from being reported as the same thing.
+    """
+    out: list[dict[str, Any]] = []
+    for rule in RULES:
+        statuses = [r["attribution"]["rules"][rule]["status"] for r in records]
+        if total == 0 or statuses.count(RULE_NOT_EVALUABLE) != total:
+            continue
+        missing_counts: dict[str, int] = {}
+        declined_counts: dict[str, int] = {}
+        for r in records:
+            check = r["attribution"]["rules"][rule]
+            for name in check.get("missing", ()):
+                missing_counts[name] = missing_counts.get(name, 0) + 1
+            if "feed_declined" in check:
+                declined_counts[check["feed_declined"]] = declined_counts.get(check["feed_declined"], 0) + 1
+        out.append({
+            "rule": rule, "ticks": total,
+            "missing": missing_counts,
+            **({"feed_declined": declined_counts} if declined_counts else {}),
+        })
+    return out
+
+
+def _has_valid_attribution(record: dict[str, Any]) -> bool:
+    rules = record.get("attribution", {}).get("rules", {})
+    if set(rules) != set(RULES):
+        return False
+    return all(
+        rules[rule].get("status") in (RULE_FIRED, RULE_QUIET, RULE_NOT_EVALUABLE)
+        for rule in RULES
+    )
+
+
+def _score_candidate(
+    sensing_ticks: list[dict], incumbent_records: list[dict[str, Any]], factory: Callable[[Any], Any],
+) -> dict[str, Any]:
+    clock = ReplayClock()
+    candidate = factory(clock)
+    records: list[dict[str, Any]] = []
+    for t in sensing_ticks:
+        sensing = t["sensing"]
+        inputs = Inputs.from_record(sensing["decision_inputs"])
+        clock.set(sensing["decided_at_mono"])
+        records.append(candidate.decide(inputs).to_record())
+
+    if records and not _has_valid_attribution(records[0]):
+        return {"refused": CANDIDATE_WITHOUT_ATTRIBUTION}
+
+    total = len(records)
+    rules: dict[str, dict[str, int]] = {}
+    for rule in RULES:
+        counts = {RULE_FIRED: 0, RULE_QUIET: 0, RULE_NOT_EVALUABLE: 0}
+        for r in records:
+            counts[r["attribution"]["rules"][rule]["status"]] += 1
+        rules[rule] = counts
+
+    rates_same = rates_differ = 0
+    first_differ_tick_id = None
+    trigger_same = trigger_differ = 0
+    per_rule: dict[str, dict[str, int]] = {
+        rule: {"agree": 0, "differ": 0, "not_evaluable": 0} for rule in RULES
+    }
+    ticks_active = 0
+    raises = 0
+    for t, candidate_r, incumbent_r in zip(sensing_ticks, records, incumbent_records):
+        if candidate_r["rates"] == incumbent_r["rates"]:
+            rates_same += 1
+        else:
+            rates_differ += 1
+            if first_differ_tick_id is None:
+                first_differ_tick_id = t.get("tick_id")
+        if candidate_r["trigger"] == incumbent_r["trigger"]:
+            trigger_same += 1
+        else:
+            trigger_differ += 1
+        for rule in RULES:
+            incumbent_status = incumbent_r["attribution"]["rules"][rule]["status"]
+            candidate_status = candidate_r["attribution"]["rules"][rule]["status"]
+            if incumbent_status == RULE_NOT_EVALUABLE:
+                per_rule[rule]["not_evaluable"] += 1
+            elif incumbent_status == candidate_status:
+                per_rule[rule]["agree"] += 1
+            else:
+                per_rule[rule]["differ"] += 1
+        if candidate_r["attribution"]["gates"]["level"] == "active":
+            ticks_active += 1
+        if any(candidate_r["attribution"]["rules"][rule]["status"] == RULE_FIRED for rule in RAISE_RULES):
+            raises += 1
+
+    mean_commanded = {key: _mean([r["rates"][key] for r in records]) for key in RATE_KEYS}
+    incumbent_mean_commanded = {key: _mean([r["rates"][key] for r in incumbent_records]) for key in RATE_KEYS}
+
+    return {
+        "rules": rules,
+        "rules_never_exercised": _rules_never_exercised(records, total),
+        "vs_incumbent": {
+            "rates": {
+                "same": rates_same, "differ": rates_differ,
+                "first_differ_tick_id": first_differ_tick_id,
+                "mean_commanded": mean_commanded,
+                "incumbent_mean_commanded": incumbent_mean_commanded,
+            },
+            "trigger": {"same": trigger_same, "differ": trigger_differ},
+            "per_rule": per_rule,
+        },
+        "activity": {"ticks_active": ticks_active, "raises": raises},
+    }
+
+
+def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None = None) -> dict[str, Any]:
+    """Everything this tool reports, as a JSON-able dict. No file I/O beyond
+    reading the run directory -- `main` owns writing `shadow_score.json`.
+    """
+    candidates = candidates or {}
+    ticks, _scenario, _timebase, unparseable = load_records(run_dir / "metadata.jsonl")
+    sensing_ticks = _sensing_ticks(ticks)
+
+    refusal = _log_refusal(ticks, sensing_ticks)
+    if refusal is not None:
+        return {"run": str(run_dir), "refused": refusal}
+
+    summary = None
+    summary_path = run_dir / "summary.json"
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text())
+
+    replay_identity, incumbent_records = _replay_incumbent(sensing_ticks)
+    result: dict[str, Any] = {
+        "run": str(run_dir),
+        "ticks": len(sensing_ticks),
+        "unparseable_lines": unparseable,
+        "replay_identity": replay_identity,
+        "segments": _segments(sensing_ticks),
+        "limits": _limits(sensing_ticks, summary),
+        "reference_witness": _reference_witness(sensing_ticks),
+    }
+    if replay_identity["status"] != "ok":
+        # No candidate scores are emitted (D8): a log that cannot reproduce its
+        # own incumbent's decisions cannot referee anyone else's.
+        return result
+
+    result["candidates"] = {
+        label: _score_candidate(sensing_ticks, incumbent_records, factory)
+        for label, factory in candidates.items()
+    }
+    return result
+
+
+def render_table(result: dict[str, Any]) -> str:
+    """The stdout table `main` prints beside `shadow_score.json`."""
+    if "refused" in result:
+        return f"[score_shadow] REFUSED: {result['refused']} ({result['run']})"
+
+    lines = [f"[score_shadow] {result['run']}", f"  ticks: {result['ticks']}"
+             f" (unparseable lines: {result['unparseable_lines']})"]
+    ri = result["replay_identity"]
+    lines.append(f"  replay_identity: {ri['status']} ({ri['mismatched']}/{ri['ticks']} mismatched)")
+    if ri["status"] != "ok":
+        lines.append(f"    first mismatch: {ri['first_mismatch']}")
+        return "\n".join(lines)
+    seg = result["segments"]
+    lines.append(f"  segments: reference={seg['reference_ticks']} "
+                 f"contaminated={seg['contaminated_ticks']} first_live_tick_id={seg['first_live_tick_id']}")
+    lim = result["limits"]
+    lines.append(f"  limits: shadow_predicts={lim['shadow_predicts']!r}")
+    lines.append(f"    structurally_absent={lim['structurally_absent']}")
+    lines.append(f"    reference_rates_hold={lim['reference_rates_hold']}")
+    rw = result["reference_witness"]
+    lines.append(f"  reference_witness: {rw['ticks_with_achieved']} ticks with achieved, "
+                 f"{rw['ticks_no_telemetry']} with no telemetry")
+    for label, c in result.get("candidates", {}).items():
+        lines.append(f"  candidate {label}:")
+        if "refused" in c:
+            lines.append(f"    REFUSED: {c['refused']}")
+            continue
+        rates = c["vs_incumbent"]["rates"]
+        lines.append(f"    rates vs incumbent: same={rates['same']} differ={rates['differ']} "
+                     f"first_differ_tick_id={rates['first_differ_tick_id']}")
+        for rule, counts in c["vs_incumbent"]["per_rule"].items():
+            lines.append(f"    {rule}: agree={counts['agree']} differ={counts['differ']} "
+                         f"not_evaluable={counts['not_evaluable']}")
+        if c["rules_never_exercised"]:
+            for entry in c["rules_never_exercised"]:
+                lines.append(f"    RULE NEVER EXERCISED: {entry['rule']} "
+                             f"(all {entry['ticks']} ticks, missing={entry['missing']})")
+    return "\n".join(lines)
+
+
+def _resolve_candidate(spec: str) -> tuple[str, Callable[[Any], Any]]:
+    """`label=module:factory` -> `(label, factory)`, importing `module` fresh."""
+    label, path = spec.split("=", 1)
+    module_name, factory_name = path.split(":", 1)
+    module = importlib.import_module(module_name)
+    return label, getattr(module, factory_name)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("run_dir", help="run directory containing metadata.jsonl")
+    parser.add_argument("--candidate", action="append", default=[], metavar="label=module:factory",
+                         help="a candidate sensing controller; factory(clock) -> object with "
+                              ".decide(Inputs) -> Decision-like. Repeatable.")
+    parser.add_argument("--no-json", action="store_true", help="do not write shadow_score.json")
+    args = parser.parse_args()
+
+    run_dir = Path(args.run_dir).expanduser()
+    candidates = dict(_resolve_candidate(spec) for spec in args.candidate)
+    result = score(run_dir, candidates)
+
+    print(render_table(result))
+    if not args.no_json and "refused" not in result:
+        (run_dir / "shadow_score.json").write_text(json.dumps(result, indent=2))
+        print(f"[score_shadow] wrote {run_dir / 'shadow_score.json'}")
+
+    if "refused" in result or result["replay_identity"]["status"] != "ok":
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
