@@ -552,6 +552,71 @@ cannot be scored on what it happened to show:
 6. `score_shadow.py` against a pre-task-35 run directory
    (device-test-2026-08-25): the named refusal, not a crash, not a score.
 
+## Measured on two device runs, 2026-09-01
+
+Two drives, because mode is fixed at construction and `run_demo` has no `flip_to`
+call site: one drive is either all-reference or all-contaminated, never split.
+Both over the tailnet, phone dialling the Jetson on a direct path.
+
+| | shadow drive | `--live-rates` drive |
+| -- | -- | -- |
+| ticks | 599 over 120 s | 353 over 90 s |
+| unparseable lines | 0 | 0 |
+| `log_completeness` | 599 recorded, 599 scored, 0 missing | 353 / 353 / 0 |
+| **`replay_identity`** | **ok, 0 of 599 mismatched** | **ok, 0 of 353 mismatched** |
+| `segments` | reference 599, contaminated 0 | reference 0, contaminated 353 |
+| `structurally_absent` | `feed_congestion`, `source_disagreement` | `[]` |
+| `reference_rates_hold` | true | false |
+| witness | 598 with achieved, 1 no telemetry, 118 reports, 0 stale | 352 / 1 / 88 / 0 |
+
+**The identity gate holds on logs this tool did not write.** Every test and probe
+before this built the drive in memory and read it straight back; these are the
+first directories `run_demo` produced, with floats that went through
+`MetadataLogger`'s buffered writer and back out through `json.loads`. Zero
+mismatches on both.
+
+**The `reports` counter is right this time, checked arithmetically rather than
+eyeballed** — it has been wrong twice. At 1 Hz telemetry expect `reports` to
+approximate the drive's duration in seconds, and `ticks_with_achieved` to
+approximate that times the camera rate: 118 against 120 s, and 598 against 5 Hz
+over 120 s. The formula this replaced would have read 1 on any drive at the idle
+camera rate.
+
+**Coverage and cost.** Every tick of both drives carries `decision_inputs`,
+`decided_at_mono` and `reference`: 599 of 599 and 353 of 353. The task's
+additions cost 595 B and 605 B per tick against a mean record of 8511 B and 8552
+B — 7.0 and 7.1 per cent, against an estimate of about 560 B and about 7 per
+cent. That estimate held, unlike task 34's, which was five times off on the base.
+
+**The staleness reconciliation agrees, weakly.** The witness's `ticks_stale` and
+the count of ticks whose `thermal_backoff.cause` is `stale_telemetry` both read 0
+on both drives. They now use the same predicate, so agreement is expected — but
+agreement at zero shows only that the witness raises no false positives. Neither
+drive had stale telemetry, so the path where they would have to agree on a
+non-zero count is still untested on hardware.
+
+**A candidate, and what it took to make one differ.** Two candidates produced no
+differences at all before one did. Lowering `EVENT_ACCEL_MPS2` from 1.5 to 1.0
+changed nothing, because the handset was stationary and acceleration never
+approached either threshold. Halving `NARROW_MARGIN` from 0.15 changed nothing
+either, because the policy margin was constant at 0.0123 for all 599 ticks — an
+untrained bundle on a static scene. A threshold of 0.01, below the margin itself,
+finally differs: `rates` 3 same and 596 differ with `first_differ_tick_id` 3, the
+margin rule differing on all 599, and the first three ticks agreeing because the
+dwell has not yet promoted the incumbent. **The lesson for whoever scores a real
+candidate: a threshold change only shows up if the drive exercises the quantity
+it keys on, and a stationary phone with an untrained bundle exercises almost
+none of them.**
+
+**What these runs do not establish.** `source_disagreement` is
+`not_evaluable` on every tick of both drives, so the only claim available about
+it is that the refusal is correctly named — the scorer printed `RULE NEVER
+EXERCISED (log-wide)` on both, which is right, and is not evidence that per-rule
+comparison works on a rule that can fire. Bare `NaN` appears in the metadata log
+on 70 lines of the shadow drive and 1 of the live drive, from NaN GPS before a
+fix; the identity gate is unaffected and `shadow_score.json` stays clean, and
+this is pre-existing rather than anything this task introduced.
+
 ## Open items flagged for the user
 
 0. **`first_differ_tick_id` is never asserted.** `first_live_tick_id` and

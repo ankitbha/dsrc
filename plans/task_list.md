@@ -1187,8 +1187,60 @@ Written as part of the implementation, not added afterwards.
     Crossing two quiet entries in the emitted record still survives, accepted as a
     limit. `RuleCheck.to_record()` does not reject non-finite floats, judged
     unreachable because the transport refuses them at framing.
-35. Shadow-mode decision log emitted alongside the full-rate reference, so every
-    candidate policy can be scored against identical traffic from one drive.
+35. ~~Shadow-mode decision log emitted alongside the full-rate reference, so every
+    candidate policy can be scored against identical traffic from one drive.~~
+    **The task's wording promises more than the system can deliver, and the plan says
+    so.** `shadow_mode.py` already records that the traffic feed is structurally absent
+    from a pure shadow drive — the phone makes no HERE query, so the feed stays silent
+    and the disagreement rule cannot fire — and task 34's drive confirmed it from the
+    other side at 899 of 899 ticks not evaluable. So "identical traffic" is defined as
+    identical *recorded inputs to the decision function*: never the HERE feed, never the
+    trajectory, and only the full-rate reference until the first live tick. The log
+    carries the exact 13-field `Inputs` unrounded (the attribution's evidence rounds to
+    four places, so scavenging it would diverge silently), the controller's own clock
+    read, and a per-tick reference witnessed from the phone's `achieved`/`dropped` —
+    decoded since forever and read by nothing until now, so the reference stopped being
+    an assumption about the phone's defaults. `score_shadow.py` replays the log and must
+    reproduce the incumbent byte for byte before it scores anyone; a log that fails that
+    identity scores nobody.
+    **Three validation rounds, and the defect that mattered most was mine.** Round 1
+    (ten findings): the witness could not tell a live phone from one that reported once
+    and died — two 300-tick drives produced a byte-identical block claiming 300 ticks
+    with achieved, while the controller itself had recorded `stale_telemetry` on 250 of
+    them. Round 2: **the counter I specified to fix that was wrong across a whole
+    regime**, not a corner — `1 + count(age decreasing)` fails whenever the tick
+    interval is at least the telemetry interval, and idle camera rate is 1.0 Hz against
+    1 Hz telemetry, so the ordinary drive sits exactly on that boundary. An idle drive
+    with 120 genuine reports counted 1, indistinguishable from the dead phone the fix
+    existed to catch. Replaced with distinct arrival instants. Round 2 also found the
+    witness's staleness predicate disagreeing with the controller's on NaN, where the
+    tick landed in neither partition and a bare `NaN` reached the JSON. Round 3 found a
+    truncated log scoring clean: `summary.json` was already loaded and the run's own
+    tick count never compared against it, a check `eval_run` has pinned and this tool
+    did not do.
+    **Experiment**, two drives because mode is fixed at construction so one drive is
+    either all-reference or all-contaminated: **599 ticks shadow and 353 live-rates,
+    `replay_identity` 0 mismatched on both** — the first logs this tool ever read that
+    it had not itself written, with floats through `MetadataLogger`'s buffered writer.
+    Every tick of both carries `decision_inputs`, `decided_at_mono` and `reference`.
+    The additions cost 595 and 605 B against a mean record of 8511 and 8552 B, 7.0 and
+    7.1 per cent, against an estimate of ~560 B and ~7 per cent — an estimate that held,
+    unlike task 34's.
+    **The method lesson: a candidate only differs where the drive exercises the quantity
+    it keys on.** Three candidates were needed to produce one difference. Lowering the
+    acceleration threshold did nothing on a stationary handset; halving the margin
+    threshold did nothing because an untrained bundle on a static scene held the margin
+    constant at 0.0123 for all 599 ticks; only a threshold below the margin itself
+    differed, at 596 of 599 with `first_differ_tick_id` 3, the first three agreeing
+    because the dwell had not yet promoted the incumbent.
+    **Open:** the staleness reconciliation agrees at zero on both drives, which shows
+    only that the witness raises no false positives — neither drive had stale telemetry,
+    so non-zero agreement is untested on hardware. `first_differ_tick_id` is exercised
+    but not pinned; the candidate that would pin it must move rates across the dwell.
+    `source_disagreement` was not evaluable on every tick of both drives, so the only
+    claim available about it is that the refusal is correctly named. Bare `NaN` appears
+    in the metadata log from NaN GPS before a fix — 70 lines and 1 — which is
+    pre-existing and does not affect the identity gate.
 36. Per-tick field provenance and missingness.
 37. Thermal and throttle-event log for both devices.
 38. Failure event log: GPS dropout, HERE failure or quota exhaustion, dropped
