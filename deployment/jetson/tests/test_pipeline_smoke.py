@@ -403,12 +403,18 @@ def test_the_sensing_loop_reads_a_real_tick(pipeline) -> None:
 
     # The free tier and the camera's own view: present, not defaulted away.
     assert inputs.ego_speed == pytest.approx(27.0)
-    # Whether the speed window settles to a real slope or is refused as stale
-    # depends on how much real wall-clock time this test's own 45 ticks took
-    # against the scripted GPS schedule -- `run_ticks` deliberately lags GPS
-    # behind real time, because e2e latency is measured against the real
-    # clock -- so the invariant checked is that a null value and a
-    # substituted source agree with each other, not a specific outcome.
+    # `ObservationBuilder.build` stamps each speed sample with a fresh
+    # `time.monotonic()` read (`pipeline.py`), not with the frame's own
+    # scripted `t_mono` -- so the 45 ticks `run_ticks` drives inside this one
+    # test call, which take on the order of milliseconds of real time, leave
+    # a window spanning milliseconds rather than the ~1.5 s the scripted
+    # schedule implies. That is short of the 0.3 s a slope needs to fit, so
+    # it is the window-span guard that refuses `ego_acceleration` here, not
+    # the GPS-staleness guard -- GPS itself stays fresh throughout, which is
+    # why `ego_speed` above reads as a real measurement. The outcome is
+    # therefore deterministic, not a race against the scripted schedule.
+    assert inputs.ego_acceleration is None
+    assert inputs.ego_acceleration_source == provenance.SOURCE_FALLBACK_NEUTRAL
     assert (inputs.ego_acceleration is None) == provenance.is_substituted(
         inputs.ego_acceleration_source
     )
