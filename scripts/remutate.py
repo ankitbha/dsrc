@@ -842,12 +842,27 @@ MUTATIONS = [
      "python"),
     ("eval: an old log with too few samples is taken as usable",
      "deployment/jetson/eval_run.py",
-     '    if "usable" in record:\n'
-     '        return bool(record["usable"])\n'
-     '    return record.get("offset_samples", 0) >= MIN_OFFSET_SAMPLES',
-     '    if "usable" in record:\n'
-     '        return bool(record["usable"])\n'
+     '    if record.get("offset_samples", 0) < MIN_OFFSET_SAMPLES:\n'
+     '        return False',
+     '    if record.get("offset_samples", 0) < MIN_OFFSET_SAMPLES:\n'
+     '        pass',
+     "python"),
+    # `rtt_min_ns` is a property of the estimate, written into every persisted line --
+    # unlike staleness, it survives in an old-format one just as well as a new one, so
+    # the ceiling applies to both.
+    ("eval: an old log round-trip line above the RTT ceiling is taken as usable",
+     "deployment/jetson/eval_run.py",
+     '    rtt = record.get("rtt_min_ns")\n'
+     '    return rtt is None or rtt <= MAX_ACCEPTABLE_RTT_NS',
      '    return True',
+     "python"),
+    # The ceiling is a round-trip concept -- on a one-way line `rtt_min_ns` is a delay
+    # spread, and `OneWayEstimator` has no ceiling clause on it at all.
+    ("eval: the round-trip RTT ceiling is applied to a one-way line too",
+     "deployment/jetson/eval_run.py",
+     '    if record.get("source") != "round_trip":\n'
+     '        return True',
+     '    pass',
      "python"),
     # Both estimators are rebuilt whole on every redial, so `estimate_id` restarts
     # at 1 on the new session -- wall time alone cannot tell a stale estimate from
@@ -862,15 +877,19 @@ MUTATIONS = [
      "python"),
     ("run_demo: the session id is not carried onto the timebase estimate line",
      "deployment/jetson/run_demo.py",
-     '            "session_id": None if phone.session is None else phone.session.session_id,',
+     '            "session_id": session_id,',
      '            "session_id": None,',
      "python"),
-    ("run_demo: the tick record does not carry this tick's session id",
+    # `tick_session_id` is the one place `phone.session.session_id` is read per tick --
+    # `run_live` used to read it twice, once for the tick record and once inside
+    # `_log_timebase_estimates`, and a rebind between the two reads could put a
+    # different session's id on each. Pinned on the helper directly, which needs none
+    # of the detector/policy bundle/config/camera/GPS machinery a full run does; the
+    # call sites in `run_live` just pass its one result on.
+    ("run_demo: tick_session_id ignores which session the phone actually holds",
      "deployment/jetson/run_demo.py",
-     '                    record["session_id"] = (\n'
-     '                        None if phone.session is None else phone.session.session_id\n'
-     '                    )',
-     '                    record["session_id"] = None',
+     "    if phone is None or phone.session is None:\n        return None\n    return phone.session.session_id",
+     "    return None",
      "python"),
     # One helper, so `pipeline.Tick.to_record()` and `policy.sensing_loop` name the
     # same tick with the same integer. Each call site pinned separately: mutating
@@ -906,10 +925,14 @@ MUTATIONS = [
      '            clock="phone", reason="advisory expired before current() returned it"\n'
      '        )',
      "python"),
-    ("advisory: superseded does not subtract what expired",
+    # `shown` and `expired` are not a partition of `received` -- an advisory `current()`
+    # already returned once can still go on to age out, so a derived
+    # received - shown - expired goes negative on that sequence. Counted at the moment of
+    # replacement instead, in `accept`.
+    ("advisory: superseded counts a replacement that had already been shown",
      "phone/app/src/main/kotlin/com/dsrc/phone/ui/AdvisoryHolder.kt",
-     "        val superseded: Long\n            get() = received - shown - expired",
-     "        val superseded: Long\n            get() = received - shown",
+     "        if (latest != null && shownAtNs == null) superseded++",
+     "        if (latest != null) superseded++",
      "app"),
     # The direction and the sign of the one offline conversion nothing had pinned a
     # value for. A test that only checks `basis == "converted"` and that the fields
@@ -975,6 +998,28 @@ MUTATIONS = [
      '    return StageTiming.measured((end_ns - start_ns) / 1e6, clock="phone")',
      '    return StageTiming.measured((end_ns - start_ns) / 1e6, clock="phone")',
      "python"),
+    # Deliberately absent: "run_phone_drive: the matched-a-real-frame count is
+    # recomputed instead of using the stamp actually sent"
+    # (`scripts/run_phone_drive.py:209`, `sent_stamps.append(int(tick.t_capture_mono *
+    # 1e9))` -> the fixed `outcome.command.t_capture_mono_ns`).
+    #
+    # `scripts/` carries no test suite -- the lint gates exclude it and this harness
+    # runs pytest against `deployment/jetson/tests/` only -- so a mutation there can
+    # never be CAUGHT and would sit as a permanent, silent SURVIVED. That is a worse
+    # record than no entry: it reads as a lapsed pin when it never was one. The script
+    # is exercised by hand (its own docstring: "python3 scripts/run_phone_drive.py"),
+    # and the fixed line reads the integer the router actually sent rather than
+    # recomputing it, which is what removed the drift in the first place.
+    ("pong: the carried receipt stamp is a fresh clock reading, not the reader's own",
+     "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
+     "                recvMonoNs = message.recvMonoNs,",
+     "                recvMonoNs = monoClock(),",
+     "transport"),
+    ("deliver: the delivered receipt stamps are fresh clock readings, not the reader's own",
+     "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
+     "            onFrame(frame, message.recvMonoNs, message.recvWallNs)",
+     "            onFrame(frame, monoClock(), wallClock())",
+     "transport"),
 ]
 
 RESULTS = {
