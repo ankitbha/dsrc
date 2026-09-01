@@ -384,6 +384,58 @@ class TestTheAccelerationProvenanceMatchesTheBranchTaken:
         assert past.encoded[idx] == pytest.approx(0.0)
         assert past.encoded[idx] != pytest.approx(result.encoded[idx])
 
+    def test_a_dropout_gap_is_not_fitted_as_a_slope_once_gps_returns(self):
+        """A real dropout (`gps.valid` False, not a stale fix aging in
+        place) leaves a hole in the MIDDLE of the window, not at its edge.
+        The span guard in `_speed_slope` only asks whether the window's
+        first and last timestamps are 0.3 s apart, so it cannot see the
+        hole -- and before `speed_samples` was cleared on every non-fresh
+        tick, the pre-dropout samples were still sitting in the window when
+        GPS returned. A tick after an 8 s dropout, with speed dropping from
+        a constant 25 m/s to a constant 10 m/s, used to fit a slope across
+        nine pre-dropout samples and one post-dropout sample and report it
+        as `derived` -- a real acceleration measurement of an interval that
+        contains no measurement at all.
+        """
+        cfg = BuilderConfig()
+        builder = ObservationBuilder(cfg)
+        dt = 0.1
+        t = 1000.0
+        for i in range(10):
+            t = 1000.0 + i * dt
+            builder.build([], GpsFix(valid=True, speed_mps=25.0, t_mono=t, t_wall=0.0), t)
+
+        dropout_ticks = round(8.0 / dt)
+        for i in range(1, dropout_ticks + 1):
+            now = t + i * dt
+            builder.build([], GpsFix(valid=False, t_mono=now, t_wall=0.0), now)
+        t += dropout_ticks * dt
+
+        # The instant GPS returns, at a different (but also constant)
+        # speed: the window must not be trusted yet, however large the
+        # slope across the gap would have been.
+        t += dt
+        first_return = builder.build(
+            [], GpsFix(valid=True, speed_mps=10.0, t_mono=t, t_wall=0.0), t
+        )
+        assert first_return.field_sources["ego_acceleration"] == (
+            provenance.SOURCE_FALLBACK_NEUTRAL
+        )
+        assert first_return.obs["ego_acceleration"] == pytest.approx(0.0)
+
+        # Once the window has refilled from fresh, post-dropout samples
+        # only, the label returns to `derived` -- and now with the value the
+        # window actually supports: zero, because the speed either side of
+        # this later window is the same constant 10 m/s.
+        result = first_return
+        for i in range(1, 6):
+            t += dt
+            result = builder.build(
+                [], GpsFix(valid=True, speed_mps=10.0, t_mono=t, t_wall=0.0), t
+            )
+        assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
+        assert result.obs["ego_acceleration"] == pytest.approx(0.0, abs=1e-6)
+
 
 class TestCoverageAndMissingness:
     """`field_sources` after this task covers all 39 encoder slots, and

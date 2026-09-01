@@ -212,6 +212,15 @@ class ObservationBuilder:
             # hold last known speed rather than reporting 0 (= "stopped")
             ego_speed = self._ego.last_speed_mps if self._ego.ever_had_fix else 0.0
             src["ego_speed"] = provenance.SOURCE_FALLBACK_NEUTRAL
+            # The window's invariant: it holds only samples from an unbroken run
+            # of fresh fixes. Without this, a gap in the middle of the window is
+            # invisible to the span check below (which only sees first-to-last),
+            # so the slope fitted across the gap keeps being reported as
+            # `derived` once GPS resumes -- a real hole in the data, reported as
+            # a real measurement. Clearing here means acceleration is
+            # unavailable for a further ~0.3 s after any dropout ends, while the
+            # window refills from the first fresh sample back up to three.
+            self._ego.speed_samples.clear()
         # From the branch actually taken, not from the sample count -- the count
         # cannot see the window-span guard below it, and passing this tick's
         # own freshness verdict lets the branch also refuse a window whose fix
