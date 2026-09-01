@@ -1094,11 +1094,11 @@ MUTATIONS = [
     # forward. These three close that.
     ("controller: the attribution record is dropped from Decision.to_record()",
      "deployment/jetson/policy/sensing_controller.py",
-     '            "here_radius_m": None if self.here_query is None else self.here_query.radius_m,\n'
-     '            "attribution": self.attribution.to_record(),\n'
-     "        }",
-     '            "here_radius_m": None if self.here_query is None else self.here_query.radius_m,\n'
-     "        }",
+     # Anchored on the one line, not on the block that used to close the dict. A
+     # field added after `attribution` moved the brace, so the three-line anchor
+     # stopped matching and the entry printed SKIP while pinning nothing.
+     '            "attribution": self.attribution.to_record(),\n',
+     "",
      "python"),
     ("controller: the first decision is always reported as first",
      "deployment/jetson/policy/sensing_controller.py",
