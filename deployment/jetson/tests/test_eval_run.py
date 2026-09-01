@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from eval_run import analyze, join_phone_log, load_phone_log
+from eval_run import analyze, join_phone_log, load_phone_log, stage_timings
 
 T0 = 1_750_000_000.0
 RATE_HZ = 30.0
@@ -580,3 +580,51 @@ def test_analyze_without_a_phone_log_leaves_the_join_absent(tmp_path):
     run_dir = write_run(tmp_path, [make_tick(i) for i in range(10)])
     result = analyze(run_dir)
     assert result["phone_join"] is None
+
+
+class TestStageTimings:
+    """The table's whole purpose is that a stage which was not measured cannot be
+    read as one that was, so each basis is checked for what it contributes."""
+
+    def test_an_instant_contributes_no_duration(self):
+        # `capture` is a point in time and carries `ms: 0.0` as a placeholder. Counting
+        # it as a duration reports a stage that took no time, which on a real run put
+        # `capture | n 900 | min 0.0 | mean 0.0` in the table.
+        ticks = [{"stages": {"capture": {"ms": 0.0, "basis": "instant", "clock": "phone"}}}
+                 for _ in range(5)]
+        out = stage_timings(ticks)["capture"]
+        assert out["basis"] == {"instant": 5}
+        assert out["stats"] is None, "an instant must not report duration statistics"
+
+    def test_an_absent_stage_carries_its_reason_and_no_value(self):
+        ticks = [
+            {"stages": {"transport": {"ms": None, "basis": "absent", "clock": "cross",
+                                      "reason": "only 3 samples in the offset window"}}},
+            {"stages": {"transport": {"ms": 20.0, "basis": "converted", "clock": "cross",
+                                      "bound_ms": 4.0}}},
+        ]
+        out = stage_timings(ticks)["transport"]
+        assert out["basis"] == {"absent": 1, "converted": 1}
+        assert out["absent_reasons"] == {"only 3 samples in the offset window": 1}
+        # One value, not two: the absent tick contributes nothing rather than a zero
+        # that would halve the mean.
+        assert out["stats"]["n"] == 1
+        assert out["stats"]["mean"] == pytest.approx(20.0)
+        assert out["bound_ms"]["n"] == 1
+
+    def test_a_measured_stage_reports_the_values_it_was_given(self):
+        ticks = [{"stages": {"detect": {"ms": v, "basis": "measured", "clock": "jetson"}}}
+                 for v in (10.0, 20.0, 30.0)]
+        out = stage_timings(ticks)["detect"]
+        assert out["stats"]["n"] == 3
+        assert out["stats"]["mean"] == pytest.approx(20.0)
+        assert out["absent_reasons"] == {}
+
+    def test_a_stage_absent_on_every_tick_reports_no_statistics(self):
+        # The case that must not render as zeros: nothing was measured at all.
+        ticks = [{"stages": {"render": {"ms": None, "basis": "absent", "clock": "phone",
+                                        "reason": "no advisory_shown line"}}}
+                 for _ in range(4)]
+        out = stage_timings(ticks)["render"]
+        assert out["stats"] is None
+        assert out["absent_reasons"] == {"no advisory_shown line": 4}

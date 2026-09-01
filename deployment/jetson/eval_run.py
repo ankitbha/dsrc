@@ -345,6 +345,55 @@ def fmt_row(name: str, s: dict[str, float]) -> str:
     )
 
 
+#: The loop's stages in the order the signal travels, so the table reads as a path
+#: rather than as an alphabetical list. `return` and `render` come from the phone join
+#: and are absent from a run with no phone log.
+STAGE_ORDER = (
+    "capture", "capture_to_encode_start", "encode", "encode_done_to_enqueue",
+    "enqueue_to_wire", "transport", "jpeg_decode", "detect", "track", "fuse",
+    "infer", "decode", "return", "render",
+)
+
+
+def stage_timings(ticks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-stage durations, kept apart from how each one was arrived at.
+
+    A stage is `measured` on one clock, `converted` across two with a bound,
+    `absent` with a named reason, or an `instant` that is a point rather than a
+    duration. The distinction is the whole point of the table: a stage that could
+    not be measured must not average in as though it were, and must not show a
+    zero. So the statistics are computed over the values that exist, `n` says how
+    many that was, and the basis counts say what the rest were.
+    """
+    out: dict[str, Any] = {}
+    for tick in ticks:
+        for name, entry in (tick.get("stages") or {}).items():
+            slot = out.setdefault(
+                name, {"values": [], "basis": {}, "absent_reasons": {}, "bounds": []}
+            )
+            basis = entry.get("basis")
+            slot["basis"][basis] = slot["basis"].get(basis, 0) + 1
+            if basis == "absent":
+                why = entry.get("reason") or "unstated"
+                slot["absent_reasons"][why] = slot["absent_reasons"].get(why, 0) + 1
+                continue
+            if basis == "instant":
+                # A point in time carries `ms: 0.0` as a placeholder, not a duration of
+                # zero. Averaging it in reports a stage that took no time, which is the
+                # one thing this table exists to make impossible.
+                continue
+            ms = entry.get("ms")
+            if ms is not None:
+                slot["values"].append(float(ms))
+            bound = entry.get("bound_ms")
+            if bound is not None:
+                slot["bounds"].append(float(bound))
+    for name, slot in out.items():
+        slot["stats"] = pctl(slot.pop("values")) if slot["values"] else None
+        slot["bound_ms"] = pctl(slot.pop("bounds")) if slot["bounds"] else None
+    return out
+
+
 def in_dropout_affected(elapsed_s: float, dropouts: list[tuple[float, float]]) -> bool:
     return any(a <= elapsed_s < b + DROPOUT_RECOVERY_MARGIN_S for a, b in dropouts)
 
@@ -551,6 +600,10 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     applicable = [g["pass"] for g in gates.values() if g["pass"] is not None]
     overall = all(applicable) if applicable else False
 
+    phone_join = (
+        None if phone_log_path is None
+        else join_phone_log(ticks, timebase_estimates, *load_phone_log(phone_log_path))
+    )
     return {
         "run_dir": str(run_dir),
         "scenario": {
@@ -573,9 +626,14 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
         # the verdict rather than reported beside it, because a field nobody looks at
         # is the failure this whole check exists to close.
         "overall_pass": overall and integrity["log_complete"],
-        "phone_join": (
-            None if phone_log_path is None
-            else join_phone_log(ticks, timebase_estimates, *load_phone_log(phone_log_path))
+        "phone_join": phone_join,
+        # Sourced from the joined rows when a phone log was supplied, because those
+        # carry `return` and `render` as well -- the two stages only the phone
+        # witnesses. Without one, the Jetson-side stages every tick already holds are
+        # the whole table, and the two phone stages are simply not in it rather than
+        # present and empty.
+        "stage_timings": stage_timings(
+            phone_join["rows"] if phone_join and phone_join.get("rows") else ticks
         ),
         "_sim_truth": sim_truth,  # stripped before JSON dump
         "_ticks": ticks,
@@ -711,6 +769,39 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         # and an absent series must not render as zeros.
         if r["latency_ms"].get(key) is not None:
             lines.append(fmt_row(key.removesuffix("_ms"), r["latency_ms"][key]))
+    stages = r.get("stage_timings") or {}
+    if stages:
+        lines += [
+            "",
+            "## Per-stage timings",
+            "",
+            "`measured` is one clock. `converted` crossed two and carries a bound. "
+            "`absent` names why there is no number; it is never a zero. `instant` is a "
+            "point in time, not a duration.",
+            "",
+            "| stage | basis | n | min | mean | p50 | p95 | max |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        named = [k for k in STAGE_ORDER if k in stages]
+        for name in named + sorted(k for k in stages if k not in STAGE_ORDER):
+            slot = stages[name]
+            basis = ", ".join(f"{k} {v}" for k, v in sorted(slot["basis"].items()))
+            st = slot.get("stats")
+            if st is None:
+                lines.append(f"| {name} | {basis} | 0 | | | | | |")
+            else:
+                lines.append(
+                    f"| {name} | {basis} | {st['n']} | {st.get('min', 0.0):.1f} | "
+                    f"{st['mean']:.1f} | {st['p50']:.1f} | {st['p95']:.1f} | "
+                    f"{st['max']:.1f} |"
+                )
+        absent = {n: s["absent_reasons"] for n, s in stages.items() if s["absent_reasons"]}
+        if absent:
+            lines += ["", "Why a stage had no number:"]
+            for name, reasons in sorted(absent.items()):
+                for why, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
+                    lines.append(f"- `{name}` x{n}: {why}")
+
     p = r["perception"]
     lines += [
         "",

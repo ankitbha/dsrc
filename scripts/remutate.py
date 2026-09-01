@@ -804,6 +804,23 @@ MUTATIONS = [
      "python"),
     # Task 29's rule, pinned from task 30's side: the whole "a shadow drive cannot
     # reach DISAGREEMENT" claim rests on this returning False for a missing feed.
+    # The report table's own instance of this task's rule. `capture` is a point in
+    # time carrying `ms: 0.0`; counting it as a duration put a stage that took no time
+    # into the table on the first real run.
+    ("eval: an instant is averaged in as a zero-length stage",
+     "deployment/jetson/eval_run.py",
+     '            if basis == "instant":\n                # A point in time carries `ms: 0.0` as a placeholder, not a duration of\n                # zero. Averaging it in reports a stage that took no time, which is the\n                # one thing this table exists to make impossible.\n                continue',
+     "            if False:\n                continue",
+     "python"),
+    # Deleting the `continue` alone is a no-op: an absent entry's `ms` is None, so the
+    # guard below skips it anyway. Two independent guards protect this, and a mutation
+    # that removes one of them proves nothing -- so the mutation makes the absent branch
+    # contribute the zero it exists to prevent.
+    ("eval: an absent stage contributes a zero to the table",
+     "deployment/jetson/eval_run.py",
+     '                slot["absent_reasons"][why] = slot["absent_reasons"].get(why, 0) + 1\n                continue',
+     '                slot["absent_reasons"][why] = slot["absent_reasons"].get(why, 0) + 1\n                slot["values"].append(0.0)\n                continue',
+     "python"),
     ("controller: a missing feed counts as disagreement",
      "deployment/jetson/policy/sensing_controller.py",
      "    if feed_congestion is None or camera_density_bin is None:\n        return False",
