@@ -384,6 +384,23 @@ to "proxied forever". The adapter's preference order and the per-stamp
 both estimators reset together (the existing reset at phone_link.py:428-429
 extends to the pair — a new session is a new peer clock).
 
+## Amended after implementation, 2026-08-31 — step 3's mechanism
+
+Step 3 below says the advisory asks for a wire stamp by way of `AdvisoryMessage`.
+It was implemented instead as a `wants_wire_stamp` parameter on `Session.send` and
+`MessageRouter.send`, which is the mechanism the Kotlin transport already uses for
+the same purpose.
+
+The reason is that the literal instruction would have changed the bytes of the
+frozen `message_advisory` golden vector, and a change to a frozen vector forces a
+`PROTOCOL_VERSION` bump that nothing in this task discussed. Checked rather than
+assumed: after the change all 20 pre-existing golden cases are byte-identical,
+exactly two cases were added, and `PROTOCOL_VERSION` is untouched.
+
+Recorded here rather than left in a commit message because this file is the fixed
+target the validator audits against, and a plan that describes a mechanism the code
+does not use turns every audit of that area into a false finding.
+
 ## The work
 
 1. **Spec first**: specs/transport_protocol.md — three new optional ping
