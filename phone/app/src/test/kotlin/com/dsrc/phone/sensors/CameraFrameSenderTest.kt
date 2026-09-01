@@ -16,6 +16,7 @@ class CameraFrameSenderTest {
         val channel: String,
         val extensions: Map<String, JsonValue>,
         val payload: ByteArray,
+        val wantsWireStamp: Boolean,
     )
 
     private fun frame(id: Long, jpeg: ByteArray = byteArrayOf(1, 2, 3)) = CapturedFrame(
@@ -33,8 +34,8 @@ class CameraFrameSenderTest {
         sink: ConcurrentLinkedQueue<Sent> = ConcurrentLinkedQueue(),
     ) = sink to CameraFrameSender(
         drain = { null },
-        send = { channel, extensions, payload ->
-            sink.add(Sent(channel, extensions, payload))
+        send = { channel, extensions, payload, wantsWireStamp ->
+            sink.add(Sent(channel, extensions, payload, wantsWireStamp))
             accept
         },
     )
@@ -58,6 +59,41 @@ class CameraFrameSenderTest {
         assertEquals("jpeg", decoded.format)
         assertEquals(85L, decoded.quality)
         assertEquals(5_007, decoded.captureMonoNs)
+    }
+
+    @Test
+    fun `every dispatch asks for a wire stamp`() {
+        // The busiest channel, and the one task 33's transport stage needs: the network
+        // hop cannot be measured at all without the departure stamp this asks for.
+        val (sink, sender) = sender()
+        sender.dispatch(frame(1))
+
+        assertTrue(sink.single().wantsWireStamp)
+    }
+
+    @Test
+    fun `the encode timestamps ride the wire when the frame carries them`() {
+        val (sink, sender) = sender()
+        val withEncodeStamps = CapturedFrame(
+            frameId = 9, width = 1280, height = 720, format = "jpeg", quality = 85,
+            captureMonoNs = 5_009, jpeg = byteArrayOf(1),
+            encodeStartMonoNs = 5_020, encodeDoneMonoNs = 5_035,
+        )
+        sender.dispatch(withEncodeStamps)
+
+        val decoded = CameraFrameMessage.fromWire(sink.single().extensions, sink.single().payload)
+        assertEquals(5_020L, decoded.encodeStartMonoNs)
+        assertEquals(5_035L, decoded.encodeDoneMonoNs)
+    }
+
+    @Test
+    fun `a frame with no encode timestamps omits them rather than sending null`() {
+        val (sink, sender) = sender()
+        sender.dispatch(frame(2))
+
+        val extensions = sink.single().extensions
+        assertFalse(extensions.containsKey(CameraFrameMessage.KEY_ENCODE_START))
+        assertFalse(extensions.containsKey(CameraFrameMessage.KEY_ENCODE_DONE))
     }
 
     @Test
@@ -100,7 +136,7 @@ class CameraFrameSenderTest {
 
         val sender = CameraFrameSender(
             drain = { waiting.poll() },
-            send = { _, _, _ -> sleepsBeforeEachSend.add(sleeps.get()); true },
+            send = { _, _, _, _ -> sleepsBeforeEachSend.add(sleeps.get()); true },
             pollMs = 1,
             sleeper = {
                 sleeps.incrementAndGet()
@@ -129,7 +165,7 @@ class CameraFrameSenderTest {
         val sleeps = AtomicLong(0)
         val sender = CameraFrameSender(
             drain = { null },
-            send = { _, _, _ -> true },
+            send = { _, _, _, _ -> true },
             pollMs = 1,
             sleeper = { sleeps.incrementAndGet(); Thread.sleep(1) },
         )
@@ -171,7 +207,7 @@ class CameraFrameSenderTest {
         val sleeping = java.util.concurrent.CountDownLatch(1)
         val sender = CameraFrameSender(
             drain = { null },
-            send = { _, _, _ -> true },
+            send = { _, _, _, _ -> true },
             pollMs = 30_000,
             sleeper = { millis ->
                 sleeping.countDown()
@@ -203,7 +239,7 @@ class CameraFrameSenderTest {
         // A second start here spawns a second dsrc-camera-send thread and overwrites the
         // field, so stop() interrupts only the newer one and the first polls the buffer
         // forever -- stealing frames from the live sender.
-        val sender = CameraFrameSender(drain = { null }, send = { _, _, _ -> true }, pollMs = 5)
+        val sender = CameraFrameSender(drain = { null }, send = { _, _, _, _ -> true }, pollMs = 5)
         sender.start()
         try {
             val second = runCatching { sender.start() }

@@ -147,7 +147,7 @@ class SessionTest {
                 role = role,
                 monoClock = clock,
                 wallClock = wall,
-                onFrame = { frame ->
+                onFrame = { frame, _, _ ->
                     synchronized(received) { received.add(frame) }
                     onFrame(frame)
                     latch.countDown()
@@ -384,7 +384,7 @@ class SessionTest {
         val session = Session(
             client.getInputStream(), client.getOutputStream(), "phone", "phone",
             { System.nanoTime() }, { 0 },
-            onFrame = { synchronized(received) { received.add(it) } },
+            onFrame = { frame, _, _ -> synchronized(received) { received.add(frame) } },
         ).also { sessions.add(it) }
 
         val error = runCatching { session.start() }.exceptionOrNull()
@@ -405,7 +405,7 @@ class SessionTest {
         )
         val session = Session(
             client.getInputStream(), client.getOutputStream(), "phone", "phone",
-            { System.nanoTime() }, { 0 }, onFrame = {},
+            { System.nanoTime() }, { 0 }, onFrame = { _, _, _ -> },
         ).also { sessions.add(it) }
         assertTrue(runCatching { session.start() }.exceptionOrNull() is FramingError)
     }
@@ -706,7 +706,7 @@ class SessionTest {
         val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
         val session = Session(
             client.getInputStream(), client.getOutputStream(), "phone", "phone",
-            monoClock = { now.get() }, wallClock = { 0 }, onFrame = {},
+            monoClock = { now.get() }, wallClock = { 0 }, onFrame = { _, _, _ -> },
             onEnd = { reason, cause -> synchronized(ends) { ends.add(reason to cause) } },
         ).also { sessions.add(it) }
         session.start()
@@ -886,7 +886,7 @@ class SessionTest {
         val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
         val session = Session(
             client.getInputStream(), client.getOutputStream(), "phone", "phone",
-            monoClock = { now.get() }, wallClock = { 0 }, onFrame = {},
+            monoClock = { now.get() }, wallClock = { 0 }, onFrame = { _, _, _ -> },
             onEnd = { reason, cause -> synchronized(ends) { ends.add(reason to cause) } },
         ).also { sessions.add(it) }
         session.start()
@@ -1323,6 +1323,61 @@ class SessionTest {
     }
 
     @Test
+    fun `the first ping of a session carries no previous exchange`() {
+        val wire = WireLog()
+        val (phone, _) = pair(clock = { 1_000 }, onPhoneWrite = wire::record)
+
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 1))
+        assertTrue(
+            awaitCondition { decodedPings(wire).isNotEmpty() },
+            "the first ping was never written",
+        )
+        val first = decodedPings(wire).first { it.exchangeId == 1L }
+        assertNull(first.prevExchangeId)
+        assertNull(first.tPrevPongWireMonoNs)
+        assertNull(first.tPrevPongRecvMonoNs)
+    }
+
+    @Test
+    fun `the second ping carries the exchange the first pong answered`() {
+        // D2: this is what lets a responder that never initiates reconstruct a
+        // round-trip sample -- t1 is its own pong's departure, already known to it;
+        // t2 and t4 arrive on the very next ping.
+        val clock = AtomicLong(1_000)
+        val wire = WireLog()
+        val (phone, _) = pair(clock = { clock.addAndGet(1_000) }, onPhoneWrite = wire::record)
+
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 1))
+        assertTrue(awaitFrames(phone, 1), "no pong came back for the first ping")
+        val firstPong = TimeSyncMessage.fromWire(
+            phone.received.first { it.channel == Channels.CONTROL }.header.entries,
+            phone.received.first { it.channel == Channels.CONTROL }.payload,
+        )
+
+        assertTrue(phone.session.sendTimeSyncPing(exchangeId = 2))
+        assertTrue(
+            awaitCondition { decodedPings(wire).any { it.exchangeId == 2L } },
+            "the second ping was never written",
+        )
+        val second = decodedPings(wire).first { it.exchangeId == 2L }
+
+        assertEquals(1L, second.prevExchangeId)
+        assertEquals(firstPong.wireMonoNs, second.tPrevPongWireMonoNs)
+        assertTrue(
+            (second.tPrevPongRecvMonoNs ?: 0) > 0,
+            "the receipt stamp must be a real timestamp, not left unset",
+        )
+    }
+
+    /** Every control-channel frame the wire log holds that decodes as a ping. Hellos
+     *  and heartbeats on the same channel do not decode as [TimeSyncMessage] at all
+     *  and are skipped rather than asserted on. */
+    private fun decodedPings(wire: WireLog): List<TimeSyncMessage> =
+        wire.on(Channels.CONTROL)
+            .mapNotNull { runCatching { TimeSyncMessage.fromWire(it.header.entries, it.payload) }.getOrNull() }
+            .filter { it.isPing }
+
+    @Test
     fun `a phone refuses a ping, because the phone is the initiator`() {
         // The spec: "The phone initiates and the Jetson only ever answers... A Jetson
         // receiving a pong, or a phone receiving a ping, is a protocol error", counted as
@@ -1400,7 +1455,7 @@ class SessionTest {
             role = "phone",
             monoClock = { System.nanoTime() },
             wallClock = { 0 },
-            onFrame = {},
+            onFrame = { _, _, _ -> },
             onEnd = { reason, cause -> ends.add(reason to cause) },
         ).also { sessions.add(it) }
 
@@ -1432,7 +1487,7 @@ class SessionTest {
             role = "phone",
             monoClock = { System.nanoTime() },
             wallClock = { 0 },
-            onFrame = {},
+            onFrame = { _, _, _ -> },
             onEnd = { reason, cause -> ends.add(reason to cause) },
         ).also { sessions.add(it) }
 
@@ -2188,7 +2243,7 @@ class SessionTest {
                     role = bad,
                     monoClock = { 0 },
                     wallClock = { 0 },
-                    onFrame = {},
+                    onFrame = { _, _, _ -> },
                 )
             }
             assertTrue(refused.isFailure, "role '$bad' was accepted")
@@ -2206,7 +2261,7 @@ class SessionTest {
                 role = good,
                 monoClock = { 0 },
                 wallClock = { 0 },
-                onFrame = {},
+                onFrame = { _, _, _ -> },
             )
         }
     }
@@ -2227,7 +2282,7 @@ class SessionTest {
             role = Session.ROLE_PHONE,
             monoClock = { System.nanoTime() },
             wallClock = { 0 },
-            onFrame = {},
+            onFrame = { _, _, _ -> },
             onEnd = { reason, cause -> ends.add(reason to cause) },
         ).also { sessions.add(it) }
 

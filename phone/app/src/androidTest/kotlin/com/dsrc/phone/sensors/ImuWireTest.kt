@@ -128,7 +128,7 @@ class ImuWireTest {
                         role = Session.ROLE_JETSON,
                         monoClock = { System.nanoTime() },
                         wallClock = { System.currentTimeMillis() * 1_000_000L },
-                        onFrame = { frames.add(it) },
+                        onFrame = { frame, _, _ -> frames.add(frame) },
                     )
                     sessions.add(session)
                     session.start()

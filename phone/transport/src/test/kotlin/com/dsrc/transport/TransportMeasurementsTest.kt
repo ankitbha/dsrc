@@ -51,7 +51,7 @@ class TransportMeasurementsTest {
             role = role,
             monoClock = { System.nanoTime() },
             wallClock = { System.currentTimeMillis() * 1_000_000 },
-            onFrame = onFrame,
+            onFrame = { frame, _, _ -> onFrame(frame) },
         ).also { sessions.add(it) }
 
         val phone = build(client, "phone") {}

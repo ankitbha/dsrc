@@ -50,8 +50,9 @@ class SessionHolder(
     private val deviceId: String,
     private val monoClock: () -> Long,
     private val wallClock: () -> Long,
-    /** Delivered inbound frames. Called on a session reader thread. */
-    private val onFrame: (Frame) -> Unit,
+    /** Delivered inbound frames, with the reader's own receipt stamps. Called on a
+     *  session delivery thread. */
+    private val onFrame: (Frame, Long, Long) -> Unit,
     /** Handed each outgoing header, as canonical JSON, for a local recorder. */
     private val onSent: ((String) -> Unit)? = null,
     private val dial: (LinkConfig) -> Link = ::dialTcp,

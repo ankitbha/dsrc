@@ -23,6 +23,14 @@ data class CapturedFrame(
      */
     val captureMonoNs: Long,
     val jpeg: ByteArray,
+    /**
+     * When [CameraPipeline]'s encode call started and finished, on the same
+     * [captureMonoNs] clock. Null is not expected on a live capture -- both are always
+     * available once `compress` runs -- but the field is nullable rather than required so
+     * a test frame built without them, or a decode of an older wire record, stays valid.
+     */
+    val encodeStartMonoNs: Long? = null,
+    val encodeDoneMonoNs: Long? = null,
 ) {
     init {
         require(width > 0 && height > 0) { "frame is ${width}x$height" }
@@ -40,6 +48,8 @@ data class CapturedFrame(
             format == other.format &&
             quality == other.quality &&
             captureMonoNs == other.captureMonoNs &&
+            encodeStartMonoNs == other.encodeStartMonoNs &&
+            encodeDoneMonoNs == other.encodeDoneMonoNs &&
             jpeg.contentEquals(other.jpeg)
     }
 
@@ -50,6 +60,8 @@ data class CapturedFrame(
         result = 31 * result + format.hashCode()
         result = 31 * result + (quality ?: 0)
         result = 31 * result + captureMonoNs.hashCode()
+        result = 31 * result + (encodeStartMonoNs?.hashCode() ?: 0)
+        result = 31 * result + (encodeDoneMonoNs?.hashCode() ?: 0)
         result = 31 * result + jpeg.contentHashCode()
         return result
     }

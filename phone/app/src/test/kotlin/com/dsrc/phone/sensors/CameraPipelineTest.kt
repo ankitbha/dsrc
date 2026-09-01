@@ -3,8 +3,10 @@ package com.dsrc.phone.sensors
 import com.dsrc.phone.config.SensingConfig
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -125,6 +127,35 @@ class CameraPipelineTest {
             assertTrue(frame.captureMonoNs >= previous)
             previous = frame.captureMonoNs
         }
+    }
+
+    // -- encode timing (task 33) ----------------------------------------------
+
+    @Test
+    fun `the encode stamps bracket the compress call, on the injected clock`() {
+        val clockValue = AtomicLong(1_000)
+        val p = CameraPipeline(
+            SensingConfig(cameraHz = 1000.0), inline,
+            monoClock = { clockValue.getAndAdd(5) },
+        )
+        offer(p, ms)
+        val frame = p.drain()!!
+        assertNotNull(frame.encodeStartMonoNs)
+        assertNotNull(frame.encodeDoneMonoNs)
+        assertTrue(frame.encodeDoneMonoNs!! >= frame.encodeStartMonoNs!!)
+    }
+
+    @Test
+    fun `the encode stamps are read from the clock, not copied from the capture stamp`() {
+        // A fixed clock distinct from every capture timestamp used below: a bug that
+        // copied timestampNs into both encode fields would pass any test that checks
+        // only ordering, since a capture stamp is itself non-decreasing.
+        val p = CameraPipeline(SensingConfig(cameraHz = 1000.0), inline, monoClock = { 777_000L })
+        offer(p, 5 * ms)
+        val frame = p.drain()!!
+        assertEquals(777_000L, frame.encodeStartMonoNs)
+        assertEquals(777_000L, frame.encodeDoneMonoNs)
+        assertEquals(5 * ms, frame.captureMonoNs)
     }
 
     // -- failure -------------------------------------------------------------

@@ -92,8 +92,16 @@ class Session(
     private val role: String,
     private val monoClock: () -> Long,
     private val wallClock: () -> Long,
-    /** Delivered messages, minus transport traffic. Called on the reader thread. */
-    private val onFrame: (Frame) -> Unit,
+    /**
+     * Delivered messages, minus transport traffic, called on the delivery thread with the
+     * reader's own receipt stamps.
+     *
+     * The stamps are the reader's, taken in [readLoop] at the instant the frame arrived,
+     * not a fresh reading here or in the caller's handler -- see [Received.recvMonoNs] for
+     * why that distinction matters for anything timing-sensitive, an inbound advisory's
+     * arrival among them.
+     */
+    private val onFrame: (Frame, Long, Long) -> Unit,
     /**
      * Called with each outgoing frame's header, as canonical JSON.
      *
@@ -137,6 +145,22 @@ class Session(
      * loopback tests, and because the phone's half is `sendTimeSyncPing`.
      */
     private val timeSync = TimeSyncResponder(monoClock, wallClock)
+
+    /**
+     * The one pong this side (as an initiator) most recently saw, carried onto the next
+     * ping so a responder that never initiates can reconstruct a round-trip sample with
+     * no pending state of its own -- see `sendTimeSyncPing` and
+     * `phone_link._answer_pings` on the Jetson, which is what actually consumes this.
+     *
+     * `@Volatile` rather than behind a lock: written only from the delivery thread inside
+     * `handleTimeSync`, read only from whichever thread calls `sendTimeSyncPing`, and a
+     * torn read here costs at most one missed reconstruction opportunity rather than a
+     * wrong one -- the fields are read together as one reference, never field by field.
+     */
+    @Volatile
+    private var lastPong: PrevPong? = null
+
+    private data class PrevPong(val exchangeId: Long, val wireMonoNs: Long, val recvMonoNs: Long)
     private val running = AtomicBoolean(true)
     private val ended = AtomicBoolean(false)
 
@@ -556,6 +580,15 @@ class Session(
                 countInboundRefusal(frame.channel, RefusalReason.UNKNOWN_VALUE.wire)
                 return TimeSyncOutcome.REFUSED
             }
+            // Recorded regardless of whether the estimator above the transport can still
+            // match this exchange to a pending ping: the far side already knows its own
+            // departure stamp and only needs this side's receipt of it echoed back, so an
+            // unmatched or late pong is still a legitimate one to carry onto the next ping.
+            lastPong = PrevPong(
+                exchangeId = decoded.exchangeId,
+                wireMonoNs = decoded.wireMonoNs,
+                recvMonoNs = message.recvMonoNs,
+            )
             // A pong is the answer to our own ping, and the estimate is built above the
             // transport, so it is delivered rather than absorbed.
             return TimeSyncOutcome.NOT_OURS
@@ -581,6 +614,7 @@ class Session(
      */
     fun sendTimeSyncPing(exchangeId: Long): Boolean {
         require(role == ROLE_PHONE) { "only the initiator sends pings; this session is '$role'" }
+        val prev = lastPong
         val ping = TimeSyncMessage(
             captureMonoNs = monoClock(),
             exchangeId = exchangeId,
@@ -589,6 +623,9 @@ class Session(
             peerRecvMonoNs = null,
             peerRecvWallNs = null,
             peerWireMonoNs = null,
+            prevExchangeId = prev?.exchangeId,
+            tPrevPongWireMonoNs = prev?.wireMonoNs,
+            tPrevPongRecvMonoNs = prev?.recvMonoNs,
         )
         return send(Channels.CONTROL, ping.toExtensions(), wantsWireStamp = true)
     }
@@ -690,7 +727,7 @@ class Session(
         }
 
         try {
-            onFrame(frame)
+            onFrame(frame, message.recvMonoNs, message.recvWallNs)
             inbound.countDelivered(frame.channel)
         } catch (e: MessageError) {
             // Drop and count. The session stays open: one bad record costs one record.

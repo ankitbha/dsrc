@@ -181,4 +181,70 @@ class AdvisoryHolderTest {
 
         assertEquals(1, holder.stats.expired)
     }
+
+    @Test
+    fun `the first current call fires onFirstShown with the arrival-relative latency`() {
+        val calls = mutableListOf<Pair<AdvisoryMessage, Long>>()
+        val holder = AdvisoryHolder(onFirstShown = { advisory, shownAtNs ->
+            calls.add(advisory to shownAtNs)
+        }).also { it.start() }
+
+        holder.accept(advisory(), nowNs = 0)
+        holder.current(nowNs = second / 4)
+
+        assertEquals(1, calls.size)
+        assertEquals(second / 4, calls[0].second)
+        assertEquals(1, holder.stats.shown)
+        assertEquals(second / 4, holder.stats.lastRenderNs)
+    }
+
+    @Test
+    fun `onFirstShown fires once per advisory, not once per current call`() {
+        val calls = mutableListOf<Long>()
+        val holder = AdvisoryHolder(onFirstShown = { _, shownAtNs -> calls.add(shownAtNs) })
+            .also { it.start() }
+
+        holder.accept(advisory(), nowNs = 0)
+        repeat(5) { holder.current(nowNs = second / 10) }
+
+        assertEquals("a steady poll of the same advisory must not log five renders", 1, calls.size)
+    }
+
+    @Test
+    fun `a new advisory is shown again even though the last one already was`() {
+        val calls = mutableListOf<Long>()
+        val holder = AdvisoryHolder(onFirstShown = { _, shownAtNs -> calls.add(shownAtNs) })
+            .also { it.start() }
+
+        holder.accept(advisory(recSpeed = 10.0), nowNs = 0)
+        holder.current(nowNs = 0)
+        holder.accept(advisory(recSpeed = 20.0), nowNs = second)
+        holder.current(nowNs = second + 100)
+
+        assertEquals(2, calls.size)
+        assertEquals(2, holder.stats.shown)
+    }
+
+    @Test
+    fun `an advisory that expires unseen never fires onFirstShown`() {
+        val calls = mutableListOf<Long>()
+        val holder = AdvisoryHolder(onFirstShown = { _, shownAtNs -> calls.add(shownAtNs) })
+            .also { it.start() }
+
+        holder.accept(advisory(), nowNs = 0)
+        holder.current(nowNs = AdvisoryHolder.MAX_AGE_NS + 1)  // expired, never returned
+
+        assertTrue(calls.isEmpty())
+        assertEquals(0, holder.stats.shown)
+        assertNull(holder.stats.lastRenderNs)
+    }
+
+    @Test
+    fun `no callback is required, and current still works without one`() {
+        // The default parameter, exercised: a caller with nothing to log must not have to
+        // supply a no-op lambda of its own.
+        val holder = running()
+        holder.accept(advisory(), nowNs = 0)
+        assertNotNull(holder.current(nowNs = 0))
+    }
 }

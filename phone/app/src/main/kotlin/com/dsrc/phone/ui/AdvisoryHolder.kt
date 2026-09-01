@@ -19,14 +19,31 @@ import com.dsrc.transport.AdvisoryMessage
  */
 class AdvisoryHolder(
     private val maxAgeNs: Long = MAX_AGE_NS,
+    /**
+     * Called the first time [current] returns a given advisory, with the advisory and the
+     * instant it was returned -- both phone-clock, which is what lets a caller log
+     * "render" as a plain subtraction against the advisory's own arrival, with no
+     * timebase involved. Must not block: it runs inside the lock this class already
+     * takes on every read, and anything slow here becomes latency on the UI's poll of
+     * every other advisory.
+     */
+    private val onFirstShown: (AdvisoryMessage, Long) -> Unit = { _, _ -> },
 ) {
     private val lock = Any()
 
     private var latest: AdvisoryMessage? = null
     private var arrivedAtNs = 0L
+    //: When `current()` first returned `latest`, or null when nothing has yet. Reset
+    //: whenever `latest` changes, since "shown" is a fact about one specific advisory,
+    //: not a running total.
+    private var shownAtNs: Long? = null
     private var received = 0L
     private var expired = 0L
     private var afterStop = 0L
+    private var shown = 0L
+    //: The render latency of the most recently shown advisory -- first current() call
+    //: minus arrival, both phone-clock. Null until at least one advisory has been shown.
+    private var lastRenderNs: Long? = null
 
     /**
      * Whether advisories are being taken at all.
@@ -52,6 +69,8 @@ class AdvisoryHolder(
         }
         latest = advisory
         arrivedAtNs = nowNs
+        // A new advisory has not been shown yet, whatever the last one's history was.
+        shownAtNs = null
         received++
     }
 
@@ -59,6 +78,7 @@ class AdvisoryHolder(
     fun start() = synchronized(lock) {
         accepting = true
         latest = null
+        shownAtNs = null
     }
 
     /**
@@ -66,6 +86,11 @@ class AdvisoryHolder(
      *
      * Counting an expiry here rather than at a timer means the count moves only when
      * someone actually asks — which is the only moment it could have been shown.
+     *
+     * The first call to return a given advisory marks it shown and fires
+     * [onFirstShown], from inside the lock: both stamps -- arrival and this return --
+     * are this device's own clock, so the render segment they bound is exact, and there
+     * is no later, unlocked moment where "first" could still mean something else.
      */
     fun current(nowNs: Long): AdvisoryMessage? = synchronized(lock) {
         val held = latest ?: return null
@@ -73,6 +98,12 @@ class AdvisoryHolder(
             latest = null
             expired++
             return null
+        }
+        if (shownAtNs == null) {
+            shownAtNs = nowNs
+            shown++
+            lastRenderNs = nowNs - arrivedAtNs
+            onFirstShown(held, nowNs)
         }
         return held
     }
@@ -86,6 +117,7 @@ class AdvisoryHolder(
     fun clear() = synchronized(lock) {
         accepting = false
         latest = null
+        shownAtNs = null
     }
 
     val stats: Stats
@@ -95,6 +127,8 @@ class AdvisoryHolder(
                 expired = expired,
                 showing = latest != null,
                 afterStop = afterStop,
+                shown = shown,
+                lastRenderNs = lastRenderNs,
             )
         }
 
@@ -104,6 +138,10 @@ class AdvisoryHolder(
         val showing: Boolean,
         /** Advisories that arrived after the session ended, and were refused. */
         val afterStop: Long,
+        /** Advisories `current()` returned at least once. */
+        val shown: Long,
+        /** Render latency of the most recently shown advisory, or null before the first. */
+        val lastRenderNs: Long?,
     )
 
     companion object {

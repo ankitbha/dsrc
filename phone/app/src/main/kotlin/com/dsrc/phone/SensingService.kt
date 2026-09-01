@@ -381,7 +381,9 @@ class SensingService : LifecycleService() {
 
         val sender = CameraFrameSender(
             drain = pipe::drain,
-            send = { channel, extensions, payload -> holder.send(channel, extensions, payload) },
+            send = { channel, extensions, payload, wantsWireStamp ->
+                holder.send(channel, extensions, payload, wantsWireStamp)
+            },
         )
         frameSender = sender
         sender.start()
@@ -581,12 +583,16 @@ class SensingService : LifecycleService() {
      * reach the delivery thread's backstop counts it as `failed` rather than `refused`.
      * That is the right heading for it.
      */
-    private fun onInboundFrame(frame: Frame) {
+    private fun onInboundFrame(frame: Frame, recvMonoNs: Long, recvWallNs: Long) {
         if (frame.channel == Channels.ADVISORY) {
+            // The reader's own receipt, not a fresh reading here: this callback runs on
+            // the delivery thread, one queue-drain later than the frame actually arrived,
+            // and the "return" segment a later offline join computes is exactly this gap.
             advisories.accept(
                 AdvisoryMessage.fromWire(frame.header.entries, frame.payload),
-                SystemClock.elapsedRealtimeNanos(),
+                recvMonoNs,
             )
+            sessionLog?.offerInbound(recvMonoNs, recvWallNs, frame.header)
             return
         }
         if (frame.channel != Channels.RATE_CMD) {
@@ -1056,8 +1062,16 @@ class SensingService : LifecycleService() {
          * On the companion rather than an instance field: the UI outlives any one service
          * instance, and an advisory that survived a stop would be a recommendation about a
          * drive that had ended. `onSensingDown` clears it for exactly that reason.
+         *
+         * The callback writes an `advisory_shown` line to whichever session log is live at
+         * the moment an advisory is first returned -- read here rather than captured, since
+         * `advisories` is constructed once at class load, before any drive's log exists.
          */
-        val advisories = AdvisoryHolder()
+        val advisories = AdvisoryHolder(
+            onFirstShown = { advisory, shownAtNs ->
+                liveLog?.offerAdvisoryShown(advisory.captureMonoNs, shownAtNs)
+            },
+        )
 
         /**
          * Release steps that threw, across every instance.

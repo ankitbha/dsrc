@@ -7,6 +7,16 @@ package com.dsrc.transport
  * other message on this wire, and a second type on one channel would need a `kind` field
  * to tell them apart, which is exactly what this protocol refuses. The null convention
  * carries it instead — a ping has the three peer fields null, a pong has them set.
+ *
+ * A ping may also carry the previous exchange -- `prevExchangeId`,
+ * `tPrevPongWireMonoNs` (that pong's own wire departure, echoed back) and
+ * `tPrevPongRecvMonoNs` (this side's receipt of it). Absent-tolerant rather than merely
+ * nullable, on the first ping of a session where there is none yet, and all three
+ * present together or absent together for the same reason as the peer trio above. This
+ * is what lets a responder that never initiates reconstruct a round-trip sample: `t1` is
+ * the pong's own departure, already known to whoever sent it; `t2` is
+ * `tPrevPongRecvMonoNs`; `t3` is this ping's own `wireMonoNs`; `t4` is this side's receipt
+ * of it. See `phone_link._answer_pings` on the Jetson.
  */
 data class TimeSyncMessage(
     val captureMonoNs: Long,
@@ -19,18 +29,35 @@ data class TimeSyncMessage(
     val peerRecvWallNs: Long?,
     /** Null on a ping; on a pong, the ping's own wire stamp echoed back. */
     val peerWireMonoNs: Long?,
+    /** Ping-only, absent-tolerant: the exchange id of the previous pong this side saw. */
+    val prevExchangeId: Long? = null,
+    /** That pong's own wire departure, echoed back so a responder need not remember it. */
+    val tPrevPongWireMonoNs: Long? = null,
+    /** This side's receipt of that pong, on this side's own clock. */
+    val tPrevPongRecvMonoNs: Long? = null,
 ) {
     /** A ping has no peer fields; a pong has all three. */
     val isPing: Boolean get() = peerRecvMonoNs == null && peerRecvWallNs == null && peerWireMonoNs == null
 
-    fun toExtensions(): Map<String, JsonValue> = mapOf(
-        Fields.CAPTURE_KEY to JsonValue.Num(captureMonoNs),
-        KEY_EXCHANGE to JsonValue.Num(exchangeId),
-        KEY_WIRE to JsonValue.Num(wireMonoNs),
-        KEY_PEER_RECV_MONO to Fields.toWire(peerRecvMonoNs),
-        KEY_PEER_RECV_WALL to Fields.toWire(peerRecvWallNs),
-        KEY_PEER_WIRE to Fields.toWire(peerWireMonoNs),
-    )
+    fun toExtensions(): Map<String, JsonValue> {
+        val base = mapOf(
+            Fields.CAPTURE_KEY to JsonValue.Num(captureMonoNs),
+            KEY_EXCHANGE to JsonValue.Num(exchangeId),
+            KEY_WIRE to JsonValue.Num(wireMonoNs),
+            KEY_PEER_RECV_MONO to Fields.toWire(peerRecvMonoNs),
+            KEY_PEER_RECV_WALL to Fields.toWire(peerRecvWallNs),
+            KEY_PEER_WIRE to Fields.toWire(peerWireMonoNs),
+        )
+        if (prevExchangeId == null) return base
+        // All three or none: checked at construction time nowhere, but every producer
+        // in this tree (Session.sendTimeSyncPing, TimeSyncInitiator's Python mirror)
+        // sets all three together or leaves all three null.
+        return base + mapOf(
+            KEY_PREV_EXCHANGE to JsonValue.Num(prevExchangeId),
+            KEY_PREV_PONG_WIRE to JsonValue.Num(tPrevPongWireMonoNs!!),
+            KEY_PREV_PONG_RECV to JsonValue.Num(tPrevPongRecvMonoNs!!),
+        )
+    }
 
     companion object {
         const val KEY_EXCHANGE = "exchange_id"
@@ -38,6 +65,9 @@ data class TimeSyncMessage(
         const val KEY_PEER_RECV_MONO = "t_peer_recv_mono_ns"
         const val KEY_PEER_RECV_WALL = "t_peer_recv_wall_ns"
         const val KEY_PEER_WIRE = "t_peer_wire_mono_ns"
+        const val KEY_PREV_EXCHANGE = "prev_exchange_id"
+        const val KEY_PREV_PONG_WIRE = "t_prev_pong_wire_mono_ns"
+        const val KEY_PREV_PONG_RECV = "t_prev_pong_recv_mono_ns"
 
         fun fromWire(extensions: Map<String, JsonValue>, payload: ByteArray): TimeSyncMessage {
             Fields.checkNoPayload(payload, Channels.CONTROL)
@@ -61,6 +91,17 @@ data class TimeSyncMessage(
                 )
             }
 
+            val prevExchangeId = Fields.absentableInt(extensions, KEY_PREV_EXCHANGE)
+            val prevPongWire = Fields.absentableInt(extensions, KEY_PREV_PONG_WIRE)
+            val prevPongRecv = Fields.absentableInt(extensions, KEY_PREV_PONG_RECV)
+            val prevSet = listOf(prevExchangeId, prevPongWire, prevPongRecv).count { it != null }
+            if (prevSet != 0 && prevSet != 3) {
+                throw MessageError(
+                    RefusalReason.NULL_NOT_ALLOWED,
+                    "a ping needs all three previous-exchange stamps or none; $prevSet of 3 are set",
+                )
+            }
+
             return TimeSyncMessage(
                 captureMonoNs = Fields.requireInt(extensions, Fields.CAPTURE_KEY),
                 exchangeId = Fields.requireCount(extensions, KEY_EXCHANGE),
@@ -68,6 +109,9 @@ data class TimeSyncMessage(
                 peerRecvMonoNs = peerRecvMono,
                 peerRecvWallNs = peerRecvWall,
                 peerWireMonoNs = peerWire,
+                prevExchangeId = prevExchangeId,
+                tPrevPongWireMonoNs = prevPongWire,
+                tPrevPongRecvMonoNs = prevPongRecv,
             )
         }
     }

@@ -1,5 +1,7 @@
 package com.dsrc.phone.log
 
+import com.dsrc.transport.Json
+import com.dsrc.transport.JsonValue
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -167,6 +169,79 @@ class SessionLogTest {
 
         assertEquals(3, log.stats.droppedNotRunning)
         assertFalse(log.stats.complete)
+    }
+
+    // -- task 33: the two inbound line shapes ---------------------------------
+
+    private fun anAdvisoryHeader(captureMonoNs: Long = 555) = JsonValue.Obj(
+        mapOf(
+            "ch" to JsonValue.Text("advisory"),
+            "seq" to JsonValue.Num(3),
+            "t_mono_ns" to JsonValue.Num(100),
+            "t_wall_ns" to JsonValue.Num(200),
+            "n" to JsonValue.Num(0),
+            "t_capture_mono_ns" to JsonValue.Num(captureMonoNs),
+        )
+    )
+
+    @Test
+    fun `an inbound line carries the receipt stamps and the header verbatim`() {
+        val log = log()
+        log.start()
+        log.offerInbound(recvMonoNs = 1_000, recvWallNs = 2_000, header = anAdvisoryHeader())
+        log.stop()
+
+        val decoded = Json.decode(lines().single()) as JsonValue.Obj
+        assertEquals("in", (decoded.entries.getValue("dir") as JsonValue.Text).value)
+        assertEquals(1_000L, (decoded.entries.getValue("recv_mono_ns") as JsonValue.Num).value)
+        assertEquals(2_000L, (decoded.entries.getValue("recv_wall_ns") as JsonValue.Num).value)
+
+        // Verbatim, the same "cannot disagree with what was decoded" contract offer()
+        // already gives the outbound side -- every field the header carried is still there.
+        val header = decoded.entries.getValue("header") as JsonValue.Obj
+        assertEquals("advisory", (header.entries.getValue("ch") as JsonValue.Text).value)
+        assertEquals(555L, (header.entries.getValue("t_capture_mono_ns") as JsonValue.Num).value)
+    }
+
+    @Test
+    fun `an inbound line is not mistaken for an outbound one`() {
+        // Outbound lines are bare headers with no "dir" key at all -- this is the whole
+        // discriminator an offline reader keys on.
+        val log = log()
+        log.start()
+        log.offer("""{"ch":"camera","seq":1}""")
+        log.offerInbound(1, 2, anAdvisoryHeader())
+        log.stop()
+
+        val decodedOutbound = Json.decode(lines()[0]) as JsonValue.Obj
+        val decodedInbound = Json.decode(lines()[1]) as JsonValue.Obj
+        assertFalse("dir" in decodedOutbound.entries)
+        assertEquals("in", (decodedInbound.entries.getValue("dir") as JsonValue.Text).value)
+    }
+
+    @Test
+    fun `an advisory_shown line names the advisory and when it was first shown`() {
+        val log = log()
+        log.start()
+        log.offerAdvisoryShown(captureMonoNs = 555, shownMonoNs = 1_250)
+        log.stop()
+
+        val decoded = Json.decode(lines().single()) as JsonValue.Obj
+        assertEquals("shown", (decoded.entries.getValue("dir") as JsonValue.Text).value)
+        assertEquals(555L, (decoded.entries.getValue("t_capture_mono_ns") as JsonValue.Num).value)
+        assertEquals(1_250L, (decoded.entries.getValue("shown_mono_ns") as JsonValue.Num).value)
+    }
+
+    @Test
+    fun `an inbound line offered before start is counted the same way an outbound one is`() {
+        val log = log()
+        log.offerInbound(1, 2, anAdvisoryHeader())
+        log.offerAdvisoryShown(555, 600)
+        log.start()
+        log.stop()
+
+        assertEquals(2, log.stats.droppedNotRunning)
+        assertEquals(0, lines().size)
     }
 
 }

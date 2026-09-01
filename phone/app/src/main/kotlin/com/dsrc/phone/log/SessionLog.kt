@@ -1,6 +1,8 @@
 package com.dsrc.phone.log
 
 import android.util.Log
+import com.dsrc.transport.Json
+import com.dsrc.transport.JsonValue
 import java.io.File
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.TimeUnit
@@ -78,7 +80,51 @@ class SessionLog(
      * — and the honest response is to drop this line and count it, because the alternative
      * is back-pressure onto whichever sensing thread happened to call.
      */
-    fun offer(headerJson: String) {
+    fun offer(headerJson: String) = enqueueLine(headerJson)
+
+    /**
+     * Record one inbound frame, with the reader's own receipt stamps.
+     *
+     * A distinct shape from the outbound lines [offer] writes -- `{"dir":"in",...}` rather
+     * than a bare header -- because an outbound line already *is* the canonical header this
+     * device sent, verbatim, and an inbound line needs to say more than the header alone
+     * can: when this device received it, on its own clock, which the header does not carry
+     * at all. `header` is passed through as the frame's own extensions object, unmodified,
+     * for the same "verbatim, cannot disagree" reason [offer] exists.
+     */
+    fun offerInbound(recvMonoNs: Long, recvWallNs: Long, header: JsonValue.Obj) {
+        val wrapped = JsonValue.Obj(
+            mapOf(
+                "dir" to JsonValue.Text("in"),
+                "recv_mono_ns" to JsonValue.Num(recvMonoNs),
+                "recv_wall_ns" to JsonValue.Num(recvWallNs),
+                "header" to header,
+            )
+        )
+        enqueueLine(Json.encode(wrapped))
+    }
+
+    /**
+     * Record the first instant `AdvisoryHolder.current()` returned a given advisory.
+     *
+     * Keyed on the advisory's own `t_capture_mono_ns` rather than a generated id, because
+     * that is the same key an offline join already uses to pair an advisory with the
+     * Jetson tick that produced it -- `run_phone_drive.py` and `eval_run.py`'s phone-log
+     * join both key on it, and a third identifier here would just be one more thing to
+     * keep in agreement with the other two.
+     */
+    fun offerAdvisoryShown(captureMonoNs: Long, shownMonoNs: Long) {
+        val wrapped = JsonValue.Obj(
+            mapOf(
+                "dir" to JsonValue.Text("shown"),
+                "t_capture_mono_ns" to JsonValue.Num(captureMonoNs),
+                "shown_mono_ns" to JsonValue.Num(shownMonoNs),
+            )
+        )
+        enqueueLine(Json.encode(wrapped))
+    }
+
+    private fun enqueueLine(line: String) {
         if (!running) {
             // Counted, not dropped in silence. A frame the transport wrote after the log
             // was stopped -- teardown releases them in an order, and the link outlives the
@@ -88,7 +134,7 @@ class SessionLog(
             synchronized(lock) { droppedNotRunning++ }
             return
         }
-        if (!queue.offer(headerJson)) {
+        if (!queue.offer(line)) {
             synchronized(lock) { droppedQueueFull++ }
         }
     }

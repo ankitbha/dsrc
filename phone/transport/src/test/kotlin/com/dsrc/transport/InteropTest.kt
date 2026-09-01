@@ -129,7 +129,7 @@ class InteropTest {
             role = "phone",
             monoClock = { System.nanoTime() },
             wallClock = { System.currentTimeMillis() * 1_000_000 },
-            onFrame = onFrame,
+            onFrame = { frame, _, _ -> onFrame(frame) },
         ).also { this.session = it }
         session.start()
         // The peer prints "ready" once its own handshake has completed.
@@ -351,7 +351,7 @@ class InteropTest {
             role = "phone",
             monoClock = { System.nanoTime() },
             wallClock = { System.currentTimeMillis() * 1_000_000 },
-            onFrame = {},
+            onFrame = { _, _, _ -> },
             onEnd = { reason, _ -> synchronized(ends) { ends.add(reason) } },
         ).also { this.session = it }
         session.start()

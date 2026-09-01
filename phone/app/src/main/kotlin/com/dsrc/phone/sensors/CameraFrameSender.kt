@@ -33,7 +33,7 @@ class CameraFrameSender(
      * and a concrete pipeline cannot be made to yield a scripted sequence.
      */
     private val drain: () -> CapturedFrame?,
-    private val send: (String, Map<String, JsonValue>, ByteArray) -> Boolean,
+    private val send: (String, Map<String, JsonValue>, ByteArray, Boolean) -> Boolean,
     private val pollMs: Long = DEFAULT_POLL_MS,
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
 ) {
@@ -112,8 +112,13 @@ class CameraFrameSender(
             height = frame.height.toLong(),
             format = frame.format,
             quality = frame.quality?.toLong(),
+            encodeStartMonoNs = frame.encodeStartMonoNs,
+            encodeDoneMonoNs = frame.encodeDoneMonoNs,
         )
-        val accepted = send(Channels.CAMERA, message.toExtensions(), frame.jpeg)
+        // Asked for on every camera frame, not conditionally: this is the busiest
+        // channel and the one whose network hop task 33's "transport" stage needs, and
+        // the added header cost is one int64 -- negligible against a JPEG payload.
+        val accepted = send(Channels.CAMERA, message.toExtensions(), frame.jpeg, true)
         if (accepted) sent.incrementAndGet() else refused.incrementAndGet()
         return accepted
     }

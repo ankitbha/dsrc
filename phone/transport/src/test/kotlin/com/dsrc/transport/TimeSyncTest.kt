@@ -214,4 +214,68 @@ class TimeSyncTest {
         val reply = responder().reply(ping.copy(wireMonoNs = 7), 11, 13)!!
         assertEquals(reply, TimeSyncMessage.fromWire(reply.toExtensions(), ByteArray(0)))
     }
+
+    // -- D2: a ping may carry the previous exchange --------------------------
+
+    private val pingWithPrev = ping.copy(
+        exchangeId = 18,
+        prevExchangeId = 17,
+        tPrevPongWireMonoNs = 1_000_000_100,
+        tPrevPongRecvMonoNs = 1_000_000_130,
+    )
+
+    @Test
+    fun `the plain ping carries none of the previous-exchange trio`() {
+        val extensions = ping.toExtensions()
+        assertTrue(TimeSyncMessage.KEY_PREV_EXCHANGE !in extensions)
+        assertTrue(TimeSyncMessage.KEY_PREV_PONG_WIRE !in extensions)
+        assertTrue(TimeSyncMessage.KEY_PREV_PONG_RECV !in extensions)
+
+        val decoded = decode(ping)
+        assertNull(decoded.prevExchangeId)
+        assertNull(decoded.tPrevPongWireMonoNs)
+        assertNull(decoded.tPrevPongRecvMonoNs)
+    }
+
+    @Test
+    fun `the trio survives a round trip`() {
+        assertEquals(pingWithPrev, decode(pingWithPrev))
+    }
+
+    @Test
+    fun `one of three present without the others two is refused`() {
+        for (present in listOf(
+            TimeSyncMessage.KEY_PREV_EXCHANGE,
+            TimeSyncMessage.KEY_PREV_PONG_WIRE,
+            TimeSyncMessage.KEY_PREV_PONG_RECV,
+        )) {
+            val partial = ping.toExtensions() + (present to JsonValue.Num(5))
+            val error = assertFailsWith<MessageError>("only $present set") {
+                TimeSyncMessage.fromWire(partial, ByteArray(0))
+            }
+            assertEquals(RefusalReason.NULL_NOT_ALLOWED, error.reason)
+        }
+    }
+
+    @Test
+    fun `two of three present is also refused`() {
+        val partial = ping.toExtensions() +
+            (TimeSyncMessage.KEY_PREV_EXCHANGE to JsonValue.Num(1)) +
+            (TimeSyncMessage.KEY_PREV_PONG_WIRE to JsonValue.Num(2))
+        assertEquals(
+            RefusalReason.NULL_NOT_ALLOWED,
+            assertFailsWith<MessageError> { TimeSyncMessage.fromWire(partial, ByteArray(0)) }.reason,
+        )
+    }
+
+    @Test
+    fun `the trio and the peer trio are independent groups on one message`() {
+        // A pong with the previous-exchange trio makes no sense on the wire -- only a
+        // ping carries it -- but the two all-or-none checks must not interfere with each
+        // other regardless of which message they land on.
+        val pongWithPrev = pong.copy(
+            prevExchangeId = 3, tPrevPongWireMonoNs = 4, tPrevPongRecvMonoNs = 5,
+        )
+        assertEquals(pongWithPrev, decode(pongWithPrev))
+    }
 }

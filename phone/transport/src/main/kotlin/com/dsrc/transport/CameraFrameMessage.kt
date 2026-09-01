@@ -17,15 +17,34 @@ data class CameraFrameMessage(
     val format: String,
     /** Present-and-null for a format that has no quality setting. */
     val quality: Long?,
+    /**
+     * When the phone's own encoder started and finished turning the packed pixels into
+     * the JPEG payload, on the same clock as [captureMonoNs] and the header's own
+     * `t_mono_ns` -- so every phone-side duration between capture and the wire is a
+     * plain subtraction, exact, with no timebase involved.
+     *
+     * Absent-tolerant rather than merely nullable: added to a channel that already
+     * ships, so a build from before task 33 does not write them at all, and requiring
+     * them would refuse every frame from that build.
+     */
+    val encodeStartMonoNs: Long? = null,
+    val encodeDoneMonoNs: Long? = null,
 ) {
-    fun toExtensions(): Map<String, JsonValue> = mapOf(
-        Fields.CAPTURE_KEY to JsonValue.Num(captureMonoNs),
-        KEY_FRAME_ID to JsonValue.Num(frameId),
-        KEY_WIDTH to JsonValue.Num(width),
-        KEY_HEIGHT to JsonValue.Num(height),
-        KEY_FORMAT to JsonValue.Text(format),
-        KEY_QUALITY to Fields.toWire(quality),
-    )
+    fun toExtensions(): Map<String, JsonValue> {
+        val base = mapOf(
+            Fields.CAPTURE_KEY to JsonValue.Num(captureMonoNs),
+            KEY_FRAME_ID to JsonValue.Num(frameId),
+            KEY_WIDTH to JsonValue.Num(width),
+            KEY_HEIGHT to JsonValue.Num(height),
+            KEY_FORMAT to JsonValue.Text(format),
+            KEY_QUALITY to Fields.toWire(quality),
+        )
+        val encode = buildMap<String, JsonValue> {
+            if (encodeStartMonoNs != null) put(KEY_ENCODE_START, JsonValue.Num(encodeStartMonoNs))
+            if (encodeDoneMonoNs != null) put(KEY_ENCODE_DONE, JsonValue.Num(encodeDoneMonoNs))
+        }
+        return base + encode
+    }
 
     companion object {
         const val KEY_FRAME_ID = "frame_id"
@@ -33,6 +52,8 @@ data class CameraFrameMessage(
         const val KEY_HEIGHT = "height"
         const val KEY_FORMAT = "format"
         const val KEY_QUALITY = "quality"
+        const val KEY_ENCODE_START = "t_encode_start_mono_ns"
+        const val KEY_ENCODE_DONE = "t_encode_done_mono_ns"
 
         /**
          * @param payload the JPEG, which is not a header field and is deliberately not
@@ -66,6 +87,8 @@ data class CameraFrameMessage(
                 height = height,
                 format = format,
                 quality = quality,
+                encodeStartMonoNs = Fields.absentableInt(extensions, KEY_ENCODE_START),
+                encodeDoneMonoNs = Fields.absentableInt(extensions, KEY_ENCODE_DONE),
             )
         }
     }

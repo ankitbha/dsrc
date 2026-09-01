@@ -105,4 +105,36 @@ class CameraFrameMessageTest {
         val decoded = CameraFrameMessage.fromWire(message().toExtensions(), ByteArray(0))
         assertEquals(7, decoded.frameId)
     }
+
+    // -- task 33: the phone's own encode timing, absent-tolerant -------------
+
+    @Test
+    fun `a message with no encode stamps omits both keys rather than nulling them`() {
+        val extensions = message().toExtensions()
+        assertTrue("t_encode_start_mono_ns" !in extensions)
+        assertTrue("t_encode_done_mono_ns" !in extensions)
+
+        val decoded = CameraFrameMessage.fromWire(extensions, jpeg)
+        assertNull(decoded.encodeStartMonoNs)
+        assertNull(decoded.encodeDoneMonoNs)
+    }
+
+    @Test
+    fun `the encode stamps survive a round trip when present`() {
+        val original = message().copy(encodeStartMonoNs = 5_010, encodeDoneMonoNs = 5_025)
+        val decoded = CameraFrameMessage.fromWire(original.toExtensions(), jpeg)
+        assertEquals(original, decoded)
+        assertEquals(5_010L, decoded.encodeStartMonoNs)
+        assertEquals(5_025L, decoded.encodeDoneMonoNs)
+    }
+
+    @Test
+    fun `a wrong typed encode stamp is refused rather than ignored`() {
+        for (key in listOf(CameraFrameMessage.KEY_ENCODE_START, CameraFrameMessage.KEY_ENCODE_DONE)) {
+            val bad = message().toExtensions() + (key to JsonValue.Text("soon"))
+            val error = runCatching { CameraFrameMessage.fromWire(bad, jpeg) }.exceptionOrNull()
+            assertTrue("$key accepted a string", error is MessageError)
+            assertEquals(RefusalReason.WRONG_TYPE, (error as MessageError).reason)
+        }
+    }
 }

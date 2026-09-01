@@ -134,6 +134,21 @@ object Fields {
         }
     }
 
+    /**
+     * As [absentableNumber], for an integer field added to a shipped protocol.
+     *
+     * No existing absentable field before task 33 was an integer -- `skin_temp_c` and
+     * `skin_temp_zone` are a number and a string -- so this did not exist yet.
+     */
+    fun absentableInt(extensions: Map<String, JsonValue>, key: String): Long? {
+        val value = extensions[key] ?: return null
+        return when (value) {
+            is JsonValue.Null -> null
+            is JsonValue.Num -> value.value
+            else -> throw MessageError(RefusalReason.WRONG_TYPE, "'$key' is not an integer or null")
+        }
+    }
+
     fun optionalString(extensions: Map<String, JsonValue>, key: String): String? {
         val value = require(extensions, key)
         return when (value) {

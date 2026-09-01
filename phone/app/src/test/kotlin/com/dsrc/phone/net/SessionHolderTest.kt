@@ -96,7 +96,7 @@ class SessionHolderTest {
                         role = "jetson",
                         monoClock = { System.nanoTime() },
                         wallClock = { System.currentTimeMillis() * 1_000_000L },
-                        onFrame = { received.add(it) },
+                        onFrame = { frame, _, _ -> received.add(frame) },
                     )
                     session.start()
                     session.peer?.role?.let { rolesSeen.add(it) }
@@ -171,7 +171,7 @@ class SessionHolderTest {
             deviceId = "phone-test",
             monoClock = { System.nanoTime() },
             wallClock = { System.currentTimeMillis() * 1_000_000L },
-            onFrame = onFrame,
+            onFrame = { frame, _, _ -> onFrame(frame) },
             dial = dial ?: SessionHolder::dialTcp,
             sleeper = sleeper,
         )
@@ -301,7 +301,7 @@ class SessionHolderTest {
             deviceId = "phone-test",
             monoClock = { System.nanoTime() },
             wallClock = { 0 },
-            onFrame = {},
+            onFrame = { _, _, _ -> },
             dial = { throw IOException("refused") },
             sleeper = { millis ->
                 sleeping.countDown()
@@ -382,7 +382,7 @@ class SessionHolderTest {
             deviceId = "phone-test",
             monoClock = { System.nanoTime() },
             wallClock = { 0 },
-            onFrame = {},
+            onFrame = { _, _, _ -> },
             dial = dial,
             sleeper = { millis -> asked.add(millis) },
         )
@@ -591,7 +591,7 @@ class SessionHolderTest {
             role = Session.ROLE_PHONE,
             monoClock = { System.nanoTime() },
             wallClock = { 0 },
-            onFrame = {},
+            onFrame = { _, _, _ -> },
         )
         session.start()
         assertTrue("a live session must be usable", SessionHolder.usable(session))
@@ -621,7 +621,7 @@ class SessionHolderTest {
             role = Session.ROLE_PHONE,
             monoClock = { System.nanoTime() },
             wallClock = { 0 },
-            onFrame = {},
+            onFrame = { _, _, _ -> },
         )
         session.start()
 

@@ -22,6 +22,9 @@ class CameraPipeline(
     config: com.dsrc.phone.config.SensingConfig,
     private val encodeExecutor: Executor,
     private val buffer: FrameBuffer = FrameBuffer(),
+    /** Same clock as `timestampNs` in [offer] -- `elapsedRealtimeNanos` on a live capture,
+     *  injectable so a test's encode-duration assertions do not depend on real time. */
+    private val monoClock: () -> Long = android.os.SystemClock::elapsedRealtimeNanos,
 ) {
     private val gate = RateGate(config.cameraHz)
     private val nextFrameId = AtomicLong(0)
@@ -117,7 +120,9 @@ class CameraPipeline(
                     return@execute
                 }
                 try {
+                    val encodeStartNs = monoClock()
                     val jpeg = compress(packed, width, height, quality)
+                    val encodeDoneNs = monoClock()
                     buffer.offer(
                         CapturedFrame(
                             frameId = frameId,
@@ -127,6 +132,8 @@ class CameraPipeline(
                             quality = quality,
                             captureMonoNs = timestampNs,
                             jpeg = jpeg,
+                            encodeStartMonoNs = encodeStartNs,
+                            encodeDoneMonoNs = encodeDoneNs,
                         )
                     )
                     encoded.incrementAndGet()
