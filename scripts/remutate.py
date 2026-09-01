@@ -567,10 +567,14 @@ MUTATIONS = [
      "        if t[-1] - t[0] < 0.3:\n            return 0.0, True",
      "python"),
     # Braking. Every acceleration in the controller's tests was positive.
+    # Task 34 moved this comparison out of `decide` and into the `RuleCheck` it
+    # builds for `Trigger.EVENT`; the anchor follows it there. Still the same
+    # property: dropping `abs()` reads only acceleration as an event and stops
+    # braking from ever firing it.
     ("controller: only acceleration is an event, not braking",
      "deployment/jetson/policy/sensing_controller.py",
-     "if inputs.ego_acceleration is not None and abs(inputs.ego_acceleration) >= EVENT_ACCEL_MPS2:",
-     "if inputs.ego_acceleration is not None and inputs.ego_acceleration >= EVENT_ACCEL_MPS2:",
+     "            event_fired = abs(value) >= EVENT_ACCEL_MPS2",
+     "            event_fired = value >= EVENT_ACCEL_MPS2",
      "python"),
     # The published bound, as opposed to the field the estimator computed.
     ("timebase: the published one-way bound is halved on the way out",
@@ -1037,6 +1041,42 @@ MUTATIONS = [
      "            onFrame(frame, message.recvMonoNs, message.recvWallNs)",
      "            onFrame(frame, monoClock(), wallClock())",
      "transport"),
+
+    # Task 34. Attribution's three-state vocabulary, and the identity and thermal
+    # bookkeeping it depends on.
+    #
+    # A rule missing its input used to be indistinguishable from one that ran and
+    # found nothing -- the whole reason `not_evaluable` exists as its own status
+    # rather than folding into `quiet`. Pinned on `disagreement`'s not_evaluable
+    # return, the one already covered from the other side by the
+    # "controller: a missing feed counts as disagreement" entry above.
+    ("controller: a missing rule's input reports quiet instead of not_evaluable",
+     "deployment/jetson/policy/sensing_controller.py",
+     "        return RuleCheck(status=RULE_NOT_EVALUABLE, missing=missing, evidence=evidence)",
+     "        return RuleCheck(status=RULE_QUIET, missing=missing, evidence=evidence)",
+     "python"),
+    # `rules_fired` is supposed to be derived from the same `checks` dict the
+    # attribution record carries, so the two cannot drift apart. Loosening the
+    # filter to "not not_evaluable" still looks like a status check but starts
+    # counting every quiet rule as fired the moment nothing in a tick is missing --
+    # caught on a fully quiet decision, where the true list is empty.
+    ("controller: rules_fired counts a quiet rule as fired",
+     "deployment/jetson/policy/sensing_controller.py",
+     "        fired = [rule for rule in RULES if checks[rule].status == RULE_FIRED]",
+     "        fired = [rule for rule in RULES if checks[rule].status != RULE_NOT_EVALUABLE]",
+     "python"),
+    # A skin threshold that strictly lowers the scale below what the status alone
+    # reached is supposed to claim the cause. Dropping the reassignment leaves the
+    # scale correctly cut but the cause still naming the status -- a record that
+    # states the right number for the wrong reason, on a phone whose status word
+    # never moved while its skin warmed 5.4 C under load.
+    ("controller: a skin-driven backoff still names the status as its cause",
+     "deployment/jetson/policy/sensing_controller.py",
+     '                if THERMAL_SCALE["severe"] < scale:\n'
+     "                    cause = THERMAL_CAUSE_SKIN_HOT\n"
+     '                scale = min(scale, THERMAL_SCALE["severe"])',
+     '                scale = min(scale, THERMAL_SCALE["severe"])',
+     "python"),
 ]
 
 RESULTS = {
