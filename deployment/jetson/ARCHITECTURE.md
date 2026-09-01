@@ -127,7 +127,7 @@ the whole encoded vector.)
 | local_density_bin | sim formula count/(2·range/1000), sim bin edges (12, 30) | derived / derived_empty (zero in-range tracks -- the disagreement rule's only firing condition under shipped constants) |
 | local_mean_speed_bin | mean(ego + rel_speed) over valid tracks, sim edges (8, 18) | derived |
 | local_queue_estimate | tracks with absolute speed < 5 m/s (sim queue_speed) | derived / derived_empty (no in-range tracks) / fallback_neutral (tracks present, none measurable) |
-| uncongested_low_speed_flag | mirrors `safety/etiquette.py` (density < 12 ∧ v < vf − 8) | derived |
+| uncongested_low_speed_flag | mirrors `safety/etiquette.py` (density < 12 ∧ v < vf − 8), against a locally sensed density where the sim reads a segment one | approximated |
 | distance_to_next_merge | 0.0 - **sim parity**: the sim itself hardcodes 0.0 | sim_parity |
 | distance_to_downstream_bottleneck | inf (no map matching; sim's off-bottleneck value) | sim_parity |
 | time_since_last_lane_change, lane_changes_last_km | inf / 0 (no lane-change detection) | fallback_neutral |
