@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -217,6 +218,17 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _is_stale_report(age_s: float) -> bool:
+    """Whether a report this old is one the incumbent controller would have
+    discarded, by the same predicate `_thermal_scale` applies to the same
+    age (`sensing_controller.py`): not finite, or more than
+    `MAX_TELEMETRY_AGE_S` away from now in either direction. A witness using
+    a different predicate could call a report fresh that the controller
+    itself never used, or the reverse.
+    """
+    return not math.isfinite(age_s) or abs(age_s) > MAX_TELEMETRY_AGE_S
+
+
 def _reference_witness(sensing_ticks: list[dict]) -> dict[str, Any]:
     """The full-rate reference, witnessed rather than assumed: how many ticks
     the phone actually reported on, how many distinct reports those ticks
@@ -227,14 +239,14 @@ def _reference_witness(sensing_ticks: list[dict]) -> dict[str, Any]:
     rebind, so a phone that reported once and then had its telemetry thread
     die looks identical to one reporting every tick if presence is all that
     is read -- `ticks_with_achieved` alone cannot tell the two drives apart.
-    `age_s` can: it decreases exactly when a new report arrives and grows by
-    the tick interval between reports, so `reports` counts the arrivals
-    rather than the ticks that echo one. Ticks whose report has aged past
-    `MAX_TELEMETRY_AGE_S` are excluded from `achieved_mean` and
-    `dropped_final` -- the incumbent controller treats a report that old as
-    no report at all (`sensing_controller.MAX_TELEMETRY_AGE_S`), and a mean
-    that quietly included them would be a mean over readings the decision
-    log itself never used.
+    `reports` counts the distinct arrival instants (`reference.at_mono`)
+    rather than the ticks that echo one: an age recomputed against a fresh
+    `now` on every tick does not by itself reveal that the underlying report
+    did not change, and undercounts whenever the tick interval is at least
+    as long as the telemetry interval. Ticks whose report is stale
+    (`_is_stale_report`) are excluded from `achieved_mean` and
+    `dropped_final` -- a mean that quietly included them would be a mean
+    over readings the decision log itself never used.
     """
     with_achieved = [t["sensing"]["reference"] for t in sensing_ticks
                       if t["sensing"]["reference"]["absent"] is None]
@@ -242,9 +254,10 @@ def _reference_witness(sensing_ticks: list[dict]) -> dict[str, Any]:
 
     known_age = [r for r in with_achieved if r["age_s"] is not None]
     ages = [r["age_s"] for r in known_age]
-    reports = 1 + sum(1 for i in range(1, len(ages)) if ages[i] < ages[i - 1]) if ages else 0
-    fresh = [r for r in known_age if r["age_s"] <= MAX_TELEMETRY_AGE_S]
-    stale = [r for r in known_age if r["age_s"] > MAX_TELEMETRY_AGE_S]
+    reports = len({r["at_mono"] for r in known_age})
+    fresh = [r for r in known_age if not _is_stale_report(r["age_s"])]
+    stale = [r for r in known_age if _is_stale_report(r["age_s"])]
+    assert len(fresh) + len(stale) == len(known_age)
 
     achieved_mean = (
         {key: _mean([r["achieved"][key] for r in fresh]) for key in RATE_KEYS}
@@ -429,8 +442,11 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
         # mean over ticks the mode record itself calls contaminated would be
         # a mean over a segment `reference_rates_hold` says is not the
         # reference. The contaminated segment gets its own witness rather
-        # than being pooled into this one or silently dropped.
-        "reference_witness": _reference_witness(reference_ticks),
+        # than being pooled into this one or silently dropped. Both are
+        # None on a segment of zero ticks, matching each other: `segments`
+        # already states the tick count, so a witness here would describe a
+        # segment the drive does not have rather than an empty one it does.
+        "reference_witness": _reference_witness(reference_ticks) if reference_ticks else None,
         "reference_witness_contaminated": (
             _reference_witness(contaminated_ticks) if contaminated_ticks else None
         ),
@@ -473,9 +489,10 @@ def render_table(result: dict[str, Any]) -> str:
     lines.append(f"    structurally_absent={lim['structurally_absent']}")
     lines.append(f"    reference_rates_hold={lim['reference_rates_hold']}")
     rw = result["reference_witness"]
-    lines.append(f"  reference_witness (reference segment): {rw['ticks_with_achieved']} ticks with achieved, "
-                 f"{rw['ticks_no_telemetry']} with no telemetry, {rw['reports']} reports, "
-                 f"{rw['ticks_stale']} stale")
+    if rw is not None:
+        lines.append(f"  reference_witness (reference segment): {rw['ticks_with_achieved']} ticks with achieved, "
+                     f"{rw['ticks_no_telemetry']} with no telemetry, {rw['reports']} reports, "
+                     f"{rw['ticks_stale']} stale")
     rwc = result["reference_witness_contaminated"]
     if rwc is not None:
         lines.append(f"  reference_witness (contaminated segment): {rwc['ticks_with_achieved']} ticks "

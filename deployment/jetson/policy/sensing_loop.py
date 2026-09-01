@@ -153,18 +153,28 @@ def reference_from(phone: Any, *, now: float) -> dict[str, Any]:
     `achieved` is the phone's windowed average and `dropped` is cumulative
     (`TelemetryReporter` on the phone side); both arrive on every telemetry frame
     and neither had a reader on this side before this task. Null together with
-    `age_s`, and `absent` named, when the phone has never reported -- never
-    zeros, because a phone reporting zero achieved and a phone never heard from
-    are different drives.
+    `age_s` and `at_mono`, and `absent` named, when the phone has never reported
+    -- never zeros, because a phone reporting zero achieved and a phone never
+    heard from are different drives.
+
+    `at_mono` is the report's own arrival instant (`phone.telemetry_at_mono`),
+    carried alongside the age computed from it. `age_s` says how stale a report
+    is; `at_mono` says whether two ticks are looking at the same report or two
+    different ones, which age alone cannot answer -- a tick rate at or below the
+    telemetry rate re-reports on every tick, and an age recomputed against a
+    fresh `now` each time never reveals that the underlying report did not
+    change.
     """
     telemetry = getattr(phone, "telemetry", None)
     if telemetry is None:
-        return {"achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry"}
+        return {"achieved": None, "dropped": None, "age_s": None, "at_mono": None,
+                "absent": "no_telemetry"}
     telemetry_at = getattr(phone, "telemetry_at_mono", None)
     return {
         "achieved": {key: telemetry.achieved[key] for key in RATE_KEYS},
         "dropped": {key: telemetry.dropped[key] for key in DROP_KEYS},
         "age_s": None if telemetry_at is None else now - telemetry_at,
+        "at_mono": telemetry_at,
         "absent": None,
     }
 
