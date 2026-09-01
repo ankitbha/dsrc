@@ -523,13 +523,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 if phone is not None:
                     record["session_id"] = session_id
                 if outcome is not None:
-                    record["sensing"] = {
-                        **outcome.decision.to_record(),
-                        "shadow": outcome.command.shadow,
-                        "advisory_sent": outcome.advisory_sent,
-                        "command_sent": outcome.command_sent,
-                        "send_reason": outcome.send_reason,
-                    }
+                    record["sensing"] = outcome.to_record()
                 logger.write(record)
                 if phone is not None:
                     _log_timebase_estimates(logger, phone, last_estimate_ids, session_id)

@@ -231,7 +231,20 @@ class TestTimebaseEstimateLogging:
         assert logger.lines[0]["session_id"] is None
 
 
-class TestTickSessionId:
+class TestTheSensingRecordIsBuiltByTickOutcome:
+    """`record["sensing"]` used to be assembled inline in `run_live`, which is
+    what left task 34's round-1 defect -- the emitted shape was the one thing
+    no test read. `on_tick`'s return value is exercised directly in
+    `test_sensing_loop.py`; this pins that `run_live` actually calls it rather
+    than reverting to its own copy of the shape, which needs none of the
+    camera/policy/config machinery a full run does.
+    """
+
+    def test_run_live_builds_the_sensing_record_from_outcome_to_record(self):
+        import inspect
+
+        source = inspect.getsource(run_demo.run_live)
+        assert 'record["sensing"] = outcome.to_record()' in source
     """`run_live` used to read `phone.session.session_id` twice -- once for the
     tick record, once inside `_log_timebase_estimates` -- and a rebind between
     the two reads could put a different session's id on each. The fix pulls
