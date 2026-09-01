@@ -151,6 +151,137 @@ def test_stage_timings_recorded(pipeline) -> None:
     assert snapshot["e2e_ms"]["p95"] >= snapshot["e2e_ms"]["p50"] >= 0.0
 
 
+# -- task 33: the per-tick stages record --------------------------------------
+
+
+ALL_STAGE_KEYS = {
+    "capture", "capture_to_encode_start", "encode", "encode_done_to_enqueue",
+    "enqueue_to_wire", "transport", "jpeg_decode", "detect", "track", "fuse",
+    "infer", "decode",
+}
+
+
+def test_every_stage_key_is_present_on_a_local_camera_tick(pipeline) -> None:
+    tick = run_ticks(pipeline, 3)
+    assert set(tick.stages) == ALL_STAGE_KEYS
+
+
+def test_a_local_camera_reports_capture_as_an_instant_on_its_own_clock(pipeline) -> None:
+    tick = run_ticks(pipeline, 3)
+    capture = tick.stages["capture"]
+    assert capture.basis == "instant"
+    assert capture.clock == "jetson"
+    assert capture.ms == 0.0
+
+
+def test_a_local_camera_has_no_phone_dwell_or_transport_stages(pipeline) -> None:
+    """None of these happened -- captured locally, on this device -- and each
+    must say so by name rather than reporting a zero for a segment that does
+    not exist."""
+    tick = run_ticks(pipeline, 3)
+    for key in ("capture_to_encode_start", "encode", "encode_done_to_enqueue",
+                "enqueue_to_wire", "transport"):
+        stage = tick.stages[key]
+        assert stage.basis == "absent", key
+        assert stage.ms is None, key
+        assert stage.reason, key
+
+
+def test_jpeg_decode_is_absent_for_a_local_source(pipeline) -> None:
+    tick = run_ticks(pipeline, 3)
+    stage = tick.stages["jpeg_decode"]
+    assert stage.basis == "absent"
+    assert stage.ms is None
+    assert "local" in stage.reason
+
+
+def test_the_jetson_side_stages_are_measured_and_non_negative(pipeline) -> None:
+    tick = run_ticks(pipeline, 3)
+    for key in ("detect", "track", "fuse", "infer", "decode"):
+        stage = tick.stages[key]
+        assert stage.basis == "measured", key
+        assert stage.clock == "jetson", key
+        assert stage.ms is not None and stage.ms >= 0.0, key
+
+
+def test_infer_plus_decode_equals_policy_advisory_within_rounding(pipeline) -> None:
+    tick = run_ticks(pipeline, 3)
+    total = tick.stages["infer"].ms + tick.stages["decode"].ms
+    # set_target_headway runs between the decode stamp and t4, so the two are
+    # close but not required to be bit-identical.
+    assert total == pytest.approx(tick.stage_ms["policy_advisory"], abs=1.0)
+
+
+def test_the_stages_dict_survives_json_round_trip(pipeline) -> None:
+    tick = run_ticks(pipeline, 3)
+    record = tick.to_record()
+    parsed = json.loads(json.dumps(record))
+    assert set(parsed["stages"]) == ALL_STAGE_KEYS
+    assert parsed["stages"]["capture"]["basis"] == "instant"
+    assert parsed["stages"]["transport"]["basis"] == "absent"
+
+
+def test_the_tick_record_carries_the_capture_stamp_in_nanoseconds(pipeline) -> None:
+    tick = run_ticks(pipeline, 3)
+    record = tick.to_record()
+    assert record["t_capture_mono_ns"] == int(round(tick.t_capture_mono * 1e9))
+
+
+def test_new_stat_series_are_in_the_snapshot(pipeline) -> None:
+    run_ticks(pipeline, 3)
+    snapshot = pipeline.stats.snapshot()
+    for key in ("transport_round_trip_ms", "transport_one_way_ms",
+                "jpeg_decode_ms", "fuse_ms", "infer_ms", "decode_ms"):
+        assert key in snapshot, key
+    # No phone behind any of these ticks: nothing was converted, so the two
+    # transport series and jpeg_decode stay empty rather than reporting zeros.
+    assert snapshot["transport_round_trip_ms"] is None
+    assert snapshot["transport_one_way_ms"] is None
+    assert snapshot["jpeg_decode_ms"] is None
+    # fuse/infer/decode ran on every tick, local or not.
+    assert snapshot["fuse_ms"]["n"] == 3
+    assert snapshot["infer_ms"]["n"] == 3
+    assert snapshot["decode_ms"]["n"] == 3
+
+
+def test_a_phone_fed_frames_stages_pass_through_unchanged(pipeline) -> None:
+    from sensors.time_sync import StageTiming
+
+    phone_stages = {
+        "capture": StageTiming.instant(clock="phone"),
+        "capture_to_encode_start": StageTiming.measured(3.0, clock="phone"),
+        "encode": StageTiming.measured(12.0, clock="phone"),
+        "encode_done_to_enqueue": StageTiming.measured(1.5, clock="phone"),
+        "enqueue_to_wire": StageTiming.measured(0.5, clock="phone"),
+        "transport": StageTiming.converted(
+            9.0, bound_ms=25.0, estimate_id=7, source="round_trip"
+        ),
+    }
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    now = time.monotonic()
+    frame = Frame(
+        image=image, frame_id=999, t_mono=now - 0.05, t_wall=time.time() - 0.05,
+        jpeg_decode_s=0.004, phone_stages=phone_stages,
+    )
+    fix = GpsFix(
+        valid=True, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+        fix_quality=1, num_sats=9, hdop=0.9, altitude_m=3.0,
+        utc_epoch_s=time.time(), t_mono=now - 0.05, t_wall=time.time() - 0.05,
+    )
+    tick = pipeline.step(frame, fix, detections_override=scene_detections(0.0))
+
+    for key, expected in phone_stages.items():
+        assert tick.stages[key] == expected, key
+    assert tick.stages["jpeg_decode"].ms == pytest.approx(4.0)
+    assert tick.stages["jpeg_decode"].basis == "measured"
+
+    snapshot = pipeline.stats.snapshot()
+    assert snapshot["transport_round_trip_ms"]["n"] == 1
+    assert snapshot["transport_round_trip_ms"]["mean"] == pytest.approx(9.0)
+    assert snapshot["transport_one_way_ms"] is None
+    assert snapshot["jpeg_decode_ms"]["n"] == 1
+
+
 def test_the_sensing_loop_reads_a_real_tick(pipeline) -> None:
     """Task 31's wiring, against a Tick the pipeline actually built.
 

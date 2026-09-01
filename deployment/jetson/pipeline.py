@@ -28,6 +28,12 @@ from policy.actor_runtime import ActorRuntime, PolicyOutput
 from policy.advisory import Advisory, AdvisoryDecoder
 from sensors.camera_stream import Frame
 from sensors.gps_reader import GpsFix
+from sensors.time_sync import StageTiming
+
+#: Why a phone-side stage is absent on a tick with no phone behind it. Named
+#: once rather than restated at each of the five stages a local camera has
+#: none of, so the reason string cannot drift between them.
+NO_PHONE_STAGES_REASON = "no phone behind this frame; captured locally"
 
 
 class RollingStats:
@@ -86,6 +92,13 @@ class Tick:
     # None for a local camera, where there is no link and nothing was converted.
     link_ms: float | None = None
     timebase: dict[str, Any] | None = None
+    #: The task-33 per-stage record: capture, encode and its two neighbouring
+    #: dwell segments, transport, jpeg_decode, detect, track, fuse, infer and
+    #: decode -- ten and sometimes eleven entries (a local camera adds no
+    #: encode-dwell segments of its own but still names why they are absent).
+    #: `return` and `render` are not here: they are facts only the phone
+    #: witnesses, joined in offline by `eval_run.py --phone-log`.
+    stages: dict[str, StageTiming] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         """JSON-able log record (uses Python JSON's Infinity literal for inf)."""
@@ -94,11 +107,17 @@ class Tick:
             "tick_id": self.tick_id,
             "frame_id": self.frame_id,
             "t_wall": self.t_capture_wall,
+            # The exact join key an offline phone-log reader needs: this is the
+            # same nanosecond value `AdvisoryMessage.t_capture_mono_ns` carries
+            # when this tick's advisory is sent (sensing_loop.py), so a phone's
+            # inbound advisory line and this tick can be paired precisely.
+            "t_capture_mono_ns": int(round(self.t_capture_mono * 1e9)),
             "stage_ms": {k: round(v, 2) for k, v in self.stage_ms.items()},
             "e2e_ms": round(self.e2e_ms, 2),
             "jetson_ms": round(self.jetson_ms, 2),
             "link_ms": None if self.link_ms is None else round(self.link_ms, 2),
             "timebase": self.timebase,
+            "stages": {name: stage.to_record() for name, stage in self.stages.items()},
             "fps": round(self.fps, 2),
             "n_detections": self.n_detections,
             "vehicles": [
@@ -156,6 +175,17 @@ class PipelineStats:
     track: RollingStats = field(default_factory=RollingStats)
     observe: RollingStats = field(default_factory=RollingStats)
     policy: RollingStats = field(default_factory=RollingStats)
+    #: The network hop alone (wire departure to Jetson arrival), kept in two
+    #: series rather than one. A round-trip-converted sample's error is
+    #: bounded by half a round trip; a one-way-converted one's is bounded only
+    #: by a delay spread with an unobservable floor. Pooling the two would let
+    #: one series launder the other's confidence.
+    transport_round_trip: RollingStats = field(default_factory=RollingStats)
+    transport_one_way: RollingStats = field(default_factory=RollingStats)
+    jpeg_decode: RollingStats = field(default_factory=RollingStats)
+    fuse: RollingStats = field(default_factory=RollingStats)
+    infer: RollingStats = field(default_factory=RollingStats)
+    decode: RollingStats = field(default_factory=RollingStats)
 
     def snapshot(self) -> dict[str, dict[str, float]]:
         return {
@@ -166,6 +196,12 @@ class PipelineStats:
             "track_ms": self.track.summary(),
             "observe_ms": self.observe.summary(),
             "policy_ms": self.policy.summary(),
+            "transport_round_trip_ms": self.transport_round_trip.summary(),
+            "transport_one_way_ms": self.transport_one_way.summary(),
+            "jpeg_decode_ms": self.jpeg_decode.summary(),
+            "fuse_ms": self.fuse.summary(),
+            "infer_ms": self.infer.summary(),
+            "decode_ms": self.decode.summary(),
         }
 
 
@@ -231,9 +267,13 @@ class PerceptionPolicyPipeline:
         t3 = time.monotonic()
 
         policy_out: PolicyOutput = self.actor.act(obs_result.encoded)
+        t3a = time.monotonic()
         advisory: Advisory = self.advisory_decoder.decode(policy_out, obs_result.obs)
+        t3b = time.monotonic()
         self.builder.set_target_headway(advisory.headway_target_s)
         t4 = time.monotonic()
+        infer_ms = (t3a - t3) * 1000.0
+        decode_ms = (t3b - t3a) * 1000.0
 
         # Arrival is exact and local; capture may be converted from a peer clock.
         # With no timebase stamp the frame was captured here, so the two coincide.
@@ -262,6 +302,21 @@ class PerceptionPolicyPipeline:
         self.stats.observe.add(stage_ms["observe"])
         self.stats.policy.add(stage_ms["policy_advisory"])
 
+        stages = self._stages(
+            frame, stage_ms=stage_ms, infer_ms=infer_ms, decode_ms=decode_ms
+        )
+        transport = stages["transport"]
+        if transport.basis == "converted":
+            if transport.source == "round_trip":
+                self.stats.transport_round_trip.add(transport.ms)
+            elif transport.source == "one_way":
+                self.stats.transport_one_way.add(transport.ms)
+        if stages["jpeg_decode"].ms is not None:
+            self.stats.jpeg_decode.add(stages["jpeg_decode"].ms)
+        self.stats.fuse.add(stages["fuse"].ms)
+        self.stats.infer.add(infer_ms)
+        self.stats.decode.add(decode_ms)
+
         if self._last_step_mono is not None:
             dt = t4 - self._last_step_mono
             if dt > 0:
@@ -287,6 +342,52 @@ class PerceptionPolicyPipeline:
             advisory=advisory,
             gps=gps,
             n_peers=len(peers) if peers else 0,
+            stages=stages,
         )
         self._tick_counter += 1
         return tick
+
+    def _stages(
+        self, frame: Frame, *, stage_ms: dict[str, float], infer_ms: float, decode_ms: float,
+    ) -> dict[str, StageTiming]:
+        """The task-33 per-tick record: what the phone's header answered
+        exactly, what this device measured on its own clock, and what could
+        not be answered at all -- never a zero standing in for "not measured".
+        """
+        if frame.phone_stages is not None:
+            stages: dict[str, StageTiming] = dict(frame.phone_stages)
+        else:
+            # A local camera has none of the phone-side segments and no
+            # network hop: capture happened here, on this device's own clock.
+            stages = {
+                "capture": StageTiming.instant(clock="jetson"),
+                "capture_to_encode_start": StageTiming.absent(
+                    clock="phone", reason=NO_PHONE_STAGES_REASON
+                ),
+                "encode": StageTiming.absent(clock="phone", reason=NO_PHONE_STAGES_REASON),
+                "encode_done_to_enqueue": StageTiming.absent(
+                    clock="phone", reason=NO_PHONE_STAGES_REASON
+                ),
+                "enqueue_to_wire": StageTiming.absent(
+                    clock="phone", reason=NO_PHONE_STAGES_REASON
+                ),
+                "transport": StageTiming.absent(clock="cross", reason=NO_PHONE_STAGES_REASON),
+            }
+
+        if frame.jpeg_decode_s is not None:
+            stages["jpeg_decode"] = StageTiming.measured(
+                frame.jpeg_decode_s * 1000.0, clock="jetson"
+            )
+        else:
+            stages["jpeg_decode"] = StageTiming.absent(
+                clock="jetson", reason="decoded inside the local camera source, not timed here"
+            )
+
+        stages["detect"] = StageTiming.measured(stage_ms["detect"], clock="jetson")
+        stages["track"] = StageTiming.measured(stage_ms["track_distance"], clock="jetson")
+        stages["fuse"] = StageTiming.measured(
+            self.builder.last_timings.get("fuse_ms", 0.0), clock="jetson"
+        )
+        stages["infer"] = StageTiming.measured(infer_ms, clock="jetson")
+        stages["decode"] = StageTiming.measured(decode_ms, clock="jetson")
+        return stages

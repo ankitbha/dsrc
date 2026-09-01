@@ -136,6 +136,43 @@ def test_target_headway_feedback(builder: ObservationBuilder) -> None:
     assert result.obs["target_headway_s"] == 2.2
 
 
+class TestFuseTiming:
+    """`last_timings["fuse_ms"]` -- the peer/cooperation merge plus the traffic
+    feed's ownership decision, timed as one sub-segment of `observe`. Same
+    precedent as `TrtYoloDetector.last_timings`."""
+
+    def test_set_before_the_first_build_like_last_feed_ownership(
+        self, builder: ObservationBuilder
+    ) -> None:
+        assert builder.last_timings["fuse_ms"] == 0.0
+
+    def test_a_build_always_reports_a_non_negative_duration(
+        self, builder: ObservationBuilder
+    ) -> None:
+        builder.build([], fresh_fix(20.0), time.monotonic())
+        assert builder.last_timings["fuse_ms"] >= 0.0
+
+    def test_the_reading_is_from_the_most_recent_build_not_accumulated(
+        self, builder: ObservationBuilder
+    ) -> None:
+        builder.build([], fresh_fix(20.0), time.monotonic())
+        first = builder.last_timings["fuse_ms"]
+        builder.build([], fresh_fix(20.0), time.monotonic())
+        second = builder.last_timings["fuse_ms"]
+        # Both are real durations of the same code path, not a running total --
+        # an accumulator would make the second call strictly larger than the
+        # first every time, which a single sample cannot disprove on its own,
+        # so the shape checked here is that the field holds one call's cost.
+        assert second < first + 0.050, (first, second)
+
+    def test_peers_present_still_produces_a_timed_fuse(
+        self, builder: ObservationBuilder
+    ) -> None:
+        peers = [PeerState(peer_id="a", distance_m=80.0, speed_mps=24.0, lane_id=1)]
+        builder.build([], fresh_fix(20.0), time.monotonic(), peers)
+        assert builder.last_timings["fuse_ms"] >= 0.0
+
+
 class TestTheFreshnessPredicateIsWhollyPinned:
     """Half of it was not, and the deleted half is what the comment above it defends."""
 

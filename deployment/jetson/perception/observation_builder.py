@@ -30,6 +30,7 @@ Known v0 gaps (documented in ARCHITECTURE.md with upgrade paths):
 from __future__ import annotations
 
 import math
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -133,6 +134,13 @@ class ObservationBuilder:
         # Set before the first build, so a reader does not have to guard for an
         # attribute that only exists after a tick has run.
         self.last_feed_ownership = feed_fusion.own(None)
+        #: How long the last `build()` spent on each named sub-segment, keyed by
+        #: name and in milliseconds. Same precedent as
+        #: `TrtYoloDetector.last_timings`: a plain dict the caller reads after
+        #: the call, rather than a return value every caller would otherwise
+        #: have to thread through. Set before the first build for the same
+        #: reason `last_feed_ownership` is.
+        self.last_timings: dict[str, float] = {"fuse_ms": 0.0}
 
     def set_target_headway(self, headway_s: float) -> None:
         """Feed back the last commanded headway bin (mirrors the sim loop,
@@ -250,7 +258,15 @@ class ObservationBuilder:
         if cfg.symmetrize_counts:
             queue_count *= 2
 
-        # --- cooperation / nearby AVs (V2V beacons, else neutral) ------
+        # --- cooperation / nearby AVs, and the traffic feed: "fuse" --------
+        #
+        # Timed together as one sub-segment because both are the same job seen
+        # from two sources: folding a reading this vehicle cannot itself
+        # measure -- another AV's beacon, a traffic service's estimate -- into
+        # what this tick knows, before the vector is assembled. Precedent:
+        # `TrtYoloDetector.last_timings`, a plain dict read after the call
+        # rather than a return value every caller would have to thread through.
+        fuse_started = time.monotonic()
         if peers:
             av_count = len(peers)
             # The admission range peers were actually accepted at, not a literal.
@@ -301,6 +317,7 @@ class ObservationBuilder:
         # it informs decisions without becoming an input the policy never saw.
         owned = feed_fusion.own(feed)
         self.last_feed_ownership = owned
+        self.last_timings["fuse_ms"] = (time.monotonic() - fuse_started) * 1000.0
 
         # --- etiquette flag (mirrors src/safety/etiquette.py) ----------
         # `density` here is the locally sensed one; the simulator uses the segment
