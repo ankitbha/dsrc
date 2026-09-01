@@ -1077,6 +1077,29 @@ MUTATIONS = [
      '                scale = min(scale, THERMAL_SCALE["severe"])',
      '                scale = min(scale, THERMAL_SCALE["severe"])',
      "python"),
+
+    # Task 34 round 2. The attribution record itself was unpinned: every test read
+    # `decision.attribution` off the dataclass, and nothing asserted the shape
+    # `Decision.to_record()` actually emits -- the one artifact a tick log carries
+    # forward. These three close that.
+    ("controller: the attribution record is dropped from Decision.to_record()",
+     "deployment/jetson/policy/sensing_controller.py",
+     '            "here_radius_m": None if self.here_query is None else self.here_query.radius_m,\n'
+     '            "attribution": self.attribution.to_record(),\n'
+     "        }",
+     '            "here_radius_m": None if self.here_query is None else self.here_query.radius_m,\n'
+     "        }",
+     "python"),
+    ("controller: the first decision is always reported as first",
+     "deployment/jetson/policy/sensing_controller.py",
+     "        first_decision = self._last is None",
+     "        first_decision = True",
+     "python"),
+    ("controller: level_sensitive is always reported as false",
+     "deployment/jetson/policy/sensing_controller.py",
+     '                "level_sensitive": IDLE_RATES[key] != ACTIVE_RATES[key],',
+     '                "level_sensitive": False,',
+     "python"),
 ]
 
 RESULTS = {
