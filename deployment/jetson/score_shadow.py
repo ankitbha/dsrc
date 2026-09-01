@@ -45,6 +45,7 @@ import argparse
 import importlib
 import json
 import math
+import statistics
 import sys
 from dataclasses import fields
 from pathlib import Path
@@ -369,11 +370,13 @@ def _rules_never_exercised(records: list[dict[str, Any]], total: int) -> list[di
 
     `why` generalises what used to be a `feed_declined`-only special case:
     every evidence key a `not_evaluable` check carries besides `status` and
-    `missing` is its own reason, counted by value. Task 36 gave a
-    `not_evaluable` entry a provenance-class reason
-    (`ego_acceleration_source`) as well as `feed_declined`, and the map is
-    built once, over every such key, rather than growing a second
-    special case beside the first.
+    `missing` is its own reason. A categorical key (a provenance class, a
+    named decline reason) is counted by value, one bucket per distinct
+    value seen. A continuous key is not: bucketing a value that is a
+    little different on every tick produces one bucket per tick rather than
+    a reason, so a numeric key is summarised as its min/median/max instead
+    -- a key counts as numeric here when every value it carried, other than
+    `None`, was a number.
     """
     out: list[dict[str, Any]] = []
     for rule in RULES:
@@ -381,7 +384,7 @@ def _rules_never_exercised(records: list[dict[str, Any]], total: int) -> list[di
         if total == 0 or statuses.count(RULE_NOT_EVALUABLE) != total:
             continue
         missing_counts: dict[str, int] = {}
-        why: dict[str, dict[Any, int]] = {}
+        evidence_values: dict[str, list[Any]] = {}
         for r in records:
             check = r["attribution"]["rules"][rule]
             for name in check.get("missing", ()):
@@ -389,8 +392,24 @@ def _rules_never_exercised(records: list[dict[str, Any]], total: int) -> list[di
             for key, value in check.items():
                 if key in ("status", "missing"):
                     continue
-                bucket = why.setdefault(key, {})
-                bucket[value] = bucket.get(value, 0) + 1
+                evidence_values.setdefault(key, []).append(value)
+        why: dict[str, Any] = {}
+        for key, values in evidence_values.items():
+            present = [v for v in values if v is not None]
+            numeric = [v for v in present if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            if present and len(numeric) == len(present):
+                entry: dict[str, Any] = {
+                    "min": min(numeric), "median": statistics.median(numeric), "max": max(numeric),
+                }
+                none_count = len(values) - len(present)
+                if none_count:
+                    entry["none"] = none_count
+                why[key] = entry
+            else:
+                bucket: dict[Any, int] = {}
+                for value in values:
+                    bucket[value] = bucket.get(value, 0) + 1
+                why[key] = bucket
         out.append({
             "rule": rule, "ticks": total,
             "missing": missing_counts,
@@ -592,7 +611,17 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
 def render_table(result: dict[str, Any]) -> str:
     """The stdout table `main` prints beside `shadow_score.json`."""
     if "refused" in result:
-        return f"[score_shadow] REFUSED: {result['refused']} ({result['run']})"
+        line = f"[score_shadow] REFUSED: {result['refused']} ({result['run']})"
+        schema = result.get("schema")
+        if schema is not None:
+            # The operator otherwise gets a refusal with no names -- D10
+            # chose a schema-derived refusal specifically so it could say
+            # which keys, and on which tick.
+            line += (
+                f"\n    missing={schema['missing']} unknown={schema['unknown']} "
+                f"first_tick_id={schema['first_tick_id']}"
+            )
+        return line
 
     lines = [f"[score_shadow] {result['run']}", f"  ticks: {result['ticks']}"
              f" (unparseable lines: {result['unparseable_lines']})"]

@@ -20,7 +20,7 @@ from typing import Any, Callable
 import pytest
 
 import score_shadow
-from perception.feed_fusion import FeedOwnership
+from perception.feed_fusion import Decline, FeedOwnership
 from policy.advisory import Advisory
 from policy.sensing_controller import (
     RULE_FIRED,
@@ -157,7 +157,16 @@ def _jammed_feed() -> FeedOwnership:
     return FeedOwnership(downstream_congestion=0.9, free_flow_mps=30.0, age_s=1.0)
 
 
+def _declined_feed() -> FeedOwnership:
+    """A feed that was asked and named a reason it owns nothing -- as
+    opposed to no feed object at all, which is a different absence
+    (`feed_declined` stays `None` on that one; see `inputs_from`).
+    """
+    return FeedOwnership(declined=Decline.STALE)
+
+
 def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(),
+              declined_feed_ticks: frozenset = frozenset(),
               live_from: int | None = None, telemetry: bool = True,
               telemetry_at: frozenset[int] | None = None,
               accel_ticks: frozenset = frozenset(),
@@ -193,7 +202,12 @@ def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(
         if reports_this_tick:
             phone.telemetry = _telemetry(i, thermal_status=status)
             phone.telemetry_at_mono = clock.now - 0.02
-        feed = _jammed_feed() if i in feed_ticks else None
+        if i in feed_ticks:
+            feed = _jammed_feed()
+        elif i in declined_feed_ticks:
+            feed = _declined_feed()
+        else:
+            feed = None
         density = 0 if i in feed_ticks else 2
         accel = 3.0 if i in accel_ticks else 0.0
         outcome = loop.on_tick(
@@ -1023,6 +1037,32 @@ class TestSchemaRefusal:
         assert result["schema"]["unknown"] == ["extra_field"]
         assert result["schema"]["missing"] == []
 
+    def test_every_tick_is_checked_not_only_the_first(self, tmp_path):
+        # The first tick is left alone here -- both other tests in this
+        # class either strip the same keys from every tick or touch only
+        # tick 0, so a check that only ever looked at `sensing_ticks[0]`
+        # would still pass all of them.
+        run_dir = write_run(tmp_path, n=5)
+        lines = [json.loads(line) for line in (run_dir / "metadata.jsonl").read_text().splitlines()]
+        del lines[2]["sensing"]["decision_inputs"]["ego_speed_source"]
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            for entry in lines:
+                f.write(json.dumps(entry) + "\n")
+        result = score_shadow.score(run_dir)
+        assert result["refused"] == score_shadow.REFUSAL_INPUTS_SCHEMA
+        assert result["schema"]["missing"] == ["ego_speed_source"]
+        assert result["schema"]["first_tick_id"] == lines[2]["tick_id"]
+
+    def test_render_table_names_the_missing_and_unknown_keys(self, tmp_path):
+        run_dir = write_run(tmp_path, n=3)
+        self._strip_task_36_keys(run_dir)
+        result = score_shadow.score(run_dir)
+        table = score_shadow.render_table(result)
+        assert "REFUSED" in table
+        for key in self.PRE_TASK_36_KEYS:
+            assert key in table
+        assert "first_tick_id" in table
+
 
 class TestRulesNeverExercisedWhyMap:
     """D11: a general `why: {evidence_key: {value: count}}`, generalising
@@ -1041,16 +1081,26 @@ class TestRulesNeverExercisedWhyMap:
         assert entry["missing"] == {"ego_acceleration": 6}
         assert entry["why"]["ego_acceleration_source"] == {"fallback_neutral": 6}
 
-    def test_why_carries_feed_declined_on_the_disagreement_rule(self, tmp_path):
-        # Every tick here has no feed at all -- `feed_congestion` is missing
-        # on all of them and `feed_declined` is never set (no feed object to
-        # decline), so `why` on this rule is the drive from
-        # `TestTheThreeStateScoringDiscipline` restated through the general
-        # map instead of the old special case.
+    def test_why_carries_camera_density_bin_source_when_there_is_no_feed_at_all(self, tmp_path):
+        # Every tick here has no feed object at all -- `feed_congestion` is
+        # missing on all of them and `feed_declined` stays `None` (there is
+        # no feed to decline), so `why` on this rule carries only the
+        # camera-side reason.
         run_dir = write_run(tmp_path, n=5)
         result = score_shadow.score(run_dir)
         entry = next(e for e in result["rules_never_exercised"] if e["rule"] == Trigger.DISAGREEMENT)
         assert "camera_density_bin_source" in entry["why"]
+        assert "feed_declined" not in entry["why"]
+
+    def test_why_carries_feed_declined_when_the_feed_is_genuinely_declined(self, tmp_path):
+        # A feed that was asked and named a reason it owns nothing, on every
+        # tick -- as opposed to the no-feed-at-all shape above, which the
+        # previous version of this test used while claiming to cover this
+        # one; `feed_declined` was never actually set by it.
+        run_dir = write_run(tmp_path, n=5, declined_feed_ticks=frozenset(range(5)))
+        result = score_shadow.score(run_dir)
+        entry = next(e for e in result["rules_never_exercised"] if e["rule"] == Trigger.DISAGREEMENT)
+        assert entry["why"]["feed_declined"] == {Decline.STALE: 5}
 
     def test_rendered_in_the_table(self, tmp_path):
         run_dir = write_run(
@@ -1060,6 +1110,58 @@ class TestRulesNeverExercisedWhyMap:
         table = score_shadow.render_table(result)
         assert "why:" in table
         assert "ego_acceleration_source" in table
+
+
+class TestRulesNeverExercisedNumericEvidenceIsSummarised:
+    """M4: bucketing every evidence value by exact value put one bucket per
+    tick for a continuous key -- `camera_last_detection_age_s` is a little
+    different on nearly every tick of a real drive, so a `why` map built
+    that way names 899 "reasons" for an 899-tick drive instead of one. A
+    key counts as numeric only when every value it carried (other than
+    `None`) is a number; a categorical key is still bucketed by value.
+    """
+
+    @staticmethod
+    def _records(ages: list[float | None]) -> list[dict]:
+        # `_rules_never_exercised` reads every rule's status off every
+        # record before it decides which rule qualifies, so each record
+        # needs an entry for all four -- only `DISAGREEMENT`'s content is
+        # under test here, the other three are quiet and evidence-free.
+        quiet = {"status": RULE_QUIET}
+        return [
+            {"attribution": {"rules": {
+                Trigger.EVENT: quiet, Trigger.NARROW_MARGIN: quiet, Trigger.THERMAL: quiet,
+                Trigger.DISAGREEMENT: {
+                    "status": RULE_NOT_EVALUABLE,
+                    "missing": ["feed_congestion"],
+                    "camera_density_bin_source": "derived_empty",
+                    "camera_last_detection_age_s": age,
+                },
+            }}}
+            for age in ages
+        ]
+
+    def test_a_continuous_key_is_summarised_not_bucketed_per_tick(self):
+        ages = [0.1, 4.4, 9.9, 12.0, 30.5]
+        out = score_shadow._rules_never_exercised(self._records(ages), total=len(ages))
+        entry = next(e for e in out if e["rule"] == Trigger.DISAGREEMENT)
+        assert entry["why"]["camera_last_detection_age_s"] == {
+            "min": 0.1, "median": 9.9, "max": 30.5,
+        }
+
+    def test_a_categorical_key_is_still_bucketed_by_value(self):
+        ages = [0.1, 4.4]
+        out = score_shadow._rules_never_exercised(self._records(ages), total=len(ages))
+        entry = next(e for e in out if e["rule"] == Trigger.DISAGREEMENT)
+        assert entry["why"]["camera_density_bin_source"] == {"derived_empty": 2}
+
+    def test_a_none_value_is_counted_beside_the_numeric_summary(self):
+        ages = [None, 2.0, 4.0]
+        out = score_shadow._rules_never_exercised(self._records(ages), total=len(ages))
+        entry = next(e for e in out if e["rule"] == Trigger.DISAGREEMENT)
+        assert entry["why"]["camera_last_detection_age_s"] == {
+            "min": 2.0, "median": 3.0, "max": 4.0, "none": 1,
+        }
 
 
 class TestInputProvenance:
@@ -1075,6 +1177,18 @@ class TestInputProvenance:
         assert set(result["input_provenance"]) == {
             "ego_acceleration", "ego_speed", "camera_density_bin",
         }
+
+    def test_each_field_reports_its_own_class_not_the_accelerations(self, tmp_path):
+        sources = dict(_grounded_field_sources())
+        sources["ego_acceleration"] = "fallback_neutral"
+        sources["ego_speed"] = "measured"
+        sources["local_density_bin"] = "derived_empty"
+        run_dir = write_run(tmp_path, n=4, field_sources=sources)
+        result = score_shadow.score(run_dir)
+        ip = result["input_provenance"]
+        assert ip["ego_acceleration"] == {"fallback_neutral": 4}
+        assert ip["ego_speed"] == {"measured": 4}
+        assert ip["camera_density_bin"] == {"derived_empty": 4}
 
     def test_each_fields_counts_sum_to_ticks(self, tmp_path):
         run_dir = write_run(tmp_path, n=7, accel_ticks=frozenset({1, 3, 5}))
