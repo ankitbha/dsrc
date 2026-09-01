@@ -245,6 +245,9 @@ class TestTheSensingRecordIsBuiltByTickOutcome:
 
         source = inspect.getsource(run_demo.run_live)
         assert 'record["sensing"] = outcome.to_record()' in source
+
+
+class TestTickSessionId:
     """`run_live` used to read `phone.session.session_id` twice -- once for the
     tick record, once inside `_log_timebase_estimates` -- and a rebind between
     the two reads could put a different session's id on each. The fix pulls
