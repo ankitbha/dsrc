@@ -373,6 +373,18 @@ class TestReferenceWitnessStalePredicateMatchesTheController:
         return [{"sensing": {"reference": self._reference(age, at_mono=float(i))}}
                 for i, age in enumerate(ages)]
 
+    def test_a_non_finite_age_does_not_poison_the_reported_ages(self):
+        # `max()` and the mean propagate a NaN to the whole field, and `json.dumps`
+        # writes it as a bare `NaN` that strict parsers refuse, so one unusable age
+        # would cost a reader both numbers and the ability to load the file at all.
+        witness = score_shadow._reference_witness(
+            self._ticks([2.0, float("nan"), 4.0]))
+        assert witness["age_s_max"] == 4.0
+        assert witness["age_s_mean"] == pytest.approx(3.0)
+        # Not silently forgotten: an age the controller could not use is stale.
+        assert witness["ticks_stale"] == 1
+        json.loads(json.dumps(witness))
+
     def test_every_known_age_lands_in_exactly_one_of_fresh_or_stale(self):
         # `_reference_witness` asserts this partition itself; reaching the
         # return statement at all is the assertion passing.

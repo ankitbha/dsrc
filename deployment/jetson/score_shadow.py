@@ -253,7 +253,12 @@ def _reference_witness(sensing_ticks: list[dict]) -> dict[str, Any]:
     no_telemetry = sum(1 for t in sensing_ticks if t["sensing"]["reference"]["absent"] is not None)
 
     known_age = [r for r in with_achieved if r["age_s"] is not None]
-    ages = [r["age_s"] for r in known_age]
+    # Only finite ages go into the max and the mean. `max()` and the mean propagate a
+    # NaN to the whole field, and `json.dumps` writes it as a bare `NaN`, which strict
+    # parsers refuse -- so one unusable age would cost a reader both numbers and the
+    # ability to load the file at all. A non-finite age is still counted in
+    # `ticks_stale`, which is where it belongs.
+    ages = [r["age_s"] for r in known_age if math.isfinite(r["age_s"])]
     reports = len({r["at_mono"] for r in known_age})
     fresh = [r for r in known_age if not _is_stale_report(r["age_s"])]
     stale = [r for r in known_age if _is_stale_report(r["age_s"])]

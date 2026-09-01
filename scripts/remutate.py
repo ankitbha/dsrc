@@ -1237,6 +1237,14 @@ MUTATIONS = [
     # comes off the Jetson's own monotonic clock -- but this is now the
     # fifth predicate in the repo answering "is this report too old", and
     # the only one that would have disagreed with the other four.
+    # `max()` and the mean propagate a NaN to the whole field, and `json.dumps` writes
+    # it as a bare `NaN` that strict parsers refuse -- so one unusable age would cost a
+    # reader both numbers and the ability to load the file.
+    ("score_shadow: a non-finite age is averaged into the reported ages",
+     "deployment/jetson/score_shadow.py",
+     '    ages = [r["age_s"] for r in known_age if math.isfinite(r["age_s"])]',
+     '    ages = [r["age_s"] for r in known_age]',
+     "python"),
     ("score_shadow: the stale predicate disagrees with the controller on a non-finite or negative-beyond-bound age",
      "deployment/jetson/score_shadow.py",
      "    return not math.isfinite(age_s) or abs(age_s) > MAX_TELEMETRY_AGE_S",
