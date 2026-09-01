@@ -1241,7 +1241,93 @@ Written as part of the implementation, not added afterwards.
     claim available about it is that the refusal is correctly named. Bare `NaN` appears
     in the metadata log from NaN GPS before a fix — 70 lines and 1 — which is
     pre-existing and does not affect the identity gate.
-36. Per-tick field provenance and missingness.
+36. ~~Per-tick field provenance and missingness.~~
+    Every value the encoder reads now says where it came from: a closed eleven-member
+    vocabulary, a `field_sources` entry for all 39 encoder slots where the informal map
+    covered 33, the classes carried into the controller's `Inputs` and into
+    `score_shadow`, and every log recorded before this task refused **by name** rather
+    than scored against defaults. The distinction the task exists for is between a zero
+    that was measured and a zero that stands in for an absence.
+    **Three validation rounds and two fix rounds, and the rounds kept finding defects
+    inside the previous round's fix.** The critical one: both GPS readers return the
+    held fix with no age invalidation, so a receiver that goes silent presents as the
+    same `valid=True` fix growing older -- not as `valid=False`, which was the only
+    shape the task's own dropout tests used. The staleness guard measured from the last
+    appended sample rather than from the fix's own capture, so it fired a full
+    `gps_stale_after_s` late: for 2.0 s the speed read `fallback_neutral` while the
+    acceleration read 0.0 labelled `derived`, which is a calm road reported from a dead
+    sensor. **The plan's own scope claim was false.** It said the guard could only ever
+    remove a rate raise; `ego_acceleration` is an encoder slot, so the guard also
+    changes the actor's input and moves `policy_margin`, which is itself a raise rule.
+    The mechanism was measured -- 11 of 12 random-init bundles moved, by up to 0.0027
+    against a 0.15 threshold -- and no crossing was exhibited, because there is no
+    trained bundle to exhibit one with. **Four of the task's own new behaviours had no
+    catching test**, each surviving the full suite; the sharpest read the wrong
+    observation key, which would have recorded `measured` where the truth was
+    `derived_empty`. A further defect neither guard caught: on the first fresh tick
+    after an outage the window holds samples from both sides of the gap, so a slope was
+    fitted **across an interval containing no data**, labelled `derived`, and cleared
+    the event threshold -- 20 m/s, a 5 s dropout, GPS returning at 0 m/s and staying
+    there produced -3.6 m/s^2 and latched the camera at 5 Hz for the full hold. It is
+    identical at the parent commit, so it was pre-existing rather than introduced.
+    Fixed by clearing the sample window on any non-fresh tick, which gives one
+    stateable invariant: the window holds only samples from an unbroken run of fresh
+    fixes. The last round also found `eval_run` still deciding encoder coverage by
+    **counting** keys -- the defect the previous round had fixed in the builder and left
+    standing in the surface an operator reads -- and a test that fix round had added
+    passing without ever reaching the clause it was named for, because its fixture's
+    order made an earlier assertion decide the outcome.
+    **Experiment**, two drives, the second with a deliberately induced 46 s GPS outage
+    because the first drive's only gap was cold-start acquisition. 600 and 500 ticks,
+    the laptop's tailnet path direct but **the phone-to-Jetson session relayed via nyc
+    on both** -- a different pair of hosts from the leg that looks healthy. The census
+    over 23,400 field-ticks: `fallback_neutral` 67.09%, `derived_empty` 7.69%,
+    `static_config` 7.69%, `derived` 7.47%, `sim_parity` 5.13%, `approximated` 2.56%,
+    `measured_converted` 2.36%, with every tick carrying exactly 39 entries.
+    `score_shadow` scored the new log (600 of 600, `replay_identity` 0 mismatched) and
+    **refused both task-35 drives by name**, printing the four missing keys and the
+    first tick id. **The synchrony fix holds on hardware**: across six recoveries on two
+    drives there is no tick where `ego_speed` is substituted and `ego_acceleration` is
+    not, and two independent code paths agree exactly on the count, 51 = 51 and
+    320 = 320. Acceleration stays substituted for two to three ticks after speed
+    recovers while the cleared window refills to its 0.3 s minimum span, which is
+    visible as a third missingness value one tick wide either side of every recovery.
+    **Two numbers came out worse than estimated.** The added bytes measured 852 per
+    record, 8.9% of it, against an estimate of 630 and 7% -- 26% below, with one field
+    omitted from the estimate entirely; task 35's estimate had held. And the missingness
+    figure rose 6.02 percentage points on identical footage, from 0.611 to 0.671, purely
+    because the denominator went from 33 slots to 39 and all six added slots are
+    substituted on a lone instrumented car.
+    **The experiment found what 1,694 tests could not**, in the shape task 33 found
+    first: `report.md` printed the missingness mean and no spread, and on the second
+    drive that printed mean of 69.9% **occurred on zero ticks** -- the drive is bimodal
+    at 66.7% and 71.8%. The percentiles were already in `report.json` and the renderer
+    ignored them.
+    **The method lesson: run the old code before calling something a repair.** A
+    per-tick-bucketing hazard was written up as a defect this task's design had
+    introduced by composing two decisions that were never considered together. Extracting
+    the pre-task function verbatim and running it against real records showed it never
+    emitted that key at all -- the hazard was created and pre-empted inside the same
+    change, and the write-up had attributed to the old code a behaviour it never had.
+    The same drive showed the corrected summariser has still never run on real data,
+    because the branch needs a continuous value and the only candidate was null on every
+    tick of both drives.
+    **Open:** while GPS is fresh, one held fix is re-appended every tick, so a real slope
+    decays toward 0.0 and is still labelled `derived`; fixing that changes acceleration
+    values upward and would make the event rule fire more often, so it is its own task.
+    The camera was occluded on both drives -- 0 detections across 1,100 ticks -- so
+    `derived_empty` on 100% of ticks came from a covered lens rather than an empty road,
+    which is exactly the distinction that class names and cannot itself resolve. Four of
+    the second drive's five recorded gaps were single ticks where the fix aged 1 to 30 ms
+    past the freshness bound; the class alone does not separate those from the 46 s
+    outage. The event rule fired three times on a handset lying on a desk, because the
+    fused speed reported 5.3 m/s while stationary -- the provenance record is correct and
+    the value is wrong, which is the boundary of what this task claims: it records where
+    a number came from, never whether the number is right. Two defensive branches in the
+    numeric summariser survive mutation and were left unpinned rather than pinned with a
+    manufactured state, since no evidence key a rule can carry on every non-evaluable
+    tick is boolean or mixed-type. `summarise({})` reports 0.0 missingness for an empty
+    map, unreachable from the builder and unchanged from before.
 37. Thermal and throttle-event log for both devices.
 38. Failure event log: GPS dropout, HERE failure or quota exhaustion, dropped
     frames, transport stalls, with recovery outcome.
