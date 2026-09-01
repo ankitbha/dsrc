@@ -533,5 +533,48 @@ class TestTickOutcomeToRecord:
         assert record["reference"] == outcome.reference
 
 
+class DriftingClock:
+    """Advances by a fixed step on every read, never on request.
+
+    `Clock` above is fixed until `.advance()` is called, so two reads inside
+    one tick return the same value under it -- which let a mutation that
+    re-reads the clock a second time, instead of reusing the value the gates
+    already compared, pass every test that used it. This clock changes on
+    every call, so the loop's own read and `decide`'s own read are never
+    mistaken for each other.
+    """
+
+    def __init__(self, start: float = 1000.0, step: float = 1e-6) -> None:
+        self._next = start
+        self._step = step
+
+    def __call__(self) -> float:
+        value = self._next
+        self._next += self._step
+        return value
+
+
+class TestDecidedAtMonoIsTheControllersOwnRead:
+    """`on_tick` reads the shared clock once for its own `now`, before it
+    ever calls `decide` -- which reads the same clock again for its own
+    `now`, the value every dwell/hold/bridge/gap comparison inside `decide`
+    actually uses. `decided_at_mono` has to be that second read, not the
+    first: a replay fed the first read compares gates against an instant a
+    few microseconds earlier than the one they were decided from.
+    """
+
+    def test_decided_at_mono_is_the_second_clock_read_not_the_first(self):
+        clock = DriftingClock(start=1000.0)
+        loop = SensingLoop(clock=clock)
+        phone = Phone()
+
+        outcome = loop.on_tick(tick(), phone)
+
+        first_read = 1000.0          # the loop's own `now`, at the top of `on_tick`
+        second_read = 1000.0 + 1e-6  # `decide`'s own `now`, one clock call later
+        assert outcome.decision.decided_at_mono == second_read
+        assert outcome.decision.decided_at_mono != first_read
+
+
 def _degrees_north(metres: float) -> float:
     return metres / 111_320.0
