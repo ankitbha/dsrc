@@ -37,11 +37,41 @@ class FakeGps:
     valid: bool = True
 
 
+def _grounded_field_sources() -> dict[str, str]:
+    """A real 39-key `field_sources` map, produced by the actual builder on a
+    plain fresh-GPS, no-vehicles, no-peers tick -- not hand-typed, so this
+    fixture cannot drift from what `ObservationBuilder` actually emits.
+
+    Warmed up over five fresh ticks so `ego_acceleration` settles to
+    `derived` rather than a fresh builder's first-tick `fallback_neutral` --
+    otherwise every fixture built from this default would have its
+    `ego_acceleration` nulled by `inputs_from` regardless of what `obs`
+    itself sets it to, which is not what any test using this fixture means
+    to exercise unless it says so explicitly.
+    """
+    import time as _time
+
+    from perception.observation_builder import BuilderConfig, ObservationBuilder
+    from sensors.gps_reader import GpsFix
+
+    builder = ObservationBuilder(BuilderConfig())
+    now = _time.monotonic()
+    result = None
+    for i in range(5):
+        t = now + i * 0.1
+        fix = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                    heading_deg=90.0, fix_quality=1, num_sats=8, hdop=1.0,
+                    t_mono=t, t_wall=_time.time())
+        result = builder.build([], fix, t)
+    return result.field_sources
+
+
 @dataclass
 class FakeObs:
     obs: dict
     feed: Any = None
     diagnostics: dict = field(default_factory=lambda: {"gps_age_s": 0.4})
+    field_sources: dict = field(default_factory=_grounded_field_sources)
 
 
 @dataclass
@@ -438,6 +468,42 @@ class TestTriggerAndRuleCounters:
         assert sum(record["decisions_by_trigger"].values()) == 1
         assert record["rules_by_status"]
         assert sum(sum(counts.values()) for counts in record["rules_by_status"].values()) == 4
+
+
+class TestInputsBySource:
+    """`inputs_by_source` -- the provenance counterpart of `rules_by_status`,
+    present in `summary["sensing"]` (`SensingLoop.to_record()`) with no
+    `run_demo` change, since `summary["sensing"]` *is* that record.
+    """
+
+    def test_each_fields_counts_sum_to_ticks(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        for i in range(12):
+            clock.advance(0.1)
+            loop.on_tick(tick(accel=9.0 if i % 4 == 0 else 0.0, density=i % 3), None)
+        record = loop.to_record()
+        for field_name, counts in record["inputs_by_source"].items():
+            assert sum(counts.values()) == loop.ticks, field_name
+
+    def test_the_three_fields_this_loop_rolls_up(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        loop.on_tick(tick(), None)
+        assert set(loop.to_record()["inputs_by_source"]) == {
+            "ego_acceleration", "ego_speed", "camera_density_bin",
+        }
+
+
+class TestDecisionInputsCarriesEveryField:
+
+    def test_every_tick_logs_seventeen_keys(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        for i in range(5):
+            clock.advance(0.1)
+            outcome = loop.on_tick(tick(accel=float(i)), None)
+            assert len(outcome.to_record()["decision_inputs"]) == 17
 
 
 def _telemetry(**achieved_and_dropped) -> PhoneTelemetry:

@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from geo import haversine_m
+from perception import provenance
 from policy.sensing_controller import Decision, Inputs, SensingController
 from policy.shadow_mode import SHADOW, ModeHolder, command_for
 from sensors.time_sync import capture_stamp_ns
@@ -49,6 +50,13 @@ from transport.messages import DROP_KEYS, RATE_KEYS
 
 #: How long a rate command may go unsent while nothing changes.
 RATE_CMD_HEARTBEAT_S = 5.0
+
+#: The `Inputs` fields `SensingLoop.inputs_by_source` counts, and the obs key
+#: each one's provenance is read from. Three, not all four `Inputs` source
+#: fields: `ego_speed_source` is carried for the record (D14) but no rule
+#: keys on it, so a per-drive rollup of it would answer a question nothing
+#: downstream asks.
+INPUT_SOURCE_FIELDS = ("ego_acceleration", "ego_speed", "camera_density_bin")
 
 #: How far the vehicle may travel from the point it last asked about, as a fraction
 #: of that query's radius, before the query is resent. A fraction rather than a fixed
@@ -118,13 +126,39 @@ def inputs_from(tick: Any, phone: Any, *, now: float) -> Inputs:
 
     The ages are computed against `now` rather than read off the objects, because
     freshness is a question about this instant and the stamps are from earlier ones.
+
+    `field_sources` is read by attribute, not `getattr(..., {})`:
+    `ObservationResult.field_sources` is a required field, so a result with
+    none is a caller bug, not a missing measurement, and should raise rather
+    than silently score every field unattributed. A name the map itself does
+    not carry an entry for -- which the coverage test makes unreachable in
+    production -- reads as `SOURCE_UNATTRIBUTED` rather than a raise, because
+    only this function ever needs to tell "the builder wrote nothing" apart
+    from "the builder wrote a class".
     """
     obs = tick.obs_result.obs
+    src = tick.obs_result.field_sources
+    diagnostics = tick.obs_result.diagnostics
     feed = tick.obs_result.feed
     telemetry = getattr(phone, "telemetry", None)
     telemetry_at = getattr(phone, "telemetry_at_mono", None)
+
+    ego_acceleration_source = src.get("ego_acceleration", provenance.SOURCE_UNATTRIBUTED)
+    ego_speed_source = src.get("ego_speed", provenance.SOURCE_UNATTRIBUTED)
+    camera_density_bin_source = src.get("local_density_bin", provenance.SOURCE_UNATTRIBUTED)
+
     return Inputs(
-        ego_acceleration=obs.get("ego_acceleration"),
+        # A substituted value is not evidence about this tick, so it is
+        # nulled here rather than passed through -- the controller is told
+        # the value was not evidence rather than handed the neutral that
+        # stood in for it (D2). `ego_speed` and `camera_density_bin` are NOT
+        # nulled the same way: the HERE query still sizes itself from a held
+        # speed with no gate, and gating the density bin on `derived_empty`
+        # would delete the disagreement rule's only firing path (D4).
+        ego_acceleration=(
+            None if provenance.is_substituted(ego_acceleration_source)
+            else obs.get("ego_acceleration")
+        ),
         ego_speed=obs.get("ego_speed"),
         policy_margin=_margin(tick.policy.head_probs),
         # The feed's own number, from beside the observation vector rather than in
@@ -137,13 +171,17 @@ def inputs_from(tick: Any, phone: Any, *, now: float) -> Inputs:
         feed_declined=None if feed is None else feed.declined,
         camera_density_bin=None if obs.get("local_density_bin") is None
         else int(obs["local_density_bin"]),
+        ego_acceleration_source=ego_acceleration_source,
+        ego_speed_source=ego_speed_source,
+        camera_density_bin_source=camera_density_bin_source,
+        camera_last_detection_age_s=diagnostics.get("last_detection_age_s"),
         thermal_status=getattr(telemetry, "thermal_status", None),
         skin_temp_c=getattr(telemetry, "skin_temp_c", None),
         telemetry_age_s=None if telemetry_at is None else now - telemetry_at,
         lat=tick.gps.lat,
         lon=tick.gps.lon,
         position_valid=bool(tick.gps.valid),
-        position_age_s=tick.obs_result.diagnostics.get("gps_age_s"),
+        position_age_s=diagnostics.get("gps_age_s"),
     )
 
 
@@ -207,6 +245,10 @@ class SensingLoop:
         #: "how often was this rule fired / quiet / not_evaluable" over a whole drive
         #: without re-reading every tick's attribution record.
         self.rules_by_status: dict[str, dict[str, int]] = {}
+        #: Provenance class counts for `INPUT_SOURCE_FIELDS` -- `{field:
+        #: {class: count}}`. Each field's counts sum to `ticks`, the same way
+        #: `rules_by_status`'s do per rule.
+        self.inputs_by_source: dict[str, dict[str, int]] = {}
 
     def on_tick(self, tick: Any, phone: Any = None) -> TickOutcome:
         now = self._now()
@@ -220,6 +262,10 @@ class SensingLoop:
         for rule_name, check in decision.attribution.rules.items():
             counts = self.rules_by_status.setdefault(rule_name, {})
             counts[check.status] = counts.get(check.status, 0) + 1
+        for field_name in INPUT_SOURCE_FIELDS:
+            source = getattr(inputs, f"{field_name}_source")
+            counts = self.inputs_by_source.setdefault(field_name, {})
+            counts[source] = counts.get(source, 0) + 1
         # The frame's capture stamp, on our clock -- the advisory and the command are
         # both about the tick that produced them, not about the moment of sending.
         # `capture_stamp_ns` is the same conversion `Tick.to_record()` uses, so this
@@ -288,6 +334,9 @@ class SensingLoop:
             "mode": self.modes.to_record(),
             "decisions_by_trigger": dict(self.decisions_by_trigger),
             "rules_by_status": {name: dict(counts) for name, counts in self.rules_by_status.items()},
+            "inputs_by_source": {
+                name: dict(counts) for name, counts in self.inputs_by_source.items()
+            },
         }
 
 

@@ -242,6 +242,25 @@ class Inputs:
     #: out is treated as no report at all -- a phone that said `nominal` once and
     #: then went quiet is not a cool phone.
     telemetry_age_s: float | None = None
+    #: The `field_sources` class of `ego_acceleration`, as `inputs_from` read
+    #: it. `ego_acceleration` is None exactly when this class is a
+    #: substitution (`provenance.SUBSTITUTED`): the controller is told the
+    #: value was not evidence rather than handed the neutral that stood in
+    #: for it.
+    ego_acceleration_source: str | None = None
+    #: The class behind `ego_speed`. No rule keys on it -- the HERE query
+    #: radius is still sized from a held speed with no gate -- but the record
+    #: of what `here_radius_m` rested on has to exist somewhere.
+    ego_speed_source: str | None = None
+    #: The class behind `camera_density_bin` (the obs field
+    #: `local_density_bin`). `derived_empty` means the bin rests on an
+    #: absence of detections, which is what a blind camera and an empty road
+    #: both produce.
+    camera_density_bin_source: str | None = None
+    #: How long since the perception chain last produced an in-range track.
+    #: The only bound available on whether "the camera saw nothing" is a
+    #: statement about the road. None means it never has on this drive.
+    camera_last_detection_age_s: float | None = None
     #: Where we are, for the HERE query that goes down with `here_hz`.
     lat: float | None = None
     lon: float | None = None
@@ -273,6 +292,10 @@ class Inputs:
             "thermal_status": self.thermal_status,
             "skin_temp_c": self.skin_temp_c,
             "telemetry_age_s": self.telemetry_age_s,
+            "ego_acceleration_source": self.ego_acceleration_source,
+            "ego_speed_source": self.ego_speed_source,
+            "camera_density_bin_source": self.camera_density_bin_source,
+            "camera_last_detection_age_s": self.camera_last_detection_age_s,
             "lat": self.lat,
             "lon": self.lon,
             "position_valid": self.position_valid,
@@ -422,7 +445,10 @@ def _disagreement_check(inputs: Inputs) -> RuleCheck:
         if value is None
     )
     if missing:
-        evidence: dict[str, Any] = {}
+        evidence: dict[str, Any] = {
+            "camera_density_bin_source": inputs.camera_density_bin_source,
+            "camera_last_detection_age_s": inputs.camera_last_detection_age_s,
+        }
         if inputs.feed_declined is not None:
             evidence["feed_declined"] = inputs.feed_declined
         return RuleCheck(status=RULE_NOT_EVALUABLE, missing=missing, evidence=evidence)
@@ -434,6 +460,8 @@ def _disagreement_check(inputs: Inputs) -> RuleCheck:
             "jammed_congestion": JAMMED_CONGESTION,
             "camera_density_bin": inputs.camera_density_bin,
             "empty_density_bin": EMPTY_DENSITY_BIN,
+            "camera_density_bin_source": inputs.camera_density_bin_source,
+            "camera_last_detection_age_s": inputs.camera_last_detection_age_s,
         },
     )
 
@@ -462,14 +490,17 @@ class SensingController:
         checks: dict[str, RuleCheck] = {}
 
         if inputs.ego_acceleration is None:
-            checks[Trigger.EVENT] = RuleCheck(status=RULE_NOT_EVALUABLE,
-                                              missing=("ego_acceleration",))
+            checks[Trigger.EVENT] = RuleCheck(
+                status=RULE_NOT_EVALUABLE, missing=("ego_acceleration",),
+                evidence={"ego_acceleration_source": inputs.ego_acceleration_source},
+            )
         else:
             value = inputs.ego_acceleration
             event_fired = abs(value) >= EVENT_ACCEL_MPS2
             checks[Trigger.EVENT] = RuleCheck(
                 status=RULE_FIRED if event_fired else RULE_QUIET,
-                evidence={"value": value, "threshold": EVENT_ACCEL_MPS2},
+                evidence={"value": value, "threshold": EVENT_ACCEL_MPS2,
+                         "ego_acceleration_source": inputs.ego_acceleration_source},
             )
             if event_fired:
                 reasons.append(f"|accel| {abs(value):.1f} >= {EVENT_ACCEL_MPS2}")

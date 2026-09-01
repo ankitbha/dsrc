@@ -899,14 +899,16 @@ class TestThreeStatesAreThreeStates:
         check = decision.attribution.rules[Trigger.EVENT]
         assert check.status == RULE_FIRED
         assert check.to_record() == {"status": "fired", "value": 9.0,
-                                     "threshold": EVENT_ACCEL_MPS2}
+                                     "threshold": EVENT_ACCEL_MPS2,
+                                     "ego_acceleration_source": None}
 
     def test_event_quiet_at_zero(self):
         decision = SensingController(clock=Clock()).decide(calm())
         check = decision.attribution.rules[Trigger.EVENT]
         assert check.status == RULE_QUIET
         assert check.to_record() == {"status": "quiet", "value": 0.0,
-                                     "threshold": EVENT_ACCEL_MPS2}
+                                     "threshold": EVENT_ACCEL_MPS2,
+                                     "ego_acceleration_source": None}
 
     def test_margin_not_evaluable_before_the_first_inference(self):
         decision = SensingController(clock=Clock()).decide(calm(policy_margin=None))
@@ -921,7 +923,8 @@ class TestThreeStatesAreThreeStates:
         decision = SensingController(clock=Clock()).decide(calm(ego_acceleration=None))
         check = decision.attribution.rules[Trigger.EVENT]
         assert check.to_record() == {"status": "not_evaluable",
-                                     "missing": ["ego_acceleration"]}
+                                     "missing": ["ego_acceleration"],
+                                     "ego_acceleration_source": None}
 
     def test_a_named_missing_input_and_a_quiet_status_cannot_coexist(self):
         # `RuleCheck` can represent `{"status": "quiet", "missing": ["x"]}` -- a status
@@ -944,7 +947,10 @@ class TestThreeStatesAreThreeStates:
         # counted as fired would slip through unnoticed.
         decision = SensingController(clock=Clock()).decide(calm(feed_congestion=None))
         check = decision.attribution.rules[Trigger.DISAGREEMENT]
-        assert check.to_record() == {"status": "not_evaluable", "missing": ["feed_congestion"]}
+        assert check.to_record() == {
+            "status": "not_evaluable", "missing": ["feed_congestion"],
+            "camera_density_bin_source": None, "camera_last_detection_age_s": None,
+        }
         assert decision.rules_fired == []
 
     def test_disagreement_names_both_missing_views(self):
@@ -961,6 +967,7 @@ class TestThreeStatesAreThreeStates:
         check = decision.attribution.rules[Trigger.DISAGREEMENT]
         assert check.to_record() == {
             "status": "not_evaluable", "missing": ["feed_congestion"],
+            "camera_density_bin_source": None, "camera_last_detection_age_s": None,
             "feed_declined": "feed_stale",
         }
 
@@ -1133,6 +1140,7 @@ class TestDisagreementEvidenceNamesItsConstants:
         assert check.evidence == {
             "feed_congestion": 0.9, "jammed_congestion": JAMMED_CONGESTION,
             "camera_density_bin": 0, "empty_density_bin": EMPTY_DENSITY_BIN,
+            "camera_density_bin_source": None, "camera_last_detection_age_s": None,
         }
 
     def test_quiet_evidence_carries_the_same_shape(self):
@@ -1140,7 +1148,32 @@ class TestDisagreementEvidenceNamesItsConstants:
         check = decision.attribution.rules[Trigger.DISAGREEMENT]
         assert check.status == RULE_QUIET
         assert set(check.evidence) == {"feed_congestion", "jammed_congestion",
-                                       "camera_density_bin", "empty_density_bin"}
+                                       "camera_density_bin", "empty_density_bin",
+                                       "camera_density_bin_source",
+                                       "camera_last_detection_age_s"}
+
+
+class TestDisagreementStillFiresOnADerivedEmptyBin:
+    """D4: the over-report is named, not removed. Under shipped constants the
+    rule fires if and only if the camera detected nothing, and gating on
+    `derived_empty` would delete its only firing path -- so it still fires,
+    and the record now says what the camera's "empty road" claim rested on.
+    """
+
+    def test_fires_and_names_the_basis(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock, calm(
+            feed_congestion=0.9, camera_density_bin=0,
+            camera_density_bin_source="derived_empty",
+            camera_last_detection_age_s=241.7,
+        ))
+        check = decision.attribution.rules[Trigger.DISAGREEMENT]
+        assert check.status == RULE_FIRED
+        assert decision.trigger == Trigger.DISAGREEMENT
+        assert decision.rates["camera_hz"] == ACTIVE_RATES["camera_hz"]
+        assert check.evidence["camera_density_bin_source"] == "derived_empty"
+        assert check.evidence["camera_last_detection_age_s"] == 241.7
 
 
 class TestPerSensorChain:
@@ -1307,7 +1340,9 @@ class TestInputsRoundTrip:
     ALL_FIELD_NAMES = {
         "ego_acceleration", "ego_speed", "policy_margin", "feed_congestion",
         "camera_density_bin", "feed_declined", "thermal_status", "skin_temp_c",
-        "telemetry_age_s", "lat", "lon", "position_valid", "position_age_s",
+        "telemetry_age_s", "ego_acceleration_source", "ego_speed_source",
+        "camera_density_bin_source", "camera_last_detection_age_s",
+        "lat", "lon", "position_valid", "position_age_s",
     }
 
     def _round_trip(self, inputs: Inputs) -> Inputs:
@@ -1315,7 +1350,7 @@ class TestInputsRoundTrip:
 
         return Inputs.from_record(json.loads(json.dumps(inputs.to_record())))
 
-    def test_to_record_has_exactly_the_thirteen_field_names(self):
+    def test_to_record_has_exactly_the_seventeen_field_names(self):
         assert set(Inputs().to_record()) == self.ALL_FIELD_NAMES
 
     def test_an_all_none_instance_round_trips(self):
@@ -1326,6 +1361,9 @@ class TestInputsRoundTrip:
             ego_acceleration=0.5, ego_speed=13.4, policy_margin=0.2,
             feed_congestion=0.9, camera_density_bin=0, feed_declined="stale",
             thermal_status="moderate", skin_temp_c=41.0, telemetry_age_s=0.4,
+            ego_acceleration_source="derived", ego_speed_source="measured",
+            camera_density_bin_source="derived_empty",
+            camera_last_detection_age_s=12.4,
             lat=37.42, lon=-122.08, position_valid=True, position_age_s=0.2,
         )
         assert self._round_trip(inputs) == inputs
@@ -1337,6 +1375,14 @@ class TestInputsRoundTrip:
         value = 0.03199999999999998
         inputs = Inputs(policy_margin=value)
         assert self._round_trip(inputs).policy_margin == value
+
+    def test_camera_last_detection_age_s_survives_at_full_precision(self):
+        # The same precision guarantee as `policy_margin` above, on the field
+        # this task adds: a liveness bound a candidate might threshold on
+        # must not be replayed from a rounded copy either.
+        value = 12.399999999999999
+        inputs = Inputs(camera_last_detection_age_s=value)
+        assert self._round_trip(inputs).camera_last_detection_age_s == value
 
     def test_from_record_refuses_a_missing_key_by_name(self):
         record = Inputs().to_record()
