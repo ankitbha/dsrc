@@ -1100,6 +1100,21 @@ MUTATIONS = [
      '                "level_sensitive": IDLE_RATES[key] != ACTIVE_RATES[key],',
      '                "level_sensitive": False,',
      "python"),
+    # `rules` is transformed through `RuleCheck.to_record()` on the way out, unlike
+    # `gates` and `per_sensor` which the record carries by reference -- so a filter
+    # applied here changes what the record says without changing the object a test
+    # might check instead.
+    ("controller: quiet and not-evaluable rules are dropped from the emitted rules block",
+     "deployment/jetson/policy/sensing_controller.py",
+     '            "rules": {name: check.to_record() for name, check in self.rules.items()},',
+     '            "rules": {name: check.to_record() for name, check in self.rules.items()'
+     ' if check.status == RULE_FIRED},',
+     "python"),
+    ("controller: wants_more in the gates record is always reported as false",
+     "deployment/jetson/policy/sensing_controller.py",
+     '            "wants_more": wants_more,',
+     '            "wants_more": False,',
+     "python"),
 ]
 
 RESULTS = {
