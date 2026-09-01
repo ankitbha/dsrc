@@ -1569,6 +1569,85 @@ MUTATIONS = [
      "    provenance_fields_mixed = len(provenance_field_sizes) > 1",
      "    provenance_fields_mixed = False",
      "python"),
+
+    # Task 36 round 2 (a re-audit of the round-1 fixes above).
+    #
+    # The span guard in `_speed_slope` only compares the window's first and
+    # last timestamps, so it cannot see a hole in the middle of it. GPS
+    # returning fresh on the first tick after a real dropout used to feed
+    # the slope a window mixing pre-dropout and post-dropout samples, and
+    # the fitted slope across the gap was reported `derived` -- a real
+    # measurement of an interval containing none. Caught by the dropout
+    # test, which drives a genuine `gps.valid=False` gap (not merely an
+    # aging held fix) and checks the tick GPS returns on.
+    ("observation_builder: the speed window is not cleared on a non-fresh tick",
+     "deployment/jetson/perception/observation_builder.py",
+     '            self._ego.speed_samples.clear()\n',
+     "",
+     "python"),
+    # The same defect `ObservationBuilder._covers_encoder` was written to
+    # catch (a map with the right COUNT of keys but the wrong NAMES reads as
+    # complete), left in the one surface an operator actually reads. Caught
+    # by the same-size name-swap test: 39 keys, one real slot deleted and a
+    # made-up name added in its place.
+    ("eval_run: covers_encoder compares a count instead of the field names",
+     "deployment/jetson/eval_run.py",
+     "        else provenance_field_names == set(sim_contract.encoded_slot_names())\n",
+     "        else provenance_fields == sim_contract.local_obs_dim()\n",
+     "python"),
+    # Distinct from the mutation above: this drops the mixed-size
+    # short-circuit itself rather than the name comparison it guards, so a
+    # run whose tick-to-tick provenance map size varies could read as
+    # complete whenever the union of every name ever seen happens to equal
+    # the full 39-name set -- which it does whenever an incomplete tick's
+    # keys are a subset of a later, complete tick's keys. Caught by the
+    # mixed-run tests in both fixture orders (the un-reordered one alone
+    # left this branch unexercised under the previous, count-based
+    # comparison: the first tick's size was already unequal to 39 with no
+    # help from this clause).
+    ("eval_run: the mixed-size short-circuit is dropped from covers_encoder",
+     "deployment/jetson/eval_run.py",
+     "    covers_encoder = (\n"
+     "        None if provenance_fields is None\n"
+     "        else False if provenance_fields_mixed\n"
+     "        else provenance_field_names == set(sim_contract.encoded_slot_names())\n"
+     "    )\n",
+     "    covers_encoder = (\n"
+     "        None if provenance_fields is None\n"
+     "        else provenance_field_names == set(sim_contract.encoded_slot_names())\n"
+     "    )\n",
+     "python"),
+    # `provenance_fields` is supposed to be the FIRST tick's map size (what
+    # `render_markdown` calls it: "first tick has {pf}"), not the last one
+    # to be seen. Caught by the mixed-run test's own size assertion, which
+    # needs a first tick and a last tick of different sizes to tell the two
+    # apart at all.
+    ("eval_run: provenance_fields reports the last tick's size instead of the first",
+     "deployment/jetson/eval_run.py",
+     "        provenance_field_sizes.add(len(field_sources))\n"
+     "        if provenance_fields is None:\n"
+     "            provenance_fields = len(field_sources)\n",
+     "        provenance_field_sizes.add(len(field_sources))\n"
+     "        provenance_fields = len(field_sources)\n",
+     "python"),
+    # A tick whose `field_sources` map is empty used to be skipped entirely
+    # when sizing the run, so a run half carrying no provenance and half
+    # carrying the full map read as uniform (one size seen) and complete.
+    # Caught by the empty-then-full test.
+    ("eval_run: an empty field_sources tick is excluded from the mixture",
+     "deployment/jetson/eval_run.py",
+     "        field_sources = t.get(\"field_sources\") or {}\n"
+     "        provenance_field_sizes.add(len(field_sources))\n"
+     "        if provenance_fields is None:\n"
+     "            provenance_fields = len(field_sources)\n"
+     "        provenance_field_names.update(field_sources)\n",
+     "        field_sources = t.get(\"field_sources\") or {}\n"
+     "        if field_sources:\n"
+     "            provenance_field_sizes.add(len(field_sources))\n"
+     "            if provenance_fields is None:\n"
+     "                provenance_fields = len(field_sources)\n"
+     "        provenance_field_names.update(field_sources)\n",
+     "python"),
 ]
 
 RESULTS = {
