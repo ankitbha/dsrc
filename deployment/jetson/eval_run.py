@@ -875,9 +875,21 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
     ]
     obs = r["observation"]
     pf = obs.get("provenance_fields")
+    m = obs["missingness"]
+    # A mean is one number for a metric that only takes a handful of discrete
+    # values (a count of fallback fields over a fixed encoder-field total), so
+    # it can land on a percentage no tick ever produced. The range tells a
+    # reader that; the distinct-value count tells them more directly still,
+    # because with one mode dominating, p50 and p95 both read as that mode and
+    # hide a rarer one sitting between it and the other extreme.
+    distinct = sorted({t["obs_diagnostics"]["missingness"] for t in r["_ticks"]})
+    spread = f"min {m['min']:.1%}, p50 {m['p50']:.1%}, p95 {m['p95']:.1%}, max {m['max']:.1%}"
+    if len(distinct) <= 8:  # same "worth naming individually" cutoff as most_common(8) below
+        spread += f", {len(distinct)} distinct value{'s' if len(distinct) != 1 else ''}"
     lines.append(
-        f"- encoder-field missingness: mean {obs['missingness']['mean']:.1%}"
+        f"- encoder-field missingness: mean {m['mean']:.1%}"
         + (f" of {pf} provenance-tagged fields" if pf is not None else "")
+        + f" ({spread})"
     )
     if pf is not None:
         if obs.get("provenance_fields_mixed"):

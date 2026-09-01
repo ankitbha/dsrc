@@ -1648,6 +1648,26 @@ MUTATIONS = [
      "                provenance_fields = len(field_sources)\n"
      "        provenance_field_names.update(field_sources)\n",
      "python"),
+
+    # Task 36 round 3: the renderer, not the provenance plumbing task 36 itself
+    # added. `pctl` already computes min/p50/p95/max for every distribution in
+    # this file, including missingness; the markdown line read only the mean,
+    # so a bimodal (or trimodal) run reported a percentage none of its ticks
+    # actually had. Caught by the trimodal fixture, whose assertions on the
+    # rendered line do not hold if the spread or the distinct-value count it
+    # names is dropped.
+    ("eval_run: encoder-field missingness renders no spread beside the mean",
+     "deployment/jetson/eval_run.py",
+     '    lines.append(\n'
+     '        f"- encoder-field missingness: mean {m[\'mean\']:.1%}"\n'
+     '        + (f" of {pf} provenance-tagged fields" if pf is not None else "")\n'
+     '        + f" ({spread})"\n'
+     '    )\n',
+     '    lines.append(\n'
+     '        f"- encoder-field missingness: mean {m[\'mean\']:.1%}"\n'
+     '        + (f" of {pf} provenance-tagged fields" if pf is not None else "")\n'
+     '    )\n',
+     "python"),
 ]
 
 RESULTS = {

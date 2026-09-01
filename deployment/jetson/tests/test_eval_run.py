@@ -12,7 +12,7 @@ RATE_HZ = 30.0
 
 def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
               gps_fresh=True, leader_rel_measured=True, jetson_ms=None,
-              link_ms=None, field_sources=None) -> dict:
+              link_ms=None, field_sources=None, missingness=0.3) -> dict:
     has_leader = leader_gap is not None
     gap = leader_gap if has_leader else float("inf")
     return {
@@ -41,7 +41,7 @@ def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
             else "fallback_neutral",
         },
         "obs_diagnostics": {
-            "missingness": 0.3,
+            "missingness": missingness,
             "fallback_fields": ["follower_gap", "merge_pressure"],
             "gps_fresh": gps_fresh,
             "leader_track_id": 1 if has_leader else None,
@@ -793,3 +793,60 @@ class TestObservationProvenance:
         result = analyze(run_dir)
         report = render_markdown(result, [])
         assert "varies across ticks" in report
+
+
+class TestMissingnessSpread:
+    """A mean alone hides a bimodal (or, here, trimodal) missingness run --
+    two ticks can average to a percentage neither one produced. The report
+    line has to carry the range and, when there are only a few, how many
+    distinct values actually occurred.
+    """
+
+    def test_report_md_names_the_spread_and_distinct_value_count(self, tmp_path):
+        # Three ticks at each of 0.6, 0.7, 0.8: mean 70.0%, min 60.0%, p50
+        # 70.0%, p95 80.0%, max 80.0%, 3 distinct values -- chosen so p50 and
+        # p95 land on two different values and neither is the minimum, the
+        # same shape a mean-only line cannot distinguish from a run where
+        # every tick sat at 70.0%.
+        ticks = (
+            [make_tick(i, missingness=0.6) for i in range(3)]
+            + [make_tick(i, missingness=0.7) for i in range(3, 6)]
+            + [make_tick(i, missingness=0.8) for i in range(6, 9)]
+        )
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        obs = result["observation"]
+        assert obs["missingness"]["mean"] == pytest.approx(0.7)
+        report = render_markdown(result, [])
+        line = next(l for l in report.splitlines() if "encoder-field missingness" in l)
+        # The old wording stays exactly as it read before -- comparability
+        # against the two runs already recorded depends on it -- with the
+        # spread added alongside it, not in place of it.
+        assert "mean 70.0%" in line
+        assert "min 60.0%" in line
+        assert "p50 70.0%" in line
+        assert "p95 80.0%" in line
+        assert "max 80.0%" in line
+        assert "3 distinct values" in line
+
+    def test_a_uniform_run_names_one_distinct_value_singular(self, tmp_path):
+        ticks = [make_tick(i, missingness=0.3) for i in range(5)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        report = render_markdown(result, [])
+        line = next(l for l in report.splitlines() if "encoder-field missingness" in l)
+        assert "1 distinct value" in line
+        assert "1 distinct values" not in line
+
+    def test_many_distinct_values_are_not_named_individually(self, tmp_path):
+        # 20 ticks, each its own missingness value: naming every one of them
+        # would not tell a reader the metric is discrete, so past the small-
+        # count cutoff the count itself is omitted rather than printed as a
+        # number that swamps the line.
+        ticks = [make_tick(i, missingness=round(0.3 + 0.01 * i, 3)) for i in range(20)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        report = render_markdown(result, [])
+        line = next(l for l in report.splitlines() if "encoder-field missingness" in l)
+        assert "distinct value" not in line
+        assert "min " in line and "max " in line
