@@ -1050,6 +1050,16 @@ MUTATIONS = [
     # rather than folding into `quiet`. Pinned on `disagreement`'s not_evaluable
     # return, the one already covered from the other side by the
     # "controller: a missing feed counts as disagreement" entry above.
+    # The one rule whose not-evaluable branch had no assertion. Unreachable today --
+    # the observation builder substitutes a neutral float before the controller looks --
+    # but task 36's provenance work makes this the live path for a dead accelerometer,
+    # and a `quiet` status beside a named missing input reads as "the sensor was read
+    # and the road was calm".
+    ("controller: the event rule reports quiet when it has no acceleration to read",
+     "deployment/jetson/policy/sensing_controller.py",
+     "            checks[Trigger.EVENT] = RuleCheck(status=RULE_NOT_EVALUABLE,",
+     "            checks[Trigger.EVENT] = RuleCheck(status=RULE_QUIET,",
+     "python"),
     ("controller: a missing rule's input reports quiet instead of not_evaluable",
      "deployment/jetson/policy/sensing_controller.py",
      "        return RuleCheck(status=RULE_NOT_EVALUABLE, missing=missing, evidence=evidence)",

@@ -355,6 +355,17 @@ render any of it (task 39).
    cheap version (the controller cannot see provenance today), so this is
    flagged rather than silently chosen. The branch still exists and is
    tested via direct `Inputs`.
+
+   **The same substitution hides a second field, in the opposite direction.**
+   `local_density_bin` is derived from the detection count and
+   `field_sources` marks it `derived` unconditionally, so a camera that sees
+   nothing yields `n_local = 0`, a bin index of 0, and `disagreement(0.9, 0)`
+   returns True. A blind camera beside a congested feed therefore **fires**
+   the rule and raises the camera rate, recorded as `{"status": "fired",
+   "camera_density_bin": 0}` — faithful to what the controller saw, and
+   misleading about the road. The accelerometer case under-reports and
+   changes nothing; this one over-reports and moves a rate. Whoever acts on
+   this item should carry both fields, not the accelerometer alone.
 3. **The word `quiet`.** No strong preference against `did_not_fire` or
    `evaluated_false`; the vocabulary is load-bearing for every later reader,
    so the name deserves sign-off.

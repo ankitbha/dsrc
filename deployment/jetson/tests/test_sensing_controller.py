@@ -306,7 +306,8 @@ class TestTheRecord:
 
         clock = Clock()
         controller = SensingController(clock=clock)
-        record = settled(controller, clock, calm(ego_acceleration=9.0)).to_record()
+        decision = settled(controller, clock, calm(ego_acceleration=9.0))
+        record = decision.to_record()
 
         attribution = record["attribution"]
         assert set(attribution) == {"first_decision", "rules", "gates", "per_sensor"}
@@ -322,6 +323,13 @@ class TestTheRecord:
                    for r in attribution["rules"].values())
         assert record["rules_fired"] == [n for n in RULES
                                          if attribution["rules"][n]["status"] == RULE_FIRED]
+        # `gates` and `per_sensor` are the same objects here as on the dataclass, so
+        # the assertions elsewhere that read them off `decision.attribution` cover the
+        # emitted record too. That is only true while they are passed by reference: a
+        # defensive copy would leave the record side of both silently unasserted, and
+        # this is what fails on the day someone writes one.
+        assert record["attribution"]["gates"] is decision.attribution.gates
+        assert record["attribution"]["per_sensor"] is decision.attribution.per_sensor
         assert set(attribution["gates"]) == {
             "wants_more", "gapped", "dwell", "hold", "bridged", "level",
         }
@@ -904,6 +912,29 @@ class TestThreeStatesAreThreeStates:
         decision = SensingController(clock=Clock()).decide(calm(policy_margin=None))
         check = decision.attribution.rules[Trigger.NARROW_MARGIN]
         assert check.to_record() == {"status": "not_evaluable", "missing": ["policy_margin"]}
+
+    def test_event_not_evaluable_without_an_acceleration(self):
+        # The sibling of the margin case above, and the one rule whose
+        # `not_evaluable` branch had no assertion. The randomized closure test
+        # reaches it but asserts only that the status is in the closed set, and
+        # `quiet` is in that set -- so the branch was exercised and unchecked.
+        decision = SensingController(clock=Clock()).decide(calm(ego_acceleration=None))
+        check = decision.attribution.rules[Trigger.EVENT]
+        assert check.to_record() == {"status": "not_evaluable",
+                                     "missing": ["ego_acceleration"]}
+
+    def test_a_named_missing_input_and_a_quiet_status_cannot_coexist(self):
+        # `RuleCheck` can represent `{"status": "quiet", "missing": ["x"]}` -- a status
+        # contradicting its own evidence, which downstream reads as "the sensor was
+        # read and the road was calm". Nothing produces it; nothing forbade it either.
+        for name, inputs in (
+            (Trigger.EVENT, calm(ego_acceleration=None)),
+            (Trigger.NARROW_MARGIN, calm(policy_margin=None)),
+            (Trigger.DISAGREEMENT, calm(feed_congestion=None)),
+        ):
+            check = SensingController(clock=Clock()).decide(inputs).attribution.rules[name]
+            record = check.to_record()
+            assert ("missing" in record) == (record["status"] == RULE_NOT_EVALUABLE), record
 
     def test_disagreement_not_evaluable_when_the_feed_is_silent(self):
         # Restates the scripts/remutate.py:824 pin from the record side: a missing
