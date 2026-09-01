@@ -22,8 +22,8 @@ attribute rate changes afterwards and free text makes that a text-mining problem
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass, field, fields
+from typing import Any, Mapping
 
 #: The wire refuses anything outside `(0, 1000]`, so zero is not a rate. The FLOOR
 #: below is this module's own and is deliberately far under the idle rates: an
@@ -255,6 +255,48 @@ class Inputs:
     #: dropout is 600 m, further than the smallest radius this controller asks for.
     position_age_s: float | None = None
 
+    def to_record(self) -> dict[str, Any]:
+        """Every field, at full precision. This is the replay substrate task 35
+        scores candidates against, so a value here must be exactly what `decide`
+        saw -- `RuleCheck.to_record` rounds its evidence floats to four places
+        because evidence is read by a person, not replayed, and a replay built
+        from a rounded copy can flip a threshold comparison this decision never
+        made.
+        """
+        return {
+            "ego_acceleration": self.ego_acceleration,
+            "ego_speed": self.ego_speed,
+            "policy_margin": self.policy_margin,
+            "feed_congestion": self.feed_congestion,
+            "camera_density_bin": self.camera_density_bin,
+            "feed_declined": self.feed_declined,
+            "thermal_status": self.thermal_status,
+            "skin_temp_c": self.skin_temp_c,
+            "telemetry_age_s": self.telemetry_age_s,
+            "lat": self.lat,
+            "lon": self.lon,
+            "position_valid": self.position_valid,
+            "position_age_s": self.position_age_s,
+        }
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "Inputs":
+        """The strict inverse of `to_record`. A missing field and an unknown field
+        are both refused by name rather than defaulted -- a schema drift between
+        the writer and this reader must be loud, because a silently defaulted
+        input is a silently different replay.
+        """
+        expected = {f.name for f in fields(cls)}
+        present = set(record)
+        missing = expected - present
+        unknown = present - expected
+        if missing or unknown:
+            raise ValueError(
+                f"decision_inputs does not match Inputs: missing={sorted(missing)}, "
+                f"unknown={sorted(unknown)}"
+            )
+        return cls(**record)
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -280,6 +322,14 @@ class Decision:
     #: default to protect, and an optional default would itself be a silent-absence
     #: path -- the defect class this field exists to close.
     attribution: "Attribution" = field(kw_only=True)
+    #: The instant `decide` read its own clock (:409), carried onto the Decision it
+    #: produced. Every gate -- dwell, hold, bridge, gap -- compares differences of
+    #: this same instant, so a replay fed anything else, including a clock read a
+    #: few microseconds apart by the tick loop, is a different drive at exactly the
+    #: ticks that straddle a dwell boundary. Required and keyword-only for the same
+    #: reason `attribution` is: there is one construction site and no caller for a
+    #: default to protect.
+    decided_at_mono: float = field(kw_only=True)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -291,6 +341,7 @@ class Decision:
             "clamped": list(self.clamped),
             "here_radius_m": None if self.here_query is None else self.here_query.radius_m,
             "attribution": self.attribution.to_record(),
+            "decided_at_mono": self.decided_at_mono,
         }
 
 
@@ -611,6 +662,10 @@ class SensingController:
             rules_fired=fired, clamped=clamped,
             here_query=self._here_query(inputs, intended_here_hz),
             attribution=attribution,
+            # The exact instant the gates above compared, not a fresh read: a
+            # second call here would return a different value in production and
+            # replaying against it would not reproduce this decision.
+            decided_at_mono=now,
         )
         self._last = decision
         self._last_active = active

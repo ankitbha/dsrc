@@ -1296,3 +1296,195 @@ class TestAttributionVocabularyClosure:
             cause = decision.attribution.rules[Trigger.THERMAL].evidence["cause"]
             assert cause is None or cause in THERMAL_CAUSES
             assert decision.attribution.gates["level"] in ("idle", "active")
+
+
+class TestInputsRoundTrip:
+    """`Inputs.to_record`/`from_record` is the replay substrate task 35 scores
+    candidates against. A value that survives the round trip inexactly, or a
+    schema drift `from_record` lets through silently, is a different replay.
+    """
+
+    ALL_FIELD_NAMES = {
+        "ego_acceleration", "ego_speed", "policy_margin", "feed_congestion",
+        "camera_density_bin", "feed_declined", "thermal_status", "skin_temp_c",
+        "telemetry_age_s", "lat", "lon", "position_valid", "position_age_s",
+    }
+
+    def _round_trip(self, inputs: Inputs) -> Inputs:
+        import json
+
+        return Inputs.from_record(json.loads(json.dumps(inputs.to_record())))
+
+    def test_to_record_has_exactly_the_thirteen_field_names(self):
+        assert set(Inputs().to_record()) == self.ALL_FIELD_NAMES
+
+    def test_an_all_none_instance_round_trips(self):
+        assert self._round_trip(Inputs()) == Inputs()
+
+    def test_an_all_set_instance_round_trips(self):
+        inputs = Inputs(
+            ego_acceleration=0.5, ego_speed=13.4, policy_margin=0.2,
+            feed_congestion=0.9, camera_density_bin=0, feed_declined="stale",
+            thermal_status="moderate", skin_temp_c=41.0, telemetry_age_s=0.4,
+            lat=37.42, lon=-122.08, position_valid=True, position_age_s=0.2,
+        )
+        assert self._round_trip(inputs) == inputs
+
+    def test_a_seventeen_significant_digit_float_survives_unchanged(self):
+        # Pins D2 against "simplifying" to the evidence path's four-place
+        # rounding: a replay built from a rounded copy can flip a threshold
+        # comparison this decision never made.
+        value = 0.03199999999999998
+        inputs = Inputs(policy_margin=value)
+        assert self._round_trip(inputs).policy_margin == value
+
+    def test_from_record_refuses_a_missing_key_by_name(self):
+        record = Inputs().to_record()
+        del record["skin_temp_c"]
+        with pytest.raises(ValueError, match="skin_temp_c"):
+            Inputs.from_record(record)
+
+    def test_from_record_refuses_an_unknown_key_by_name(self):
+        record = Inputs().to_record()
+        record["extra_field"] = 1.0
+        with pytest.raises(ValueError, match="extra_field"):
+            Inputs.from_record(record)
+
+
+def _mixed_sequence() -> list[tuple[float, Inputs]]:
+    """(advance_seconds, inputs) pairs that visit idle, an armed-but-unsatisfied
+    dwell, a satisfied dwell, a hold, a bridge across the end of that hold, a
+    gap wider than `MAX_EVIDENCE_GAP_S` that resets the dwell, and every
+    thermal scale tier -- the shape the replay-identity property has to hold
+    across, not just at a single quiet tick.
+    """
+    return [
+        (0.0, calm()),                                           # idle
+        (0.2, calm(ego_acceleration=9.0)),                       # armed, not satisfied
+        (RAISE_DWELL_S + 0.05, calm(ego_acceleration=9.0)),      # dwell satisfied -> active
+        (HOLD_S - 0.01, calm()),                                 # evidence gone, holding
+        (0.05, calm(ego_acceleration=9.0)),                      # hold just lapsed, bridged
+        (MAX_EVIDENCE_GAP_S + 1.0, calm(ego_acceleration=9.0)),  # gap resets the dwell
+        (RAISE_DWELL_S + 0.1, calm(thermal_status="nominal")),
+        (RAISE_DWELL_S + 0.1, calm(thermal_status="light")),
+        (RAISE_DWELL_S + 0.1, calm(thermal_status="moderate")),
+        (RAISE_DWELL_S + 0.1, calm(thermal_status="severe")),
+        (RAISE_DWELL_S + 0.1, calm(thermal_status="critical")),
+        (RAISE_DWELL_S + 0.1, calm(thermal_status="emergency")),
+        (RAISE_DWELL_S + 0.1, calm(thermal_status="shutdown")),
+        (RAISE_DWELL_S + 0.1, calm(thermal_status="unknown")),
+    ]
+
+
+class _ReplayClock:
+    """Fed by the log instead of by time: set once per tick, held rather than
+    popped, exactly what `score_shadow.ReplayClock` does for a candidate."""
+
+    def __init__(self) -> None:
+        self._current: float | None = None
+
+    def set(self, value: float) -> None:
+        self._current = value
+
+    def __call__(self) -> float:
+        return self._current
+
+
+class TestReplayIdentity:
+    """The property `score_shadow.py` rests on: a controller replayed from
+    `Inputs.to_record()`/`from_record()` and the logged `decided_at_mono`
+    reproduces `to_record()` exactly, tick for tick, with no access to the
+    original `Inputs` objects or the original clock.
+    """
+
+    def _drive(self, controller: SensingController, clock: Clock,
+               sequence: list[tuple[float, Inputs]]) -> list[dict]:
+        records = []
+        for advance, inputs in sequence:
+            clock.advance(advance)
+            records.append(controller.decide(inputs).to_record())
+        return records
+
+    def _replay(self, sequence: list[tuple[float, Inputs]], records: list[dict]) -> list[dict]:
+        import json
+
+        replay_clock = _ReplayClock()
+        replay_controller = SensingController(clock=replay_clock)
+        replayed = []
+        for (_, inputs), record in zip(sequence, records):
+            replay_clock.set(record["decided_at_mono"])
+            # Round-tripped through JSON, like a real log line -- not the
+            # original `Inputs` object -- so this tests what a logged drive
+            # can actually reconstruct, not what the test happens to hold.
+            from_log = Inputs.from_record(json.loads(json.dumps(inputs.to_record())))
+            replayed.append(replay_controller.decide(from_log).to_record())
+        return replayed
+
+    def test_a_scripted_mixed_drive_replays_exactly(self):
+        sequence = _mixed_sequence()
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        records = self._drive(controller, clock, sequence)
+
+        gates_seen = {"armed_not_satisfied": False, "dwell_satisfied": False,
+                      "holding": False, "bridged": False, "gapped": False}
+        for record in records:
+            gates = record["attribution"]["gates"]
+            if gates["wants_more"] and not gates["dwell"]["satisfied"]:
+                gates_seen["armed_not_satisfied"] = True
+            if gates["dwell"]["satisfied"]:
+                gates_seen["dwell_satisfied"] = True
+            if gates["hold"]["active"]:
+                gates_seen["holding"] = True
+            if gates["bridged"]:
+                gates_seen["bridged"] = True
+            if gates["gapped"]:
+                gates_seen["gapped"] = True
+        assert all(gates_seen.values()), (
+            f"the script never reached: {[k for k, v in gates_seen.items() if not v]}"
+        )
+
+        replayed = self._replay(sequence, records)
+        for i, (record, replay) in enumerate(zip(records, replayed)):
+            assert replay == record, f"tick {i} diverged on replay"
+
+    def test_a_clamp_replays_exactly_too(self, monkeypatch):
+        # `clamped` is structurally unreachable with today's constants (the
+        # existing floor test raises it to exercise the bookkeeping), and the
+        # replay identity has to hold there too: a candidate's clamp math is
+        # exactly the incumbent's, so a log that cannot replay a clamped tick
+        # cannot referee a candidate that would have clamped differently.
+        import policy.sensing_controller as sc
+
+        monkeypatch.setattr(sc, "MIN_RATE_HZ", 1.0)
+        sequence = _mixed_sequence() + [(RAISE_DWELL_S + 0.1, calm(thermal_status="shutdown"))]
+        clock = Clock()
+        controller = sc.SensingController(clock=clock)
+        records = self._drive(controller, clock, sequence)
+        assert records[-1]["clamped"]
+
+        replayed = self._replay(sequence, records)
+        for i, (record, replay) in enumerate(zip(records, replayed)):
+            assert replay == record, f"tick {i} diverged on replay"
+
+    def test_a_shifted_decided_at_mono_diverges_at_a_dwell_boundary(self):
+        # D3 is load-bearing, not decorative: replaying with a clock read a few
+        # hundred microseconds away from the exact `decided_at_mono` -- the gap
+        # between the tick loop's own read and the controller's -- can flip a
+        # dwell comparison and produce a different decision.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        controller.decide(calm(ego_acceleration=9.0))
+        clock.advance(RAISE_DWELL_S)
+        original = controller.decide(calm(ego_acceleration=9.0))
+        assert original.attribution.gates["dwell"]["satisfied"] is True
+
+        replay_clock = _ReplayClock()
+        replay_controller = SensingController(clock=replay_clock)
+        replay_clock.set(1000.0)
+        replay_controller.decide(calm(ego_acceleration=9.0))
+        replay_clock.set(1000.0 + RAISE_DWELL_S - 300e-6)
+        shifted = replay_controller.decide(calm(ego_acceleration=9.0))
+
+        assert shifted.attribution.gates["dwell"]["satisfied"] is False
+        assert shifted.rates != original.rates
