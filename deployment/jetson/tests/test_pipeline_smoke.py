@@ -411,8 +411,11 @@ def test_the_sensing_loop_reads_a_real_tick(pipeline) -> None:
     # schedule implies. That is short of the 0.3 s a slope needs to fit, so
     # it is the window-span guard that refuses `ego_acceleration` here, not
     # the GPS-staleness guard -- GPS itself stays fresh throughout, which is
-    # why `ego_speed` above reads as a real measurement. The outcome is
-    # therefore deterministic, not a race against the scripted schedule.
+    # why `ego_speed` above reads as a real measurement. Measured: the 45
+    # steps take 5.4 ms and the ten-sample window spans 1.06 ms, about 283x
+    # under the 0.3 s threshold -- this assertion is a race against the real
+    # clock, not the scripted schedule, and it is that margin, not
+    # determinism, that keeps it passing.
     assert inputs.ego_acceleration is None
     assert inputs.ego_acceleration_source == provenance.SOURCE_FALLBACK_NEUTRAL
     assert (inputs.ego_acceleration is None) == provenance.is_substituted(

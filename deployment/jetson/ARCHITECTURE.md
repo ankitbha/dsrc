@@ -114,8 +114,8 @@ the whole encoded vector.)
 
 | sim observation field | prototype source | provenance |
 |---|---|---|
-| ego_speed | GPS RMC speed-over-ground (5 Hz); held during dropouts | measured |
-| ego_acceleration | least-squares slope of GPS speed (~1 s window), refused once the window's newest sample is older than `gps_stale_after_s` | derived / fallback_neutral |
+| ego_speed | GPS RMC speed-over-ground (5 Hz); held during dropouts | measured / measured_converted / measured_arrival_proxy / fallback_neutral (held value during a dropout) |
+| ego_acceleration | least-squares slope of GPS speed (~1 s window), refused whenever this tick's GPS fix is not fresh | derived / fallback_neutral |
 | ego_lane | `observation.assumed_lane` (no lane detection in v0) | static_config |
 | ego_headway_s | leader_gap / ego_speed (inf when no leader, as sim) | derived |
 | target_headway_s | previous tick's commanded headway bin (feedback loop, as in sim) | static/feedback |
