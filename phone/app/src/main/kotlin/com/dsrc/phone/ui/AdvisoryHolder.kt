@@ -41,6 +41,12 @@ class AdvisoryHolder(
     private var expired = 0L
     private var afterStop = 0L
     private var shown = 0L
+    //: Advisories replaced by a newer one before they were ever shown. Counted at the
+    //: moment of replacement, in `accept`, rather than derived afterwards: `shown` and
+    //: `expired` are not a partition of `received` -- an advisory `current()` has already
+    //: returned once can still go on to age out, so both counters move for the one
+    //: advisory and a derived count goes negative.
+    private var superseded = 0L
     //: The render latency of the most recently shown advisory -- first current() call
     //: minus arrival, both phone-clock. Null until at least one advisory has been shown.
     private var lastRenderNs: Long? = null
@@ -67,6 +73,9 @@ class AdvisoryHolder(
             afterStop++
             return@synchronized
         }
+        // Whatever is held is being replaced, however recent -- and if nothing has shown
+        // it yet, that replacement is the only record it will ever leave.
+        if (latest != null && shownAtNs == null) superseded++
         latest = advisory
         arrivedAtNs = nowNs
         // A new advisory has not been shown yet, whatever the last one's history was.
@@ -129,6 +138,7 @@ class AdvisoryHolder(
                 afterStop = afterStop,
                 shown = shown,
                 lastRenderNs = lastRenderNs,
+                superseded = superseded,
             )
         }
 
@@ -142,18 +152,13 @@ class AdvisoryHolder(
         val shown: Long,
         /** Render latency of the most recently shown advisory, or null before the first. */
         val lastRenderNs: Long?,
-    ) {
         /**
-         * Accepted advisories that were neither shown nor separately counted as expired:
-         * `accept` replaces `latest` unconditionally and counts nothing about what it
-         * replaced, so an advisory a newer one displaced before any poll asked for it
-         * leaves no record of its own anywhere else in [Stats]. At the Jetson's tick rate
-         * against a 250 ms UI poll this is the ordinary way an advisory goes unseen, not
-         * the exception `expired` covers.
+         * Advisories replaced by a newer one before they were ever shown. At the Jetson's
+         * tick rate against a 250 ms UI poll this is the ordinary way an advisory goes
+         * unseen, not the exception `expired` covers.
          */
-        val superseded: Long
-            get() = received - shown - expired
-    }
+        val superseded: Long,
+    )
 
     companion object {
         /**

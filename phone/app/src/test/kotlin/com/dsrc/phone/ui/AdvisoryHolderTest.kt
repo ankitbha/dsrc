@@ -269,6 +269,57 @@ class AdvisoryHolderTest {
     }
 
     @Test
+    fun `an advisory shown once and then left to age out is not counted as superseded`() {
+        // `shown` and `expired` are not a partition of `received`: the same advisory can be
+        // returned by `current()` once and then, with nothing arriving to replace it, still
+        // age past the limit -- the ordinary shape of the last advisory of a drive, a
+        // dropout, or a redial. A count derived as received - shown - expired goes negative
+        // on exactly this sequence; counting the outcome in `accept` instead cannot.
+        val holder = running()
+        holder.accept(advisory(), nowNs = 0)
+        assertNotNull(holder.current(nowNs = second / 4))
+        assertNull(holder.current(nowNs = AdvisoryHolder.MAX_AGE_NS + 1))
+
+        assertEquals(1, holder.stats.received)
+        assertEquals(1, holder.stats.shown)
+        assertEquals(1, holder.stats.expired)
+        assertEquals(0, holder.stats.superseded)
+    }
+
+    @Test
+    fun `an advisory that was already shown is not counted as superseded when it is later replaced`() {
+        // `superseded` means "replaced without ever being shown". Once `current()` has
+        // returned an advisory at least once, a later replacement is ordinary turnover,
+        // not the failure mode this counter exists to catch.
+        val holder = running()
+        holder.accept(advisory(recSpeed = 10.0), nowNs = 0)
+        assertNotNull(holder.current(nowNs = second / 4))
+        holder.accept(advisory(recSpeed = 20.0), nowNs = second / 2)
+
+        assertEquals(2, holder.stats.received)
+        assertEquals(1, holder.stats.shown)
+        assertEquals(0, holder.stats.expired)
+        assertEquals(0, holder.stats.superseded)
+    }
+
+    @Test
+    fun `superseded accumulates across more than one unseen replacement`() {
+        // A genuine, repeated supersession: three advisories arrive back to back with no
+        // poll between the first two, so the counter must count both of the unseen ones
+        // rather than only recognising the first.
+        val holder = running()
+        holder.accept(advisory(recSpeed = 1.0), nowNs = 0)
+        holder.accept(advisory(recSpeed = 2.0), nowNs = second / 8)
+        holder.accept(advisory(recSpeed = 3.0), nowNs = second / 4)
+        assertNotNull(holder.current(nowNs = second / 4))
+
+        assertEquals(3, holder.stats.received)
+        assertEquals(1, holder.stats.shown)
+        assertEquals(0, holder.stats.expired)
+        assertEquals(2, holder.stats.superseded)
+    }
+
+    @Test
     fun `no callback is required, and current still works without one`() {
         // The default parameter, exercised: a caller with nothing to log must not have to
         // supply a no-op lambda of its own.
