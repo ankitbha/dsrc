@@ -1171,11 +1171,15 @@ MUTATIONS = [
     # against a manufactured "achieved nothing" reading is scored against data
     # that does not exist. Caught by the absence test, which requires all three
     # fields null together rather than a zeroed achieved map.
+    # Re-anchored: `at_mono` was added to the same dict literal, which moved
+    # this line and split it in two.
     ("sensing_loop: the reference block reports 0.0 achieved when the phone never reported",
      "deployment/jetson/policy/sensing_loop.py",
-     'return {"achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry"}',
-     'return {"achieved": {key: 0.0 for key in RATE_KEYS},'
-     ' "dropped": {key: 0 for key in DROP_KEYS}, "age_s": None, "absent": "no_telemetry"}',
+     '        return {"achieved": None, "dropped": None, "age_s": None, "at_mono": None,\n'
+     '                "absent": "no_telemetry"}',
+     '        return {"achieved": {key: 0.0 for key in RATE_KEYS},'
+     ' "dropped": {key: 0 for key in DROP_KEYS},\n'
+     '                "age_s": None, "at_mono": None, "absent": "no_telemetry"}',
      "python"),
     # The defect class this task exists for, reproduced directly: folding a
     # rule's not-evaluable ticks into "agree" is exactly "this candidate was
@@ -1215,6 +1219,105 @@ MUTATIONS = [
      "deployment/jetson/score_shadow.py",
      "RAISE_RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT)",
      "RAISE_RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT, Trigger.THERMAL)",
+     "python"),
+
+    # Task 35 round 2. `reports` and the fresh/stale split it and three
+    # other fields depend on.
+    #
+    # An age recomputed from `now` on every tick cannot by itself reveal
+    # that the underlying report did not change, so a tick rate at or below
+    # the telemetry rate makes the age sequence flat rather than
+    # decreasing -- the exact drive `write_run`'s own default produces.
+    ("score_shadow: reports counts ticks whose age happened to decrease, not distinct arrivals",
+     "deployment/jetson/score_shadow.py",
+     '    reports = len({r["at_mono"] for r in known_age})',
+     '    reports = 1 + sum(1 for i in range(1, len(ages)) if ages[i] < ages[i - 1]) if ages else 0',
+     "python"),
+    # Not reachable through `reference_from` today -- `telemetry_age_s`
+    # comes off the Jetson's own monotonic clock -- but this is now the
+    # fifth predicate in the repo answering "is this report too old", and
+    # the only one that would have disagreed with the other four.
+    ("score_shadow: the stale predicate disagrees with the controller on a non-finite or negative-beyond-bound age",
+     "deployment/jetson/score_shadow.py",
+     "    return not math.isfinite(age_s) or abs(age_s) > MAX_TELEMETRY_AGE_S",
+     "    return age_s > MAX_TELEMETRY_AGE_S",
+     "python"),
+    # The four fields below all read `fresh`/`stale`/`known_age` correctly in
+    # today's code; each survived the full suite before this round because
+    # every existing witness drive re-reports on every tick, so `stale` is
+    # always empty and the excluded and unexcluded computations coincide.
+    # Caught by a drive whose fresh and stale reports carry different
+    # numbers.
+    ("score_shadow: ticks_stale treats the bound itself as stale",
+     "deployment/jetson/score_shadow.py",
+     "    return not math.isfinite(age_s) or abs(age_s) > MAX_TELEMETRY_AGE_S",
+     "    return not math.isfinite(age_s) or abs(age_s) >= MAX_TELEMETRY_AGE_S",
+     "python"),
+    ("score_shadow: achieved_mean is taken over every report, stale included",
+     "deployment/jetson/score_shadow.py",
+     '    achieved_mean = (\n        {key: _mean([r["achieved"][key] for r in fresh]) for key in RATE_KEYS}\n        if fresh else None\n    )',
+     '    achieved_mean = (\n        {key: _mean([r["achieved"][key] for r in known_age]) for key in RATE_KEYS}\n        if known_age else None\n    )',
+     "python"),
+    ("score_shadow: dropped_final is the last report regardless of staleness",
+     "deployment/jetson/score_shadow.py",
+     '    dropped_final = fresh[-1]["dropped"] if fresh else None',
+     '    dropped_final = known_age[-1]["dropped"] if known_age else None',
+     "python"),
+    ("score_shadow: age_s_max reports the mean instead",
+     "deployment/jetson/score_shadow.py",
+     '        "age_s_max": max(ages) if ages else None,',
+     '        "age_s_max": _mean(ages),',
+     "python"),
+
+    # The activity drive never supplied a feed, so `source_disagreement` was
+    # `not_evaluable` on every one of its ticks and this membership could
+    # never be exercised. Caught by a stretch of ticks where the feed
+    # disagrees with the camera and nothing else fires.
+    ("score_shadow: RAISE_RULES drops source_disagreement",
+     "deployment/jetson/score_shadow.py",
+     "RAISE_RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT)",
+     "RAISE_RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN)",
+     "python"),
+
+    # The segment split: which ticks each witness reads, and what an empty
+    # one renders as.
+    ("score_shadow: the contaminated witness is computed over the reference ticks",
+     "deployment/jetson/score_shadow.py",
+     '            _reference_witness(contaminated_ticks) if contaminated_ticks else None',
+     '            _reference_witness(reference_ticks) if contaminated_ticks else None',
+     "python"),
+    ("score_shadow: the reference witness is computed over the whole drive again",
+     "deployment/jetson/score_shadow.py",
+     '        "reference_witness": _reference_witness(reference_ticks) if reference_ticks else None,',
+     '        "reference_witness": _reference_witness(sensing_ticks) if reference_ticks else None,',
+     "python"),
+    ("score_shadow: an empty contaminated segment gets a zeroed block instead of null",
+     "deployment/jetson/score_shadow.py",
+     '            _reference_witness(contaminated_ticks) if contaminated_ticks else None\n        ),',
+     '            _reference_witness(contaminated_ticks)\n        ),',
+     "python"),
+    # The other half of the same symmetry: an empty REFERENCE segment must
+    # render the same way an empty contaminated one already does.
+    ("score_shadow: an empty reference segment gets a zeroed block instead of null",
+     "deployment/jetson/score_shadow.py",
+     '        "reference_witness": _reference_witness(reference_ticks) if reference_ticks else None,',
+     '        "reference_witness": _reference_witness(reference_ticks),',
+     "python"),
+    ("score_shadow: render_table assumes reference_witness is never null",
+     "deployment/jetson/score_shadow.py",
+     '    rw = result["reference_witness"]\n    if rw is not None:',
+     '    rw = result["reference_witness"]\n    if True:',
+     "python"),
+
+    ("score_shadow: a missing metadata.jsonl is not refused by name",
+     "deployment/jetson/score_shadow.py",
+     "    if not metadata_path.exists():",
+     "    if False:",
+     "python"),
+    ("score_shadow: the candidate shape check inspects only the first record",
+     "deployment/jetson/score_shadow.py",
+     "    if records and not all(_has_valid_attribution(r) for r in records):",
+     "    if records and not _has_valid_attribution(records[0]):",
      "python"),
 ]
 
