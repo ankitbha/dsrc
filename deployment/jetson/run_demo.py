@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 JETSON_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(JETSON_DIR))
@@ -181,7 +182,16 @@ def telemetry_record(tick) -> dict:
     return rec
 
 
-def _log_timebase_estimates(logger, phone, last_estimate_ids: dict[str, int | None]) -> None:
+def tick_session_id(phone) -> Any:
+    """Which peer clock this tick's phone-side stages were measured against."""
+    if phone is None or phone.session is None:
+        return None
+    return phone.session.session_id
+
+
+def _log_timebase_estimates(
+    logger, phone, last_estimate_ids: dict[str, int | None], session_id: Any,
+) -> None:
     """Write a `timebase_estimate` line whenever either estimator publishes a
     new one, so an offline reader can re-derive a conversion against the
     estimate that was actually current at the time rather than only the one
@@ -199,11 +209,14 @@ def _log_timebase_estimates(logger, phone, last_estimate_ids: dict[str, int | No
     adapter would have converted against from one it would have proxied
     around.
 
-    `session_id` ties the line to the peer clock it measured. Both estimators
-    are replaced whole on every redial (`phone_link._rebind`), so their
-    `estimate_id` counters restart at 1 on the new session -- an offline reader
-    matching on wall time alone could otherwise pick an estimate left over from
-    the previous phone.
+    `session_id` ties the line to the peer clock it measured, and is passed in
+    rather than read off `phone.session` here: the caller already reads it once
+    for the tick record itself, and a second, independent read of the same
+    field is the shape of defect this file has already had to fix once. Both
+    estimators are replaced whole on every redial (`phone_link._rebind`), so
+    their `estimate_id` counters restart at 1 on the new session -- an offline
+    reader matching on wall time alone could otherwise pick an estimate left
+    over from the previous phone.
     """
     sources = (
         ("round_trip", phone.round_trip_estimator, phone.round_trip_estimator.estimate),
@@ -216,7 +229,7 @@ def _log_timebase_estimates(logger, phone, last_estimate_ids: dict[str, int | No
         logger.write({
             "type": "timebase_estimate",
             "source": source,
-            "session_id": None if phone.session is None else phone.session.session_id,
+            "session_id": session_id,
             # This device's own wall clock, for an offline reader correlating
             # this estimate against a phone log's wall-stamped receipts -- both
             # devices are NTP-locked, so wall time is a valid matching key even
@@ -502,11 +515,13 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 # measured or converted against -- the same key the persisted
                 # `timebase_estimate` lines carry, so an offline reader can
                 # refuse to convert this tick's `return` stage against an
-                # estimate left over from a different session.
+                # estimate left over from a different session. Read once here,
+                # rather than once for the record and again inside
+                # `_log_timebase_estimates`, so the two cannot name different
+                # sessions.
+                session_id = tick_session_id(phone)
                 if phone is not None:
-                    record["session_id"] = (
-                        None if phone.session is None else phone.session.session_id
-                    )
+                    record["session_id"] = session_id
                 if outcome is not None:
                     record["sensing"] = {
                         **outcome.decision.to_record(),
@@ -517,7 +532,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                     }
                 logger.write(record)
                 if phone is not None:
-                    _log_timebase_estimates(logger, phone, last_estimate_ids)
+                    _log_timebase_estimates(logger, phone, last_estimate_ids, session_id)
             if video_logger is not None:
                 video_logger.write(frame.image)
             if telemetry is not None:

@@ -161,14 +161,14 @@ class TestTimebaseEstimateLogging:
         logger = _FakeLogger()
         phone = _FakePhone()
         ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
-        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
         assert logger.lines == []
 
     def test_a_new_estimate_on_each_side_is_logged_once_each(self):
         logger = _FakeLogger()
         phone = _FakePhone(round_trip=_FakeEstimate(1), one_way=_FakeEstimate(9))
         ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
-        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
 
         assert len(logger.lines) == 2
         by_source = {line["source"]: line for line in logger.lines}
@@ -182,18 +182,18 @@ class TestTimebaseEstimateLogging:
         logger = _FakeLogger()
         phone = _FakePhone(round_trip=_FakeEstimate(1))
         ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
-        run_demo._log_timebase_estimates(logger, phone, ids)
-        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
         assert len(logger.lines) == 1
 
     def test_a_changed_estimate_id_is_logged_again(self):
         logger = _FakeLogger()
         phone = _FakePhone(round_trip=_FakeEstimate(1))
         ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
-        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
 
         phone.round_trip_estimator.estimate = _FakeEstimate(2)
-        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
 
         assert len(logger.lines) == 2
         assert logger.lines[-1]["estimate_id"] == 2
@@ -208,7 +208,7 @@ class TestTimebaseEstimateLogging:
         phone.round_trip_estimator.usable = False
         phone.round_trip_estimator._why_not_usable = "only 1 samples in the offset window"
         ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
-        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
 
         line = logger.lines[0]
         assert line["usable"] is False
@@ -218,7 +218,7 @@ class TestTimebaseEstimateLogging:
         logger = _FakeLogger()
         phone = _FakePhone(round_trip=_FakeEstimate(1), session_id="peer-7")
         ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
-        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
 
         assert logger.lines[0]["session_id"] == "peer-7"
 
@@ -226,29 +226,28 @@ class TestTimebaseEstimateLogging:
         logger = _FakeLogger()
         phone = _FakePhone(round_trip=_FakeEstimate(1), session_id=None)
         ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
-        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids, run_demo.tick_session_id(phone))
 
         assert logger.lines[0]["session_id"] is None
 
 
-def test_the_tick_record_carries_this_ticks_session_id():
-    """Untestable end to end without a detector, a policy bundle, a config,
-    and a camera and GPS feeding the whole loop -- so, like the deadline
-    check in `TestTheDriveEnds`, this pins the source directly: without a
-    session id on the tick, an offline reader has no way to refuse a
-    `timebase_estimate` line left over from a different session when it
-    converts this tick's `return` stage.
+class TestTickSessionId:
+    """`run_live` used to read `phone.session.session_id` twice -- once for the
+    tick record, once inside `_log_timebase_estimates` -- and a rebind between
+    the two reads could put a different session's id on each. The fix pulls
+    the read out into this one function, called once per tick, so there is
+    only one place left for it to disagree with itself. Testing it directly,
+    rather than through `run_live`, needs none of the detector/policy
+    bundle/config/camera/GPS machinery a full run does.
     """
-    import inspect
 
-    source = inspect.getsource(run_demo.run_live)
-    assign = source.index('record["session_id"]')
-    write = source.index("logger.write(record)")
-    assert assign < write, "the session id is set after the record is already logged"
-    # Scoped to this block, not the whole function: `run_live` also prints
-    # `phone.session.session_id` elsewhere (the "phone back after Ns" log line),
-    # and a check against the whole source would still pass with the tick
-    # record's own reference to it mutated away.
-    assert "phone.session.session_id" in source[assign:write], (
-        "the tick record's session_id no longer reads the real session id"
-    )
+    def test_reads_the_current_sessions_id(self):
+        phone = _FakePhone(session_id="peer-7")
+        assert run_demo.tick_session_id(phone) == "peer-7"
+
+    def test_no_session_on_the_phone_is_none(self):
+        phone = _FakePhone(session_id=None)
+        assert run_demo.tick_session_id(phone) is None
+
+    def test_no_phone_at_all_is_none(self):
+        assert run_demo.tick_session_id(None) is None
