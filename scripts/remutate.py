@@ -1397,10 +1397,15 @@ MUTATIONS = [
     # Caught by the 1.9 s / 2.1 s boundary test: without this, a slope fitted
     # before a GPS dropout is still reported `derived` for as long as the
     # dropout lasts, because the window's own sample count and span cannot
-    # see how long ago its newest sample arrived.
+    # see how stale the fix behind it has gone. Re-anchored from an earlier
+    # version that measured staleness off the last appended sample's own
+    # clock, which is what let a receiver that keeps returning the same
+    # fix -- still `gps_fresh` by its own age test -- look freshly appended
+    # for a further `gps_stale_after_s` after it had actually gone stale;
+    # taking this tick's own `gps_fresh` verdict instead closed that gap.
     ("observation_builder: the speed window's own staleness is never checked",
      "deployment/jetson/perception/observation_builder.py",
-     '        if t_mono - t[-1] > self.config.gps_stale_after_s:\n'
+     '        if not gps_fresh:\n'
      '            return 0.0, False\n'
      '        t = t - t.mean()',
      '        t = t - t.mean()',
@@ -1428,11 +1433,15 @@ MUTATIONS = [
     # most likely to be "fixed" by a later reader: under shipped constants
     # the disagreement rule fires iff the camera detected nothing, so gating
     # `derived_empty` as a substitution deletes the rule's only firing path.
-    # Caught directly by the vocabulary-closure test asserting
-    # `SOURCE_DERIVED_EMPTY not in SUBSTITUTED` -- `camera_density_bin` is
-    # deliberately never filtered through `is_substituted` (D4), so this
-    # particular mutation does not change what the disagreement rule itself
-    # decides; the vocabulary test is what actually catches it.
+    # That deletion is NOT what this mutation is caught by, though: it
+    # cannot be, because `is_substituted` has exactly one production
+    # caller -- `ego_acceleration_source`, in `inputs_from` -- and that
+    # field is never `derived_empty`. `camera_density_bin` is never passed
+    # through `is_substituted` at all. So this mutation cannot reach the
+    # disagreement rule or any other decision; what actually catches it is
+    # the vocabulary-closure test on the constant itself
+    # (`SOURCE_DERIVED_EMPTY not in SUBSTITUTED`), which guards the
+    # constant rather than any rule's behaviour.
     ("provenance: derived_empty is added to SUBSTITUTED",
      "deployment/jetson/perception/provenance.py",
      "SUBSTITUTED = frozenset({\n"
@@ -1457,6 +1466,108 @@ MUTATIONS = [
      "deployment/jetson/score_shadow.py",
      "        if missing or unknown:",
      "        if False:",
+     "python"),
+
+    # Task 36 validation round.
+    #
+    # A 39-key map missing one real encoder slot and carrying one bogus name
+    # in its place has the right COUNT, so comparing counts reports coverage
+    # that is not there. Caught by the bogus-name test.
+    ("observation_builder: covers_encoder compares a count instead of the field names",
+     "deployment/jetson/perception/observation_builder.py",
+     "        return set(field_sources) == set(sim_contract.encoded_slot_names())",
+     "        return len(field_sources) == len(sim_contract.encoded_slot_names())",
+     "python"),
+    # The nested `cooperation.*` entries are supposed to be the SAME class as
+    # their own flat field, not a neighbour's -- `merge_pressure` is the one
+    # of the three that stays `fallback_neutral` even with peers present, so
+    # it is the only one of the three whose class actually differs from the
+    # other two on a peers-present tick. Caught by the peers-present test.
+    ("observation_builder: cooperation.merge_pressure copies segment_target_speed's class",
+     "deployment/jetson/perception/observation_builder.py",
+     '        src["cooperation.merge_pressure"] = src["merge_pressure"]',
+     '        src["cooperation.merge_pressure"] = src["segment_target_speed"]',
+     "python"),
+    # `inputs_from`'s own class for a field the map has no entry for at all,
+    # hardcoded to `measured` instead of read off the builder -- a wrong-key
+    # or dropped-lookup regression that a fixed constant across every test
+    # using the shared grounded fixture cannot distinguish from correct.
+    # Caught by the real-builder round-trip test, which varies the fix
+    # between fresh and stale and checks the source moves with it.
+    ("sensing_loop: ego_speed_source is hardcoded instead of read off field_sources",
+     "deployment/jetson/policy/sensing_loop.py",
+     '    ego_speed_source = src.get("ego_speed", provenance.SOURCE_UNATTRIBUTED)',
+     "    ego_speed_source = provenance.SOURCE_MEASURED",
+     "python"),
+    # The defect class this task exists for, reproduced directly in the one
+    # place a wrong key would matter most: `camera_density_bin_source` reads
+    # `ego_speed`'s class instead of `local_density_bin`'s, so a fresh fix
+    # with no vehicles would claim `measured` where the truth is
+    # `derived_empty`. Caught by the real-builder round-trip test built on
+    # exactly that tick shape.
+    ("sensing_loop: camera_density_bin_source reads the wrong obs key",
+     "deployment/jetson/policy/sensing_loop.py",
+     '    camera_density_bin_source = src.get("local_density_bin", provenance.SOURCE_UNATTRIBUTED)',
+     '    camera_density_bin_source = src.get("ego_speed", provenance.SOURCE_UNATTRIBUTED)',
+     "python"),
+    # D14's whole contribution -- a liveness bound the disagreement rule can
+    # cite beside its claim -- never reaches the controller if this is
+    # dropped. Caught by the aging-out test, which requires a non-null age
+    # after a detection has come and gone.
+    ("sensing_loop: camera_last_detection_age_s never reaches Inputs",
+     "deployment/jetson/policy/sensing_loop.py",
+     '        camera_last_detection_age_s=diagnostics.get("last_detection_age_s"),',
+     "        camera_last_detection_age_s=None,",
+     "python"),
+    # The operator otherwise gets a refusal with no names -- D10 chose a
+    # schema-derived refusal specifically so it could say which keys, and on
+    # which tick. Caught by the render test asserting the missing/unknown
+    # key names actually appear in the printed table.
+    ("score_shadow: render_table drops the schema detail on a refusal",
+     "deployment/jetson/score_shadow.py",
+     '        schema = result.get("schema")\n        if schema is not None:',
+     '        schema = result.get("schema")\n        if False:',
+     "python"),
+    # A continuous evidence value (`camera_last_detection_age_s`) is a
+    # little different on nearly every tick of a real drive, so bucketing it
+    # by exact value the same way a categorical one is produces one bucket
+    # per tick rather than a reason. Caught by the summary test, which
+    # requires a min/median/max entry instead of five one-tick buckets.
+    ("score_shadow: the why map buckets a continuous evidence value instead of summarising it",
+     "deployment/jetson/score_shadow.py",
+     "            if present and len(numeric) == len(present):",
+     "            if False:",
+     "python"),
+    # The schema check has to hold on EVERY tick of the log, not only the
+    # first -- a log can drift shape partway through. Caught by a corrupted
+    # tick placed after the first one.
+    ("score_shadow: the decision_inputs schema check only inspects the first tick",
+     "deployment/jetson/score_shadow.py",
+     '    for t in sensing_ticks:\n'
+     '        present = set(t["sensing"]["decision_inputs"])',
+     '    for t in sensing_ticks[:1]:\n'
+     '        present = set(t["sensing"]["decision_inputs"])',
+     "python"),
+    # `_input_provenance` is supposed to answer three separate questions, one
+    # per `INPUT_SOURCE_FIELDS` entry -- reading the acceleration's own key
+    # regardless of which field is being counted would report the same
+    # class for `ego_speed` and `camera_density_bin` as for
+    # `ego_acceleration`. Caught by a run whose three fields are given
+    # deliberately distinct classes.
+    ("score_shadow: _input_provenance reads ego_acceleration_source for every field",
+     "deployment/jetson/score_shadow.py",
+     '            source = decision_inputs.get(f"{field_name}_source")',
+     '            source = decision_inputs.get("ego_acceleration_source")',
+     "python"),
+    # `by_source`/`fields_by_source` pool every tick's `field_sources`
+    # regardless of its size, so a run whose maps are not uniform needs to
+    # say so rather than reporting the first tick's size as if it applied
+    # throughout. Caught by a run built from a mix of a 1-key and a 39-key
+    # fixture.
+    ("eval_run: provenance_fields_mixed is never detected",
+     "deployment/jetson/eval_run.py",
+     "    provenance_fields_mixed = len(provenance_field_sizes) > 1",
+     "    provenance_fields_mixed = False",
      "python"),
 ]
 
