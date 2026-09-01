@@ -1154,6 +1154,18 @@ MUTATIONS = [
      "            decided_at_mono=now,",
      "            decided_at_mono=self._last_at if self._last_at is not None else now,",
      "python"),
+    # The plan's original mutation for this field, previously argued not to
+    # exist because sensing_controller.py has no direct handle on "the
+    # loop's" clock read. It exists: reading the clock again here, after the
+    # gates above already compared the first read, is an instant a few
+    # microseconds later than the one they used -- caught by a clock that
+    # advances on every read, which a clock fixed until `.advance()` is
+    # called cannot exercise.
+    ("controller: decided_at_mono is a fresh clock read, not the one the gates compared",
+     "deployment/jetson/policy/sensing_controller.py",
+     "            decided_at_mono=now,",
+     "            decided_at_mono=self._now(),",
+     "python"),
     # The reference block has to say a phone was never heard from, not that it
     # reported zero -- those are different drives, and a candidate scored
     # against a manufactured "achieved nothing" reading is scored against data
@@ -1190,6 +1202,19 @@ MUTATIONS = [
      "deployment/jetson/score_shadow.py",
      "statuses.count(RULE_NOT_EVALUABLE) != total",
      "statuses.count(RULE_QUIET) != total",
+     "python"),
+    # `activity` was uncovered: nothing named it, so both of the following
+    # survived the full suite. Caught by the drive with a known, unequal
+    # active/idle split and a tick where thermal backs off alone.
+    ("score_shadow: activity counts idle ticks as active",
+     "deployment/jetson/score_shadow.py",
+     '        if candidate_r["attribution"]["gates"]["level"] == "active":',
+     '        if candidate_r["attribution"]["gates"]["level"] == "idle":',
+     "python"),
+    ("score_shadow: RAISE_RULES counts a thermal backoff as a raise",
+     "deployment/jetson/score_shadow.py",
+     "RAISE_RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT)",
+     "RAISE_RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT, Trigger.THERMAL)",
      "python"),
 ]
 
