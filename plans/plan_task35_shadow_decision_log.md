@@ -554,6 +554,19 @@ cannot be scored on what it happened to show:
 
 ## Open items flagged for the user
 
+0. **`first_differ_tick_id` is never asserted.** `first_live_tick_id` and
+   `first_mismatch["tick_id"]` are both pinned against the tick's index now, but
+   the third field of the same family is not, because no test produces a
+   candidate whose *rates* differ. The obvious candidate does not: raising
+   `JAMMED_CONGESTION` changes the disagreement rule's outcome on three ticks
+   and changes no rate, since one tick of evidence does not satisfy the dwell
+   and both controllers stay idle — measured, `rates.differ` is 0 and the field
+   is null. Closing it needs a candidate that moves rates across the dwell, for
+   which `EVENT_ACCEL_MPS2` 1.5 → 1.0 is the cheapest. Left open rather than
+   built after the validation rounds were spent; it is a reporting field with no
+   defect behind it, and the device run supplies a natural fixture.
+
+
 1. **Where the reference segment ends (D9).** Mode-keyed was taken to match
    `reference_rates_hold`; delivery-keyed (`command_sent`) is physically
    truer when a live command was built but never sent. Weak preference,
