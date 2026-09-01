@@ -503,26 +503,35 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     # (a 33-field prefix followed by a 39-field tail, say) needs to say so
     # rather than reporting the first tick's size as if it applied to all of
     # them -- `covers_encoder` in particular is not a meaningful yes/no over
-    # a mixture.
+    # a mixture. `provenance_fields` is the size of the FIRST tick's map
+    # (matching the "first tick has {pf}" wording below), recorded for every
+    # tick including one whose map is empty -- a tick that carries no
+    # provenance is part of the mixture, not an exception to it.
     provenance_fields: int | None = None
     provenance_field_sizes: set[int] = set()
+    provenance_field_names: set[str] = set()
     by_source_counter: Counter[str] = Counter()
     fields_by_class: dict[str, Counter[str]] = defaultdict(Counter)
     for t in ticks:
         field_sources = t.get("field_sources") or {}
-        if field_sources:
-            provenance_field_sizes.add(len(field_sources))
-            if provenance_fields is None:
-                provenance_fields = len(field_sources)
+        provenance_field_sizes.add(len(field_sources))
+        if provenance_fields is None:
+            provenance_fields = len(field_sources)
+        provenance_field_names.update(field_sources)
         for field_name, source in field_sources.items():
             by_source_counter[source] += 1
             fields_by_class[source][field_name] += 1
     total_field_ticks = sum(by_source_counter.values())
     provenance_fields_mixed = len(provenance_field_sizes) > 1
+    # Coverage is decided by NAME, mirroring
+    # `ObservationBuilder._covers_encoder` -- a map with the right number of
+    # keys but the wrong ones (a real slot missing, a name the encoder never
+    # reads standing in for it) is not coverage, and a count comparison
+    # cannot tell the two apart.
     covers_encoder = (
         None if provenance_fields is None
         else False if provenance_fields_mixed
-        else provenance_fields == sim_contract.local_obs_dim()
+        else provenance_field_names == set(sim_contract.encoded_slot_names())
     )
     observation = {
         "missingness": pctl(missingness),

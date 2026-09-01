@@ -723,6 +723,65 @@ class TestObservationProvenance:
         obs = result["observation"]
         assert obs["provenance_fields_mixed"] is True
         assert obs["covers_encoder"] is False
+        # Pins the "first tick" half of the name: the 1-key ticks are first,
+        # so this is 1, not 39 (the last tick's size) and not 5 (the number
+        # of distinct sizes) -- `render_markdown` below prints this number
+        # as "first tick has {pf}", and nothing else makes that sentence true.
+        assert obs["provenance_fields"] == 1
+
+    def test_the_mixed_guard_still_refuses_coverage_with_the_full_map_first(self, tmp_path):
+        # Same mixture as above, reordered: the 39-key ticks come first this
+        # time. `covers_encoder` must still be False -- a run whose maps are
+        # not all the same size is not a run with settled coverage, whichever
+        # tick happens to be first. (With the 1-key ticks first, the union of
+        # every name ever seen already equals the full 39-name set, because
+        # that one key is itself one of the 39 -- so this order is the one
+        # that actually exercises the mixed short-circuit rather than passing
+        # by coincidence.)
+        sources = _grounded_field_sources()
+        ticks = (
+            [make_tick(i, field_sources=sources) for i in range(5)]
+            + [make_tick(i) for i in range(5, 10)]
+        )
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        obs = result["observation"]
+        assert obs["provenance_fields_mixed"] is True
+        assert obs["covers_encoder"] is False
+        assert obs["provenance_fields"] == 39
+
+    def test_covers_encoder_is_false_on_a_same_size_name_swap(self, tmp_path):
+        # The defect `_covers_encoder` was written to catch, reproduced at
+        # the surface an operator reads: a map the same SIZE as the full
+        # contract but not the same set of NAMES is not coverage. Deleting
+        # "ego_speed" and adding "not_a_real_slot" keeps the count at 39.
+        sources = dict(_grounded_field_sources())
+        del sources["ego_speed"]
+        sources["not_a_real_slot"] = "measured"
+        ticks = [make_tick(i, field_sources=sources) for i in range(10)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        obs = result["observation"]
+        assert obs["provenance_fields"] == 39
+        assert obs["provenance_fields_mixed"] is False
+        assert obs["covers_encoder"] is False
+        assert "ego_speed" not in obs["fields_by_source"].get("measured", {})
+
+    def test_an_empty_field_sources_tick_still_counts_toward_the_mixture(self, tmp_path):
+        # A tick with no provenance at all (`field_sources == {}`) used to be
+        # skipped when sizing the run, so a run half carrying no provenance
+        # and half carrying the full map read as uniform and complete.
+        sources = _grounded_field_sources()
+        ticks = (
+            [make_tick(i, field_sources={}) for i in range(5)]
+            + [make_tick(i, field_sources=sources) for i in range(5, 10)]
+        )
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        obs = result["observation"]
+        assert obs["provenance_fields"] == 0
+        assert obs["provenance_fields_mixed"] is True
+        assert obs["covers_encoder"] is False
 
     def test_report_md_names_the_mixture(self, tmp_path):
         sources = _grounded_field_sources()

@@ -87,9 +87,12 @@ def summarise(field_sources: Mapping[str, str]) -> dict[str, Any]:
     `missingness` and `fallback_fields` are the two names `obs_diagnostics`
     carried before this module existed, computed here so the formula has one
     home instead of being re-typed at every call site. `fields` and
-    `by_source` describe the map exactly as given; whether that count is the
-    full encoder contract is for the caller to decide, against
-    `sim_contract.local_obs_dim()`.
+    `by_source` describe the map exactly as given; whether it covers the
+    full encoder contract is for the caller to decide, and that decision has
+    to be made by NAME against `sim_contract.encoded_slot_names()` -- a map
+    with the right number of keys but the wrong ones is not coverage, and a
+    count comparison against `sim_contract.local_obs_dim()` cannot tell the
+    two apart.
     """
     by_source: dict[str, int] = {}
     for source in field_sources.values():
