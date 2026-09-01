@@ -1339,6 +1339,18 @@ MUTATIONS = [
      '    return {"ticks_recorded": recorded, "ticks_scored": scored, "ticks_missing": recorded - scored}',
      '    return {"ticks_recorded": recorded, "ticks_scored": scored, "ticks_missing": 0}',
      "python"),
+    # `born_live` asks whether the FIRST tick was live. A drive promoted from
+    # shadow to live partway through has a leading segment that never had a
+    # feed in it, and only a first-tick reading can tell that segment apart
+    # from one that was live throughout -- reading it as "was any tick ever
+    # live" reports nothing absent from a segment that structurally had
+    # nothing. Caught by a drive with no `summary.json` that starts shadow and
+    # is promoted partway.
+    ("score_shadow: born_live is read as ever_live",
+     "deployment/jetson/score_shadow.py",
+     '    born_live = bool(sensing_ticks) and sensing_ticks[0]["sensing"]["shadow"] is False',
+     '    born_live = any(t["sensing"]["shadow"] is False for t in sensing_ticks)',
+     "python"),
 ]
 
 RESULTS = {

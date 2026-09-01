@@ -167,6 +167,36 @@ def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(
     return run_dir
 
 
+def _promoted_drive(tmp_path: Path, n: int = 20, live_from: int = 10,
+                     tick_id_base: int = 0, name: str = "promoted") -> Path:
+    """A drive that starts in shadow and is promoted to live partway through,
+    written without a `summary.json` so `_limits` takes its derived-from-ticks
+    path rather than echoing a mode block. `tick_id_base` lets a caller give
+    it logged ids that are not their own position in the log, the same way
+    `write_run` does.
+    """
+    clock = Clock()
+    modes = ModeHolder(SHADOW, clock=clock)
+    loop = SensingLoop(clock=clock, modes=modes)
+    phone = Phone()
+    lines = []
+    for i in range(n):
+        clock.advance(0.1)
+        if i == live_from:
+            modes.flip_to(LIVE)
+        phone.telemetry = _telemetry(i)
+        phone.telemetry_at_mono = clock.now - 0.02
+        lines.append({"type": "tick", "tick_id": tick_id_base + i,
+                      "sensing": loop.on_tick(_tick(i), phone).to_record()})
+
+    run_dir = tmp_path / name
+    run_dir.mkdir()
+    with open(run_dir / "metadata.jsonl", "w") as f:
+        for r in lines:
+            f.write(json.dumps(r) + "\n")
+    return run_dir
+
+
 class TestReplayClock:
 
     def test_reading_before_the_first_tick_is_set_raises(self):
@@ -343,6 +373,19 @@ class TestLimitsDerivedFromTicks:
         run_dir = write_run(tmp_path, n=5, live_from=0)
         result = score_shadow.score(run_dir)
         assert result["limits"]["structurally_absent"] == []
+
+    def test_a_drive_promoted_partway_still_names_its_shadow_segments_absences(self, tmp_path):
+        # `born_live` asks whether the FIRST tick was live, not whether any
+        # tick ever was -- a drive promoted partway has a leading shadow
+        # segment that genuinely had no feed in it, so the two feed-derived
+        # inputs really are absent from that part of the log. Reading this as
+        # "ever live" would report nothing absent, which is the exact error
+        # `shadow_mode.ModeHolder.to_record`'s own comment names.
+        run_dir = _promoted_drive(tmp_path, n=20, live_from=10)
+        result = score_shadow.score(run_dir)
+        assert "mode_derived_from_ticks" in result["limits"]
+        assert result["limits"]["structurally_absent"] == ["feed_congestion", "source_disagreement"]
+        assert result["limits"]["reference_rates_hold"] is False
 
     def test_summary_json_is_echoed_verbatim_when_present(self, tmp_path):
         run_dir = write_run(tmp_path, n=5)
