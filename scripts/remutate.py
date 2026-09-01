@@ -558,8 +558,10 @@ MUTATIONS = [
     # it, so a neutral fallback was tagged `derived` on half the ticks of a brake.
     ("builder: the acceleration provenance ignores the window guard",
      "deployment/jetson/perception/observation_builder.py",
-     '        src["ego_acceleration"] = "derived" if accel_derived else "fallback_neutral"',
-     '        src["ego_acceleration"] = "derived"',
+     '        src["ego_acceleration"] = (\n'
+     '            provenance.SOURCE_DERIVED if accel_derived else provenance.SOURCE_FALLBACK_NEUTRAL\n'
+     '        )',
+     '        src["ego_acceleration"] = provenance.SOURCE_DERIVED',
      "python"),
     ("builder: a window too short to fit a slope is reported as derived",
      "deployment/jetson/perception/observation_builder.py",
@@ -673,13 +675,17 @@ MUTATIONS = [
     # The observation vector against the distribution the policy was trained on.
     ("builder: the queue is reported as derived over an empty population",
      "deployment/jetson/perception/observation_builder.py",
-     '            "local_queue_estimate": "derived" if abs_speeds else "fallback_neutral",',
-     '            "local_queue_estimate": "derived",',
+     '            "local_queue_estimate": (\n'
+     '                provenance.SOURCE_DERIVED if abs_speeds\n'
+     '                else provenance.SOURCE_DERIVED_EMPTY if not in_range\n'
+     '                else provenance.SOURCE_FALLBACK_NEUTRAL\n'
+     '            ),',
+     '            "local_queue_estimate": provenance.SOURCE_DERIVED,',
      "python"),
     ("builder: the etiquette flag claims a derived segment density",
      "deployment/jetson/perception/observation_builder.py",
-     '            "uncongested_low_speed_flag": "approximated",',
-     '            "uncongested_low_speed_flag": "derived",',
+     '            "uncongested_low_speed_flag": provenance.SOURCE_APPROXIMATED,',
+     '            "uncongested_low_speed_flag": provenance.SOURCE_DERIVED,',
      "python"),
     ("builder: the av density divides by a literal instead of the admission range",
      "deployment/jetson/perception/observation_builder.py",
@@ -1057,8 +1063,8 @@ MUTATIONS = [
     # and the road was calm".
     ("controller: the event rule reports quiet when it has no acceleration to read",
      "deployment/jetson/policy/sensing_controller.py",
-     "            checks[Trigger.EVENT] = RuleCheck(status=RULE_NOT_EVALUABLE,",
-     "            checks[Trigger.EVENT] = RuleCheck(status=RULE_QUIET,",
+     '                status=RULE_NOT_EVALUABLE, missing=("ego_acceleration",),',
+     '                status=RULE_QUIET, missing=("ego_acceleration",),',
      "python"),
     ("controller: a missing rule's input reports quiet instead of not_evaluable",
      "deployment/jetson/policy/sensing_controller.py",
@@ -1373,6 +1379,84 @@ MUTATIONS = [
      '    fresh = [r for r in known_age if not _is_stale_report(r["age_s"])]\n'
      '    stale = [r for r in known_age if _is_stale_report(r["age_s"])]\n'
      '    reports = len({r["at_mono"] for r in fresh})',
+     "python"),
+
+    # Task 36. Per-tick field provenance: a substituted acceleration told
+    # apart from a measured calm one, a stale speed window refused rather
+    # than reported as a fresh slope, an empty detection set named rather
+    # than read as a measurement, and a schema refusal that replaces a
+    # traceback on a pre-task-36 log.
+    ("sensing_loop: a substituted acceleration is passed through instead of nulled",
+     "deployment/jetson/policy/sensing_loop.py",
+     '        ego_acceleration=(\n'
+     '            None if provenance.is_substituted(ego_acceleration_source)\n'
+     '            else obs.get("ego_acceleration")\n'
+     '        ),',
+     '        ego_acceleration=obs.get("ego_acceleration"),',
+     "python"),
+    # Caught by the 1.9 s / 2.1 s boundary test: without this, a slope fitted
+    # before a GPS dropout is still reported `derived` for as long as the
+    # dropout lasts, because the window's own sample count and span cannot
+    # see how long ago its newest sample arrived.
+    ("observation_builder: the speed window's own staleness is never checked",
+     "deployment/jetson/perception/observation_builder.py",
+     '        if t_mono - t[-1] > self.config.gps_stale_after_s:\n'
+     '            return 0.0, False\n'
+     '        t = t - t.mean()',
+     '        t = t - t.mean()',
+     "python"),
+    # Caught by the zero-in-range-tracks test: reverts `local_density_bin` to
+    # unconditional `derived`, so an empty detection set is indistinguishable
+    # from a measured light road again -- the defect the disagreement rule's
+    # over-report was named, not removed, because of (D4).
+    ("observation_builder: local_density_bin is derived even from an empty detection set",
+     "deployment/jetson/perception/observation_builder.py",
+     '            src["local_density_bin"] = provenance.SOURCE_DERIVED_EMPTY\n'
+     '        else:',
+     '            src["local_density_bin"] = provenance.SOURCE_DERIVED\n'
+     '        else:',
+     "python"),
+    # Caught by the parametrized `is_substituted` closure test on the
+    # `unattributed` member: a field the builder forgot to tag would then be
+    # decided on as if it were measured, rather than failing the rule safe.
+    ("provenance: is_substituted no longer treats unattributed as a substitution",
+     "deployment/jetson/perception/provenance.py",
+     "    return source in SUBSTITUTED",
+     "    return source in SUBSTITUTED and source != SOURCE_UNATTRIBUTED",
+     "python"),
+    # This pins the deliberate non-change (D4), which is the decision here
+    # most likely to be "fixed" by a later reader: under shipped constants
+    # the disagreement rule fires iff the camera detected nothing, so gating
+    # `derived_empty` as a substitution deletes the rule's only firing path.
+    # Caught directly by the vocabulary-closure test asserting
+    # `SOURCE_DERIVED_EMPTY not in SUBSTITUTED` -- `camera_density_bin` is
+    # deliberately never filtered through `is_substituted` (D4), so this
+    # particular mutation does not change what the disagreement rule itself
+    # decides; the vocabulary test is what actually catches it.
+    ("provenance: derived_empty is added to SUBSTITUTED",
+     "deployment/jetson/perception/provenance.py",
+     "SUBSTITUTED = frozenset({\n"
+     "    SOURCE_FALLBACK_NEUTRAL,\n"
+     "    SOURCE_STATIC_CONFIG,\n"
+     "    SOURCE_SIM_PARITY,\n"
+     "    SOURCE_UNATTRIBUTED,\n"
+     "})",
+     "SUBSTITUTED = frozenset({\n"
+     "    SOURCE_FALLBACK_NEUTRAL,\n"
+     "    SOURCE_STATIC_CONFIG,\n"
+     "    SOURCE_SIM_PARITY,\n"
+     "    SOURCE_UNATTRIBUTED,\n"
+     "    SOURCE_DERIVED_EMPTY,\n"
+     "})",
+     "python"),
+    # Caught by the schema-refusal test: without this check, a pre-task-36
+    # log's 13-key `decision_inputs` reaches `Inputs.from_record` inside
+    # `_replay_incumbent` and raises `ValueError` instead of being refused by
+    # name -- the traceback this refusal exists to replace with a named exit.
+    ("score_shadow: the decision_inputs schema check never refuses anything",
+     "deployment/jetson/score_shadow.py",
+     "        if missing or unknown:",
+     "        if False:",
      "python"),
 ]
 
