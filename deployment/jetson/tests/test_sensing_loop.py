@@ -458,13 +458,15 @@ class TestReferenceFromPhone:
 
     def test_no_phone_at_all_is_named_absent(self):
         assert reference_from(None, now=1000.0) == {
-            "achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry",
+            "achieved": None, "dropped": None, "age_s": None, "at_mono": None,
+            "absent": "no_telemetry",
         }
 
     def test_a_phone_that_never_reported_is_named_absent_not_zero(self):
         record = reference_from(Phone(), now=1000.0)
         assert record == {
-            "achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry",
+            "achieved": None, "dropped": None, "age_s": None, "at_mono": None,
+            "absent": "no_telemetry",
         }
 
     def test_a_phone_that_reported_echoes_achieved_dropped_and_age(self):
@@ -475,6 +477,7 @@ class TestReferenceFromPhone:
         assert record["achieved"] == {"camera_hz": 4.97, "gps_hz": 1.0, "imu_hz": 49.8, "here_hz": 0.0}
         assert record["dropped"] == {"camera": 61, "gps": 0, "imu": 0, "here": 0}
         assert record["age_s"] == pytest.approx(0.41)
+        assert record["at_mono"] == 999.59
         assert record["absent"] is None
 
     def test_on_tick_wires_the_reference_from_the_phone(self):
@@ -493,7 +496,8 @@ class TestReferenceFromPhone:
         loop = SensingLoop(clock=clock)
         outcome = loop.on_tick(tick(), None)
         assert outcome.reference == {
-            "achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry",
+            "achieved": None, "dropped": None, "age_s": None, "at_mono": None,
+            "absent": "no_telemetry",
         }
 
 

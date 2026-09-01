@@ -324,11 +324,17 @@ class TestLimitsDerivedFromTicks:
 class TestReferenceWitness:
 
     def test_a_fully_reported_drive_counts_every_tick(self, tmp_path):
+        # Every tick gets a fresh report here (`write_run`'s default), so this
+        # is also the boundary case where the tick interval is no longer than
+        # the telemetry interval: an age recomputed from `now` on every tick
+        # settles to a near-constant value and never decreases, which is
+        # exactly the drive an age-based arrival count misreads.
         run_dir = write_run(tmp_path, n=8, telemetry=True)
         result = score_shadow.score(run_dir)
         rw = result["reference_witness"]
         assert rw["ticks_with_achieved"] == 8
         assert rw["ticks_no_telemetry"] == 0
+        assert rw["reports"] == 8
         assert rw["achieved_mean"] == {"camera_hz": 4.97, "gps_hz": 1.0,
                                        "imu_hz": 49.8, "here_hz": 0.0}
         assert rw["dropped_final"] == {"camera": 7, "gps": 0, "imu": 0, "here": 0}
@@ -339,8 +345,122 @@ class TestReferenceWitness:
         rw = result["reference_witness"]
         assert rw["ticks_with_achieved"] == 0
         assert rw["ticks_no_telemetry"] == 6
+        assert rw["reports"] == 0
         assert rw["achieved_mean"] is None
         assert rw["dropped_final"] is None
+
+
+class TestReferenceWitnessStalePredicateMatchesTheController:
+    """`ticks_stale` has to answer exactly the question `_thermal_scale`
+    answers about the same age (`sensing_controller.py`), or a report the
+    incumbent discarded as too old could still be averaged into
+    `achieved_mean` here, and the reverse. Built directly against
+    `_reference_witness` rather than through a live drive, because
+    `telemetry_age_s` comes off the Jetson's own monotonic clock -- neither
+    a NaN nor a negative-beyond-bound age reaches this path through
+    `reference_from` today.
+    """
+
+    @staticmethod
+    def _reference(age_s, *, camera_hz=1.0, dropped=0, at_mono=0.0):
+        return {
+            "achieved": {"camera_hz": camera_hz, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.0},
+            "dropped": {"camera": dropped, "gps": 0, "imu": 0, "here": 0},
+            "age_s": age_s, "at_mono": at_mono, "absent": None,
+        }
+
+    def _ticks(self, ages):
+        return [{"sensing": {"reference": self._reference(age, at_mono=float(i))}}
+                for i, age in enumerate(ages)]
+
+    def test_every_known_age_lands_in_exactly_one_of_fresh_or_stale(self):
+        # `_reference_witness` asserts this partition itself; reaching the
+        # return statement at all is the assertion passing.
+        rw = score_shadow._reference_witness(
+            self._ticks([0.0, 5.0, 10.0, 10.1, -0.5, -60.0, float("inf"), float("nan")]))
+        assert rw["ticks_with_achieved"] == 8
+
+    def test_a_negative_age_far_beyond_the_bound_is_stale(self):
+        rw = score_shadow._reference_witness(self._ticks([-60.0]))
+        assert rw["ticks_stale"] == 1
+        assert rw["achieved_mean"] is None
+
+    def test_a_nan_age_is_stale_not_silently_dropped_from_both_partitions(self):
+        rw = score_shadow._reference_witness(self._ticks([float("nan")]))
+        assert rw["ticks_with_achieved"] == 1
+        assert rw["ticks_stale"] == 1
+        assert rw["achieved_mean"] is None
+
+
+class TestReferenceWitnessExcludesStaleReports:
+    """The defect class F1 is about: a witness field that is supposed to
+    exclude stale reports has no way to prove it on a drive where every
+    report is fresh, because the excluded and unexcluded computations then
+    coincide. This drive's fresh and stale reports carry different numbers,
+    so a field that fails to exclude the stale ones is observably wrong
+    rather than accidentally right.
+    """
+
+    @staticmethod
+    def _telemetry_at(camera_hz: float, dropped: int) -> PhoneTelemetry:
+        return PhoneTelemetry(
+            t_capture_mono_ns=0, thermal_status="nominal", thermal_headroom=None,
+            achieved={"camera_hz": camera_hz, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.0},
+            dropped={"camera": dropped, "gps": 0, "imu": 0, "here": 0},
+            here_calls=0, here_errors=0,
+        )
+
+    def _write(self, tmp_path) -> Path:
+        """Report A runs fresh for seven ticks, the last landing exactly on
+        `MAX_TELEMETRY_AGE_S` (fresh, not stale -- the incumbent's own `>`).
+        Report B arrives just before the tick loop stalls for 20 s, so every
+        tick that ever observes B observes it already aged out: the last
+        report and the last report the controller would have used are two
+        different reports.
+        """
+        clock = Clock()
+        loop = SensingLoop(clock=clock, modes=ModeHolder(SHADOW, clock=clock))
+        phone = Phone()
+        lines = []
+
+        def emit(i):
+            lines.append({"type": "tick", "tick_id": i,
+                          "sensing": loop.on_tick(_tick(i), phone).to_record()})
+
+        phone.telemetry = self._telemetry_at(9.0, 100)
+        phone.telemetry_at_mono = clock.now
+        for i in range(6):                                          # ages 0..5, fresh
+            emit(i)
+            clock.advance(1.0)
+        clock.advance(score_shadow.MAX_TELEMETRY_AGE_S - 6.0)        # land exactly on the bound
+        emit(6)                                                      # age == bound: fresh
+        phone.telemetry = self._telemetry_at(1.0, 200)
+        phone.telemetry_at_mono = clock.now
+        clock.advance(20.0)                                          # the loop stalls
+        for i in range(7, 12):                                       # ages 20..24, all stale
+            emit(i)
+            clock.advance(1.0)
+
+        run_dir = tmp_path / "mixed_freshness"
+        run_dir.mkdir()
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            for r in lines:
+                f.write(json.dumps(r) + "\n")
+        return run_dir
+
+    def test_stale_reports_are_excluded_from_every_field_that_claims_to_exclude_them(self, tmp_path):
+        rw = score_shadow.score(self._write(tmp_path))["reference_witness"]
+
+        assert rw["ticks_with_achieved"] == 12
+        assert rw["ticks_stale"] == 5
+        # The stale reports ran at 1.0 Hz and the fresh ones at 9.0 Hz; a
+        # mean that included the stale ticks would not be 9.0.
+        assert rw["achieved_mean"]["camera_hz"] == 9.0
+        # The last report overall is the 1.0 Hz one; the last report the
+        # controller would have used is the 9.0 Hz one.
+        assert rw["dropped_final"] == {"camera": 100, "gps": 0, "imu": 0, "here": 0}
+        assert rw["age_s_max"] == pytest.approx(24.0)
+        assert rw["age_s_mean"] < rw["age_s_max"]
 
 
 class TestReferenceWitnessTellsALiveDriveFromADeadOne:
@@ -383,7 +503,7 @@ class TestReferenceWitnessRespectsSegments:
         run_dir = write_run(tmp_path, n=5, live_from=0, telemetry=True)
         result = score_shadow.score(run_dir)
         assert result["segments"]["reference_ticks"] == 0
-        assert result["reference_witness"]["ticks_with_achieved"] == 0
+        assert result["reference_witness"] is None
         assert result["reference_witness_contaminated"]["ticks_with_achieved"] == 5
 
     def test_a_drive_that_goes_live_partway_splits_the_witness_too(self, tmp_path):
@@ -557,11 +677,18 @@ class TestActivityBlock:
     def test_ticks_active_and_raises_match_the_logged_decisions(self, tmp_path):
         # Ticks 0-4: thermal backs off alone (no other raise rule fires).
         # Ticks 5-12: sustained hard acceleration, which both fires EVENT and
-        # eventually dwells the rates active. The split is asymmetric by
-        # construction so an active/idle inversion cannot land on the same
-        # count by coincidence.
+        # eventually dwells the rates active. Ticks 13-17: the feed
+        # disagrees with the camera alone -- no acceleration, no thermal
+        # backoff -- the only stretch on this drive where
+        # `Trigger.DISAGREEMENT` is the sole raise rule firing, so a
+        # candidate that stopped counting it as a raise would diverge here
+        # even though it agrees with the incumbent on every rule's own
+        # status. The three stretches are asymmetric by construction so an
+        # active/idle inversion, or a dropped raise rule, cannot land on the
+        # same count by coincidence.
         run_dir = write_run(
-            tmp_path, n=13, accel_ticks=frozenset(range(5, 13)),
+            tmp_path, n=18, accel_ticks=frozenset(range(5, 13)),
+            feed_ticks=frozenset(range(13, 18)),
             thermal_status_at=lambda i: "severe" if i < 5 else "nominal",
         )
         lines = [json.loads(line) for line in (run_dir / "metadata.jsonl").read_text().splitlines()]
@@ -585,6 +712,16 @@ class TestActivityBlock:
         # the same count as the correct one -- this is the whole point of
         # the thermal-only preamble above.
         assert thermal_alone
+        disagreement_alone = [
+            l for l in lines
+            if l["sensing"]["attribution"]["rules"][Trigger.DISAGREEMENT]["status"] == RULE_FIRED
+            and not any(l["sensing"]["attribution"]["rules"][r]["status"] == RULE_FIRED
+                        for r in (Trigger.EVENT, Trigger.NARROW_MARGIN))
+        ]
+        # Otherwise a mutation that drops DISAGREEMENT from the raise rules
+        # would land on the same count as the correct one: nothing else on
+        # this drive fires alongside it.
+        assert disagreement_alone
 
         result = score_shadow.score(run_dir, {"copy": lambda clock: SensingController(clock=clock)})
         assert result["replay_identity"]["status"] == "ok"
@@ -658,3 +795,14 @@ class TestRenderTable:
         table = score_shadow.render_table(result)
         assert "RULE NEVER EXERCISED" in table
         assert Trigger.DISAGREEMENT in table
+
+    def test_a_born_live_drive_renders_without_a_reference_segment_line(self, tmp_path):
+        # `reference_witness` is None on this drive (zero reference ticks) --
+        # the table must skip that line rather than subscript a null block,
+        # the same way it already skips the contaminated line when that
+        # segment is empty.
+        run_dir = write_run(tmp_path, n=5, live_from=0)
+        result = score_shadow.score(run_dir)
+        table = score_shadow.render_table(result)
+        assert "reference_witness (reference segment)" not in table
+        assert "reference_witness (contaminated segment)" in table
