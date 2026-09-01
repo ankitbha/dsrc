@@ -23,6 +23,15 @@ candidate can be refereed by a record that cannot reproduce its own author's
 decisions. A log recorded before this task carries no `decision_inputs` at
 all and is refused by name rather than approximated from rounded evidence.
 
+**Reproducing the incumbent is not the same claim as an uncorrupted log.**
+The replay gate proves the log can reproduce the decisions it recorded; it
+does not prove the log is uncorrupted, because a corruption the incumbent's
+own thresholds never cross replays identically. Measured on one drive:
+rounding latitude to four decimal places (about 11 m) passed the gate on all
+800 ticks, and rounding `policy_margin` passed on 601 of 800 ticks, while
+rounding `ego_speed` was caught. A candidate with different thresholds may be
+sensitive exactly where the incumbent is not.
+
     python3 deployment/jetson/score_shadow.py <run_dir> \\
         [--candidate label=module:factory ...] [--no-json]
 
@@ -44,6 +53,7 @@ sys.path.insert(0, str(JETSON_DIR))
 
 from eval_run import load_records  # noqa: E402
 from policy.sensing_controller import (  # noqa: E402
+    MAX_TELEMETRY_AGE_S,
     RULE_FIRED,
     RULE_NOT_EVALUABLE,
     RULE_QUIET,
@@ -69,6 +79,7 @@ SHADOW_PREDICTS = "the decision function, not the trajectory"
 #: Named refusals. Each means the log cannot be scored at all -- not "scored
 #: with a caveat" -- because the thing that failed is the log's ability to
 #: referee anyone, including its own incumbent.
+REFUSAL_NO_METADATA = "no_metadata_jsonl"
 REFUSAL_NO_TICKS = "no_tick_records"
 REFUSAL_PHONELESS = "phoneless_run"
 REFUSAL_PRE_TASK_35 = "decision_inputs_absent"
@@ -208,19 +219,47 @@ def _mean(values: list[float]) -> float | None:
 
 def _reference_witness(sensing_ticks: list[dict]) -> dict[str, Any]:
     """The full-rate reference, witnessed rather than assumed: how many ticks
-    the phone actually reported on, and what it reported.
+    the phone actually reported on, how many distinct reports those ticks
+    came from, and whether the reports were fresh enough for the incumbent to
+    have used them.
+
+    `PhoneLink.telemetry` holds the latest report and is cleared only on
+    rebind, so a phone that reported once and then had its telemetry thread
+    die looks identical to one reporting every tick if presence is all that
+    is read -- `ticks_with_achieved` alone cannot tell the two drives apart.
+    `age_s` can: it decreases exactly when a new report arrives and grows by
+    the tick interval between reports, so `reports` counts the arrivals
+    rather than the ticks that echo one. Ticks whose report has aged past
+    `MAX_TELEMETRY_AGE_S` are excluded from `achieved_mean` and
+    `dropped_final` -- the incumbent controller treats a report that old as
+    no report at all (`sensing_controller.MAX_TELEMETRY_AGE_S`), and a mean
+    that quietly included them would be a mean over readings the decision
+    log itself never used.
     """
     with_achieved = [t["sensing"]["reference"] for t in sensing_ticks
                       if t["sensing"]["reference"]["absent"] is None]
     no_telemetry = sum(1 for t in sensing_ticks if t["sensing"]["reference"]["absent"] is not None)
+
+    known_age = [r for r in with_achieved if r["age_s"] is not None]
+    ages = [r["age_s"] for r in known_age]
+    reports = 1 + sum(1 for i in range(1, len(ages)) if ages[i] < ages[i - 1]) if ages else 0
+    fresh = [r for r in known_age if r["age_s"] <= MAX_TELEMETRY_AGE_S]
+    stale = [r for r in known_age if r["age_s"] > MAX_TELEMETRY_AGE_S]
+
     achieved_mean = (
-        {key: _mean([r["achieved"][key] for r in with_achieved]) for key in RATE_KEYS}
-        if with_achieved else None
+        {key: _mean([r["achieved"][key] for r in fresh]) for key in RATE_KEYS}
+        if fresh else None
     )
-    dropped_final = with_achieved[-1]["dropped"] if with_achieved else None
+    dropped_final = fresh[-1]["dropped"] if fresh else None
     return {
         "ticks_with_achieved": len(with_achieved),
         "ticks_no_telemetry": no_telemetry,
+        "reports": reports,
+        "age_s_max": max(ages) if ages else None,
+        "age_s_mean": _mean(ages),
+        "ticks_stale": len(stale),
+        # Both computed over fresh (non-stale) reports only -- see the
+        # docstring above.
         "achieved_mean": achieved_mean,
         "dropped_final": dropped_final,
     }
@@ -276,7 +315,7 @@ def _score_candidate(
         clock.set(sensing["decided_at_mono"])
         records.append(candidate.decide(inputs).to_record())
 
-    if records and not _has_valid_attribution(records[0]):
+    if records and not all(_has_valid_attribution(r) for r in records):
         return {"refused": CANDIDATE_WITHOUT_ATTRIBUTION}
 
     total = len(records)
@@ -293,6 +332,15 @@ def _score_candidate(
     per_rule: dict[str, dict[str, int]] = {
         rule: {"agree": 0, "differ": 0, "not_evaluable": 0} for rule in RULES
     }
+    # Evaluability is a property of the inputs and is shared by construction
+    # (D6/D7): the incumbent and the candidate see the same `Inputs` each
+    # tick, so a candidate that reports `fired`/`quiet` where the incumbent
+    # reports `not_evaluable` did not see more than the incumbent did -- it
+    # did not apply the same "missing input means not_evaluable" discipline.
+    # `per_rule` still counts that tick `not_evaluable`, matching every other
+    # candidate's denominator; this counts it again, separately, so the
+    # divergence is not silently absorbed into an unqualified `quiet`.
+    candidate_evaluated_where_incumbent_could_not: dict[str, int] = {rule: 0 for rule in RULES}
     ticks_active = 0
     raises = 0
     for t, candidate_r, incumbent_r in zip(sensing_ticks, records, incumbent_records):
@@ -311,6 +359,8 @@ def _score_candidate(
             candidate_status = candidate_r["attribution"]["rules"][rule]["status"]
             if incumbent_status == RULE_NOT_EVALUABLE:
                 per_rule[rule]["not_evaluable"] += 1
+                if candidate_status != RULE_NOT_EVALUABLE:
+                    candidate_evaluated_where_incumbent_could_not[rule] += 1
             elif incumbent_status == candidate_status:
                 per_rule[rule]["agree"] += 1
             else:
@@ -337,6 +387,7 @@ def _score_candidate(
             "per_rule": per_rule,
         },
         "activity": {"ticks_active": ticks_active, "raises": raises},
+        "candidate_evaluated_where_incumbent_could_not": candidate_evaluated_where_incumbent_could_not,
     }
 
 
@@ -345,7 +396,13 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
     reading the run directory -- `main` owns writing `shadow_score.json`.
     """
     candidates = candidates or {}
-    ticks, _scenario, _timebase, unparseable = load_records(run_dir / "metadata.jsonl")
+    metadata_path = run_dir / "metadata.jsonl"
+    if not metadata_path.exists():
+        # A run directory this shape -- a phone-side session.jsonl and no
+        # Jetson metadata log at all -- has nothing for `load_records` to
+        # open. Named refusal, not `load_records`' own FileNotFoundError.
+        return {"run": str(run_dir), "refused": REFUSAL_NO_METADATA}
+    ticks, _scenario, _timebase, unparseable = load_records(metadata_path)
     sensing_ticks = _sensing_ticks(ticks)
 
     refusal = _log_refusal(ticks, sensing_ticks)
@@ -358,19 +415,36 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
         summary = json.loads(summary_path.read_text())
 
     replay_identity, incumbent_records = _replay_incumbent(sensing_ticks)
+    segments = _segments(sensing_ticks)
+    reference_ticks = sensing_ticks[:segments["reference_ticks"]]
+    contaminated_ticks = sensing_ticks[segments["reference_ticks"]:]
     result: dict[str, Any] = {
         "run": str(run_dir),
         "ticks": len(sensing_ticks),
         "unparseable_lines": unparseable,
         "replay_identity": replay_identity,
-        "segments": _segments(sensing_ticks),
+        "segments": segments,
         "limits": _limits(sensing_ticks, summary),
-        "reference_witness": _reference_witness(sensing_ticks),
+        # Computed over the reference segment only (D9's own boundary) -- a
+        # mean over ticks the mode record itself calls contaminated would be
+        # a mean over a segment `reference_rates_hold` says is not the
+        # reference. The contaminated segment gets its own witness rather
+        # than being pooled into this one or silently dropped.
+        "reference_witness": _reference_witness(reference_ticks),
+        "reference_witness_contaminated": (
+            _reference_witness(contaminated_ticks) if contaminated_ticks else None
+        ),
     }
     if replay_identity["status"] != "ok":
         # No candidate scores are emitted (D8): a log that cannot reproduce its
         # own incumbent's decisions cannot referee anyone else's.
         return result
+
+    # A property of the log itself, not of any candidate: whether a rule went
+    # unexercised over the whole drive. Computed here so it is present even
+    # when zero candidates are supplied -- running the tool with none is
+    # exactly the log-validity check this states the result of.
+    result["rules_never_exercised"] = _rules_never_exercised(incumbent_records, len(incumbent_records))
 
     result["candidates"] = {
         label: _score_candidate(sensing_ticks, incumbent_records, factory)
@@ -399,8 +473,20 @@ def render_table(result: dict[str, Any]) -> str:
     lines.append(f"    structurally_absent={lim['structurally_absent']}")
     lines.append(f"    reference_rates_hold={lim['reference_rates_hold']}")
     rw = result["reference_witness"]
-    lines.append(f"  reference_witness: {rw['ticks_with_achieved']} ticks with achieved, "
-                 f"{rw['ticks_no_telemetry']} with no telemetry")
+    lines.append(f"  reference_witness (reference segment): {rw['ticks_with_achieved']} ticks with achieved, "
+                 f"{rw['ticks_no_telemetry']} with no telemetry, {rw['reports']} reports, "
+                 f"{rw['ticks_stale']} stale")
+    rwc = result["reference_witness_contaminated"]
+    if rwc is not None:
+        lines.append(f"  reference_witness (contaminated segment): {rwc['ticks_with_achieved']} ticks "
+                     f"with achieved, {rwc['ticks_no_telemetry']} with no telemetry, "
+                     f"{rwc['reports']} reports, {rwc['ticks_stale']} stale")
+    # Printed unconditionally -- a property of the log itself, present even
+    # when no candidates are supplied (D7): running with none is exactly
+    # the log-validity check this states the result of.
+    for entry in result["rules_never_exercised"]:
+        lines.append(f"  RULE NEVER EXERCISED (log-wide): {entry['rule']} "
+                     f"(all {entry['ticks']} ticks, missing={entry['missing']})")
     for label, c in result.get("candidates", {}).items():
         lines.append(f"  candidate {label}:")
         if "refused" in c:

@@ -13,9 +13,9 @@ from __future__ import annotations
 import json
 import sys
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pytest
 
@@ -27,6 +27,7 @@ from policy.sensing_controller import (
     RULE_NOT_EVALUABLE,
     RULE_QUIET,
     RULES,
+    RuleCheck,
     SensingController,
     Trigger,
 )
@@ -110,9 +111,9 @@ class Phone:
         return True
 
 
-def _telemetry(i: int) -> PhoneTelemetry:
+def _telemetry(i: int, *, thermal_status: str = "nominal") -> PhoneTelemetry:
     return PhoneTelemetry(
-        t_capture_mono_ns=0, thermal_status="nominal", thermal_headroom=None,
+        t_capture_mono_ns=0, thermal_status=thermal_status, thermal_headroom=None,
         achieved={"camera_hz": 4.97, "gps_hz": 1.0, "imu_hz": 49.8, "here_hz": 0.0},
         dropped={"camera": i, "gps": 0, "imu": 0, "here": 0},
         here_calls=0, here_errors=0,
@@ -125,9 +126,18 @@ def _jammed_feed() -> FeedOwnership:
 
 def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(),
               live_from: int | None = None, telemetry: bool = True,
+              telemetry_at: frozenset[int] | None = None,
+              accel_ticks: frozenset = frozenset(),
+              thermal_status_at: Callable[[int], str] | None = None,
               name: str = "run") -> Path:
     """A run directory built from a real `SensingLoop`, so every `sensing`
     block scored here is byte-for-byte what `TickOutcome.to_record()` emits.
+
+    `telemetry_at`, given, restricts the ticks on which `phone.telemetry`
+    is (re)assigned to that set -- everywhere else, whatever was last
+    assigned stays in place, exactly as `PhoneLink.telemetry` behaves when
+    the reporting thread has died. `telemetry=True` with `telemetry_at=None`
+    keeps the old behaviour: a fresh report on every tick.
     """
     clock = Clock()
     modes = ModeHolder(SHADOW, clock=clock)
@@ -138,12 +148,15 @@ def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(
         clock.advance(0.1)
         if live_from is not None and i == live_from:
             modes.flip_to(LIVE)
-        if telemetry:
-            phone.telemetry = _telemetry(i)
+        status = thermal_status_at(i) if thermal_status_at else "nominal"
+        reports_this_tick = (i in telemetry_at) if telemetry_at is not None else telemetry
+        if reports_this_tick:
+            phone.telemetry = _telemetry(i, thermal_status=status)
             phone.telemetry_at_mono = clock.now - 0.02
         feed = _jammed_feed() if i in feed_ticks else None
         density = 0 if i in feed_ticks else 2
-        outcome = loop.on_tick(_tick(i, feed=feed, density=density), phone)
+        accel = 3.0 if i in accel_ticks else 0.0
+        outcome = loop.on_tick(_tick(i, accel=accel, feed=feed, density=density), phone)
         lines.append({"type": "tick", "tick_id": i, "sensing": outcome.to_record()})
 
     run_dir = tmp_path / name
@@ -172,6 +185,22 @@ class TestReplayClock:
 class TestRefusals:
     """A log that cannot referee anyone, including its own incumbent, refuses
     by name rather than scoring an approximation."""
+
+    def test_a_run_dir_with_no_metadata_jsonl_refuses_by_name(self, tmp_path):
+        # The plan's own named example run, device-test-2026-08-25, is exactly
+        # this shape: a phone-side session.jsonl and no Jetson metadata log.
+        run_dir = tmp_path / "phone_only"
+        run_dir.mkdir()
+        (run_dir / "session.jsonl").write_text('{"dir": "in"}\n')
+        result = score_shadow.score(run_dir)
+        assert result["refused"] == score_shadow.REFUSAL_NO_METADATA
+
+    def test_main_exits_2_on_a_missing_metadata_jsonl(self, tmp_path, monkeypatch):
+        run_dir = tmp_path / "phone_only"
+        run_dir.mkdir()
+        monkeypatch.setattr(sys, "argv", ["score_shadow.py", str(run_dir)])
+        assert score_shadow.main() == 2
+        assert not (run_dir / "shadow_score.json").exists()
 
     def test_no_tick_records_at_all(self, tmp_path):
         run_dir = tmp_path / "empty"
@@ -314,6 +343,62 @@ class TestReferenceWitness:
         assert rw["dropped_final"] is None
 
 
+class TestReferenceWitnessTellsALiveDriveFromADeadOne:
+    """`PhoneLink.telemetry` holds the latest report and is cleared only on
+    rebind, so a phone that reported once and then had its telemetry thread
+    die is, by presence alone, indistinguishable from one reporting every
+    tick -- both show `ticks_with_achieved` equal to the tick count. `age_s`
+    is what actually tells the two drives apart.
+    """
+
+    def test_a_dead_phone_and_a_live_one_produce_different_witnesses(self, tmp_path):
+        live = write_run(tmp_path, n=300, telemetry_at=frozenset(range(0, 300, 5)), name="live")
+        dead = write_run(tmp_path, n=300, telemetry_at=frozenset({0}), name="dead")
+
+        live_rw = score_shadow.score(live)["reference_witness"]
+        dead_rw = score_shadow.score(dead)["reference_witness"]
+
+        # The defect, reproduced: presence alone reports the same thing for
+        # both drives.
+        assert live_rw["ticks_with_achieved"] == 300
+        assert dead_rw["ticks_with_achieved"] == 300
+
+        assert live_rw != dead_rw
+        assert live_rw["reports"] == 60
+        assert dead_rw["reports"] == 1
+        assert live_rw["ticks_stale"] == 0
+        assert dead_rw["ticks_stale"] > 0
+        assert live_rw["age_s_max"] < score_shadow.MAX_TELEMETRY_AGE_S
+        assert dead_rw["age_s_max"] > score_shadow.MAX_TELEMETRY_AGE_S
+
+
+class TestReferenceWitnessRespectsSegments:
+    """The reference witness is a claim about the reference segment
+    (`reference_rates_hold`'s own boundary, D9) -- a drive with zero
+    reference ticks must not report a full-rate witness for a segment its
+    own report calls zero ticks long.
+    """
+
+    def test_a_drive_born_live_has_a_zero_length_reference_witness(self, tmp_path):
+        run_dir = write_run(tmp_path, n=5, live_from=0, telemetry=True)
+        result = score_shadow.score(run_dir)
+        assert result["segments"]["reference_ticks"] == 0
+        assert result["reference_witness"]["ticks_with_achieved"] == 0
+        assert result["reference_witness_contaminated"]["ticks_with_achieved"] == 5
+
+    def test_a_drive_that_goes_live_partway_splits_the_witness_too(self, tmp_path):
+        run_dir = write_run(tmp_path, n=10, live_from=4, telemetry=True)
+        result = score_shadow.score(run_dir)
+        assert result["segments"]["reference_ticks"] == 4
+        assert result["reference_witness"]["ticks_with_achieved"] == 4
+        assert result["reference_witness_contaminated"]["ticks_with_achieved"] == 6
+
+    def test_a_pure_shadow_drive_has_no_contaminated_witness(self, tmp_path):
+        run_dir = write_run(tmp_path, n=5)
+        result = score_shadow.score(run_dir)
+        assert result["reference_witness_contaminated"] is None
+
+
 class TestTheThreeStateScoringDiscipline:
     """The defect class this task exists for: a candidate that would differ on
     a rule it was never given the inputs to decide on must not score as
@@ -374,6 +459,28 @@ class TestTheThreeStateScoringDiscipline:
         assert c["vs_incumbent"]["trigger"]["differ"] == 0
 
 
+class TestRulesNeverExercisedIsLogLevel:
+    """D7: a mandatory output, not a footnote inside a candidate's score --
+    present even when zero candidates are supplied, because running the tool
+    with none is exactly the log-validity check this states the result of.
+    """
+
+    def test_present_with_zero_candidates_on_a_pure_shadow_drive(self, tmp_path):
+        run_dir = write_run(tmp_path, n=10)  # feed never present anywhere
+        result = score_shadow.score(run_dir)
+        assert result["candidates"] == {}
+        entry = next(e for e in result["rules_never_exercised"] if e["rule"] == Trigger.DISAGREEMENT)
+        assert entry["ticks"] == 10
+        assert entry["missing"] == {"feed_congestion": 10}
+
+    def test_rendered_unconditionally_with_zero_candidates(self, tmp_path):
+        run_dir = write_run(tmp_path, n=6)
+        result = score_shadow.score(run_dir)
+        table = score_shadow.render_table(result)
+        assert "RULE NEVER EXERCISED" in table
+        assert Trigger.DISAGREEMENT in table
+
+
 class TestCandidateWithoutAttribution:
 
     def test_a_candidate_that_cannot_report_attribution_is_refused_by_name(self, tmp_path):
@@ -388,6 +495,102 @@ class TestCandidateWithoutAttribution:
 
         result = score_shadow.score(run_dir, {"bad": NoAttribution})
         assert result["candidates"]["bad"] == {"refused": score_shadow.CANDIDATE_WITHOUT_ATTRIBUTION}
+
+    def test_a_candidate_valid_on_tick_zero_but_malformed_later_is_refused(self, tmp_path):
+        # The shape check used to inspect only tick 0 (score_shadow.py:279),
+        # so a candidate malformed from the second tick on raised a raw
+        # KeyError instead of refusing cleanly.
+        run_dir = write_run(tmp_path, n=3)
+
+        class ValidThenBroken:
+            def __init__(self, clock):
+                self._inner = SensingController(clock=clock)
+                self.calls = 0
+
+            def decide(self, inputs):
+                self.calls += 1
+                if self.calls == 1:
+                    return self._inner.decide(inputs)
+                return types.SimpleNamespace(to_record=lambda: {"rates": {}, "trigger": "idle"})
+
+        result = score_shadow.score(run_dir, {"bad": ValidThenBroken})
+        assert result["candidates"]["bad"] == {"refused": score_shadow.CANDIDATE_WITHOUT_ATTRIBUTION}
+
+    def test_evaluating_past_a_missing_input_is_flagged_not_absorbed(self, tmp_path):
+        # A candidate that reports `quiet` for a rule the incumbent could not
+        # evaluate did not see more than the incumbent did on the same
+        # `Inputs` -- it dropped the "missing input means not_evaluable"
+        # discipline. That divergence must be visible beside the ordinary
+        # `quiet` count, not silently folded into it.
+        run_dir = write_run(tmp_path, n=6)  # feed never present anywhere
+
+        class EvaluatesEverything:
+            def __init__(self, clock):
+                self._inner = SensingController(clock=clock)
+
+            def decide(self, inputs):
+                decision = self._inner.decide(inputs)
+                rules = dict(decision.attribution.rules)
+                for name, check in list(rules.items()):
+                    if check.status == RULE_NOT_EVALUABLE:
+                        rules[name] = RuleCheck(status=RULE_QUIET, evidence={})
+                attribution = replace(decision.attribution, rules=rules)
+                return replace(decision, attribution=attribution)
+
+        result = score_shadow.score(run_dir, {"over_eager": EvaluatesEverything})
+        c = result["candidates"]["over_eager"]
+        assert c["rules"][Trigger.DISAGREEMENT][RULE_QUIET] == 6
+        assert c["vs_incumbent"]["per_rule"][Trigger.DISAGREEMENT] == {
+            "agree": 0, "differ": 0, "not_evaluable": 6,
+        }
+        assert c["candidate_evaluated_where_incumbent_could_not"][Trigger.DISAGREEMENT] == 6
+
+
+class TestActivityBlock:
+    """`activity.ticks_active` and `activity.raises` are emitted numbers in
+    the plan's template that nothing named directly. Both are checked here
+    against ground truth read straight off the drive's own logged decisions
+    -- independent of the counting code under test -- on a drive with a
+    known, unequal active/idle split.
+    """
+
+    def test_ticks_active_and_raises_match_the_logged_decisions(self, tmp_path):
+        # Ticks 0-4: thermal backs off alone (no other raise rule fires).
+        # Ticks 5-12: sustained hard acceleration, which both fires EVENT and
+        # eventually dwells the rates active. The split is asymmetric by
+        # construction so an active/idle inversion cannot land on the same
+        # count by coincidence.
+        run_dir = write_run(
+            tmp_path, n=13, accel_ticks=frozenset(range(5, 13)),
+            thermal_status_at=lambda i: "severe" if i < 5 else "nominal",
+        )
+        lines = [json.loads(line) for line in (run_dir / "metadata.jsonl").read_text().splitlines()]
+
+        expected_active = sum(1 for l in lines if l["sensing"]["attribution"]["gates"]["level"] == "active")
+        expected_idle = len(lines) - expected_active
+        assert 0 < expected_active < len(lines)
+        assert expected_active != expected_idle
+
+        raise_rules = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT)
+        expected_raises = sum(
+            1 for l in lines
+            if any(l["sensing"]["attribution"]["rules"][r]["status"] == RULE_FIRED for r in raise_rules)
+        )
+        thermal_alone = [
+            l for l in lines
+            if l["sensing"]["attribution"]["rules"][Trigger.THERMAL]["status"] == RULE_FIRED
+            and not any(l["sensing"]["attribution"]["rules"][r]["status"] == RULE_FIRED for r in raise_rules)
+        ]
+        # Otherwise a mutation that folds THERMAL into `raises` would land on
+        # the same count as the correct one -- this is the whole point of
+        # the thermal-only preamble above.
+        assert thermal_alone
+
+        result = score_shadow.score(run_dir, {"copy": lambda clock: SensingController(clock=clock)})
+        assert result["replay_identity"]["status"] == "ok"
+        c = result["candidates"]["copy"]
+        assert c["activity"]["ticks_active"] == expected_active
+        assert c["activity"]["raises"] == expected_raises
 
 
 class TestVocabularyClosure:
