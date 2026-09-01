@@ -339,6 +339,40 @@ put attribution on the wire; does not attribute *sends* beyond what
 counters by shadow/live segment (task 35 owns segment scoring); and does not
 render any of it (task 39).
 
+## Measured on a device run, 2026-09-01
+
+899 ticks over 180 s, phone dialling the Jetson over the tailnet on a direct path,
+no USB in the data path. Every tick carried an attribution block. These answer
+five questions the audit could not, because every check before this constructed
+`Inputs` directly and nothing had run `inputs_from` against real telemetry.
+
+- **All three states appear on real data.** `advisory_margin_narrow` fired on 899
+  ticks, `event_from_free_tier` and `thermal_backoff` were quiet on 899, and
+  `source_disagreement` was `not_evaluable` on 899 with `missing:
+  ["feed_congestion"]`. That last row is the point of the task: HERE is not
+  configured, so the rule genuinely cannot be evaluated, and the record says so
+  rather than reporting the quiet 0.0 that would otherwise be indistinguishable
+  from a calm road.
+- **`feed_declined` is non-null on a real drive**, carrying `"feed_outcome"` on
+  every tick. Open item 1 asked whether the field delivers anything; it does, and
+  the answer is to keep it.
+- **The thermal cause was null on all 899 ticks**, so the scale never left 1.0 and
+  no tick reported `no_telemetry` or `stale_telemetry`. The telemetry thread did
+  not die during this run.
+- **`policy_margin` was never `not_evaluable`**, and `gapped` was false on all 899
+  ticks, so the dwell was never re-armed by a gap.
+- **Record growth, corrected.** Open item 4 estimated 0.8-1.0 KB of attribution on
+  a roughly 1.5 KB record, about +60%. Measured: attribution is 1354 B on a mean
+  tick record of 7847 B, so the absolute size is about a third larger than
+  estimated while the proportional cost is 17%, not 60% — the base record is some
+  five times the size the estimate assumed.
+
+One consequence for the reachability audit: with HERE unconfigured,
+`source_disagreement` cannot be evaluated at all on a real drive, so
+`Trigger.DISAGREEMENT` is unreachable in practice as well as structurally
+unreachable on shadow drives. The observed triggers were `advisory_margin_narrow`
+on 896 ticks and `idle` on 3.
+
 ## Open items flagged for the user
 
 1. **`Inputs.feed_declined` borders task 36.** Taken (D7) because the named

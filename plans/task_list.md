@@ -1132,8 +1132,61 @@ Written as part of the implementation, not added afterwards.
     test still uses `Thread.sleep(200)` where an observable exists (never seen to
     fail); and runs recorded before this task carry the old pair of capture-stamp
     spellings, so their `--phone-log` joins will show about 1.5 per cent unmatched.
-34. Trigger attribution in the controller: which rule fired, for which sensor,
-    and why.
+34. ~~Trigger attribution in the controller: which rule fired, for which sensor,
+    and why.~~
+    The controller decides one global level bit, then scales two named keys for
+    thermal, then clamps — a composition chain, not a rule per sensor — so the record
+    follows the chain the code actually walks: per rule a closed three-state status
+    (**fired** / **quiet** / **not evaluable with the missing inputs named**), a
+    `gates` block separating "fired but blocked by the dwell" from "idle and quiet",
+    and a `per_sensor` block carrying base rate, level sensitivity, thermal scale or
+    exemption, clamp, previous and changed, with a reconstruction identity
+    `_clamp(base × scale) == rates[k]`. Nothing the controller decides changed: rates,
+    the trigger word, `rules_fired` and the `reasons` texts are byte-identical.
+    **Three validation rounds found no defect in the implementation.** Round 1 drove
+    `decide()` over 12,000 randomized calls asserting the record against the decision
+    on every one — 0 inconsistencies. Round 2 replayed 15,000 decisions through the
+    pre-task and post-task trees and got byte-identical records, same md5, on a corpus
+    that produced all 6 trigger words, all 16 reachable `rules_fired` combinations and
+    14 distinct `reasons` templates; that closed the no-behaviour-change contract by
+    measurement rather than by reading the diff. **Every finding across all three
+    rounds was a guard that would not have noticed if the code became wrong.** The
+    blocker: deleting the whole attribution from the emitted record left all 1543
+    tests passing, because every test read the dataclass and none read the tick log —
+    the task's own defect class turned on the task's own output. Its mechanism is
+    worth keeping: `gates` and `per_sensor` are the *same objects* in the record as on
+    the dataclass, so object assertions pin them transitively, while `rules` is
+    transformed and `first_decision` copied — exactly the two fields no test asserted
+    values for. Round 3 then found that filtering the emitted `rules` to fired-only
+    also survived, restoring absence-as-ambiguity in the log, and that the event rule
+    was the one whose `not_evaluable` branch nothing asserted. That last is unreachable
+    today because the observation builder substitutes a neutral float — and becomes the
+    live path the moment task 36 lands provenance, which is why it is pinned now.
+    **Experiment**, 899 ticks over 180 s, phone dialling the Jetson over a direct
+    tailnet path with no USB in the data path: every tick carried an attribution block,
+    and **all three states appear on real data** — `advisory_margin_narrow` fired on
+    899 (an untrained random-init bundle), `event_from_free_tier` and `thermal_backoff`
+    quiet on 899, and `source_disagreement` **not evaluable on 899** with `missing:
+    ["feed_congestion"]`, because HERE is unconfigured. That row is the deliverable
+    proving itself: before this task the rule's absence was indistinguishable from a
+    calm road. `feed_declined` carried `"feed_outcome"` on every tick, so the field
+    delivers and open item 1 resolves toward keeping it. The thermal cause was null
+    throughout, so the telemetry thread did not die as the code's comment warns it has
+    on Android 10, and `gapped` was false on all 899 ticks.
+    **Two estimates corrected by measurement.** Record growth was projected at 0.8-1.0
+    KB of attribution on a ~1.5 KB record, about +60%; measured 1354 B on a mean record
+    of 7847 B — a third larger in absolute terms, and 17% rather than 60% in relative
+    terms, because the base record is some five times the assumed size. And with HERE
+    unconfigured, `Trigger.DISAGREEMENT` is unreachable in practice as well as on
+    shadow drives.
+    **Open:** `local_density_bin` carries the same substitution blind spot as the
+    accelerometer but in the opposite direction — a camera seeing nothing gives a bin
+    index of 0, so a blind camera beside a congested feed **fires** the disagreement
+    rule and raises the camera rate; the accelerometer case under-reports and changes
+    nothing, this one over-reports and moves a rate, and open item 2 now names both.
+    Crossing two quiet entries in the emitted record still survives, accepted as a
+    limit. `RuleCheck.to_record()` does not reject non-finite floats, judged
+    unreachable because the transport refuses them at framing.
 35. Shadow-mode decision log emitted alongside the full-rate reference, so every
     candidate policy can be scored against identical traffic from one drive.
 36. Per-tick field provenance and missingness.
