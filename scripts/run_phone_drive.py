@@ -206,7 +206,10 @@ def main():
         outcome = loop.on_tick(tick, link)
         ticks += 1
         if outcome.advisory_sent:
-            sent_stamps.append(int(tick.t_capture_mono * 1e9))
+            # The integer actually sent on the wire, not a recomputation of it --
+            # `capture_stamp_ns` rounds, so re-deriving this from `tick.t_capture_mono`
+            # with a truncating cast disagrees with the sent value on some ticks.
+            sent_stamps.append(outcome.command.t_capture_mono_ns)
         time.sleep(max(0.0, deadline - time.monotonic()))
 
     time.sleep(0.3)
