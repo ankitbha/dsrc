@@ -29,11 +29,15 @@ from sensors.phone_source import (
 from sensors.time_sync import TimebaseStamp
 from transport.channels import Channel
 from transport.clock import now_mono_ns
+from transport.frames import WIRE_STAMP_KEY
+from transport.frames import Frame as WireFrame
 from transport.loopback import loopback_pair
 from transport.messages import CameraFrame, GpsRecord, MessageRouter
-from transport.session import Session
+from transport.session import ReceivedMessage, Session
 from transport.timebase import (
     MIN_OFFSET_SAMPLES,
+    OneWayEstimator,
+    OneWaySample,
     TimebaseEstimator,
     TimebaseNotReady,
     TimeSyncSample,
@@ -986,3 +990,208 @@ def test_a_zero_tick_run_can_still_print_its_summary():
     # And the dashboard's guard: get(k, default) does not apply the default for a
     # present-but-None key.
     assert (snapshot.get("link_ms") or {}).get("p50", 0) == 0
+
+
+# -- the clock adapter's cascade ----------------------------------------------
+
+
+def test_round_trip_is_tried_before_one_way():
+    """Given both, the round-trip estimator wins: its error is bounded by half
+    a round trip, the one-way estimator's only by a delay spread with an
+    unobservable floor."""
+    round_trip, _ = converged_estimator(offset_ns=1_000_000_000)
+    one_way = OneWayEstimator(mono_clock=lambda: BASE_NS)
+    for i in range(MIN_OFFSET_SAMPLES + 2):
+        one_way.add(OneWaySample(
+            exchange_id=i, t1_remote_send_ns=BASE_NS + 2_000_000_000,
+            t2_local_recv_ns=BASE_NS,
+        ))
+    adapter = PhoneClockAdapter(one_way, round_trip=round_trip)
+
+    stamp = adapter.stamp(BASE_NS + 1_000_000_000, BASE_NS / 1e9)
+    assert not stamp.proxy
+    assert stamp.source == "round_trip"
+    assert adapter.to_record()["converted_by_source"] == {"round_trip": 1, "one_way": 0}
+
+
+def test_one_way_is_used_when_round_trip_is_not_ready():
+    """The fallback still fires, and says which source answered."""
+    round_trip = TimebaseEstimator(mono_clock=lambda: BASE_NS)  # no samples, never usable
+    one_way = OneWayEstimator(mono_clock=lambda: BASE_NS)
+    for i in range(MIN_OFFSET_SAMPLES + 2):
+        one_way.add(OneWaySample(
+            exchange_id=i, t1_remote_send_ns=BASE_NS + 2_000_000_000,
+            t2_local_recv_ns=BASE_NS,
+        ))
+    adapter = PhoneClockAdapter(one_way, round_trip=round_trip)
+
+    stamp = adapter.stamp(BASE_NS + 2_000_000_000, BASE_NS / 1e9)
+    assert not stamp.proxy
+    assert stamp.source == "one_way"
+    assert adapter.to_record()["converted_by_source"] == {"round_trip": 0, "one_way": 1}
+
+
+def test_neither_ready_proxies_and_names_the_one_way_reason():
+    """The last reason tried is the one recorded -- the one-way estimator's,
+    since it is tried last -- and a stamp carries it, not only the aggregate."""
+    round_trip = TimebaseEstimator(mono_clock=lambda: BASE_NS)
+    one_way = OneWayEstimator(mono_clock=lambda: BASE_NS)
+    adapter = PhoneClockAdapter(one_way, round_trip=round_trip)
+
+    stamp = adapter.stamp(BASE_NS, BASE_NS / 1e9)
+    assert stamp.proxy
+    assert stamp.source == "proxy"
+    assert stamp.proxy_reason == "no samples"
+    assert adapter.to_record()["proxy_reasons"] == {"no samples": 1}
+
+
+def test_a_single_estimator_caller_is_unaffected_by_the_cascade():
+    """Every existing caller passes one estimator, of either kind, and gets it
+    tried on its own -- the shape this class had before `round_trip` existed."""
+    estimator, _ = converged_estimator()
+    adapter = PhoneClockAdapter(estimator)
+    stamp = adapter.stamp(BASE_NS + PLANTED_OFFSET_NS + 500_000_000, BASE_NS / 1e9)
+    assert not stamp.proxy
+    assert stamp.source == "one_way"
+    assert adapter.converted == 1
+
+
+# -- per-tick stage instrumentation on a phone-fed frame ----------------------
+
+
+def a_receipt(*, t_mono_ns: int, t_recv_mono_ns: int, extensions: dict | None = None,
+              t_wall_ns: int = 0) -> ReceivedMessage:
+    frame = WireFrame(
+        channel=Channel.CAMERA, seq=1, t_mono_ns=t_mono_ns, t_wall_ns=t_wall_ns,
+        extensions=extensions or {},
+    )
+    return ReceivedMessage(frame=frame, t_recv_mono_ns=t_recv_mono_ns, t_recv_wall_ns=0)
+
+
+def a_bare_camera_stream(adapter=None) -> PhoneCameraStream:
+    """`_accept` is exercised directly, so the router is never touched."""
+    return PhoneCameraStream(router=None, adapter=adapter or PhoneClockAdapter(TimebaseEstimator()))
+
+
+def test_jpeg_decode_time_is_measured_and_never_negative():
+    camera = a_bare_camera_stream()
+    message = CameraFrame(
+        t_capture_mono_ns=100, frame_id=1, width=16, height=16,
+        format="jpeg", quality=85, jpeg=a_jpeg(),
+    )
+    stamp = TimebaseStamp(t_capture_mono=0.0, t_arrival_mono=0.0, bound_s=None,
+                           estimate_id=None, proxy=True, source="proxy")
+    receipt = a_receipt(t_mono_ns=100, t_recv_mono_ns=110)
+    camera._accept(message, receipt, stamp)
+
+    frame = camera.latest()
+    assert frame is not None
+    assert frame.jpeg_decode_s is not None
+    assert frame.jpeg_decode_s >= 0.0
+
+
+def test_capture_is_an_instant_with_no_duration():
+    camera = a_bare_camera_stream()
+    message = CameraFrame(
+        t_capture_mono_ns=100, frame_id=1, width=16, height=16,
+        format="jpeg", quality=85, jpeg=a_jpeg(),
+    )
+    stamp = TimebaseStamp(t_capture_mono=0.0, t_arrival_mono=0.0, bound_s=None,
+                           estimate_id=None, proxy=True, source="proxy")
+    camera._accept(message, a_receipt(t_mono_ns=100, t_recv_mono_ns=110), stamp)
+
+    stages = camera.latest().phone_stages
+    assert stages["capture"].basis == "instant"
+    assert stages["capture"].ms == 0.0
+    assert stages["capture"].clock == "phone"
+
+
+def test_the_phone_dwell_segments_are_absent_without_encode_stamps():
+    """An older phone build, or one that never instruments encode timing, must
+    read as absent-with-a-reason -- never as a silent zero."""
+    camera = a_bare_camera_stream()
+    message = CameraFrame(
+        t_capture_mono_ns=100, frame_id=1, width=16, height=16,
+        format="jpeg", quality=85, jpeg=a_jpeg(),
+    )
+    stamp = TimebaseStamp(t_capture_mono=0.0, t_arrival_mono=0.0, bound_s=None,
+                           estimate_id=None, proxy=True, source="proxy")
+    camera._accept(message, a_receipt(t_mono_ns=140, t_recv_mono_ns=150), stamp)
+
+    stages = camera.latest().phone_stages
+    for key in ("capture_to_encode_start", "encode", "encode_done_to_enqueue"):
+        assert stages[key].basis == "absent", key
+        assert stages[key].ms is None, key
+        assert stages[key].reason, key
+
+
+def test_the_phone_dwell_segments_are_measured_and_exact_with_encode_stamps():
+    camera = a_bare_camera_stream()
+    message = CameraFrame(
+        t_capture_mono_ns=100, frame_id=1, width=16, height=16,
+        format="jpeg", quality=85, jpeg=a_jpeg(),
+        t_encode_start_mono_ns=110, t_encode_done_mono_ns=130,
+    )
+    stamp = TimebaseStamp(t_capture_mono=0.0, t_arrival_mono=0.0, bound_s=None,
+                           estimate_id=None, proxy=True, source="proxy")
+    # enqueue (t_mono_ns) at 140, no wire stamp requested.
+    camera._accept(message, a_receipt(t_mono_ns=140, t_recv_mono_ns=150), stamp)
+
+    stages = camera.latest().phone_stages
+    assert stages["capture_to_encode_start"].basis == "measured"
+    assert stages["capture_to_encode_start"].ms == pytest.approx(10 / 1e6)
+    assert stages["capture_to_encode_start"].clock == "phone"
+    assert stages["encode"].ms == pytest.approx(20 / 1e6)
+    assert stages["encode_done_to_enqueue"].ms == pytest.approx(10 / 1e6)
+    # No wire stamp on this frame: the last leg and the whole transport segment
+    # are absent, with a reason distinct from "no encode stamps".
+    assert stages["enqueue_to_wire"].basis == "absent"
+    assert stages["transport"].basis == "absent"
+    assert stages["transport"].clock == "cross"
+
+
+def test_transport_is_converted_when_the_frame_carries_a_wire_stamp():
+    round_trip_estimator, _ = converged_estimator(offset_ns=0)
+    adapter = PhoneClockAdapter(round_trip_estimator)
+    camera = a_bare_camera_stream(adapter)
+    message = CameraFrame(
+        t_capture_mono_ns=BASE_NS, frame_id=1, width=16, height=16,
+        format="jpeg", quality=85, jpeg=a_jpeg(),
+    )
+    stamp = TimebaseStamp(t_capture_mono=0.0, t_arrival_mono=0.0, bound_s=None,
+                           estimate_id=None, proxy=True, source="proxy")
+    wire_ns = BASE_NS + 5_000_000
+    receipt = a_receipt(
+        t_mono_ns=BASE_NS, t_recv_mono_ns=BASE_NS + 20_000_000,
+        extensions={WIRE_STAMP_KEY: wire_ns},
+    )
+    camera._accept(message, receipt, stamp)
+
+    transport = camera.latest().phone_stages["transport"]
+    assert transport.basis == "converted"
+    assert transport.clock == "cross"
+    assert transport.source == "one_way"
+    assert transport.bound_ms is not None
+    assert transport.estimate_id is not None
+    assert transport.ms == pytest.approx(20.0 - 5.0, abs=1.0)
+
+
+def test_transport_is_absent_when_the_wire_stamp_cannot_be_converted():
+    """A frame that asked for the stamp but arrived before the estimator
+    converged must not report a zero-length transport segment."""
+    camera = a_bare_camera_stream()  # adapter with an unfed TimebaseEstimator
+    message = CameraFrame(
+        t_capture_mono_ns=BASE_NS, frame_id=1, width=16, height=16,
+        format="jpeg", quality=85, jpeg=a_jpeg(),
+    )
+    stamp = TimebaseStamp(t_capture_mono=0.0, t_arrival_mono=0.0, bound_s=None,
+                           estimate_id=None, proxy=True, source="proxy")
+    receipt = a_receipt(
+        t_mono_ns=BASE_NS, t_recv_mono_ns=BASE_NS + 20_000_000,
+        extensions={WIRE_STAMP_KEY: BASE_NS + 5_000_000},
+    )
+    camera._accept(message, receipt, stamp)
+
+    transport = camera.latest().phone_stages["transport"]
+    assert transport.basis == "absent"
+    assert transport.reason == "no samples"

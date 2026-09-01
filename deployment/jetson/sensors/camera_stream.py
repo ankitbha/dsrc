@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
-from sensors.time_sync import TimebaseStamp, now_mono, now_wall
+from sensors.time_sync import StageTiming, TimebaseStamp, now_mono, now_wall
 
 
 @dataclass
@@ -36,6 +36,16 @@ class Frame:
     # converted or proxied value. None means this device captured it and t_mono
     # is exact, which is the case for every local camera.
     timebase: "TimebaseStamp | None" = None
+    #: How long turning the wire bytes back into pixels took, on this device's
+    #: own clock. None for a local camera, where the codec inside
+    #: `cv2.VideoCapture.read()` is not separately timed; a phone-fed frame
+    #: always measures this in `PhoneCameraStream._accept`.
+    jpeg_decode_s: float | None = None
+    #: The stage record for everything only the sender's own header can answer
+    #: exactly (the phone-clock segments between capture and the wire) plus the
+    #: one cross-device segment this device can compute (the network hop).
+    #: None for a local camera, which has none of these stages at all.
+    phone_stages: "dict[str, StageTiming] | None" = None
 
 
 def reopen_past_failure(capture: cv2.VideoCapture, open_fn) -> cv2.VideoCapture | None:

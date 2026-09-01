@@ -36,12 +36,32 @@ import numpy as np
 
 from sensors.camera_stream import Frame
 from sensors.gps_reader import GpsDiagnostics, GpsFix
-from sensors.time_sync import TimebaseStamp, now_mono
+from sensors.time_sync import StageTiming, TimebaseStamp, now_mono
 from transport.channels import Channel
+from transport.frames import WIRE_STAMP_KEY
 from transport.timebase import TimebaseNotReady
 
 # Proxying is normal for the first seconds of a drive and abnormal after that, so
 # the reasons are counted separately rather than lumped into one number.
+
+#: The two sources tried, in preference order, and the label each carries on a
+#: `TimebaseStamp`. Round-trip first: its error is bounded by half a round trip,
+#: while a one-way sample's bound is only a delay spread with an unobservable
+#: floor -- see `OneWayEstimator`'s own docstring.
+SOURCE_ROUND_TRIP = "round_trip"
+SOURCE_ONE_WAY = "one_way"
+SOURCE_PROXY = "proxy"
+
+
+def _phone_span(start_ns: int | None, end_ns: int | None, *, reason: str) -> StageTiming:
+    """A duration between two phone-clock stamps, or absent with a named cause.
+
+    Both ends are on one device's own clock, so the subtraction needs no
+    timebase at all -- it is either exact or it did not happen, never a guess.
+    """
+    if start_ns is None or end_ns is None:
+        return StageTiming.absent(clock="phone", reason=reason)
+    return StageTiming.measured((end_ns - start_ns) / 1e6, clock="phone")
 
 
 class PhoneClockAdapter:
@@ -49,14 +69,30 @@ class PhoneClockAdapter:
 
     Thread-safe: the camera and GPS backends convert from their own reader
     threads, and both share one adapter so the record covers the whole session.
+
+    Takes one estimator, as it always has, tried second; `round_trip` is the
+    one addition, tried first when supplied. Every existing caller -- one
+    estimator, of either kind, duck-typed -- keeps working unchanged with
+    `round_trip` left at its default of None, in which case the cascade is
+    exactly what it was before this stage carried a name.
     """
 
-    def __init__(self, estimator: Any) -> None:
-        self._estimator = estimator
+    def __init__(self, estimator: Any, *, round_trip: Any | None = None) -> None:
+        self._one_way = estimator
+        self._round_trip = round_trip
         self._lock = threading.Lock()
-        self.converted = 0
+        self.converted_by_source: dict[str, int] = {SOURCE_ROUND_TRIP: 0, SOURCE_ONE_WAY: 0}
         self.proxied = 0
         self.proxy_reasons: dict[str, int] = {}
+
+    @property
+    def converted(self) -> int:
+        return sum(self.converted_by_source.values())
+
+    def _sources(self):
+        if self._round_trip is not None:
+            yield SOURCE_ROUND_TRIP, self._round_trip
+        yield SOURCE_ONE_WAY, self._one_way
 
     def stamp(self, t_capture_peer_ns: int, t_arrival_local_s: float) -> TimebaseStamp:
         """Convert, or fall back to arrival and say so.
@@ -68,40 +104,50 @@ class PhoneClockAdapter:
         refusing to tick, which would leave the advisory dark exactly when the
         driver has just set off.
         """
-        try:
-            # to_local, not to_remote: this is a PEER stamp arriving, and the
-            # inverse direction. Getting it wrong is not subtle in its effect but
-            # is invisible in its shape -- with the clocks 67.6 hours apart,
-            # to_remote pushed every capture stamp 135 hours into the past, which
-            # the estimator's extrapolation guard then refused, so every frame
-            # silently took the proxy path and the run still produced advisories.
-            converted = self._estimator.to_local(t_capture_peer_ns)
-        except TimebaseNotReady as exc:
+        last_reason = "no source configured"
+        for source, estimator in self._sources():
+            try:
+                # to_local, not to_remote: this is a PEER stamp arriving, and the
+                # inverse direction. Getting it wrong is not subtle in its effect
+                # but is invisible in its shape -- with the clocks 67.6 hours
+                # apart, to_remote pushed every capture stamp 135 hours into the
+                # past, which the estimator's extrapolation guard then refused,
+                # so every frame silently took the proxy path and the run still
+                # produced advisories.
+                converted = estimator.to_local(t_capture_peer_ns)
+            except TimebaseNotReady as exc:
+                last_reason = exc.reason
+                continue
             with self._lock:
-                self.proxied += 1
-                self.proxy_reasons[exc.reason] = self.proxy_reasons.get(exc.reason, 0) + 1
+                self.converted_by_source[source] += 1
             return TimebaseStamp(
-                t_capture_mono=t_arrival_local_s,
+                t_capture_mono=converted.t_remote_mono_ns / 1e9,
                 t_arrival_mono=t_arrival_local_s,
-                bound_s=None,
-                estimate_id=None,
-                proxy=True,
+                bound_s=converted.bound_ns / 1e9,
+                estimate_id=converted.estimate_id,
+                proxy=False,
+                source=source,
             )
         with self._lock:
-            self.converted += 1
+            self.proxied += 1
+            self.proxy_reasons[last_reason] = self.proxy_reasons.get(last_reason, 0) + 1
         return TimebaseStamp(
-            t_capture_mono=converted.t_remote_mono_ns / 1e9,
+            t_capture_mono=t_arrival_local_s,
             t_arrival_mono=t_arrival_local_s,
-            bound_s=converted.bound_ns / 1e9,
-            estimate_id=converted.estimate_id,
-            proxy=False,
+            bound_s=None,
+            estimate_id=None,
+            proxy=True,
+            source=SOURCE_PROXY,
+            proxy_reason=last_reason,
         )
 
     def to_record(self) -> dict[str, Any]:
         with self._lock:
-            total = self.converted + self.proxied
+            by_source = dict(self.converted_by_source)
+            total = sum(by_source.values()) + self.proxied
             return {
-                "converted": self.converted,
+                "converted": sum(by_source.values()),
+                "converted_by_source": by_source,
                 "proxied": self.proxied,
                 "proxy_reasons": dict(sorted(self.proxy_reasons.items())),
                 "proxy_fraction": None if total == 0 else round(self.proxied / total, 4),
@@ -357,6 +403,7 @@ class PhoneCameraStream(_PhoneSource):
             self._on_reader_ended()
 
     def _accept(self, message, receipt, stamp: TimebaseStamp) -> None:
+        decode_started = now_mono()
         try:
             image = self._decode(message.jpeg)
         except Exception:
@@ -365,18 +412,77 @@ class PhoneCameraStream(_PhoneSource):
             # malformed message and a malformed byte stream.
             self.decode_failures += 1
             return
+        jpeg_decode_s = now_mono() - decode_started
         frame = Frame(
             image=image,
             frame_id=message.frame_id,
             t_mono=stamp.t_capture_mono,
             t_wall=receipt.frame.t_wall_ns / 1e9,
             timebase=stamp,
+            jpeg_decode_s=jpeg_decode_s,
+            phone_stages=self._phone_stages(message, receipt),
         )
         with self._cond:
             if self._latest is not None and self._latest.frame_id > self._last_consumed_id:
                 self._drop_counter += 1
             self._latest = frame
             self._cond.notify_all()
+
+    def _phone_stages(self, message, receipt) -> dict[str, "StageTiming"]:
+        """Everything only the sender's own header can answer exactly, plus
+        the one cross-device segment this device can compute: the network hop.
+
+        Every phone-clock difference here needs no conversion at all -- both
+        ends of each subtraction were stamped by the phone -- which is the
+        whole point of carrying the encode timestamps on the frame instead of
+        only converting the capture stamp.
+        """
+        capture_ns = message.t_capture_mono_ns
+        encode_start_ns = message.t_encode_start_mono_ns
+        encode_done_ns = message.t_encode_done_mono_ns
+        enqueue_ns = receipt.frame.t_mono_ns
+        wire_ns = receipt.extensions.get(WIRE_STAMP_KEY)
+
+        stages: dict[str, StageTiming] = {
+            "capture": StageTiming.instant(clock="phone"),
+            "capture_to_encode_start": _phone_span(
+                capture_ns, encode_start_ns,
+                reason="phone did not report an encode-start stamp",
+            ),
+            "encode": _phone_span(
+                encode_start_ns, encode_done_ns,
+                reason="phone did not report encode stamps",
+            ),
+            "encode_done_to_enqueue": _phone_span(
+                encode_done_ns, enqueue_ns,
+                reason="phone did not report an encode-done stamp",
+            ),
+            "enqueue_to_wire": _phone_span(
+                enqueue_ns, wire_ns,
+                reason="frame did not ask for a wire stamp",
+            ),
+        }
+
+        if wire_ns is None:
+            stages["transport"] = StageTiming.absent(
+                clock="cross", reason="frame did not ask for a wire stamp"
+            )
+        else:
+            wire_stamp = self._adapter.stamp(wire_ns, receipt.t_recv_mono_ns / 1e9)
+            if wire_stamp.proxy:
+                # Capture IS arrival under the proxy, by construction -- the same
+                # reason `TimebaseStamp.link_s` refuses to report a zero here.
+                stages["transport"] = StageTiming.absent(
+                    clock="cross", reason=wire_stamp.proxy_reason or "proxied"
+                )
+            else:
+                stages["transport"] = StageTiming.converted(
+                    wire_stamp.link_s * 1000.0,
+                    bound_ms=wire_stamp.bound_s * 1000.0,
+                    estimate_id=wire_stamp.estimate_id,
+                    source=wire_stamp.source,
+                )
+        return stages
 
     def wait_for_fresh(self, timeout: float = 1.0) -> Frame | None:
         deadline = now_mono() + timeout

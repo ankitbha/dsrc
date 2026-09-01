@@ -45,7 +45,37 @@ from transport.endpoint import SessionRefused, SessionStarted, TransportListener
 from transport.handshake import Hello, Role
 from transport.messages import MessageRouter, advisory_message_from_advisory
 from transport.tcp import DEFAULT_PORT, TcpAcceptor
-from transport.timebase import OneWayEstimator, OneWaySample, answer_ping
+from transport.timebase import (
+    OneWayEstimator,
+    OneWaySample,
+    TimebaseEstimator,
+    TimeSyncSample,
+    answer_ping,
+)
+
+
+def sample_from_prev_exchange(ping: Any, receipt: Any) -> TimeSyncSample | None:
+    """The round-trip sample a ping's carried trio makes possible.
+
+    With zero pending state on this side: everything this device did not
+    measure itself -- the previous pong's departure and the initiator's
+    receipt of it -- rides on the ping, and this device supplies only what it
+    already has, its own receipt of the ping now arriving.
+
+    None on a ping that carries no previous exchange -- the first of a
+    session, or a peer build from before this trio existed. The wire's
+    all-or-none rule means the three fields are fully present or fully absent,
+    so checking one is checking all.
+    """
+    if ping.prev_exchange_id is None:
+        return None
+    return TimeSyncSample(
+        exchange_id=ping.prev_exchange_id,
+        t1_local_send_ns=ping.t_prev_pong_wire_mono_ns,
+        t2_remote_recv_ns=ping.t_prev_pong_recv_mono_ns,
+        t3_remote_send_ns=ping.t_wire_mono_ns,
+        t4_local_recv_ns=receipt.t_recv_mono_ns,
+    )
 
 
 def sample_from(message: Any, receipt: Any) -> OneWaySample:
@@ -113,7 +143,15 @@ class PhoneLink:
             accept_poll_s=0.2,
         )
         self.estimator = OneWayEstimator()
-        self.adapter = PhoneClockAdapter(self.estimator)
+        # The round-trip estimator, fed from the D2 reconstruction in
+        # `_answer_pings`: every ping that carries the previous exchange gives
+        # this side a full four-stamp sample despite never initiating one
+        # itself. Tried first by the adapter -- see `PhoneClockAdapter` -- and
+        # kept alongside the one-way estimator rather than in place of it, so a
+        # peer build from before the trio existed still converges on arrival
+        # timing alone.
+        self.round_trip_estimator = TimebaseEstimator()
+        self.adapter = PhoneClockAdapter(self.estimator, round_trip=self.round_trip_estimator)
         self.session: Any = None
         self.router: MessageRouter | None = None
         self.camera: PhoneCameraStream | None = None
@@ -424,9 +462,12 @@ class PhoneLink:
             self.sessions.append(self._session_record())
             # A new session is a new peer clock. Carrying the old estimate over
             # would convert the new session's first stamps against the previous
-            # phone's offset and report them as healthy.
+            # phone's offset and report them as healthy. Both estimators reset
+            # together: a new peer invalidates the round-trip one exactly as
+            # much as it does the one-way one.
             self.estimator = OneWayEstimator()
-            self.adapter = PhoneClockAdapter(self.estimator)
+            self.round_trip_estimator = TimebaseEstimator()
+            self.adapter = PhoneClockAdapter(self.estimator, round_trip=self.round_trip_estimator)
             # And a new device is a new thermal state and a new position. The
             # estimator was reset on the argument that a new session is a new peer;
             # the same argument applies to everything else the peer reported. A
@@ -478,12 +519,16 @@ class PhoneLink:
         return False
 
     def _answer_pings(self) -> None:
-        """Answer every ping, and take the arrival as a one-way sample.
+        """Answer every ping, and take the arrival as a one-way sample -- and,
+        when the ping carries it, reconstruct a round-trip one too.
 
-        Two jobs on one message and both matter. Answering is what the phone needs
-        to build *its* estimate; sampling is what we need to build ours. Doing only
-        the first would leave the phone converging while every stamp we convert
-        went through the proxy path.
+        Three jobs on one message now. Answering is what the phone needs to
+        build *its* estimate; the one-way sample is the fallback this side can
+        always build; and the round-trip sample -- from the previous exchange a
+        ping may carry, per D2 -- is the one worth preferring, because its
+        error is bounded by half a round trip rather than by an unobservable
+        delay floor. Skipping the third would leave every stamp we convert on
+        the wider bound even once the phone build supports the better one.
         """
         assert self.router is not None
         while not self._stop.is_set():
@@ -502,6 +547,9 @@ class PhoneLink:
                 # estimator, where its stamps mean something else entirely.
                 continue
             self.estimator.add(sample_from(message, receipt))
+            sample = sample_from_prev_exchange(message, receipt)
+            if sample is not None:
+                self.round_trip_estimator.add(sample)
             self.router.send(answer_ping((message, receipt)))
             self.pings_answered += 1
 
@@ -590,15 +638,20 @@ class PhoneLink:
         blank because a clock estimate wandered would be a fault invented by its own
         safety check". So this is provenance, and nothing here may come to depend on
         the phone reading it.
+
+        Asks for the wire stamp: the offline "return" segment -- advisory departure
+        to phone receipt -- is computed later by joining the phone's own log against
+        this stamp, and the Jetson never learns the phone's side of that exchange any
+        other way.
         """
         return self._send(advisory_message_from_advisory(advisory, t_capture_mono_ns),
-                          counter="advisories_sent")
+                          counter="advisories_sent", wants_wire_stamp=True)
 
     def send_rate_command(self, command: Any) -> bool:
         """Send a rate command to the phone. False when there is nothing to send on."""
         return self._send(command, counter="rate_commands_sent")
 
-    def _send(self, message: Any, *, counter: str) -> bool:
+    def _send(self, message: Any, *, counter: str, wants_wire_stamp: bool = False) -> bool:
         """One place that knows there may be no session.
 
         Returning False rather than raising, and per reason. A drive whose phone has
@@ -617,7 +670,7 @@ class PhoneLink:
         # its own bug with the drop-and-count idiom meant for the peer's. A broad
         # `except Exception` here turned a KeyError on a malformed rates dict into a
         # link refusal, which is the same mistake one layer up.
-        if not router.send(message):
+        if not router.send(message, wants_wire_stamp=wants_wire_stamp):
             self.sends_refused += 1
             return False
         setattr(self, counter, getattr(self, counter) + 1)
@@ -752,6 +805,21 @@ class PhoneLink:
             }
         return record
 
+    def _timebase_record(self) -> dict[str, Any]:
+        """Both estimators, under distinct headings.
+
+        Not one flat dict: the two have different error semantics -- a
+        round-trip sample's error is bounded by half its round trip, a
+        one-way sample's only by a delay spread with an unobservable floor --
+        and a reader comparing `samples_accepted` across headings without
+        knowing that would be comparing two different kinds of confidence as
+        if they were one.
+        """
+        return {
+            "round_trip": self.round_trip_estimator.to_record(),
+            "one_way": self.estimator.to_record(),
+        }
+
     def _session_record(self) -> dict[str, Any]:
         """What one session did, snapshotted before its objects are replaced.
 
@@ -768,7 +836,7 @@ class PhoneLink:
             "peer_device_id": self.peer_device_id,
             "end_reason": _end_reason_of(session),
             "pings_answered": self.pings_answered,
-            "timebase": self.estimator.to_record(),
+            "timebase": self._timebase_record(),
             "clock": self.adapter.to_record(),
             "camera": None if self.camera is None else self.camera.to_record(),
             "gps": None if self.gps is None else self.gps.to_record(),
@@ -833,7 +901,7 @@ class PhoneLink:
                 "refused": self.sends_refused,
             },
             "rebinds": list(self.rebinds),
-            "timebase": self.estimator.to_record(),
+            "timebase": self._timebase_record(),
             "clock": self.adapter.to_record(),
             "camera": None if self.camera is None else self.camera.to_record(),
             "gps": None if self.gps is None else self.gps.to_record(),

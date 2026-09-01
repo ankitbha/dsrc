@@ -164,6 +164,74 @@ class TestTimeSyncDirection:
             phone.close()
 
 
+class TestRoundTripReconstruction:
+    """D2: a ping that carries the previous exchange lets the Jetson build a
+    round-trip sample despite never initiating one, with no pending state of
+    its own."""
+
+    def test_the_second_ping_of_a_session_feeds_the_round_trip_estimator(self):
+        # The first ping of a session carries no previous exchange -- there is
+        # none yet -- so only the second one, sent after the initiator has seen
+        # a pong, can feed the round-trip estimator at all.
+        from transport.timebase import TimeSyncInitiator
+
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        try:
+            attach(link, jetson, down)
+            initiator = TimeSyncInitiator(up)
+
+            initiator.send_ping()
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and initiator.pump(timeout=0.01) is None:
+                pass
+            assert link.round_trip_estimator.samples_accepted == 0, (
+                "the first ping has no previous exchange to reconstruct from"
+            )
+
+            initiator.send_ping()
+            deadline = time.monotonic() + 5.0
+            while (time.monotonic() < deadline
+                   and link.round_trip_estimator.samples_accepted == 0):
+                time.sleep(0.01)
+            assert link.round_trip_estimator.samples_accepted == 1
+            estimate = link.round_trip_estimator.estimate
+            assert estimate is not None
+            # remote (phone) - local (jetson): the same planted offset the
+            # one-way estimator above recovers, now from a bounded round trip
+            # instead of an unbounded delay spread.
+            assert TRUE_OFFSET_NS - estimate.offset_ns < int(0.5 * NS)
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_the_adapter_prefers_the_round_trip_estimate_once_it_exists(self):
+        from transport.timebase import TimeSyncInitiator
+
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        try:
+            attach(link, jetson, down)
+            initiator = TimeSyncInitiator(up)
+            for _ in range(6):
+                initiator.send_ping()
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline and initiator.pump(timeout=0.01) is None:
+                    pass
+
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and link.round_trip_estimator.samples_accepted < 5:
+                time.sleep(0.01)
+            assert link.round_trip_estimator.usable, link.round_trip_estimator.why_not_usable()
+
+            stamp = link.adapter.stamp(now_mono_ns() + TRUE_OFFSET_NS, now_mono_ns() / 1e9)
+            assert not stamp.proxy
+            assert stamp.source == "round_trip"
+        finally:
+            link.stop()
+            phone.close()
+
+
 class TestComeUpAndTeardown:
 
     def test_waiting_for_a_phone_that_never_dials_returns_false(self):
@@ -212,7 +280,12 @@ class TestProvenance:
             attach(link, jetson, down)
             record = link.to_record()
 
-            assert record["timebase"]["one_way"] is True
+            # Two headings, because the two estimators have different error
+            # semantics and one must not be pooled with, or mistaken for, the
+            # other. A loopback phone with no trio on its pings never feeds the
+            # round-trip estimator at all.
+            assert record["timebase"]["one_way"]["one_way"] is True
+            assert record["timebase"]["round_trip"]["usable"] is False
             assert record["peer_device_id"] == "test-phone"
             assert record["session_id"] == jetson.session_id
             assert "clock" in record and "camera" in record and "gps" in record
@@ -720,6 +793,25 @@ class TestTheReturnPath:
             link.stop()
             phone.close()
 
+    def test_an_advisory_asks_for_and_receives_a_wire_stamp(self):
+        # The offline "return" segment -- advisory departure to phone receipt --
+        # is computed later by joining the phone's own log against this stamp;
+        # the Jetson has no other way to learn the phone's side of the exchange.
+        from transport.frames import WIRE_STAMP_KEY
+
+        phone, jetson, phone_router, _ = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            assert link.send_advisory(_advisory(), t_capture_mono_ns=1) is True
+            received = phone_router.recv_with_receipt(Channel.ADVISORY, timeout=2.0)
+            assert received is not None
+            _message, receipt = received
+            assert receipt.extensions[WIRE_STAMP_KEY] > 0
+        finally:
+            link.stop()
+            phone.close()
+
     def test_a_rate_command_reaches_the_phone(self):
         phone, jetson, phone_router, _ = phone_and_jetson()
         link = PhoneLink(acceptor=LoopbackAcceptor())
@@ -848,8 +940,10 @@ class TestRedial:
             assert link.estimator.to_record()["samples_accepted"] == 0
             # The adapter must follow it. Keeping the old one would leave the new
             # session's stamps converting through the previous phone's offset with a
-            # fresh estimator sitting unused beside it.
-            assert link.adapter._estimator is link.estimator
+            # fresh estimator sitting unused beside it. Both halves of the cascade
+            # follow the rebind, not just the one-way fallback.
+            assert link.adapter._one_way is link.estimator
+            assert link.adapter._round_trip is link.round_trip_estimator
             second.hang_up()
         finally:
             link.stop()
@@ -1072,10 +1166,10 @@ class TestWhatANewDeviceInherits:
             assert len(record["sessions"]) == 1
             kept = record["sessions"][0]
             assert kept["peer_device_id"] == "phone-one"
-            assert kept["timebase"]["samples_accepted"] == 1
+            assert kept["timebase"]["one_way"]["samples_accepted"] == 1
             assert kept["end_reason"] is not None
             # And the live fields describe the CURRENT session, not the old one.
-            assert record["timebase"]["samples_accepted"] == 0
+            assert record["timebase"]["one_way"]["samples_accepted"] == 0
             assert record["peer_device_id"] == "phone-two"
             second.hang_up()
         finally:
