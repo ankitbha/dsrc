@@ -112,6 +112,10 @@ class SessionTest {
         wall: () -> Long = { HARNESS_WALL_NS },
         onPhoneFrame: ((Frame) -> Unit)? = null,
         onJetsonFrame: ((Frame) -> Unit)? = null,
+        /** Like [onPhoneFrame], but also given the reader's own receipt stamps. */
+        onPhoneFrameReceipt: ((Frame, Long, Long) -> Unit)? = null,
+        /** Like [onJetsonFrame], but also given the reader's own receipt stamps. */
+        onJetsonFrameReceipt: ((Frame, Long, Long) -> Unit)? = null,
         phoneOutputGate: CountDownLatch? = null,
         onPhoneWrite: ((ByteArray) -> Unit)? = null,
         phoneWriteDelayMs: Long = 0,
@@ -124,7 +128,12 @@ class SessionTest {
 
         val gates = mutableListOf<GatedOutputStream>()
 
-        fun build(socket: Socket, role: String, onFrame: (Frame) -> Unit): Peer {
+        fun build(
+            socket: Socket,
+            role: String,
+            onFrame: (Frame) -> Unit,
+            onFrameReceipt: ((Frame, Long, Long) -> Unit)? = null,
+        ): Peer {
             val received = mutableListOf<Frame>()
             val ends = mutableListOf<Pair<SessionEnd, Throwable?>>()
             var latch = CountDownLatch(1)
@@ -147,9 +156,10 @@ class SessionTest {
                 role = role,
                 monoClock = clock,
                 wallClock = wall,
-                onFrame = { frame, _, _ ->
+                onFrame = { frame, recvMonoNs, recvWallNs ->
                     synchronized(received) { received.add(frame) }
                     onFrame(frame)
+                    onFrameReceipt?.invoke(frame, recvMonoNs, recvWallNs)
                     latch.countDown()
                 },
                 onEnd = { reason, cause -> synchronized(ends) { ends.add(reason to cause) } },
@@ -158,8 +168,8 @@ class SessionTest {
             return Peer(session, received, ends, { latch }, socket)
         }
 
-        val phone = build(clientSocket, "phone", onPhoneFrame ?: {})
-        val jetson = build(serverSocket, "jetson", onJetsonFrame ?: {})
+        val phone = build(clientSocket, "phone", onPhoneFrame ?: {}, onPhoneFrameReceipt)
+        val jetson = build(serverSocket, "jetson", onJetsonFrame ?: {}, onJetsonFrameReceipt)
 
         // Both send their hello before either reads, which is why starting them on two
         // threads cannot deadlock here.
@@ -1345,7 +1355,18 @@ class SessionTest {
         // t2 and t4 arrive on the very next ping.
         val clock = AtomicLong(1_000)
         val wire = WireLog()
-        val (phone, _) = pair(clock = { clock.addAndGet(1_000) }, onPhoneWrite = wire::record)
+        // Captured independently of the session's own carried value, from the same
+        // delivery callback every other inbound frame goes through -- so the assertion
+        // below catches the carried value drifting to any other reading, not only a
+        // literally-unset one.
+        var firstPongRecvMonoNs: Long? = null
+        val (phone, _) = pair(
+            clock = { clock.addAndGet(1_000) },
+            onPhoneWrite = wire::record,
+            onPhoneFrameReceipt = { frame, recvMonoNs, _ ->
+                if (frame.channel == Channels.CONTROL) firstPongRecvMonoNs = recvMonoNs
+            },
+        )
 
         assertTrue(phone.session.sendTimeSyncPing(exchangeId = 1))
         assertTrue(awaitFrames(phone, 1), "no pong came back for the first ping")
@@ -1353,6 +1374,7 @@ class SessionTest {
             phone.received.first { it.channel == Channels.CONTROL }.header.entries,
             phone.received.first { it.channel == Channels.CONTROL }.payload,
         )
+        assertTrue(firstPongRecvMonoNs != null, "the first pong's own receipt was never captured")
 
         assertTrue(phone.session.sendTimeSyncPing(exchangeId = 2))
         assertTrue(
@@ -1363,9 +1385,9 @@ class SessionTest {
 
         assertEquals(1L, second.prevExchangeId)
         assertEquals(firstPong.wireMonoNs, second.tPrevPongWireMonoNs)
-        assertTrue(
-            (second.tPrevPongRecvMonoNs ?: 0) > 0,
-            "the receipt stamp must be a real timestamp, not left unset",
+        assertEquals(
+            firstPongRecvMonoNs, second.tPrevPongRecvMonoNs,
+            "the carried receipt must be the reader's own stamp on the pong, not a later reading",
         )
     }
 
@@ -1772,6 +1794,57 @@ class SessionTest {
             wallBase + stampedAt,
             decoded.peerRecvWallNs,
             "the wall half of the receipt is not the reader's stamp",
+        )
+    }
+
+    @Test
+    fun `a delivered frame's receipt is the reader's stamp, not the delivery thread's clock`() {
+        // The same hazard as the pong's receipt above, one level up: every channel's
+        // `onFrame` callback is handed the reader's own recvMonoNs/recvWallNs, and a
+        // reading taken fresh on the delivery thread instead would move with however long
+        // the previous frame's handler happened to take -- which is exactly what
+        // `return_ms` and `render_ms` are computed from downstream.
+        val clock = AtomicLong(1_000)
+        val wallBase = HARNESS_WALL_NS
+        val gate = CountDownLatch(1)
+        var firstHandlerRan = false
+        var secondRecvMonoNs: Long? = null
+        var secondRecvWallNs: Long? = null
+        val (phone, _) = pair(
+            clock = { clock.get() },
+            wall = { wallBase + clock.get() },
+            // The jetson's own delivery thread is blocked behind the first frame.
+            onJetsonFrameReceipt = { _, recvMonoNs, recvWallNs ->
+                if (!firstHandlerRan) {
+                    firstHandlerRan = true
+                    gate.await()
+                } else if (secondRecvMonoNs == null) {
+                    secondRecvMonoNs = recvMonoNs
+                    secondRecvWallNs = recvWallNs
+                }
+            },
+        )
+
+        assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(1).toExtensions()))
+        assertTrue(awaitCondition { firstHandlerRan }, "the first frame's handler never ran")
+        // The second frame is read and stamped now, by the reader thread, while the first
+        // frame's handler is still parked at the gate.
+        val stampedAt = clock.get()
+        assertTrue(phone.session.send(Channels.GPS, GpsRecord.noFix(2).toExtensions()))
+        Thread.sleep(200)
+        // Then the clock jumps before the delivery thread ever reaches the second frame.
+        // A delivery-time reading would report the jumped value; the reader's own stamp
+        // cannot, because it was already taken and queued.
+        val jump = 1_000_000_000L
+        clock.set(stampedAt + jump)
+        gate.countDown()
+
+        assertTrue(awaitCondition { secondRecvMonoNs != null }, "the second frame was never delivered")
+        assertEquals(stampedAt, secondRecvMonoNs, "the delivered receipt is not the reader's stamp")
+        assertEquals(
+            wallBase + stampedAt,
+            secondRecvWallNs,
+            "the wall half of the delivered receipt is not the reader's stamp",
         )
     }
 
