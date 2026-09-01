@@ -562,6 +562,10 @@ class TestReferenceWitnessExcludesStaleReports:
 
         assert rw["ticks_with_achieved"] == 12
         assert rw["ticks_stale"] == 5
+        # Report B is only ever observed after it has gone stale: two distinct
+        # reports arrive on this drive, and `reports` counts arrivals, not
+        # fresh arrivals, so it is 2 rather than 1.
+        assert rw["reports"] == 2
         # The stale reports ran at 1.0 Hz and the fresh ones at 9.0 Hz; a
         # mean that included the stale ticks would not be 9.0.
         assert rw["achieved_mean"]["camera_hz"] == 9.0

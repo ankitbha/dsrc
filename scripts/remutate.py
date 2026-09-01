@@ -1360,6 +1360,20 @@ MUTATIONS = [
      '            first_live_tick_id = t.get("tick_id")',
      "            first_live_tick_id = i",
      "python"),
+    # `reports` counts distinct arrivals a tick observed, including one that is
+    # already stale on every tick that ever sees it -- excluding stale reports
+    # here would undercount arrivals by exactly the ones that never arrived
+    # fresh. Caught by a drive whose second report only ever arrives after a
+    # stall long enough that it is stale the instant it is first observed.
+    ("score_shadow: reports excludes an arrival that was only ever observed stale",
+     "deployment/jetson/score_shadow.py",
+     '    reports = len({r["at_mono"] for r in known_age})\n'
+     '    fresh = [r for r in known_age if not _is_stale_report(r["age_s"])]\n'
+     '    stale = [r for r in known_age if _is_stale_report(r["age_s"])]',
+     '    fresh = [r for r in known_age if not _is_stale_report(r["age_s"])]\n'
+     '    stale = [r for r in known_age if _is_stale_report(r["age_s"])]\n'
+     '    reports = len({r["at_mono"] for r in fresh})',
+     "python"),
 ]
 
 RESULTS = {

@@ -279,6 +279,18 @@ def _reference_witness(sensing_ticks: list[dict]) -> dict[str, Any]:
     (`_is_stale_report`) are excluded from `achieved_mean` and
     `dropped_final` -- a mean that quietly included them would be a mean
     over readings the decision log itself never used.
+
+    `reports` counts arrivals a tick observed, not arrivals that were still
+    fresh when observed: a report that never arrives before the incumbent
+    would have discarded it for age is still an arrival, and is still
+    counted here even though every tick that observes it counts it as
+    stale. It also counts arrivals a tick observed, not arrivals the phone
+    sent: `PhoneLink.telemetry` exposes only the newest report, so on a
+    drive where the phone falls behind and reports far more often than the
+    tick loop reads, most of what it sent is overwritten before any tick
+    sees it and is invisible to this count. That is correct for a witness
+    of what the incumbent could have used, but the name invites the other
+    reading.
     """
     with_achieved = [t["sensing"]["reference"] for t in sensing_ticks
                       if t["sensing"]["reference"]["absent"] is None]
@@ -294,6 +306,10 @@ def _reference_witness(sensing_ticks: list[dict]) -> dict[str, Any]:
     reports = len({r["at_mono"] for r in known_age})
     fresh = [r for r in known_age if not _is_stale_report(r["age_s"])]
     stale = [r for r in known_age if _is_stale_report(r["age_s"])]
+    # Restates the partition rather than checking it: `stale` is built by negating the
+    # same predicate `fresh` is built from, over the same list, so the two can never
+    # fail to add back up to it. Kept as documentation of the invariant; the coverage
+    # that matters is on `_is_stale_report` itself, not on this line.
     assert len(fresh) + len(stale) == len(known_age)
 
     achieved_mean = (
