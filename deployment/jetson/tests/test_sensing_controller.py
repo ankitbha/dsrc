@@ -297,6 +297,30 @@ class TestTheRecord:
         assert record["reasons"]
         assert set(record["rates"]) == set(RATE_KEYS)
 
+    def test_the_attribution_record_has_the_shape_a_reader_can_rely_on(self):
+        # `to_record()` is the only artifact a later reader has -- `run_demo`
+        # spreads it into the tick log and nothing else carries `decision.attribution`
+        # forward. Round-tripping through it and checking the emitted shape is the
+        # only way a key silently dropped from `to_record()` would be caught.
+        import json
+
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        record = settled(controller, clock, calm(ego_acceleration=9.0)).to_record()
+
+        attribution = record["attribution"]
+        assert set(attribution) == {"first_decision", "rules", "gates", "per_sensor"}
+        assert set(attribution["gates"]) == {
+            "wants_more", "gapped", "dwell", "hold", "bridged", "level",
+        }
+        assert set(attribution["per_sensor"]) == set(RATE_KEYS)
+        one_sensor = attribution["per_sensor"]["camera_hz"]
+        assert set(one_sensor) == {
+            "hz", "base_hz", "level_sensitive", "thermal_exempt", "scale",
+            "clamped", "previous_hz", "changed",
+        }
+        json.dumps(record)
+
 
 class TestEvidenceNeverLowersRates:
     """More evidence must never produce lower rates.
@@ -938,6 +962,7 @@ class TestGatesTellDwellFromIdle:
 
         assert decision.attribution.rules[Trigger.EVENT].status == RULE_FIRED
         gates = decision.attribution.gates
+        assert gates["wants_more"] is True
         assert gates["dwell"]["satisfied"] is False
         assert gates["dwell"]["elapsed_s"] == 0.0
         assert gates["dwell"]["required_s"] == RAISE_DWELL_S
@@ -946,6 +971,7 @@ class TestGatesTellDwellFromIdle:
 
     def test_no_dwell_running_is_null_not_zero(self):
         decision = SensingController(clock=Clock()).decide(calm())
+        assert decision.attribution.gates["wants_more"] is False
         assert decision.attribution.gates["dwell"]["elapsed_s"] is None
 
     def test_a_holding_tick_has_all_raises_quiet_and_a_positive_remaining(self):
@@ -1114,11 +1140,20 @@ class TestPerSensorChain:
                 assert entry["changed"] is False
 
     def test_the_first_decision_has_no_previous_and_has_not_changed(self):
-        decision = SensingController(clock=Clock()).decide(calm())
+        controller = SensingController(clock=Clock())
+        decision = controller.decide(calm())
         assert decision.attribution.first_decision is True
         for entry in decision.attribution.per_sensor.values():
             assert entry["previous_hz"] is None
             assert entry["changed"] is False
+
+        # The second call is not a first decision, even though nothing about the
+        # inputs changed -- `first_decision` separates "no history yet" from
+        # "history exists and agrees", which `changed` alone cannot do.
+        second = controller.decide(calm())
+        assert second.attribution.first_decision is False
+        for entry in second.attribution.per_sensor.values():
+            assert entry["previous_hz"] is not None
 
     def test_a_raise_tick_shows_the_camera_changed_from_idle(self):
         clock = Clock()
@@ -1145,6 +1180,16 @@ class TestPerSensorChain:
         decision = settled(controller, clock, calm(thermal_status="severe"))
         for key, entry in decision.attribution.per_sensor.items():
             assert entry["thermal_exempt"] == (key not in THERMAL_SCALED_KEYS)
+
+    def test_level_sensitive_matches_whether_idle_and_active_rates_differ(self):
+        # gps_hz and imu_hz are the free always-on tier and never move with the
+        # level, but camera_hz and here_hz do -- 1.0 -> 5.0 and 0.05 -> 0.2. Checked
+        # across all four keys, not just the two that happen to be False.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock, calm(thermal_status="severe"))
+        for key, entry in decision.attribution.per_sensor.items():
+            assert entry["level_sensitive"] == (IDLE_RATES[key] != ACTIVE_RATES[key])
 
 
 class TestTriggerAgreesWithGates:
