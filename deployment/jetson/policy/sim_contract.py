@@ -112,6 +112,23 @@ def local_obs_dim() -> int:
     return len(LOCAL_OBS_FIELDS) + len(COOPERATION_FIELDS) + len(LANE_DISTRIBUTION_LANES)
 
 
+def encoded_slot_names() -> tuple[str, ...]:
+    """The 39 slot names `encode_local_observation` fills, in encoder order.
+
+    Dotted names for the two nested blocks (`cooperation.*`,
+    `nearby_av_lane_distribution.<lane>`), so a flat field and the same value
+    read through the nested block it is also part of have distinct names in
+    anything keyed on this tuple -- `field_sources` included. Additive: it
+    introduces no new constant, so `contract_fingerprint` (below), which
+    hashes only `LOCAL_OBS_FIELDS` and `FIELD_SCALES`, is unaffected.
+    """
+    return (
+        *LOCAL_OBS_FIELDS,
+        *(f"cooperation.{field}" for field in COOPERATION_FIELDS),
+        *(f"nearby_av_lane_distribution.{lane}" for lane in LANE_DISTRIBUTION_LANES),
+    )
+
+
 def encode_local_observation(obs: Mapping[str, Any]) -> np.ndarray:
     """numpy twin of src.rl.encoders.encode_local_observation (torch-free)."""
     values = [_field_number(field, obs.get(field)) for field in LOCAL_OBS_FIELDS]

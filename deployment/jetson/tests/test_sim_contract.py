@@ -182,3 +182,37 @@ class TestTheBundleGuardSeesMoreThanTheDimension:
         from policy import sim_contract as sc
 
         assert sc.contract_fingerprint() == sc.contract_fingerprint()
+
+
+class TestEncodedSlotNames:
+    """The 39 names `encode_local_observation` fills, in encoder order --
+    what `field_sources` has to cover for `missingness` to be a statement
+    about the whole vector rather than the 33 flat fields alone.
+    """
+
+    def test_the_first_33_are_local_obs_fields_in_order(self):
+        assert sim_contract.encoded_slot_names()[:33] == sim_contract.LOCAL_OBS_FIELDS
+
+    def test_length_matches_local_obs_dim(self):
+        assert len(sim_contract.encoded_slot_names()) == sim_contract.local_obs_dim() == 39
+
+    def test_the_tail_is_the_two_nested_blocks_dotted(self):
+        names = sim_contract.encoded_slot_names()
+        assert names[33:36] == (
+            "cooperation.segment_target_speed",
+            "cooperation.merge_pressure",
+            "cooperation.downstream_congestion_estimate",
+        )
+        assert names[36:39] == (
+            "nearby_av_lane_distribution.0",
+            "nearby_av_lane_distribution.1",
+            "nearby_av_lane_distribution.2",
+        )
+
+    def test_additive_the_fingerprint_does_not_depend_on_it(self):
+        # `contract_fingerprint` hashes only `LOCAL_OBS_FIELDS` and
+        # `FIELD_SCALES` (sim_contract.py:253-258) -- this helper introduces
+        # no new constant, so calling it must not move the fingerprint.
+        before = sim_contract.contract_fingerprint()
+        sim_contract.encoded_slot_names()
+        assert sim_contract.contract_fingerprint() == before
