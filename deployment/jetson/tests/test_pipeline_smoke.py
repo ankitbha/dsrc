@@ -212,6 +212,47 @@ def test_infer_plus_decode_equals_policy_advisory_within_rounding(pipeline) -> N
     assert total == pytest.approx(tick.stage_ms["policy_advisory"], abs=1.0)
 
 
+def test_fuse_never_exceeds_the_observe_segment_it_is_timed_inside(pipeline) -> None:
+    tick = run_ticks(pipeline, 3)
+    assert tick.stages["fuse"].ms <= tick.stage_ms["observe"] + 1e-6
+
+
+def test_a_proxied_transport_segment_feeds_neither_stat_series(pipeline) -> None:
+    """A stage read as absent must not sneak into a series through the back
+    door: `basis == "absent"` is the only thing pipeline.step checks before
+    routing a sample into transport_round_trip or transport_one_way, so a
+    proxied phone stage -- absent for a different reason than "no phone
+    behind this frame" -- must be excluded on the same terms a local
+    camera's is."""
+    from sensors.time_sync import StageTiming
+
+    phone_stages = {
+        "capture": StageTiming.instant(clock="phone"),
+        "capture_to_encode_start": StageTiming.absent(clock="phone", reason="x"),
+        "encode": StageTiming.absent(clock="phone", reason="x"),
+        "encode_done_to_enqueue": StageTiming.absent(clock="phone", reason="x"),
+        "enqueue_to_wire": StageTiming.measured(1.0, clock="phone"),
+        "transport": StageTiming.absent(clock="cross", reason="samples too old"),
+    }
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    now = time.monotonic()
+    frame = Frame(
+        image=image, frame_id=1000, t_mono=now - 0.05, t_wall=time.time() - 0.05,
+        jpeg_decode_s=0.002, phone_stages=phone_stages,
+    )
+    fix = GpsFix(
+        valid=True, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+        fix_quality=1, num_sats=9, hdop=0.9, altitude_m=3.0,
+        utc_epoch_s=time.time(), t_mono=now - 0.05, t_wall=time.time() - 0.05,
+    )
+    tick = pipeline.step(frame, fix, detections_override=scene_detections(0.0))
+
+    assert tick.stages["transport"].basis == "absent"
+    snapshot = pipeline.stats.snapshot()
+    assert snapshot["transport_round_trip_ms"] is None
+    assert snapshot["transport_one_way_ms"] is None
+
+
 def test_the_stages_dict_survives_json_round_trip(pipeline) -> None:
     tick = run_ticks(pipeline, 3)
     record = tick.to_record()
