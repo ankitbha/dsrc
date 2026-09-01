@@ -117,10 +117,23 @@ def test_peers_populate_cooperation_fields(builder: ObservationBuilder) -> None:
     ]
     result = builder.build([], fresh_fix(20.0), time.monotonic(), peers)
     obs = result.obs
+    src = result.field_sources
     assert obs["nearby_av_count"] == 2
     assert obs["nearby_av_mean_speed"] == pytest.approx(25.0)
     assert obs["cooperation"]["segment_target_speed"] == pytest.approx(25.0)
     assert obs["nearby_av_lane_distribution"] == {"1": 0.5, "2": 0.5}
+    # With peers present, `segment_target_speed` and
+    # `downstream_congestion_estimate` become `measured` while
+    # `merge_pressure` -- never actually computed from a peer -- stays
+    # `fallback_neutral`. That split is the only tick shape that can catch
+    # the nested `cooperation.*` entries copying the wrong flat field's
+    # class: on a no-peer tick all three classes coincide.
+    assert src["segment_target_speed"] == "measured"
+    assert src["downstream_congestion_estimate"] == "measured"
+    assert src["merge_pressure"] == "fallback_neutral"
+    assert src["cooperation.segment_target_speed"] == src["segment_target_speed"]
+    assert src["cooperation.merge_pressure"] == src["merge_pressure"]
+    assert src["cooperation.downstream_congestion_estimate"] == src["downstream_congestion_estimate"]
 
 
 def test_uncongested_low_speed_flag_mirrors_etiquette(builder: ObservationBuilder) -> None:
@@ -280,10 +293,15 @@ class TestTheAccelerationProvenanceMatchesTheBranchTaken:
         assert cold_start.field_sources["ego_acceleration"] == stale.field_sources["ego_acceleration"]
 
     def test_the_threshold_is_the_gps_window_not_a_new_literal(self):
-        # Brake hard under fresh GPS, then stop supplying fresh fixes. At
-        # 1.9 s of dropout the frozen window is still `derived`; at 2.1 s
-        # (past `gps_stale_after_s`) it is `fallback_neutral` and the value
-        # is exactly 0.0 -- the substituted neutral, not a stale slope.
+        # A dead receiver does not report `valid=False` -- it keeps returning
+        # the same fix, which only grows older against the tick clock, so
+        # `gps_fresh` (not an abrupt "no signal") is what actually crosses
+        # `gps_stale_after_s` here. Brake hard under fresh GPS, then keep
+        # calling `build()` with the SAME fix as it ages in place. At 1.9 s
+        # it is still inside the window and `ego_speed` is still trusted, so
+        # the slope is still `derived`; at 2.1 s (past `gps_stale_after_s`)
+        # both fields go stale on the same tick and the value is exactly
+        # 0.0 -- the substituted neutral, not a stale slope.
         cfg = BuilderConfig()
         builder = ObservationBuilder(cfg)
         t = 1000.0
@@ -295,15 +313,76 @@ class TestTheAccelerationProvenanceMatchesTheBranchTaken:
             speed -= 3.0 * 0.2
         assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
 
-        dropout_start = t
-        stale_gps = GpsFix(valid=False)
+        held = GpsFix(valid=True, speed_mps=speed, t_mono=t, t_wall=0.0)
 
-        within = builder.build([], stale_gps, dropout_start + 1.9)
+        within = builder.build([], held, t + 1.9)
+        assert within.field_sources["ego_speed"] == "measured"
         assert within.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
 
-        past = builder.build([], stale_gps, dropout_start + 2.1)
+        past = builder.build([], held, t + 2.1)
+        assert past.field_sources["ego_speed"] == provenance.SOURCE_FALLBACK_NEUTRAL
         assert past.field_sources["ego_acceleration"] == provenance.SOURCE_FALLBACK_NEUTRAL
         assert past.obs["ego_acceleration"] == 0.0
+
+    def test_a_dead_receiver_holding_a_valid_fix_does_not_double_the_dropout_window(self):
+        """A dead receiver presents as the SAME `GpsFix(valid=True)` growing
+        older, not as `valid=False` -- the only shape the other tests in
+        this class use. Appending a sample under `gps_fresh` on every tick,
+        stamped with the tick's own clock rather than the fix's, used to let
+        the window look freshly appended for a further `gps_stale_after_s`
+        after `gps_age` itself had already crossed the threshold, so
+        `ego_acceleration` stayed `derived` for twice as long as `ego_speed`
+        did. On every tick of this held-fix dropout the two must be
+        substituted together, not one two seconds after the other.
+        """
+        cfg = BuilderConfig()
+        builder = ObservationBuilder(cfg)
+        t = 1000.0
+        speed = 20.0
+        dt = 0.1
+        for i in range(20):
+            t = 1000.0 + i * dt
+            gps = GpsFix(valid=True, speed_mps=speed, t_mono=t, t_wall=0.0)
+            builder.build([], gps, t)
+            speed -= 3.0 * dt
+
+        held = GpsFix(valid=True, speed_mps=speed, t_mono=t, t_wall=0.0)
+        dropout_start = t
+        for i in range(1, 40):
+            now = dropout_start + i * dt
+            result = builder.build([], held, now)
+            speed_src = result.field_sources["ego_speed"]
+            accel_src = result.field_sources["ego_acceleration"]
+            assert provenance.is_substituted(accel_src) == provenance.is_substituted(speed_src), (
+                now - dropout_start, speed_src, accel_src,
+            )
+
+    def test_the_guard_boundary_changes_the_encoded_value_not_just_the_label(self):
+        """D6 replaces a frozen slope with the neutral 0.0 in the actor's
+        OWN input, not only in a record a reader might assume is
+        record-only: `ego_acceleration` is an encoded slot
+        (`sim_contract.py`, scale 8.0), so a tick on either side of the
+        staleness guard produces a different `encoded` vector, not merely a
+        different `field_sources` label.
+        """
+        cfg = BuilderConfig()
+        builder = ObservationBuilder(cfg)
+        t = 1000.0
+        speed = 20.0
+        for i in range(8):
+            t = 1000.0 + i * 0.2
+            gps = GpsFix(valid=True, speed_mps=speed, t_mono=t, t_wall=0.0)
+            result = builder.build([], gps, t)
+            speed -= 3.0 * 0.2
+        idx = sim_contract.LOCAL_OBS_FIELDS.index("ego_acceleration")
+        assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
+        assert result.encoded[idx] != pytest.approx(0.0)
+
+        held = GpsFix(valid=True, speed_mps=speed, t_mono=t, t_wall=0.0)
+        past = builder.build([], held, t + 2.1)
+        assert past.field_sources["ego_acceleration"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert past.encoded[idx] == pytest.approx(0.0)
+        assert past.encoded[idx] != pytest.approx(result.encoded[idx])
 
 
 class TestCoverageAndMissingness:
@@ -396,6 +475,31 @@ class TestCoverageAndMissingness:
                 result = builder.build(vehicles, self._gps(20.0, t + 0.1), t + 0.1, peers)
                 prov = result.diagnostics["provenance"]
                 assert sum(prov["by_source"].values()) == prov["fields"] == 39
+
+    def test_covers_encoder_checks_names_not_just_a_count(self):
+        # Same key count as the real 39 (one encoder slot dropped, one name
+        # the encoder never reads put in its place) -- a count comparison
+        # cannot tell this apart from real coverage.
+        good = {name: "measured" for name in sim_contract.encoded_slot_names()}
+        assert ObservationBuilder._covers_encoder(good) is True
+        bad = dict(good)
+        del bad["ego_speed"]
+        bad["not_a_real_slot"] = "measured"
+        assert len(bad) == len(good)
+        assert ObservationBuilder._covers_encoder(bad) is False
+
+
+def test_nearby_av_density_uses_the_configured_peer_range_not_a_literal():
+    # `peer_range_m` defaults to 150.0, which used to make a mutation that
+    # hardcodes 150.0 in its place a runtime no-op against every test in this
+    # suite -- none of them set it to anything else.
+    cfg = BuilderConfig(peer_range_m=300.0)
+    builder = ObservationBuilder(cfg)
+    peers = [PeerState(peer_id="a", distance_m=80.0, speed_mps=24.0, lane_id=1)]
+    result = builder.build([], fresh_fix(20.0), time.monotonic(), peers)
+    expected_density = 1 / ((2.0 * 300.0) / 1000.0)
+    assert result.obs["nearby_av_density"] == pytest.approx(expected_density)
+    assert result.obs["nearby_av_density"] != pytest.approx(1 / ((2.0 * 150.0) / 1000.0))
 
 
 class TestTheDensityPath:

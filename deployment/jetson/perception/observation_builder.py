@@ -213,10 +213,12 @@ class ObservationBuilder:
             ego_speed = self._ego.last_speed_mps if self._ego.ever_had_fix else 0.0
             src["ego_speed"] = provenance.SOURCE_FALLBACK_NEUTRAL
         # From the branch actually taken, not from the sample count -- the count
-        # cannot see the window-span guard below it, and `t_mono` lets the
-        # branch also refuse a window whose newest sample has gone stale
-        # since it was appended, which the sample count cannot see either.
-        ego_accel, accel_derived = self._speed_slope(t_mono)
+        # cannot see the window-span guard below it, and passing this tick's
+        # own freshness verdict lets the branch also refuse a window whose fix
+        # has gone stale even though a sample was appended for it on every
+        # tick it was still (nominally) fresh, which the sample count cannot
+        # see either.
+        ego_accel, accel_derived = self._speed_slope(gps_fresh)
         src["ego_acceleration"] = (
             provenance.SOURCE_DERIVED if accel_derived else provenance.SOURCE_FALLBACK_NEUTRAL
         )
@@ -514,7 +516,7 @@ class ObservationBuilder:
             "provenance": {
                 "fields": prov["fields"],
                 "by_source": prov["by_source"],
-                "covers_encoder": prov["fields"] == sim_contract.local_obs_dim(),
+                "covers_encoder": self._covers_encoder(src),
             },
             # How long since the perception chain last produced an in-range
             # track -- the only bound available on whether an empty
@@ -533,7 +535,7 @@ class ObservationBuilder:
         lane = int(round(offset))
         return max(-2, min(2, lane))
 
-    def _speed_slope(self, t_mono: float) -> tuple[float, bool]:
+    def _speed_slope(self, gps_fresh: bool) -> tuple[float, bool]:
         """The ego acceleration and whether it was actually derived.
 
         Two ways to fall back and they used to be reported as one: the caller set
@@ -550,13 +552,18 @@ class ObservationBuilder:
         docstring calls the basis for the observation-missingness metric, so the
         missingness was under-counted by the same margin.
 
-        A third way to fall back, added later: samples are appended only under a
-        fresh GPS fix, so a dropout freezes the window instead of emptying it, and
-        neither guard above notices -- the window still has 10 samples spanning
-        well over 0.3 s. Without this check the slope of a window frozen minutes
-        ago is reported as `derived` for as long as the dropout lasts. Refused
-        against `gps_stale_after_s`, the same bound `ego_speed`'s own freshness
-        check uses, so acceleration is stale on exactly the ticks its own speed is.
+        A third way to fall back: a sample is appended only under a fresh GPS fix,
+        but "fresh" describes the fix, not the window -- a receiver that has
+        stopped producing new readings and keeps returning the last one it had is
+        still fresh by that test for as long as its own age stays inside
+        `gps_stale_after_s`, so a sample keeps being appended, stamped with this
+        tick's own clock, every tick that receiver is silently dead. Measuring
+        staleness from the newest sample's own timestamp let a window built that
+        way look freshly appended for a further `gps_stale_after_s` after the fix
+        behind it had already gone stale -- double the delay the bound is supposed
+        to be. Taking `gps_fresh` directly, the same verdict `ego_speed` was
+        already built from, makes the two fields go stale on the same tick,
+        whatever caused it.
         """
         samples = list(self._ego.speed_samples)[-10:]
         if len(samples) < 3:
@@ -565,10 +572,20 @@ class ObservationBuilder:
         v = np.array([s[1] for s in samples])
         if t[-1] - t[0] < 0.3:
             return 0.0, False
-        if t_mono - t[-1] > self.config.gps_stale_after_s:
+        if not gps_fresh:
             return 0.0, False
         t = t - t.mean()
         return float((t * (v - v.mean())).sum() / max((t * t).sum(), 1e-9)), True
+
+    @staticmethod
+    def _covers_encoder(field_sources: dict[str, str]) -> bool:
+        """Whether `field_sources` tags every slot the encoder reads, by NAME
+        rather than by count -- a map with the right number of keys but the
+        wrong ones (one encoder slot missing, one name the encoder never
+        reads standing in for it) is not coverage, and a count comparison
+        cannot tell the two apart.
+        """
+        return set(field_sources) == set(sim_contract.encoded_slot_names())
 
     @staticmethod
     def _peer_lane_distribution(peers: list[PeerState]) -> dict[str, float]:
