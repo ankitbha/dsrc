@@ -3,6 +3,7 @@ package com.dsrc.transport
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
@@ -1359,22 +1360,38 @@ class SessionTest {
         // delivery callback every other inbound frame goes through -- so the assertion
         // below catches the carried value drifting to any other reading, not only a
         // literally-unset one.
-        var firstPongRecvMonoNs: Long? = null
+        // Every CONTROL receipt, in arrival order, rather than one variable the callback
+        // overwrites. The second exchange's pong lands while this test is still running,
+        // so a last-write-wins capture reports THAT receipt as the first pong's whenever
+        // the test thread is descheduled long enough for the second round trip to finish
+        // -- and the assertion then blames the session for a value the test itself moved.
+        // Indexing a list instead is stable no matter how many pongs have arrived.
+        //
+        // The wait is on this list and not on `received`, because the delivery callback
+        // appends to `received` before it invokes the receipt hook: waiting on `received`
+        // returns while the receipt is still unrecorded.
+        val controlReceipts = CopyOnWriteArrayList<Long>()
         val (phone, _) = pair(
             clock = { clock.addAndGet(1_000) },
             onPhoneWrite = wire::record,
             onPhoneFrameReceipt = { frame, recvMonoNs, _ ->
-                if (frame.channel == Channels.CONTROL) firstPongRecvMonoNs = recvMonoNs
+                if (frame.channel == Channels.CONTROL) controlReceipts.add(recvMonoNs)
             },
         )
 
         assertTrue(phone.session.sendTimeSyncPing(exchangeId = 1))
-        assertTrue(awaitFrames(phone, 1), "no pong came back for the first ping")
-        val firstPong = TimeSyncMessage.fromWire(
-            phone.received.first { it.channel == Channels.CONTROL }.header.entries,
-            phone.received.first { it.channel == Channels.CONTROL }.payload,
+        assertTrue(
+            awaitCondition { controlReceipts.isNotEmpty() },
+            "no pong came back for the first ping",
         )
-        assertTrue(firstPongRecvMonoNs != null, "the first pong's own receipt was never captured")
+        val firstPongRecvMonoNs = controlReceipts[0]
+        // Read under the monitor the delivery thread adds beneath: a second pong can
+        // arrive at any point from here on, and an unsynchronised read of a list another
+        // thread is appending to has no defined result.
+        val firstPongFrame = synchronized(phone.received) {
+            phone.received.first { it.channel == Channels.CONTROL }
+        }
+        val firstPong = TimeSyncMessage.fromWire(firstPongFrame.header.entries, firstPongFrame.payload)
 
         assertTrue(phone.session.sendTimeSyncPing(exchangeId = 2))
         assertTrue(
