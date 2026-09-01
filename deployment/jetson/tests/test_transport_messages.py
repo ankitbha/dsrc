@@ -134,9 +134,31 @@ def a_time_sync_pong(**over):
     return TimeSyncMessage(**fields)
 
 
+def a_time_sync_ping_with_prev(**over):
+    """A ping that also carries the previous exchange, per task 33's D2."""
+    fields = dict(
+        t_capture_mono_ns=888, exchange_id=5,
+        prev_exchange_id=4, t_prev_pong_wire_mono_ns=1_000, t_prev_pong_recv_mono_ns=1_050,
+    )
+    fields.update(over)
+    return TimeSyncMessage(**fields)
+
+
+def a_camera_frame_with_encode_stamps(**over):
+    """A camera frame carrying the phone's encode timing, per task 33's D3."""
+    fields = dict(
+        t_capture_mono_ns=111, frame_id=7, width=1280, height=720,
+        format="jpeg", quality=85, jpeg=b"\xff\xd8fake",
+        t_encode_start_mono_ns=120, t_encode_done_mono_ns=135,
+    )
+    fields.update(over)
+    return CameraFrame(**fields)
+
+
 ALL_BUILDERS = [
     a_camera_frame, a_gps_record, an_imu_sample, a_here_response,
     a_telemetry, an_advisory, a_rate_command, a_time_sync_ping, a_time_sync_pong,
+    a_time_sync_ping_with_prev, a_camera_frame_with_encode_stamps,
 ]
 
 
@@ -320,11 +342,25 @@ def test_a_non_finite_number_arriving_on_the_wire_is_refused():
 # -- refusals ----------------------------------------------------------------
 
 
+#: Fields that are absent-tolerant rather than required: a field added to a
+#: channel that already ships, which an older sender simply does not write.
+#: Removing one of these from a message's extensions is not a refusal case --
+#: it is the normal shape of an older build's frame -- so the generic "every
+#: field is required" sweep below must not iterate over them.
+ABSENTABLE_FIELDS = {
+    "skin_temp_c", "skin_temp_zone",
+    "t_encode_start_mono_ns", "t_encode_done_mono_ns",
+    "prev_exchange_id", "t_prev_pong_wire_mono_ns", "t_prev_pong_recv_mono_ns",
+}
+
+
 @pytest.mark.parametrize("build", ALL_BUILDERS, ids=lambda b: b.__name__)
 def test_a_missing_required_field_is_refused(build):
     message = build()
     extensions, payload = message.to_wire()
     for field in list(extensions):
+        if field in ABSENTABLE_FIELDS:
+            continue
         trimmed = {k: v for k, v in extensions.items() if k != field}
         with pytest.raises(MessageError, match=re.escape(field)):
             decode_message(message.CHANNEL, trimmed, payload)
@@ -1839,3 +1875,126 @@ class TestSkinTemperature:
                 PhoneTelemetry.from_wire(
                     {**a_telemetry().to_wire()[0], field: bad}, b""
                 )
+
+
+class TestCameraEncodeStamps:
+    """The two phone-clock encode stamps, added to a channel that already ships.
+
+    Same shape as `TestSkinTemperature`: absent-tolerant rather than merely
+    nullable, so a phone build from before task 33 is still accepted.
+    """
+
+    def test_a_phone_that_does_not_send_them_is_still_accepted(self):
+        extensions, payload = a_camera_frame().to_wire()
+        assert "t_encode_start_mono_ns" not in extensions
+        assert "t_encode_done_mono_ns" not in extensions
+
+        decoded = CameraFrame.from_wire(extensions, payload)
+        assert decoded.t_encode_start_mono_ns is None
+        assert decoded.t_encode_done_mono_ns is None
+
+    def test_the_stamps_survive_the_wire(self):
+        extensions, payload = a_camera_frame_with_encode_stamps().to_wire()
+        decoded = CameraFrame.from_wire(extensions, payload)
+        assert decoded.t_encode_start_mono_ns == 120
+        assert decoded.t_encode_done_mono_ns == 135
+
+    def test_the_existing_frozen_shape_is_unaffected(self):
+        """A frame built the way every prior build constructs one must encode to
+        exactly the same extension keys it always has -- adding an absentable
+        field must not silently widen an already-shipped, byte-frozen case."""
+        extensions, _ = a_camera_frame().to_wire()
+        assert set(extensions) == {
+            CAPTURE_KEY, "frame_id", "width", "height", "format", "quality",
+        }
+
+    def test_a_wrong_typed_stamp_is_refused_rather_than_ignored(self):
+        for field in ("t_encode_start_mono_ns", "t_encode_done_mono_ns"):
+            with pytest.raises(MessageError):
+                CameraFrame.from_wire(
+                    {**a_camera_frame().to_wire()[0], field: "soon"}, b"\xff\xd8fake"
+                )
+
+
+class TestTimeSyncPreviousExchange:
+    """The trio a ping may carry so a responder can build a round-trip sample
+    with no pending state of its own -- task 33's D2."""
+
+    def test_the_first_ping_of_a_session_carries_none_of_it(self):
+        extensions, _ = a_time_sync_ping().to_wire()
+        assert "prev_exchange_id" not in extensions
+        assert "t_prev_pong_wire_mono_ns" not in extensions
+        assert "t_prev_pong_recv_mono_ns" not in extensions
+
+        decoded = TimeSyncMessage.from_wire(extensions, b"")
+        assert decoded.prev_exchange_id is None
+        assert decoded.t_prev_pong_wire_mono_ns is None
+        assert decoded.t_prev_pong_recv_mono_ns is None
+
+    def test_the_trio_survives_the_wire(self):
+        extensions, payload = a_time_sync_ping_with_prev().to_wire()
+        decoded = TimeSyncMessage.from_wire(extensions, payload)
+        assert decoded.prev_exchange_id == 4
+        assert decoded.t_prev_pong_wire_mono_ns == 1_000
+        assert decoded.t_prev_pong_recv_mono_ns == 1_050
+
+    @pytest.mark.parametrize(
+        "present", ["prev_exchange_id", "t_prev_pong_wire_mono_ns", "t_prev_pong_recv_mono_ns"]
+    )
+    def test_one_of_three_present_is_refused(self, present):
+        """Partially filled is worse than absent: the arithmetic would run on
+        an incomplete exchange and hand back a plausible, wrong sample."""
+        extensions, _ = a_time_sync_ping_with_prev().to_wire()
+        for other in ("prev_exchange_id", "t_prev_pong_wire_mono_ns", "t_prev_pong_recv_mono_ns"):
+            if other != present:
+                del extensions[other]
+        with pytest.raises(MessageError) as caught:
+            TimeSyncMessage.from_wire(extensions, b"")
+        assert caught.value.reason == "null_not_allowed"
+
+    def test_a_ping_still_round_trips_with_only_the_original_peer_trio_absent(self):
+        """The two independent all-or-none groups on one message do not
+        interfere with each other."""
+        message = a_time_sync_ping_with_prev()
+        assert roundtrip(message) == message
+
+
+class TestWantsWireStamp:
+    """The transport-level ask, for a message whose own encoding has nothing to
+    do with timing -- the advisory and (on the Kotlin sender) the camera frame.
+
+    Distinct from `TimeSyncMessage`, whose `t_wire_mono_ns` is data the message's
+    own arithmetic reads back and so is baked into `to_wire()` itself.
+    """
+
+    def test_a_message_with_no_placeholder_still_gets_stamped(self):
+        near, far = loopback_pair()
+        writer = Session(near, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+        reader = Session(far, session_id=2, heartbeat_s=None, stall_timeout_s=None).start()
+        try:
+            router = MessageRouter(writer)
+            message = an_advisory()
+            extensions_before, _ = message.to_wire()
+            assert WIRE_STAMP_KEY not in extensions_before
+
+            assert router.send(message, wants_wire_stamp=True)
+            received = reader.recv(Channel.ADVISORY, timeout=5.0)
+            assert received is not None
+            assert received.extensions[WIRE_STAMP_KEY] > 0
+        finally:
+            writer.close()
+            reader.close()
+
+    def test_without_the_flag_no_key_is_added(self):
+        near, far = loopback_pair()
+        writer = Session(near, session_id=1, heartbeat_s=None, stall_timeout_s=None).start()
+        reader = Session(far, session_id=2, heartbeat_s=None, stall_timeout_s=None).start()
+        try:
+            router = MessageRouter(writer)
+            assert router.send(an_advisory())
+            received = reader.recv(Channel.ADVISORY, timeout=5.0)
+            assert received is not None
+            assert WIRE_STAMP_KEY not in received.extensions
+        finally:
+            writer.close()
+            reader.close()

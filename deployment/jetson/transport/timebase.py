@@ -245,6 +245,45 @@ class TimebaseEstimate:
         # code did not have.
         return -(-self.rtt_min_ns // 2) + int(math.ceil(drift))
 
+    def convert_to_remote(self, t_local_mono_ns: int) -> ConvertedInstant | None:
+        """The forward conversion this estimate supports, or None past its reach.
+
+        The pure arithmetic behind `TimebaseEstimator.to_remote`, with no gate:
+        a caller holding one `TimebaseEstimate` -- live, or re-read from a
+        persisted `to_record()` -- has already decided it is the one to apply.
+        None rather than a raise, because an offline reader re-deriving a whole
+        run wants to skip what a live one would have refused, not stop on it.
+        """
+        reach_ns = abs(t_local_mono_ns - self.t_reference_ns)
+        if reach_ns > int(MAX_EXTRAPOLATION_S * NS_PER_S):
+            return None
+        drift_ns = 0.0
+        if self.skew_ppm is not None:
+            drift_ns = (t_local_mono_ns - self.t_reference_ns) * self.skew_ppm / 1e6
+        return ConvertedInstant(
+            t_remote_mono_ns=t_local_mono_ns + self.offset_ns + int(round(drift_ns)),
+            bound_ns=self.bound_ns_at(t_local_mono_ns),
+            estimate_id=self.estimate_id,
+        )
+
+    def convert_to_local(self, t_remote_mono_ns: int) -> ConvertedInstant | None:
+        """The inverse conversion, or None past this estimate's reach.
+
+        Exact inverse rather than a first-order approximation -- see
+        `TimebaseEstimator.to_local` for the derivation this mirrors.
+        """
+        skew = 0.0 if self.skew_ppm is None else self.skew_ppm / 1e6
+        numerator = t_remote_mono_ns - self.offset_ns + skew * self.t_reference_ns
+        t_local = int(round(numerator / (1.0 + skew)))
+        reach_ns = abs(t_local - self.t_reference_ns)
+        if reach_ns > int(MAX_EXTRAPOLATION_S * NS_PER_S):
+            return None
+        return ConvertedInstant(
+            t_remote_mono_ns=t_local,
+            bound_ns=self.bound_ns_at(t_local),
+            estimate_id=self.estimate_id,
+        )
+
     def to_record(self) -> dict[str, Any]:
         return {
             "estimate_id": self.estimate_id,
@@ -508,21 +547,15 @@ class TimebaseEstimator:
         # only asks that the newest sample be fresh; without this, an instant
         # half an hour from the reference still got an answer, with a drift term
         # extrapolated that whole way on evidence that spans five minutes.
-        reach_ns = abs(t_local_mono_ns - estimate.t_reference_ns)
-        if reach_ns > int(MAX_EXTRAPOLATION_S * NS_PER_S):
+        converted = estimate.convert_to_remote(t_local_mono_ns)
+        if converted is None:
+            reach_ns = abs(t_local_mono_ns - estimate.t_reference_ns)
             raise TimebaseNotReady(
                 f"instant is {reach_ns / NS_PER_S:.1f}s from the reference, beyond the "
                 f"{MAX_EXTRAPOLATION_S:.0f}s the samples support",
                 "beyond extrapolation limit",
             )
-        drift_ns = 0.0
-        if estimate.skew_ppm is not None:
-            drift_ns = (t_local_mono_ns - estimate.t_reference_ns) * estimate.skew_ppm / 1e6
-        return ConvertedInstant(
-            t_remote_mono_ns=t_local_mono_ns + estimate.offset_ns + int(round(drift_ns)),
-            bound_ns=estimate.bound_ns_at(t_local_mono_ns),
-            estimate_id=estimate.estimate_id,
-        )
+        return converted
 
     def to_local(self, t_remote_mono_ns: int) -> ConvertedInstant:
         """Convert a PEER instant to this device's clock, with its bound.
@@ -547,22 +580,18 @@ class TimebaseEstimator:
         if reason is not None:
             raise TimebaseNotReady(f"cannot convert: {reason}", reason)
         assert estimate is not None
-        skew = 0.0 if estimate.skew_ppm is None else estimate.skew_ppm / 1e6
-        numerator = t_remote_mono_ns - estimate.offset_ns + skew * estimate.t_reference_ns
-        t_local = int(round(numerator / (1.0 + skew)))
-
-        reach_ns = abs(t_local - estimate.t_reference_ns)
-        if reach_ns > int(MAX_EXTRAPOLATION_S * NS_PER_S):
+        converted = estimate.convert_to_local(t_remote_mono_ns)
+        if converted is None:
+            skew = 0.0 if estimate.skew_ppm is None else estimate.skew_ppm / 1e6
+            numerator = t_remote_mono_ns - estimate.offset_ns + skew * estimate.t_reference_ns
+            t_local = int(round(numerator / (1.0 + skew)))
+            reach_ns = abs(t_local - estimate.t_reference_ns)
             raise TimebaseNotReady(
                 f"instant is {reach_ns / NS_PER_S:.1f}s from the reference, beyond the "
                 f"{MAX_EXTRAPOLATION_S:.0f}s the samples support",
                 "beyond extrapolation limit",
             )
-        return ConvertedInstant(
-            t_remote_mono_ns=t_local,
-            bound_ns=estimate.bound_ns_at(t_local),
-            estimate_id=estimate.estimate_id,
-        )
+        return converted
 
     def history(self) -> list[TimebaseEstimate]:
         with self._lock:
@@ -650,6 +679,19 @@ class _Pending:
     t_sent_mono_ns: int
 
 
+@dataclass(frozen=True)
+class _LastPong:
+    """The one pong this initiator most recently saw, carried onto the next
+    ping so a responder that never initiates can reconstruct a round-trip
+    sample with no pending state of its own -- see `phone_link._answer_pings`
+    and the Kotlin `Session`, which hold the same three values for the same
+    reason."""
+
+    exchange_id: int
+    t_wire_mono_ns: int
+    t_recv_mono_ns: int
+
+
 class TimeSyncInitiator:
     """The phone's side: emit pings on a cadence, match pongs, feed the estimator.
 
@@ -672,6 +714,11 @@ class TimeSyncInitiator:
         self.estimator = estimator or TimebaseEstimator(mono_clock=mono_clock)
         self._next_id = 1
         self._pending: dict[int, _Pending] = {}
+        # The one piece of state a responder cannot keep for itself: which pong
+        # this side received last, and when. Carried on the next ping so the
+        # far side can form a sample from its own departure and this side's
+        # receipt, without a pending table of its own.
+        self._last_pong: _LastPong | None = None
         self._started_ns = self._mono()
         self.pings_sent = 0
         self.pongs_matched = 0
@@ -717,8 +764,15 @@ class TimeSyncInitiator:
         # stamp exists to remove.
         self._expire_pending()
         sent_at = self._mono()
+        prev = self._last_pong
         queued = self._router.send(
-            TimeSyncMessage(t_capture_mono_ns=sent_at, exchange_id=exchange_id)
+            TimeSyncMessage(
+                t_capture_mono_ns=sent_at,
+                exchange_id=exchange_id,
+                prev_exchange_id=None if prev is None else prev.exchange_id,
+                t_prev_pong_wire_mono_ns=None if prev is None else prev.t_wire_mono_ns,
+                t_prev_pong_recv_mono_ns=None if prev is None else prev.t_recv_mono_ns,
+            )
         )
         if not queued:
             # A closed session returns False. Counting it anyway made a dead link
@@ -774,6 +828,16 @@ class TimeSyncInitiator:
         if pong.is_ping:
             self.wrong_direction += 1
             return None
+        # Recorded regardless of whether this exchange can still be matched
+        # locally: the responder that sent this pong already knows its own
+        # departure stamp and only needs the initiator's receipt echoed back,
+        # so an unmatched or late pong is still a legitimate one to carry
+        # forward.
+        self._last_pong = _LastPong(
+            exchange_id=pong.exchange_id,
+            t_wire_mono_ns=pong.t_wire_mono_ns,
+            t_recv_mono_ns=t_recv_mono_ns,
+        )
         pending = self._pending.pop(pong.exchange_id, None)
         if pending is None:
             # An exchange we already timed out is a late answer, not a stray one.

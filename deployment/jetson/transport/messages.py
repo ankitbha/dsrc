@@ -262,6 +262,24 @@ def absentable_str(extensions: Mapping[str, Any], field: str) -> str | None:
     return value
 
 
+def absentable_int(extensions: Mapping[str, Any], field: str) -> int | None:
+    """As `absentable_number`, for an integer field added to a shipped protocol.
+
+    Bool is refused the same way `optional_int` refuses it: True is an int in
+    Python and would silently decode a timestamp as 0 or 1.
+    """
+    if field not in extensions:
+        return None
+    value = extensions[field]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise MessageError(
+            f"{field} is {type(value).__name__}, expected int or null", REASON_WRONG_TYPE
+        )
+    return value
+
+
 def require_capture(extensions: Mapping[str, Any]) -> int:
     return require_int(extensions, CAPTURE_KEY)
 
@@ -364,21 +382,31 @@ class CameraFrame:
     format: str
     jpeg: bytes
     quality: int | None = None
+    #: When the phone's encoder started and finished turning the packed pixels
+    #: into `jpeg`, on the phone's own clock -- the same one `t_capture_mono_ns`
+    #: is on, so their differences need no cross-device conversion at all.
+    #: Absent rather than merely null: these were added to a channel that
+    #: already ships, and a phone built before they existed does not write
+    #: them, so requiring the key would refuse every one of its frames.
+    t_encode_start_mono_ns: int | None = None
+    t_encode_done_mono_ns: int | None = None
 
     CHANNEL: ClassVar[Channel] = Channel.CAMERA
 
     def to_wire(self) -> tuple[dict[str, Any], bytes]:
-        return (
-            {
-                CAPTURE_KEY: int(self.t_capture_mono_ns),
-                "frame_id": int(self.frame_id),
-                "width": int(self.width),
-                "height": int(self.height),
-                "format": self.format,
-                "quality": None if self.quality is None else int(self.quality),
-            },
-            self.jpeg,
-        )
+        extensions: dict[str, Any] = {
+            CAPTURE_KEY: int(self.t_capture_mono_ns),
+            "frame_id": int(self.frame_id),
+            "width": int(self.width),
+            "height": int(self.height),
+            "format": self.format,
+            "quality": None if self.quality is None else int(self.quality),
+        }
+        if self.t_encode_start_mono_ns is not None:
+            extensions["t_encode_start_mono_ns"] = int(self.t_encode_start_mono_ns)
+        if self.t_encode_done_mono_ns is not None:
+            extensions["t_encode_done_mono_ns"] = int(self.t_encode_done_mono_ns)
+        return extensions, self.jpeg
 
     @classmethod
     def from_wire(cls, extensions: Mapping[str, Any], payload: bytes) -> "CameraFrame":
@@ -395,6 +423,8 @@ class CameraFrame:
             format=require_str(extensions, "format"),
             quality=quality,
             jpeg=payload,
+            t_encode_start_mono_ns=absentable_int(extensions, "t_encode_start_mono_ns"),
+            t_encode_done_mono_ns=absentable_int(extensions, "t_encode_done_mono_ns"),
         )
 
 
@@ -863,6 +893,21 @@ class TimeSyncMessage:
     stamp exists to remove. Removing it from the responder's departure and
     leaving it on the initiator's would have fixed one half of a symmetric
     calculation.
+
+    A ping may also carry the previous exchange: `prev_exchange_id`,
+    `t_prev_pong_wire_mono_ns` (that pong's wire departure, echoed back) and
+    `t_prev_pong_recv_mono_ns` (the initiator's own receipt of that pong).
+    Absent on the first ping of a session, and absent-tolerant the same way
+    `skin_temp_c` is on telemetry: an older initiator does not write them, and
+    requiring them would refuse every one of its pings. Together they let a
+    responder -- which by the spec above never gets to initiate and so never
+    forms a `TimeSyncSample` of its own -- reconstruct one from the pong it
+    already sent and the ping that answers it, with no pending state of its
+    own: `t1` is the pong's own departure (this side's clock, already known),
+    `t2` is `t_prev_pong_recv_mono_ns` (the initiator's clock), `t3` is this
+    ping's own `t_wire_mono_ns` (the initiator's clock), and `t4` is this
+    side's receipt of it. All three are present together or absent together,
+    for the same reason as the peer trio above.
     """
 
     t_capture_mono_ns: int
@@ -871,6 +916,9 @@ class TimeSyncMessage:
     t_peer_recv_mono_ns: int | None = None
     t_peer_recv_wall_ns: int | None = None
     t_peer_wire_mono_ns: int | None = None
+    prev_exchange_id: int | None = None
+    t_prev_pong_wire_mono_ns: int | None = None
+    t_prev_pong_recv_mono_ns: int | None = None
 
     CHANNEL: ClassVar[Channel] = Channel.CONTROL
     RESERVED_ALLOWED: ClassVar[tuple[str, ...]] = (WIRE_STAMP_KEY,)
@@ -880,23 +928,27 @@ class TimeSyncMessage:
         return self.t_peer_recv_mono_ns is None
 
     def to_wire(self) -> tuple[dict[str, Any], bytes]:
-        return (
-            {
-                CAPTURE_KEY: int(self.t_capture_mono_ns),
-                "exchange_id": self.exchange_id,
-                WIRE_STAMP_KEY: int(self.t_wire_mono_ns),
-                "t_peer_recv_mono_ns": (
-                    None if self.t_peer_recv_mono_ns is None else int(self.t_peer_recv_mono_ns)
-                ),
-                "t_peer_recv_wall_ns": (
-                    None if self.t_peer_recv_wall_ns is None else int(self.t_peer_recv_wall_ns)
-                ),
-                "t_peer_wire_mono_ns": (
-                    None if self.t_peer_wire_mono_ns is None else int(self.t_peer_wire_mono_ns)
-                ),
-            },
-            b"",
-        )
+        extensions: dict[str, Any] = {
+            CAPTURE_KEY: int(self.t_capture_mono_ns),
+            "exchange_id": self.exchange_id,
+            WIRE_STAMP_KEY: int(self.t_wire_mono_ns),
+            "t_peer_recv_mono_ns": (
+                None if self.t_peer_recv_mono_ns is None else int(self.t_peer_recv_mono_ns)
+            ),
+            "t_peer_recv_wall_ns": (
+                None if self.t_peer_recv_wall_ns is None else int(self.t_peer_recv_wall_ns)
+            ),
+            "t_peer_wire_mono_ns": (
+                None if self.t_peer_wire_mono_ns is None else int(self.t_peer_wire_mono_ns)
+            ),
+        }
+        if self.prev_exchange_id is not None:
+            assert self.t_prev_pong_wire_mono_ns is not None
+            assert self.t_prev_pong_recv_mono_ns is not None
+            extensions["prev_exchange_id"] = int(self.prev_exchange_id)
+            extensions["t_prev_pong_wire_mono_ns"] = int(self.t_prev_pong_wire_mono_ns)
+            extensions["t_prev_pong_recv_mono_ns"] = int(self.t_prev_pong_recv_mono_ns)
+        return extensions, b""
 
     @classmethod
     def from_wire(cls, extensions: Mapping[str, Any], payload: bytes) -> "TimeSyncMessage":
@@ -921,6 +973,21 @@ class TimeSyncMessage:
                 f"{', '.join(absent)} must not be null when {', '.join(present)} is set",
                 REASON_NULL_NOT_ALLOWED,
             )
+
+        # The previous-exchange trio: present together or absent together, same
+        # rule as the peer trio, but on absence rather than on null -- an older
+        # initiator omits the keys entirely rather than nulling them.
+        prev_fields = (
+            "prev_exchange_id", "t_prev_pong_wire_mono_ns", "t_prev_pong_recv_mono_ns",
+        )
+        prev = {name: absentable_int(extensions, name) for name in prev_fields}
+        prev_absent = sorted(name for name, value in prev.items() if value is None)
+        if prev_absent and len(prev_absent) != len(prev_fields):
+            prev_present = sorted(set(prev_fields) - set(prev_absent))
+            raise MessageError(
+                f"{', '.join(prev_absent)} must be set when {', '.join(prev_present)} is",
+                REASON_NULL_NOT_ALLOWED,
+            )
         return cls(
             t_capture_mono_ns=capture,
             exchange_id=exchange_id,
@@ -928,6 +995,9 @@ class TimeSyncMessage:
             t_peer_recv_mono_ns=peer["t_peer_recv_mono_ns"],
             t_peer_recv_wall_ns=peer["t_peer_recv_wall_ns"],
             t_peer_wire_mono_ns=peer["t_peer_wire_mono_ns"],
+            prev_exchange_id=prev["prev_exchange_id"],
+            t_prev_pong_wire_mono_ns=prev["t_prev_pong_wire_mono_ns"],
+            t_prev_pong_recv_mono_ns=prev["t_prev_pong_recv_mono_ns"],
         )
 
 
@@ -1064,7 +1134,7 @@ class MessageRouter:
     def session(self) -> Any:
         return self._session
 
-    def send(self, message: Message) -> bool:
+    def send(self, message: Message, *, wants_wire_stamp: bool = False) -> bool:
         """Encode and send, refusing anything our own decoder would reject.
 
         One rule, applied to every message rather than to the one type whose
@@ -1075,6 +1145,11 @@ class MessageRouter:
 
         Raises InvalidMessage, not MessageError, so a consumer cannot swallow
         its own bug with the drop-and-count idiom meant for the peer's.
+
+        `wants_wire_stamp` asks the session to add the departure stamp at write
+        time, without it being part of `message.to_wire()`'s own output --
+        see `Session.send`. It never appears in `extensions` here, so it plays
+        no part in the self-check above.
         """
         extensions, payload = message.to_wire()
         allowed: tuple[str, ...] = getattr(message, "RESERVED_ALLOWED", ())
@@ -1093,7 +1168,8 @@ class MessageRouter:
             )
             raise InvalidMessage(str(exc), exc.reason) from None
         return self._session.send(
-            message.CHANNEL, payload, extensions, allow_reserved=allowed
+            message.CHANNEL, payload, extensions,
+            allow_reserved=allowed, wants_wire_stamp=wants_wire_stamp,
         )
 
     def recv(self, channel: Channel, timeout: float | None = 0.0) -> Message | None:

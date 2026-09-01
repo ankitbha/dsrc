@@ -360,6 +360,7 @@ class Session:
         payload: bytes = b"",
         extensions: Mapping[str, Any] | None = None,
         allow_reserved: tuple[str, ...] = (),
+        wants_wire_stamp: bool = False,
     ) -> bool:
         """Queue a message. False means the session has already ended.
 
@@ -367,6 +368,14 @@ class Session:
         will not accept, including a reserved header extension: `hello` and
         `heartbeat` belong to the transport, and a caller message carrying one
         would be consumed as transport traffic and silently never delivered.
+
+        `wants_wire_stamp` asks the writer to add `t_wire_mono_ns` at departure,
+        without the caller's own `extensions` having to carry the reserved key
+        itself -- a message whose encoded bytes are otherwise unrelated to
+        timing, such as an advisory or a camera frame, can ask for the stamp
+        this way with no change to what it puts on the wire when nobody asks.
+        `TimeSyncMessage` still carries its own placeholder, because there the
+        field is data the message's own arithmetic reads back, not a request.
         """
         if extensions:
             # `allow_reserved` is per-call and names the exact keys, so opting
@@ -382,20 +391,21 @@ class Session:
                 raise FramingError(
                     f"extension(s) {', '.join(sorted(clash))} are reserved for the transport"
                 )
-        return self._enqueue(channel, payload, extensions)
+        return self._enqueue(channel, payload, extensions, wants_wire_stamp=wants_wire_stamp)
 
     def _enqueue(
         self,
         channel: Channel,
         payload: bytes = b"",
         extensions: Mapping[str, Any] | None = None,
+        wants_wire_stamp: bool = False,
     ) -> bool:
         """The transport's own path, which may use the reserved extensions."""
         if self.is_closed:
             return False
         policy = policy_for(channel)
         prepared = dict(extensions or {})
-        if WIRE_STAMP_KEY in prepared:
+        if wants_wire_stamp or WIRE_STAMP_KEY in prepared:
             # Reserve the widest stamp now, so the encode below is the caller's
             # verdict on the widest header this frame can produce. The writer
             # then only ever makes it shorter, and send()'s documented promise

@@ -1843,3 +1843,201 @@ def test_to_local_refuses_beyond_the_extrapolation_limit():
     )
     with pytest.raises(TimebaseNotReady, match="beyond"):
         estimator.to_local(far)
+
+
+# -- pure re-derivation, for an offline reader -------------------------------
+
+
+def test_convert_to_local_and_convert_to_remote_agree_with_the_gated_estimator():
+    """The gate-less methods on `TimebaseEstimate` are the same arithmetic the
+    live estimator applies to its current estimate -- pulled out so an offline
+    reader can re-derive a conversion from a persisted `to_record()` without a
+    live, stateful estimator to hold it."""
+    link = Link(skew_ppm=12.0, seed=401)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=200, period_ns=NS_PER_S)
+    estimate = estimator.estimate
+    assert estimate is not None
+
+    at = estimate.t_reference_ns + 40 * NS_PER_S
+    via_estimator = estimator.to_remote(at)
+    via_estimate = estimate.convert_to_remote(at)
+    assert via_estimate is not None
+    assert via_estimate.t_remote_mono_ns == via_estimator.t_remote_mono_ns
+    assert via_estimate.bound_ns == via_estimator.bound_ns
+
+    remote_at = via_estimator.t_remote_mono_ns
+    back_via_estimator = estimator.to_local(remote_at)
+    back_via_estimate = estimate.convert_to_local(remote_at)
+    assert back_via_estimate is not None
+    assert back_via_estimate.t_remote_mono_ns == back_via_estimator.t_remote_mono_ns
+
+
+def test_convert_to_local_returns_none_rather_than_raising_beyond_reach():
+    """The offline caller has already decided this is the estimate to use; a
+    reach it cannot support is a fact to skip, not an exception to catch."""
+    from transport.timebase import MAX_EXTRAPOLATION_S
+
+    link = Link(seed=402)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=20, period_ns=100_000_000)
+    estimate = estimator.estimate
+    assert estimate is not None
+
+    far = estimate.t_reference_ns + int((MAX_EXTRAPOLATION_S + 600) * NS_PER_S)
+    assert estimate.convert_to_local(far) is None
+    assert estimate.convert_to_remote(far) is None
+
+
+def test_a_reconstructed_estimate_from_to_record_converts_identically():
+    """`to_record()` promises re-derivation; this is the round trip through it."""
+    link = Link(seed=403)
+    clock = SteppedClock()
+    estimator = TimebaseEstimator(mono_clock=clock)
+    feed(estimator, link, clock, count=25, period_ns=100_000_000)
+    estimate = estimator.estimate
+    assert estimate is not None
+
+    record = estimate.to_record()
+    # `skew_uncertainty_ppm` is computed, not a constructor field.
+    record.pop("skew_uncertainty_ppm")
+    reconstructed = TimebaseEstimate(**record)
+
+    at = estimate.t_reference_ns + 2 * NS_PER_S
+    original = estimate.convert_to_local(at)
+    replayed = reconstructed.convert_to_local(at)
+    assert original is not None and replayed is not None
+    assert original.t_remote_mono_ns == replayed.t_remote_mono_ns
+    assert original.bound_ns == replayed.bound_ns
+
+
+# -- D2: a responder reconstructs a sample from a ping's carried trio --------
+
+
+def test_the_initiator_carries_the_last_pong_onto_the_next_ping():
+    """`TimeSyncInitiator` plays the phone's role in the harness and in
+    `scripts/interop_jetson_peer.py`; it must exercise the same carry-forward a
+    real handset's `Session` does, or the responder-side reconstruction is
+    never tested against anything but a fabricated ping."""
+    router = _NullRouter()
+    initiator = TimeSyncInitiator(router)
+
+    initiator.send_ping()
+    first = router.sent[-1]
+    assert first.prev_exchange_id is None, "the first ping has no previous pong"
+
+    pong = TimeSyncMessage(
+        t_capture_mono_ns=1, exchange_id=first.exchange_id, t_wire_mono_ns=5_000,
+        t_peer_recv_mono_ns=100, t_peer_recv_wall_ns=200, t_peer_wire_mono_ns=1_000,
+    )
+    initiator.on_pong(pong, t_recv_mono_ns=6_000)
+
+    initiator.send_ping()
+    second = router.sent[-1]
+    assert second.prev_exchange_id == first.exchange_id
+    assert second.t_prev_pong_wire_mono_ns == 5_000
+    assert second.t_prev_pong_recv_mono_ns == 6_000
+
+
+def test_the_carry_forward_survives_an_unmatched_pong():
+    """A pong that arrived too late to match locally is still one the far side
+    sent and is still the freshest thing to report back -- the initiator's own
+    pending table has nothing to do with what the responder needs."""
+    router = _NullRouter()
+    initiator = TimeSyncInitiator(router)
+    initiator.send_ping()
+    exchange_id = router.sent[-1].exchange_id
+    initiator._pending.pop(exchange_id)  # simulate an expiry the test does not wait for
+
+    pong = TimeSyncMessage(
+        t_capture_mono_ns=1, exchange_id=exchange_id, t_wire_mono_ns=9_000,
+        t_peer_recv_mono_ns=100, t_peer_recv_wall_ns=200, t_peer_wire_mono_ns=1_000,
+    )
+    assert initiator.on_pong(pong, t_recv_mono_ns=9_500) is None  # unmatched, not a sample
+    assert initiator.pongs_unmatched == 1
+
+    initiator.send_ping()
+    second = router.sent[-1]
+    assert second.prev_exchange_id == exchange_id
+    assert second.t_prev_pong_wire_mono_ns == 9_000
+    assert second.t_prev_pong_recv_mono_ns == 9_500
+
+
+def test_a_responder_with_zero_pending_state_reconstructs_a_usable_estimate():
+    """The whole point of D2: a device that can only ever answer -- and so
+    never forms a `TimeSyncSample` of its own -- builds one anyway, from the
+    pong it sent and the trio the next ping echoes back. No table of pending
+    exchanges is needed on this side at all: each iteration below reads only
+    the ping just received and a running "what did I send last" scalar, never
+    a dict keyed by exchange id.
+
+    Two independent clocks with a planted offset and skew, checked against the
+    recovered estimate -- the same standard every other accuracy test in this
+    file holds itself to.
+    """
+    responder_offset_ns = 3_000_000_000  # phone_clock - responder_clock
+    responder_skew_ppm = 8.0
+    one_way_delay_ns = 15_000_000
+
+    responder_clock = 4_000_000_000_000
+    ref_responder = responder_clock
+
+    def phone_clock_at(responder_ns: int) -> int:
+        drift = int(responder_skew_ppm * 1e-6 * (responder_ns - ref_responder))
+        return responder_ns + responder_offset_ns + drift
+
+    responder_estimator = TimebaseEstimator(mono_clock=lambda: responder_clock)
+    last_pong: tuple[int, int, int] | None = None  # (exchange_id, t_wire, t_recv)
+
+    for exchange_id in range(1, MIN_OFFSET_SAMPLES + 6):
+        # The phone sends a ping; its departure is stamped on the phone's own
+        # clock and arrives after one_way_delay_ns of responder-clock time.
+        ping_departs_phone_ns = phone_clock_at(responder_clock)
+        responder_clock += one_way_delay_ns
+        ping = TimeSyncMessage(
+            t_capture_mono_ns=ping_departs_phone_ns,
+            exchange_id=exchange_id,
+            t_wire_mono_ns=ping_departs_phone_ns,
+            prev_exchange_id=None if last_pong is None else last_pong[0],
+            t_prev_pong_wire_mono_ns=None if last_pong is None else last_pong[1],
+            t_prev_pong_recv_mono_ns=None if last_pong is None else last_pong[2],
+        )
+        t4_responder_ns = responder_clock  # this side's own receipt, exact
+
+        if ping.prev_exchange_id is not None:
+            sample = TimeSyncSample(
+                exchange_id=ping.prev_exchange_id,
+                t1_local_send_ns=ping.t_prev_pong_wire_mono_ns,
+                t2_remote_recv_ns=ping.t_prev_pong_recv_mono_ns,
+                t3_remote_send_ns=ping.t_wire_mono_ns,
+                t4_local_recv_ns=t4_responder_ns,
+            )
+            assert responder_estimator.add(sample), responder_estimator.refused_by_reason
+
+        # The responder answers, on its own clock, then that pong crosses back.
+        pong_departs_responder_ns = responder_clock
+        pong = TimeSyncMessage(
+            t_capture_mono_ns=pong_departs_responder_ns,
+            exchange_id=exchange_id,
+            t_wire_mono_ns=pong_departs_responder_ns,
+            t_peer_recv_mono_ns=t4_responder_ns,
+            t_peer_wire_mono_ns=ping.t_wire_mono_ns,
+        )
+        responder_clock += one_way_delay_ns
+        pong_arrives_phone_ns = phone_clock_at(responder_clock)
+        last_pong = (pong.exchange_id, pong.t_wire_mono_ns, pong_arrives_phone_ns)
+
+        responder_clock += 980_000_000  # steady-rate spacing between exchanges
+
+    assert responder_estimator.usable, responder_estimator.why_not_usable()
+    estimate = responder_estimator.estimate
+    assert estimate is not None
+    # remote (phone) - local (responder) is what this estimator recovers, which
+    # is exactly the phone-clock - responder-clock offset planted above.
+    drift_at_reference = int(
+        responder_skew_ppm * 1e-6 * (estimate.t_reference_ns - ref_responder)
+    )
+    planted = responder_offset_ns + drift_at_reference
+    assert abs(estimate.offset_ns - planted) < 50_000_000, (estimate.offset_ns, planted)

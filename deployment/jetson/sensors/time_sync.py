@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 
 def now_mono() -> float:
@@ -46,6 +47,16 @@ class TimebaseStamp:
     bound_s: float | None
     estimate_id: int | None
     proxy: bool
+    #: Which estimator produced this, or "proxy" when neither could. A converted
+    #: number must never look as measured as a same-device one, and a
+    #: round-trip-converted number must not be pooled with a one-way-converted
+    #: one -- the two have different error semantics, so this is what lets a
+    #: consumer keep their samples in separate series.
+    source: str = "proxy"
+    #: Why the estimator refused, when `proxy` is True. None when it did not
+    #: proxy. Kept apart from the adapter's aggregate `proxy_reasons` counter so
+    #: a single stamp can say why for itself, not only the run as a whole.
+    proxy_reason: str | None = None
 
     @property
     def link_s(self) -> float | None:
@@ -70,10 +81,90 @@ class TimebaseStamp:
         return {
             "converted": not self.proxy,
             "proxy": self.proxy,
+            "source": self.source,
+            "proxy_reason": self.proxy_reason,
             "bound_ms": None if self.bound_s is None else round(self.bound_s * 1000.0, 3),
             "estimate_id": self.estimate_id,
             "link_ms": None if self.link_s is None else round(self.link_s * 1000.0, 3),
         }
+
+
+# The three bases a stage's duration can rest on. A fourth, "instant", covers
+# the one stage (capture) that names a reference point rather than a span.
+STAGE_BASIS_MEASURED = "measured"
+STAGE_BASIS_CONVERTED = "converted"
+STAGE_BASIS_ABSENT = "absent"
+STAGE_BASIS_INSTANT = "instant"
+
+
+@dataclass(frozen=True)
+class StageTiming:
+    """One named segment of a tick's time, and how much the number is worth.
+
+    The recurring defect this project keeps naming is a record that cannot
+    distinguish failure from success: a stage that was proxied, never
+    instrumented, or measured across an unsynchronised clock has to be
+    distinguishable from one read straight off a single device's own clock, in
+    the record itself rather than in a reader's memory of how the pipeline
+    works. So every stage carries `basis` and `clock` beside its `ms`, and a
+    stage that could not be measured carries `ms: None` and a `reason`, never a
+    zero -- the same discipline `RollingStats.summary` and `TimebaseStamp.link_s`
+    already apply to their own numbers.
+    """
+
+    ms: float | None
+    basis: str
+    clock: str
+    #: Present only when `basis == "converted"`.
+    bound_ms: float | None = None
+    estimate_id: int | None = None
+    source: str | None = None
+    #: Present only when `basis == "absent"`.
+    reason: str | None = None
+
+    def to_record(self) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "ms": None if self.ms is None else round(self.ms, 3),
+            "basis": self.basis,
+            "clock": self.clock,
+        }
+        if self.bound_ms is not None:
+            record["bound_ms"] = round(self.bound_ms, 3)
+        if self.estimate_id is not None:
+            record["estimate_id"] = self.estimate_id
+        if self.source is not None:
+            record["source"] = self.source
+        if self.reason is not None:
+            record["reason"] = self.reason
+        return record
+
+    @classmethod
+    def measured(cls, ms: float, *, clock: str) -> "StageTiming":
+        return cls(ms=ms, basis=STAGE_BASIS_MEASURED, clock=clock)
+
+    @classmethod
+    def converted(
+        cls, ms: float, *, bound_ms: float, estimate_id: int, source: str
+    ) -> "StageTiming":
+        return cls(
+            ms=ms, basis=STAGE_BASIS_CONVERTED, clock="cross",
+            bound_ms=bound_ms, estimate_id=estimate_id, source=source,
+        )
+
+    @classmethod
+    def absent(cls, *, clock: str, reason: str) -> "StageTiming":
+        return cls(ms=None, basis=STAGE_BASIS_ABSENT, clock=clock, reason=reason)
+
+    @classmethod
+    def instant(cls, *, clock: str) -> "StageTiming":
+        """The reference point a tick's other stages are measured from.
+
+        Zero rather than absent: `capture` is not unmeasured, it is by
+        definition the origin every other phone-clock stage is a distance from.
+        The shutter-to-callback bias that instant does not capture is a named,
+        open limitation (see the task plan), not something this record hides.
+        """
+        return cls(ms=0.0, basis=STAGE_BASIS_INSTANT, clock=clock)
 
 
 @dataclass
