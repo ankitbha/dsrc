@@ -57,6 +57,11 @@ THERMAL_SCALE = {
     "unknown": 0.6,
 }
 
+#: The two rates thermal backoff actually touches. IMU and GPS are the free tier and
+#: are exempt from it -- backing them off to save a fraction of a percent of the
+#: stream would blind the controller exactly when it has decided to look less.
+THERMAL_SCALED_KEYS = ("camera_hz", "here_hz")
+
 #: Skin temperature that triggers backoff before the status moves. Measured on the
 #: handset: it warmed 5.4 C under camera load while `thermal_status` stayed
 #: `nominal` for all 81 telemetry frames, so the status alone does not move until
@@ -131,6 +136,87 @@ class Trigger:
     ALL = frozenset({IDLE, EVENT, NARROW_MARGIN, DISAGREEMENT, THERMAL, HOLD})
 
 
+#: The three states one rule's check can be in on a given tick. A rule missing from
+#: `rules_fired` used to be all three of these at once -- fired-but-lost, quiet, or
+#: never evaluated -- and a reader could not tell which without re-reading the code.
+#: `fired` says the comparison ran and crossed its threshold; `quiet` says it ran and
+#: did not; `not_evaluable` says the input it needs was absent, named in `missing`.
+RULE_FIRED = "fired"
+RULE_QUIET = "quiet"
+RULE_NOT_EVALUABLE = "not_evaluable"
+
+#: The four rules attribution reports on, in the order `decide` checks them. `IDLE`
+#: and `HOLD` are rate-level words the trigger can say and never appear here: they
+#: describe the rates, not a comparison that ran against an input.
+RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT, Trigger.THERMAL)
+
+#: Why the thermal rule backed the rates off, when it did. Closed set: `status` covers
+#: both a named status below `nominal` and a missing status defaulting to `unknown`;
+#: `skin_warm`/`skin_hot` claim the word only when the skin reading strictly lowered
+#: the scale the status alone had already reached; `no_telemetry`/`stale_telemetry`
+#: are the two ways silence is read as the `unknown` tier rather than as `nominal`.
+THERMAL_CAUSE_STATUS = "status"
+THERMAL_CAUSE_SKIN_WARM = "skin_warm"
+THERMAL_CAUSE_SKIN_HOT = "skin_hot"
+THERMAL_CAUSE_NO_TELEMETRY = "no_telemetry"
+THERMAL_CAUSE_STALE_TELEMETRY = "stale_telemetry"
+THERMAL_CAUSES = frozenset({
+    THERMAL_CAUSE_STATUS, THERMAL_CAUSE_SKIN_WARM, THERMAL_CAUSE_SKIN_HOT,
+    THERMAL_CAUSE_NO_TELEMETRY, THERMAL_CAUSE_STALE_TELEMETRY,
+})
+
+
+@dataclass(frozen=True)
+class RuleCheck:
+    """One rule's status this tick, and enough evidence to say why.
+
+    `missing` is populated only on `not_evaluable`, naming `Inputs` fields. `evidence`
+    carries the numbers a `fired` or `quiet` verdict was reached from -- a threshold
+    compared only against a value that produced it can drift by 10x with every test
+    still green, so the record states both rather than the verdict alone.
+    """
+
+    status: str
+    missing: tuple[str, ...] = ()
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    def to_record(self) -> dict[str, Any]:
+        record: dict[str, Any] = {"status": self.status}
+        if self.missing:
+            record["missing"] = list(self.missing)
+        for key, value in self.evidence.items():
+            record[key] = round(value, 4) if isinstance(value, float) else value
+        return record
+
+
+@dataclass(frozen=True)
+class Attribution:
+    """Which rule, for which sensor, and why -- built where the checks run.
+
+    `rules` always has exactly the four `RULES` entries, closing the three-state gap
+    `rules_fired` alone leaves open. `gates` states the dwell/hold/bridge machinery a
+    rule word cannot show by itself: a raise rule can fire and still be held off by
+    the dwell, and `trigger` alone cannot distinguish that from the rule staying
+    quiet. `per_sensor` gives each of the four rates its own composition chain --
+    base, level sensitivity, thermal scale, clamp, previous value -- so "for which
+    sensor" is answered by the record instead of by a reader who has memorised
+    `IDLE_RATES`/`ACTIVE_RATES`.
+    """
+
+    rules: dict[str, RuleCheck]
+    gates: dict[str, Any]
+    per_sensor: dict[str, dict[str, Any]]
+    first_decision: bool
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "first_decision": self.first_decision,
+            "rules": {name: check.to_record() for name, check in self.rules.items()},
+            "gates": self.gates,
+            "per_sensor": self.per_sensor,
+        }
+
+
 @dataclass(frozen=True)
 class Inputs:
     """Everything the controller is allowed to look at, in one place."""
@@ -144,6 +230,11 @@ class Inputs:
     #: The feed's derived congestion, and what the camera sees locally.
     feed_congestion: float | None = None
     camera_density_bin: int | None = None
+    #: `FeedOwnership.declined` for this tick, when the feed was asked and named a
+    #: reason it owns nothing. None both when the feed owns `feed_congestion` and
+    #: when nothing carried a reason forward -- those two absences are not told
+    #: apart at this layer, which is task 36's subject.
+    feed_declined: str | None = None
     #: The phone's last self-report. None means never heard from.
     thermal_status: str | None = None
     skin_temp_c: float | None = None
@@ -184,6 +275,11 @@ class Decision:
     #: The query that goes down with `here_hz`. None when there is no position to
     #: ask about -- a query centred on a fix we do not have describes nowhere.
     here_query: Any = None
+    #: Which rule, for which sensor, and why. Required and keyword-only: `_record` is
+    #: the only place a `Decision` is built, so there is no caller for an optional
+    #: default to protect, and an optional default would itself be a silent-absence
+    #: path -- the defect class this field exists to close.
+    attribution: "Attribution" = field(kw_only=True)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -194,6 +290,7 @@ class Decision:
             "thermal_scale": self.thermal_scale,
             "clamped": list(self.clamped),
             "here_radius_m": None if self.here_query is None else self.here_query.radius_m,
+            "attribution": self.attribution.to_record(),
         }
 
 
@@ -237,6 +334,13 @@ def _clamp(hz: float) -> float:
     return max(MIN_RATE_HZ, min(MAX_RATE_HZ, hz))
 
 
+#: The two literals `disagreement` compares against, named so attribution can echo
+#: them beside the value they judged rather than leaving the threshold implicit in
+#: the boolean it produced.
+JAMMED_CONGESTION = 0.5
+EMPTY_DENSITY_BIN = 0
+
+
 def disagreement(feed_congestion: float | None, camera_density_bin: int | None) -> bool:
     """Whether the two views contradict each other about where we are.
 
@@ -247,9 +351,40 @@ def disagreement(feed_congestion: float | None, camera_density_bin: int | None) 
     """
     if feed_congestion is None or camera_density_bin is None:
         return False
-    jammed_ahead = feed_congestion >= 0.5
-    empty_here = camera_density_bin <= 0
+    jammed_ahead = feed_congestion >= JAMMED_CONGESTION
+    empty_here = camera_density_bin <= EMPTY_DENSITY_BIN
     return jammed_ahead and empty_here
+
+
+def _disagreement_check(inputs: Inputs) -> RuleCheck:
+    """`disagreement`'s verdict as a three-state check, with its evidence attached.
+
+    Missing rather than quiet when a view is absent -- one source silent is not two
+    sources agreeing, and the pin at scripts/remutate.py rests on `disagreement`
+    itself returning False for it; this only reports that verdict, never changes it.
+    """
+    missing = tuple(
+        name for name, value in (
+            ("feed_congestion", inputs.feed_congestion),
+            ("camera_density_bin", inputs.camera_density_bin),
+        )
+        if value is None
+    )
+    if missing:
+        evidence: dict[str, Any] = {}
+        if inputs.feed_declined is not None:
+            evidence["feed_declined"] = inputs.feed_declined
+        return RuleCheck(status=RULE_NOT_EVALUABLE, missing=missing, evidence=evidence)
+    fired = disagreement(inputs.feed_congestion, inputs.camera_density_bin)
+    return RuleCheck(
+        status=RULE_FIRED if fired else RULE_QUIET,
+        evidence={
+            "feed_congestion": inputs.feed_congestion,
+            "jammed_congestion": JAMMED_CONGESTION,
+            "camera_density_bin": inputs.camera_density_bin,
+            "empty_density_bin": EMPTY_DENSITY_BIN,
+        },
+    )
 
 
 class SensingController:
@@ -273,19 +408,43 @@ class SensingController:
     def decide(self, inputs: Inputs) -> Decision:
         now = self._now()
         reasons: list[str] = []
-        fired: list[str] = []
+        checks: dict[str, RuleCheck] = {}
 
-        if inputs.ego_acceleration is not None and abs(inputs.ego_acceleration) >= EVENT_ACCEL_MPS2:
-            fired.append(Trigger.EVENT)
-            reasons.append(f"|accel| {abs(inputs.ego_acceleration):.1f} >= {EVENT_ACCEL_MPS2}")
-        if inputs.policy_margin is not None and inputs.policy_margin <= NARROW_MARGIN:
-            fired.append(Trigger.NARROW_MARGIN)
-            reasons.append(f"policy margin {inputs.policy_margin:.3f} <= {NARROW_MARGIN}")
-        if disagreement(inputs.feed_congestion, inputs.camera_density_bin):
-            fired.append(Trigger.DISAGREEMENT)
+        if inputs.ego_acceleration is None:
+            checks[Trigger.EVENT] = RuleCheck(status=RULE_NOT_EVALUABLE,
+                                              missing=("ego_acceleration",))
+        else:
+            value = inputs.ego_acceleration
+            event_fired = abs(value) >= EVENT_ACCEL_MPS2
+            checks[Trigger.EVENT] = RuleCheck(
+                status=RULE_FIRED if event_fired else RULE_QUIET,
+                evidence={"value": value, "threshold": EVENT_ACCEL_MPS2},
+            )
+            if event_fired:
+                reasons.append(f"|accel| {abs(value):.1f} >= {EVENT_ACCEL_MPS2}")
+
+        if inputs.policy_margin is None:
+            checks[Trigger.NARROW_MARGIN] = RuleCheck(status=RULE_NOT_EVALUABLE,
+                                                       missing=("policy_margin",))
+        else:
+            margin = inputs.policy_margin
+            margin_fired = margin <= NARROW_MARGIN
+            checks[Trigger.NARROW_MARGIN] = RuleCheck(
+                status=RULE_FIRED if margin_fired else RULE_QUIET,
+                evidence={"value": margin, "threshold": NARROW_MARGIN},
+            )
+            if margin_fired:
+                reasons.append(f"policy margin {margin:.3f} <= {NARROW_MARGIN}")
+
+        checks[Trigger.DISAGREEMENT] = _disagreement_check(inputs)
+        if checks[Trigger.DISAGREEMENT].status == RULE_FIRED:
             reasons.append("feed says jammed, camera sees empty road")
 
-        wants_more = bool(fired)
+        # `wants_more` reads the three raise checks' verdicts rather than a list built
+        # alongside them, so a rule that is not_evaluable or quiet cannot be counted
+        # here by drifting out of step with what `checks` itself says.
+        wants_more = any(checks[rule].status == RULE_FIRED
+                         for rule in (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT))
 
         # Dwell before raising, and a hold after -- but a hold already running is
         # NOT cancelled by fresh evidence. Re-arming the dwell on every new event
@@ -346,26 +505,37 @@ class SensingController:
         # asking one enormous question instead of several small ones.
         intended_here_hz = rates["here_hz"]
 
-        scale = self._thermal_scale(inputs, reasons)
-        if scale < 1.0:
-            fired.append(Trigger.THERMAL)
+        scale, thermal_cause, thermal_evidence = self._thermal_scale(inputs, reasons)
+        thermal_fired = scale < 1.0
+        checks[Trigger.THERMAL] = RuleCheck(
+            status=RULE_FIRED if thermal_fired else RULE_QUIET,
+            evidence={**thermal_evidence, "scale": scale, "cause": thermal_cause},
+        )
+        if thermal_fired:
             # The free tier is not scaled. It is what notices the next event, and
             # backing it off to save a tenth of a percent of the stream would blind
             # the controller exactly when it has decided to look less.
-            for key in ("camera_hz", "here_hz"):
+            for key in THERMAL_SCALED_KEYS:
                 rates[key] = rates[key] * scale
 
         clamped = [k for k, v in rates.items() if _clamp(v) != v]
         rates = {k: _clamp(v) for k, v in rates.items()}
 
+        # In `RULES` order, and derived from the same `checks` this tick built rather
+        # than accumulated independently -- so `rules_fired` and the attribution
+        # record's rule statuses cannot silently drift apart.
+        fired = [rule for rule in RULES if checks[rule].status == RULE_FIRED]
+
         return self._record(
-            rates=rates, fired=fired, reasons=reasons, scale=scale, clamped=clamped,
-            active=active, dwelled=dwelled, holding=holding, inputs=inputs, now=now,
-            intended_here_hz=intended_here_hz, bridged=bridged,
+            rates=rates, fired=fired, checks=checks, reasons=reasons, scale=scale,
+            clamped=clamped, active=active, dwelled=dwelled, holding=holding,
+            inputs=inputs, now=now, intended_here_hz=intended_here_hz, bridged=bridged,
+            gapped=gapped, wants_more=wants_more,
         )
 
-    def _record(self, *, rates, fired, reasons, scale, clamped, active, dwelled,
-                holding, inputs, now, intended_here_hz, bridged) -> Decision:
+    def _record(self, *, rates, fired, checks, reasons, scale, clamped, active, dwelled,
+                holding, inputs, now, intended_here_hz, bridged, gapped,
+                wants_more) -> Decision:
         """Name the decision in one word, without letting that word mislead.
 
         `trigger` used to be whichever rule was checked last, which produced two
@@ -392,10 +562,55 @@ class SensingController:
         else:
             trigger = Trigger.IDLE
 
+        first_decision = self._last is None
+        # `_raised_since` is None exactly when no dwell is running -- reported as
+        # null, not 0.0, so a tick with no dwell in progress cannot be read as one
+        # that just armed. While a dwell IS running, 0.0 on the arming tick is a
+        # measured zero: elapsed time really is zero, not an absent measurement.
+        dwell_elapsed_s = None if self._raised_since is None else now - self._raised_since
+        gates = {
+            "wants_more": wants_more,
+            "gapped": gapped,
+            "dwell": {
+                "elapsed_s": dwell_elapsed_s,
+                "required_s": RAISE_DWELL_S,
+                "satisfied": dwelled,
+            },
+            "hold": {
+                "active": holding,
+                "remaining_s": (self._holding_until - now) if holding else None,
+            },
+            "bridged": bridged,
+            "level": "active" if active else "idle",
+        }
+
+        profile = ACTIVE_RATES if active else IDLE_RATES
+        per_sensor: dict[str, dict[str, Any]] = {}
+        for key, hz in rates.items():
+            previous_hz = None if self._last is None else self._last.rates[key]
+            per_sensor[key] = {
+                "hz": hz,
+                "base_hz": profile[key],
+                "level_sensitive": IDLE_RATES[key] != ACTIVE_RATES[key],
+                "thermal_exempt": key not in THERMAL_SCALED_KEYS,
+                "scale": scale if key in THERMAL_SCALED_KEYS else 1.0,
+                "clamped": key in clamped,
+                "previous_hz": previous_hz,
+                "changed": False if self._last is None else previous_hz != hz,
+            }
+
+        attribution = Attribution(
+            rules={name: checks[name] for name in RULES},
+            gates=gates,
+            per_sensor=per_sensor,
+            first_decision=first_decision,
+        )
+
         decision = Decision(
             rates=rates, trigger=trigger, reasons=reasons, thermal_scale=scale,
             rules_fired=fired, clamped=clamped,
             here_query=self._here_query(inputs, intended_here_hz),
+            attribution=attribution,
         )
         self._last = decision
         self._last_active = active
@@ -426,11 +641,21 @@ class SensingController:
             lat=float(inputs.lat), lon=float(inputs.lon), radius_m=float(radius_m),
         )
 
-    def _thermal_scale(self, inputs: Inputs, reasons: list[str]) -> float:
-        """How much to back off. Silence is not nominal."""
+    def _thermal_scale(
+        self, inputs: Inputs, reasons: list[str]
+    ) -> tuple[float, str | None, dict[str, Any]]:
+        """How much to back off, the `THERMAL_CAUSES` member responsible, and its
+        evidence. Silence is not nominal.
+
+        Internal signature -- `decide` is the only caller -- so returning more than
+        a float here changes nothing external. `cause` is None exactly when the
+        scale is 1.0; every other return path names one member of the closed set.
+        """
         if inputs.thermal_status is None and inputs.skin_temp_c is None:
             reasons.append("thermal unknown: no telemetry received")
-            return THERMAL_SCALE["unknown"]
+            evidence = {"thermal_status": None, "skin_temp_c": None,
+                       "telemetry": "absent", "telemetry_age_s": None}
+            return THERMAL_SCALE["unknown"], THERMAL_CAUSE_NO_TELEMETRY, evidence
 
         # abs(), because `PhoneGpsReader.is_stale` states the rule outright and
         # there are now four such predicates in this codebase: a stamp from this
@@ -443,23 +668,38 @@ class SensingController:
             # can die while the session stays healthy, and one `nominal` from
             # minutes ago would otherwise pin full rates for the rest of the drive.
             reasons.append(f"thermal stale: {age}s old")
-            return THERMAL_SCALE["unknown"]
+            evidence = {"thermal_status": inputs.thermal_status,
+                       "skin_temp_c": inputs.skin_temp_c,
+                       "telemetry": "stale", "telemetry_age_s": age}
+            return THERMAL_SCALE["unknown"], THERMAL_CAUSE_STALE_TELEMETRY, evidence
 
         scale = THERMAL_SCALE.get(inputs.thermal_status or "unknown", THERMAL_SCALE["unknown"])
+        cause: str | None = None
         if scale < 1.0 and inputs.thermal_status is not None:
             reasons.append(f"thermal status {inputs.thermal_status}")
+            cause = THERMAL_CAUSE_STATUS
         elif scale < 1.0:
             # Reachable when a status is absent but a skin reading is not. A 40%
             # rate cut with nothing saying why is not a decision anyone can audit.
             reasons.append("thermal status unknown")
+            cause = THERMAL_CAUSE_STATUS
 
         # Skin temperature moves before the status does. Measured on the handset:
         # 5.4 C of warming under camera load with the status `nominal` throughout.
+        # A `min` tie leaves the cause alone: skin claims it only when it strictly
+        # lowers the scale the status had already reached, not when it merely ties.
         if inputs.skin_temp_c is not None:
             if inputs.skin_temp_c >= SKIN_HOT_C:
                 reasons.append(f"skin {inputs.skin_temp_c:.1f}C >= {SKIN_HOT_C}")
+                if THERMAL_SCALE["severe"] < scale:
+                    cause = THERMAL_CAUSE_SKIN_HOT
                 scale = min(scale, THERMAL_SCALE["severe"])
             elif inputs.skin_temp_c >= SKIN_WARM_C:
                 reasons.append(f"skin {inputs.skin_temp_c:.1f}C >= {SKIN_WARM_C}")
+                if THERMAL_SCALE["moderate"] < scale:
+                    cause = THERMAL_CAUSE_SKIN_WARM
                 scale = min(scale, THERMAL_SCALE["moderate"])
-        return scale
+
+        evidence = {"thermal_status": inputs.thermal_status, "skin_temp_c": inputs.skin_temp_c,
+                   "telemetry": "fresh", "telemetry_age_s": age}
+        return scale, cause, evidence

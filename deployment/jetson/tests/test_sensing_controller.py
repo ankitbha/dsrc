@@ -14,6 +14,8 @@ from policy.sensing_controller import (
     EVENT_ACCEL_MPS2,
     HOLD_S,
     IDLE_RATES,
+    JAMMED_CONGESTION,
+    EMPTY_DENSITY_BIN,
     MAX_POSITION_AGE_S,
     MAX_TELEMETRY_AGE_S,
     MIN_QUERY_RADIUS_M,
@@ -23,9 +25,20 @@ from policy.sensing_controller import (
     MIN_RATE_HZ,
     NARROW_MARGIN,
     RAISE_DWELL_S,
+    RULES,
+    RULE_FIRED,
+    RULE_NOT_EVALUABLE,
+    RULE_QUIET,
     SKIN_HOT_C,
     SKIN_WARM_C,
+    THERMAL_CAUSE_NO_TELEMETRY,
+    THERMAL_CAUSE_SKIN_HOT,
+    THERMAL_CAUSE_SKIN_WARM,
+    THERMAL_CAUSE_STALE_TELEMETRY,
+    THERMAL_CAUSE_STATUS,
+    THERMAL_CAUSES,
     THERMAL_SCALE,
+    THERMAL_SCALED_KEYS,
     Decision,
     Inputs,
     SensingController,
@@ -830,3 +843,368 @@ class TestTheConstantsAreValuesNotSelfReferences:
         import inspect
         default = inspect.signature(PhoneGpsReader.__init__).parameters["stale_after_s"]
         assert default.default == MAX_POSITION_AGE_S
+
+
+class TestThreeStatesAreThreeStates:
+    """`rules_fired` alone cannot tell a rule that fired from one that ran and found
+    nothing, or from one that never had its input. `attribution.rules` can.
+    """
+
+    def test_event_fired_carries_its_signed_value_and_threshold(self):
+        decision = SensingController(clock=Clock()).decide(calm(ego_acceleration=9.0))
+        check = decision.attribution.rules[Trigger.EVENT]
+        assert check.status == RULE_FIRED
+        assert check.to_record() == {"status": "fired", "value": 9.0,
+                                     "threshold": EVENT_ACCEL_MPS2}
+
+    def test_event_quiet_at_zero(self):
+        decision = SensingController(clock=Clock()).decide(calm())
+        check = decision.attribution.rules[Trigger.EVENT]
+        assert check.status == RULE_QUIET
+        assert check.to_record() == {"status": "quiet", "value": 0.0,
+                                     "threshold": EVENT_ACCEL_MPS2}
+
+    def test_margin_not_evaluable_before_the_first_inference(self):
+        decision = SensingController(clock=Clock()).decide(calm(policy_margin=None))
+        check = decision.attribution.rules[Trigger.NARROW_MARGIN]
+        assert check.to_record() == {"status": "not_evaluable", "missing": ["policy_margin"]}
+
+    def test_disagreement_not_evaluable_when_the_feed_is_silent(self):
+        # Restates the scripts/remutate.py:824 pin from the record side: a missing
+        # view is not_evaluable, never fired, and `rules_fired` still lacks it. Every
+        # other rule is quiet on this fixture, so the whole list must come back
+        # empty -- not just missing the one name -- or a status of "quiet" being
+        # counted as fired would slip through unnoticed.
+        decision = SensingController(clock=Clock()).decide(calm(feed_congestion=None))
+        check = decision.attribution.rules[Trigger.DISAGREEMENT]
+        assert check.to_record() == {"status": "not_evaluable", "missing": ["feed_congestion"]}
+        assert decision.rules_fired == []
+
+    def test_disagreement_names_both_missing_views(self):
+        decision = SensingController(clock=Clock()).decide(
+            calm(feed_congestion=None, camera_density_bin=None)
+        )
+        check = decision.attribution.rules[Trigger.DISAGREEMENT]
+        assert check.missing == ("feed_congestion", "camera_density_bin")
+
+    def test_feed_declined_rides_disagreements_not_evaluable_entry(self):
+        decision = SensingController(clock=Clock()).decide(
+            calm(feed_congestion=None, feed_declined="feed_stale")
+        )
+        check = decision.attribution.rules[Trigger.DISAGREEMENT]
+        assert check.to_record() == {
+            "status": "not_evaluable", "missing": ["feed_congestion"],
+            "feed_declined": "feed_stale",
+        }
+
+    def test_feed_declined_is_absent_rather_than_invented_when_unset(self):
+        decision = SensingController(clock=Clock()).decide(calm(feed_congestion=None))
+        assert "feed_declined" not in decision.attribution.rules[Trigger.DISAGREEMENT].to_record()
+
+
+class TestRulesFiredIsAnIdentity:
+
+    def test_a_fully_quiet_decision_has_an_empty_rules_fired(self):
+        # Every rule ran its comparison and found nothing -- "quiet" must not be
+        # counted as "fired" by the derivation, only "not not_evaluable" would let
+        # that happen without a single rule actually crossing its threshold.
+        decision = SensingController(clock=Clock()).decide(calm())
+        for check in decision.attribution.rules.values():
+            assert check.status == RULE_QUIET
+        assert decision.rules_fired == []
+
+    def test_rules_fired_equals_the_fired_checks_in_rules_order(self):
+        # An identity by construction, not a resemblance checked afterwards: both
+        # are derived from the same `checks` dict inside `decide`.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock, calm(
+            ego_acceleration=9.0, policy_margin=0.01,
+            feed_congestion=0.9, camera_density_bin=0, thermal_status="moderate",
+        ))
+        expected = [name for name in RULES
+                    if decision.attribution.rules[name].status == RULE_FIRED]
+        assert decision.rules_fired == expected
+        assert expected == [Trigger.EVENT, Trigger.NARROW_MARGIN,
+                            Trigger.DISAGREEMENT, Trigger.THERMAL]
+
+
+class TestGatesTellDwellFromIdle:
+
+    def test_one_tick_of_evidence_is_fired_but_blocked_by_the_dwell(self):
+        # The record now distinguishes "fired, blocked by dwell" from "idle, quiet",
+        # which `trigger == "idle"` alone could not.
+        decision = SensingController(clock=Clock()).decide(calm(ego_acceleration=9.0))
+
+        assert decision.attribution.rules[Trigger.EVENT].status == RULE_FIRED
+        gates = decision.attribution.gates
+        assert gates["dwell"]["satisfied"] is False
+        assert gates["dwell"]["elapsed_s"] == 0.0
+        assert gates["dwell"]["required_s"] == RAISE_DWELL_S
+        assert gates["level"] == "idle"
+        assert decision.rates["camera_hz"] == IDLE_RATES["camera_hz"]
+
+    def test_no_dwell_running_is_null_not_zero(self):
+        decision = SensingController(clock=Clock()).decide(calm())
+        assert decision.attribution.gates["dwell"]["elapsed_s"] is None
+
+    def test_a_holding_tick_has_all_raises_quiet_and_a_positive_remaining(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        settled(controller, clock, calm(ego_acceleration=9.0))
+
+        clock.advance(1.0)
+        decision = controller.decide(calm())
+        gates = decision.attribution.gates
+        assert decision.trigger == Trigger.HOLD
+        for rule in (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT):
+            assert decision.attribution.rules[rule].status == RULE_QUIET
+        assert gates["hold"]["active"] is True
+        assert gates["hold"]["remaining_s"] > 0.0
+
+    def test_hold_remaining_is_null_when_not_holding(self):
+        decision = SensingController(clock=Clock()).decide(calm())
+        assert decision.attribution.gates["hold"]["active"] is False
+        assert decision.attribution.gates["hold"]["remaining_s"] is None
+
+    def test_a_bridged_tick_names_itself_bridged(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        settled(controller, clock, calm(ego_acceleration=9.0))
+        clock.advance(HOLD_S - 0.4)
+        controller.decide(calm())
+
+        clock.advance(0.2)
+        decision = controller.decide(calm(ego_acceleration=9.0))
+        assert decision.attribution.gates["bridged"] is True
+
+    def test_a_redial_length_gap_reports_gapped_on_the_resuming_tick(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        controller.decide(calm(ego_acceleration=9.0))
+        clock.advance(120.0)
+
+        decision = controller.decide(calm(ego_acceleration=9.0))
+        assert decision.attribution.gates["gapped"] is True
+        assert decision.trigger == Trigger.IDLE
+
+
+class TestThermalCause:
+
+    def test_status_alone_is_the_cause(self):
+        decision = SensingController(clock=Clock()).decide(
+            calm(thermal_status="moderate", skin_temp_c=None)
+        )
+        check = decision.attribution.rules[Trigger.THERMAL]
+        assert check.status == RULE_FIRED
+        assert check.evidence["cause"] == THERMAL_CAUSE_STATUS
+
+    def test_hot_skin_under_a_nominal_status_is_skin_hot(self):
+        decision = SensingController(clock=Clock()).decide(
+            calm(thermal_status="nominal", skin_temp_c=46.0)
+        )
+        check = decision.attribution.rules[Trigger.THERMAL]
+        assert check.evidence["cause"] == THERMAL_CAUSE_SKIN_HOT
+        assert check.evidence["scale"] == THERMAL_SCALE["severe"]
+
+    def test_stale_telemetry_is_its_own_cause(self):
+        decision = SensingController(clock=Clock()).decide(
+            calm(thermal_status="nominal", telemetry_age_s=MAX_TELEMETRY_AGE_S + 1.0)
+        )
+        check = decision.attribution.rules[Trigger.THERMAL]
+        assert check.evidence["cause"] == THERMAL_CAUSE_STALE_TELEMETRY
+
+    def test_total_silence_is_no_telemetry(self):
+        decision = SensingController(clock=Clock()).decide(
+            calm(thermal_status=None, skin_temp_c=None)
+        )
+        check = decision.attribution.rules[Trigger.THERMAL]
+        assert check.evidence["cause"] == THERMAL_CAUSE_NO_TELEMETRY
+
+    def test_a_min_tie_leaves_the_earlier_cause_standing(self):
+        # `severe` status already reaches the scale hot skin would compute, so skin
+        # does not strictly lower it and the cause stays with the status.
+        decision = SensingController(clock=Clock()).decide(
+            calm(thermal_status="severe", skin_temp_c=46.0)
+        )
+        check = decision.attribution.rules[Trigger.THERMAL]
+        assert check.evidence["cause"] == THERMAL_CAUSE_STATUS
+        assert check.evidence["scale"] == THERMAL_SCALE["severe"]
+
+    def test_a_nominal_scale_is_quiet_with_a_null_cause(self):
+        decision = SensingController(clock=Clock()).decide(
+            calm(thermal_status="nominal", skin_temp_c=30.0)
+        )
+        check = decision.attribution.rules[Trigger.THERMAL]
+        assert check.status == RULE_QUIET
+        assert check.evidence["cause"] is None
+
+    def test_every_cause_ever_produced_is_a_member(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        for status in ("nominal", "moderate", "severe", "critical", None):
+            for skin in (None, 30.0, 41.0, 46.0):
+                clock.advance(0.1)
+                decision = controller.decide(calm(thermal_status=status, skin_temp_c=skin))
+                cause = decision.attribution.rules[Trigger.THERMAL].evidence["cause"]
+                assert cause is None or cause in THERMAL_CAUSES
+
+
+class TestDisagreementEvidenceNamesItsConstants:
+    """The two literals `disagreement` compares against, echoed beside the values
+    they judged rather than left implicit in the boolean it produced.
+    """
+
+    def test_fired_evidence_echoes_the_threshold_beside_the_value(self):
+        decision = SensingController(clock=Clock()).decide(
+            calm(feed_congestion=0.9, camera_density_bin=0)
+        )
+        check = decision.attribution.rules[Trigger.DISAGREEMENT]
+        assert check.status == RULE_FIRED
+        assert check.evidence == {
+            "feed_congestion": 0.9, "jammed_congestion": JAMMED_CONGESTION,
+            "camera_density_bin": 0, "empty_density_bin": EMPTY_DENSITY_BIN,
+        }
+
+    def test_quiet_evidence_carries_the_same_shape(self):
+        decision = SensingController(clock=Clock()).decide(calm())
+        check = decision.attribution.rules[Trigger.DISAGREEMENT]
+        assert check.status == RULE_QUIET
+        assert set(check.evidence) == {"feed_congestion", "jammed_congestion",
+                                       "camera_density_bin", "empty_density_bin"}
+
+
+class TestPerSensorChain:
+
+    def _assert_reconstructs(self, decision):
+        from policy.sensing_controller import _clamp
+
+        for key, entry in decision.attribution.per_sensor.items():
+            assert _clamp(entry["base_hz"] * entry["scale"]) == pytest.approx(entry["hz"])
+            assert entry["hz"] == decision.rates[key]
+
+    def test_reconstruction_identity_holds_across_a_mixed_sweep(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        scenarios = [
+            calm(),
+            calm(ego_acceleration=9.0),
+            calm(policy_margin=0.01),
+            calm(feed_congestion=0.9, camera_density_bin=0),
+            calm(thermal_status="severe"),
+            calm(thermal_status="critical"),
+            calm(thermal_status="shutdown"),
+        ]
+        for inputs in scenarios:
+            decision = settled(controller, clock, inputs)
+            self._assert_reconstructs(decision)
+            for key in RATE_KEYS:
+                entry = decision.attribution.per_sensor[key]
+                assert entry["clamped"] == (key in decision.clamped)
+
+    def test_gps_and_imu_are_never_level_sensitive_thermal_exempt_or_changed(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        for inputs in (calm(), calm(ego_acceleration=9.0), calm(thermal_status="shutdown")):
+            decision = settled(controller, clock, inputs)
+            for key in ("gps_hz", "imu_hz"):
+                entry = decision.attribution.per_sensor[key]
+                assert entry["level_sensitive"] is False
+                assert entry["thermal_exempt"] is True
+                assert entry["changed"] is False
+
+    def test_the_first_decision_has_no_previous_and_has_not_changed(self):
+        decision = SensingController(clock=Clock()).decide(calm())
+        assert decision.attribution.first_decision is True
+        for entry in decision.attribution.per_sensor.values():
+            assert entry["previous_hz"] is None
+            assert entry["changed"] is False
+
+    def test_a_raise_tick_shows_the_camera_changed_from_idle(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock, calm(ego_acceleration=9.0))
+        entry = decision.attribution.per_sensor["camera_hz"]
+        assert entry["previous_hz"] == IDLE_RATES["camera_hz"]
+        assert entry["changed"] is True
+
+    def test_the_floor_agrees_with_decisions_clamped_list(self, monkeypatch):
+        import policy.sensing_controller as sc
+
+        monkeypatch.setattr(sc, "MIN_RATE_HZ", 1.0)
+        clock = Clock()
+        controller = sc.SensingController(clock=clock)
+        decision = settled(controller, clock, calm(thermal_status="shutdown"))
+        entry = decision.attribution.per_sensor["here_hz"]
+        assert entry["clamped"] is True
+        assert "here_hz" in decision.clamped
+
+    def test_thermal_exempt_matches_thermal_scaled_keys(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        decision = settled(controller, clock, calm(thermal_status="severe"))
+        for key, entry in decision.attribution.per_sensor.items():
+            assert entry["thermal_exempt"] == (key not in THERMAL_SCALED_KEYS)
+
+
+class TestTriggerAgreesWithGates:
+
+    def test_the_trigger_matches_its_gates_branch_across_a_long_mixed_drive(self):
+        # Both directions: the branch a decision's own gates block implies is the one
+        # `trigger` actually names, over a drive that visits every branch many times.
+        import random
+
+        rng = random.Random(29)
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        raise_names = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT)
+        for _ in range(3000):
+            clock.advance(rng.choice([0.1, 0.2, 0.5, 1.0]))
+            decision = controller.decide(calm(
+                ego_acceleration=rng.choice([0.0, 0.5, 9.0]),
+                policy_margin=rng.choice([0.9, 0.01]),
+                feed_congestion=rng.choice([0.1, 0.9]),
+                camera_density_bin=rng.choice([2, 0]),
+                thermal_status=rng.choice(["nominal", "moderate", "critical"]),
+            ))
+            gates = decision.attribution.gates
+            any_raise_fired = any(decision.attribution.rules[r].status == RULE_FIRED
+                                  for r in raise_names)
+            thermal_fired = decision.attribution.rules[Trigger.THERMAL].status == RULE_FIRED
+
+            if (gates["level"] == "active"
+                    and (gates["dwell"]["satisfied"] or gates["bridged"])
+                    and any_raise_fired):
+                assert decision.trigger in raise_names
+            elif gates["level"] == "active" and gates["hold"]["active"]:
+                assert decision.trigger == Trigger.HOLD
+            elif thermal_fired:
+                assert decision.trigger == Trigger.THERMAL
+            else:
+                assert decision.trigger == Trigger.IDLE
+            assert decision.trigger in Trigger.ALL
+
+
+class TestAttributionVocabularyClosure:
+
+    def test_every_status_cause_and_level_produced_is_a_member(self):
+        import random
+
+        rng = random.Random(7)
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        for _ in range(500):
+            clock.advance(rng.choice([0.1, 0.5, 1.0]))
+            decision = controller.decide(calm(
+                ego_acceleration=rng.choice([0.0, 9.0, None]),
+                policy_margin=rng.choice([0.9, 0.01, None]),
+                feed_congestion=rng.choice([0.1, 0.9, None]),
+                camera_density_bin=rng.choice([2, 0, None]),
+                thermal_status=rng.choice(["nominal", "moderate", "critical", None]),
+                skin_temp_c=rng.choice([30.0, 46.0, None]),
+            ))
+            for check in decision.attribution.rules.values():
+                assert check.status in (RULE_FIRED, RULE_QUIET, RULE_NOT_EVALUABLE)
+            cause = decision.attribution.rules[Trigger.THERMAL].evidence["cause"]
+            assert cause is None or cause in THERMAL_CAUSES
+            assert decision.attribution.gates["level"] in ("idle", "active")
