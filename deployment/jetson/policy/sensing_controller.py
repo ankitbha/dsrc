@@ -679,8 +679,14 @@ class SensingController:
             reasons.append(f"thermal status {inputs.thermal_status}")
             cause = THERMAL_CAUSE_STATUS
         elif scale < 1.0:
-            # Reachable when a status is absent but a skin reading is not. A 40%
-            # rate cut with nothing saying why is not a decision anyone can audit.
+            # Not reachable through `inputs_from`, the only production caller:
+            # `thermal_status` and `skin_temp_c` there both come off one
+            # `PhoneTelemetry`, and `PhoneTelemetry.thermal_status` is a required
+            # string that `require_str` refuses to leave null. So a decoded
+            # telemetry frame always carries a status, and the frame's total
+            # absence is caught by the `no_telemetry` branch above, before this
+            # line runs. This branch only runs when a test builds `Inputs` by
+            # hand with a null status and a non-null skin reading.
             reasons.append("thermal status unknown")
             cause = THERMAL_CAUSE_STATUS
 
