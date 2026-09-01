@@ -39,7 +39,11 @@ sys.path.insert(0, str(JETSON_DIR))
 import numpy as np  # noqa: E402
 
 from sensors.time_sync import StageTiming  # noqa: E402
-from transport.timebase import MIN_OFFSET_SAMPLES, TimebaseEstimate  # noqa: E402
+from transport.timebase import (  # noqa: E402
+    MAX_ACCEPTABLE_RTT_NS,
+    MIN_OFFSET_SAMPLES,
+    TimebaseEstimate,
+)
 
 #: How far apart two devices' `timebase_estimate` and advisory-receipt wall
 #: stamps may sit and still be treated as describing the same moment in the
@@ -132,16 +136,28 @@ def _was_usable(record: dict) -> bool:
 
     `usable` was added to the persisted line alongside `why_not_usable`, both
     read off the estimator at the moment it was written. A run logged before
-    that field existed carries neither, and the only signal still recoverable
-    from it is the same sample-count floor the live gate applies first -- the
-    other gate conditions (staleness, the RTT ceiling) are moments in time
-    that log did not capture and cannot be reconstructed after the fact, so an
-    old estimate that clears the sample floor is taken as usable, same as it
-    would have been read before this field existed.
+    that field existed carries neither, and staleness is the one gate
+    condition that is genuinely unrecoverable from an old-format line: it is a
+    question about how long ago the newest sample arrived relative to *now*,
+    at the moment the estimator was asked, and that moment was never
+    captured. The sample count and the RTT ceiling are not like that --
+    `offset_samples` and `rtt_min_ns` are properties of the estimate itself,
+    written into every persisted line whatever its format, so both gate
+    conditions can still be applied.
+
+    The RTT ceiling is a round-trip-estimator concept: on a one-way line
+    `rtt_min_ns` is a delay spread, not a round trip, and `OneWayEstimator`
+    has no ceiling clause on it at all. Applying the round-trip bound there
+    would refuse estimates the live one-way path accepts.
     """
     if "usable" in record:
         return bool(record["usable"])
-    return record.get("offset_samples", 0) >= MIN_OFFSET_SAMPLES
+    if record.get("offset_samples", 0) < MIN_OFFSET_SAMPLES:
+        return False
+    if record.get("source") != "round_trip":
+        return True
+    rtt = record.get("rtt_min_ns")
+    return rtt is None or rtt <= MAX_ACCEPTABLE_RTT_NS
 
 
 def _nearest_estimate(

@@ -462,6 +462,45 @@ class TestJoinPhoneLog:
         row = join_phone_log([tick], [old_style], [advisory], [])["rows"][0]
         assert row["stages"]["return"]["basis"] == "absent"
 
+    def test_an_old_log_round_trip_line_above_the_rtt_ceiling_is_refused(self):
+        # Unlike staleness, the RTT ceiling is a property of the estimate itself --
+        # `rtt_min_ns` is written into every persisted line, old format or new -- so
+        # an old-format line above the ceiling must be refused exactly as the live
+        # gate would have refused it, not accepted just because `usable` is absent.
+        from transport.timebase import MAX_ACCEPTABLE_RTT_NS
+
+        wall_now = 1_755_000_000.0
+        old_style = a_timebase_estimate(
+            source="round_trip", t_wall=wall_now, offset_ns=0,
+            rtt_min_ns=MAX_ACCEPTABLE_RTT_NS + 1,  # no `usable` key: an old-format line
+        )
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(
+            capture_ns=100, wire_ns=0, recv_ns=0, recv_wall_ns=int(wall_now * 1e9),
+        )
+        row = join_phone_log([tick], [old_style], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "absent"
+
+    def test_an_old_log_one_way_line_above_the_round_trip_ceiling_still_converts(self):
+        # `rtt_min_ns` means something different on a one-way line -- a spread of
+        # observed delays, not half a round trip -- and `OneWayEstimator` has no
+        # ceiling clause on it. Applying the round-trip bound here would refuse an
+        # estimate the live one-way path accepts.
+        from transport.timebase import MAX_ACCEPTABLE_RTT_NS
+
+        wall_now = 1_755_000_000.0
+        old_style = a_timebase_estimate(
+            source="one_way", t_wall=wall_now, offset_ns=0,
+            rtt_min_ns=MAX_ACCEPTABLE_RTT_NS + 1,  # no `usable` key: an old-format line
+        )
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(
+            capture_ns=100, wire_ns=0, recv_ns=0, recv_wall_ns=int(wall_now * 1e9),
+        )
+        row = join_phone_log([tick], [old_style], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "converted"
+        assert row["stages"]["return"]["source"] == "one_way"
+
     def test_return_does_not_convert_against_the_previous_sessions_estimate(self):
         """Both estimators are rebuilt whole on every redial, so their
         `estimate_id` counters restart at 1 on the new session -- an estimate
