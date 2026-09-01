@@ -1064,8 +1064,74 @@ tunnels over USB and is unaffected.
 
 Written as part of the implementation, not added afterwards.
 
-33. Per-stage timestamps across the loop: capture, encode, transport, detect,
-    track, fuse, infer, decode, return, render.
+33. ~~Per-stage timestamps across the loop: capture, encode, transport, detect,
+    track, fuse, infer, decode, return, render.~~
+    Four of the ten already existed on the Jetson; six did not. Capture, encode,
+    return and render happen on the phone, transport was a single capture-to-arrival
+    lump converted through a one-way clock estimate whose own docstring calls it
+    "unfit for attributing latency", and fuse, infer and decode were buried inside
+    two undivided segments. The work: land the `t4`-on-next-ping field so the Jetson
+    forms four-stamp samples and feeds the round-trip estimator it already shipped
+    but never used; carry the phone's capture and encode instants on the camera
+    header as same-clock stamps; split the Jetson tick; and publish a per-tick
+    `stages` object in which every entry says whether it was **measured** on one
+    clock, **converted** across two with a stated bound, or **absent with a named
+    reason** — never a zero.
+    **Three validation rounds, and each round's defects were inside the previous
+    round's fix.** Round 1 (13 findings): `run_demo` persisted a timebase estimate
+    without consulting the estimator's usability gate and `eval_run` converted
+    against it, so with one time-sync sample the live adapter recorded `proxy=True,
+    reason="only 1 samples in the offset window"` while the offline join reported
+    `converted, ms 80.0` against a truth of 40.0 ms with a stated bound of 0.007 ms —
+    an error some 5,700 times its own bound, reachable on every drive. Round 2 (9):
+    round 1's own `capture_stamp_ns` unification had missed a third call site, so
+    `run_phone_drive`'s advisory-match metric disagreed with itself on ~1.5 per cent
+    of ticks; the old-log compatibility fallback reopened the RTT-ceiling clause it
+    had just closed; `superseded = received - shown - expired` went to −1 because
+    `shown` and `expired` are not a partition; and the test pinning the session id
+    asserted source text with `inspect.getsource`, passing for every behavioural
+    defect on the field. Round 3: round 2's new pin was itself unsound, failing 3
+    runs in 8 — the callback assigned on every CONTROL frame into one variable named
+    for the first, so the second pong overwrote it and the assertion read
+    `expected:<57000> but was:<32000>`, **naming the session's correct value as the
+    wrong one**.
+    **Experiment**, 900 ticks over 180 s with the phone dialling the Jetson over a
+    relayed tailnet path and `adb reverse` empty: **900 advisories logged by the
+    phone, 900 matched to a tick, 0 unmatched** — the capture-stamp unification
+    confirmed in the field, where the pre-fix rate would have left about 13
+    unmatched. Per-stage p50s: capture-to-encode 4.3 ms, encode 7.6 ms,
+    encode-to-enqueue 10.4 ms, enqueue-to-wire 12.6 ms, transport 26.8 ms, JPEG
+    decode 10.2 ms, detect 17.8 ms, infer 0.5 ms, return 11.1 ms, render 93.0 ms;
+    Jetson segment mean 30.7 ms, zero dropped frames. **`transport` converted on 898
+    ticks and absent on 2** ("only 3 samples in the offset window"), **`render`
+    measured on 665 and absent on 235** ("no advisory_shown line for this capture
+    stamp") — both absences named rather than zeroed, on real data, which is the
+    property the task exists for.
+    **The experiment found a gap no test could.** All 900 ticks recorded the `stages`
+    block and the report printed none of it: every stage name appeared zero times in
+    `report.md`. The measurement existed and the surface meant to carry it did not.
+    Building that surface then produced two more instances of the same rule — an
+    instant carrying `ms: 0.0` was averaged as a duration, printing `capture | n 900
+    | mean 0.0`, a stage that took no time; and the aggregation read tick records
+    rather than joined rows, so the ten-stage table had twelve rows and lacked the
+    two only the phone witnesses.
+    **The method lesson: four test defects, three of one shape** — a test inferring
+    another thread's state instead of waiting on an observable, then naming the
+    production code when the inference failed. Also four separate cases of a harness
+    reporting something that reads like a result while having measured nothing: a
+    mutation table entry printing SKIP because its anchor had drifted, a mutation run
+    reporting SURVIVED with the module's test count at 816 against a 1091 baseline, a
+    no-op mutation whose two independent guards meant removing either changed
+    nothing, and three instrumented runs scored as failures that installed nothing
+    and ran zero tests. The rule that survives all four: score on the count matching
+    the baseline, not on failures being zero.
+    **Open:** nothing confirms CameraX's frame timestamp is on `elapsedRealtimeNanos`
+    on this handset, so `capture_to_encode_start` could be a subtraction across two
+    clocks reported as `measured`, in the one stage no test reaches; `fuse`'s absent
+    branch is unreachable, so its protection is argued rather than demonstrated; one
+    test still uses `Thread.sleep(200)` where an observable exists (never seen to
+    fail); and runs recorded before this task carry the old pair of capture-stamp
+    spellings, so their `--phone-log` joins will show about 1.5 per cent unmatched.
 34. Trigger attribution in the controller: which rule fired, for which sensor,
     and why.
 35. Shadow-mode decision log emitted alongside the full-rate reference, so every
