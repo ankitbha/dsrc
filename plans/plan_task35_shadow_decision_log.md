@@ -399,6 +399,19 @@ on every report, verbatim from the mode record. `mean_commanded` is a
 decision-function statistic (what the candidate would have asked for), never
 labelled as consumption or outcome.
 
+**Adjudication (2026-09-01): `reference_witness` is segment-scoped; `per_rule`
+stays flat.** The JSON template above shows one flat `reference_witness`
+block, which contradicts this section's own "every count reported per
+segment" — a drive with zero reference ticks reported a full-rate witness
+for a segment its own report calls zero ticks long. Resolved in favour of
+the prose for `reference_witness` alone: it is computed over the `reference`
+segment's ticks only, and the `contaminated` segment gets its own witness
+under `reference_witness_contaminated` (`null` when the drive has no
+contaminated ticks). `per_rule` and `rules` keep the flat, whole-drive
+template as written: those counts are about candidate-versus-incumbent
+agreement, not about what the phone was witnessed running, so nothing about
+`reference_rates_hold` bears on them.
+
 ## The work
 
 1. **`Inputs.to_record()` / `Inputs.from_record()`** in sensing_controller.py:
