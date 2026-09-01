@@ -53,7 +53,7 @@ from policy.sensing_controller import (  # noqa: E402
     Trigger,
 )
 from policy.shadow_mode import ABSENT_IN_PURE_SHADOW  # noqa: E402
-from transport.messages import DROP_KEYS, RATE_KEYS  # noqa: E402
+from transport.messages import RATE_KEYS  # noqa: E402
 
 #: The raise rules `activity.raises` counts. `Trigger.THERMAL` is excluded: it
 #: backs rates off rather than asking for more, so it is not a "raise" in the
