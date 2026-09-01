@@ -585,6 +585,65 @@
       "header_len": 367,
       "frame_len": 373,
       "frame_sha256": "78b81efae03932d8f263ea24575ed58ff33a22fa2783de513aa3a1e9d8a79942"
+    },
+    {
+      "name": "message_camera_with_encode_stamps",
+      "why": "a camera frame carrying the phone's own encode timing (task 33) -- absent-tolerant, so message_camera above stays byte-identical without it",
+      "frame": {
+        "ch": "camera",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000010,
+          "frame_id": 1842,
+          "width": 1280,
+          "height": 720,
+          "format": "jpeg",
+          "quality": 85,
+          "t_encode_start_mono_ns": 1000000020,
+          "t_encode_done_mono_ns": 1000000035
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 4096
+      },
+      "prefix_hex": "000010000104",
+      "header_hex": "7b226368223a2263616d657261222c22666f726d6174223a226a706567222c226672616d655f6964223a313834322c22686569676874223a3732302c226e223a343039362c227175616c697479223a38352c22736571223a312c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303031302c22745f656e636f64655f646f6e655f6d6f6e6f5f6e73223a313030303030303033352c22745f656e636f64655f73746172745f6d6f6e6f5f6e73223a313030303030303032302c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c227769647468223a313238307d",
+      "header_len": 260,
+      "frame_len": 4362,
+      "frame_sha256": "768f3b714a96431a966376083d968ff6f053d07a9c13fce9d57c544899c5693b"
+    },
+    {
+      "name": "message_time_sync_ping_with_prev",
+      "why": "a ping carrying the previous exchange (task 33): the trio a responder needs to reconstruct a round-trip sample with no pending state of its own",
+      "frame": {
+        "ch": "control",
+        "seq": 1,
+        "t_mono_ns": 1100000000,
+        "t_wall_ns": 1755648000000000000,
+        "extensions": {
+          "t_capture_mono_ns": 1000000011,
+          "exchange_id": 18,
+          "t_wire_mono_ns": 0,
+          "t_peer_recv_mono_ns": null,
+          "t_peer_recv_wall_ns": null,
+          "t_peer_wire_mono_ns": null,
+          "prev_exchange_id": 17,
+          "t_prev_pong_wire_mono_ns": 1000000100,
+          "t_prev_pong_recv_mono_ns": 1000000130
+        }
+      },
+      "payload": {
+        "kind": "pattern",
+        "length": 0
+      },
+      "prefix_hex": "00000000014b",
+      "header_hex": "7b226368223a22636f6e74726f6c222c2265786368616e67655f6964223a31382c226e223a302c22707265765f65786368616e67655f6964223a31372c22736571223a312c22745f636170747572655f6d6f6e6f5f6e73223a313030303030303031312c22745f6d6f6e6f5f6e73223a313130303030303030302c22745f706565725f726563765f6d6f6e6f5f6e73223a6e756c6c2c22745f706565725f726563765f77616c6c5f6e73223a6e756c6c2c22745f706565725f776972655f6d6f6e6f5f6e73223a6e756c6c2c22745f707265765f706f6e675f726563765f6d6f6e6f5f6e73223a313030303030303133302c22745f707265765f706f6e675f776972655f6d6f6e6f5f6e73223a313030303030303130302c22745f77616c6c5f6e73223a313735353634383030303030303030303030302c22745f776972655f6d6f6e6f5f6e73223a307d",
+      "header_len": 331,
+      "frame_len": 337,
+      "frame_sha256": "d8505459b10f10c2b93507f4781d2a55331b3d8995b53ba9de7d75535a74200e"
     }
   ]
 }

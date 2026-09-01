@@ -282,6 +282,29 @@ MESSAGES = [
             skin_temp_c=41.5, skin_temp_zone="xo_therm",
         ),
     ),
+    # Two more absent-tolerant additions, appended rather than edited into their
+    # nearest existing case for the same reason as message_telemetry_with_skin:
+    # a frozen vector that moves is not a vector.
+    (
+        "message_camera_with_encode_stamps",
+        "a camera frame carrying the phone's own encode timing (task 33) -- "
+        "absent-tolerant, so message_camera above stays byte-identical without it",
+        CameraFrame(
+            t_capture_mono_ns=1_000_000_010, frame_id=1842, width=1280, height=720,
+            format="jpeg", quality=85, jpeg=pattern_payload(4096),
+            t_encode_start_mono_ns=1_000_000_020, t_encode_done_mono_ns=1_000_000_035,
+        ),
+    ),
+    (
+        "message_time_sync_ping_with_prev",
+        "a ping carrying the previous exchange (task 33): the trio a responder "
+        "needs to reconstruct a round-trip sample with no pending state of its own",
+        TimeSyncMessage(
+            t_capture_mono_ns=1_000_000_011, exchange_id=18,
+            prev_exchange_id=17, t_prev_pong_wire_mono_ns=1_000_000_100,
+            t_prev_pong_recv_mono_ns=1_000_000_130,
+        ),
+    ),
 ]
 
 

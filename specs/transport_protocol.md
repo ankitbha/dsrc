@@ -334,14 +334,39 @@ by the sender's transport rather than by the message.
 
 | channel | header fields | payload |
 |---|---|---|
-| `camera` | `frame_id`, `width`, `height`, `format`, `quality` | JPEG bytes |
+| `camera` | `frame_id`, `width`, `height`, `format`, `quality`, `t_encode_start_mono_ns`*, `t_encode_done_mono_ns`* | JPEG bytes |
 | `gps` | `valid`, `lat`, `lon`, `speed_mps`, `heading_deg`, `fix_quality`, `num_sats`, `hdop`, `altitude_m`, `utc_epoch_ns` | empty |
 | `imu` | `ax`, `ay`, `az`, `gx`, `gy`, `gz`, `accuracy` | empty |
 | `here` | `request_url`, `status`, `content_type`, `query_lat`, `query_lon`, `query_radius_m`, `t_request_mono_ns`, `t_response_mono_ns` | response body bytes |
 | `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `headway_target_s`, `lane_text`, `merge_text`, `traffic_text`, `confidence`, `confidence_label`, `action` | empty |
 | `rate_cmd` | `rates`, `trigger`, `shadow` | empty |
 | `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors`, `skin_temp_c`*, `skin_temp_zone`* | empty |
-| `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns`, `t_peer_wire_mono_ns` | empty |
+| `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns`, `t_peer_wire_mono_ns`, `prev_exchange_id`*, `t_prev_pong_wire_mono_ns`*, `t_prev_pong_recv_mono_ns`* | empty |
+
+The fields above marked `*`, like `skin_temp_c` and `skin_temp_zone` below,
+are absent-tolerant rather than merely nullable: added to a channel that
+already ships, so an older sender does not write them at all and a receiver
+that required them would refuse every one of that sender's messages.
+
+`t_encode_start_mono_ns` and `t_encode_done_mono_ns` bracket the phone's own
+JPEG encode, on the same clock as `t_capture_mono_ns` and the header's
+`t_mono_ns` -- so every phone-side duration between capture and the wire is a
+plain subtraction, exact, with no timebase involved.
+
+The `control` trio lets a ping carry the exchange that produced the pong
+before it: `prev_exchange_id` names it, `t_prev_pong_wire_mono_ns` echoes that
+pong's own wire departure back, and `t_prev_pong_recv_mono_ns` is the
+initiator's receipt of it. All three are present together or absent
+together -- absent on the first ping of a session, where there is no previous
+exchange to carry. This is what lets the side that only ever answers pings
+reconstruct a complete four-stamp round-trip sample despite never initiating
+one itself: with `t1` the pong's own departure (its own clock, already
+known), `t2` the echoed `t_prev_pong_recv_mono_ns` (the initiator's clock),
+`t3` this ping's own `t_wire_mono_ns` (the initiator's clock), and `t4` this
+side's own receipt of it (its own clock) -- every ordering check under The
+Arithmetic below applies unchanged, and the responder holds no pending state
+at all: each ping is either the first of a session, or already carries
+everything the previous exchange needs.
 
 Nullable fields: every numeric field of `gps` except `valid`, `fix_quality` and
 `num_sats`; `quality` on `camera`; `accuracy` on `imu`; `thermal_headroom` on

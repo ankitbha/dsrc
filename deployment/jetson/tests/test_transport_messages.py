@@ -680,6 +680,10 @@ POPULATED_OPTIONALS = {
             for field in a_telemetry(skin_temp_c=30.112, skin_temp_zone="xo_therm").to_wire()[0]
         }
         if channel is Channel.TELEMETRY
+        else set(a_camera_frame_with_encode_stamps().to_wire()[0])
+        if channel is Channel.CAMERA
+        else set(a_time_sync_ping_with_prev().to_wire()[0])
+        if channel is Channel.CONTROL
         else set()
     )
     for channel in MESSAGE_FOR_CHANNEL
