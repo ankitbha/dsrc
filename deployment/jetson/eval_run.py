@@ -38,6 +38,7 @@ sys.path.insert(0, str(JETSON_DIR))
 
 import numpy as np  # noqa: E402
 
+from policy import sim_contract  # noqa: E402
 from sensors.time_sync import StageTiming  # noqa: E402
 from transport.timebase import (  # noqa: E402
     MAX_ACCEPTABLE_RTT_NS,
@@ -491,10 +492,40 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     fallback_counter: Counter[str] = Counter()
     for t in ticks:
         fallback_counter.update(t["obs_diagnostics"].get("fallback_fields", []))
+
+    # Every tick back to the beginning carries `field_sources`, so this reads
+    # cleanly off a run recorded before this task too -- it just reports
+    # fewer fields and `covers_encoder: False`, the `jetson_ms_source`
+    # precedent for a run whose shape predates the field being measured.
+    provenance_fields: int | None = None
+    by_source_counter: Counter[str] = Counter()
+    fields_by_class: dict[str, Counter[str]] = defaultdict(Counter)
+    for t in ticks:
+        field_sources = t.get("field_sources") or {}
+        if provenance_fields is None and field_sources:
+            provenance_fields = len(field_sources)
+        for field_name, source in field_sources.items():
+            by_source_counter[source] += 1
+            fields_by_class[source][field_name] += 1
+    total_field_ticks = sum(by_source_counter.values())
+    covers_encoder = (
+        None if provenance_fields is None
+        else provenance_fields == sim_contract.local_obs_dim()
+    )
     observation = {
         "missingness": pctl(missingness),
         "top_fallback_fields": {
             k: round(c / len(ticks), 3) for k, c in fallback_counter.most_common(8)
+        },
+        "provenance_fields": provenance_fields,
+        "covers_encoder": covers_encoder,
+        "by_source": (
+            {k: round(c / total_field_ticks, 3) for k, c in by_source_counter.items()}
+            if total_field_ticks else {}
+        ),
+        "fields_by_source": {
+            source: {field: round(c / len(ticks), 3) for field, c in counter.most_common(8)}
+            for source, counter in fields_by_class.items()
         },
     }
 
@@ -819,7 +850,33 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         "",
         "## Observation quality",
         "",
-        f"- encoder-field missingness: mean {r['observation']['missingness']['mean']:.1%}",
+    ]
+    obs = r["observation"]
+    pf = obs.get("provenance_fields")
+    lines.append(
+        f"- encoder-field missingness: mean {obs['missingness']['mean']:.1%}"
+        + (f" of {pf} provenance-tagged fields" if pf is not None else "")
+    )
+    if pf is not None:
+        lines.append(
+            f"- provenance covers {pf} of {sim_contract.local_obs_dim()} encoder slots"
+        )
+    if obs.get("by_source"):
+        by_source_str = ", ".join(
+            f"{source} {frac:.1%}"
+            for source, frac in sorted(obs["by_source"].items(), key=lambda kv: -kv[1])
+        )
+        lines.append(f"- by source: {by_source_str}")
+    derived_empty_fields = obs.get("fields_by_source", {}).get("derived_empty")
+    if derived_empty_fields:
+        parts = ", ".join(
+            f"{field} {frac:.0%} of ticks" for field, frac in derived_empty_fields.items()
+        )
+        lines.append(
+            "- derived from an absence (a blind sensor and an empty road are the same "
+            f"number here): {parts}"
+        )
+    lines += [
         f"- most frequent fallback fields (fraction of ticks): "
         f"{r['observation']['top_fallback_fields']}",
         "",

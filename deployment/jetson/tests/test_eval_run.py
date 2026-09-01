@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from eval_run import analyze, join_phone_log, load_phone_log, stage_timings
+from eval_run import analyze, join_phone_log, load_phone_log, render_markdown, stage_timings
 
 T0 = 1_750_000_000.0
 RATE_HZ = 30.0
@@ -12,7 +12,7 @@ RATE_HZ = 30.0
 
 def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
               gps_fresh=True, leader_rel_measured=True, jetson_ms=None,
-              link_ms=None) -> dict:
+              link_ms=None, field_sources=None) -> dict:
     has_leader = leader_gap is not None
     gap = leader_gap if has_leader else float("inf")
     return {
@@ -36,7 +36,7 @@ def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
             if has_leader else []
         ),
         "obs": {"leader_gap": gap, "ego_speed": ego_speed},
-        "field_sources": {
+        "field_sources": field_sources if field_sources is not None else {
             "leader_relative_speed": "measured" if (has_leader and leader_rel_measured)
             else "fallback_neutral",
         },
@@ -628,3 +628,83 @@ class TestStageTimings:
         out = stage_timings(ticks)["render"]
         assert out["stats"] is None
         assert out["absent_reasons"] == {"no advisory_shown line": 4}
+
+
+def _grounded_field_sources() -> dict:
+    """A real 39-key `field_sources` map, produced by the actual builder --
+    not hand-typed, so this fixture cannot drift from what
+    `ObservationBuilder` actually emits.
+    """
+    from perception.observation_builder import BuilderConfig, ObservationBuilder
+    from sensors.gps_reader import GpsFix
+
+    builder = ObservationBuilder(BuilderConfig())
+    result = None
+    for i in range(5):
+        t = 1000.0 + i * 0.1
+        fix = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0, heading_deg=90.0,
+                    fix_quality=1, num_sats=8, hdop=1.0, t_mono=t, t_wall=0.0)
+        result = builder.build([], fix, t)
+    return result.field_sources
+
+
+class TestObservationProvenance:
+    """`observation`'s four new keys, computed from each tick's own
+    `field_sources` -- which every log back to the beginning carries, so an
+    old, 1-key fixture reports `covers_encoder: False` rather than crashing
+    (the `jetson_ms_source` precedent), and a full 39-key one reports the
+    real rollup.
+    """
+
+    def test_a_pre_task_36_style_fixture_reports_covers_encoder_false(self, tmp_path):
+        # `make_tick`'s own default `field_sources` is a single key -- never
+        # the full 33- or 39-field map -- which is exactly the shape a log
+        # missing this task's coverage takes.
+        ticks = [make_tick(i) for i in range(10)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        obs = result["observation"]
+        assert obs["covers_encoder"] is False
+        assert obs["provenance_fields"] == 1
+
+    def test_a_full_map_reports_covers_encoder_true_and_by_source_sums_to_one(self, tmp_path):
+        sources = _grounded_field_sources()
+        ticks = [make_tick(i, field_sources=sources) for i in range(10)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        obs = result["observation"]
+        assert obs["provenance_fields"] == 39
+        assert obs["covers_encoder"] is True
+        # Each class's fraction is independently rounded to three places, so
+        # the sum is close to but not always exactly 1.0.
+        assert sum(obs["by_source"].values()) == pytest.approx(1.0, abs=0.01)
+        assert "derived_empty" in obs["by_source"]
+
+    def test_fields_by_source_names_the_derived_empty_fields(self, tmp_path):
+        sources = _grounded_field_sources()
+        ticks = [make_tick(i, field_sources=sources) for i in range(5)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        derived_empty = result["observation"]["fields_by_source"]["derived_empty"]
+        assert "local_density_bin" in derived_empty
+        assert derived_empty["local_density_bin"] == pytest.approx(1.0)
+
+    def test_report_md_names_the_by_source_line_and_derived_empty_fields(self, tmp_path):
+        sources = _grounded_field_sources()
+        ticks = [make_tick(i, field_sources=sources) for i in range(5)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        report = render_markdown(result, [])
+        assert "provenance covers 39 of 39 encoder slots" in report
+        assert "by source:" in report
+        assert "local_density_bin" in report
+
+    def test_a_pre_task_36_style_fixture_still_renders_a_report(self, tmp_path):
+        # Does not crash on the shape every pre-task-36 log has, and states
+        # the incomplete coverage rather than omitting the line.
+        ticks = [make_tick(i) for i in range(5)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        report = render_markdown(result, [])
+        assert "encoder-field missingness" in report
+        assert "provenance covers 1 of 39 encoder slots" in report
