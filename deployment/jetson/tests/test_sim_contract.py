@@ -213,6 +213,11 @@ class TestEncodedSlotNames:
         # `contract_fingerprint` hashes only `LOCAL_OBS_FIELDS` and
         # `FIELD_SCALES` (sim_contract.py:253-258) -- this helper introduces
         # no new constant, so calling it must not move the fingerprint.
+        # Pinned against the golden value rather than only against itself:
+        # two calls to the same pure function agree with each other no
+        # matter what either one returns, so that comparison alone cannot
+        # fail.
         before = sim_contract.contract_fingerprint()
+        assert before == "918ec57cf2f2e1db"
         sim_contract.encoded_slot_names()
         assert sim_contract.contract_fingerprint() == before
