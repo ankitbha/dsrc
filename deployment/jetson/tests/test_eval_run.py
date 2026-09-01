@@ -249,7 +249,7 @@ class TestATruncatedLogIsNotACompleteRun:
         assert integrity["unparseable_lines"] == 0
 
 
-# -- task 33: joining the phone's own log against the Jetson's ticks --------
+# -- joining the phone's own log against the Jetson's ticks -----------------
 
 
 def write_phone_log(tmp_path, lines: list[dict]):

@@ -151,7 +151,7 @@ def test_stage_timings_recorded(pipeline) -> None:
     assert snapshot["e2e_ms"]["p95"] >= snapshot["e2e_ms"]["p50"] >= 0.0
 
 
-# -- task 33: the per-tick stages record --------------------------------------
+# -- the per-tick stages record -----------------------------------------------
 
 
 ALL_STAGE_KEYS = {

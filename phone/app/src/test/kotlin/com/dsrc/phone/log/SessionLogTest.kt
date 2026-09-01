@@ -171,7 +171,7 @@ class SessionLogTest {
         assertFalse(log.stats.complete)
     }
 
-    // -- task 33: the two inbound line shapes ---------------------------------
+    // -- the two inbound line shapes -------------------------------------------
 
     private fun anAdvisoryHeader(captureMonoNs: Long = 555) = JsonValue.Obj(
         mapOf(

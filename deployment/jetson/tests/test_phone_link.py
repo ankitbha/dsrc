@@ -165,7 +165,7 @@ class TestTimeSyncDirection:
 
 
 class TestRoundTripReconstruction:
-    """D2: a ping that carries the previous exchange lets the Jetson build a
+    """A ping that carries the previous exchange lets the Jetson build a
     round-trip sample despite never initiating one, with no pending state of
     its own."""
 

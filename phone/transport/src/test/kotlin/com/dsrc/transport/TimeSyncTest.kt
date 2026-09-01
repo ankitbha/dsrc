@@ -215,7 +215,7 @@ class TimeSyncTest {
         assertEquals(reply, TimeSyncMessage.fromWire(reply.toExtensions(), ByteArray(0)))
     }
 
-    // -- D2: a ping may carry the previous exchange --------------------------
+    // -- a ping may carry the previous exchange -------------------------------
 
     private val pingWithPrev = ping.copy(
         exchangeId = 18,

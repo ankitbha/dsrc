@@ -135,7 +135,8 @@ def a_time_sync_pong(**over):
 
 
 def a_time_sync_ping_with_prev(**over):
-    """A ping that also carries the previous exchange, per task 33's D2."""
+    """A ping that also carries the previous exchange: the trio a responder
+    uses to reconstruct a round-trip sample without initiating one itself."""
     fields = dict(
         t_capture_mono_ns=888, exchange_id=5,
         prev_exchange_id=4, t_prev_pong_wire_mono_ns=1_000, t_prev_pong_recv_mono_ns=1_050,
@@ -145,7 +146,7 @@ def a_time_sync_ping_with_prev(**over):
 
 
 def a_camera_frame_with_encode_stamps(**over):
-    """A camera frame carrying the phone's encode timing, per task 33's D3."""
+    """A camera frame carrying the phone's own encode timing."""
     fields = dict(
         t_capture_mono_ns=111, frame_id=7, width=1280, height=720,
         format="jpeg", quality=85, jpeg=b"\xff\xd8fake",
@@ -1885,7 +1886,7 @@ class TestCameraEncodeStamps:
     """The two phone-clock encode stamps, added to a channel that already ships.
 
     Same shape as `TestSkinTemperature`: absent-tolerant rather than merely
-    nullable, so a phone build from before task 33 is still accepted.
+    nullable, so a phone build that predates these fields is still accepted.
     """
 
     def test_a_phone_that_does_not_send_them_is_still_accepted(self):
@@ -1922,7 +1923,7 @@ class TestCameraEncodeStamps:
 
 class TestTimeSyncPreviousExchange:
     """The trio a ping may carry so a responder can build a round-trip sample
-    with no pending state of its own -- task 33's D2."""
+    with no pending state of its own."""
 
     def test_the_first_ping_of_a_session_carries_none_of_it(self):
         extensions, _ = a_time_sync_ping().to_wire()

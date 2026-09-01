@@ -24,8 +24,8 @@ data class CameraFrameMessage(
      * plain subtraction, exact, with no timebase involved.
      *
      * Absent-tolerant rather than merely nullable: added to a channel that already
-     * ships, so a build from before task 33 does not write them at all, and requiring
-     * them would refuse every frame from that build.
+     * ships, so an older build does not write them at all, and requiring them would
+     * refuse every frame from that build.
      */
     val encodeStartMonoNs: Long? = null,
     val encodeDoneMonoNs: Long? = null,

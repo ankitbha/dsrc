@@ -1913,7 +1913,7 @@ def test_a_reconstructed_estimate_from_to_record_converts_identically():
     assert original.bound_ns == replayed.bound_ns
 
 
-# -- D2: a responder reconstructs a sample from a ping's carried trio --------
+# -- a responder reconstructs a sample from a ping's carried trio -----------
 
 
 def test_the_initiator_carries_the_last_pong_onto_the_next_ping():
@@ -1966,8 +1966,8 @@ def test_the_carry_forward_survives_an_unmatched_pong():
 
 
 def test_a_responder_with_zero_pending_state_reconstructs_a_usable_estimate():
-    """The whole point of D2: a device that can only ever answer -- and so
-    never forms a `TimeSyncSample` of its own -- builds one anyway, from the
+    """A device that can only ever answer -- and so never forms a
+    `TimeSyncSample` of its own -- builds one anyway, from the
     pong it sent and the trio the next ping echoes back. No table of pending
     exchanges is needed on this side at all: each iteration below reads only
     the ping just received and a running "what did I send last" scalar, never

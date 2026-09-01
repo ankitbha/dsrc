@@ -588,7 +588,7 @@
     },
     {
       "name": "message_camera_with_encode_stamps",
-      "why": "a camera frame carrying the phone's own encode timing (task 33) -- absent-tolerant, so message_camera above stays byte-identical without it",
+      "why": "a camera frame carrying the phone's own encode timing -- absent-tolerant, so message_camera above stays byte-identical without it",
       "frame": {
         "ch": "camera",
         "seq": 1,
@@ -617,7 +617,7 @@
     },
     {
       "name": "message_time_sync_ping_with_prev",
-      "why": "a ping carrying the previous exchange (task 33): the trio a responder needs to reconstruct a round-trip sample with no pending state of its own",
+      "why": "a ping carrying the previous exchange: the trio a responder needs to reconstruct a round-trip sample with no pending state of its own",
       "frame": {
         "ch": "control",
         "seq": 1,

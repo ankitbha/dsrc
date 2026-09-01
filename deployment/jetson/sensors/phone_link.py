@@ -143,7 +143,7 @@ class PhoneLink:
             accept_poll_s=0.2,
         )
         self.estimator = OneWayEstimator()
-        # The round-trip estimator, fed from the D2 reconstruction in
+        # The round-trip estimator, fed from the reconstruction in
         # `_answer_pings`: every ping that carries the previous exchange gives
         # this side a full four-stamp sample despite never initiating one
         # itself. Tried first by the adapter -- see `PhoneClockAdapter` -- and
@@ -522,13 +522,13 @@ class PhoneLink:
         """Answer every ping, and take the arrival as a one-way sample -- and,
         when the ping carries it, reconstruct a round-trip one too.
 
-        Three jobs on one message now. Answering is what the phone needs to
-        build *its* estimate; the one-way sample is the fallback this side can
-        always build; and the round-trip sample -- from the previous exchange a
-        ping may carry, per D2 -- is the one worth preferring, because its
-        error is bounded by half a round trip rather than by an unobservable
-        delay floor. Skipping the third would leave every stamp we convert on
-        the wider bound even once the phone build supports the better one.
+        Three jobs on one message. Answering is what the phone needs to build
+        *its* estimate; the one-way sample is the fallback this side can
+        always build; and the round-trip sample -- from the previous exchange
+        a ping may carry -- is the one worth preferring, because its error is
+        bounded by half a round trip rather than by an unobservable delay
+        floor. Skipping the third would leave every stamp we convert on the
+        wider bound even once the phone build supports the better one.
         """
         assert self.router is not None
         while not self._stop.is_set():

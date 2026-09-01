@@ -134,12 +134,7 @@ object Fields {
         }
     }
 
-    /**
-     * As [absentableNumber], for an integer field added to a shipped protocol.
-     *
-     * No existing absentable field before task 33 was an integer -- `skin_temp_c` and
-     * `skin_temp_zone` are a number and a string -- so this did not exist yet.
-     */
+    /** As [absentableNumber], for an integer field added to a shipped protocol. */
     fun absentableInt(extensions: Map<String, JsonValue>, key: String): Long? {
         val value = extensions[key] ?: return null
         return when (value) {

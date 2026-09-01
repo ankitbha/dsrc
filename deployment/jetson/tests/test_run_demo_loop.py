@@ -137,9 +137,9 @@ class _FakeLogger:
 
 
 class TestTimebaseEstimateLogging:
-    """D7: a `timebase_estimate` line per source, written only when the
-    estimate actually changes, so an offline reader can re-derive a
-    conversion against the estimate that was current at the time."""
+    """A `timebase_estimate` line per source, written only when the estimate
+    actually changes, so an offline reader can re-derive a conversion against
+    the estimate that was current at the time."""
 
     def test_no_estimate_on_either_side_writes_nothing(self):
         logger = _FakeLogger()

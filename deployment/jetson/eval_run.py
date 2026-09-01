@@ -303,7 +303,8 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     `phone_log_path` is optional: a run with no phone behind it, or one whose
     phone log was not pulled off the handset, still analyses fully on the
     eight Jetson-side stages every tick already carries. When it is supplied,
-    the two logs are joined into the ten-stage table task 33 asks for.
+    the two logs are joined into a ten-stage table that adds `return` and
+    `render`, the two facts only the phone witnesses.
     """
     ticks, scenario, timebase_estimates, unparseable = load_records(run_dir / "metadata.jsonl")
     if not ticks:

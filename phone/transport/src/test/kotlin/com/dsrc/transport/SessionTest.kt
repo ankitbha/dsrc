@@ -1340,7 +1340,7 @@ class SessionTest {
 
     @Test
     fun `the second ping carries the exchange the first pong answered`() {
-        // D2: this is what lets a responder that never initiates reconstruct a
+        // This is what lets a responder that never initiates reconstruct a
         // round-trip sample -- t1 is its own pong's departure, already known to it;
         // t2 and t4 arrive on the very next ping.
         val clock = AtomicLong(1_000)

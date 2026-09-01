@@ -129,7 +129,7 @@ class CameraPipelineTest {
         }
     }
 
-    // -- encode timing (task 33) ----------------------------------------------
+    // -- encode timing ---------------------------------------------------------
 
     @Test
     fun `the encode stamps bracket the compress call, on the injected clock`() {

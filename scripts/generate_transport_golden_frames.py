@@ -287,8 +287,8 @@ MESSAGES = [
     # a frozen vector that moves is not a vector.
     (
         "message_camera_with_encode_stamps",
-        "a camera frame carrying the phone's own encode timing (task 33) -- "
-        "absent-tolerant, so message_camera above stays byte-identical without it",
+        "a camera frame carrying the phone's own encode timing -- absent-tolerant, "
+        "so message_camera above stays byte-identical without it",
         CameraFrame(
             t_capture_mono_ns=1_000_000_010, frame_id=1842, width=1280, height=720,
             format="jpeg", quality=85, jpeg=pattern_payload(4096),
@@ -297,8 +297,8 @@ MESSAGES = [
     ),
     (
         "message_time_sync_ping_with_prev",
-        "a ping carrying the previous exchange (task 33): the trio a responder "
-        "needs to reconstruct a round-trip sample with no pending state of its own",
+        "a ping carrying the previous exchange: the trio a responder needs to "
+        "reconstruct a round-trip sample with no pending state of its own",
         TimeSyncMessage(
             t_capture_mono_ns=1_000_000_011, exchange_id=18,
             prev_exchange_id=17, t_prev_pong_wire_mono_ns=1_000_000_100,

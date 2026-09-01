@@ -116,8 +116,9 @@ class CameraFrameSender(
             encodeDoneMonoNs = frame.encodeDoneMonoNs,
         )
         // Asked for on every camera frame, not conditionally: this is the busiest
-        // channel and the one whose network hop task 33's "transport" stage needs, and
-        // the added header cost is one int64 -- negligible against a JPEG payload.
+        // channel and a departure stamp is what a receiver needs to measure the
+        // network hop, and the added header cost is one int64 -- negligible against
+        // a JPEG payload.
         val accepted = send(Channels.CAMERA, message.toExtensions(), frame.jpeg, true)
         if (accepted) sent.incrementAndGet() else refused.incrementAndGet()
         return accepted

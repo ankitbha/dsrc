@@ -106,7 +106,7 @@ class CameraFrameMessageTest {
         assertEquals(7, decoded.frameId)
     }
 
-    // -- task 33: the phone's own encode timing, absent-tolerant -------------
+    // -- the phone's own encode timing, absent-tolerant -----------------------
 
     @Test
     fun `a message with no encode stamps omits both keys rather than nulling them`() {

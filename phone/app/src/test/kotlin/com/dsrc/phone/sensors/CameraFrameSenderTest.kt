@@ -63,8 +63,8 @@ class CameraFrameSenderTest {
 
     @Test
     fun `every dispatch asks for a wire stamp`() {
-        // The busiest channel, and the one task 33's transport stage needs: the network
-        // hop cannot be measured at all without the departure stamp this asks for.
+        // The busiest channel: a receiver cannot measure the network hop at all
+        // without the departure stamp this asks for.
         val (sink, sender) = sender()
         sender.dispatch(frame(1))
 
