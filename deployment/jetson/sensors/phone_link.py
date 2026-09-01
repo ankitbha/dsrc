@@ -913,6 +913,12 @@ class PhoneLink:
                 "thermal_headroom": getattr(self.telemetry, "thermal_headroom", None),
                 "skin_temp_c": getattr(self.telemetry, "skin_temp_c", None),
                 "skin_temp_zone": getattr(self.telemetry, "skin_temp_zone", None),
+                # What the phone reports it actually achieved and dropped, per
+                # `RATE_KEYS`/`DROP_KEYS` -- read nowhere on this side before this
+                # task, so the "full-rate reference" was an assumption about the
+                # phone's startup defaults rather than a measurement of the drive.
+                "achieved": getattr(self.telemetry, "achieved", None),
+                "dropped": getattr(self.telemetry, "dropped", None),
                 "at_mono": self.telemetry_at_mono,
                 "reader_alive": bool(self._telemetry_reader and self._telemetry_reader.is_alive()),
             },

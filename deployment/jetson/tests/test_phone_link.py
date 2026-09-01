@@ -666,6 +666,13 @@ class TestTelemetryIngestion:
             record = link.to_record()["telemetry"]
             assert record["thermal_status"] == "moderate"
             assert record["skin_temp_c"] == 41.5
+            # What the phone reports it actually achieved and dropped -- read
+            # nowhere on this side before task 35, so the drive summary's
+            # "full-rate reference" was an assumption about the phone's
+            # startup defaults rather than a measurement of this drive.
+            assert record["achieved"] == {"camera_hz": 4.9, "gps_hz": 1.0,
+                                          "imu_hz": 49.8, "here_hz": 0.2}
+            assert record["dropped"] == {"camera": 0, "gps": 0, "imu": 0, "here": 0}
         finally:
             link.stop()
             phone.close()
@@ -679,6 +686,10 @@ class TestTelemetryIngestion:
             assert record["received"] == 0
             assert record["thermal_status"] is None
             assert record["skin_temp_c"] is None
+            # Absent, not zero: a phone reporting zero achieved and a phone
+            # never heard from are different drives.
+            assert record["achieved"] is None
+            assert record["dropped"] is None
         finally:
             link.stop()
             phone.close()
