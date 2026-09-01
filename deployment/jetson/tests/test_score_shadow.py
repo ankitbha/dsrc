@@ -54,11 +54,41 @@ class FakeGps:
     valid: bool = True
 
 
+def _grounded_field_sources() -> dict[str, str]:
+    """A real 39-key `field_sources` map, produced by the actual builder on a
+    plain fresh-GPS, no-vehicles, no-peers tick -- not hand-typed, so this
+    fixture cannot drift from what `ObservationBuilder` actually emits.
+
+    Warmed up over five fresh ticks so `ego_acceleration` settles to
+    `derived` rather than a fresh builder's first-tick `fallback_neutral` --
+    otherwise every fixture built from this default would have its
+    `ego_acceleration` nulled by `inputs_from` regardless of what `obs`
+    itself sets it to, which is not what any test using this fixture means
+    to exercise unless it says so explicitly.
+    """
+    import time as _time
+
+    from perception.observation_builder import BuilderConfig, ObservationBuilder
+    from sensors.gps_reader import GpsFix
+
+    builder = ObservationBuilder(BuilderConfig())
+    now = _time.monotonic()
+    result = None
+    for i in range(5):
+        t = now + i * 0.1
+        fix = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                    heading_deg=90.0, fix_quality=1, num_sats=8, hdop=1.0,
+                    t_mono=t, t_wall=_time.time())
+        result = builder.build([], fix, t)
+    return result.field_sources
+
+
 @dataclass
 class FakeObs:
     obs: dict
     feed: Any = None
     diagnostics: dict = field(default_factory=lambda: {"gps_age_s": 0.4})
+    field_sources: dict = field(default_factory=_grounded_field_sources)
 
 
 @dataclass
@@ -86,10 +116,13 @@ def _advisory() -> Advisory:
                 "lane_preference": "keep", "merge_mode": "normal"})
 
 
-def _tick(tick_id: int, *, accel=0.0, density=2, feed=None) -> FakeTick:
+def _tick(tick_id: int, *, accel=0.0, density=2, feed=None, field_sources=None) -> FakeTick:
+    obs_kwargs = dict(obs={"ego_acceleration": accel, "ego_speed": 20.0,
+                          "local_density_bin": float(density)}, feed=feed)
+    if field_sources is not None:
+        obs_kwargs["field_sources"] = field_sources
     return FakeTick(
-        obs_result=FakeObs(obs={"ego_acceleration": accel, "ego_speed": 20.0,
-                                "local_density_bin": float(density)}, feed=feed),
+        obs_result=FakeObs(**obs_kwargs),
         policy=FakePolicy(head_probs={
             head: [0.95, 0.05] for head in ACTION_HEADS}),
         gps=FakeGps(),
@@ -130,6 +163,7 @@ def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(
               accel_ticks: frozenset = frozenset(),
               thermal_status_at: Callable[[int], str] | None = None,
               tick_id_base: int = 1000,
+              field_sources: dict | None = None,
               name: str = "run") -> Path:
     """A run directory built from a real `SensingLoop`, so every `sensing`
     block scored here is byte-for-byte what `TickOutcome.to_record()` emits.
@@ -162,7 +196,9 @@ def write_run(tmp_path: Path, n: int = 10, *, feed_ticks: frozenset = frozenset(
         feed = _jammed_feed() if i in feed_ticks else None
         density = 0 if i in feed_ticks else 2
         accel = 3.0 if i in accel_ticks else 0.0
-        outcome = loop.on_tick(_tick(i, accel=accel, feed=feed, density=density), phone)
+        outcome = loop.on_tick(
+            _tick(i, accel=accel, feed=feed, density=density, field_sources=field_sources), phone,
+        )
         lines.append({"type": "tick", "tick_id": tick_id_base + i, "sensing": outcome.to_record()})
 
     run_dir = tmp_path / name
@@ -919,3 +955,136 @@ class TestRenderTable:
         table = score_shadow.render_table(result)
         assert "reference_witness (reference segment)" not in table
         assert "reference_witness (contaminated segment)" in table
+
+
+def _substituted_accel_field_sources() -> dict:
+    """A grounded 39-key map with `ego_acceleration` forced to a
+    substitution, so a drive built from it is `not_evaluable` on
+    `event_from_free_tier` throughout -- the shape `_rules_never_exercised`'s
+    `why` map exists to explain.
+    """
+    sources = dict(_grounded_field_sources())
+    sources["ego_acceleration"] = "fallback_neutral"
+    return sources
+
+
+class TestSchemaRefusal:
+    """D10: `decision_inputs` present but the wrong shape -- narrower than
+    `REFUSAL_PRE_TASK_35`, which only catches the key's total absence.
+    Without this, `Inputs.from_record` raises `ValueError` deep inside
+    `_replay_incumbent`, which is the traceback this refusal exists to
+    replace with a named exit.
+    """
+
+    PRE_TASK_36_KEYS = (
+        "ego_acceleration_source", "ego_speed_source",
+        "camera_density_bin_source", "camera_last_detection_age_s",
+    )
+
+    def _strip_task_36_keys(self, run_dir: Path) -> None:
+        lines = [json.loads(line) for line in (run_dir / "metadata.jsonl").read_text().splitlines()]
+        for entry in lines:
+            for key in self.PRE_TASK_36_KEYS:
+                del entry["sensing"]["decision_inputs"][key]
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            for entry in lines:
+                f.write(json.dumps(entry) + "\n")
+
+    def test_refuses_by_schema_and_names_the_missing_keys(self, tmp_path):
+        run_dir = write_run(tmp_path, n=5)
+        self._strip_task_36_keys(run_dir)
+
+        result = score_shadow.score(run_dir)
+        assert result["refused"] == score_shadow.REFUSAL_INPUTS_SCHEMA
+        assert sorted(result["schema"]["missing"]) == sorted(self.PRE_TASK_36_KEYS)
+        assert result["schema"]["unknown"] == []
+        assert result["schema"]["first_tick_id"] == 1000
+        assert "candidates" not in result
+
+    def test_main_exits_2_with_no_traceback_and_no_json(self, tmp_path, monkeypatch):
+        run_dir = write_run(tmp_path, n=3)
+        self._strip_task_36_keys(run_dir)
+        monkeypatch.setattr(sys, "argv", ["score_shadow.py", str(run_dir)])
+        # A `ValueError` here would propagate out of `main()` and fail the
+        # test with an unhandled exception rather than returning 2 -- this
+        # is the assertion that it does not.
+        assert score_shadow.main() == 2
+        assert not (run_dir / "shadow_score.json").exists()
+
+    def test_an_unknown_key_is_also_named(self, tmp_path):
+        run_dir = write_run(tmp_path, n=3)
+        lines = [json.loads(line) for line in (run_dir / "metadata.jsonl").read_text().splitlines()]
+        lines[0]["sensing"]["decision_inputs"]["extra_field"] = 1.0
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            for entry in lines:
+                f.write(json.dumps(entry) + "\n")
+        result = score_shadow.score(run_dir)
+        assert result["refused"] == score_shadow.REFUSAL_INPUTS_SCHEMA
+        assert result["schema"]["unknown"] == ["extra_field"]
+        assert result["schema"]["missing"] == []
+
+
+class TestRulesNeverExercisedWhyMap:
+    """D11: a general `why: {evidence_key: {value: count}}`, generalising
+    the `feed_declined` special case -- after this task a `not_evaluable`
+    entry can carry `ego_acceleration_source` too, and two reasons can
+    appear in the one map.
+    """
+
+    def test_why_carries_the_substituted_accel_source(self, tmp_path):
+        run_dir = write_run(
+            tmp_path, n=6, field_sources=_substituted_accel_field_sources(),
+        )
+        result = score_shadow.score(run_dir)
+        entry = next(e for e in result["rules_never_exercised"] if e["rule"] == Trigger.EVENT)
+        assert entry["ticks"] == 6
+        assert entry["missing"] == {"ego_acceleration": 6}
+        assert entry["why"]["ego_acceleration_source"] == {"fallback_neutral": 6}
+
+    def test_why_carries_feed_declined_on_the_disagreement_rule(self, tmp_path):
+        # Every tick here has no feed at all -- `feed_congestion` is missing
+        # on all of them and `feed_declined` is never set (no feed object to
+        # decline), so `why` on this rule is the drive from
+        # `TestTheThreeStateScoringDiscipline` restated through the general
+        # map instead of the old special case.
+        run_dir = write_run(tmp_path, n=5)
+        result = score_shadow.score(run_dir)
+        entry = next(e for e in result["rules_never_exercised"] if e["rule"] == Trigger.DISAGREEMENT)
+        assert "camera_density_bin_source" in entry["why"]
+
+    def test_rendered_in_the_table(self, tmp_path):
+        run_dir = write_run(
+            tmp_path, n=4, field_sources=_substituted_accel_field_sources(),
+        )
+        result = score_shadow.score(run_dir)
+        table = score_shadow.render_table(result)
+        assert "why:" in table
+        assert "ego_acceleration_source" in table
+
+
+class TestInputProvenance:
+    """D13: a drive-level surface, present with zero candidates for the same
+    reason `rules_never_exercised` is -- the question it answers is about
+    the log the incumbent produced, not about anyone scored against it.
+    """
+
+    def test_present_with_zero_candidates(self, tmp_path):
+        run_dir = write_run(tmp_path, n=6)
+        result = score_shadow.score(run_dir)
+        assert result["candidates"] == {}
+        assert set(result["input_provenance"]) == {
+            "ego_acceleration", "ego_speed", "camera_density_bin",
+        }
+
+    def test_each_fields_counts_sum_to_ticks(self, tmp_path):
+        run_dir = write_run(tmp_path, n=7, accel_ticks=frozenset({1, 3, 5}))
+        result = score_shadow.score(run_dir)
+        for field_name, counts in result["input_provenance"].items():
+            assert sum(counts.values()) == result["ticks"], field_name
+
+    def test_rendered_in_the_table(self, tmp_path):
+        run_dir = write_run(tmp_path, n=5)
+        result = score_shadow.score(run_dir)
+        table = score_shadow.render_table(result)
+        assert "input_provenance" in table
+        assert "ego_acceleration" in table

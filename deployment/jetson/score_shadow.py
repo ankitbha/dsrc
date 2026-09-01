@@ -46,6 +46,7 @@ import importlib
 import json
 import math
 import sys
+from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -84,6 +85,12 @@ REFUSAL_NO_METADATA = "no_metadata_jsonl"
 REFUSAL_NO_TICKS = "no_tick_records"
 REFUSAL_PHONELESS = "phoneless_run"
 REFUSAL_PRE_TASK_35 = "decision_inputs_absent"
+#: Narrower than `REFUSAL_PRE_TASK_35`: `decision_inputs` is present but does
+#: not match the `Inputs` this code ships -- a log recorded before task 36
+#: added four fields to it. Schema-derived rather than a hard-coded key list,
+#: so the next `Inputs` change gets a refusal instead of the `ValueError`
+#: `Inputs.from_record` would otherwise raise deep inside `_replay_incumbent`.
+REFUSAL_INPUTS_SCHEMA = "decision_inputs_schema"
 
 #: Why a candidate's own score is refused rather than emitted on rates alone.
 #: A candidate that cannot report the same three-state attribution the
@@ -116,17 +123,38 @@ def _sensing_ticks(ticks: list[dict]) -> list[dict]:
     return [t for t in ticks if "sensing" in t]
 
 
-def _log_refusal(ticks: list[dict], sensing_ticks: list[dict]) -> str | None:
-    """Whether this log can be scored at all, before anything is replayed."""
+def _log_refusal(
+    ticks: list[dict], sensing_ticks: list[dict],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Whether this log can be scored at all, before anything is replayed.
+
+    Returns the refusal name and, for `REFUSAL_INPUTS_SCHEMA` only, the extra
+    detail the caller folds into the result -- which keys are missing or
+    unknown, and the first tick that showed it. The other refusals need no
+    detail beyond their own name.
+    """
     if not ticks:
-        return REFUSAL_NO_TICKS
+        return REFUSAL_NO_TICKS, None
     if not sensing_ticks:
-        return REFUSAL_PHONELESS
+        return REFUSAL_PHONELESS, None
     for t in sensing_ticks:
         sensing = t["sensing"]
         if "decision_inputs" not in sensing or "decided_at_mono" not in sensing:
-            return REFUSAL_PRE_TASK_35
-    return None
+            return REFUSAL_PRE_TASK_35, None
+    expected = {f.name for f in fields(Inputs)}
+    for t in sensing_ticks:
+        present = set(t["sensing"]["decision_inputs"])
+        missing = expected - present
+        unknown = present - expected
+        if missing or unknown:
+            return REFUSAL_INPUTS_SCHEMA, {
+                "schema": {
+                    "missing": sorted(missing),
+                    "unknown": sorted(unknown),
+                    "first_tick_id": t.get("tick_id"),
+                },
+            }
+    return None, None
 
 
 def _replay_incumbent(sensing_ticks: list[dict]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -337,6 +365,14 @@ def _rules_never_exercised(records: list[dict[str, Any]], total: int) -> list[di
     A rule missing its input on 100% of a drive is not the same fact as a
     candidate agreeing with the incumbent on it, and this is what keeps the
     two from being reported as the same thing.
+
+    `why` generalises what used to be a `feed_declined`-only special case:
+    every evidence key a `not_evaluable` check carries besides `status` and
+    `missing` is its own reason, counted by value. Task 36 gave a
+    `not_evaluable` entry a provenance-class reason
+    (`ego_acceleration_source`) as well as `feed_declined`, and the map is
+    built once, over every such key, rather than growing a second
+    special case beside the first.
     """
     out: list[dict[str, Any]] = []
     for rule in RULES:
@@ -344,18 +380,44 @@ def _rules_never_exercised(records: list[dict[str, Any]], total: int) -> list[di
         if total == 0 or statuses.count(RULE_NOT_EVALUABLE) != total:
             continue
         missing_counts: dict[str, int] = {}
-        declined_counts: dict[str, int] = {}
+        why: dict[str, dict[Any, int]] = {}
         for r in records:
             check = r["attribution"]["rules"][rule]
             for name in check.get("missing", ()):
                 missing_counts[name] = missing_counts.get(name, 0) + 1
-            if "feed_declined" in check:
-                declined_counts[check["feed_declined"]] = declined_counts.get(check["feed_declined"], 0) + 1
+            for key, value in check.items():
+                if key in ("status", "missing"):
+                    continue
+                bucket = why.setdefault(key, {})
+                bucket[value] = bucket.get(value, 0) + 1
         out.append({
             "rule": rule, "ticks": total,
             "missing": missing_counts,
-            **({"feed_declined": declined_counts} if declined_counts else {}),
+            **({"why": why} if why else {}),
         })
+    return out
+
+
+#: The `Inputs` fields this rolls up, matching `SensingLoop.INPUT_SOURCE_FIELDS`
+#: (sensing_loop.py) -- the same three, for the same reason: `ego_speed_source`
+#: is carried on the record but no rule keys on it.
+INPUT_SOURCE_FIELDS = ("ego_acceleration", "ego_speed", "camera_density_bin")
+
+
+def _input_provenance(sensing_ticks: list[dict]) -> dict[str, dict[str, int]]:
+    """`{field: {class: count}}` over the drive's own `decision_inputs`.
+
+    The same rollup `SensingLoop.inputs_by_source` keeps live, computed here
+    from the log alone -- a run scored after the fact gets the same answer
+    without replaying anything.
+    """
+    out: dict[str, dict[str, int]] = {field: {} for field in INPUT_SOURCE_FIELDS}
+    for t in sensing_ticks:
+        decision_inputs = t["sensing"]["decision_inputs"]
+        for field_name in INPUT_SOURCE_FIELDS:
+            source = decision_inputs.get(f"{field_name}_source")
+            counts = out[field_name]
+            counts[source] = counts.get(source, 0) + 1
     return out
 
 
@@ -471,9 +533,12 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
     ticks, _scenario, _timebase, unparseable = load_records(metadata_path)
     sensing_ticks = _sensing_ticks(ticks)
 
-    refusal = _log_refusal(ticks, sensing_ticks)
+    refusal, refusal_detail = _log_refusal(ticks, sensing_ticks)
     if refusal is not None:
-        return {"run": str(run_dir), "refused": refusal}
+        refused = {"run": str(run_dir), "refused": refusal}
+        if refusal_detail:
+            refused.update(refusal_detail)
+        return refused
 
     summary = None
     summary_path = run_dir / "summary.json"
@@ -515,6 +580,12 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
     # when zero candidates are supplied -- running the tool with none is
     # exactly the log-validity check this states the result of.
     result["rules_never_exercised"] = _rules_never_exercised(incumbent_records, len(incumbent_records))
+    # Also a property of the log, not of any candidate, and computed beside
+    # `rules_never_exercised` for the same reason: present with zero
+    # candidates, because the question "how often was the free tier fed a
+    # substitution" is answered by the log this incumbent produced, not by
+    # anyone scored against it.
+    result["input_provenance"] = _input_provenance(sensing_ticks)
 
     result["candidates"] = {
         label: _score_candidate(sensing_ticks, incumbent_records, factory)
@@ -562,6 +633,12 @@ def render_table(result: dict[str, Any]) -> str:
     for entry in result["rules_never_exercised"]:
         lines.append(f"  RULE NEVER EXERCISED (log-wide): {entry['rule']} "
                      f"(all {entry['ticks']} ticks, missing={entry['missing']})")
+        if "why" in entry:
+            lines.append(f"    why: {entry['why']}")
+    ip = result.get("input_provenance")
+    if ip is not None:
+        for field_name, counts in ip.items():
+            lines.append(f"  input_provenance: {field_name} {counts}")
     for label, c in result.get("candidates", {}).items():
         lines.append(f"  candidate {label}:")
         if "refused" in c:
