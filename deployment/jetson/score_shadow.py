@@ -64,6 +64,7 @@ from policy.sensing_controller import (  # noqa: E402
     SensingController,
     Trigger,
 )
+from policy.sensing_loop import INPUT_SOURCE_FIELDS  # noqa: E402
 from policy.shadow_mode import ABSENT_IN_PURE_SHADOW  # noqa: E402
 from transport.messages import RATE_KEYS  # noqa: E402
 
@@ -396,12 +397,6 @@ def _rules_never_exercised(records: list[dict[str, Any]], total: int) -> list[di
             **({"why": why} if why else {}),
         })
     return out
-
-
-#: The `Inputs` fields this rolls up, matching `SensingLoop.INPUT_SOURCE_FIELDS`
-#: (sensing_loop.py) -- the same three, for the same reason: `ego_speed_source`
-#: is carried on the record but no rule keys on it.
-INPUT_SOURCE_FIELDS = ("ego_acceleration", "ego_speed", "camera_density_bin")
 
 
 def _input_provenance(sensing_ticks: list[dict]) -> dict[str, dict[str, int]]:
