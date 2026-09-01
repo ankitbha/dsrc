@@ -275,6 +275,43 @@ class TestReplayIdentityGate:
         assert score_shadow.main() == 2
 
 
+class TestLogCompleteness:
+    """`summary["sensing"]["ticks"]` is the tick count `SensingLoop` itself
+    recorded; `len(sensing_ticks)` is what this scorer read back off the
+    log. A truncated log can carry fewer records than the run it came from
+    reported, with everything else about it -- `unparseable_lines`,
+    `replay_identity` -- reading clean.
+    """
+
+    def test_none_without_a_recorded_tick_count(self, tmp_path):
+        run_dir = write_run(tmp_path, n=10)  # no summary.json written at all
+        result = score_shadow.score(run_dir)
+        assert result["log_completeness"] is None
+
+    def test_a_complete_log_reports_zero_missing(self, tmp_path):
+        run_dir = write_run(tmp_path, n=10)
+        (run_dir / "summary.json").write_text(json.dumps({"sensing": {"ticks": 10}}))
+        result = score_shadow.score(run_dir)
+        assert result["log_completeness"] == {
+            "ticks_recorded": 10, "ticks_scored": 10, "ticks_missing": 0,
+        }
+
+    def test_a_truncated_log_reports_the_shortfall_against_the_runs_own_count(self, tmp_path):
+        # The run's own `SensingLoop` ran for 13 ticks; only 10 made it into
+        # the log this scorer can read -- the shape of a log whose tail was
+        # lost after `close()` had already written `summary.json`.
+        run_dir = write_run(tmp_path, n=10)
+        (run_dir / "summary.json").write_text(json.dumps({"sensing": {"ticks": 13}}))
+        result = score_shadow.score(run_dir)
+        assert result["log_completeness"] == {
+            "ticks_recorded": 13, "ticks_scored": 10, "ticks_missing": 3,
+        }
+        table = score_shadow.render_table(result)
+        assert "recorded=13" in table
+        assert "scored=10" in table
+        assert "missing=3" in table
+
+
 class TestSegments:
 
     def test_a_pure_shadow_drive_is_reference_throughout(self, tmp_path):

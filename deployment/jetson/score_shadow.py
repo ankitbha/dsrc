@@ -214,6 +214,38 @@ def _limits(sensing_ticks: list[dict], summary: dict[str, Any] | None) -> dict[s
     }
 
 
+def _log_completeness(sensing_ticks: list[dict], summary: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Whether the tick records this scorer read match the count the run
+    itself recorded, or `None` when there is nothing to compare against.
+
+    `summary["sensing"]["ticks"]` is `SensingLoop.ticks`: incremented once
+    per call to `on_tick`, independent of whatever later made it into
+    `metadata.jsonl`. `len(sensing_ticks)` is what this scorer actually read
+    back off that log. A run whose log lost its tail after every tick had
+    already been decided states a higher count than it can produce records
+    for, and nothing before this compared the two.
+
+    This catches a log truncated after a clean `close()` -- an interrupted
+    `adb pull` or `scp` off the device, a full disk, a partial copy -- which
+    is the likely shape of a log that arrives over a cable rather than one
+    still on the Jetson. It does not catch the more common truncation cause,
+    `MetadataLogger`'s unflushed write queue when `close()` never runs,
+    because in that case `summary.json` itself was never written and this
+    comparison has nothing to read: the check is unavailable exactly when
+    the loss is largest. `unparseable_lines` does not stand in for it either
+    -- that count is 0 or 1 regardless of how many ticks are missing,
+    because a record `close()` never wrote leaves no line behind to fail
+    parsing.
+    """
+    if summary is None:
+        return None
+    recorded = summary.get("sensing", {}).get("ticks")
+    if not isinstance(recorded, int):
+        return None
+    scored = len(sensing_ticks)
+    return {"ticks_recorded": recorded, "ticks_scored": scored, "ticks_missing": recorded - scored}
+
+
 def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
@@ -440,6 +472,7 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
         "run": str(run_dir),
         "ticks": len(sensing_ticks),
         "unparseable_lines": unparseable,
+        "log_completeness": _log_completeness(sensing_ticks, summary),
         "replay_identity": replay_identity,
         "segments": segments,
         "limits": _limits(sensing_ticks, summary),
@@ -481,6 +514,10 @@ def render_table(result: dict[str, Any]) -> str:
 
     lines = [f"[score_shadow] {result['run']}", f"  ticks: {result['ticks']}"
              f" (unparseable lines: {result['unparseable_lines']})"]
+    lc = result["log_completeness"]
+    if lc is not None:
+        lines.append(f"  log_completeness: recorded={lc['ticks_recorded']} "
+                     f"scored={lc['ticks_scored']} missing={lc['ticks_missing']}")
     ri = result["replay_identity"]
     lines.append(f"  replay_identity: {ri['status']} ({ri['mismatched']}/{ri['ticks']} mismatched)")
     if ri["status"] != "ok":

@@ -1327,6 +1327,18 @@ MUTATIONS = [
      "    if records and not all(_has_valid_attribution(r) for r in records):",
      "    if records and not _has_valid_attribution(records[0]):",
      "python"),
+
+    # `summary.json`'s own recorded tick count is never checked against what the
+    # log actually replays. A log truncated after a clean `close()` states a
+    # tick count beside a file that is short of it, with `unparseable_lines` and
+    # `replay_identity` both reading clean, because a record `close()` never
+    # wrote leaves no trace for either of those to find. Caught by a drive whose
+    # log is shorter than the tick count in its own summary.
+    ("score_shadow: the recorded tick count is not compared against what was scored",
+     "deployment/jetson/score_shadow.py",
+     '    return {"ticks_recorded": recorded, "ticks_scored": scored, "ticks_missing": recorded - scored}',
+     '    return {"ticks_recorded": recorded, "ticks_scored": scored, "ticks_missing": 0}',
+     "python"),
 ]
 
 RESULTS = {
