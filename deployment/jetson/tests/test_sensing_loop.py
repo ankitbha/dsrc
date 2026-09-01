@@ -433,6 +433,144 @@ class TestInputsFromATick:
         assert inputs.telemetry_age_s is None
 
 
+class TestInputsFromATickCarriesTheBuildersOwnProvenance:
+    """`inputs_from` reads `field_sources` by name, one obs key per `Inputs`
+    source field. Every other fixture in this file uses the fixed
+    `_grounded_field_sources()` map regardless of what `obs` itself claims,
+    so a wrong-key mutation would read the same constant no matter which
+    key it actually asked for. These build a real `ObservationBuilder` tick
+    instead, so a wrong key reads a real mismatch.
+    """
+
+    def _real_tick(self, obs_result, gps, t_mono, margins=(0.9, 0.4)):
+        return FakeTick(
+            obs_result=obs_result,
+            policy=FakePolicy(head_probs={
+                head: [0.5 + m / 2, 0.5 - m / 2]
+                for head, m in zip(ACTION_HEADS, margins)}),
+            gps=gps,
+            advisory=advisory(),
+            t_capture_mono=t_mono,
+        )
+
+    def test_ego_acceleration_source_matches_the_builders_own_map(self):
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        from sensors.gps_reader import GpsFix
+
+        builder = ObservationBuilder(BuilderConfig())
+        result = None
+        t = 1000.0
+        for i in range(5):
+            t = 1000.0 + i * 0.1
+            gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                        heading_deg=90.0, fix_quality=1, num_sats=8, hdop=1.0,
+                        t_mono=t, t_wall=0.0)
+            result = builder.build([], gps, t)
+        inputs = inputs_from(self._real_tick(result, gps, t), None, now=t)
+        assert result.field_sources["ego_acceleration"] == "derived"
+        assert inputs.ego_acceleration_source == result.field_sources["ego_acceleration"]
+
+    def test_camera_density_bin_source_matches_local_density_bin_not_another_key(self):
+        # A fresh fix, no vehicles: the real builder tags `local_density_bin`
+        # `derived_empty` (an empty detection set), never `measured` -- which
+        # is what a wrong-key read (e.g. off `ego_speed`, `measured` on this
+        # same tick) would produce instead.
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        from sensors.gps_reader import GpsFix
+
+        builder = ObservationBuilder(BuilderConfig())
+        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                    heading_deg=90.0, fix_quality=1, num_sats=8, hdop=1.0,
+                    t_mono=1000.0, t_wall=0.0)
+        result = builder.build([], gps, 1000.0)
+        inputs = inputs_from(self._real_tick(result, gps, 1000.0), None, now=1000.0)
+        assert result.field_sources["local_density_bin"] == "derived_empty"
+        assert inputs.camera_density_bin_source == "derived_empty"
+        assert inputs.camera_density_bin_source == result.field_sources["local_density_bin"]
+
+    def test_ego_speed_source_matches_the_builders_own_map_not_a_constant(self):
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        from sensors.gps_reader import GpsFix
+
+        builder = ObservationBuilder(BuilderConfig())
+        fresh = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                       heading_deg=90.0, fix_quality=1, num_sats=8, hdop=1.0,
+                       t_mono=1000.0, t_wall=0.0)
+        result = builder.build([], fresh, 1000.0)
+        inputs = inputs_from(self._real_tick(result, fresh, 1000.0), None, now=1000.0)
+        assert result.field_sources["ego_speed"] == "measured"
+        assert inputs.ego_speed_source == "measured"
+
+        stale = GpsFix(valid=True, speed_mps=99.0, t_mono=1000.0 - 10.0, t_wall=0.0)
+        result = builder.build([], stale, 1000.1)
+        inputs = inputs_from(self._real_tick(result, stale, 1000.1), None, now=1000.1)
+        assert result.field_sources["ego_speed"] == "fallback_neutral"
+        assert inputs.ego_speed_source == "fallback_neutral"
+
+    def test_camera_last_detection_age_s_reaches_the_controller_after_aging_out(self):
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        from sensors.gps_reader import GpsFix
+        from perception.distance import TrackedVehicle
+        import numpy as np
+
+        builder = ObservationBuilder(BuilderConfig())
+        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                    heading_deg=90.0, fix_quality=1, num_sats=8, hdop=1.0,
+                    t_mono=1000.0, t_wall=0.0)
+
+        no_detection = builder.build([], gps, 1000.0)
+        assert no_detection.diagnostics["last_detection_age_s"] is None
+        assert inputs_from(
+            self._real_tick(no_detection, gps, 1000.0), None, now=1000.0
+        ).camera_last_detection_age_s is None
+
+        vehicle = TrackedVehicle(
+            track_id=1, xyxy=np.array([0, 0, 10, 10], dtype=np.float32), cls=2,
+            conf=0.9, distance_m=30.0, lateral_m=0.0, rel_speed_mps=0.0,
+            rel_speed_valid=True, method="ground_plane",
+        )
+        detected = builder.build([vehicle], gps, 1000.2)
+        assert detected.diagnostics["last_detection_age_s"] == 0.0
+
+        aged_out = builder.build([], gps, 1003.7)
+        assert aged_out.diagnostics["last_detection_age_s"] == pytest.approx(3.5)
+        inputs = inputs_from(self._real_tick(aged_out, gps, 1003.7), None, now=1003.7)
+        assert inputs.camera_last_detection_age_s == pytest.approx(3.5)
+        assert inputs.camera_last_detection_age_s == aged_out.diagnostics["last_detection_age_s"]
+
+    def test_a_field_with_no_provenance_entry_makes_its_rule_refuse(self):
+        """D9: a field the builder never tagged is not evidence -- it fails
+        safe, the same way a substitution does, rather than being decided
+        on as if it were measured. `ego_acceleration` is set to a large
+        nonzero value here specifically so a broken guard (deciding on it
+        as if it were evidence) would visibly fire the event rule instead of
+        coincidentally staying quiet at 0.0.
+        """
+        from perception import provenance
+        from policy.sensing_controller import RULE_NOT_EVALUABLE, SensingController, Trigger
+
+        sources = dict(_grounded_field_sources())
+        del sources["ego_acceleration"]
+        obs_result = FakeObs(
+            obs={"ego_acceleration": 9.0, "ego_speed": 20.0, "local_density_bin": 2.0},
+            field_sources=sources,
+        )
+        fake_tick = FakeTick(
+            obs_result=obs_result,
+            policy=FakePolicy(head_probs={head: [0.95, 0.05] for head in ACTION_HEADS}),
+            gps=FakeGps(),
+            advisory=advisory(),
+        )
+        inputs = inputs_from(fake_tick, None, now=1000.0)
+        assert inputs.ego_acceleration_source == provenance.SOURCE_UNATTRIBUTED
+        assert inputs.ego_acceleration is None
+
+        decision = SensingController().decide(inputs)
+        check = decision.attribution.rules[Trigger.EVENT]
+        assert check.status == RULE_NOT_EVALUABLE
+        assert check.missing == ("ego_acceleration",)
+
+
 class TestTriggerAndRuleCounters:
     """`summary["sensing"]` is `SensingLoop.to_record()` -- these are the first
     trigger-attribution numbers a drive summary can publish.
