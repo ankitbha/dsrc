@@ -105,6 +105,10 @@ def inputs_from(tick: Any, phone: Any, *, now: float) -> Inputs:
         # it -- task 28 concluded the feed owns no observation field, and the
         # controller is the consumer that reading was published for.
         feed_congestion=None if feed is None else feed.downstream_congestion,
+        # The feed's own named reason it owns nothing, when it has one -- so
+        # disagreement's not_evaluable entry can say why the view is missing rather
+        # than just that it is.
+        feed_declined=None if feed is None else feed.declined,
         camera_density_bin=None if obs.get("local_density_bin") is None
         else int(obs["local_density_bin"]),
         thermal_status=getattr(telemetry, "thermal_status", None),
@@ -139,11 +143,23 @@ class SensingLoop:
         self._last_query: Any = None
         self.ticks = 0
         self.sends_by_reason: dict[str, int] = {}
+        #: One decision, counted by its single word. Sums to `ticks`.
+        self.decisions_by_trigger: dict[str, int] = {}
+        #: Every rule's status, every tick -- `{rule_name: {status: count}}`. Answers
+        #: "how often was this rule fired / quiet / not_evaluable" over a whole drive
+        #: without re-reading every tick's attribution record.
+        self.rules_by_status: dict[str, dict[str, int]] = {}
 
     def on_tick(self, tick: Any, phone: Any = None) -> TickOutcome:
         now = self._now()
         self.ticks += 1
         decision = self.controller.decide(inputs_from(tick, phone, now=now))
+        self.decisions_by_trigger[decision.trigger] = (
+            self.decisions_by_trigger.get(decision.trigger, 0) + 1
+        )
+        for rule_name, check in decision.attribution.rules.items():
+            counts = self.rules_by_status.setdefault(rule_name, {})
+            counts[check.status] = counts.get(check.status, 0) + 1
         # The frame's capture stamp, on our clock -- the advisory and the command are
         # both about the tick that produced them, not about the moment of sending.
         # `capture_stamp_ns` is the same conversion `Tick.to_record()` uses, so this
@@ -208,6 +224,8 @@ class SensingLoop:
             "rate_commands_sent": sum(self.sends_by_reason.values()),
             "heartbeat_s": self.heartbeat_s,
             "mode": self.modes.to_record(),
+            "decisions_by_trigger": dict(self.decisions_by_trigger),
+            "rules_by_status": {name: dict(counts) for name, counts in self.rules_by_status.items()},
         }
 
 

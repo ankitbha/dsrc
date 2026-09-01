@@ -356,6 +356,27 @@ class TestTheFeedReachesTheController:
         inputs = inputs_from(tick(feed=None), None, now=1000.0)
         assert inputs.feed_congestion is None
 
+    def test_the_feeds_declined_reason_reaches_the_controller(self):
+        # The named reason already exists one call upstream and `inputs_from` used
+        # to discard it, writing "missing, reason unknown" when the system knew why.
+        from perception.feed_fusion import Decline, FeedOwnership
+        from policy.sensing_controller import Trigger
+
+        declined = FeedOwnership(declined=Decline.STALE, age_s=12.0)
+        inputs = inputs_from(tick(feed=declined), None, now=1000.0)
+        assert inputs.feed_declined == Decline.STALE
+
+        outcome = SensingLoop(clock=Clock()).on_tick(tick(feed=declined), None)
+        check = outcome.decision.attribution.rules[Trigger.DISAGREEMENT]
+        assert check.evidence.get("feed_declined") == Decline.STALE
+
+    def test_an_owned_feed_carries_no_declined_reason(self):
+        from perception.feed_fusion import FeedOwnership
+
+        owned = FeedOwnership(downstream_congestion=0.4, free_flow_mps=25.0, age_s=1.0)
+        inputs = inputs_from(tick(feed=owned), None, now=1000.0)
+        assert inputs.feed_declined is None
+
 
 class TestInputsFromATick:
 
@@ -380,6 +401,43 @@ class TestInputsFromATick:
         inputs = inputs_from(tick(), Phone(), now=1000.0)
         assert inputs.thermal_status is None
         assert inputs.telemetry_age_s is None
+
+
+class TestTriggerAndRuleCounters:
+    """`summary["sensing"]` is `SensingLoop.to_record()` -- these are the first
+    trigger-attribution numbers a drive summary can publish.
+    """
+
+    def test_decisions_by_trigger_sums_to_ticks(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        for i in range(15):
+            clock.advance(0.1)
+            loop.on_tick(tick(accel=9.0 if i % 3 == 0 else 0.0), None)
+        assert sum(loop.decisions_by_trigger.values()) == loop.ticks == 15
+
+    def test_rules_by_status_counts_a_scripted_sequence(self):
+        from policy.sensing_controller import RULE_FIRED, RULE_QUIET, Trigger
+
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        loop.on_tick(tick(accel=0.0), None)
+        clock.advance(0.1)
+        loop.on_tick(tick(accel=9.0), None)
+
+        counts = loop.rules_by_status[Trigger.EVENT]
+        assert counts.get(RULE_QUIET, 0) == 1
+        assert counts.get(RULE_FIRED, 0) == 1
+
+    def test_both_counters_reach_to_record(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        loop.on_tick(tick(), None)
+        record = loop.to_record()
+
+        assert sum(record["decisions_by_trigger"].values()) == 1
+        assert record["rules_by_status"]
+        assert sum(sum(counts.values()) for counts in record["rules_by_status"].values()) == 4
 
 
 def _degrees_north(metres: float) -> float:
