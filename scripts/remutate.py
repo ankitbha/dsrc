@@ -1125,6 +1125,72 @@ MUTATIONS = [
      '            "wants_more": wants_more,',
      '            "wants_more": False,',
      "python"),
+
+    # Task 35. A shadow decision log that says what it can and cannot score --
+    # the exact inputs a decision was made from, the instant it was made, and
+    # a witnessed (not assumed) full-rate reference, plus the offline scorer
+    # that replays a log and refuses before it misleads.
+    #
+    # `Inputs.to_record` is the replay substrate `score_shadow.py` rests on, and
+    # the temptation this pins against is copying the evidence path's own
+    # rounding (`RuleCheck.to_record`, sensing_controller.py:188) onto it. A
+    # value rounded to four places can flip a threshold comparison a replayed
+    # decision never actually made.
+    ("controller: Inputs.to_record rounds policy_margin to four places",
+     "deployment/jetson/policy/sensing_controller.py",
+     '            "policy_margin": self.policy_margin,',
+     '            "policy_margin": round(self.policy_margin, 4)'
+     ' if isinstance(self.policy_margin, float) else self.policy_margin,',
+     "python"),
+    # `decided_at_mono` has to be the exact instant the gates above it compared,
+    # not a nearby one -- dwell, hold, bridge and gap all compare differences of
+    # it, so a replay fed anything else is a different drive at exactly the
+    # ticks that straddle a boundary. This substitutes the previous decision's
+    # instant, which is wrong in the same way a read taken earlier than the
+    # controller's own is wrong: caught by the scripted mixed-drive replay
+    # diverging on state that depends on elapsed time (dwell, hold, gap).
+    ("controller: decided_at_mono is the previous decision's instant, not this one's",
+     "deployment/jetson/policy/sensing_controller.py",
+     "            decided_at_mono=now,",
+     "            decided_at_mono=self._last_at if self._last_at is not None else now,",
+     "python"),
+    # The reference block has to say a phone was never heard from, not that it
+    # reported zero -- those are different drives, and a candidate scored
+    # against a manufactured "achieved nothing" reading is scored against data
+    # that does not exist. Caught by the absence test, which requires all three
+    # fields null together rather than a zeroed achieved map.
+    ("sensing_loop: the reference block reports 0.0 achieved when the phone never reported",
+     "deployment/jetson/policy/sensing_loop.py",
+     'return {"achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry"}',
+     'return {"achieved": {key: 0.0 for key in RATE_KEYS},'
+     ' "dropped": {key: 0 for key in DROP_KEYS}, "age_s": None, "absent": "no_telemetry"}',
+     "python"),
+    # The defect class this task exists for, reproduced directly: folding a
+    # rule's not-evaluable ticks into "agree" is exactly "this candidate was
+    # never given the inputs to decide on" reported as "this candidate agreed" --
+    # caught by the denominator test, which requires the not-evaluable count to
+    # come out beside the agree/differ counts rather than inside them.
+    ("score_shadow: a not_evaluable tick is counted into agree",
+     "deployment/jetson/score_shadow.py",
+     '            if incumbent_status == RULE_NOT_EVALUABLE:\n'
+     '                per_rule[rule]["not_evaluable"] += 1',
+     '            if incumbent_status == RULE_NOT_EVALUABLE:\n'
+     '                per_rule[rule]["agree"] += 1',
+     "python"),
+    # `rules_never_exercised` has to name a rule that was structurally absent
+    # from every tick's inputs, not one that simply never fired. A rule that is
+    # `quiet` on every tick describes a calm road; a rule that is
+    # `not_evaluable` on every tick describes an instrument the drive never
+    # had. Reporting the first as the second is the exact confusion task 34
+    # closed, reopened here in the scorer. Caught by the pure-shadow candidate
+    # test, which drives ticks where every rule other than `source_disagreement`
+    # is genuinely quiet (not absent) and would wrongly qualify under this
+    # mutation.
+    ("score_shadow: rules_never_exercised is computed from quiet instead of not_evaluable",
+     "deployment/jetson/score_shadow.py",
+     "statuses.count(RULE_NOT_EVALUABLE) != total",
+     "statuses.count(RULE_QUIET) != total",
+     "python"),
 ]
 
 RESULTS = {
