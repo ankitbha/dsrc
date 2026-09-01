@@ -92,3 +92,92 @@ class TestTheDriveEnds:
         camera.end_of_stream = True
         elapsed = loop_for(camera, duration_s=60.0)
         assert elapsed < 3.0
+
+
+class _FakeEstimate:
+    def __init__(self, estimate_id: int) -> None:
+        self.estimate_id = estimate_id
+
+    def to_record(self) -> dict:
+        return {"estimate_id": self.estimate_id, "offset_ns": 123}
+
+
+class _FakeRoundTripEstimator:
+    """`TimebaseEstimator.estimate` is a property; the fake mirrors that shape
+    with a plain attribute, since a test double has no need of the real
+    property machinery to be read the same way."""
+
+    def __init__(self, estimate=None) -> None:
+        self.estimate = estimate
+
+
+class _FakeOneWayEstimator:
+    """`OneWayEstimator.estimate()` is a method, not a property -- the
+    asymmetry `_log_timebase_estimates` itself has to read across."""
+
+    def __init__(self, estimate=None) -> None:
+        self._estimate = estimate
+
+    def estimate(self):
+        return self._estimate
+
+
+class _FakePhone:
+    def __init__(self, *, round_trip=None, one_way=None) -> None:
+        self.round_trip_estimator = _FakeRoundTripEstimator(round_trip)
+        self.estimator = _FakeOneWayEstimator(one_way)
+
+
+class _FakeLogger:
+    def __init__(self) -> None:
+        self.lines: list[dict] = []
+
+    def write(self, record: dict) -> None:
+        self.lines.append(record)
+
+
+class TestTimebaseEstimateLogging:
+    """D7: a `timebase_estimate` line per source, written only when the
+    estimate actually changes, so an offline reader can re-derive a
+    conversion against the estimate that was current at the time."""
+
+    def test_no_estimate_on_either_side_writes_nothing(self):
+        logger = _FakeLogger()
+        phone = _FakePhone()
+        ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
+        run_demo._log_timebase_estimates(logger, phone, ids)
+        assert logger.lines == []
+
+    def test_a_new_estimate_on_each_side_is_logged_once_each(self):
+        logger = _FakeLogger()
+        phone = _FakePhone(round_trip=_FakeEstimate(1), one_way=_FakeEstimate(9))
+        ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
+        run_demo._log_timebase_estimates(logger, phone, ids)
+
+        assert len(logger.lines) == 2
+        by_source = {line["source"]: line for line in logger.lines}
+        assert by_source["round_trip"]["type"] == "timebase_estimate"
+        assert by_source["round_trip"]["estimate_id"] == 1
+        assert by_source["one_way"]["estimate_id"] == 9
+        assert "t_wall" in by_source["round_trip"]
+        assert ids == {"round_trip": 1, "one_way": 9}
+
+    def test_the_same_estimate_id_is_not_logged_twice(self):
+        logger = _FakeLogger()
+        phone = _FakePhone(round_trip=_FakeEstimate(1))
+        ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
+        run_demo._log_timebase_estimates(logger, phone, ids)
+        run_demo._log_timebase_estimates(logger, phone, ids)
+        assert len(logger.lines) == 1
+
+    def test_a_changed_estimate_id_is_logged_again(self):
+        logger = _FakeLogger()
+        phone = _FakePhone(round_trip=_FakeEstimate(1))
+        ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
+        run_demo._log_timebase_estimates(logger, phone, ids)
+
+        phone.round_trip_estimator.estimate = _FakeEstimate(2)
+        run_demo._log_timebase_estimates(logger, phone, ids)
+
+        assert len(logger.lines) == 2
+        assert logger.lines[-1]["estimate_id"] == 2

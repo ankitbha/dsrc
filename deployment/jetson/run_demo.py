@@ -181,6 +181,36 @@ def telemetry_record(tick) -> dict:
     return rec
 
 
+def _log_timebase_estimates(logger, phone, last_estimate_ids: dict[str, int | None]) -> None:
+    """Write a `timebase_estimate` line whenever either estimator publishes a
+    new one, so an offline reader can re-derive a conversion against the
+    estimate that was actually current at the time rather than only the one
+    live at the end of the run.
+
+    `TimebaseEstimator.estimate` is a property; `OneWayEstimator.estimate` is a
+    method -- the two classes are not otherwise identical, and this is the one
+    place both are read side by side.
+    """
+    sources = (
+        ("round_trip", phone.round_trip_estimator.estimate),
+        ("one_way", phone.estimator.estimate()),
+    )
+    for source, estimate in sources:
+        if estimate is None or estimate.estimate_id == last_estimate_ids[source]:
+            continue
+        last_estimate_ids[source] = estimate.estimate_id
+        logger.write({
+            "type": "timebase_estimate",
+            "source": source,
+            # This device's own wall clock, for an offline reader correlating
+            # this estimate against a phone log's wall-stamped receipts -- both
+            # devices are NTP-locked, so wall time is a valid matching key even
+            # though it is never used for the latency arithmetic itself.
+            "t_wall": time.time(),
+            **estimate.to_record(),
+        })
+
+
 def apply_scenario(config: dict, args: argparse.Namespace) -> dict | None:
     """Load a simulated-drive scenario and fold it into config/args.
 
@@ -372,6 +402,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
     target_hz = float(config["loop"]["target_hz"])
     deadline = time.monotonic() + args.duration_s if args.duration_s else None
     last_print = 0.0
+    # The estimate_id last written for each estimator, so a line goes out only
+    # when the current estimate actually changed rather than once a tick. None
+    # is a real prior state (no estimate published yet), distinct from having
+    # written id 0, so this is not a plain int default.
+    last_estimate_ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
 
     # Constructed for a phone run only. Deciding rates for a local camera would
     # produce a command with nowhere to go, and the `here` query would describe a
@@ -455,6 +490,8 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                         "send_reason": outcome.send_reason,
                     }
                 logger.write(record)
+                if phone is not None:
+                    _log_timebase_estimates(logger, phone, last_estimate_ids)
             if video_logger is not None:
                 video_logger.write(frame.image)
             if telemetry is not None:

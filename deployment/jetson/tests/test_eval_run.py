@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from eval_run import analyze
+from eval_run import analyze, join_phone_log, load_phone_log
 
 T0 = 1_750_000_000.0
 RATE_HZ = 30.0
@@ -247,3 +247,182 @@ class TestATruncatedLogIsNotACompleteRun:
         assert integrity["log_complete"] is True
         assert integrity["missing_ticks"] == 0
         assert integrity["unparseable_lines"] == 0
+
+
+# -- task 33: joining the phone's own log against the Jetson's ticks --------
+
+
+def write_phone_log(tmp_path, lines: list[dict]):
+    path = tmp_path / "session.jsonl"
+    with open(path, "w") as f:
+        for line in lines:
+            f.write(json.dumps(line) + "\n")
+    return path
+
+
+def an_inbound_advisory(*, capture_ns: int, wire_ns: int | None, recv_ns: int,
+                         recv_wall_ns: int) -> dict:
+    header = {"ch": "advisory", "seq": 1, "t_mono_ns": recv_ns - 1_000_000,
+              "t_wall_ns": recv_wall_ns, "n": 0, "t_capture_mono_ns": capture_ns}
+    if wire_ns is not None:
+        header["t_wire_mono_ns"] = wire_ns
+    return {"dir": "in", "recv_mono_ns": recv_ns, "recv_wall_ns": recv_wall_ns, "header": header}
+
+
+def a_shown_line(*, capture_ns: int, shown_ns: int) -> dict:
+    return {"dir": "shown", "t_capture_mono_ns": capture_ns, "shown_mono_ns": shown_ns}
+
+
+def a_timebase_estimate(*, source: str, t_wall: float, offset_ns: int = 0,
+                         rtt_min_ns: int = 10_000_000, t_reference_ns: int = 0) -> dict:
+    return {
+        "type": "timebase_estimate", "source": source, "t_wall": t_wall,
+        "estimate_id": 1, "offset_ns": offset_ns, "t_reference_ns": t_reference_ns,
+        "rtt_min_ns": rtt_min_ns, "offset_samples": 10,
+        "skew_ppm": None, "skew_stderr_ppm": None, "skew_samples": 0,
+    }
+
+
+class TestLoadPhoneLog:
+
+    def test_an_outbound_header_is_not_mistaken_for_either_shape(self, tmp_path):
+        # A bare frame header, exactly what SessionLog writes for anything it
+        # sent -- it carries no `dir` key at all.
+        path = write_phone_log(tmp_path, [
+            {"ch": "camera", "seq": 1, "t_mono_ns": 1, "t_wall_ns": 1, "n": 0},
+        ])
+        inbound, shown = load_phone_log(path)
+        assert inbound == [] and shown == []
+
+    def test_an_inbound_non_advisory_frame_is_ignored(self, tmp_path):
+        path = write_phone_log(tmp_path, [
+            {"dir": "in", "recv_mono_ns": 1, "recv_wall_ns": 1,
+             "header": {"ch": "rate_cmd"}},
+        ])
+        inbound, shown = load_phone_log(path)
+        assert inbound == []
+
+    def test_inbound_advisories_and_shown_lines_are_both_picked_out(self, tmp_path):
+        advisory = an_inbound_advisory(capture_ns=100, wire_ns=200, recv_ns=300, recv_wall_ns=400)
+        shown = a_shown_line(capture_ns=100, shown_ns=350)
+        path = write_phone_log(tmp_path, [advisory, shown])
+        loaded_advisories, loaded_shown = load_phone_log(path)
+        assert loaded_advisories == [advisory]
+        assert loaded_shown == [shown]
+
+
+class TestJoinPhoneLog:
+
+    def test_matches_on_the_exact_capture_stamp(self):
+        tick = {"tick_id": 5, "t_capture_mono_ns": 100, "stages": {"detect": {"ms": 1.0}}}
+        advisory = an_inbound_advisory(capture_ns=100, wire_ns=None, recv_ns=300, recv_wall_ns=400)
+        result = join_phone_log([tick], [], [advisory], [])
+
+        assert result["matched"] == 1
+        assert result["unmatched"] == 0
+        row = result["rows"][0]
+        assert row["tick_id"] == 5
+        assert row["stages"]["detect"] == {"ms": 1.0}
+        assert "return" in row["stages"] and "render" in row["stages"]
+
+    def test_an_advisory_with_no_matching_tick_is_counted(self):
+        advisory = an_inbound_advisory(capture_ns=999, wire_ns=None, recv_ns=300, recv_wall_ns=400)
+        result = join_phone_log([], [], [advisory], [])
+        assert result["matched"] == 0
+        assert result["unmatched"] == 1
+        assert result["advisories_seen_by_the_phone"] == 1
+
+    def test_return_is_absent_without_a_wire_stamp(self):
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(capture_ns=100, wire_ns=None, recv_ns=300, recv_wall_ns=400)
+        row = join_phone_log([tick], [], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "absent"
+        assert "wire stamp" in row["stages"]["return"]["reason"]
+
+    def test_return_is_absent_with_no_estimate_near_enough(self):
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(capture_ns=100, wire_ns=200, recv_ns=300, recv_wall_ns=400)
+        # An estimate that exists, but nowhere near this receipt's wall time.
+        estimate = a_timebase_estimate(source="round_trip", t_wall=1_000_000.0)
+        row = join_phone_log([tick], [estimate], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "absent"
+
+    def test_return_is_converted_against_the_nearest_matching_estimate(self):
+        # A real estimator, fed real samples, so the reconstruction under test
+        # runs the same arithmetic a live conversion would.
+        from transport.timebase import NS_PER_S, TimebaseEstimator, TimeSyncSample
+
+        base_ns = 4_000_000_000_000
+        estimator = TimebaseEstimator(mono_clock=lambda: base_ns + 20 * NS_PER_S)
+        for i in range(10):
+            t1 = base_ns + i * NS_PER_S
+            estimator.add(TimeSyncSample(
+                exchange_id=i, t1_local_send_ns=t1,
+                t2_remote_recv_ns=t1 + 5_000_000 + 2_000_000_000,
+                t3_remote_send_ns=t1 + 5_000_000 + 2_000_000_000,
+                t4_local_recv_ns=t1 + 10_000_000,
+            ))
+        estimate_record = estimator.estimate.to_record()
+
+        wall_now = 1_755_000_000.0
+        timebase_estimate = {
+            "type": "timebase_estimate", "source": "round_trip", "t_wall": wall_now,
+            **estimate_record,
+        }
+        # The phone's receipt, on the remote (phone) clock: some instant that
+        # converts cleanly back near this estimate's own reference.
+        recv_ns = estimator.estimate.t_reference_ns + estimator.estimate.offset_ns
+        advisory = an_inbound_advisory(
+            capture_ns=100, wire_ns=base_ns, recv_ns=recv_ns, recv_wall_ns=int(wall_now * 1e9),
+        )
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+
+        row = join_phone_log([tick], [timebase_estimate], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "converted"
+        assert row["stages"]["return"]["source"] == "round_trip"
+        assert row["stages"]["return"]["ms"] is not None
+        assert row["stages"]["return"]["bound_ms"] is not None
+
+    def test_render_is_measured_between_two_phone_clock_stamps(self):
+        # Nanosecond deltas large enough to survive the record's millisecond
+        # rounding -- a real render segment is tens of milliseconds, not
+        # hundreds of nanoseconds.
+        recv_ns, shown_ns = 300_000_000, 550_000_000
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(
+            capture_ns=100, wire_ns=None, recv_ns=recv_ns, recv_wall_ns=400
+        )
+        shown = a_shown_line(capture_ns=100, shown_ns=shown_ns)
+        row = join_phone_log([tick], [], [advisory], [shown])["rows"][0]
+        assert row["stages"]["render"]["basis"] == "measured"
+        assert row["stages"]["render"]["ms"] == pytest.approx((shown_ns - recv_ns) / 1e6)
+        assert row["stages"]["render"]["clock"] == "phone"
+
+    def test_render_is_absent_when_the_advisory_was_never_shown(self):
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(capture_ns=100, wire_ns=None, recv_ns=300, recv_wall_ns=400)
+        row = join_phone_log([tick], [], [advisory], [])["rows"][0]
+        assert row["stages"]["render"]["basis"] == "absent"
+
+
+def test_analyze_with_a_phone_log_produces_the_phone_join(tmp_path):
+    ticks = [make_tick(i) for i in range(10)]
+    ticks[3]["t_capture_mono_ns"] = 555
+    ticks[3]["stages"] = {"detect": {"ms": 1.0}}
+    run_dir = write_run(tmp_path, ticks)
+
+    phone_log = write_phone_log(tmp_path, [
+        an_inbound_advisory(capture_ns=555, wire_ns=None, recv_ns=600, recv_wall_ns=700),
+        a_shown_line(capture_ns=555, shown_ns=650),
+    ])
+
+    result = analyze(run_dir, phone_log)
+    join = result["phone_join"]
+    assert join["matched"] == 1
+    assert join["rows"][0]["stages"]["render"]["basis"] == "measured"
+
+
+def test_analyze_without_a_phone_log_leaves_the_join_absent(tmp_path):
+    run_dir = write_run(tmp_path, [make_tick(i) for i in range(10)])
+    result = analyze(run_dir)
+    assert result["phone_join"] is None

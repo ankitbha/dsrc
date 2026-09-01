@@ -38,6 +38,15 @@ sys.path.insert(0, str(JETSON_DIR))
 
 import numpy as np  # noqa: E402
 
+from sensors.time_sync import StageTiming  # noqa: E402
+from transport.timebase import TimebaseEstimate  # noqa: E402
+
+#: How far apart two devices' `timebase_estimate` and advisory-receipt wall
+#: stamps may sit and still be treated as describing the same moment in the
+#: link's history. Both clocks are NTP-locked, so this is generous against
+#: NTP's own accuracy rather than a tight tolerance.
+ESTIMATE_MATCH_WINDOW_S = 30.0
+
 # The gate is on the ON-JETSON segment, not on end-to-end. The threshold is a
 # claim about what this hardware can do, so charging it for a link the Jetson
 # does not control would make a run fail for the network's behaviour. It would
@@ -52,8 +61,9 @@ GATE_VEHICLE_TICK_FRACTION = 0.50
 DROPOUT_RECOVERY_MARGIN_S = 2.5  # stale_after_s + one fix interval
 
 
-def load_records(metadata_path: Path) -> tuple[list[dict], dict | None, int]:
-    """Records, the scenario, and how many lines would not parse.
+def load_records(metadata_path: Path) -> tuple[list[dict], dict | None, list[dict], int]:
+    """Ticks, the scenario, the timebase_estimate lines, and how many lines
+    would not parse.
 
     The count is returned rather than swallowed. `MetadataLogger` buffers a mebibyte
     and flushes only in `close()`, and there is a path where `close()` never runs --
@@ -63,6 +73,7 @@ def load_records(metadata_path: Path) -> tuple[list[dict], dict | None, int]:
     """
     ticks: list[dict] = []
     scenario: dict | None = None
+    timebase_estimates: list[dict] = []
     unparseable = 0
     with open(metadata_path) as f:
         for line in f:
@@ -75,7 +86,170 @@ def load_records(metadata_path: Path) -> tuple[list[dict], dict | None, int]:
                 ticks.append(record)
             elif record.get("type") == "scenario":
                 scenario = record
-    return ticks, scenario, unparseable
+            elif record.get("type") == "timebase_estimate":
+                timebase_estimates.append(record)
+    return ticks, scenario, timebase_estimates, unparseable
+
+
+def load_phone_log(phone_log_path: Path) -> tuple[list[dict], list[dict]]:
+    """Inbound advisory lines and advisory_shown lines from a phone's session
+    log, ignoring everything else the file holds.
+
+    Every outbound line `SessionLog` writes is a bare frame header -- the
+    canonical JSON that went on the wire, verbatim, with no wrapper -- so it
+    carries no `dir` key at all. The two line shapes this join wants both do,
+    which is what tells them apart from an outbound line and from each other
+    without this reader having to know every line shape a later task adds.
+    """
+    inbound_advisories: list[dict] = []
+    shown: list[dict] = []
+    with open(phone_log_path) as f:
+        for line in f:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            direction = record.get("dir")
+            if direction == "in" and record.get("header", {}).get("ch") == "advisory":
+                inbound_advisories.append(record)
+            elif direction == "shown":
+                shown.append(record)
+    return inbound_advisories, shown
+
+
+def _reconstruct_estimate(record: dict) -> TimebaseEstimate:
+    """A `TimebaseEstimate` from its persisted `to_record()`, the re-derivation
+    the estimate_id on every converted stamp promises is possible."""
+    fields = {
+        k: v for k, v in record.items()
+        if k in TimebaseEstimate.__dataclass_fields__
+    }
+    return TimebaseEstimate(**fields)
+
+
+def _nearest_estimate(
+    timebase_estimates: list[dict], *, source: str, near_wall_ns: int
+) -> TimebaseEstimate | None:
+    """The persisted estimate of the given source closest in Jetson wall time
+    to `near_wall_ns`, or None when there is none within the match window.
+
+    Wall time, not monotonic: the two logs come from two devices whose
+    monotonic clocks share no origin, so nothing else lets an offline reader
+    line up "the estimate that was current then" across the two files. Both
+    devices are NTP-locked -- the same premise `phone_source.py` states for
+    using wall stamps as a correlation key, never as the latency measurement
+    itself, which is why the actual conversion below still runs on monotonic
+    nanoseconds through the estimate's own arithmetic.
+    """
+    candidates = [e for e in timebase_estimates if e.get("source") == source]
+    if not candidates:
+        return None
+    best = min(candidates, key=lambda e: abs(int(e["t_wall"] * 1e9) - near_wall_ns))
+    if abs(int(best["t_wall"] * 1e9) - near_wall_ns) > int(ESTIMATE_MATCH_WINDOW_S * 1e9):
+        return None
+    return _reconstruct_estimate(best)
+
+
+def _return_stage(
+    header: dict, receipt: dict, timebase_estimates: list[dict]
+) -> StageTiming:
+    """Advisory wire departure (Jetson clock) to phone receipt (phone clock),
+    converted offline against whichever persisted estimate was nearest in
+    wall time -- round-trip preferred, one-way as a fallback, exactly the
+    adapter's own live preference order.
+    """
+    wire_ns = header.get("t_wire_mono_ns")
+    if wire_ns is None:
+        return StageTiming.absent(clock="cross", reason="advisory carried no wire stamp")
+    recv_ns = receipt.get("recv_mono_ns")
+    recv_wall_ns = receipt.get("recv_wall_ns")
+    if recv_ns is None or recv_wall_ns is None:
+        return StageTiming.absent(clock="cross", reason="phone log did not record the receipt")
+
+    for source in ("round_trip", "one_way"):
+        estimate = _nearest_estimate(
+            timebase_estimates, source=source, near_wall_ns=recv_wall_ns
+        )
+        if estimate is None:
+            continue
+        converted = estimate.convert_to_local(recv_ns)
+        if converted is None:
+            continue
+        return_ms = (converted.t_remote_mono_ns - wire_ns) / 1e6
+        return StageTiming.converted(
+            return_ms, bound_ms=converted.bound_ns / 1e6,
+            estimate_id=converted.estimate_id, source=source,
+        )
+    return StageTiming.absent(
+        clock="cross", reason="no timebase estimate near this receipt's wall time"
+    )
+
+
+def _render_stage(receipt: dict, shown_record: dict | None) -> StageTiming:
+    """Phone receipt to the first `current()` call that returned this
+    advisory -- both phone-clock, so no conversion is needed at all. Absent
+    when the advisory expired before anything ever asked for it.
+    """
+    if shown_record is None:
+        return StageTiming.absent(
+            clock="phone", reason="advisory expired before current() returned it"
+        )
+    recv_ns = receipt.get("recv_mono_ns")
+    shown_ns = shown_record.get("shown_mono_ns")
+    if recv_ns is None or shown_ns is None:
+        return StageTiming.absent(clock="phone", reason="phone log is missing a stamp")
+    return StageTiming.measured((shown_ns - recv_ns) / 1e6, clock="phone")
+
+
+def join_phone_log(
+    ticks: list[dict],
+    timebase_estimates: list[dict],
+    inbound_advisories: list[dict],
+    shown: list[dict],
+) -> dict[str, Any]:
+    """The ten-stage table: each Jetson tick's own eight stages, plus `return`
+    and `render` -- facts only the phone witnesses -- joined on the exact
+    nanosecond key `AdvisoryMessage.t_capture_mono_ns` carries on both ends of
+    the exchange (`run_phone_drive.py` already joins the same way).
+
+    An inbound advisory with no matching tick is counted rather than dropped
+    silently: nothing about a mismatch here says which side is wrong, but a
+    reader needs to know it happened.
+    """
+    ticks_by_capture_ns = {
+        t["t_capture_mono_ns"]: t for t in ticks if "t_capture_mono_ns" in t
+    }
+    shown_by_capture_ns: dict[int, dict] = {}
+    for record in shown:
+        capture_ns = record.get("t_capture_mono_ns")
+        if capture_ns is not None:
+            shown_by_capture_ns[capture_ns] = record
+
+    rows: list[dict[str, Any]] = []
+    unmatched = 0
+    for record in inbound_advisories:
+        header = record.get("header", {})
+        capture_ns = header.get("t_capture_mono_ns")
+        tick = ticks_by_capture_ns.get(capture_ns)
+        if tick is None:
+            unmatched += 1
+            continue
+        stages = dict(tick.get("stages", {}))
+        stages["return"] = _return_stage(header, record, timebase_estimates).to_record()
+        stages["render"] = _render_stage(
+            record, shown_by_capture_ns.get(capture_ns)
+        ).to_record()
+        rows.append({
+            "t_capture_mono_ns": capture_ns,
+            "tick_id": tick.get("tick_id"),
+            "stages": stages,
+        })
+    return {
+        "advisories_seen_by_the_phone": len(inbound_advisories),
+        "matched": len(rows),
+        "unmatched": unmatched,
+        "rows": rows,
+    }
 
 
 def pctl(values: list[float]) -> dict[str, float]:
@@ -123,9 +297,15 @@ def in_dropout_affected(elapsed_s: float, dropouts: list[tuple[float, float]]) -
     return any(a <= elapsed_s < b + DROPOUT_RECOVERY_MARGIN_S for a, b in dropouts)
 
 
-def analyze(run_dir: Path) -> dict[str, Any]:
-    """All metrics + gates as a JSON-able dict (report rendering is separate)."""
-    ticks, scenario, unparseable = load_records(run_dir / "metadata.jsonl")
+def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]:
+    """All metrics + gates as a JSON-able dict (report rendering is separate).
+
+    `phone_log_path` is optional: a run with no phone behind it, or one whose
+    phone log was not pulled off the handset, still analyses fully on the
+    eight Jetson-side stages every tick already carries. When it is supplied,
+    the two logs are joined into the ten-stage table task 33 asks for.
+    """
+    ticks, scenario, timebase_estimates, unparseable = load_records(run_dir / "metadata.jsonl")
     if not ticks:
         raise SystemExit(f"no tick records in {run_dir / 'metadata.jsonl'}")
     summary = {}
@@ -340,6 +520,10 @@ def analyze(run_dir: Path) -> dict[str, Any]:
         # the verdict rather than reported beside it, because a field nobody looks at
         # is the failure this whole check exists to close.
         "overall_pass": overall and integrity["log_complete"],
+        "phone_join": (
+            None if phone_log_path is None
+            else join_phone_log(ticks, timebase_estimates, *load_phone_log(phone_log_path))
+        ),
         "_sim_truth": sim_truth,  # stripped before JSON dump
         "_ticks": ticks,
     }
@@ -522,6 +706,27 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         f"- confidence labels: {a['confidence_labels']}",
         f"- head distributions: {json.dumps(a['head_distributions'], indent=2)}",
     ]
+    join = r.get("phone_join")
+    if join is not None:
+        return_ms = [
+            row["stages"]["return"]["ms"] for row in join["rows"]
+            if row["stages"]["return"]["ms"] is not None
+        ]
+        render_ms = [
+            row["stages"]["render"]["ms"] for row in join["rows"]
+            if row["stages"]["render"]["ms"] is not None
+        ]
+        lines += [
+            "",
+            "## Phone join (return / render)",
+            "",
+            f"- advisories the phone logged as received: {join['advisories_seen_by_the_phone']}",
+            f"- matched to a Jetson tick: {join['matched']}; unmatched: {join['unmatched']}",
+            f"- return_ms measured on {len(return_ms)} of {join['matched']} matched rows"
+            + (f" (p50 {sorted(return_ms)[len(return_ms) // 2]:.1f} ms)" if return_ms else ""),
+            f"- render_ms measured on {len(render_ms)} of {join['matched']} matched rows"
+            + (f" (p50 {sorted(render_ms)[len(render_ms) // 2]:.1f} ms)" if render_ms else ""),
+        ]
     if plots:
         lines += ["", "## Plots", ""] + [f"![{p}]({p})" for p in plots]
     lines.append("")
@@ -532,10 +737,15 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir", help="run directory containing metadata.jsonl")
     parser.add_argument("--no-plots", action="store_true")
+    parser.add_argument(
+        "--phone-log", type=Path, default=None,
+        help="the phone's own session log (SessionLog output), to join return/render "
+             "onto the eight Jetson-side stages every tick already carries",
+    )
     args = parser.parse_args()
     run_dir = Path(args.run_dir).expanduser()
 
-    result = analyze(run_dir)
+    result = analyze(run_dir, args.phone_log.expanduser() if args.phone_log else None)
     plots = [] if args.no_plots else render_plots(result, run_dir)
     report_md = render_markdown(result, plots)
     (run_dir / "report.md").write_text(report_md)
