@@ -310,6 +310,18 @@ class TestTheRecord:
 
         attribution = record["attribution"]
         assert set(attribution) == {"first_decision", "rules", "gates", "per_sensor"}
+        # The fixture's second `decide()` is not the controller's first, so this is
+        # only true because `to_record()` copies the field rather than recomputing
+        # it -- a copy that goes stale reports the opposite of what happened.
+        assert attribution["first_decision"] is False
+        # `rules` is transformed through `RuleCheck.to_record()` on the way out, so
+        # this is the only place these hold at the record level rather than on the
+        # `Attribution` object a reader of the tick log never sees.
+        assert set(attribution["rules"]) == set(RULES)
+        assert all(r["status"] in (RULE_FIRED, RULE_QUIET, RULE_NOT_EVALUABLE)
+                   for r in attribution["rules"].values())
+        assert record["rules_fired"] == [n for n in RULES
+                                         if attribution["rules"][n]["status"] == RULE_FIRED]
         assert set(attribution["gates"]) == {
             "wants_more", "gapped", "dwell", "hold", "bridged", "level",
         }
