@@ -105,12 +105,17 @@ of the sum. `eval_run` gates `latency_jetson_p95`.
 
 ## 5. Simulation ↔ prototype observation mapping
 
-(paper table; provenance is logged per-tick in `field_sources`)
+(paper table; provenance is logged per-tick in `field_sources`, from the
+closed vocabulary in `perception/provenance.py`. The map covers all 39 slots
+`sim_contract.encoded_slot_names()` lists, not just the 33 flat observation
+fields below -- `cooperation.*` and `nearby_av_lane_distribution.<lane>` each
+get their own entry, dotted, so the missingness metric is a statement about
+the whole encoded vector.)
 
 | sim observation field | prototype source | provenance |
 |---|---|---|
 | ego_speed | GPS RMC speed-over-ground (5 Hz); held during dropouts | measured |
-| ego_acceleration | least-squares slope of GPS speed (~1 s window) | derived |
+| ego_acceleration | least-squares slope of GPS speed (~1 s window), refused once the window's newest sample is older than `gps_stale_after_s` | derived / fallback_neutral |
 | ego_lane | `observation.assumed_lane` (no lane detection in v0) | static_config |
 | ego_headway_s | leader_gap / ego_speed (inf when no leader, as sim) | derived |
 | target_headway_s | previous tick's commanded headway bin (feedback loop, as in sim) | static/feedback |
@@ -118,15 +123,16 @@ of the sum. `eval_run` gates `latency_jetson_p95`.
 | left/right_lane_front_gap | nearest track with lateral offset ≈ ∓1 lane | measured |
 | follower_*, *_rear_gap, rear_required_decel | spec "empty road" values (inf / 0) - no rear sensing | fallback_neutral |
 | target_lane_* | = current-lane values (sim defaults target lane to current) | derived |
-| active_vehicle_count_local | forward in-range track count ×2 (symmetric extrapolation, `symmetrize_counts`) | derived |
-| local_density_bin | sim formula count/(2·range/1000), sim bin edges (12, 30) | derived |
+| active_vehicle_count_local | forward in-range track count ×2 (symmetric extrapolation, `symmetrize_counts`) | derived / derived_empty (zero in-range tracks) |
+| local_density_bin | sim formula count/(2·range/1000), sim bin edges (12, 30) | derived / derived_empty (zero in-range tracks -- the disagreement rule's only firing condition under shipped constants) |
 | local_mean_speed_bin | mean(ego + rel_speed) over valid tracks, sim edges (8, 18) | derived |
-| local_queue_estimate | tracks with absolute speed < 5 m/s (sim queue_speed) | derived |
+| local_queue_estimate | tracks with absolute speed < 5 m/s (sim queue_speed) | derived / derived_empty (no in-range tracks) / fallback_neutral (tracks present, none measurable) |
 | uncongested_low_speed_flag | mirrors `safety/etiquette.py` (density < 12 ∧ v < vf − 8) | derived |
 | distance_to_next_merge | 0.0 - **sim parity**: the sim itself hardcodes 0.0 | sim_parity |
 | distance_to_downstream_bottleneck | inf (no map matching; sim's off-bottleneck value) | sim_parity |
 | time_since_last_lane_change, lane_changes_last_km | inf / 0 (no lane-change detection) | fallback_neutral |
 | nearby_av_*, cooperation.* | V2V beacons when enabled; else spec neutral fallbacks (count 0, mean speed = free-flow, pressure/congestion 0) | measured / fallback_neutral |
+| nearby_av_lane_distribution.{0,1,2} | share of heard peers reporting each lane | derived (a peer carried a lane id) / fallback_neutral (no peers, or none carried one) |
 
 Encoding (scales, inf clamping, bool handling) is **bit-identical** to
 `src/rl/encoders.py` - property-tested in `tests/test_sim_contract.py`.
