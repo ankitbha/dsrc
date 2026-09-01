@@ -45,6 +45,7 @@ from geo import haversine_m
 from policy.sensing_controller import Decision, Inputs, SensingController
 from policy.shadow_mode import SHADOW, ModeHolder, command_for
 from sensors.time_sync import capture_stamp_ns
+from transport.messages import DROP_KEYS, RATE_KEYS
 
 #: How long a rate command may go unsent while nothing changes.
 RATE_CMD_HEARTBEAT_S = 5.0
@@ -69,6 +70,31 @@ class TickOutcome:
     #: Why the command went, or None when it did not. One of the three reasons
     #: above, so a drive's send pattern can be attributed rather than counted.
     send_reason: str | None
+    #: The exact `Inputs` `decide` was called with. Required, not optional: an
+    #: optional default here is a silent-absence path, the same rule task 34 D5
+    #: applied to `attribution`. This is what makes the logged decision replayable
+    #: as a pure function of the record instead of a reconstruction from rounded
+    #: evidence.
+    inputs: Inputs
+    #: What the phone reports it is actually running, built by `reference_from`
+    #: against this tick's own `now`. Required for the same reason `inputs` is.
+    reference: dict[str, Any]
+
+    def to_record(self) -> dict[str, Any]:
+        """The shape `run_demo` writes to `record["sensing"]`: the decision
+        exactly as `Decision.to_record()` states it, the exact inputs it was
+        decided from, what the phone says it was running while that decision was
+        made, and whether the command reached the wire.
+        """
+        return {
+            **self.decision.to_record(),
+            "decision_inputs": self.inputs.to_record(),
+            "reference": dict(self.reference),
+            "shadow": self.command.shadow,
+            "advisory_sent": self.advisory_sent,
+            "command_sent": self.command_sent,
+            "send_reason": self.send_reason,
+        }
 
 
 def _margin(head_probs: dict[str, list[float]]) -> float | None:
@@ -121,6 +147,28 @@ def inputs_from(tick: Any, phone: Any, *, now: float) -> Inputs:
     )
 
 
+def reference_from(phone: Any, *, now: float) -> dict[str, Any]:
+    """What the phone says it is actually running, witnessed rather than assumed.
+
+    `achieved` is the phone's windowed average and `dropped` is cumulative
+    (`TelemetryReporter` on the phone side); both arrive on every telemetry frame
+    and neither had a reader on this side before this task. Null together with
+    `age_s`, and `absent` named, when the phone has never reported -- never
+    zeros, because a phone reporting zero achieved and a phone never heard from
+    are different drives.
+    """
+    telemetry = getattr(phone, "telemetry", None)
+    if telemetry is None:
+        return {"achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry"}
+    telemetry_at = getattr(phone, "telemetry_at_mono", None)
+    return {
+        "achieved": {key: telemetry.achieved[key] for key in RATE_KEYS},
+        "dropped": {key: telemetry.dropped[key] for key in DROP_KEYS},
+        "age_s": None if telemetry_at is None else now - telemetry_at,
+        "absent": None,
+    }
+
+
 class SensingLoop:
     """One decision per tick, and the two messages that may follow it."""
 
@@ -153,7 +201,9 @@ class SensingLoop:
     def on_tick(self, tick: Any, phone: Any = None) -> TickOutcome:
         now = self._now()
         self.ticks += 1
-        decision = self.controller.decide(inputs_from(tick, phone, now=now))
+        inputs = inputs_from(tick, phone, now=now)
+        decision = self.controller.decide(inputs)
+        reference = reference_from(phone, now=now)
         self.decisions_by_trigger[decision.trigger] = (
             self.decisions_by_trigger.get(decision.trigger, 0) + 1
         )
@@ -187,6 +237,8 @@ class SensingLoop:
             advisory_sent=advisory_sent,
             command_sent=command_sent,
             send_reason=reason if command_sent else None,
+            inputs=inputs,
+            reference=reference,
         )
 
     def _send_reason(self, command: Any, now: float) -> str | None:

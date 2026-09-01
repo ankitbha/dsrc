@@ -13,10 +13,10 @@ from typing import Any
 import pytest
 
 from policy.advisory import Advisory
-from policy.sensing_loop import QUERY_REFRESH_FRACTION, SensingLoop, inputs_from
+from policy.sensing_loop import QUERY_REFRESH_FRACTION, SensingLoop, inputs_from, reference_from
 from policy.shadow_mode import LIVE, SHADOW, ModeHolder
 from transport.channels import Channel
-from transport.messages import ACTION_HEADS, decode_message
+from transport.messages import ACTION_HEADS, PhoneTelemetry, decode_message
 
 
 class Clock:
@@ -438,6 +438,99 @@ class TestTriggerAndRuleCounters:
         assert sum(record["decisions_by_trigger"].values()) == 1
         assert record["rules_by_status"]
         assert sum(sum(counts.values()) for counts in record["rules_by_status"].values()) == 4
+
+
+def _telemetry(**achieved_and_dropped) -> PhoneTelemetry:
+    achieved = achieved_and_dropped.get(
+        "achieved", {"camera_hz": 4.97, "gps_hz": 1.0, "imu_hz": 49.8, "here_hz": 0.0})
+    dropped = achieved_and_dropped.get("dropped", {"camera": 61, "gps": 0, "imu": 0, "here": 0})
+    return PhoneTelemetry(
+        t_capture_mono_ns=0, thermal_status="nominal", thermal_headroom=None,
+        achieved=achieved, dropped=dropped, here_calls=0, here_errors=0,
+    )
+
+
+class TestReferenceFromPhone:
+    """What the phone reports it is actually running -- witnessed, not assumed.
+    Absent rather than zero when it has never reported: a phone reporting zero
+    achieved and a phone never heard from are different drives.
+    """
+
+    def test_no_phone_at_all_is_named_absent(self):
+        assert reference_from(None, now=1000.0) == {
+            "achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry",
+        }
+
+    def test_a_phone_that_never_reported_is_named_absent_not_zero(self):
+        record = reference_from(Phone(), now=1000.0)
+        assert record == {
+            "achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry",
+        }
+
+    def test_a_phone_that_reported_echoes_achieved_dropped_and_age(self):
+        phone = Phone()
+        phone.telemetry = _telemetry()
+        phone.telemetry_at_mono = 999.59
+        record = reference_from(phone, now=1000.0)
+        assert record["achieved"] == {"camera_hz": 4.97, "gps_hz": 1.0, "imu_hz": 49.8, "here_hz": 0.0}
+        assert record["dropped"] == {"camera": 61, "gps": 0, "imu": 0, "here": 0}
+        assert record["age_s"] == pytest.approx(0.41)
+        assert record["absent"] is None
+
+    def test_on_tick_wires_the_reference_from_the_phone(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        phone = Phone()
+        phone.telemetry = _telemetry(achieved={"camera_hz": 1.0, "gps_hz": 1.0,
+                                                "imu_hz": 50.0, "here_hz": 0.05})
+        phone.telemetry_at_mono = clock.now
+        outcome = loop.on_tick(tick(), phone)
+        assert outcome.reference["absent"] is None
+        assert outcome.reference["achieved"]["camera_hz"] == 1.0
+
+    def test_on_tick_with_no_phone_reports_no_telemetry(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        outcome = loop.on_tick(tick(), None)
+        assert outcome.reference == {
+            "achieved": None, "dropped": None, "age_s": None, "absent": "no_telemetry",
+        }
+
+
+class TestTickOutcomeToRecord:
+    """`record["sensing"]` is `TickOutcome.to_record()`: the five pre-existing
+    keys run_demo used to build inline, byte-identical, plus the three blocks
+    task 35 adds. Asserted here, at birth, rather than left as the one thing
+    no test reads -- task 34's round-1 lesson.
+    """
+
+    def test_the_five_pre_existing_keys_are_unchanged(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        phone = Phone()
+        outcome = loop.on_tick(tick(), phone)
+        record = outcome.to_record()
+
+        decision_record = outcome.decision.to_record()
+        for key in ("rates", "trigger", "rules_fired", "reasons", "thermal_scale",
+                    "clamped", "here_radius_m", "attribution"):
+            assert record[key] == decision_record[key]
+        assert record["shadow"] == outcome.command.shadow
+        assert record["advisory_sent"] == outcome.advisory_sent
+        assert record["command_sent"] == outcome.command_sent
+        assert record["send_reason"] == outcome.send_reason
+
+    def test_the_three_new_blocks_are_present(self):
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        phone = Phone()
+        outcome = loop.on_tick(tick(accel=3.0), phone)
+        record = outcome.to_record()
+
+        assert record["decided_at_mono"] == outcome.decision.decided_at_mono
+        assert record["decision_inputs"] == outcome.inputs.to_record()
+        assert record["decision_inputs"]["ego_acceleration"] == 3.0
+        assert record["reference"] == outcome.reference
 
 
 def _degrees_north(metres: float) -> float:
