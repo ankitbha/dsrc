@@ -1,17 +1,16 @@
 """Build the simulation actor's observation dict from real sensors.
 
-This is the sim-to-real alignment core. Every field of the sim's local
-observation (specs/observation_schema.md) is produced here, each tagged
-with a provenance class in ``field_sources``:
-
-  measured          directly from camera/GPS/V2V this tick
-  derived           computed from measured quantities (e.g. headway)
-  fallback_neutral  spec-mandated neutral value (e.g. no rear sensing)
-  static_config     operator-provided constant (e.g. assumed lane)
-  sim_parity        value the sim itself hardcodes (kept identical)
+This is the sim-to-real alignment core. Every one of the 39 slots the actor
+reads (`sim_contract.encoded_slot_names()`) is produced here, each tagged
+with a provenance class in ``field_sources``. The vocabulary itself lives in
+`perception.provenance`, not here: `ego_speed`, `ego_acceleration` and
+`local_density_bin` below are three of eleven classes a field can carry, and
+`provenance.SOURCES` is the closed list.
 
 The provenance map is logged every tick and is the basis for the paper's
-"observation missingness" metric.
+"observation missingness" metric, and (since this module's own field-level
+fixes) for the sensing controller's free-tier event rule -- a substituted
+`ego_acceleration` no longer reads as a calm road.
 
 Key geometry conventions (right-hand traffic, camera ~lane-centered):
   lateral_m > 0 is right of the camera axis; lane assignment is
@@ -37,7 +36,7 @@ from typing import Any
 
 import numpy as np
 
-from perception import feed_fusion
+from perception import feed_fusion, provenance
 from perception.distance import TrackedVehicle
 from policy import sim_contract
 from sensors.gps_reader import GpsFix
@@ -110,6 +109,9 @@ class _EgoState:
     last_speed_mps: float = 0.0
     ever_had_fix: bool = False
     target_headway_s: float = 1.6
+    #: `t_mono` of the last tick whose `in_range` was non-empty. None until
+    #: the first in-range detection this builder has ever seen.
+    last_in_range_at: float | None = None
 
 
 def _speed_provenance(gps: GpsFix) -> str:
@@ -121,10 +123,10 @@ def _speed_provenance(gps: GpsFix) -> str:
     """
     stamp = getattr(gps, "timebase", None)
     if stamp is None:
-        return "measured"
+        return provenance.SOURCE_MEASURED
     if stamp.proxy:
-        return "measured_arrival_proxy"
-    return "measured_converted"
+        return provenance.SOURCE_MEASURED_ARRIVAL_PROXY
+    return provenance.SOURCE_MEASURED_CONVERTED
 
 
 class ObservationBuilder:
@@ -209,14 +211,24 @@ class ObservationBuilder:
         else:
             # hold last known speed rather than reporting 0 (= "stopped")
             ego_speed = self._ego.last_speed_mps if self._ego.ever_had_fix else 0.0
-            src["ego_speed"] = "fallback_neutral"
+            src["ego_speed"] = provenance.SOURCE_FALLBACK_NEUTRAL
         # From the branch actually taken, not from the sample count -- the count
-        # cannot see the window-span guard below it.
-        ego_accel, accel_derived = self._speed_slope()
-        src["ego_acceleration"] = "derived" if accel_derived else "fallback_neutral"
+        # cannot see the window-span guard below it, and `t_mono` lets the
+        # branch also refuse a window whose newest sample has gone stale
+        # since it was appended, which the sample count cannot see either.
+        ego_accel, accel_derived = self._speed_slope(t_mono)
+        src["ego_acceleration"] = (
+            provenance.SOURCE_DERIVED if accel_derived else provenance.SOURCE_FALLBACK_NEUTRAL
+        )
 
         # --- lane assignment from lateral offsets --------------------
         in_range = [v for v in vehicles if v.distance_m <= cfg.effective_range_m]
+        if in_range:
+            # Recorded before anything below can refuse or shortcut, so a
+            # tick that has a detection always advances this -- the last
+            # instant the perception chain produced a track, independent of
+            # what the density/count/queue formulas do with it afterward.
+            self._ego.last_in_range_at = t_mono
         lanes: dict[int, list[TrackedVehicle]] = {}
         for v in in_range:
             lanes.setdefault(self._lane_of(v), []).append(v)
@@ -229,19 +241,38 @@ class ObservationBuilder:
         leader_rel = (
             leader.rel_speed_mps if leader is not None and leader.rel_speed_valid else 0.0
         )
-        src["leader_gap"] = "measured" if leader else "fallback_neutral"
-        src["leader_relative_speed"] = (
-            "measured" if leader is not None and leader.rel_speed_valid else "fallback_neutral"
+        src["leader_gap"] = (
+            provenance.SOURCE_MEASURED if leader else provenance.SOURCE_FALLBACK_NEUTRAL
         )
-        src["left_lane_front_gap"] = "measured" if left_front else "fallback_neutral"
-        src["right_lane_front_gap"] = "measured" if right_front else "fallback_neutral"
+        src["leader_relative_speed"] = (
+            provenance.SOURCE_MEASURED
+            if leader is not None and leader.rel_speed_valid
+            else provenance.SOURCE_FALLBACK_NEUTRAL
+        )
+        src["left_lane_front_gap"] = (
+            provenance.SOURCE_MEASURED if left_front else provenance.SOURCE_FALLBACK_NEUTRAL
+        )
+        src["right_lane_front_gap"] = (
+            provenance.SOURCE_MEASURED if right_front else provenance.SOURCE_FALLBACK_NEUTRAL
+        )
 
         # --- counts, density, speed statistics ------------------------
         n_forward = len(in_range)
         n_local = 2 * n_forward if cfg.symmetrize_counts else n_forward
         # sim formula: count / (2 * range_m / 1000)  over +-range_m
         density = n_local / max((2.0 * cfg.effective_range_m) / 1000.0, 1e-9)
-        src["active_vehicle_count_local"] = "derived" if cfg.symmetrize_counts else "measured"
+        # Zero in-range tracks makes both of these `derived_empty`: the count
+        # really is zero, nothing was substituted for a measurement that
+        # failed, so calling it a plain `derived` would say the same thing
+        # about "nothing to count" and "something we could not count".
+        if n_forward == 0:
+            src["active_vehicle_count_local"] = provenance.SOURCE_DERIVED_EMPTY
+            src["local_density_bin"] = provenance.SOURCE_DERIVED_EMPTY
+        else:
+            src["active_vehicle_count_local"] = (
+                provenance.SOURCE_DERIVED if cfg.symmetrize_counts else provenance.SOURCE_MEASURED
+            )
+            src["local_density_bin"] = provenance.SOURCE_DERIVED
 
         # Only vehicles whose relative speed the tracker could measure have a usable
         # absolute speed, so this population is a subset of `in_range` -- where the
@@ -254,7 +285,9 @@ class ObservationBuilder:
         ]
         measured_fraction = len(abs_speeds) / len(in_range) if in_range else 1.0
         mean_speed = float(np.mean(abs_speeds)) if abs_speeds else ego_speed
-        src["local_mean_speed_bin"] = "derived" if abs_speeds else "fallback_neutral"
+        src["local_mean_speed_bin"] = (
+            provenance.SOURCE_DERIVED if abs_speeds else provenance.SOURCE_FALLBACK_NEUTRAL
+        )
         queue_count = sum(1 for s in abs_speeds if s < cfg.queue_speed_mps)
         if cfg.symmetrize_counts:
             queue_count *= 2
@@ -283,14 +316,23 @@ class ObservationBuilder:
                 "downstream_congestion_estimate": 0.0,
             }
             lane_distribution = self._peer_lane_distribution(peers)
-            src["nearby_av_count"] = "measured"
+            src["nearby_av_count"] = provenance.SOURCE_MEASURED
         else:
             av_count = 0
             av_density = 0.0
             av_mean_speed = cfg.free_flow_speed_mps
             cooperation = sim_contract.neutral_cooperation(cfg.free_flow_speed_mps)
             lane_distribution: dict[str, float] = {}
-            src["nearby_av_count"] = "fallback_neutral"
+            src["nearby_av_count"] = provenance.SOURCE_FALLBACK_NEUTRAL
+        # `_peer_lane_distribution` returns {} both when there are no peers and
+        # when none of them carry a `lane_id` -- either way the three encoded
+        # lane-share slots are neutral rather than computed from a measured
+        # peer.
+        lane_source = (
+            provenance.SOURCE_DERIVED if lane_distribution else provenance.SOURCE_FALLBACK_NEUTRAL
+        )
+        for lane in sim_contract.LANE_DISTRIBUTION_LANES:
+            src[f"nearby_av_lane_distribution.{lane}"] = lane_source
 
         # --- the traffic feed: derived, recorded, and NOT in the vector -----
         #
@@ -382,24 +424,28 @@ class ObservationBuilder:
         }
 
         defaults = {
-            "is_active": "static_config",
-            "ego_lane": "static_config",
-            "ego_headway_s": "derived",
-            "target_headway_s": "static_config",
-            "time_since_last_lane_change": "fallback_neutral",
-            "lane_changes_last_km": "fallback_neutral",
-            "distance_to_next_merge": "sim_parity",
-            "distance_to_downstream_bottleneck": "sim_parity",
-            "follower_gap": "fallback_neutral",
-            "follower_relative_speed": "fallback_neutral",
-            "left_lane_rear_gap": "fallback_neutral",
-            "right_lane_rear_gap": "fallback_neutral",
-            "target_lane_front_gap": "derived",
-            "target_lane_rear_gap": "fallback_neutral",
-            "target_lane_rear_required_decel": "fallback_neutral",
-            "downstream_congestion_estimate": "fallback_neutral" if not peers else "measured",
-            "merge_pressure": "fallback_neutral",
-            "segment_target_speed": "fallback_neutral" if not peers else "measured",
+            "is_active": provenance.SOURCE_STATIC_CONFIG,
+            "ego_lane": provenance.SOURCE_STATIC_CONFIG,
+            "ego_headway_s": provenance.SOURCE_DERIVED,
+            "target_headway_s": provenance.SOURCE_STATIC_CONFIG,
+            "time_since_last_lane_change": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "lane_changes_last_km": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "distance_to_next_merge": provenance.SOURCE_SIM_PARITY,
+            "distance_to_downstream_bottleneck": provenance.SOURCE_SIM_PARITY,
+            "follower_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "follower_relative_speed": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "left_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "right_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "target_lane_front_gap": provenance.SOURCE_DERIVED,
+            "target_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "target_lane_rear_required_decel": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "downstream_congestion_estimate": (
+                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_MEASURED
+            ),
+            "merge_pressure": provenance.SOURCE_FALLBACK_NEUTRAL,
+            "segment_target_speed": (
+                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_MEASURED
+            ),
             # `approximated`, not `derived`. The formula mirrors
             # `src/safety/etiquette.py`, but the simulator feeds it a SEGMENT density
             # from `segment_metrics` and this feeds it the locally sensed +-range
@@ -409,24 +455,40 @@ class ObservationBuilder:
             # unit substitution task 28 retracted two fields for. Marked rather than
             # silently equated, so the missingness metric and anyone reading the
             # vector can see which it is.
-            "uncongested_low_speed_flag": "approximated",
-            "local_density_bin": "derived",
-            "local_queue_estimate": "derived",
-            # From the same list as `local_mean_speed_bin`, which already reports
-            # `fallback_neutral` on an empty one. An unconditional "derived" here let
-            # "six vehicles, none queued" and "six vehicles, none measurable" write
-            # the same record -- and `field_sources` is what the missingness metric
-            # is computed from.
-            "local_queue_estimate": "derived" if abs_speeds else "fallback_neutral",
+            "uncongested_low_speed_flag": provenance.SOURCE_APPROXIMATED,
+            # `local_density_bin` and `active_vehicle_count_local` are set above,
+            # beside `n_forward`, because they need it. `local_queue_estimate`
+            # reads the same population (`in_range`, `abs_speeds`) but has a
+            # third class no other field here needs: an absence of tracks is
+            # `derived_empty`, tracks present but none with a measurable speed
+            # is `fallback_neutral` -- the distinction :415-420 exists for --
+            # and a measurable one is `derived`.
+            "local_queue_estimate": (
+                provenance.SOURCE_DERIVED if abs_speeds
+                else provenance.SOURCE_DERIVED_EMPTY if not in_range
+                else provenance.SOURCE_FALLBACK_NEUTRAL
+            ),
             "active_av_count_local": src["nearby_av_count"],
             "nearby_av_density": src["nearby_av_count"],
             "nearby_av_mean_speed": src["nearby_av_count"],
         }
         for key, value in defaults.items():
             src.setdefault(key, value)
+        # The nested `cooperation` block is the same three values as the flat
+        # fields above it, read through a different key -- so their class is
+        # the flat field's class, not a fresh judgement.
+        src["cooperation.segment_target_speed"] = src["segment_target_speed"]
+        src["cooperation.merge_pressure"] = src["merge_pressure"]
+        src["cooperation.downstream_congestion_estimate"] = src["downstream_congestion_estimate"]
 
         encoded = sim_contract.encode_local_observation(obs)
-        fallback_fields = [k for k, v in src.items() if v == "fallback_neutral"]
+        prov = provenance.summarise(src)
+        if in_range:
+            last_detection_age_s = 0.0
+        elif self._ego.last_in_range_at is None:
+            last_detection_age_s = None
+        else:
+            last_detection_age_s = round(t_mono - self._ego.last_in_range_at, 3)
         diagnostics = {
             "gps_valid": gps.valid,
             "gps_age_s": round(gps_age, 3) if math.isfinite(gps_age) else None,
@@ -444,11 +506,22 @@ class ObservationBuilder:
             "leader_method": leader.method if leader else None,
             "density_veh_per_km": round(density, 2),
             "mean_speed_mps": round(mean_speed, 2),
-            "missingness": round(len(fallback_fields) / max(len(src), 1), 3),
+            "missingness": prov["missingness"],
             # So a drive where the feed never owned a field says why, rather
             # than the congestion column being quietly neutral throughout.
             "feed": feed_fusion.to_record(owned),
-            "fallback_fields": fallback_fields,
+            "fallback_fields": prov["fallback_fields"],
+            "provenance": {
+                "fields": prov["fields"],
+                "by_source": prov["by_source"],
+                "covers_encoder": prov["fields"] == sim_contract.local_obs_dim(),
+            },
+            # How long since the perception chain last produced an in-range
+            # track -- the only bound available on whether an empty
+            # `local_density_bin` is an empty road or a blind camera. None
+            # until the first in-range detection this builder has ever seen;
+            # a measured 0.0 on a tick that has one, never a substituted zero.
+            "last_detection_age_s": last_detection_age_s,
         }
         return ObservationResult(obs=obs, encoded=encoded, field_sources=src,
                                  diagnostics=diagnostics, feed=owned)
@@ -460,7 +533,7 @@ class ObservationBuilder:
         lane = int(round(offset))
         return max(-2, min(2, lane))
 
-    def _speed_slope(self) -> tuple[float, bool]:
+    def _speed_slope(self, t_mono: float) -> tuple[float, bool]:
         """The ego acceleration and whether it was actually derived.
 
         Two ways to fall back and they used to be reported as one: the caller set
@@ -476,6 +549,14 @@ class ObservationBuilder:
         half the ticks of a braking event. And `field_sources` is what this module's
         docstring calls the basis for the observation-missingness metric, so the
         missingness was under-counted by the same margin.
+
+        A third way to fall back, added later: samples are appended only under a
+        fresh GPS fix, so a dropout freezes the window instead of emptying it, and
+        neither guard above notices -- the window still has 10 samples spanning
+        well over 0.3 s. Without this check the slope of a window frozen minutes
+        ago is reported as `derived` for as long as the dropout lasts. Refused
+        against `gps_stale_after_s`, the same bound `ego_speed`'s own freshness
+        check uses, so acceleration is stale on exactly the ticks its own speed is.
         """
         samples = list(self._ego.speed_samples)[-10:]
         if len(samples) < 3:
@@ -483,6 +564,8 @@ class ObservationBuilder:
         t = np.array([s[0] for s in samples])
         v = np.array([s[1] for s in samples])
         if t[-1] - t[0] < 0.3:
+            return 0.0, False
+        if t_mono - t[-1] > self.config.gps_stale_after_s:
             return 0.0, False
         t = t - t.mean()
         return float((t * (v - v.mean())).sum() / max((t * t).sum(), 1e-9)), True

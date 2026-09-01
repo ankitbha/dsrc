@@ -42,6 +42,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from perception import provenance
 from sensors.here_feed import FlowReading, Outcome
 
 #: How far off the heading ray a match may sit and still be treated as our road.
@@ -62,8 +63,10 @@ MIN_FREE_FLOW_MPS = 2.0
 
 #: `field_sources` value for a field the feed owns. Deliberately not `measured`:
 #: it is derived from a service's estimate of a quantity this vehicle cannot see,
-#: and a reader must be able to tell that from a camera measurement.
-SOURCE_FEED = "feed_derived"
+#: and a reader must be able to tell that from a camera measurement. Re-exported
+#: from `perception.provenance`, the vocabulary's one home, so nothing that
+#: already imports it from here has to move.
+SOURCE_FEED = provenance.SOURCE_FEED
 
 
 class Decline:

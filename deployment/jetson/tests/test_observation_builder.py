@@ -6,6 +6,7 @@ import time
 import numpy as np
 import pytest
 
+from perception import provenance
 from perception.distance import TrackedVehicle
 from perception.observation_builder import BuilderConfig, ObservationBuilder, PeerState
 from policy import sim_contract
@@ -126,6 +127,10 @@ def test_uncongested_low_speed_flag_mirrors_etiquette(builder: ObservationBuilde
     # empty road (density 0 < 12), speed 10 < 30 - 8 -> flag on
     result = builder.build([], fresh_fix(10.0), time.monotonic())
     assert result.obs["uncongested_low_speed_flag"] is True
+    # `approximated`, not `derived`: the formula reads a locally sensed
+    # density where the simulator reads a segment one, the same threshold
+    # applied to a different quantity.
+    assert result.field_sources["uncongested_low_speed_flag"] == "approximated"
     result = builder.build([], fresh_fix(28.0), time.monotonic())
     assert result.obs["uncongested_low_speed_flag"] is False
 
@@ -256,3 +261,203 @@ class TestTheAccelerationProvenanceMatchesTheBranchTaken:
     def test_too_few_samples_is_also_a_fallback(self):
         result = self._drive(ObservationBuilder(BuilderConfig()), samples=2, dt=1.0)
         assert result.field_sources["ego_acceleration"] == "fallback_neutral"
+
+    def test_cold_start_and_a_stale_window_are_the_same_class(self):
+        # "Distinct from the stale case by nothing but the class" -- and the
+        # class is the same, `fallback_neutral`, in both. `_speed_slope` has
+        # no third string to tell a too-short window from a stale one, and
+        # that is correct: both are substitutions, and the controller (which
+        # only reads the class, not the internal reason) must not have to
+        # tell them apart.
+        cold_start = self._drive(ObservationBuilder(BuilderConfig()), samples=2, dt=1.0)
+        builder = ObservationBuilder(BuilderConfig())
+        for i in range(8):
+            builder.build([], GpsFix(valid=True, speed_mps=20.0 - 3.0 * i * 0.2, t_mono=1000.0 + i * 0.2, t_wall=0.0),
+                          1000.0 + i * 0.2)
+        stale = builder.build([], GpsFix(valid=False), 1000.0 + 8 * 0.2 + 10.0)
+        assert cold_start.field_sources["ego_acceleration"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert stale.field_sources["ego_acceleration"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert cold_start.field_sources["ego_acceleration"] == stale.field_sources["ego_acceleration"]
+
+    def test_the_threshold_is_the_gps_window_not_a_new_literal(self):
+        # Brake hard under fresh GPS, then stop supplying fresh fixes. At
+        # 1.9 s of dropout the frozen window is still `derived`; at 2.1 s
+        # (past `gps_stale_after_s`) it is `fallback_neutral` and the value
+        # is exactly 0.0 -- the substituted neutral, not a stale slope.
+        cfg = BuilderConfig()
+        builder = ObservationBuilder(cfg)
+        t = 1000.0
+        speed = 20.0
+        for i in range(8):
+            t = 1000.0 + i * 0.2
+            gps = GpsFix(valid=True, speed_mps=speed, t_mono=t, t_wall=0.0)
+            result = builder.build([], gps, t)
+            speed -= 3.0 * 0.2
+        assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
+
+        dropout_start = t
+        stale_gps = GpsFix(valid=False)
+
+        within = builder.build([], stale_gps, dropout_start + 1.9)
+        assert within.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
+
+        past = builder.build([], stale_gps, dropout_start + 2.1)
+        assert past.field_sources["ego_acceleration"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert past.obs["ego_acceleration"] == 0.0
+
+
+class TestCoverageAndMissingness:
+    """`field_sources` after this task covers all 39 encoder slots, and
+    `missingness` is a statement about the whole vector rather than the 33
+    flat fields alone.
+    """
+
+    @staticmethod
+    def _gps(speed: float, t: float) -> GpsFix:
+        return GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=speed, heading_deg=90.0,
+                      fix_quality=1, num_sats=8, hdop=1.0, t_mono=t, t_wall=0.0)
+
+    def _warmed_up(self) -> tuple[ObservationBuilder, float]:
+        """A builder with enough fresh, constant-speed history that
+        `ego_acceleration` reads `derived` (the ordinary case) rather than a
+        fresh builder's own first-tick `fallback_neutral`."""
+        builder = ObservationBuilder(BuilderConfig())
+        t = 1000.0
+        for i in range(5):
+            t = 1000.0 + i * 0.1
+            builder.build([], self._gps(20.0, t), t)
+        return builder, t
+
+    def test_field_sources_covers_every_encoded_slot(self):
+        builder, t = self._warmed_up()
+        result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1)
+        assert set(result.field_sources) == set(sim_contract.encoded_slot_names())
+        assert len(result.field_sources) == sim_contract.local_obs_dim() == 39
+
+    def test_the_no_peer_no_vehicle_fresh_gps_tick_pins_missingness(self):
+        """Pre-task-36 the same tick measured 21/33 = 0.636 (verified by
+        running, recorded in the plan). The move: -1 for
+        `local_queue_estimate` leaving the fallback set into `derived_empty`
+        (D5), +3 cooperation slots, +3 lane slots -- all six neutral on a
+        lone instrumented car with no peers.
+        """
+        builder, t = self._warmed_up()
+        result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1)
+
+        assert result.diagnostics["provenance"]["fields"] == 39
+        assert result.diagnostics["missingness"] == 0.667
+        assert result.diagnostics["provenance"]["by_source"]["derived_empty"] == 3
+        assert result.diagnostics["provenance"]["covers_encoder"] is True
+
+        for field in ("cooperation.segment_target_speed", "cooperation.merge_pressure",
+                     "cooperation.downstream_congestion_estimate"):
+            assert result.field_sources[field] == provenance.SOURCE_FALLBACK_NEUTRAL
+        for lane in ("0", "1", "2"):
+            assert result.field_sources[f"nearby_av_lane_distribution.{lane}"] == (
+                provenance.SOURCE_FALLBACK_NEUTRAL
+            )
+        assert result.field_sources["local_density_bin"] == provenance.SOURCE_DERIVED_EMPTY
+        assert result.field_sources["active_vehicle_count_local"] == provenance.SOURCE_DERIVED_EMPTY
+        assert result.field_sources["local_queue_estimate"] == provenance.SOURCE_DERIVED_EMPTY
+        assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
+
+    def test_peers_with_lane_id_make_the_lane_slots_derived(self):
+        builder, t = self._warmed_up()
+        peers = [PeerState(peer_id="a", distance_m=50.0, speed_mps=20.0, lane_id=1)]
+        result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1, peers)
+        for lane in ("0", "1", "2"):
+            assert result.field_sources[f"nearby_av_lane_distribution.{lane}"] == (
+                provenance.SOURCE_DERIVED
+            )
+
+    def test_peers_without_lane_id_leave_the_lane_slots_neutral(self):
+        builder, t = self._warmed_up()
+        peers = [PeerState(peer_id="a", distance_m=50.0, speed_mps=20.0, lane_id=None)]
+        result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1, peers)
+        for lane in ("0", "1", "2"):
+            assert result.field_sources[f"nearby_av_lane_distribution.{lane}"] == (
+                provenance.SOURCE_FALLBACK_NEUTRAL
+            )
+
+    def test_by_source_sums_to_fields_across_a_sweep(self):
+        builder, t = self._warmed_up()
+        vehicles_options = [
+            [],
+            [make_vehicle(1, 30.0, 0.0)],
+            [make_vehicle(i, 20.0 + i, 0.0) for i in range(6)],
+        ]
+        peers_options: list = [
+            None,
+            [PeerState(peer_id="a", distance_m=50.0, speed_mps=20.0, lane_id=1)],
+            [PeerState(peer_id="b", distance_m=50.0, speed_mps=20.0, lane_id=None)],
+        ]
+        for vehicles in vehicles_options:
+            for peers in peers_options:
+                result = builder.build(vehicles, self._gps(20.0, t + 0.1), t + 0.1, peers)
+                prov = result.diagnostics["provenance"]
+                assert sum(prov["by_source"].values()) == prov["fields"] == 39
+
+
+class TestTheDensityPath:
+
+    @staticmethod
+    def _gps(speed: float, t: float) -> GpsFix:
+        return GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=speed, heading_deg=90.0,
+                      fix_quality=1, num_sats=8, hdop=1.0, t_mono=t, t_wall=0.0)
+
+    def test_zero_in_range_tracks_are_derived_empty(self):
+        builder = ObservationBuilder(BuilderConfig())
+        result = builder.build([], self._gps(20.0, 1000.0), 1000.0)
+        assert result.obs["local_density_bin"] == 0
+        assert result.field_sources["local_density_bin"] == provenance.SOURCE_DERIVED_EMPTY
+        assert result.field_sources["active_vehicle_count_local"] == provenance.SOURCE_DERIVED_EMPTY
+        assert result.field_sources["local_queue_estimate"] == provenance.SOURCE_DERIVED_EMPTY
+
+    def test_one_in_range_track_is_derived_at_bin_one(self):
+        # Under shipped constants (edges 12.0, 30.0; symmetrize_counts=True;
+        # effective_range_m=80.0) density = 12.5 * n_forward, so bin 0 <=> 0
+        # in-range tracks and bin 1 at a single one -- what makes gating the
+        # disagreement rule on `derived_empty` (D4) a real choice rather than
+        # a no-op.
+        builder = ObservationBuilder(BuilderConfig())
+        vehicles = [make_vehicle(1, 30.0, 0.0, rel=0.0)]
+        result = builder.build(vehicles, self._gps(20.0, 1000.0), 1000.0)
+        assert result.obs["local_density_bin"] == 1
+        assert result.field_sources["local_density_bin"] == provenance.SOURCE_DERIVED
+
+    def test_six_tracks_none_measurable_leaves_queue_fallback_but_density_derived(self):
+        vehicles = [make_vehicle(i, 20.0 + i * 5, 0.0, rel_valid=False) for i in range(6)]
+        builder = ObservationBuilder(BuilderConfig())
+        result = builder.build(vehicles, self._gps(20.0, 1000.0), 1000.0)
+        assert result.field_sources["local_queue_estimate"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert result.field_sources["local_density_bin"] == provenance.SOURCE_DERIVED
+
+
+class TestLastDetectionAge:
+
+    @staticmethod
+    def _gps(speed: float, t: float) -> GpsFix:
+        return GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=speed, heading_deg=90.0,
+                      fix_quality=1, num_sats=8, hdop=1.0, t_mono=t, t_wall=0.0)
+
+    def test_none_before_the_first_in_range_detection(self):
+        builder = ObservationBuilder(BuilderConfig())
+        result = builder.build([], self._gps(20.0, 1000.0), 1000.0)
+        assert result.diagnostics["last_detection_age_s"] is None
+
+    def test_zero_on_the_tick_that_has_one(self):
+        builder = ObservationBuilder(BuilderConfig())
+        vehicles = [make_vehicle(1, 30.0, 0.0)]
+        result = builder.build(vehicles, self._gps(20.0, 1000.0), 1000.0)
+        assert result.diagnostics["last_detection_age_s"] == 0.0
+
+    def test_it_grows_monotonically_after_the_last_detection(self):
+        builder = ObservationBuilder(BuilderConfig())
+        vehicles = [make_vehicle(1, 30.0, 0.0)]
+        builder.build(vehicles, self._gps(20.0, 1000.0), 1000.0)
+        ages = []
+        for dt in (1.0, 2.0, 5.0):
+            result = builder.build([], self._gps(20.0, 1000.0 + dt), 1000.0 + dt)
+            ages.append(result.diagnostics["last_detection_age_s"])
+        assert ages == sorted(ages)
+        assert ages == [1.0, 2.0, 5.0]
