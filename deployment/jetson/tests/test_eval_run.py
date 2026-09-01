@@ -708,3 +708,29 @@ class TestObservationProvenance:
         report = render_markdown(result, [])
         assert "encoder-field missingness" in report
         assert "provenance covers 1 of 39 encoder slots" in report
+
+    def test_a_mixed_run_reports_the_mixture_instead_of_the_first_ticks_size(self, tmp_path):
+        # `by_source` pools every tick's `field_sources` regardless of its
+        # size, so reading `provenance_fields`/`covers_encoder` off only the
+        # first tick describes a run that is not actually uniform.
+        sources = _grounded_field_sources()
+        ticks = (
+            [make_tick(i) for i in range(5)]
+            + [make_tick(i, field_sources=sources) for i in range(5, 10)]
+        )
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        obs = result["observation"]
+        assert obs["provenance_fields_mixed"] is True
+        assert obs["covers_encoder"] is False
+
+    def test_report_md_names_the_mixture(self, tmp_path):
+        sources = _grounded_field_sources()
+        ticks = (
+            [make_tick(i) for i in range(5)]
+            + [make_tick(i, field_sources=sources) for i in range(5, 10)]
+        )
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        report = render_markdown(result, [])
+        assert "varies across ticks" in report

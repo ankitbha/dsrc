@@ -497,19 +497,31 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     # cleanly off a run recorded before this task too -- it just reports
     # fewer fields and `covers_encoder: False`, the `jetson_ms_source`
     # precedent for a run whose shape predates the field being measured.
+    #
+    # `by_source`/`fields_by_source` pool every tick's `field_sources`
+    # regardless of its size, so a run whose maps are not all the same size
+    # (a 33-field prefix followed by a 39-field tail, say) needs to say so
+    # rather than reporting the first tick's size as if it applied to all of
+    # them -- `covers_encoder` in particular is not a meaningful yes/no over
+    # a mixture.
     provenance_fields: int | None = None
+    provenance_field_sizes: set[int] = set()
     by_source_counter: Counter[str] = Counter()
     fields_by_class: dict[str, Counter[str]] = defaultdict(Counter)
     for t in ticks:
         field_sources = t.get("field_sources") or {}
-        if provenance_fields is None and field_sources:
-            provenance_fields = len(field_sources)
+        if field_sources:
+            provenance_field_sizes.add(len(field_sources))
+            if provenance_fields is None:
+                provenance_fields = len(field_sources)
         for field_name, source in field_sources.items():
             by_source_counter[source] += 1
             fields_by_class[source][field_name] += 1
     total_field_ticks = sum(by_source_counter.values())
+    provenance_fields_mixed = len(provenance_field_sizes) > 1
     covers_encoder = (
         None if provenance_fields is None
+        else False if provenance_fields_mixed
         else provenance_fields == sim_contract.local_obs_dim()
     )
     observation = {
@@ -518,6 +530,7 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
             k: round(c / len(ticks), 3) for k, c in fallback_counter.most_common(8)
         },
         "provenance_fields": provenance_fields,
+        "provenance_fields_mixed": provenance_fields_mixed,
         "covers_encoder": covers_encoder,
         "by_source": (
             {k: round(c / total_field_ticks, 3) for k, c in by_source_counter.items()}
@@ -858,9 +871,16 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         + (f" of {pf} provenance-tagged fields" if pf is not None else "")
     )
     if pf is not None:
-        lines.append(
-            f"- provenance covers {pf} of {sim_contract.local_obs_dim()} encoder slots"
-        )
+        if obs.get("provenance_fields_mixed"):
+            lines.append(
+                f"- provenance_fields varies across ticks (first tick has {pf}); "
+                "`by_source` below is pooled across sizes and `covers_encoder` "
+                "is not meaningful for this run"
+            )
+        else:
+            lines.append(
+                f"- provenance covers {pf} of {sim_contract.local_obs_dim()} encoder slots"
+            )
     if obs.get("by_source"):
         by_source_str = ", ".join(
             f"{source} {frac:.1%}"
