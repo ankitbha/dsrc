@@ -200,7 +200,7 @@ class TestRoundTripReconstruction:
             # remote (phone) - local (jetson): the same planted offset the
             # one-way estimator above recovers, now from a bounded round trip
             # instead of an unbounded delay spread.
-            assert TRUE_OFFSET_NS - estimate.offset_ns < int(0.5 * NS)
+            assert abs(TRUE_OFFSET_NS - estimate.offset_ns) < int(0.5 * NS)
         finally:
             link.stop()
             phone.close()

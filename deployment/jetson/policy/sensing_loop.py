@@ -44,6 +44,7 @@ from typing import Any
 from geo import haversine_m
 from policy.sensing_controller import Decision, Inputs, SensingController
 from policy.shadow_mode import SHADOW, ModeHolder, command_for
+from sensors.time_sync import capture_stamp_ns
 
 #: How long a rate command may go unsent while nothing changes.
 RATE_CMD_HEARTBEAT_S = 5.0
@@ -145,7 +146,9 @@ class SensingLoop:
         decision = self.controller.decide(inputs_from(tick, phone, now=now))
         # The frame's capture stamp, on our clock -- the advisory and the command are
         # both about the tick that produced them, not about the moment of sending.
-        capture_ns = int(tick.t_capture_mono * 1e9)
+        # `capture_stamp_ns` is the same conversion `Tick.to_record()` uses, so this
+        # value and the tick's own logged key are the identical integer.
+        capture_ns = capture_stamp_ns(tick.t_capture_mono)
         command = command_for(decision, self.modes.mode, t_capture_mono_ns=capture_ns)
 
         advisory_sent = False

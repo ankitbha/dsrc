@@ -217,6 +217,33 @@ def test_fuse_never_exceeds_the_observe_segment_it_is_timed_inside(pipeline) -> 
     assert tick.stages["fuse"].ms <= tick.stage_ms["observe"] + 1e-6
 
 
+def test_fuse_reports_the_builders_own_measurement(pipeline) -> None:
+    """A peer list and a traffic feed give `fuse` real work to do -- feed
+    fusion and the peer merge -- so its duration reads straight off the
+    builder rather than off a default that happens to also be a number.
+    """
+    from perception.observation_builder import PeerState
+
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    now = time.monotonic()
+    frame = Frame(image=image, frame_id=1, t_mono=now - 0.05, t_wall=time.time() - 0.05)
+    fix = GpsFix(
+        valid=True, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+        fix_quality=1, num_sats=9, hdop=0.9, altitude_m=3.0,
+        utc_epoch_s=time.time(), t_mono=now - 0.05, t_wall=time.time() - 0.05,
+    )
+    peers = [
+        PeerState(peer_id="a", distance_m=80.0, speed_mps=24.0, lane_id=1),
+        PeerState(peer_id="b", distance_m=120.0, speed_mps=26.0, lane_id=2),
+    ]
+    tick = pipeline.step(
+        frame, fix, peers, detections_override=scene_detections(0.0), feed=jammed_reading(),
+    )
+
+    assert tick.stages["fuse"].ms == pytest.approx(pipeline.builder.last_timings["fuse_ms"])
+    assert tick.stages["fuse"].ms > 0.0
+
+
 def test_a_proxied_transport_segment_feeds_neither_stat_series(pipeline) -> None:
     """A stage read as absent must not sneak into a series through the back
     door: `basis == "absent"` is the only thing pipeline.step checks before
@@ -266,6 +293,42 @@ def test_the_tick_record_carries_the_capture_stamp_in_nanoseconds(pipeline) -> N
     tick = run_ticks(pipeline, 3)
     record = tick.to_record()
     assert record["t_capture_mono_ns"] == int(round(tick.t_capture_mono * 1e9))
+
+
+def test_capture_stamp_ns_rounds_rather_than_truncates() -> None:
+    from sensors.time_sync import capture_stamp_ns
+
+    # Chosen so the value's nanosecond-scale fraction sits just past the
+    # halfway point: truncating and rounding disagree by exactly one
+    # nanosecond here. Real `time.monotonic()` values on this machine's
+    # coarser clock essentially never land on such a fraction, which is why
+    # the two call sites this helper replaces could disagree for a long time
+    # without a local test run ever seeing it.
+    t = 50000.1234567895
+    assert int(t * 1e9) == 50000123456789
+    assert capture_stamp_ns(t) == 50000123456790
+
+
+def test_the_tick_records_key_matches_what_sensing_loop_puts_on_the_wire(pipeline) -> None:
+    """`Tick.to_record()` and `SensingLoop.on_tick` used to convert the same
+    `t_capture_mono` float through two different spellings -- truncate here,
+    round there -- so a phone's inbound advisory line and this tick's own
+    record disagreed on the join key for the tick they are both about.
+    """
+    from policy.sensing_loop import SensingLoop
+
+    boundary_t_mono = 50000.1234567895
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    frame = Frame(image=image, frame_id=1, t_mono=boundary_t_mono, t_wall=time.time())
+    fix = GpsFix(
+        valid=True, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+        fix_quality=1, num_sats=9, hdop=0.9, altitude_m=3.0,
+        utc_epoch_s=time.time(), t_mono=boundary_t_mono, t_wall=time.time(),
+    )
+    tick = pipeline.step(frame, fix, detections_override=scene_detections(0.0))
+
+    outcome = SensingLoop().on_tick(tick, None)
+    assert tick.to_record()["t_capture_mono_ns"] == outcome.command.t_capture_mono_ns
 
 
 def test_new_stat_series_are_in_the_snapshot(pipeline) -> None:
@@ -353,7 +416,7 @@ def test_the_sensing_loop_reads_a_real_tick(pipeline) -> None:
     outcome = loop.on_tick(tick, None)
     assert outcome.decision.rates
     assert outcome.command.shadow is True
-    assert outcome.command.t_capture_mono_ns == int(tick.t_capture_mono * 1e9)
+    assert outcome.command.t_capture_mono_ns == int(round(tick.t_capture_mono * 1e9))
 
 
 def jammed_reading():

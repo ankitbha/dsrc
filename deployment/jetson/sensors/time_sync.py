@@ -26,6 +26,20 @@ def now_wall() -> float:
     return time.time()
 
 
+def capture_stamp_ns(t_capture_mono: float) -> int:
+    """The one conversion of a monotonic capture instant into the integer
+    nanoseconds a record or a wire message carries.
+
+    Both `pipeline.Tick.to_record()` and `AdvisoryMessage.t_capture_mono_ns`
+    (built in `policy.sensing_loop`) need to name the same tick with the same
+    key, and `eval_run.py` joins the two logs on exact equality of that key.
+    Rounding rather than truncating matters only at the boundary where the
+    float's fractional-nanosecond part sits past .5 -- rare, but truncating in
+    one place and rounding in the other disagreed on it.
+    """
+    return int(round(t_capture_mono * 1e9))
+
+
 @dataclass(frozen=True)
 class TimebaseStamp:
     """What a cross-device capture stamp is worth, carried with the reading.

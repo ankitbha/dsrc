@@ -1150,6 +1150,28 @@ def test_the_phone_dwell_segments_are_measured_and_exact_with_encode_stamps():
     assert stages["transport"].clock == "cross"
 
 
+def test_a_span_whose_stamps_disagree_on_order_is_absent_not_negative():
+    """A peer that reports `encode_done` before `encode_start` -- the current
+    phone build never does, but nothing here trusts a peer to keep agreeing --
+    must not have that disagreement reported as a negative duration."""
+    camera = a_bare_camera_stream()
+    message = CameraFrame(
+        t_capture_mono_ns=100, frame_id=1, width=16, height=16,
+        format="jpeg", quality=85, jpeg=a_jpeg(),
+        t_encode_start_mono_ns=130, t_encode_done_mono_ns=110,
+    )
+    stamp = TimebaseStamp(t_capture_mono=0.0, t_arrival_mono=0.0, bound_s=None,
+                           estimate_id=None, proxy=True, source="proxy")
+    camera._accept(message, a_receipt(t_mono_ns=140, t_recv_mono_ns=150), stamp)
+
+    stage = camera.latest().phone_stages["encode"]
+    assert stage.basis == "absent"
+    assert stage.ms is None
+    assert stage.reason == "stamps out of order"
+    assert camera.out_of_order_phone_stages == 1
+    assert camera.to_record()["phone_stages_out_of_order"] == 1
+
+
 def test_transport_is_converted_when_the_frame_carries_a_wire_stamp():
     round_trip_estimator, _ = converged_estimator(offset_ns=0)
     adapter = PhoneClockAdapter(round_trip_estimator)
@@ -1174,6 +1196,10 @@ def test_transport_is_converted_when_the_frame_carries_a_wire_stamp():
     assert transport.bound_ms is not None
     assert transport.estimate_id is not None
     assert transport.ms == pytest.approx(20.0 - 5.0, abs=1.0)
+    # enqueue (t_mono_ns) at BASE_NS, wire stamp 5 ms later.
+    enqueue_to_wire = camera.latest().phone_stages["enqueue_to_wire"]
+    assert enqueue_to_wire.basis == "measured"
+    assert enqueue_to_wire.ms == pytest.approx(5.0)
 
 
 def test_transport_is_absent_when_the_wire_stamp_cannot_be_converted():

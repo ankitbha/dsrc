@@ -725,7 +725,10 @@ class SensingService : LifecycleService() {
                     Log.i(TAG, "camera stats ${it.stats}")
                 }
             }
-            release("advisory stats") { Log.i(TAG, "advisory stats ${advisories.stats}") }
+            release("advisory stats") {
+                val stats = advisories.stats
+                Log.i(TAG, "advisory stats $stats, superseded=${stats.superseded}")
+            }
             // Telemetry was the one modality whose stats never left the process, so a
             // drive whose reports the link refused wrote the same evidence as one
             // whose reports all landed.

@@ -240,6 +240,35 @@ class AdvisoryHolderTest {
     }
 
     @Test
+    fun `an advisory replaced before any poll counts as superseded`() {
+        // `accept` overwrites `latest` unconditionally and counts nothing about what it
+        // replaced. The first advisory here is never shown and never ages past the
+        // limit -- the second simply arrives first -- so it must show up as
+        // `superseded`, not vanish from every count `Stats` carries.
+        val holder = running()
+        holder.accept(advisory(recSpeed = 10.0), nowNs = 0)
+        holder.accept(advisory(recSpeed = 20.0), nowNs = second / 4)
+        holder.current(nowNs = second / 4)
+
+        assertEquals(2, holder.stats.received)
+        assertEquals(1, holder.stats.shown)
+        assertEquals(0, holder.stats.expired)
+        assertEquals(1, holder.stats.superseded)
+    }
+
+    @Test
+    fun `an advisory that ages out unseen is expired, not superseded`() {
+        val holder = running()
+        holder.accept(advisory(), nowNs = 0)
+        holder.current(nowNs = AdvisoryHolder.MAX_AGE_NS + 1)
+
+        assertEquals(1, holder.stats.received)
+        assertEquals(0, holder.stats.shown)
+        assertEquals(1, holder.stats.expired)
+        assertEquals(0, holder.stats.superseded)
+    }
+
+    @Test
     fun `no callback is required, and current still works without one`() {
         // The default parameter, exercised: a caller with nothing to log must not have to
         // supply a no-op lambda of its own.

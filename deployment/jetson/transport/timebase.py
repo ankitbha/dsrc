@@ -1064,6 +1064,19 @@ class OneWayEstimator:
             return "samples too old", current
         return None, current
 
+    def why_not_usable(self) -> str | None:
+        """The single gate, and the reason it failed. None means usable.
+
+        Same surface as `TimebaseEstimator.why_not_usable`, so a caller that
+        persists one also persists the other without knowing which kind of
+        estimator it holds.
+        """
+        return self._gated()[0]
+
+    @property
+    def usable(self) -> bool:
+        return self.why_not_usable() is None
+
     def to_local(self, t_remote_mono_ns: int) -> ConvertedInstant:
         """Convert a peer instant to this device's clock.
 
@@ -1096,7 +1109,10 @@ class OneWayEstimator:
         )
 
     def to_record(self) -> dict[str, Any]:
-        estimate = self.estimate()
+        # One acquisition, so `usable`/`why_not_usable` describe the same
+        # estimate the rest of this record does -- the same reason
+        # `TimebaseEstimator.to_record` reads its gate and its estimate together.
+        reason, estimate = self._gated()
         return {
             # First, and named this, because it is the thing a reader must not
             # miss: a bound from here is a delay spread, not half a round trip.
@@ -1108,4 +1124,6 @@ class OneWayEstimator:
             "offset_ns": None if estimate is None else estimate.offset_ns,
             "delay_spread_ns": None if estimate is None else estimate.rtt_min_ns,
             "offset_samples": 0 if estimate is None else estimate.offset_samples,
+            "usable": reason is None,
+            "why_not_usable": reason,
         }

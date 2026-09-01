@@ -138,9 +138,10 @@ class ObservationBuilder:
         #: name and in milliseconds. Same precedent as
         #: `TrtYoloDetector.last_timings`: a plain dict the caller reads after
         #: the call, rather than a return value every caller would otherwise
-        #: have to thread through. Set before the first build for the same
-        #: reason `last_feed_ownership` is.
-        self.last_timings: dict[str, float] = {"fuse_ms": 0.0}
+        #: have to thread through. Empty before the first build -- a caller
+        #: reading `last_timings["fuse_ms"]` here is reading a builder nothing
+        #: has run yet, and that is a missing value, not a zero-length fuse.
+        self.last_timings: dict[str, float] = {}
 
     def set_target_headway(self, headway_s: float) -> None:
         """Feed back the last commanded headway bin (mirrors the sim loop,

@@ -141,10 +141,14 @@ class TestFuseTiming:
     feed's ownership decision, timed as one sub-segment of `observe`. Same
     precedent as `TrtYoloDetector.last_timings`."""
 
-    def test_set_before_the_first_build_like_last_feed_ownership(
+    def test_absent_before_the_first_build_not_a_placeholder_zero(
         self, builder: ObservationBuilder
     ) -> None:
-        assert builder.last_timings["fuse_ms"] == 0.0
+        # Unlike `last_feed_ownership`, which has a real neutral value to start
+        # from, there is no build yet to report a duration for -- a caller
+        # reading the key here is reading a missing value, not a zero-length
+        # fuse, so the key itself must not exist until `build()` has run once.
+        assert "fuse_ms" not in builder.last_timings
 
     def test_a_build_always_reports_a_non_negative_duration(
         self, builder: ObservationBuilder

@@ -53,14 +53,26 @@ SOURCE_ONE_WAY = "one_way"
 SOURCE_PROXY = "proxy"
 
 
+#: `_phone_span`'s reason when the two stamps it was handed are in the wrong
+#: order. Named once so a caller counting occurrences of it does not have to
+#: restate the string.
+OUT_OF_ORDER_REASON = "stamps out of order"
+
+
 def _phone_span(start_ns: int | None, end_ns: int | None, *, reason: str) -> StageTiming:
     """A duration between two phone-clock stamps, or absent with a named cause.
 
     Both ends are on one device's own clock, so the subtraction needs no
     timebase at all -- it is either exact or it did not happen, never a guess.
+    A duration where the end precedes the start is neither: the two stamps
+    disagree about which one comes first, and reporting their difference as a
+    negative "measured" span would publish a number a single device's own
+    clock cannot produce.
     """
     if start_ns is None or end_ns is None:
         return StageTiming.absent(clock="phone", reason=reason)
+    if end_ns < start_ns:
+        return StageTiming.absent(clock="phone", reason=OUT_OF_ORDER_REASON)
     return StageTiming.measured((end_ns - start_ns) / 1e6, clock="phone")
 
 
@@ -329,6 +341,13 @@ class PhoneCameraStream(_PhoneSource):
         #: then succeeded into a run that had already stopped.
         self.awaiting_link = False
         self.decode_failures = 0
+        #: Phone-side spans this frame's header made it possible to compute
+        #: (capture-to-encode-start, encode, encode-done-to-enqueue,
+        #: enqueue-to-wire) whose two stamps disagreed about which came first.
+        #: The stamps are structurally ordered on the current phone build, so
+        #: this counts a peer that disagrees with that ordering, not a
+        #: recurring condition of a healthy one.
+        self.out_of_order_phone_stages = 0
         # Read by every camera consumer in the tree. `run_demo` reads
         # `file_recoveries` unconditionally in its summary block, so without it a
         # phone-fed run raised AttributeError after the work was done and before
@@ -374,6 +393,7 @@ class PhoneCameraStream(_PhoneSource):
             self._last_consumed_id = -1
         self._drop_counter = 0
         self.decode_failures = 0
+        self.out_of_order_phone_stages = 0
 
     def stop(self) -> None:
         super().stop()
@@ -462,6 +482,12 @@ class PhoneCameraStream(_PhoneSource):
                 reason="frame did not ask for a wire stamp",
             ),
         }
+        self.out_of_order_phone_stages += sum(
+            1 for key in (
+                "capture_to_encode_start", "encode", "encode_done_to_enqueue", "enqueue_to_wire",
+            )
+            if stages[key].reason == OUT_OF_ORDER_REASON
+        )
 
         if wire_ns is None:
             stages["transport"] = StageTiming.absent(
@@ -508,6 +534,7 @@ class PhoneCameraStream(_PhoneSource):
             "frames_received": self.messages_received,
             "frames_dropped_unconsumed": self._drop_counter,
             "decode_failures": self.decode_failures,
+            "phone_stages_out_of_order": self.out_of_order_phone_stages,
             "end_of_stream": self.end_of_stream,
             **self.health(),
         }

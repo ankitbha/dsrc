@@ -133,6 +133,26 @@ class TestWhatTheBoundCovers:
         # would invite exactly the comparison this estimator cannot support.
         assert "rtt_min_ns" not in record
 
+    def test_usable_and_why_not_usable_agree_with_the_live_gate(self):
+        # Same surface as `TimebaseEstimator`: a persisted line has to say
+        # whether the estimate it carries is one an offline reader may convert
+        # against, not just what the offset was.
+        clock = Clock()
+        estimator = OneWayEstimator(mono_clock=clock)
+
+        assert estimator.usable is False
+        assert estimator.why_not_usable() == "no samples"
+        record = estimator.to_record()
+        assert record["usable"] is False
+        assert record["why_not_usable"] == "no samples"
+
+        estimator = converged(clock, delay_s=0.01)
+        assert estimator.usable is True
+        assert estimator.why_not_usable() is None
+        record = estimator.to_record()
+        assert record["usable"] is True
+        assert record["why_not_usable"] is None
+
 
 class TestConversion:
 

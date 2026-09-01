@@ -190,23 +190,40 @@ def _log_timebase_estimates(logger, phone, last_estimate_ids: dict[str, int | No
     `TimebaseEstimator.estimate` is a property; `OneWayEstimator.estimate` is a
     method -- the two classes are not otherwise identical, and this is the one
     place both are read side by side.
+
+    `usable`/`why_not_usable` are read off the estimator, not the persisted
+    `TimebaseEstimate`: the gate that decides them -- sample count, staleness,
+    the RTT ceiling -- lives on the estimator, and the dataclass an estimate is
+    handed as carries none of it. Without this an offline reader sees only
+    `offset_ns` and `estimate_id` and has no way to tell an estimate the live
+    adapter would have converted against from one it would have proxied
+    around.
+
+    `session_id` ties the line to the peer clock it measured. Both estimators
+    are replaced whole on every redial (`phone_link._rebind`), so their
+    `estimate_id` counters restart at 1 on the new session -- an offline reader
+    matching on wall time alone could otherwise pick an estimate left over from
+    the previous phone.
     """
     sources = (
-        ("round_trip", phone.round_trip_estimator.estimate),
-        ("one_way", phone.estimator.estimate()),
+        ("round_trip", phone.round_trip_estimator, phone.round_trip_estimator.estimate),
+        ("one_way", phone.estimator, phone.estimator.estimate()),
     )
-    for source, estimate in sources:
+    for source, estimator, estimate in sources:
         if estimate is None or estimate.estimate_id == last_estimate_ids[source]:
             continue
         last_estimate_ids[source] = estimate.estimate_id
         logger.write({
             "type": "timebase_estimate",
             "source": source,
+            "session_id": None if phone.session is None else phone.session.session_id,
             # This device's own wall clock, for an offline reader correlating
             # this estimate against a phone log's wall-stamped receipts -- both
             # devices are NTP-locked, so wall time is a valid matching key even
             # though it is never used for the latency arithmetic itself.
             "t_wall": time.time(),
+            "usable": estimator.usable,
+            "why_not_usable": estimator.why_not_usable(),
             **estimate.to_record(),
         })
 
@@ -481,6 +498,15 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 outcome = sensing.on_tick(tick, phone)
             if logger is not None:
                 record = tick.to_record()
+                # Which peer clock this tick's phone-side stages, if any, were
+                # measured or converted against -- the same key the persisted
+                # `timebase_estimate` lines carry, so an offline reader can
+                # refuse to convert this tick's `return` stage against an
+                # estimate left over from a different session.
+                if phone is not None:
+                    record["session_id"] = (
+                        None if phone.session is None else phone.session.session_id
+                    )
                 if outcome is not None:
                     record["sensing"] = {
                         **outcome.decision.to_record(),

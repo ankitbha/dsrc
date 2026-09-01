@@ -142,7 +142,18 @@ class AdvisoryHolder(
         val shown: Long,
         /** Render latency of the most recently shown advisory, or null before the first. */
         val lastRenderNs: Long?,
-    )
+    ) {
+        /**
+         * Accepted advisories that were neither shown nor separately counted as expired:
+         * `accept` replaces `latest` unconditionally and counts nothing about what it
+         * replaced, so an advisory a newer one displaced before any poll asked for it
+         * leaves no record of its own anywhere else in [Stats]. At the Jetson's tick rate
+         * against a 250 ms UI poll this is the ordinary way an advisory goes unseen, not
+         * the exception `expired` covers.
+         */
+        val superseded: Long
+            get() = received - shown - expired
+    }
 
     companion object {
         /**

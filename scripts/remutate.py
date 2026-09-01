@@ -126,7 +126,7 @@ MUTATIONS = [
      "        heartbeatsSent.incrementAndGet()", "transport"),
     ("log: a full queue blocks the caller instead of dropping",
      "phone/app/src/main/kotlin/com/dsrc/phone/log/SessionLog.kt",
-     "        if (!queue.offer(headerJson)) {",
+     "        if (!queue.offer(line)) {",
      "        if (!queue.offer(headerJson)) { queue.put(headerJson) } else if (false) {", "app"),
     # Re-anchored: the three call sites were folded into one `recordSent(header, payloadSize)`,
     # and the old anchor named `message.payload.size`, so this had been skipped silently.
@@ -715,7 +715,7 @@ MUTATIONS = [
      "python"),
     ("link: the session's own peer address is dropped from the record",
      "deployment/jetson/sensors/phone_link.py",
-     '            record["peer"] = self.session.stats().peer',
+     '            record["peer"] = stats.peer',
      "            pass",
      "python"),
     # Task 32 round 2. Four of the six were in round 1's own fix.
@@ -767,10 +767,12 @@ MUTATIONS = [
     # read `self.session` once per block, and the redial supervisor replaces it
     # between reads, so one record could carry two session ids and two handsets'
     # counters with nothing in it to say which was which.
+    # Anchored with the comment line above it. `_session_record` carries the same
+    # call, so the bare line matches twice and an ambiguous anchor pins nothing.
     ("link: one record is assembled from two separate session reads",
      "deployment/jetson/sensors/phone_link.py",
-     '            "wire": self._wire_record(session),',
-     '            "wire": self._wire_record(),',
+     '            # What the transport did, as opposed to what the readers made of it.\n            "wire": self._wire_record(session),',
+     '            # What the transport did, as opposed to what the readers made of it.\n            "wire": self._wire_record(),',
      "python"),
     # Found by reading the first real run's record rather than by a test: the control
     # channel showed 241 received against 121 delivered, with dropped and abandoned
@@ -806,6 +808,172 @@ MUTATIONS = [
      "deployment/jetson/policy/sensing_controller.py",
      "    if feed_congestion is None or camera_density_bin is None:\n        return False",
      "    if feed_congestion is None or camera_density_bin is None:\n        return True",
+     "python"),
+
+    # Task 33 round 1. The offline join and the two estimators it reads.
+    #
+    # The live adapter and the offline join have to refuse the same estimates for
+    # the same reasons, and the only way to check that is to persist the verdict
+    # the live gate already computes -- both the round-trip and the one-way sides
+    # of it, since only one of the two carried it before this round.
+    ("timebase: a one-way estimate's usability is not persisted",
+     "deployment/jetson/transport/timebase.py",
+     '            "offset_samples": 0 if estimate is None else estimate.offset_samples,\n'
+     '            "usable": reason is None,\n'
+     '            "why_not_usable": reason,\n'
+     '        }',
+     '            "offset_samples": 0 if estimate is None else estimate.offset_samples,\n'
+     '        }',
+     "python"),
+    ("run_demo: usable/why_not_usable are not read off the estimator",
+     "deployment/jetson/run_demo.py",
+     '            "usable": estimator.usable,\n            "why_not_usable": estimator.why_not_usable(),',
+     '            "usable": True,\n            "why_not_usable": None,',
+     "python"),
+    ("eval: return converts against an estimate the live adapter would have refused",
+     "deployment/jetson/eval_run.py",
+     '        if e.get("source") == source\n'
+     '        and e.get("session_id") == session_id\n'
+     '        and _was_usable(e)\n'
+     '    ]',
+     '        if e.get("source") == source\n'
+     '        and e.get("session_id") == session_id\n'
+     '    ]',
+     "python"),
+    ("eval: an old log with too few samples is taken as usable",
+     "deployment/jetson/eval_run.py",
+     '    if "usable" in record:\n'
+     '        return bool(record["usable"])\n'
+     '    return record.get("offset_samples", 0) >= MIN_OFFSET_SAMPLES',
+     '    if "usable" in record:\n'
+     '        return bool(record["usable"])\n'
+     '    return True',
+     "python"),
+    # Both estimators are rebuilt whole on every redial, so `estimate_id` restarts
+    # at 1 on the new session -- wall time alone cannot tell a stale estimate from
+    # the previous peer apart from a current one, which is what `session_id` is for.
+    ("eval: return converts against an estimate from a different session",
+     "deployment/jetson/eval_run.py",
+     '        if e.get("source") == source\n'
+     '        and e.get("session_id") == session_id\n'
+     '        and _was_usable(e)',
+     '        if e.get("source") == source\n'
+     '        and _was_usable(e)',
+     "python"),
+    ("run_demo: the session id is not carried onto the timebase estimate line",
+     "deployment/jetson/run_demo.py",
+     '            "session_id": None if phone.session is None else phone.session.session_id,',
+     '            "session_id": None,',
+     "python"),
+    ("run_demo: the tick record does not carry this tick's session id",
+     "deployment/jetson/run_demo.py",
+     '                    record["session_id"] = (\n'
+     '                        None if phone.session is None else phone.session.session_id\n'
+     '                    )',
+     '                    record["session_id"] = None',
+     "python"),
+    # One helper, so `pipeline.Tick.to_record()` and `policy.sensing_loop` name the
+    # same tick with the same integer. Each call site pinned separately: mutating
+    # only one of the two away from the shared helper is exactly the way this broke
+    # the first time, and a pin on the helper alone would not have caught it.
+    ("time_sync: capture_stamp_ns truncates instead of rounding",
+     "deployment/jetson/sensors/time_sync.py",
+     "    return int(round(t_capture_mono * 1e9))",
+     "    return int(t_capture_mono * 1e9)",
+     "python"),
+    ("pipeline: the tick record's capture stamp bypasses the shared conversion",
+     "deployment/jetson/pipeline.py",
+     '            "t_capture_mono_ns": capture_stamp_ns(self.t_capture_mono),',
+     '            "t_capture_mono_ns": int(self.t_capture_mono * 1e9),',
+     "python"),
+    ("sensing_loop: the outbound capture stamp bypasses the shared conversion",
+     "deployment/jetson/policy/sensing_loop.py",
+     "        capture_ns = capture_stamp_ns(tick.t_capture_mono)",
+     "        capture_ns = int(tick.t_capture_mono * 1e9)",
+     "python"),
+    # `AdvisoryHolder.accept` replaces `latest` unconditionally and counts nothing
+    # about what it replaced, so "the advisory expired" was never the only
+    # explanation for an absent render stage, and on a healthy link -- ticking
+    # every frame against a 250 ms UI poll -- it was rarely even the likely one.
+    ("eval: render's absent reason names a mechanism that did not occur",
+     "deployment/jetson/eval_run.py",
+     '    if shown_record is None:\n'
+     '        return StageTiming.absent(\n'
+     '            clock="phone", reason="no advisory_shown line for this capture stamp"\n'
+     '        )',
+     '    if shown_record is None:\n'
+     '        return StageTiming.absent(\n'
+     '            clock="phone", reason="advisory expired before current() returned it"\n'
+     '        )',
+     "python"),
+    ("advisory: superseded does not subtract what expired",
+     "phone/app/src/main/kotlin/com/dsrc/phone/ui/AdvisoryHolder.kt",
+     "        val superseded: Long\n            get() = received - shown - expired",
+     "        val superseded: Long\n            get() = received - shown",
+     "app"),
+    # The direction and the sign of the one offline conversion nothing had pinned a
+    # value for. A test that only checks `basis == "converted"` and that the fields
+    # are non-None passes both of these just as well as the correct arithmetic.
+    ("eval: the return conversion's sign is flipped",
+     "deployment/jetson/eval_run.py",
+     "        return_ms = (converted.t_remote_mono_ns - wire_ns) / 1e6",
+     "        return_ms = (wire_ns - converted.t_remote_mono_ns) / 1e6",
+     "python"),
+    ("eval: return converts in the wrong direction",
+     "deployment/jetson/eval_run.py",
+     "        converted = estimate.convert_to_local(recv_ns)",
+     "        converted = estimate.convert_to_remote(recv_ns)",
+     "python"),
+    # With the source filter gone, a round-trip request is answered by whichever
+    # estimate is nearest in wall time regardless of source, and is still stamped
+    # `source: "round_trip"` -- a one-way number, with a one-way bound, presented
+    # as though it were bounded by half a round trip.
+    ("eval: return's source filter is dropped",
+     "deployment/jetson/eval_run.py",
+     '    candidates = [\n'
+     '        e for e in timebase_estimates\n'
+     '        if e.get("source") == source\n'
+     '        and e.get("session_id") == session_id\n'
+     '        and _was_usable(e)\n'
+     '    ]',
+     '    candidates = [\n'
+     '        e for e in timebase_estimates\n'
+     '        if e.get("session_id") == session_id\n'
+     '        and _was_usable(e)\n'
+     '    ]',
+     "python"),
+    ("eval: the round-trip/one-way preference order is reversed",
+     "deployment/jetson/eval_run.py",
+     '    for source in ("round_trip", "one_way"):',
+     '    for source in ("one_way", "round_trip"):',
+     "python"),
+    # No path reads `last_timings` before `build()` has run, so this pair is latent
+    # rather than live -- but a caller that ever did read it early would get a
+    # number indistinguishable from a real zero-length fuse instead of a missing
+    # value, which is exactly the "cannot distinguish failure from success" defect
+    # this whole log format exists to close.
+    ("builder: fuse_ms starts at a placeholder zero instead of absent",
+     "deployment/jetson/perception/observation_builder.py",
+     "        self.last_timings: dict[str, float] = {}",
+     '        self.last_timings: dict[str, float] = {"fuse_ms": 0.0}',
+     "python"),
+    ("pipeline: a missing fuse timing is reported as a measured zero",
+     "deployment/jetson/pipeline.py",
+     '        fuse_ms = self.builder.last_timings.get("fuse_ms")\n'
+     '        stages["fuse"] = (\n'
+     '            StageTiming.absent(clock="jetson", reason="builder recorded no fuse timing this tick")\n'
+     '            if fuse_ms is None else StageTiming.measured(fuse_ms, clock="jetson")\n'
+     '        )',
+     '        stages["fuse"] = StageTiming.measured(\n'
+     '            self.builder.last_timings.get("fuse_ms", 0.0), clock="jetson"\n'
+     '        )',
+     "python"),
+    ("phone_source: a phone-side span with stamps out of order is reported as measured",
+     "deployment/jetson/sensors/phone_source.py",
+     '    if end_ns < start_ns:\n'
+     '        return StageTiming.absent(clock="phone", reason=OUT_OF_ORDER_REASON)\n'
+     '    return StageTiming.measured((end_ns - start_ns) / 1e6, clock="phone")',
+     '    return StageTiming.measured((end_ns - start_ns) / 1e6, clock="phone")',
      "python"),
 ]
 

@@ -39,7 +39,7 @@ sys.path.insert(0, str(JETSON_DIR))
 import numpy as np  # noqa: E402
 
 from sensors.time_sync import StageTiming  # noqa: E402
-from transport.timebase import TimebaseEstimate  # noqa: E402
+from transport.timebase import MIN_OFFSET_SAMPLES, TimebaseEstimate  # noqa: E402
 
 #: How far apart two devices' `timebase_estimate` and advisory-receipt wall
 #: stamps may sit and still be treated as describing the same moment in the
@@ -127,8 +127,25 @@ def _reconstruct_estimate(record: dict) -> TimebaseEstimate:
     return TimebaseEstimate(**fields)
 
 
+def _was_usable(record: dict) -> bool:
+    """Whether the live adapter would have converted against this estimate.
+
+    `usable` was added to the persisted line alongside `why_not_usable`, both
+    read off the estimator at the moment it was written. A run logged before
+    that field existed carries neither, and the only signal still recoverable
+    from it is the same sample-count floor the live gate applies first -- the
+    other gate conditions (staleness, the RTT ceiling) are moments in time
+    that log did not capture and cannot be reconstructed after the fact, so an
+    old estimate that clears the sample floor is taken as usable, same as it
+    would have been read before this field existed.
+    """
+    if "usable" in record:
+        return bool(record["usable"])
+    return record.get("offset_samples", 0) >= MIN_OFFSET_SAMPLES
+
+
 def _nearest_estimate(
-    timebase_estimates: list[dict], *, source: str, near_wall_ns: int
+    timebase_estimates: list[dict], *, source: str, near_wall_ns: int, session_id: Any = None,
 ) -> TimebaseEstimate | None:
     """The persisted estimate of the given source closest in Jetson wall time
     to `near_wall_ns`, or None when there is none within the match window.
@@ -140,8 +157,18 @@ def _nearest_estimate(
     using wall stamps as a correlation key, never as the latency measurement
     itself, which is why the actual conversion below still runs on monotonic
     nanoseconds through the estimate's own arithmetic.
+
+    Estimates the live adapter would have refused to convert against are
+    excluded outright, and so are estimates from a different session: both
+    estimators are rebuilt whole on every redial, so wall time alone cannot
+    tell a stale estimate from the previous peer apart from a current one.
     """
-    candidates = [e for e in timebase_estimates if e.get("source") == source]
+    candidates = [
+        e for e in timebase_estimates
+        if e.get("source") == source
+        and e.get("session_id") == session_id
+        and _was_usable(e)
+    ]
     if not candidates:
         return None
     best = min(candidates, key=lambda e: abs(int(e["t_wall"] * 1e9) - near_wall_ns))
@@ -151,7 +178,7 @@ def _nearest_estimate(
 
 
 def _return_stage(
-    header: dict, receipt: dict, timebase_estimates: list[dict]
+    header: dict, receipt: dict, timebase_estimates: list[dict], *, session_id: Any = None,
 ) -> StageTiming:
     """Advisory wire departure (Jetson clock) to phone receipt (phone clock),
     converted offline against whichever persisted estimate was nearest in
@@ -168,7 +195,7 @@ def _return_stage(
 
     for source in ("round_trip", "one_way"):
         estimate = _nearest_estimate(
-            timebase_estimates, source=source, near_wall_ns=recv_wall_ns
+            timebase_estimates, source=source, near_wall_ns=recv_wall_ns, session_id=session_id,
         )
         if estimate is None:
             continue
@@ -181,18 +208,25 @@ def _return_stage(
             estimate_id=converted.estimate_id, source=source,
         )
     return StageTiming.absent(
-        clock="cross", reason="no timebase estimate near this receipt's wall time"
+        clock="cross", reason="no usable timebase estimate near this receipt's wall time"
     )
 
 
 def _render_stage(receipt: dict, shown_record: dict | None) -> StageTiming:
     """Phone receipt to the first `current()` call that returned this
-    advisory -- both phone-clock, so no conversion is needed at all. Absent
-    when the advisory expired before anything ever asked for it.
+    advisory -- both phone-clock, so no conversion is needed at all.
+
+    Absent when nothing in the phone log ever marked this advisory shown.
+    That is not necessarily an expiry: `AdvisoryHolder.accept` replaces
+    `latest` unconditionally, so the ordinary cause is a newer advisory
+    arriving before anything polled this one, which the Jetson does every
+    tick against a 250 ms UI poll. A dropped `SessionLog` line or a null
+    `liveLog` produce the same absence here and cannot be told apart from
+    supersession by this join alone.
     """
     if shown_record is None:
         return StageTiming.absent(
-            clock="phone", reason="advisory expired before current() returned it"
+            clock="phone", reason="no advisory_shown line for this capture stamp"
         )
     recv_ns = receipt.get("recv_mono_ns")
     shown_ns = shown_record.get("shown_mono_ns")
@@ -235,7 +269,9 @@ def join_phone_log(
             unmatched += 1
             continue
         stages = dict(tick.get("stages", {}))
-        stages["return"] = _return_stage(header, record, timebase_estimates).to_record()
+        stages["return"] = _return_stage(
+            header, record, timebase_estimates, session_id=tick.get("session_id"),
+        ).to_record()
         stages["render"] = _render_stage(
             record, shown_by_capture_ns.get(capture_ns)
         ).to_record()

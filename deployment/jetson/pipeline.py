@@ -28,7 +28,7 @@ from policy.actor_runtime import ActorRuntime, PolicyOutput
 from policy.advisory import Advisory, AdvisoryDecoder
 from sensors.camera_stream import Frame
 from sensors.gps_reader import GpsFix
-from sensors.time_sync import StageTiming
+from sensors.time_sync import StageTiming, capture_stamp_ns
 
 #: Why a phone-side stage is absent on a tick with no phone behind it. Named
 #: once rather than restated at each of the five stages a local camera has
@@ -107,11 +107,11 @@ class Tick:
             "tick_id": self.tick_id,
             "frame_id": self.frame_id,
             "t_wall": self.t_capture_wall,
-            # The exact join key an offline phone-log reader needs: this is the
-            # same nanosecond value `AdvisoryMessage.t_capture_mono_ns` carries
-            # when this tick's advisory is sent (sensing_loop.py), so a phone's
-            # inbound advisory line and this tick can be paired precisely.
-            "t_capture_mono_ns": int(round(self.t_capture_mono * 1e9)),
+            # The exact join key an offline phone-log reader needs: `capture_stamp_ns`
+            # is the same conversion `policy.sensing_loop` puts through when it builds
+            # `AdvisoryMessage.t_capture_mono_ns` for this tick, so a phone's inbound
+            # advisory line and this tick's record carry the identical integer.
+            "t_capture_mono_ns": capture_stamp_ns(self.t_capture_mono),
             "stage_ms": {k: round(v, 2) for k, v in self.stage_ms.items()},
             "e2e_ms": round(self.e2e_ms, 2),
             "jetson_ms": round(self.jetson_ms, 2),
@@ -313,7 +313,8 @@ class PerceptionPolicyPipeline:
                 self.stats.transport_one_way.add(transport.ms)
         if stages["jpeg_decode"].ms is not None:
             self.stats.jpeg_decode.add(stages["jpeg_decode"].ms)
-        self.stats.fuse.add(stages["fuse"].ms)
+        if stages["fuse"].ms is not None:
+            self.stats.fuse.add(stages["fuse"].ms)
         self.stats.infer.add(infer_ms)
         self.stats.decode.add(decode_ms)
 
@@ -385,8 +386,10 @@ class PerceptionPolicyPipeline:
 
         stages["detect"] = StageTiming.measured(stage_ms["detect"], clock="jetson")
         stages["track"] = StageTiming.measured(stage_ms["track_distance"], clock="jetson")
-        stages["fuse"] = StageTiming.measured(
-            self.builder.last_timings.get("fuse_ms", 0.0), clock="jetson"
+        fuse_ms = self.builder.last_timings.get("fuse_ms")
+        stages["fuse"] = (
+            StageTiming.absent(clock="jetson", reason="builder recorded no fuse timing this tick")
+            if fuse_ms is None else StageTiming.measured(fuse_ms, clock="jetson")
         )
         stages["infer"] = StageTiming.measured(infer_ms, clock="jetson")
         stages["decode"] = StageTiming.measured(decode_ms, clock="jetson")

@@ -347,9 +347,15 @@ class TestJoinPhoneLog:
         row = join_phone_log([tick], [estimate], [advisory], [])["rows"][0]
         assert row["stages"]["return"]["basis"] == "absent"
 
-    def test_return_is_converted_against_the_nearest_matching_estimate(self):
-        # A real estimator, fed real samples, so the reconstruction under test
-        # runs the same arithmetic a live conversion would.
+    def test_return_recovers_a_planted_one_way_delay_within_its_bound(self):
+        """A planted world -- a known Jetson wire departure, a known clock
+        offset between the two devices, and a known one-way delay for this
+        specific advisory -- so the recovered value can be checked against a
+        truth rather than only checked for being present. A prior version of
+        this test asserted only `basis == "converted"` and that the fields
+        were non-None, which a sign flip and a wrong-direction conversion
+        both satisfy just as well as the correct arithmetic does.
+        """
         from transport.timebase import NS_PER_S, TimebaseEstimator, TimeSyncSample
 
         base_ns = 4_000_000_000_000
@@ -362,26 +368,127 @@ class TestJoinPhoneLog:
                 t3_remote_send_ns=t1 + 5_000_000 + 2_000_000_000,
                 t4_local_recv_ns=t1 + 10_000_000,
             ))
-        estimate_record = estimator.estimate.to_record()
-
+        estimate = estimator.estimate
         wall_now = 1_755_000_000.0
         timebase_estimate = {
             "type": "timebase_estimate", "source": "round_trip", "t_wall": wall_now,
-            **estimate_record,
+            **estimate.to_record(),
         }
-        # The phone's receipt, on the remote (phone) clock: some instant that
-        # converts cleanly back near this estimate's own reference.
-        recv_ns = estimator.estimate.t_reference_ns + estimator.estimate.offset_ns
+
+        # The wire departure sits exactly at the estimate's own reference instant, so
+        # extrapolation drift is zero and the bound is exactly half the round trip --
+        # a clean number to check the recovered value against.
+        wire_ns = estimate.t_reference_ns
+        truth_delay_ns = 7_000_000  # the advisory's actual one-way travel time
+        # The phone's own clock reading of that same wire departure, plus how long
+        # the packet actually took to arrive.
+        recv_ns = wire_ns + estimate.offset_ns + truth_delay_ns
         advisory = an_inbound_advisory(
-            capture_ns=100, wire_ns=base_ns, recv_ns=recv_ns, recv_wall_ns=int(wall_now * 1e9),
+            capture_ns=100, wire_ns=wire_ns, recv_ns=recv_ns, recv_wall_ns=int(wall_now * 1e9),
         )
         tick = {"t_capture_mono_ns": 100, "stages": {}}
 
         row = join_phone_log([tick], [timebase_estimate], [advisory], [])["rows"][0]
         assert row["stages"]["return"]["basis"] == "converted"
         assert row["stages"]["return"]["source"] == "round_trip"
-        assert row["stages"]["return"]["ms"] is not None
-        assert row["stages"]["return"]["bound_ms"] is not None
+        truth_ms = truth_delay_ns / 1e6
+        ms = row["stages"]["return"]["ms"]
+        bound_ms = row["stages"]["return"]["bound_ms"]
+        assert ms == pytest.approx(truth_ms, abs=1e-3)
+        assert abs(ms - truth_ms) <= bound_ms
+
+    def test_the_round_trip_estimate_wins_even_when_a_one_way_line_is_nearer(self):
+        """Both a round-trip and a one-way line exist for this receipt's wall
+        time, at different distances and with different offsets. Removing the
+        source filter used to let whichever line was nearest answer a
+        round-trip request while still being stamped `source: "round_trip"` --
+        a one-way number, with a one-way bound, presented as if it were
+        bounded by half a round trip. The one-way line here is deliberately
+        the nearer one, so a filter-less join would pick it.
+        """
+        wall_now = 1_755_000_000.0
+        nearer_one_way = a_timebase_estimate(
+            source="one_way", t_wall=wall_now, offset_ns=999_000_000, rtt_min_ns=500_000_000,
+        )
+        nearer_one_way["estimate_id"] = 77
+        farther_round_trip = a_timebase_estimate(
+            source="round_trip", t_wall=wall_now - 20.0, offset_ns=2_000_000, rtt_min_ns=10_000_000,
+        )
+        farther_round_trip["estimate_id"] = 42
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(
+            # recv_ns == the round-trip offset, so a round-trip conversion lands
+            # exactly on t_reference_ns (0) and wire_ns (0): return_ms == 0.0.
+            capture_ns=100, wire_ns=0, recv_ns=2_000_000, recv_wall_ns=int(wall_now * 1e9),
+        )
+
+        row = join_phone_log(
+            [tick], [farther_round_trip, nearer_one_way], [advisory], [],
+        )["rows"][0]
+        assert row["stages"]["return"]["basis"] == "converted"
+        assert row["stages"]["return"]["source"] == "round_trip"
+        assert row["stages"]["return"]["estimate_id"] == 42
+        assert row["stages"]["return"]["ms"] == pytest.approx(0.0, abs=1e-6)
+
+    def test_return_skips_an_estimate_the_live_adapter_would_have_refused(self):
+        # `usable=False` is what the live gate (staleness, the RTT ceiling, too
+        # few samples) looked like at the moment this line was written -- an
+        # offline join must refuse it exactly as the live conversion did.
+        wall_now = 1_755_000_000.0
+        unusable = a_timebase_estimate(source="round_trip", t_wall=wall_now, offset_ns=0)
+        unusable["usable"] = False
+        unusable["why_not_usable"] = "only 1 samples in the offset window"
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(
+            capture_ns=100, wire_ns=0, recv_ns=0, recv_wall_ns=int(wall_now * 1e9),
+        )
+        row = join_phone_log([tick], [unusable], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "absent"
+        assert row["stages"]["return"]["reason"] == (
+            "no usable timebase estimate near this receipt's wall time"
+        )
+
+    def test_an_old_log_without_the_usable_field_falls_back_to_the_sample_floor(self):
+        # A run logged before `usable` existed carries neither it nor
+        # `why_not_usable` at all -- the only signal left is the same
+        # sample-count floor the live gate checks first.
+        wall_now = 1_755_000_000.0
+        old_style = a_timebase_estimate(source="round_trip", t_wall=wall_now, offset_ns=0)
+        old_style["offset_samples"] = 2  # below MIN_OFFSET_SAMPLES, no `usable` key
+        tick = {"t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(
+            capture_ns=100, wire_ns=0, recv_ns=0, recv_wall_ns=int(wall_now * 1e9),
+        )
+        row = join_phone_log([tick], [old_style], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "absent"
+
+    def test_return_does_not_convert_against_the_previous_sessions_estimate(self):
+        """Both estimators are rebuilt whole on every redial, so their
+        `estimate_id` counters restart at 1 on the new session -- an estimate
+        left over from the phone that just hung up can sit within the wall-time
+        match window of an advisory the NEW phone sent. `session_id` is what
+        tells the two apart when wall time alone cannot.
+        """
+        wall_now = 1_755_000_000.0
+        stale = a_timebase_estimate(source="round_trip", t_wall=wall_now, offset_ns=5_000_000_000)
+        stale["session_id"] = 1
+        tick = {"t_capture_mono_ns": 100, "stages": {}, "session_id": 2}
+        advisory = an_inbound_advisory(
+            capture_ns=100, wire_ns=0, recv_ns=0, recv_wall_ns=int(wall_now * 1e9),
+        )
+        row = join_phone_log([tick], [stale], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "absent"
+
+    def test_return_converts_against_the_current_sessions_estimate(self):
+        wall_now = 1_755_000_000.0
+        current = a_timebase_estimate(source="round_trip", t_wall=wall_now, offset_ns=0)
+        current["session_id"] = 2
+        tick = {"t_capture_mono_ns": 100, "stages": {}, "session_id": 2}
+        advisory = an_inbound_advisory(
+            capture_ns=100, wire_ns=0, recv_ns=0, recv_wall_ns=int(wall_now * 1e9),
+        )
+        row = join_phone_log([tick], [current], [advisory], [])["rows"][0]
+        assert row["stages"]["return"]["basis"] == "converted"
 
     def test_render_is_measured_between_two_phone_clock_stamps(self):
         # Nanosecond deltas large enough to survive the record's millisecond
@@ -399,10 +506,18 @@ class TestJoinPhoneLog:
         assert row["stages"]["render"]["clock"] == "phone"
 
     def test_render_is_absent_when_the_advisory_was_never_shown(self):
+        # Named for what the join actually knows -- no `advisory_shown` line
+        # exists for this capture stamp -- not for a specific mechanism.
+        # `AdvisoryHolder.accept` replaces `latest` unconditionally with no
+        # supersession count, so a newer advisory arriving first is the
+        # ordinary cause here, not an expiry; a dropped `SessionLog` line or a
+        # null `liveLog` produce the same absence and this join cannot tell
+        # any of the three apart.
         tick = {"t_capture_mono_ns": 100, "stages": {}}
         advisory = an_inbound_advisory(capture_ns=100, wire_ns=None, recv_ns=300, recv_wall_ns=400)
         row = join_phone_log([tick], [], [advisory], [])["rows"][0]
         assert row["stages"]["render"]["basis"] == "absent"
+        assert row["stages"]["render"]["reason"] == "no advisory_shown line for this capture stamp"
 
 
 def test_analyze_with_a_phone_log_produces_the_phone_join(tmp_path):

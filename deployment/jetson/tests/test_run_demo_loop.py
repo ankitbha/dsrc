@@ -107,25 +107,41 @@ class _FakeRoundTripEstimator:
     with a plain attribute, since a test double has no need of the real
     property machinery to be read the same way."""
 
-    def __init__(self, estimate=None) -> None:
+    def __init__(self, estimate=None, *, usable: bool = True, why_not_usable: str | None = None) -> None:
         self.estimate = estimate
+        self.usable = usable
+        self._why_not_usable = why_not_usable
+
+    def why_not_usable(self) -> str | None:
+        return self._why_not_usable
 
 
 class _FakeOneWayEstimator:
     """`OneWayEstimator.estimate()` is a method, not a property -- the
     asymmetry `_log_timebase_estimates` itself has to read across."""
 
-    def __init__(self, estimate=None) -> None:
+    def __init__(self, estimate=None, *, usable: bool = True, why_not_usable: str | None = None) -> None:
         self._estimate = estimate
+        self.usable = usable
+        self._why_not_usable = why_not_usable
 
     def estimate(self):
         return self._estimate
 
+    def why_not_usable(self) -> str | None:
+        return self._why_not_usable
+
+
+class _FakeSession:
+    def __init__(self, session_id) -> None:
+        self.session_id = session_id
+
 
 class _FakePhone:
-    def __init__(self, *, round_trip=None, one_way=None) -> None:
+    def __init__(self, *, round_trip=None, one_way=None, session_id="s1") -> None:
         self.round_trip_estimator = _FakeRoundTripEstimator(round_trip)
         self.estimator = _FakeOneWayEstimator(one_way)
+        self.session = None if session_id is None else _FakeSession(session_id)
 
 
 class _FakeLogger:
@@ -181,3 +197,58 @@ class TestTimebaseEstimateLogging:
 
         assert len(logger.lines) == 2
         assert logger.lines[-1]["estimate_id"] == 2
+
+    def test_usable_and_why_not_usable_come_from_the_estimator_not_the_estimate(self):
+        # `_FakeEstimate.to_record()` carries no `usable` field at all -- if
+        # the line got these from the estimate, the key would be missing.
+        logger = _FakeLogger()
+        phone = _FakePhone(
+            round_trip=_FakeEstimate(1), one_way=None,
+        )
+        phone.round_trip_estimator.usable = False
+        phone.round_trip_estimator._why_not_usable = "only 1 samples in the offset window"
+        ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
+        run_demo._log_timebase_estimates(logger, phone, ids)
+
+        line = logger.lines[0]
+        assert line["usable"] is False
+        assert line["why_not_usable"] == "only 1 samples in the offset window"
+
+    def test_the_session_id_is_carried_onto_the_line(self):
+        logger = _FakeLogger()
+        phone = _FakePhone(round_trip=_FakeEstimate(1), session_id="peer-7")
+        ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
+        run_demo._log_timebase_estimates(logger, phone, ids)
+
+        assert logger.lines[0]["session_id"] == "peer-7"
+
+    def test_no_session_is_a_null_session_id_not_a_crash(self):
+        logger = _FakeLogger()
+        phone = _FakePhone(round_trip=_FakeEstimate(1), session_id=None)
+        ids: dict[str, int | None] = {"round_trip": None, "one_way": None}
+        run_demo._log_timebase_estimates(logger, phone, ids)
+
+        assert logger.lines[0]["session_id"] is None
+
+
+def test_the_tick_record_carries_this_ticks_session_id():
+    """Untestable end to end without a detector, a policy bundle, a config,
+    and a camera and GPS feeding the whole loop -- so, like the deadline
+    check in `TestTheDriveEnds`, this pins the source directly: without a
+    session id on the tick, an offline reader has no way to refuse a
+    `timebase_estimate` line left over from a different session when it
+    converts this tick's `return` stage.
+    """
+    import inspect
+
+    source = inspect.getsource(run_demo.run_live)
+    assign = source.index('record["session_id"]')
+    write = source.index("logger.write(record)")
+    assert assign < write, "the session id is set after the record is already logged"
+    # Scoped to this block, not the whole function: `run_live` also prints
+    # `phone.session.session_id` elsewhere (the "phone back after Ns" log line),
+    # and a check against the whole source would still pass with the tick
+    # record's own reference to it mutated away.
+    assert "phone.session.session_id" in source[assign:write], (
+        "the tick record's session_id no longer reads the real session id"
+    )
