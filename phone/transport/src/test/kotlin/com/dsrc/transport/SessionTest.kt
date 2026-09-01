@@ -2281,26 +2281,38 @@ class SessionTest {
         // The old test asserted only `dropped > 0`, so an off-by-one in the depth comparison
         // -- `>` instead of `>=` -- survived, on the check the test is named for.
         val gate = CountDownLatch(1)
-        val (phone, jetson) = pair(onPhoneFrame = { gate.await() })
+        // Opened by the handler as it enters, so the count below can wait for the state it
+        // depends on instead of assuming it. `absorbable` is `depth + 1` only once the
+        // delivery thread has taken a frame out of the queue and parked; if the sender
+        // fills the queue first, the true figure is `depth` and the assertion fails naming
+        // a shed count, which is not what went wrong.
+        val handlerEntered = CountDownLatch(1)
+        val (phone, jetson) = pair(onPhoneFrame = { handlerEntered.countDown(); gate.await() })
         try {
             val depth = Channels.policy(Channels.GPS).depth
-            // One is taken out of the queue immediately by the blocked handler, so the queue
-            // itself holds `depth` and the total the phone can absorb before shedding is
-            // depth + 1.
             val absorbable = depth + 1
             val offered = absorbable + 5
+            assertTrue(
+                jetson.session.send(Channels.GPS, GpsRecord.noFix(-1).toExtensions()),
+                "the priming frame was refused",
+            )
+            assertTrue(
+                handlerEntered.await(5, TimeUnit.SECONDS),
+                "the delivery thread never took a frame out of the queue",
+            )
             repeat(offered) { index ->
                 while (jetson.session.outboundPending() > 0) Thread.onSpinWait()
                 assertTrue(jetson.session.send(Channels.GPS, GpsRecord.noFix(index.toLong()).toExtensions()))
             }
+            val arrived = offered + 1L   // the priming frame counts as an arrival too
             assertTrue(awaitCondition {
-                phone.session.stats().inboundChannels.getValue(Channels.GPS).received >= offered.toLong()
+                phone.session.stats().inboundChannels.getValue(Channels.GPS).received >= arrived
             }, "not everything arrived: ${phone.session.stats().inboundChannels[Channels.GPS]}")
 
             val gps = phone.session.stats().inboundChannels.getValue(Channels.GPS)
-            assertEquals(offered.toLong(), gps.received)
+            assertEquals(arrived, gps.received)
             assertEquals(
-                (offered - absorbable).toLong(),
+                (arrived - absorbable).toLong(),
                 gps.dropped,
                 "shed the wrong number for a depth-$depth queue: $gps",
             )
