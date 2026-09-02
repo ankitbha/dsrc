@@ -23,11 +23,13 @@ import pytest
 from policy.advisory import Advisory
 from sensors.phone_link import PhoneLink
 from transport.channels import Channel
+from transport.frames import Frame, encode
 from transport.handshake import Hello, Role
 from transport.loopback import LoopbackAcceptor, loopback_pair
 from transport.messages import (CameraFrame, GpsRecord, ImuSample, InvalidMessage,
                                 MessageRouter, RateCommand)
 from transport.session import Session
+from transport.tcp import TcpAcceptor
 from transport.timebase import OneWaySample, now_mono_ns
 
 NS = 1_000_000_000
@@ -1886,3 +1888,68 @@ class TestTheInboundAccountBalances:
         finally:
             link.stop()
             phone.close()
+
+
+class TestWireRecordCarriesSeqGapsAndMissingSeqs:
+    """D19's first half: `_wire_record` used to omit `seq_gaps` /
+    `missing_seqs`, the only evidence in the system that the peer dropped
+    something -- computed by `session.py` on every arrival and thrown away
+    by the record builder."""
+
+    def test_a_real_sequence_gap_reaches_the_wire_record(self):
+        phone_conn, jetson_conn = loopback_pair()
+        phone_conn_session = Session(phone_conn, session_id=1, heartbeat_s=None,
+                                      stall_timeout_s=None).start()
+        jetson = Session(jetson_conn, session_id=2, heartbeat_s=None,
+                         stall_timeout_s=None).start()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        attach(link, jetson, None)
+        try:
+            # Raw frames, seq 0 then 5 -- a gap of 4 missing numbers (1..4),
+            # the same technique test_transport_session.py uses to produce
+            # one. Sent on the phone's own connection so the jetson session
+            # receives them as if the phone had.
+            for seq in (0, 5):
+                phone_conn.send_all(
+                    encode(Frame(channel=Channel.GPS, seq=seq, t_mono_ns=1, t_wall_ns=2, payload=b"f"))
+                )
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if jetson.stats().channels[Channel.GPS].received >= 2:
+                    break
+                time.sleep(0.02)
+            wire = link.to_record()["wire"]
+            gps_channel = wire["channels"][Channel.GPS.value]
+            assert gps_channel["seq_gaps"] == 1, wire
+            assert gps_channel["missing_seqs"] == 4, wire
+        finally:
+            link.stop()
+            phone_conn_session.close()
+
+
+class TestToRecordCarriesTheAcceptorsStats:
+    """D19's second half: `TcpAcceptor.stats()` was read only by a bench
+    script. `to_record` now carries it -- `first_accept_error_mono_ns`'s
+    first reader."""
+
+    def test_a_real_acceptor_reaches_to_record(self):
+        acceptor = TcpAcceptor(host="127.0.0.1", port=0)
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            record = link.to_record()
+            assert "acceptor" in record
+            assert record["acceptor"]["transient_accept_errors"] == 0
+            assert record["acceptor"]["first_accept_error_mono_ns"] is None
+            assert list(record["acceptor"]["address"]) == list(acceptor.address)
+        finally:
+            link.stop()
+
+    def test_a_loopback_acceptor_reports_none_rather_than_raising(self):
+        # `LoopbackAcceptor` has no accept-retry concept and so no `stats()`
+        # -- `to_record` must not crash the whole run's summary over it.
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        try:
+            record = link.to_record()
+            assert record["acceptor"] is None
+        finally:
+            link.stop()

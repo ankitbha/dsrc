@@ -291,24 +291,35 @@ class TestLoadPhoneLog:
         path = write_phone_log(tmp_path, [
             {"ch": "camera", "seq": 1, "t_mono_ns": 1, "t_wall_ns": 1, "n": 0},
         ])
-        inbound, shown = load_phone_log(path)
-        assert inbound == [] and shown == []
+        inbound, shown, failures = load_phone_log(path)
+        assert inbound == [] and shown == [] and failures == []
 
     def test_an_inbound_non_advisory_frame_is_ignored(self, tmp_path):
         path = write_phone_log(tmp_path, [
             {"dir": "in", "recv_mono_ns": 1, "recv_wall_ns": 1,
              "header": {"ch": "rate_cmd"}},
         ])
-        inbound, shown = load_phone_log(path)
+        inbound, shown, failures = load_phone_log(path)
         assert inbound == []
 
     def test_inbound_advisories_and_shown_lines_are_both_picked_out(self, tmp_path):
         advisory = an_inbound_advisory(capture_ns=100, wire_ns=200, recv_ns=300, recv_wall_ns=400)
         shown = a_shown_line(capture_ns=100, shown_ns=350)
         path = write_phone_log(tmp_path, [advisory, shown])
-        loaded_advisories, loaded_shown = load_phone_log(path)
+        loaded_advisories, loaded_shown, loaded_failures = load_phone_log(path)
         assert loaded_advisories == [advisory]
         assert loaded_shown == [shown]
+        assert loaded_failures == []
+
+    def test_a_fail_line_is_picked_out_and_ignored_by_the_other_two_shapes(self, tmp_path):
+        fail_line = {
+            "dir": "fail", "at_mono_ns": 1, "at_wall_ns": 2,
+            "kind": "link.dial_failed", "n": 3, "detail": "ConnectException",
+        }
+        path = write_phone_log(tmp_path, [fail_line])
+        inbound, shown, failures = load_phone_log(path)
+        assert inbound == [] and shown == []
+        assert failures == [fail_line]
 
 
 class TestJoinPhoneLog:
@@ -580,6 +591,166 @@ def test_analyze_without_a_phone_log_leaves_the_join_absent(tmp_path):
     run_dir = write_run(tmp_path, [make_tick(i) for i in range(10)])
     result = analyze(run_dir)
     assert result["phone_join"] is None
+
+
+def _append_lines(run_dir, records: list[dict]) -> None:
+    with open(run_dir / "metadata.jsonl", "a") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+
+
+class TestLoadRecordsDataclass:
+    """D18: `load_records` returns a frozen dataclass, one field per record
+    type. Written because four same-typed adjacent members -- `thermal_samples`,
+    `thermal_events`, `failure_scans`, `failure_events` -- is exactly where a
+    swapped assignment survives most tests and passes anyway."""
+
+    def test_each_record_type_lands_in_its_own_field(self, tmp_path):
+        from eval_run import load_records
+
+        run_dir = tmp_path / "loaded"
+        run_dir.mkdir()
+        path = run_dir / "metadata.jsonl"
+        with open(path, "w") as f:
+            for record in [
+                {"type": "thermal_sample", "t_mono": 1.0, "marker": "TS"},
+                {"type": "thermal_event", "t_mono": 1.0, "marker": "TE"},
+                {"type": "failure_scan", "seq": 1, "t_mono": 1.0, "marker": "FS"},
+                {"type": "failure_event", "phase": "open", "episode_id": 1, "marker": "FE"},
+            ]:
+                f.write(json.dumps(record) + "\n")
+        loaded = load_records(path)
+        assert [r["marker"] for r in loaded.thermal_samples] == ["TS"]
+        assert [r["marker"] for r in loaded.thermal_events] == ["TE"]
+        assert [r["marker"] for r in loaded.failure_scans] == ["FS"]
+        assert [r["marker"] for r in loaded.failure_events] == ["FE"]
+
+
+class TestPreTask38RunIsNotAFailedDrive:
+
+    def test_a_run_with_no_failure_records_reports_failures_none(self, tmp_path):
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(10)])
+        result = analyze(run_dir)
+        assert result["failures"] is None
+        assert result["overall_pass"] == (
+            analyze(run_dir)["overall_pass"]  # unchanged by this task's own logic
+        )
+        markdown = render_markdown(result, [])
+        assert "## Failures" not in markdown
+
+
+class TestFailuresSectionRendersOnRealRecordShapes:
+    """Task 33 and task 36 both shipped a measurement with no surface. This
+    builds a real `metadata.jsonl` with ticks, scans and two episodes and
+    asserts the `## Failures` heading, an episode line with a duration, and
+    the words `NOT EVALUABLE` on a fixture where a source was unreadable."""
+
+    def test_the_section_renders_with_a_duration_and_not_evaluable(self, tmp_path):
+        ticks = [make_tick(i) for i in range(5)]
+        for t in ticks:
+            t["failures"] = {
+                "open": [], "open_n": 0, "episodes": 2, "scan_age_s": 0.4,
+                "basis": "measured", "unreadable_n": 1, "reason": None,
+            }
+        run_dir = write_run(tmp_path, ticks, summary={
+            "ticks": len(ticks), "camera_dropped_frames": 0, "policy_trained": False,
+            "failures": {
+                "scan": {"passes": 5, "seq_last": 5,
+                         "interval_s": {"p50": 1.0, "p95": 1.0, "max": 1.0},
+                         "basis_counts": {"measured": 5, "stale": 0, "absent": 0},
+                         "absent_reasons": {}, "sources_n": 30},
+                "sources": {
+                    "gps.not_fresh": {
+                        "status": "fired", "passes_attempted": 5, "passes_readable": 5,
+                        "episodes": 1, "total": 12, "by_reason": {"stale": 12},
+                        "first_t_mono": 1.0, "last_t_mono": 4.0,
+                        "events_written": 2, "episodes_not_kept": 0,
+                    },
+                    "phone.dropped": {
+                        "status": "not_evaluable", "passes_attempted": 5, "passes_readable": 2,
+                        "episodes": 0, "total": 0, "by_reason": {},
+                        "missing": ["telemetry"], "first_t_mono": None, "last_t_mono": None,
+                        "events_written": 0, "episodes_not_kept": 0,
+                    },
+                },
+                "outcomes": {"recovered": 1},
+                "counter_went_backwards": {}, "blind_ticks": 0, "pipeline_exception": None,
+            },
+        })
+        _append_lines(run_dir, [
+            {"type": "failure_scan", "seq": 1, "t_wall": 1.0, "t_mono": 1.0,
+             "session_id": "a1b2", "ticks_seen": 5, "sources_n": 30,
+             "sources_readable": 29, "unreadable": ["phone.dropped"], "open": []},
+            {"type": "failure_event", "phase": "open", "episode_id": 1,
+             "source": "gps.not_fresh", "reason": "stale", "device": "jetson",
+             "t_wall": 1.0, "t_mono": 1.0, "basis": "measured", "bound_s": 1.0,
+             "session_id": None, "tick_id": 1, "channel": None, "value": 4.2,
+             "first_pass_n": 1, "detail": "gps_age_s 4.213"},
+            {"type": "failure_event", "phase": "close", "episode_id": 1,
+             "source": "gps.not_fresh", "device": "jetson",
+             "t_wall": 4.0, "t_mono": 4.0, "outcome": "recovered",
+             "duration_s": 3.0, "n": 12, "last_t_mono": 3.9,
+             "close_after_s": 3.0, "basis": "measured", "bound_s": 1.0,
+             "session_id": None},
+        ])
+        result = analyze(run_dir)
+        assert result["failures"] is not None
+        assert len(result["failures"]["episodes"]) == 1
+        assert result["failures"]["episodes"][0]["duration_s"] == 3.0
+
+        markdown = render_markdown(result, [])
+        assert "## Failures" in markdown
+        assert "3.0" in markdown or "duration" in markdown.lower()
+        assert "NOT EVALUABLE" in markdown
+        assert "gps.not_fresh" in markdown
+
+
+class TestLogHealthReachesTheReport:
+
+    def test_a_dead_writer_is_named_in_the_failures_section(self, tmp_path):
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(3)])
+        (run_dir / "log_health.json").write_text(json.dumps({
+            "t_wall": 1.0, "t_mono": 1.0, "dropped_records": 7,
+            "writer_failure": "OSError: No space left on device",
+            "queue_depth": 50000, "thread_alive_at_close": False,
+            "path": "metadata.jsonl", "bytes_on_disk": 1234,
+        }))
+        result = analyze(run_dir)
+        assert result["failures"]["log_health"]["dropped_records"] == 7
+        markdown = render_markdown(result, [])
+        assert "## Failures" in markdown
+        assert "7 records dropped" in markdown
+        assert "writer failed" in markdown
+
+
+class TestPhoneFailuresJoinOffline:
+
+    def test_no_phone_log_says_not_read(self, tmp_path):
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(3)])
+        _append_lines(run_dir, [
+            {"type": "failure_scan", "seq": 1, "t_wall": 1.0, "t_mono": 1.0,
+             "session_id": None, "ticks_seen": 3, "sources_n": 30,
+             "sources_readable": 30, "unreadable": [], "open": []},
+        ])
+        result = analyze(run_dir)
+        markdown = render_markdown(result, [])
+        assert "phone-side failures: not read" in markdown
+
+    def test_a_supplied_phone_log_reports_the_kind_breakdown(self, tmp_path):
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(3)])
+        _append_lines(run_dir, [
+            {"type": "failure_scan", "seq": 1, "t_wall": 1.0, "t_mono": 1.0,
+             "session_id": None, "ticks_seen": 3, "sources_n": 30,
+             "sources_readable": 30, "unreadable": [], "open": []},
+        ])
+        phone_log = write_phone_log(tmp_path, [
+            {"dir": "fail", "at_mono_ns": 1, "at_wall_ns": 2,
+             "kind": "link.dial_failed", "n": 3, "detail": "ConnectException"},
+        ])
+        result = analyze(run_dir, phone_log)
+        markdown = render_markdown(result, [])
+        assert "phone (offline)" in markdown
+        assert "link.dial_failed 3" in markdown
 
 
 class TestStageTimings:

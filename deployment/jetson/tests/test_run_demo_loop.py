@@ -10,6 +10,7 @@ control flow and not in what it drives.
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from types import SimpleNamespace
 
@@ -329,6 +330,166 @@ class TestThermalSummaryStopsBeforeReading:
         sampler = _OrderRecordingSampler()
         result = run_demo._thermal_summary(sampler, None)
         assert result["jtop_available"] is None
+
+
+class _RecordingFailures:
+    """Stands in for a `FailureSampler` where only the two direct-notification
+    entry points matter -- what `worker()` and `_tick_loop()` actually call."""
+
+    def __init__(self) -> None:
+        self.no_frame_calls: list[bool] = []
+        self.exceptions: list[BaseException] = []
+
+    def note_no_frame(self, *, end_of_stream: bool = False) -> None:
+        self.no_frame_calls.append(end_of_stream)
+
+    def note_pipeline_exception(self, exc: BaseException) -> None:
+        self.exceptions.append(exc)
+
+
+def worker_for(tick_loop, failures, stop) -> None:
+    """A transcription of `run_live`'s `worker()`, down to the exception
+    handling -- constructing the real one needs the whole run. The mutation
+    pin is what ties the two together, as `loop_for` above already does for
+    the deadline.
+    """
+    try:
+        tick_loop()
+    except BaseException as exc:  # noqa: BLE001
+        if failures is not None:
+            failures.note_pipeline_exception(exc)
+        raise
+    finally:
+        stop.set()
+
+
+class TestWorkerRecordsAndReraises:
+    """Behaviour change 1: `worker()` gains an `except BaseException` that
+    records and re-raises. What must NOT change: the exception still reaches
+    the caller, and `stop.set()` still runs in the `finally` -- both
+    asserted together, because recording it and swallowing it are different
+    defects and a test that only checked one would miss the other."""
+
+    def test_the_exception_still_propagates_and_stop_is_still_set(self):
+        import threading
+
+        stop = threading.Event()
+        failures = _RecordingFailures()
+
+        def raising_tick_loop():
+            raise RuntimeError("pipeline.step blew up")
+
+        with pytest.raises(RuntimeError, match="pipeline.step blew up"):
+            worker_for(raising_tick_loop, failures, stop)
+
+        assert stop.is_set(), "the finally must still run stop.set() on a raise"
+        assert len(failures.exceptions) == 1
+        assert isinstance(failures.exceptions[0], RuntimeError)
+
+    def test_a_clean_loop_records_nothing(self):
+        import threading
+
+        stop = threading.Event()
+        failures = _RecordingFailures()
+        worker_for(lambda: None, failures, stop)
+        assert failures.exceptions == []
+        assert stop.is_set()
+
+    def test_no_failures_sampler_still_lets_the_exception_through(self):
+        # `failures` can be None (the sampler is disabled in config) --
+        # `worker()` must not crash trying to record onto nothing.
+        import threading
+
+        stop = threading.Event()
+        with pytest.raises(RuntimeError):
+            worker_for(lambda: (_ for _ in ()).throw(RuntimeError("x")), None, stop)
+        assert stop.is_set()
+
+    def test_run_live_wires_the_except_and_the_reraise(self):
+        # Ties the transcription above to the real source: the mutation this
+        # fences is "the tick-loop exception is swallowed" (the `raise` is
+        # removed), which only a check against the literal file can catch.
+        import inspect
+
+        source = inspect.getsource(run_demo.run_live)
+        assert "except BaseException as exc" in source
+        assert "failures.note_pipeline_exception(exc)" in source
+        note_at = source.index("failures.note_pipeline_exception(exc)")
+        # A narrow window right after the call, not "somewhere later in this
+        # 300-line function" -- `run_live` has other `raise` statements of its
+        # own, so an unbounded `source.index("raise", note_at)` finds one of
+        # those and passes even when THIS `raise` was deleted.
+        window = source[note_at:note_at + 80]
+        assert "raise" in window, (
+            "the exception must still be re-raised immediately after recording it"
+        )
+
+
+class TestBlindTickWiring:
+    """Behaviour change 2: the tick loop counts the branch it already takes.
+    No new predicate -- `frame is None` and `camera.end_of_stream` are both
+    evaluated on this path already."""
+
+    def test_run_live_calls_note_no_frame_before_the_end_of_stream_check(self):
+        import inspect
+
+        source = inspect.getsource(run_demo.run_live)
+        note_at = source.index("failures.note_no_frame(end_of_stream=camera.end_of_stream)")
+        wait_at = source.index("frame = camera.wait_for_fresh(")
+        eos_at = source.index("if camera.end_of_stream:\n                    break")
+        assert wait_at < note_at < eos_at
+
+
+class TestWriteLogHealth:
+    """`log_health.json`: the metadata logger's own final state, written
+    after `close()` so `writer_failure` and `dropped_records` are whatever
+    they will ever be (D16)."""
+
+    def test_a_healthy_close_reports_no_failure(self, tmp_path):
+        from logio.metadata_logger import MetadataLogger
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        logger = MetadataLogger(run_dir)
+        logger.write({"type": "tick", "tick_id": 0})
+        logger.close()
+
+        run_demo._write_log_health(logger, run_dir)
+        health = json.loads((run_dir / "log_health.json").read_text())
+        assert health["writer_failure"] is None
+        assert health["dropped_records"] == 0
+        assert health["thread_alive_at_close"] is False
+        assert health["path"] == "metadata.jsonl"
+        assert health["bytes_on_disk"] > 0
+
+    def test_a_dead_writer_thread_is_named_not_hidden(self, tmp_path):
+        # The field's own failure mode: a full card, a read-only mount --
+        # `MetadataLogger._loop` catches `OSError` from the file handle.
+        from logio.metadata_logger import MetadataLogger
+
+        class BrokenFile:
+            def write(self, _):
+                raise OSError(28, "No space left on device")
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        logger = MetadataLogger(run_dir)
+        logger._file = BrokenFile()
+        for i in range(10):
+            logger.write({"type": "tick", "tick_id": i})
+        logger.close()
+
+        run_demo._write_log_health(logger, run_dir)
+        health = json.loads((run_dir / "log_health.json").read_text())
+        assert health["writer_failure"] is not None
+        assert "No space left" in health["writer_failure"]
+        assert health["dropped_records"] > 0
 
 
 class TestTickSessionId:

@@ -333,6 +333,24 @@ class TestReplayIdentityGate:
             "status": "ok", "ticks": 12, "mismatched": 0, "first_mismatch": None,
         }
 
+    def test_failure_log_records_mixed_into_the_file_do_not_confuse_the_ticks(self, tmp_path):
+        # D18's own argument from the reader's side: `load_records` became a
+        # dataclass because a mis-ordered unpack of same-typed lists would
+        # type-check and pass most tests. This drives `score()` -- which
+        # unpacks `loaded.ticks` and `loaded.unparseable` by attribute, not
+        # by position -- over a log task 38 has added two new record types
+        # to, and asserts the tick count and the identity replay are
+        # unaffected by either.
+        run_dir = write_run(tmp_path, n=12)
+        with open(run_dir / "metadata.jsonl", "a") as f:
+            f.write(json.dumps({"type": "failure_scan", "seq": 1, "t_mono": 1.0}) + "\n")
+            f.write(json.dumps({"type": "failure_event", "phase": "open", "episode_id": 1}) + "\n")
+        result = score_shadow.score(run_dir)
+        assert result["replay_identity"] == {
+            "status": "ok", "ticks": 12, "mismatched": 0, "first_mismatch": None,
+        }
+        assert result.get("refused") is None
+
     def test_a_corrupted_tick_fails_the_gate_and_names_it(self, tmp_path):
         run_dir = write_run(tmp_path, n=12)
         lines = (run_dir / "metadata.jsonl").read_text().splitlines()
