@@ -1854,6 +1854,16 @@ MUTATIONS = [
      "            if name in states or name in missing:\n"
      "                continue",
      "python"),
+    # Round 2 re-audit (m12): a device missing on one pass replaced the whole
+    # map instead of merging into it, so it had nothing to diff against once
+    # it started reading again -- a real transition spanning the gap went
+    # unnoticed. Unpinned before this: every existing test that exercises a
+    # missed pass never brought the device back afterward.
+    ("thermal: a device missing on one pass loses its history instead of keeping it",
+     "deployment/jetson/sensors/thermal.py",
+     "        self._prev_cooling = {**(self._prev_cooling or {}), **states}",
+     "        self._prev_cooling = dict(states)",
+     "python"),
     ("eval_run: the per-tick thermal basis is computed and never rendered",
      "deployment/jetson/eval_run.py",
      '    ticks_by_basis = thermal.get("ticks_by_basis") or {}\n'
