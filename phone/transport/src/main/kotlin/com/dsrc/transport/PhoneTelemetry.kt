@@ -44,10 +44,12 @@ data class PhoneTelemetry(
     /**
      * Transitions the phone's thermal-status listener has counted this service run,
      * independent of [thermalStatus]'s own 1 Hz poll. Sent by every phone build that knows
-     * this field exists, even when it is zero -- an older build omits it, which is the one
-     * way it is absent here.
+     * this field exists, even when it is zero -- an older build omits it entirely, which is
+     * the one way it is absent here. Nullable so a decode of a frame missing the key can say
+     * so, rather than collapsing "never reported" and "reported zero" into the same number --
+     * the same distinction [thermalHeadroom] already makes with its own absence.
      */
-    val thermalStatusChanges: Long = 0,
+    val thermalStatusChanges: Long? = 0L,
     /** The most recent transition's endpoints and when the phone observed it, on the
      * phone's own clock. All three null before the first transition. */
     val thermalChangeFrom: String? = null,
@@ -60,7 +62,7 @@ data class PhoneTelemetry(
         skinTempZone?.let { put("skin_temp_zone", JsonValue.Text(it)) }
         thermalHeadroomAbsent?.let { put("thermal_headroom_absent", JsonValue.Text(it)) }
         skinTempAbsent?.let { put("skin_temp_absent", JsonValue.Text(it)) }
-        put("thermal_status_changes", JsonValue.Num(thermalStatusChanges))
+        thermalStatusChanges?.let { put("thermal_status_changes", JsonValue.Num(it)) }
         thermalChangeFrom?.let { put("thermal_change_from", JsonValue.Text(it)) }
         thermalChangeTo?.let { put("thermal_change_to", JsonValue.Text(it)) }
         thermalChangeAtMonoNs?.let { put("thermal_change_at_mono_ns", JsonValue.Num(it)) }
@@ -97,7 +99,7 @@ data class PhoneTelemetry(
                 skinTempZone = Fields.absentableString(extensions, "skin_temp_zone"),
                 thermalHeadroomAbsent = Fields.absentableString(extensions, "thermal_headroom_absent"),
                 skinTempAbsent = Fields.absentableString(extensions, "skin_temp_absent"),
-                thermalStatusChanges = Fields.absentableInt(extensions, "thermal_status_changes") ?: 0,
+                thermalStatusChanges = Fields.absentableInt(extensions, "thermal_status_changes"),
                 thermalChangeFrom = Fields.absentableString(extensions, "thermal_change_from"),
                 thermalChangeTo = Fields.absentableString(extensions, "thermal_change_to"),
                 thermalChangeAtMonoNs = Fields.absentableInt(extensions, "thermal_change_at_mono_ns"),

@@ -398,6 +398,16 @@ class TypedMessagesTest {
     }
 
     @Test
+    fun `an older build's frame has no thermal_status_changes key, and decodes to null not zero`() {
+        // A build that predates this task never writes the key at all. Collapsing that
+        // absence to 0 would read as "reported, zero transitions" -- indistinguishable from
+        // a build that has the feature and genuinely saw none.
+        val extensions = telemetry().toExtensions() - "thermal_status_changes"
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+        assertNull(decoded.thermalStatusChanges)
+    }
+
+    @Test
     fun `an absence reason survives the wire in its own field`() {
         val extensions = telemetry().copy(
             thermalHeadroom = null, thermalHeadroomAbsent = "not_a_number",
