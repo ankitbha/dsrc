@@ -1,5 +1,6 @@
 package com.dsrc.phone.log
 
+import android.os.SystemClock
 import android.util.Log
 import com.dsrc.transport.Json
 import com.dsrc.transport.JsonValue
@@ -45,6 +46,10 @@ class SessionLog(
     private val file: File,
     private val maxBytes: Long = MAX_BYTES,
     private val queueDepth: Int = QUEUE_DEPTH,
+    /** For the one failure this class reports about itself -- see [write]'s
+     *  own catch. The same clock every other line here is stamped on. */
+    private val monoClock: () -> Long = SystemClock::elapsedRealtimeNanos,
+    private val wallClock: () -> Long = { System.currentTimeMillis() * 1_000_000L },
 ) {
     private val queue = ArrayBlockingQueue<String>(queueDepth)
     private val lock = Any()
@@ -55,6 +60,18 @@ class SessionLog(
     private var droppedNotRunning = 0L
     private var droppedAtCap = 0L
     private var failures = 0L
+
+    // -- the fourth line shape's own rate cap (D12) --------------------------
+    // One line per kind per second, plus a per-kind lifetime cap: the queue
+    // above is 128 deep and shared with every frame header this device sends,
+    // and a full queue drops the header -- the file's reason to exist. Guarded
+    // by the same `lock` as the counters above; the state is small and the
+    // critical section is short, so a second lock would only be a second thing
+    // to get the ordering of right.
+    private val lastAcceptedFailureSecond = mutableMapOf<String, Long>()
+    private val suppressedSinceAccepted = mutableMapOf<String, Long>()
+    private val writtenPerKind = mutableMapOf<String, Int>()
+    private var failuresSuppressed = 0L
 
     @Volatile
     private var running = false
@@ -124,6 +141,52 @@ class SessionLog(
         enqueueLine(Json.encode(wrapped))
     }
 
+    /**
+     * Record one failure occurrence: a condition detected off the link, at the
+     * site that already counts it -- see [FailureKinds] for the closed set of
+     * `kind`.
+     *
+     * Rate-capped to at most one line per `kind` per second and
+     * [MAX_LINES_PER_KIND] per session, because a fault repeating faster than
+     * that would otherwise compete with frame headers for the same 128-deep
+     * queue, and a full queue drops the header -- this file's whole reason to
+     * exist. An occurrence suppressed by either limit is not lost silently:
+     * the count travels forward and rides on the next accepted line of the
+     * same kind, in [suppressed].
+     *
+     * `atMonoNs` is [android.os.SystemClock.elapsedRealtimeNanos], the same
+     * clock every other line in this file is stamped on, and it is not
+     * converted -- an estimate-dependent bound on a number nobody differences
+     * would only add uncertainty nothing here needs.
+     */
+    fun offerFailure(kind: String, atMonoNs: Long, atWallNs: Long, n: Long = 1, detail: String? = null) {
+        val suppressedBefore: Long
+        synchronized(lock) {
+            val writtenSoFar = writtenPerKind.getOrDefault(kind, 0)
+            val second = atMonoNs / 1_000_000_000L
+            if (writtenSoFar >= MAX_LINES_PER_KIND || lastAcceptedFailureSecond[kind] == second) {
+                suppressedSinceAccepted[kind] = (suppressedSinceAccepted[kind] ?: 0L) + 1L
+                failuresSuppressed++
+                return
+            }
+            suppressedBefore = suppressedSinceAccepted.remove(kind) ?: 0L
+            lastAcceptedFailureSecond[kind] = second
+            writtenPerKind[kind] = writtenSoFar + 1
+        }
+        val wrapped = JsonValue.Obj(
+            mapOf(
+                "dir" to JsonValue.Text("fail"),
+                "at_mono_ns" to JsonValue.Num(atMonoNs),
+                "at_wall_ns" to JsonValue.Num(atWallNs),
+                "kind" to JsonValue.Text(kind),
+                "n" to JsonValue.Num(n),
+                "detail" to (detail?.let { JsonValue.Text(it) } ?: JsonValue.Null),
+                "suppressed" to JsonValue.Num(suppressedBefore),
+            )
+        )
+        enqueueLine(Json.encode(wrapped))
+    }
+
     private fun enqueueLine(line: String) {
         if (!running) {
             // Counted, not dropped in silence. A frame the transport wrote after the log
@@ -175,6 +238,15 @@ class SessionLog(
                 bytes -= size
             }
             Log.e(TAG, "session log write failed; continuing", e)
+            // The one failure this class can report about itself: a later write may
+            // still succeed (this one failure need not be the drive's last), so it is
+            // worth trying to say so in the file it is failing to write, through the
+            // same rate-capped path every other failure kind uses. If the disk stays
+            // dead this simply fails again next line and is counted the same way.
+            offerFailure(
+                FailureKinds.LOG_SELF, monoClock(), wallClock(),
+                detail = "${e.javaClass.simpleName}: ${e.message}",
+            )
         }
     }
 
@@ -198,6 +270,7 @@ class SessionLog(
                 droppedNotRunning = droppedNotRunning,
                 droppedAtCap = droppedAtCap,
                 failures = failures,
+                failuresSuppressed = failuresSuppressed,
                 path = file.absolutePath,
             )
         }
@@ -212,6 +285,11 @@ class SessionLog(
         /** Lines dropped because the file hit its size cap. */
         val droppedAtCap: Long,
         val failures: Long,
+        /** Failure occurrences the rate cap held back, across every kind --
+         *  the teardown census D12 names, so a fault that fired far faster
+         *  than its cap allowed is visible in total even where no single
+         *  accepted line's own `suppressed` count says so. */
+        val failuresSuppressed: Long,
         val path: String,
     ) {
         /** Whether the file is a complete record of the session. */
@@ -241,6 +319,15 @@ class SessionLog(
          * than as unbounded memory.
          */
         const val QUEUE_DEPTH = 128
+
+        /**
+         * The lifetime cap on [offerFailure] lines per `kind`, beyond the one
+         * per second the same method already enforces.
+         *
+         * `phone_link.refusals`' precedent on the Jetson side, ported: the
+         * first ones are the diagnosis, the six hundredth repeats it.
+         */
+        const val MAX_LINES_PER_KIND = 64
 
         private const val POLL_MS = 200L
         private const val JOIN_MS = 2_000L
