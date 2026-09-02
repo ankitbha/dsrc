@@ -1,6 +1,7 @@
 package com.dsrc.phone.net
 
 import com.dsrc.phone.config.LinkConfig
+import com.dsrc.phone.log.FailureKinds
 import com.dsrc.transport.Frame
 import com.dsrc.transport.JsonValue
 import com.dsrc.transport.Session
@@ -55,6 +56,11 @@ class SessionHolder(
     private val onFrame: (Frame, Long, Long) -> Unit,
     /** Handed each outgoing header, as canonical JSON, for a local recorder. */
     private val onSent: ((String) -> Unit)? = null,
+    /** A dial failure or a session end, named for the local session log --
+     *  see [FailureKinds]. The link being down is precisely the condition
+     *  neither of these can be sent to the Jetson during. */
+    private val onFailure: (kind: String, atMonoNs: Long, atWallNs: Long, detail: String?) -> Unit =
+        { _, _, _, _ -> },
     private val dial: (LinkConfig) -> Link = ::dialTcp,
     /** Sleep, injectable so a test does not spend the backoff. */
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
@@ -199,6 +205,7 @@ class SessionHolder(
                         lastEnd = end
                         lastError = error?.toString()
                         sessionsEnded.incrementAndGet()
+                        onFailure(FailureKinds.LINK_SESSION_ENDED, monoClock(), wallClock(), end.toString())
                         ended.countDown()
                     },
                 )
@@ -233,6 +240,7 @@ class SessionHolder(
                 // meets after the Jetson is updated and it is not.
                 dialFailures.incrementAndGet()
                 lastError = "${e.javaClass.simpleName}: ${e.message}"
+                onFailure(FailureKinds.LINK_DIAL_FAILED, monoClock(), wallClock(), lastError)
             } finally {
                 current = null
                 try {

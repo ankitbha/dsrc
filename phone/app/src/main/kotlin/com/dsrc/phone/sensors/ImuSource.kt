@@ -10,6 +10,7 @@ import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
 import com.dsrc.phone.config.SensingConfig
+import com.dsrc.phone.log.FailureKinds
 
 /** Whether the sensor clock and the app's clock are the same clock. */
 enum class ImuTimebase {
@@ -101,6 +102,9 @@ class ImuSource(
     @Volatile
     private var listener: SensorEventListener? = null
 
+    @Volatile
+    private var onFailure: (kind: String, detail: String?) -> Unit = { _, _ -> }
+
     private val pairing = ImuPairing()
 
     val timebase: ImuTimebase get() = pairing.timebase
@@ -149,13 +153,19 @@ class ImuSource(
      * either way. Unpinned: reaching it needs a real SensorManager and a vendor bug.
      */
     @Synchronized
-    fun start(onReading: (ImuReading) -> Unit, onUnpaired: () -> Unit) {
+    fun start(
+        onReading: (ImuReading) -> Unit,
+        onUnpaired: () -> Unit,
+        onFailure: (kind: String, detail: String?) -> Unit = { _, _ -> },
+    ) {
+        this.onFailure = onFailure
         val accelerometer = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val gyroscope = manager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         if (accelerometer == null || gyroscope == null) {
             // Not a failure of ours, and not something a retry fixes. Named rather than
             // silently producing nothing.
             Log.w(TAG, "no IMU: accelerometer=$accelerometer gyroscope=$gyroscope")
+            onFailure(FailureKinds.IMU_NO_HARDWARE, "accelerometer=$accelerometer gyroscope=$gyroscope")
             return
         }
 
@@ -291,12 +301,14 @@ class ImuSource(
     private fun stopBecauseOfTimebase() {
         if (stoppedForTimebase) return
         stoppedForTimebase = true
+        val detail = "delivery delta ${pairing.timebaseOffsetNs}ns against a clock gap of " +
+            "${pairing.clockGapNs}ns"
         Log.e(
             TAG,
-            "sensor clock is not elapsedRealtime: delivery delta ${pairing.timebaseOffsetNs}ns " +
-                "against a clock gap of ${pairing.clockGapNs}ns. Stopping IMU capture; a stamp " +
+            "sensor clock is not elapsedRealtime: $detail. Stopping IMU capture; a stamp " +
                 "on the wrong timebase would land the Jetson's fusion at the wrong instant.",
         )
+        onFailure(FailureKinds.IMU_TIMEBASE_MISMATCHED, detail)
         stop()
     }
 

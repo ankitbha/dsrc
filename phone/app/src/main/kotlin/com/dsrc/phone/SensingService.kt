@@ -21,6 +21,7 @@ import com.dsrc.phone.sensors.CameraPipeline
 import com.dsrc.phone.sensors.CameraXSource
 import com.dsrc.phone.sensors.CameraFrameSender
 import com.dsrc.phone.config.ConfigApplier
+import com.dsrc.phone.log.FailureKinds
 import com.dsrc.phone.log.SessionLog
 import java.io.File
 import com.dsrc.phone.ui.AdvisoryHolder
@@ -199,6 +200,13 @@ class SensingService : LifecycleService() {
                     if (missing.isNotEmpty()) {
                         // Revoked between the Activity's check and now. Not a failure:
                         // the remedy is a grant, not a retry.
+                        //
+                        // Not offered to the session log: `service.permission_revoked`
+                        // is in FailureKinds for the closed set's own sake, but nothing
+                        // has constructed a log yet at this point in come-up -- that
+                        // happens inside allocateAndStart, several steps below. Logcat
+                        // is this one's only destination, the same structural gap
+                        // open item 2 names for the Jetson's own model-loading failure.
                         Log.w(TAG, "cannot start, missing $missing")
                         handle(SensingEvent.PermissionRevoked)
                         return
@@ -315,6 +323,17 @@ class SensingService : LifecycleService() {
             // Whatever was published before the throw is released here rather than left to
             // a teardown that may not come.
             Log.e(TAG, "sensing failed to come up; releasing what was allocated", t)
+            // Captured before onSensingDown, which nulls it: the session log is
+            // constructed first in allocateAndStart, so most come-up failures --
+            // everything after that line -- still have somewhere to be recorded.
+            // A failure from that line or earlier has no log yet, the same
+            // structural gap a permission revocation has (see missingPermissions'
+            // own caller) -- named rather than worked around.
+            sessionLog?.offerFailure(
+                FailureKinds.SERVICE_COME_UP_FAILED,
+                SystemClock.elapsedRealtimeNanos(), wallClockNanos(),
+                detail = "${t.javaClass.simpleName}: ${t.message}",
+            )
             onSensingDown()
             throw t
         }
@@ -353,6 +372,9 @@ class SensingService : LifecycleService() {
             wallClock = ::wallClockNanos,
             onFrame = ::onInboundFrame,
             onSent = { header -> log.offer(header) },
+            onFailure = { kind, atMonoNs, atWallNs, detail ->
+                log.offerFailure(kind, atMonoNs, atWallNs, detail = detail)
+            },
         )
         link = holder
         // Not started here. Starting the link starts the reader and delivery threads, and
@@ -405,7 +427,13 @@ class SensingService : LifecycleService() {
                 apiKey = com.dsrc.phone.BuildConfig.HERE_API_KEY,
                 monoClock = android.os.SystemClock::elapsedRealtimeNanos,
             )
-        }.onFailure { Log.w(TAG, "HERE disabled: ${it.message}") }.getOrNull()
+        }.onFailure {
+            Log.w(TAG, "HERE disabled: ${it.message}")
+            log.offerFailure(
+                FailureKinds.HERE_UNCONFIGURED,
+                SystemClock.elapsedRealtimeNanos(), wallClockNanos(), detail = it.message,
+            )
+        }.getOrNull()
 
         val here = HerePipeline(
             config = config,
@@ -456,7 +484,13 @@ class SensingService : LifecycleService() {
             recordReceipt(reading)
             gps.offer(reading)
         }
-        motion.start(onReading = { imu.offer(it) }, onUnpaired = { imu.offerUnpaired() })
+        motion.start(
+            onReading = { imu.offer(it) },
+            onUnpaired = { imu.offerUnpaired() },
+            onFailure = { kind, detail ->
+                log.offerFailure(kind, SystemClock.elapsedRealtimeNanos(), wallClockNanos(), detail = detail)
+            },
+        )
         here.start()
 
         val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
@@ -810,6 +844,15 @@ class SensingService : LifecycleService() {
                 }
             }
         } finally {
+            // `service.resources_held` (FailureKinds) names the census below,
+            // but nothing here offers it to `sessionLog`: "session log" is
+            // released inside the try above, before this `finally` runs, so
+            // by the time the count below exists the log has already stopped
+            // draining and any line offered to it would only be counted as
+            // `droppedNotRunning`, never written -- the same
+            // cannot-record-its-own-death gap the Jetson's own failure log
+            // names for its metadata logger (D16 answers it there with a
+            // separate file; this class has no equivalent).
             cameraSource = null
             gpsSource = null
             imuPipeline = null
@@ -861,6 +904,16 @@ class SensingService : LifecycleService() {
         } catch (t: Throwable) {
             teardownFailures.incrementAndGet()
             Log.e(TAG, "releasing $what failed; continuing with the rest", t)
+            // `sessionLog` (the field, not yet nulled -- that happens in
+            // onSensingDown's own `finally`, after every release step here has
+            // run) is still draining for every failure this catch can reach:
+            // "session log" is itself the last content release before that
+            // `finally`, so nothing after it can fail here.
+            sessionLog?.offerFailure(
+                FailureKinds.SERVICE_TEARDOWN_FAILED,
+                SystemClock.elapsedRealtimeNanos(), wallClockNanos(),
+                detail = "$what: ${t.javaClass.simpleName}: ${t.message}",
+            )
         }
     }
 
