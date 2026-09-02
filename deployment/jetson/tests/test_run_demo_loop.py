@@ -10,6 +10,7 @@ control flow and not in what it drives.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import time
 from types import SimpleNamespace
@@ -17,6 +18,55 @@ from types import SimpleNamespace
 import pytest
 
 import run_demo
+
+
+# ---------------------------------------------------------------------------
+# AST helpers for the two structural pins below (M6): a character-window
+# check ("is `raise` within 80 characters of this call") passes a guard that
+# keeps the word `raise` nearby without ever reaching it -- `if 0: raise` --
+# because the window has no idea what actually executes. These walk the real
+# parse tree instead, so what is asserted is control flow, not text.
+# ---------------------------------------------------------------------------
+
+
+def _call_name(node: ast.AST) -> str | None:
+    """The attribute or bare name a `Call` node invokes, or `None`."""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def _calls(stmt: ast.AST, name: str) -> bool:
+    """Whether `name` is called anywhere inside `stmt` (at any nesting)."""
+    return any(_call_name(node) == name for node in ast.walk(stmt))
+
+
+def _find_except_handler(tree: ast.AST, exception_name: str) -> ast.ExceptHandler | None:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ExceptHandler) and isinstance(node.type, ast.Name) \
+                and node.type.id == exception_name:
+            return node
+    return None
+
+
+def _is_frame_is_none(test: ast.AST) -> bool:
+    return (
+        isinstance(test, ast.Compare) and isinstance(test.left, ast.Name)
+        and test.left.id == "frame" and len(test.ops) == 1 and isinstance(test.ops[0], ast.Is)
+        and isinstance(test.comparators[0], ast.Constant) and test.comparators[0].value is None
+    )
+
+
+def _is_camera_end_of_stream(test: ast.AST) -> bool:
+    return (
+        isinstance(test, ast.Attribute) and test.attr == "end_of_stream"
+        and isinstance(test.value, ast.Name) and test.value.id == "camera"
+    )
 
 
 class SilentCamera:
@@ -406,22 +456,26 @@ class TestWorkerRecordsAndReraises:
         assert stop.is_set()
 
     def test_run_live_wires_the_except_and_the_reraise(self):
-        # Ties the transcription above to the real source: the mutation this
-        # fences is "the tick-loop exception is swallowed" (the `raise` is
-        # removed), which only a check against the literal file can catch.
+        # M6: the previous version of this test asserted `"raise" in
+        # source[note_at:note_at+80]` -- a character window, not a
+        # behaviour. A guard that keeps the word `raise` inside that window
+        # without ever reaching it (`if 0: raise`) swallows the exception and
+        # still passes it. This parses `run_live` and asserts the handler's
+        # own LAST statement is a bare `raise`, which that guard fails: its
+        # last statement is the `if 0: raise`, not a `Raise` node.
         import inspect
 
         source = inspect.getsource(run_demo.run_live)
-        assert "except BaseException as exc" in source
-        assert "failures.note_pipeline_exception(exc)" in source
-        note_at = source.index("failures.note_pipeline_exception(exc)")
-        # A narrow window right after the call, not "somewhere later in this
-        # 300-line function" -- `run_live` has other `raise` statements of its
-        # own, so an unbounded `source.index("raise", note_at)` finds one of
-        # those and passes even when THIS `raise` was deleted.
-        window = source[note_at:note_at + 80]
-        assert "raise" in window, (
-            "the exception must still be re-raised immediately after recording it"
+        tree = ast.parse(source)
+        handler = _find_except_handler(tree, "BaseException")
+        assert handler is not None, "no `except BaseException` handler in run_live"
+        assert _calls(handler, "note_pipeline_exception"), (
+            "the handler must call failures.note_pipeline_exception"
+        )
+        last = handler.body[-1]
+        assert isinstance(last, ast.Raise) and last.exc is None, (
+            "the handler's last statement must be a bare `raise`, immediately "
+            f"reraising what it just recorded -- got {ast.dump(last)}"
         )
 
 
@@ -431,13 +485,32 @@ class TestBlindTickWiring:
     evaluated on this path already."""
 
     def test_run_live_calls_note_no_frame_before_the_end_of_stream_check(self):
+        # M6: same treatment as the exception handler above -- this asserts
+        # the actual statement order inside the `if frame is None:` block's
+        # AST, not the order the three anchor strings happen to appear in
+        # the source text.
         import inspect
 
         source = inspect.getsource(run_demo.run_live)
-        note_at = source.index("failures.note_no_frame(end_of_stream=camera.end_of_stream)")
-        wait_at = source.index("frame = camera.wait_for_fresh(")
-        eos_at = source.index("if camera.end_of_stream:\n                    break")
-        assert wait_at < note_at < eos_at
+        tree = ast.parse(source)
+        frame_none_if = next(
+            (n for n in ast.walk(tree) if isinstance(n, ast.If) and _is_frame_is_none(n.test)),
+            None,
+        )
+        assert frame_none_if is not None, "no `if frame is None:` block in run_live"
+
+        note_index = next(
+            (i for i, stmt in enumerate(frame_none_if.body) if _calls(stmt, "note_no_frame")),
+            None,
+        )
+        eos_index = next(
+            (i for i, stmt in enumerate(frame_none_if.body)
+             if isinstance(stmt, ast.If) and _is_camera_end_of_stream(stmt.test)),
+            None,
+        )
+        assert note_index is not None, "note_no_frame is not called inside `if frame is None:`"
+        assert eos_index is not None, "no `if camera.end_of_stream:` inside `if frame is None:`"
+        assert note_index < eos_index
 
 
 class TestWriteLogHealth:
@@ -490,6 +563,145 @@ class TestWriteLogHealth:
         assert health["writer_failure"] is not None
         assert "No space left" in health["writer_failure"]
         assert health["dropped_records"] > 0
+
+
+class _FiniteCamera:
+    """A real `run_live` drive needs a camera; this produces `n_frames` real
+    frames -- each with a small sleep standing in for capture latency, so
+    the failure sampler's own background thread gets scheduled between them
+    -- then signals `end_of_stream` so the drive ends on its own rather than
+    on a `--duration-s` deadline."""
+
+    def __init__(self, n_frames: int, *, frame_delay_s: float = 0.05) -> None:
+        import numpy as np
+
+        self.dropped_frames = 0
+        self.file_recoveries = 0
+        self.source = "test"
+        self.end_of_stream = False
+        self._remaining = n_frames
+        self._frame_delay_s = frame_delay_s
+        self._image = np.zeros((64, 64, 3), dtype="uint8")
+        self._frame_id = 0
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def wait_for_fresh(self, timeout: float = 1.0):
+        from sensors.camera_stream import Frame
+
+        if self._remaining <= 0:
+            self.end_of_stream = True
+            return None
+        time.sleep(self._frame_delay_s)
+        self._remaining -= 1
+        frame = Frame(
+            image=self._image, frame_id=self._frame_id,
+            t_mono=time.monotonic(), t_wall=time.time(),
+        )
+        self._frame_id += 1
+        return frame
+
+
+class TestRunLiveFailureSamplerIntegration:
+    """M3: five of `run_live`'s six failure-sampler wiring points had no
+    test executing them with a real sampler -- only the literal source-text
+    pins above. This drives `run_live` itself, the way
+    `TestThermalSummaryStopsBeforeReading` drives the thermal sampler's own
+    teardown, with everything upstream of the camera and policy bundle
+    faked or built the way `test_pipeline_smoke.py` already does without a
+    GPU.
+    """
+
+    def test_a_real_drive_writes_a_failure_summary_tick_block_and_log_health(self, tmp_path, monkeypatch):
+        from perception.distance import DistanceEstimator
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        from perception.tracker import IouTracker
+        from pipeline import PerceptionPolicyPipeline
+        from policy.actor_runtime import ActorRuntime
+        from policy.advisory import AdvisoryDecoder
+        from policy.export_policy import build_random, export
+
+        class FakeDetector:
+            def infer(self, image):
+                return []
+
+            def warmup(self, iterations: int = 1) -> float:
+                return 0.0
+
+        bundle_prefix = tmp_path / "bundle" / "actor_policy"
+        bundle_prefix.parent.mkdir()
+        actor_obj, info = build_random(seed=0)
+        export(actor_obj, info, str(bundle_prefix))
+        actor = ActorRuntime(str(bundle_prefix))
+
+        pipeline = PerceptionPolicyPipeline(
+            detector=FakeDetector(),
+            tracker=IouTracker(min_hits=2),
+            distance=DistanceEstimator(
+                fx_px=800.0, cx_px=640.0, horizon_y_px=360.0, camera_height_m=1.25, ema_alpha=0.6,
+            ),
+            builder=ObservationBuilder(BuilderConfig()),
+            actor=actor,
+            advisory_decoder=AdvisoryDecoder(units="mph"),
+        )
+        camera = _FiniteCamera(n_frames=6)
+
+        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
+
+        config = run_demo.load_config(str(run_demo.JETSON_DIR / "config.yaml"))
+        config["telemetry"]["enabled"] = False
+        config["v2v"]["enabled"] = False
+        config["ui"]["display"] = False
+        config["logio"]["video"] = False
+        config["logio"]["system_stats"] = False
+        config["logio"]["thermal"] = False
+        config["logio"]["nmea"] = False
+        config["logio"]["metadata"] = True
+        config["logio"]["failures"] = True
+        config["logio"]["failure_interval_s"] = 0.02
+        config["paths"]["log_dir"] = str(tmp_path / "logs")
+
+        args = argparse.Namespace(
+            duration_s=0.0, headless=True, live_rates=False, max_ticks=0,
+            no_gps=True, no_log=False, phone=False, phone_host="0.0.0.0",
+            phone_port=0, phone_wait_s=0.0, print_every=1.0, rate_heartbeat_s=1.0,
+            require_gps=False, sim_gps=None, source=None,
+        )
+
+        rc = run_demo.run_live(config, args)
+        assert rc == 0
+
+        run_dirs = list((tmp_path / "logs").iterdir())
+        assert len(run_dirs) == 1
+        run_dir = run_dirs[0]
+
+        summary = json.loads((run_dir / "summary.json").read_text())
+        # Wiring point 1 & 2: the sampler was actually constructed and
+        # started -- a summary with no passes means it never ran.
+        assert summary["failures"]["scan"]["passes"] > 0
+
+        records = [
+            json.loads(line) for line in (run_dir / "metadata.jsonl").read_text().splitlines() if line.strip()
+        ]
+        ticks = [r for r in records if r.get("type") == "tick"]
+        assert len(ticks) == 6, "the camera's six real frames should be six ticks"
+        # Wiring point 3: the tick record carries the sampler's own block.
+        assert all("failures" in t for t in ticks)
+        assert ticks[0]["failures"]["basis"] is not None
+
+        # Wiring point 4: `summary["failures"]` came from the sampler's own
+        # `to_record()`, not a dropped or default-shaped stand-in.
+        assert "sources" in summary["failures"]
+        assert summary["failures"]["scan"]["sources_n"] > 0
+
+        # Wiring point 5: `_write_log_health` ran after `close()`.
+        health = json.loads((run_dir / "log_health.json").read_text())
+        assert health["writer_failure"] is None
+        assert health["path"] == "metadata.jsonl"
 
 
 class TestTickSessionId:
