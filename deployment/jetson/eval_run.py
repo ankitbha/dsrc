@@ -39,6 +39,7 @@ sys.path.insert(0, str(JETSON_DIR))
 import numpy as np  # noqa: E402
 
 from policy import sim_contract  # noqa: E402
+from policy.sensing_controller import RULE_FIRED, RULE_NOT_EVALUABLE  # noqa: E402
 from sensors.time_sync import StageTiming  # noqa: E402
 from transport.timebase import (  # noqa: E402
     MAX_ACCEPTABLE_RTT_NS,
@@ -66,9 +67,11 @@ GATE_VEHICLE_TICK_FRACTION = 0.50
 DROPOUT_RECOVERY_MARGIN_S = 2.5  # stale_after_s + one fix interval
 
 
-def load_records(metadata_path: Path) -> tuple[list[dict], dict | None, list[dict], int]:
-    """Ticks, the scenario, the timebase_estimate lines, and how many lines
-    would not parse.
+def load_records(
+    metadata_path: Path,
+) -> tuple[list[dict], dict | None, list[dict], int, list[dict], list[dict]]:
+    """Ticks, the scenario, the timebase_estimate lines, how many lines would
+    not parse, the thermal_sample lines, and the thermal_event lines.
 
     The count is returned rather than swallowed. `MetadataLogger` buffers a mebibyte
     and flushes only in `close()`, and there is a path where `close()` never runs --
@@ -79,6 +82,8 @@ def load_records(metadata_path: Path) -> tuple[list[dict], dict | None, list[dic
     ticks: list[dict] = []
     scenario: dict | None = None
     timebase_estimates: list[dict] = []
+    thermal_samples: list[dict] = []
+    thermal_events: list[dict] = []
     unparseable = 0
     with open(metadata_path) as f:
         for line in f:
@@ -93,7 +98,11 @@ def load_records(metadata_path: Path) -> tuple[list[dict], dict | None, list[dic
                 scenario = record
             elif record.get("type") == "timebase_estimate":
                 timebase_estimates.append(record)
-    return ticks, scenario, timebase_estimates, unparseable
+            elif record.get("type") == "thermal_sample":
+                thermal_samples.append(record)
+            elif record.get("type") == "thermal_event":
+                thermal_events.append(record)
+    return ticks, scenario, timebase_estimates, unparseable, thermal_samples, thermal_events
 
 
 def load_phone_log(phone_log_path: Path) -> tuple[list[dict], list[dict]]:
@@ -395,6 +404,46 @@ def stage_timings(ticks: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
+def thermal_result(
+    ticks: list[dict[str, Any]], thermal_samples: list[dict], thermal_events: list[dict],
+    summary: dict[str, Any],
+) -> dict[str, Any] | None:
+    """The thermal section: the summary's own rollup plus what only the raw
+    records can say. `None` for a run recorded before this task -- not a
+    failed drive, the same reading `latency["jetson_ms_source"]` gives a run
+    that predates the jetson/e2e split.
+
+    `ticks_by_basis` counts the Jetson's own per-tick `basis` -- the phone's
+    tick block carries no single `basis` field, so it is not pooled in here.
+    `sample_gaps_s` is the interval between consecutive `thermal_sample`
+    lines, which is how a sampler thread that died partway through a run
+    becomes visible: a healthy 1 Hz thread reports every gap near 1.0 s, and a
+    stalled one reports a max far past it.
+    """
+    has_tick_block = any(t.get("thermal") is not None for t in ticks)
+    if not has_tick_block and not thermal_samples and not thermal_events and "thermal" not in summary:
+        return None
+
+    ticks_by_basis: dict[str, int] = {}
+    for t in ticks:
+        block = t.get("thermal")
+        if not block:
+            continue
+        basis = (block.get("jetson") or {}).get("basis")
+        if basis is not None:
+            ticks_by_basis[basis] = ticks_by_basis.get(basis, 0) + 1
+
+    ordered = sorted(r["t_mono"] for r in thermal_samples if "t_mono" in r)
+    gaps = [b - a for a, b in zip(ordered, ordered[1:])]
+
+    return {
+        "summary": summary.get("thermal"),
+        "ticks_by_basis": ticks_by_basis,
+        "sample_gaps_s": pctl(gaps) if gaps else None,
+        "events": thermal_events,
+    }
+
+
 def in_dropout_affected(elapsed_s: float, dropouts: list[tuple[float, float]]) -> bool:
     return any(a <= elapsed_s < b + DROPOUT_RECOVERY_MARGIN_S for a, b in dropouts)
 
@@ -408,7 +457,9 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     the two logs are joined into a ten-stage table that adds `return` and
     `render`, the two facts only the phone witnesses.
     """
-    ticks, scenario, timebase_estimates, unparseable = load_records(run_dir / "metadata.jsonl")
+    ticks, scenario, timebase_estimates, unparseable, thermal_samples, thermal_events = load_records(
+        run_dir / "metadata.jsonl"
+    )
     if not ticks:
         raise SystemExit(f"no tick records in {run_dir / 'metadata.jsonl'}")
     summary = {}
@@ -688,6 +739,7 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
         "stage_timings": stage_timings(
             phone_join["rows"] if phone_join and phone_join.get("rows") else ticks
         ),
+        "thermal": thermal_result(ticks, thermal_samples, thermal_events, summary),
         "_sim_truth": sim_truth,  # stripped before JSON dump
         "_ticks": ticks,
     }
@@ -769,6 +821,75 @@ def render_plots(result: dict[str, Any], run_dir: Path) -> list[str]:
     fig.tight_layout(); fig.savefig(run_dir / "eval_leader.png"); plt.close(fig)
     written.append("eval_leader.png")
     return written
+
+
+def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
+    """The `## Thermal` section. Task 33 recorded a measurement with no
+    surface and task 36 repeated it; this is the section that closes it for
+    a third measurement rather than a third silent one. Absent entirely for a
+    run this task predates, rather than a section reporting zeros.
+    """
+    if not thermal or not thermal.get("summary"):
+        return []
+    s = thermal["summary"]
+    lines = ["", "## Thermal", ""]
+
+    jetson = s.get("jetson") or {}
+    temp = jetson.get("temp_c")
+    basis = jetson.get("basis_counts") or {}
+    if temp is not None:
+        per_zone_max = jetson.get("per_zone_max_c") or {}
+        hottest = max(per_zone_max, key=per_zone_max.get) if per_zone_max else None
+        peak = (
+            f"; {len(jetson.get('zones_seen') or [])} zones read, hottest at peak "
+            f"{hottest} {per_zone_max[hottest]:.1f} C" if hottest else ""
+        )
+        lines.append(
+            f"- jetson {jetson.get('selected_zone')}: p50 {temp['p50']:.1f} C, "
+            f"p95 {temp['p95']:.1f} C, max {temp['max']:.1f} C over "
+            f"{jetson.get('samples', 0)} samples (measured {basis.get('measured', 0)}, "
+            f"stale {basis.get('stale', 0)}, absent {basis.get('absent', 0)}{peak})"
+        )
+    else:
+        lines.append(f"- jetson: no temperature reached over {jetson.get('samples', 0)} samples")
+
+    phone = s.get("phone") or {}
+    n_phone = phone.get("samples", 0)
+    status_counts = phone.get("status_counts") or {}
+    if status_counts:
+        dominant = max(status_counts, key=status_counts.get)
+        skin = phone.get("skin_temp_c")
+        skin_str = (
+            f"; skin {phone.get('skin_zone')} p50 {skin['p50']:.1f} C, max {skin['max']:.1f} C"
+            if skin else ""
+        )
+        lines.append(f"- phone: {dominant} on {status_counts[dominant]} of {n_phone} reports{skin_str}")
+    headroom_absent = phone.get("headroom_absent_counts") or {}
+    if headroom_absent:
+        lines.append(
+            f"- phone headroom: not reported on {sum(headroom_absent.values())} of "
+            f"{n_phone} reports ({', '.join(sorted(headroom_absent))})"
+        )
+
+    events = s.get("events") or {}
+    for device in ("jetson", "phone"):
+        ev = events.get(device) or {}
+        status, count = ev.get("status"), ev.get("count", 0)
+        if status == RULE_NOT_EVALUABLE:
+            missing = ", ".join(ev.get("missing") or [])
+            lines.append(
+                f"- throttle events, {device}: NOT EVALUABLE -- missing {missing}; "
+                f"this drive says nothing about whether the {device} throttled"
+            )
+        elif status == RULE_FIRED:
+            lines.append(f"- throttle events, {device}: fired -- {count} transitions")
+        elif device == "jetson":
+            lines.append(f"- throttle events, jetson: quiet -- cooling devices readable throughout, "
+                         f"{count} transitions")
+        else:
+            lines.append(f"- throttle events, phone: quiet -- {count} status transitions "
+                         f"in {n_phone} reports")
+    return lines
 
 
 def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
@@ -920,6 +1041,9 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
     lines += [
         f"- most frequent fallback fields (fraction of ticks): "
         f"{r['observation']['top_fallback_fields']}",
+    ]
+    lines += _thermal_lines(r.get("thermal"))
+    lines += [
         "",
         "## GPS",
         "",
