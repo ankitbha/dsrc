@@ -217,8 +217,8 @@ MUTATIONS = [
      "python"),
     ("messages: require_str loses its null clause",
      "deployment/jetson/transport/messages.py",
-     '    if not isinstance(value, str):\n        raise MessageError(f"{field} is {type(value).__name__}, expected str", REASON_WRONG_TYPE)',
-     '    if value is None or not isinstance(value, str):\n        raise MessageError(f"{field} is {type(value).__name__}, expected str", REASON_WRONG_TYPE)',
+     '    if value is None:\n        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)\n    if not isinstance(value, str):',
+     '    if not isinstance(value, str):',
      "python"),
     # Task 30. The first two are the round-1 and round-2 defects themselves: both
     # shipped, both were signed off by a test that named the behaviour, and both
@@ -1690,8 +1690,16 @@ MUTATIONS = [
      "python"),
     ("thermal: an unobservable event stream is reported as quiet",
      "deployment/jetson/sensors/thermal.py",
-     "            return _tick_event_record(RULE_NOT_EVALUABLE, 0, None, (MISSING_COOLING_STATE,))",
-     "            return _tick_event_record(RULE_QUIET, 0, None, ())",
+     "            return _tick_event_record(\n"
+     "                RULE_NOT_EVALUABLE, 0, None, (MISSING_COOLING_STATE,),\n"
+     "                passes_attempted=self._cooling_passes_attempted,\n"
+     "                passes_readable=self._cooling_passes_readable,\n"
+     "            )",
+     "            return _tick_event_record(\n"
+     "                RULE_QUIET, 0, None, (),\n"
+     "                passes_attempted=self._cooling_passes_attempted,\n"
+     "                passes_readable=self._cooling_passes_readable,\n"
+     "            )",
      "python"),
     ("thermal: the jetson event count is derived by subtraction rather than counted",
      "deployment/jetson/sensors/thermal.py",
@@ -1721,8 +1729,322 @@ MUTATIONS = [
      "app"),
     ("phone: the watcher is nulled but not unregistered",
      "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalStatusWatcher.kt",
-     "        if (!registered) return\n        unregister(listener)\n        registered = false",
-     "        if (!registered) return\n        registered = false",
+     "        if (registered) {\n            unregister(listener)\n            registered = false\n        }",
+     "        if (registered) {\n            registered = false\n        }",
+     "app"),
+
+    # Task 37 round 2: the four confirmed critical findings.
+    ("thermal: a phone redial's report is copied instead of accumulated",
+     "deployment/jetson/sensors/thermal.py",
+     '                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)\n'
+     "                    self._phone_event_count += delta\n"
+     '                    self._phone_last_event = {"at_mono": now, "from": frm, "to": to}',
+     '                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)\n'
+     "                    self._phone_event_count = changes\n"
+     '                    self._phone_last_event = {"at_mono": now, "from": frm, "to": to}',
+     "python"),
+    ("thermal: the phone event baseline is not cleared when telemetry goes absent",
+     "deployment/jetson/sensors/thermal.py",
+     "        if telemetry is None:\n"
+     "            self._prev_status_changes = None\n"
+     "            return\n"
+     '        changes = getattr(telemetry, "thermal_status_changes", None)',
+     "        if telemetry is None:\n"
+     "            return\n"
+     '        changes = getattr(telemetry, "thermal_status_changes", None)',
+     "python"),
+    ("thermal: an event with no transition fields is emitted anyway",
+     "deployment/jetson/sensors/thermal.py",
+     "                if frm is not None or to is not None:\n"
+     '                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)',
+     "                if True:\n"
+     '                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)',
+     "python"),
+    ("thermal: cooling readable once is reported the same as readable throughout",
+     "deployment/jetson/sensors/thermal.py",
+     "        return (\n"
+     "            self._cooling_passes_attempted > 0\n"
+     "            and self._cooling_passes_attempted == self._cooling_passes_readable\n"
+     "        )",
+     "        return self._cooling_passes_readable > 0",
+     "python"),
+    ("thermal: a cooling device that lists but will not read is dropped, not named missing",
+     "deployment/jetson/sensors/thermal.py",
+     "            if raw is None:\n"
+     "                missing.append(name)\n"
+     "                continue",
+     "            if raw is None:\n"
+     "                continue",
+     "python"),
+    ("thermal: an unparseable cooling state is dropped, not named missing",
+     "deployment/jetson/sensors/thermal.py",
+     "            except ValueError:\n"
+     "                missing.append(name)\n"
+     "                continue",
+     "            except ValueError:\n"
+     "                continue",
+     "python"),
+    ("eval_run: the per-tick thermal basis is computed and never rendered",
+     "deployment/jetson/eval_run.py",
+     '    ticks_by_basis = thermal.get("ticks_by_basis") or {}\n'
+     "    if ticks_by_basis:\n"
+     "        # The real signal for a sampler thread that died partway through the\n"
+     "        # run (see `thermal_result`'s docstring): `sample_gaps_s` cannot show\n"
+     "        # it, because a gap exists only between samples that were written.\n"
+     '        parts = ", ".join(f"{basis} {n}" for basis, n in sorted(ticks_by_basis.items()))\n'
+     '        lines.append(f"- jetson thermal seen by ticks: {parts}")\n'
+     "    return lines",
+     "    return lines",
+     "python"),
+    ("eval_run: load_records drops the thermal_event branch",
+     "deployment/jetson/eval_run.py",
+     '            elif record.get("type") == "thermal_event":\n'
+     "                thermal_events.append(record)",
+     "",
+     "python"),
+
+    # Task 37 round 2: the MAJOR findings.
+    ("thermal: no phone at all reports quiet instead of not_evaluable",
+     "deployment/jetson/sensors/thermal.py",
+     "        if telemetry is None:\n"
+     "            return _tick_event_record(RULE_NOT_EVALUABLE, 0, None, (MISSING_TELEMETRY,))",
+     "        if telemetry is None:\n"
+     "            return _tick_event_record(RULE_QUIET, 0, None, ())",
+     "python"),
+    ("thermal: an older phone build reports quiet instead of not_evaluable",
+     "deployment/jetson/sensors/thermal.py",
+     '        if getattr(telemetry, "thermal_status_changes", None) is None:\n'
+     "            return _tick_event_record(RULE_NOT_EVALUABLE, 0, None, (MISSING_STATUS_CHANGES,))",
+     '        if getattr(telemetry, "thermal_status_changes", None) is None:\n'
+     "            return _tick_event_record(RULE_QUIET, 0, None, ())",
+     "python"),
+    ("run_demo: the thermal sampler is never constructed",
+     "deployment/jetson/run_demo.py",
+     '        if config["logio"]["thermal"]:',
+     '        if False and config["logio"]["thermal"]:',
+     "python"),
+    ("run_demo: the tick's thermal block reads sensing.reference instead of the sampler",
+     "deployment/jetson/run_demo.py",
+     "                if thermal_sampler is not None:\n"
+     '                    record["thermal"] = thermal_sampler.latest()',
+     "                if thermal_sampler is not None:\n"
+     '                    record["thermal"] = (\n'
+     "                        outcome.to_record().get(\"reference\") if outcome is not None\n"
+     "                        else thermal_sampler.latest()\n"
+     "                    )",
+     "python"),
+    ("run_demo: the drive summary never gets a thermal block",
+     "deployment/jetson/run_demo.py",
+     '            summary["thermal"] = thermal_sampler.to_record(\n'
+     "                jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
+     "            )",
+     '            summary["_thermal_disabled"] = thermal_sampler.to_record(\n'
+     "                jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
+     "            )",
+     "python"),
+    ("run_demo: the thermal sampler is never stopped",
+     "deployment/jetson/run_demo.py",
+     "            thermal_sampler.stop()\n"
+     '            summary["thermal"] = thermal_sampler.to_record(',
+     '            summary["thermal"] = thermal_sampler.to_record(',
+     "python"),
+    ("run_demo: the thermal sampler is stopped after its record is read",
+     "deployment/jetson/run_demo.py",
+     "            thermal_sampler.stop()\n"
+     '            summary["thermal"] = thermal_sampler.to_record(\n'
+     "                jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
+     "            )",
+     '            summary["thermal"] = thermal_sampler.to_record(\n'
+     "                jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
+     "            )\n"
+     "            thermal_sampler.stop()",
+     "python"),
+    ("thermal: the sampler loop does not mark itself stopped when a sample raises",
+     "deployment/jetson/sensors/thermal.py",
+     "            except Exception:\n"
+     "                # A sysfs read misbehaving must not take the pipeline down with\n"
+     "                # it. `_running` goes false, so a tick after this reports\n"
+     "                # `sampler_stopped` rather than quietly repeating the last\n"
+     "                # value forever.\n"
+     "                self._running = False\n"
+     "                return",
+     "            except Exception:\n"
+     "                return",
+     "python"),
+    ("thermal: the hottest-zone fallback picks the coolest zone instead",
+     "deployment/jetson/sensors/thermal.py",
+     "            self._selected_zone = max(census, key=census.get)",
+     "            self._selected_zone = min(census, key=census.get)",
+     "python"),
+    ("thermal: samples counts only the measured passes",
+     "deployment/jetson/sensors/thermal.py",
+     "            self._process_phone_events(telemetry, now)\n"
+     "            self._accumulate_phone_summary(telemetry, telemetry_at, now)\n"
+     "            self._samples += 1",
+     "            self._process_phone_events(telemetry, now)\n"
+     "            self._accumulate_phone_summary(telemetry, telemetry_at, now)\n"
+     "            if jetson_basis == THERMAL_BASIS_MEASURED:\n"
+     "                self._samples += 1",
+     "python"),
+    ("thermal: an absent pass is counted as measured",
+     "deployment/jetson/sensors/thermal.py",
+     "        if zones_reason is not None:\n"
+     "            self._last_zones_reason = zones_reason\n"
+     "            self._basis_counts[THERMAL_BASIS_ABSENT] += 1",
+     "        if zones_reason is not None:\n"
+     "            self._last_zones_reason = zones_reason\n"
+     "            self._basis_counts[THERMAL_BASIS_MEASURED] += 1",
+     "python"),
+    ("thermal: a zone-read absence reason is never accumulated",
+     "deployment/jetson/sensors/thermal.py",
+     "            self._basis_counts[THERMAL_BASIS_ABSENT] += 1\n"
+     "            self._absent_reasons[zones_reason] = self._absent_reasons.get(zones_reason, 0) + 1\n"
+     "            return THERMAL_BASIS_ABSENT, zones_reason",
+     "            self._basis_counts[THERMAL_BASIS_ABSENT] += 1\n"
+     "            return THERMAL_BASIS_ABSENT, zones_reason",
+     "python"),
+    ("thermal: zones_seen and per_zone_max_c are never accumulated",
+     "deployment/jetson/sensors/thermal.py",
+     "        self._zones_seen.update(census)\n"
+     "        for name, value in census.items():\n"
+     "            self._per_zone_max[name] = max(self._per_zone_max.get(name, value), value)",
+     "        pass",
+     "python"),
+    ("thermal: the phone's own sample count is never accumulated",
+     "deployment/jetson/sensors/thermal.py",
+     "        self._phone_samples += 1\n"
+     '        status = getattr(telemetry, "thermal_status", None)',
+     '        status = getattr(telemetry, "thermal_status", None)',
+     "python"),
+    ("thermal: a phone absence is never counted in the summary",
+     "deployment/jetson/sensors/thermal.py",
+     "        if telemetry is None:\n"
+     "            self._phone_absent_counts[ABSENT_NO_TELEMETRY] = (\n"
+     "                self._phone_absent_counts.get(ABSENT_NO_TELEMETRY, 0) + 1\n"
+     "            )\n"
+     "            return\n"
+     "        self._phone_samples += 1",
+     "        if telemetry is None:\n"
+     "            return\n"
+     "        self._phone_samples += 1",
+     "python"),
+    ("thermal: the headroom-absence counters are never accumulated",
+     "deployment/jetson/sensors/thermal.py",
+     '        headroom = getattr(telemetry, "thermal_headroom", None)\n'
+     "        if headroom is None:\n"
+     "            # A null headroom with no stated reason is still a null headroom --\n"
+     '            # counting it nowhere would make "always answered" and "never\n'
+     '            # answered and never said why" the same empty dict.\n'
+     '            reason = getattr(telemetry, "thermal_headroom_absent", None) or HEADROOM_ABSENT_UNSPECIFIED\n'
+     "            self._phone_headroom_absent_counts[reason] = self._phone_headroom_absent_counts.get(reason, 0) + 1",
+     "",
+     "python"),
+    ("thermal: p50 and p95 are swapped",
+     "deployment/jetson/sensors/thermal.py",
+     '        "p50": at(0.50), "p95": at(0.95), "max": ordered[-1],',
+     '        "p50": at(0.95), "p95": at(0.50), "max": ordered[-1],',
+     "python"),
+    ("thermal: the summary event record's empty missing list is dropped",
+     "deployment/jetson/sensors/thermal.py",
+     '    record: dict[str, Any] = {"status": status, "count": count, "missing": list(missing)}',
+     '    record: dict[str, Any] = {"status": status, "count": count}\n'
+     "    if missing:\n"
+     '        record["missing"] = list(missing)',
+     "python"),
+    ("thermal: the disappearing held zone is reported as no zone readable",
+     "deployment/jetson/sensors/thermal.py",
+     "            self._last_zones_reason = ABSENT_ZONE_DISAPPEARED\n"
+     "            self._basis_counts[THERMAL_BASIS_ABSENT] += 1\n"
+     "            self._absent_reasons[ABSENT_ZONE_DISAPPEARED] = (\n"
+     "                self._absent_reasons.get(ABSENT_ZONE_DISAPPEARED, 0) + 1\n"
+     "            )\n"
+     "            return THERMAL_BASIS_ABSENT, ABSENT_ZONE_DISAPPEARED",
+     "            self._last_zones_reason = ABSENT_NO_ZONE_READABLE\n"
+     "            self._basis_counts[THERMAL_BASIS_ABSENT] += 1\n"
+     "            self._absent_reasons[ABSENT_NO_ZONE_READABLE] = (\n"
+     "                self._absent_reasons.get(ABSENT_NO_ZONE_READABLE, 0) + 1\n"
+     "            )\n"
+     "            return THERMAL_BASIS_ABSENT, ABSENT_NO_ZONE_READABLE",
+     "python"),
+    ("eval_run: the phone status line names only the modal status",
+     "deployment/jetson/eval_run.py",
+     "        if status_counts:\n"
+     "            # Every status seen, not only the modal one -- a build that spent\n"
+     "            # 78 of 178 reports `severe` must not render as if it never left\n"
+     "            # `nominal`.\n"
+     "            breakdown = \", \".join(\n"
+     '                f"{status} {n}" for status, n in sorted(status_counts.items(), key=lambda kv: -kv[1])\n'
+     "            )\n"
+     '            skin = phone.get("skin_temp_c")\n'
+     "            skin_str = (\n"
+     "                f\"; skin {phone.get('skin_zone')} p50 {skin['p50']:.1f} C, max {skin['max']:.1f} C\"\n"
+     '                if skin else ""\n'
+     "            )\n"
+     '            lines.append(f"- phone: {breakdown} of {n_phone} reports{skin_str}")',
+     "        if status_counts:\n"
+     "            dominant = max(status_counts, key=status_counts.get)\n"
+     '            skin = phone.get("skin_temp_c")\n'
+     "            skin_str = (\n"
+     "                f\"; skin {phone.get('skin_zone')} p50 {skin['p50']:.1f} C, max {skin['max']:.1f} C\"\n"
+     '                if skin else ""\n'
+     "            )\n"
+     '            lines.append(f"- phone: {dominant} on {status_counts[dominant]} of {n_phone} reports{skin_str}")',
+     "python"),
+    ("phone: an older build's frame collapses to zero instead of null",
+     "phone/transport/src/main/kotlin/com/dsrc/transport/PhoneTelemetry.kt",
+     '                thermalStatusChanges = Fields.absentableInt(extensions, "thermal_status_changes"),',
+     '                thermalStatusChanges = Fields.absentableInt(extensions, "thermal_status_changes") ?: 0,',
+     "transport"),
+
+    # Task 37 round 2: MINOR findings.
+    ("thermal: the two percentile conventions in the report disagree",
+     "deployment/jetson/sensors/thermal.py",
+     "    def at(fraction: float) -> float:\n"
+     "        if n == 1:\n"
+     "            return ordered[0]\n"
+     "        rank = fraction * (n - 1)\n"
+     "        lo = int(rank)\n"
+     "        hi = min(lo + 1, n - 1)\n"
+     "        return ordered[lo] + (ordered[hi] - ordered[lo]) * (rank - lo)",
+     "    def at(fraction: float) -> float:\n"
+     "        return ordered[min(n - 1, int(fraction * n))]",
+     "python"),
+    ("eval_run: a thermal section with no summary prints nothing",
+     "deployment/jetson/eval_run.py",
+     "    if not thermal:\n"
+     "        return []\n"
+     '    lines = ["", "## Thermal", ""]\n'
+     '    s = thermal.get("summary")',
+     '    if not thermal or not thermal.get("summary"):\n'
+     "        return []\n"
+     '    lines = ["", "## Thermal", ""]\n'
+     '    s = thermal.get("summary")',
+     "python"),
+    ("thermal: the millidegree threshold is a strict inequality",
+     "deployment/jetson/sensors/thermal.py",
+     "        celsius = number / 1000.0 if abs(number) >= 1000 else float(number)",
+     "        celsius = number / 1000.0 if abs(number) > 1000 else float(number)",
+     "python"),
+    ("phone: the millidegree threshold is a strict inequality",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalZones.kt",
+     "            val celsius = if (kotlin.math.abs(number) >= 1000L) number / 1000.0 else number.toDouble()",
+     "            val celsius = if (kotlin.math.abs(number) > 1000L) number / 1000.0 else number.toDouble()",
+     "app"),
+    ("phone: the thermal watcher's default executor is never shut down",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalStatusWatcher.kt",
+     "    fun stop() {\n"
+     "        if (registered) {\n"
+     "            unregister(listener)\n"
+     "            registered = false\n"
+     "        }\n"
+     "        (executor as? ExecutorService)?.shutdown()\n"
+     "    }",
+     "    fun stop() {\n"
+     "        if (registered) {\n"
+     "            unregister(listener)\n"
+     "            registered = false\n"
+     "        }\n"
+     "    }",
      "app"),
 ]
 
@@ -1853,12 +2175,7 @@ for name, rel, old, new, kind in MUTATIONS:
         print(f"  SKIP  {name}  (anchor not found -- the code moved)")
         survived.append(name + " [anchor moved]")
         continue
-    # For require_str the null clause must also go, or the mutation is a no-op.
     mutated = keep.replace(old, new, 1)
-    if "require_str" in name:
-        mutated = mutated.replace(
-            '    if value is None:\n        raise MessageError(f"{field} must not be null", REASON_NULL_NOT_ALLOWED)\n    if value is None or not isinstance(value, str):',
-            '    if value is None or not isinstance(value, str):', 1)
     SIDECAR.write_text(f"{rel}\n{keep}")
     try:
         path.write_text(mutated)
