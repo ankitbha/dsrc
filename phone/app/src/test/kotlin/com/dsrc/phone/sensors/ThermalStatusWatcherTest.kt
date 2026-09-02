@@ -3,6 +3,7 @@ package com.dsrc.phone.sensors
 import android.os.PowerManager
 import java.util.concurrent.Executor
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -114,19 +115,77 @@ class ThermalStatusWatcherTest {
     }
 
     @Test
-    fun `stop shuts down an executor service of its own`() {
-        // The default `executor` this class creates for itself is a single-thread pool with
-        // its own dedicated thread; `resourcesHeldAfterTeardown` counts the `thermalWatcher`
-        // field, not that thread, so nothing else in `SensingService`'s census can see it
-        // leaked. An injected plain `Executor` -- this file's own `inlineExecutor` -- has no
-        // `shutdown()` to call and is left alone; only an `ExecutorService` is this class's
-        // to shut down.
+    fun `stop shuts down the executor this class created for itself`() {
+        // The default executor -- built when no `executor` argument is passed at all -- is a
+        // single-thread pool with its own dedicated thread; `resourcesHeldAfterTeardown`
+        // counts the `thermalWatcher` field, not that thread, so nothing else in
+        // `SensingService`'s census can see it leaked. Captured through `onRegister` rather
+        // than a constructor argument, since exercising the real default means not passing
+        // one.
+        var capturedExecutor: Executor? = null
+        val w = ThermalStatusWatcher(
+            register = { executor, _ -> capturedExecutor = executor },
+            unregister = {},
+            monoClock = { 0L },
+        )
+        w.start()
+        w.stop()
+        val pool = capturedExecutor as java.util.concurrent.ExecutorService
+        assertTrue(pool.isShutdown)
+    }
+
+    @Test
+    fun `stop shuts down its own default executor even when start was never called`() {
+        // The unregister guard above is conditioned on `registered`; the executor shutdown is
+        // not -- a caller that never started this watcher still gets its executor's thread
+        // cleaned up.
+        var capturedExecutor: Executor? = null
+        val w = ThermalStatusWatcher(
+            register = { executor, _ -> capturedExecutor = executor },
+            unregister = {},
+            monoClock = { 0L },
+        )
+        w.stop()
+        w.start()  // only to observe which executor `register` would have received
+        val pool = capturedExecutor as java.util.concurrent.ExecutorService
+        assertTrue(pool.isShutdown)
+    }
+
+    @Test
+    fun `stop leaves a caller-supplied executor running`() {
+        // The other half of the ownership decision: a pool the caller handed in is the
+        // caller's to shut down, not this class's, whether or not it happens to be an
+        // `ExecutorService` -- shutting down a shared pool out from under whoever else uses it
+        // would be a surprise this class has no business causing.
         val pool = java.util.concurrent.Executors.newSingleThreadExecutor()
         val w = ThermalStatusWatcher(
             register = { _, _ -> }, unregister = {}, monoClock = { 0L }, executor = pool,
         )
         w.start()
         w.stop()
-        assertTrue(pool.isShutdown)
+        assertFalse(pool.isShutdown)
+        pool.shutdown()
+    }
+
+    @Test
+    fun `snapshot reports the count and the last transition together`() {
+        var now = 1_000L
+        val w = watcher(monoClock = { now })
+        w.onStatusChanged(PowerManager.THERMAL_STATUS_NONE)
+        now = 2_000L
+        w.onStatusChanged(PowerManager.THERMAL_STATUS_LIGHT)
+
+        val snapshot = w.snapshot()
+        assertEquals(1L, snapshot.changesCount)
+        assertEquals("nominal", snapshot.lastTransition?.fromStatus)
+        assertEquals("light", snapshot.lastTransition?.toStatus)
+    }
+
+    @Test
+    fun `snapshot before any transition is a zero count and no transition`() {
+        val w = watcher()
+        val snapshot = w.snapshot()
+        assertEquals(0L, snapshot.changesCount)
+        assertNull(snapshot.lastTransition)
     }
 }

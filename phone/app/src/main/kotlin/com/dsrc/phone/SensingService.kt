@@ -486,7 +486,11 @@ class SensingService : LifecycleService() {
                 // but the temperature is the thing being trended and is the whole point.
                 val skin = thermalZones.read()
                 val headroom = ThermalReader.headroomFrom(power)
-                val transition = watcher.lastTransition
+                // One snapshot, not `watcher.changesCount` and `watcher.lastTransition` read
+                // separately: those are two lock acquisitions with `power.currentThermalStatus`
+                // (a binder call) between them, so the listener firing in that window could
+                // move the count and the transition out of step with each other.
+                val thermalSnapshot = watcher.snapshot()
                 TelemetryReporter.Sample(
                     thermalStatus = ThermalReader.statusName(power.currentThermalStatus),
                     thermalHeadroom = headroom.value,
@@ -494,10 +498,10 @@ class SensingService : LifecycleService() {
                     skinTempC = skin.reading?.celsius,
                     skinTempZone = skin.reading?.zone,
                     skinTempAbsent = skin.absentReason,
-                    statusChanges = watcher.changesCount,
-                    lastTransitionFrom = transition?.fromStatus,
-                    lastTransitionTo = transition?.toStatus,
-                    lastTransitionAtMonoNs = transition?.atMonoNs,
+                    statusChanges = thermalSnapshot.changesCount,
+                    lastTransitionFrom = thermalSnapshot.lastTransition?.fromStatus,
+                    lastTransitionTo = thermalSnapshot.lastTransition?.toStatus,
+                    lastTransitionAtMonoNs = thermalSnapshot.lastTransition?.atMonoNs,
                     // What each modality actually put on the wire.
                     delivered = mapOf(
                         "camera_hz" to cameraSent.sent,
