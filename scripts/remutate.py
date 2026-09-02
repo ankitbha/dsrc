@@ -2638,6 +2638,107 @@ MUTATIONS = [
      "            Log.w(TAG, \"no IMU: accelerometer=$accelerometer gyroscope=$gyroscope\")\n"
      "            return",
      "app"),
+
+    # -- task 38 re-audit: the hardware drive's own findings (D1-D7) -----------
+
+    ("failures: a pseudo-source's episode is closed by the generic quiet streak",
+     "deployment/jetson/logio/failure_log.py",
+     "        if source.name in PSEUDO_SOURCES:",
+     "        if source.name in ():",
+     "python"),
+    ("failures: missing is cleared the moment a source becomes readable again",
+     "deployment/jetson/logio/failure_log.py",
+     "        st.last_readable = True\n"
+     "        # `last_missing` is not reset here: it names the reason the most\n"
+     "        # recent UNREADABLE pass gave, not the current pass. A source read\n"
+     "        # as `not_evaluable` at some point mid-run and readable again by\n"
+     "        # teardown must still report what was missing -- clearing it on\n"
+     "        # every readable pass left every such row with an empty `missing`.\n"
+     "        st.passes_readable += 1",
+     "        st.last_readable = True\n"
+     "        st.last_missing = None\n"
+     "        st.passes_readable += 1",
+     "python"),
+    ("eval_run: the not-evaluable line names the readable count, not the unreadable one",
+     "deployment/jetson/eval_run.py",
+     "            passes_attempted = row.get(\"passes_attempted\", 0)\n"
+     "            passes_unreadable = passes_attempted - row.get(\"passes_readable\", 0)\n"
+     "            lines.append(\n"
+     "                f\"- {name}: NOT EVALUABLE on {passes_unreadable} of \"",
+     "            passes_attempted = row.get(\"passes_attempted\", 0)\n"
+     "            passes_unreadable = row.get(\"passes_readable\", 0)\n"
+     "            lines.append(\n"
+     "                f\"- {name}: NOT EVALUABLE on {passes_unreadable} of \"",
+     "python"),
+    ("failures: phone.dropped reads a stale telemetry snapshot through a down session",
+     "deployment/jetson/logio/failure_log.py",
+     "    if _session_stats_or_none(phone) is None:\n"
+     "        # `PhoneLink.telemetry` is cleared on a rebind (`_rebind`), not on\n"
+     "        # session loss -- so while the link is down, it still holds the last\n"
+     "        # report received before the outage. Reading it without this gate\n"
+     "        # reports the phone's drop counters as current, unchanged, for the\n"
+     "        # whole outage, which is exactly the recovery `link.down` exists to\n"
+     "        # let every phone-side source refuse to claim.\n"
+     "        return SourceSnapshot(readable=False, missing=MISSING_NO_SESSION)\n"
+     "    telemetry = phone.telemetry\n"
+     "    if telemetry is None:\n"
+     "        return SourceSnapshot(readable=False, missing=MISSING_NO_TELEMETRY)\n"
+     "    dropped = telemetry.dropped or {}",
+     "    telemetry = phone.telemetry\n"
+     "    if telemetry is None:\n"
+     "        return SourceSnapshot(readable=False, missing=MISSING_NO_TELEMETRY)\n"
+     "    dropped = telemetry.dropped or {}",
+     "python"),
+    ("failures: phone.here_errors reads a stale telemetry snapshot through a down session",
+     "deployment/jetson/logio/failure_log.py",
+     "    if _session_stats_or_none(phone) is None:\n"
+     "        # See `_read_phone_dropped`: the same stale-snapshot hazard applies\n"
+     "        # to `here_errors`, read off the same `telemetry` object.\n"
+     "        return SourceSnapshot(readable=False, missing=MISSING_NO_SESSION)\n"
+     "    telemetry = phone.telemetry\n"
+     "    if telemetry is None:\n"
+     "        return SourceSnapshot(readable=False, missing=MISSING_NO_TELEMETRY)\n"
+     "    total = int(telemetry.here_errors)",
+     "    telemetry = phone.telemetry\n"
+     "    if telemetry is None:\n"
+     "        return SourceSnapshot(readable=False, missing=MISSING_NO_TELEMETRY)\n"
+     "    total = int(telemetry.here_errors)",
+     "python"),
+    ("failures: by_reason_total credits only the dominant reason, not every reason that moved",
+     "deployment/jetson/logio/failure_log.py",
+     "            if reason_deltas:\n"
+     "                for key, value in reason_deltas.items():\n"
+     "                    st.by_reason_total[key] = st.by_reason_total.get(key, 0) + value\n"
+     "            else:\n"
+     "                st.by_reason_total[reason] = st.by_reason_total.get(reason, 0) + delta",
+     "            st.by_reason_total[reason] = st.by_reason_total.get(reason, 0) + delta",
+     "python"),
+    ("eval_run: the episode count and the closed-episode total are always reported as one number",
+     "deployment/jetson/eval_run.py",
+     "        if len(episodes) == closed_total:",
+     "        if True:",
+     "python"),
+    ("failures: camera.blind_ticks.passes_attempted also counts direct notifications",
+     "deployment/jetson/logio/failure_log.py",
+     "            st = self._state[\"camera.blind_ticks\"]\n"
+     "            source = self._by_name[\"camera.blind_ticks\"]",
+     "            st = self._state[\"camera.blind_ticks\"]\n"
+     "            st.passes_attempted += 1\n"
+     "            st.passes_readable += 1\n"
+     "            st.last_readable = True\n"
+     "            st.last_readable_t_mono = now\n"
+     "            source = self._by_name[\"camera.blind_ticks\"]",
+     "python"),
+    ("failures: pipeline.exception.passes_attempted also counts direct notifications",
+     "deployment/jetson/logio/failure_log.py",
+     "            st = self._state[\"pipeline.exception\"]\n"
+     "            st.run_total += 1",
+     "            st = self._state[\"pipeline.exception\"]\n"
+     "            st.passes_attempted += 1\n"
+     "            st.passes_readable += 1\n"
+     "            st.last_readable = True\n"
+     "            st.run_total += 1",
+     "python"),
 ]
 
 RESULTS = {
