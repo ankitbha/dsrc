@@ -241,6 +241,26 @@ def _log_timebase_estimates(
         })
 
 
+def _thermal_summary(thermal_sampler, stats_sampler) -> dict[str, Any] | None:
+    """`summary["thermal"]`, or `None` when no sampler was constructed this run.
+
+    Stops the sampler before reading its own record, in that order: `stop()`
+    joins the sampler's thread, and `_samples` is incremented inside the same
+    lock as the rest of one pass but before `_write_sample` writes that pass's
+    `thermal_sample` line to disk. Reading the record first can therefore race
+    a pass that has already counted itself but not yet written -- `samples`
+    would then be one more than the `thermal_sample` lines actually on disk,
+    never one fewer. Stopping first, so the thread has finished its last write
+    before `to_record()` runs, closes that window.
+    """
+    if thermal_sampler is None:
+        return None
+    thermal_sampler.stop()
+    return thermal_sampler.to_record(
+        jtop_available=stats_sampler.available if stats_sampler is not None else None
+    )
+
+
 def apply_scenario(config: dict, args: argparse.Namespace) -> dict | None:
     """Load a simulated-drive scenario and fold it into config/args.
 
@@ -618,16 +638,9 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # commands were all refused and one where nothing needed sending write
             # the same tick log otherwise.
             summary["sensing"] = sensing.to_record()
-        if thermal_sampler is not None:
-            # Stopped before its own record is read: the sampler's thread runs
-            # independently of everything else in this block, and reading
-            # `to_record()` first can race a sample the thread is mid-way
-            # through writing, so `samples` here would undercount the
-            # `thermal_sample` lines already on disk by one.
-            thermal_sampler.stop()
-            summary["thermal"] = thermal_sampler.to_record(
-                jtop_available=stats_sampler.available if stats_sampler is not None else None
-            )
+        thermal_summary = _thermal_summary(thermal_sampler, stats_sampler)
+        if thermal_summary is not None:
+            summary["thermal"] = thermal_summary
         if phone is not None:
             # Which clock produced the stamps and how the offset was obtained.
             # Without it a run where every stamp took the proxy path and one where

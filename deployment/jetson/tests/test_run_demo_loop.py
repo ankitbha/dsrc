@@ -248,12 +248,14 @@ class TestTheSensingRecordIsBuiltByTickOutcome:
 
 
 class TestThermalSamplerIntegration:
-    """`run_live`'s four thermal integration points: constructing the sampler
-    under its config gate, writing the tick block, writing the summary block,
-    and stopping it in the `finally`. Like `TestTheSensingRecordIsBuiltByTickOutcome`
-    above, none of these need the detector/policy bundle/config/camera
-    machinery a full run does, so this asserts the literal wiring rather than
-    driving one.
+    """`run_live`'s thermal integration points into the tick loop and its own
+    `finally`: constructing the sampler under its config gate, writing the
+    tick block, and handing the sampler to `_thermal_summary` for the summary
+    block. Like `TestTheSensingRecordIsBuiltByTickOutcome` above, none of
+    these need the detector/policy bundle/config/camera machinery a full run
+    does, so this asserts the literal wiring rather than driving one.
+    `_thermal_summary`'s own stop-before-read behaviour is driven directly,
+    below, rather than by where its two calls sit in the source.
     """
 
     def test_the_sampler_is_constructed_under_its_config_gate(self):
@@ -273,23 +275,60 @@ class TestThermalSamplerIntegration:
         source = inspect.getsource(run_demo.run_live)
         assert 'record["thermal"] = thermal_sampler.latest()' in source
 
-    def test_the_summary_writes_the_samplers_own_record(self):
+    def test_the_summary_is_assigned_from_thermal_summary(self):
         import inspect
 
         source = inspect.getsource(run_demo.run_live)
-        assert 'summary["thermal"] = thermal_sampler.to_record(' in source
+        assert "thermal_summary = _thermal_summary(thermal_sampler, stats_sampler)" in source
+        assert 'summary["thermal"] = thermal_summary' in source
 
-    def test_the_sampler_is_stopped_before_its_record_is_read(self):
-        # Stopped before `to_record()`, not after: reading the snapshot while
-        # the thread might still be mid-write would undercount the
-        # `thermal_sample` lines already on disk by one.
-        import inspect
 
-        source = inspect.getsource(run_demo.run_live)
-        assert "thermal_sampler.stop()" in source
-        assert source.index("thermal_sampler.stop()") < source.index(
-            'summary["thermal"] = thermal_sampler.to_record('
-        )
+class _OrderRecordingSampler:
+    """A stand-in that records which of its two methods ran, and in which
+    order -- the runtime fact `_thermal_summary` exists to guarantee, where a
+    pin on the position of the two calls' text in the source file cannot tell
+    a real reordering from a second, redundant `stop()` placed earlier in the
+    file that changes nothing about which call actually runs first.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def stop(self) -> None:
+        self.calls.append("stop")
+
+    def to_record(self, *, jtop_available: bool | None = None) -> dict:
+        self.calls.append("to_record")
+        return {"jtop_available": jtop_available, "calls_seen_by_to_record": list(self.calls)}
+
+
+class TestThermalSummaryStopsBeforeReading:
+    """`_thermal_summary` is `run_live`'s `finally`-block logic pulled out so
+    it can be driven directly: stopping the sampler joins its thread, closing
+    the window where a pass has counted itself under its lock but not yet
+    written its `thermal_sample` line, which reading the record first would
+    leave open.
+    """
+
+    def test_no_sampler_is_a_null_summary(self):
+        assert run_demo._thermal_summary(None, None) is None
+
+    def test_stop_runs_before_to_record(self):
+        sampler = _OrderRecordingSampler()
+        result = run_demo._thermal_summary(sampler, None)
+        assert sampler.calls == ["stop", "to_record"]
+        assert result["calls_seen_by_to_record"] == ["stop", "to_record"]
+
+    def test_jtop_available_comes_from_the_stats_sampler_when_present(self):
+        sampler = _OrderRecordingSampler()
+        stats_sampler = SimpleNamespace(available=True)
+        result = run_demo._thermal_summary(sampler, stats_sampler)
+        assert result["jtop_available"] is True
+
+    def test_jtop_available_is_none_with_no_stats_sampler(self):
+        sampler = _OrderRecordingSampler()
+        result = run_demo._thermal_summary(sampler, None)
+        assert result["jtop_available"] is None
 
 
 class TestTickSessionId:
