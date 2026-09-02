@@ -373,7 +373,8 @@ def _read_camera_dropped_unconsumed(ctx: _Context) -> SourceSnapshot:
     # would notice.
     if ctx.camera is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
-    return _fixed("unconsumed", int(ctx.camera.dropped_frames))
+    snap = _fixed("unconsumed", int(ctx.camera.dropped_frames))
+    return SourceSnapshot(readable=True, by_reason=snap.by_reason, session_id=ctx.pass_session_id)
 
 
 def _read_camera_decode_failures(ctx: _Context) -> SourceSnapshot:
@@ -882,7 +883,7 @@ def build_registry(*, camera: Any = None) -> tuple[Source, ...]:
         Source("clock.proxied", _read_clock_proxied, None, None,
                "session", True, False, "jetson"),
         Source("pipeline.exception", _read_pipeline_exception, None, None,
-               "run", False, True, "jetson"),
+               "run", True, True, "jetson"),
     )
 
 
@@ -892,7 +893,6 @@ def build_registry(*, camera: Any = None) -> tuple[Source, ...]:
 #: actually given (see `build_registry`'s own docstring) rather than reading
 #: this one.
 REGISTRY: tuple[Source, ...] = build_registry()
-_BY_NAME: dict[str, Source] = {s.name: s for s in REGISTRY}
 
 
 def _dominant_reason(current: Mapping[str, int], previous: Mapping[str, int]) -> str | None:
@@ -1378,6 +1378,9 @@ class FailureSampler:
                     st, source, now, t_wall, reason, 1, None,
                     SourceSnapshot(readable=True, detail=detail, detail_truncated=truncated),
                 )
+            else:
+                st.open_episode.n += 1
+                st.open_episode.last_t_mono = now
 
     # -- per tick --------------------------------------------------------------
 

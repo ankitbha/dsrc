@@ -89,7 +89,7 @@ class TestRegistryAccessorsResolve:
     would have caught the task-37 class of defect at plan time.
 
     The old version of this test asserted only "readable, or unreadable with
-    a named reason" -- and MISSING accepts five different words, so a rename
+    a named reason" -- and MISSING accepts six different words, so a rename
     that flips a source from readable to not_evaluable still satisfies it.
     This asserts an explicit expected-readable set instead, so a rename shows
     up as that set changing rather than as a still-passing test.
@@ -194,6 +194,78 @@ class TestNotEvaluableIsNotQuiet:
         assert not_evaluable["status"] == sensing_controller.RULE_NOT_EVALUABLE
         assert not_evaluable["episodes"] == 0
         assert "missing" in not_evaluable
+
+
+class TestMissingIsExhaustive:
+    """`OUTCOMES`' own exhaustiveness is pinned by
+    `test_all_three_outcomes_are_reachable_and_distinct` -- a `seen ==
+    OUTCOMES` comparison built from driving every real code path, which
+    catches a member added or removed on either side. `MISSING` had no
+    equivalent: its only use is a membership check that passes whether it
+    has five, six or seven words in it, and grew a sixth member
+    (`MISSING_ACCESSOR_RAISED`) with nothing to notice if a seventh arrived
+    -- or if one were quietly dropped. This drives every real cause of an
+    unreadable pass and asserts the observed set is exactly `MISSING`."""
+
+    def test_every_missing_reason_is_reachable_and_the_set_is_exact(self):
+        seen: set[str] = set()
+
+        def _collect(record: dict) -> None:
+            for row in record["sources"].values():
+                if row["status"] == sensing_controller.RULE_NOT_EVALUABLE:
+                    seen.update(row.get("missing") or [])
+
+        # MISSING_NO_PHONE and MISSING_NO_SOURCE: nothing is wired up at all.
+        s1 = sampler(phone=None, camera=None, gps=None)
+        s1.sample_once()
+        _collect(s1.to_record())
+
+        # MISSING_NO_SESSION: a phone exists, nothing is bound yet.
+        phone = FakePhone()
+        phone.session = None
+        s2 = sampler(phone=phone)
+        s2.sample_once()
+        _collect(s2.to_record())
+
+        # MISSING_NO_TELEMETRY: a session is bound, no telemetry frame has
+        # arrived yet -- `FakePhone.telemetry` defaults to `None`.
+        s3 = sampler(phone=FakePhone())
+        s3.sample_once()
+        _collect(s3.to_record())
+
+        # MISSING_SESSION_MOVED: the pass straddles a rebind (D15), the same
+        # drive as `test_a_pass_that_straddles_a_rebind_is_not_evaluable`.
+        s4 = sampler(phone=FakePhone(session_id="s1"))
+        s4.sample_once()
+        real_read = failure_log._read_here_refused
+
+        def torn_read(ctx):
+            snap = real_read(ctx)
+            return SourceSnapshot(readable=True, by_reason=dict(snap.by_reason), session_id="a-different-session")
+
+        here_source = s4._by_name["here.refused"]
+        object.__setattr__(here_source, "read", torn_read)
+        try:
+            s4.sample_once()
+        finally:
+            object.__setattr__(here_source, "read", real_read)
+        _collect(s4.to_record())
+
+        # MISSING_ACCESSOR_RAISED: the accessor's own bug.
+        s5 = sampler(gps=FakeGps())
+
+        def boom(ctx):
+            raise RuntimeError("accessor bug")
+
+        parse_errors_source = s5._by_name["gps.parse_errors"]
+        object.__setattr__(parse_errors_source, "read", boom)
+        try:
+            s5.sample_once()
+        finally:
+            object.__setattr__(parse_errors_source, "read", failure_log._read_gps_parse_errors)
+        _collect(s5.to_record())
+
+        assert seen == MISSING
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +571,33 @@ class TestSessionScopedResetOnRedial:
         # The old session's open episode is closed as unobservable at the
         # rebind boundary, not attributed a negative size.
         assert outcomes.get(OUTCOME_UNOBSERVABLE, 0) >= 1
+
+    def test_camera_dropped_unconsumed_is_not_diffed_across_a_redial(self):
+        # M2: the previous pin for this fix
+        # (`test_the_phone_fed_camera_sources_are_readable_against_a_real_phonecamerastream`)
+        # asserted only the source's declared `scope` string. `scope ==
+        # "session"` stayed true even while `_read_camera_dropped_unconsumed`
+        # attached no `session_id` at all, so the gate in `_process_source`
+        # (`source.scope in ("session", "mixed") and snap.session_id is not
+        # None`) never reset the baseline on a redial, and this source
+        # reported `counter_went_backwards` on every one -- exactly the
+        # output the declared scope was supposed to prevent. This drives an
+        # actual redial and pins the behaviour instead of the declaration.
+        phone = FakePhone(session_id="s1")
+        camera = FakeCamera(decode_failures=0)  # hasattr(camera, "decode_failures") -> session scope
+        camera.dropped_frames = 40
+        s = sampler(phone=phone, camera=camera)
+        s.sample_once()
+
+        phone.session = _fake_session("s2")
+        camera.dropped_frames = 3
+        s.sample_once()
+        s.stop()
+
+        record = s.to_record()
+        row = record["sources"]["camera.dropped_unconsumed"]
+        assert row["total"] == 43
+        assert "camera.dropped_unconsumed" not in record["counter_went_backwards"]
 
     def test_a_run_cumulative_counter_that_decreases_is_recorded_not_clamped(self):
         phone = FakePhone()
@@ -1019,3 +1118,65 @@ class TestBlindTicks:
         assert record["pipeline_exception"] == "ValueError"
         opens = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["source"] == "pipeline.exception"]
         assert opens[0]["reason"] == "ValueError"
+
+    def test_three_consecutive_pipeline_exceptions_accumulate_in_one_episode(self):
+        # M1: `note_pipeline_exception` credited `run_total` on every call but
+        # only grew the open episode's own `n` on the first one, since there
+        # was no `else` branch to match `note_no_frame`'s. Three exceptions
+        # used to give `total == 3` against `kept_total == 1`.
+        s = sampler()
+        for msg in ("a", "b", "c"):
+            try:
+                raise ValueError(msg)
+            except ValueError as exc:
+                s.note_pipeline_exception(exc)
+        s.stop()
+        row = s.to_record()["sources"]["pipeline.exception"]
+        assert row["total"] == 3
+        assert row["episodes"] == 1
+        assert row["kept_total"] + row["suppressed"] + row["below_episode_threshold"] == row["total"]
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert closes[0]["n"] == 3
+
+
+# ---------------------------------------------------------------------------
+# M1: the accounting invariant, walked across every registry row rather than
+# the two single-source spots that pinned it before.
+# ---------------------------------------------------------------------------
+
+
+class TestAccountingInvariantAcrossAllSources:
+
+    def test_the_invariant_holds_on_every_registry_row(self):
+        phone = FakePhone()
+        phone.here.refused_by_reason = {"unparseable": 3}
+        phone.telemetry = type(
+            "T", (), {"dropped": {"camera": 2, "gps": 1, "imu": 0, "here": 0}, "here_errors": 1},
+        )()
+        camera = FakeCamera(decode_failures=4)
+        camera.dropped_frames = 2
+        camera.file_recoveries = 1
+        gps = FakeGps()
+        gps.diagnostics.parse_errors = 3
+        s = sampler(phone=phone, camera=camera, gps=gps)
+        s.sample_once()
+        s.note_no_frame()
+        s.note_no_frame()
+        try:
+            raise ValueError("x")
+        except ValueError as exc:
+            s.note_pipeline_exception(exc)
+            s.note_pipeline_exception(exc)
+            s.note_pipeline_exception(exc)
+        s.sample_once()
+        s.stop()
+
+        record = s.to_record()
+        assert len(record["sources"]) == len(REGISTRY)
+        for name, row in record["sources"].items():
+            assert row["kept_total"] + row["suppressed"] + row["below_episode_threshold"] == row["total"], name
+
+        # The specific defect this walk exists to catch: three exceptions
+        # must land as three occurrences, not collapse to the first one.
+        assert record["sources"]["pipeline.exception"]["total"] == 3
+        assert record["sources"]["pipeline.exception"]["kept_total"] == 3
