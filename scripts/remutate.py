@@ -1701,6 +1701,33 @@ MUTATIONS = [
      "                passes_readable=self._cooling_passes_readable,\n"
      "            )",
      "python"),
+    # Round 2 re-audit: a real, already-logged transition was being reported as
+    # `not_evaluable`/`count: 0` whenever some other cooling device on the same
+    # pass -- or a later pass -- never gave a reading (C2). The fix keeps
+    # `fired` and the real count whenever anything actually fired, carrying the
+    # incompleteness in `missing`/the pass counters instead of erasing it.
+    ("thermal: a fired jetson count is reported as not_evaluable when observation is incomplete",
+     "deployment/jetson/sensors/thermal.py",
+     "        if self._jetson_event_count > 0:\n"
+     "            if self._cooling_fully_readable():\n"
+     "                return _tick_event_record(RULE_FIRED, self._jetson_event_count, self._jetson_last_event)",
+     "        if self._jetson_event_count > 0 and self._cooling_fully_readable():\n"
+     "            if self._cooling_fully_readable():\n"
+     "                return _tick_event_record(RULE_FIRED, self._jetson_event_count, self._jetson_last_event)",
+     "python"),
+    ("thermal: the summary's fired jetson count is reported as not_evaluable when observation is incomplete",
+     "deployment/jetson/sensors/thermal.py",
+     "        if self._jetson_event_count > 0:\n"
+     "            if self._cooling_fully_readable():\n"
+     "                return _summary_event_record(\n"
+     "                    RULE_FIRED, self._jetson_event_count, (), by_unit=self._jetson_events_by_unit,\n"
+     "                )",
+     "        if self._jetson_event_count > 0 and self._cooling_fully_readable():\n"
+     "            if self._cooling_fully_readable():\n"
+     "                return _summary_event_record(\n"
+     "                    RULE_FIRED, self._jetson_event_count, (), by_unit=self._jetson_events_by_unit,\n"
+     "                )",
+     "python"),
     ("thermal: the jetson event count is derived by subtraction rather than counted",
      "deployment/jetson/sensors/thermal.py",
      "                    self._jetson_event_count += 1",
@@ -1736,12 +1763,12 @@ MUTATIONS = [
     # Task 37 round 2: the four confirmed critical findings.
     ("thermal: a phone redial's report is copied instead of accumulated",
      "deployment/jetson/sensors/thermal.py",
-     '                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)\n'
-     "                    self._phone_event_count += delta\n"
-     '                    self._phone_last_event = {"at_mono": now, "from": frm, "to": to}',
-     '                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)\n'
-     "                    self._phone_event_count = changes\n"
-     '                    self._phone_last_event = {"at_mono": now, "from": frm, "to": to}',
+     '                at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)\n'
+     "                self._phone_event_count += delta\n"
+     '                self._phone_last_event = {"at_mono": now, "from": frm, "to": to}',
+     '                at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)\n'
+     "                self._phone_event_count = changes\n"
+     '                self._phone_last_event = {"at_mono": now, "from": frm, "to": to}',
      "python"),
     ("thermal: the phone event baseline is not cleared when telemetry goes absent",
      "deployment/jetson/sensors/thermal.py",
@@ -1753,12 +1780,31 @@ MUTATIONS = [
      "            return\n"
      '        changes = getattr(telemetry, "thermal_status_changes", None)',
      "python"),
-    ("thermal: an event with no transition fields is emitted anyway",
+    # Round 2 re-audit: the gate above turned out to discard a real, genuine
+    # rise whenever the descriptors did not survive the report (C1), so it was
+    # removed rather than kept as a mutation target -- a rise with no
+    # descriptors is now the behaviour, not the defect. The three entries
+    # below replace it: discarding the rise is still a defect, just a
+    # different one (the count/event, not the gate), and the gate's `or` moved
+    # to a narrower distinction worth its own pin.
+    ("thermal: a rise with absent descriptors is discarded instead of counted",
      "deployment/jetson/sensors/thermal.py",
-     "                if frm is not None or to is not None:\n"
-     '                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)',
-     "                if True:\n"
-     '                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)',
+     "                self._phone_event_count += delta\n",
+     "                self._phone_event_count += delta if (frm is not None or to is not None) else 0\n",
+     "python"),
+    ("thermal: a half-described transition is folded into the without-descriptors count",
+     "deployment/jetson/sensors/thermal.py",
+     "                if frm is None and to is None:\n"
+     "                    self._phone_count_without_descriptors += delta",
+     "                if frm is None or to is None:\n"
+     "                    self._phone_count_without_descriptors += delta",
+     "python"),
+    ("thermal: a multi-transition gap is not recorded",
+     "deployment/jetson/sensors/thermal.py",
+     "                if delta > 1:\n"
+     "                    self._phone_gap_events += 1",
+     "                if delta > 1:\n"
+     "                    pass",
      "python"),
     ("thermal: cooling readable once is reported the same as readable throughout",
      "deployment/jetson/sensors/thermal.py",
@@ -1782,6 +1828,30 @@ MUTATIONS = [
      "                missing.append(name)\n"
      "                continue",
      "            except ValueError:\n"
+     "                continue",
+     "python"),
+    # Round 2 re-audit: a device whose own `type` would not read fell into
+    # neither `states` nor `missing` (M1), which a caller cannot tell apart
+    # from a root with no `cooling_device*` entries at all -- fixed by naming
+    # it in `missing` too, keyed by directory name.
+    ("thermal: a cooling device whose type will not read is filed as nothing attempted",
+     "deployment/jetson/sensors/thermal.py",
+     "            if name is None:\n"
+     "                missing.append(entry.name)\n"
+     "                continue",
+     "            if name is None:\n"
+     "                continue",
+     "python"),
+    # Round 2 re-audit: the dedup this fixed (M1) was also checking `name in
+    # missing`, so a device sharing a type name with one that had already
+    # failed to read was skipped outright rather than given its own attempt
+    # (m9) -- regressed by this same round, since the pre-round-1 dedup only
+    # checked `states`.
+    ("thermal: a device sharing a failed name's type is never given its own attempt",
+     "deployment/jetson/sensors/thermal.py",
+     "            if name in states:\n"
+     "                continue",
+     "            if name in states or name in missing:\n"
      "                continue",
      "python"),
     ("eval_run: the per-tick thermal basis is computed and never rendered",
@@ -1833,31 +1903,48 @@ MUTATIONS = [
      "                        else thermal_sampler.latest()\n"
      "                    )",
      "python"),
+    # Round 2 re-audit: `run_live`'s own stop-then-summarize logic moved into
+    # `_thermal_summary` so it can be driven directly rather than pinned by
+    # where its two calls sit in the source text (M2) -- the three anchors
+    # below moved with it.
     ("run_demo: the drive summary never gets a thermal block",
      "deployment/jetson/run_demo.py",
-     '            summary["thermal"] = thermal_sampler.to_record(\n'
-     "                jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
-     "            )",
-     '            summary["_thermal_disabled"] = thermal_sampler.to_record(\n'
-     "                jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
-     "            )",
+     '        thermal_summary = _thermal_summary(thermal_sampler, stats_sampler)\n'
+     "        if thermal_summary is not None:\n"
+     '            summary["thermal"] = thermal_summary',
+     '        thermal_summary = _thermal_summary(thermal_sampler, stats_sampler)\n'
+     "        if thermal_summary is not None:\n"
+     '            summary["_thermal_disabled"] = thermal_summary',
      "python"),
     ("run_demo: the thermal sampler is never stopped",
      "deployment/jetson/run_demo.py",
-     "            thermal_sampler.stop()\n"
-     '            summary["thermal"] = thermal_sampler.to_record(',
-     '            summary["thermal"] = thermal_sampler.to_record(',
+     "    if thermal_sampler is None:\n"
+     "        return None\n"
+     "    thermal_sampler.stop()\n"
+     "    return thermal_sampler.to_record(\n"
+     "        jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
+     "    )",
+     "    if thermal_sampler is None:\n"
+     "        return None\n"
+     "    return thermal_sampler.to_record(\n"
+     "        jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
+     "    )",
      "python"),
     ("run_demo: the thermal sampler is stopped after its record is read",
      "deployment/jetson/run_demo.py",
-     "            thermal_sampler.stop()\n"
-     '            summary["thermal"] = thermal_sampler.to_record(\n'
-     "                jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
-     "            )",
-     '            summary["thermal"] = thermal_sampler.to_record(\n'
-     "                jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
-     "            )\n"
-     "            thermal_sampler.stop()",
+     "    if thermal_sampler is None:\n"
+     "        return None\n"
+     "    thermal_sampler.stop()\n"
+     "    return thermal_sampler.to_record(\n"
+     "        jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
+     "    )",
+     "    if thermal_sampler is None:\n"
+     "        return None\n"
+     "    result = thermal_sampler.to_record(\n"
+     "        jtop_available=stats_sampler.available if stats_sampler is not None else None\n"
+     "    )\n"
+     "    thermal_sampler.stop()\n"
+     "    return result",
      "python"),
     ("thermal: the sampler loop does not mark itself stopped when a sample raises",
      "deployment/jetson/sensors/thermal.py",
@@ -1995,19 +2082,42 @@ MUTATIONS = [
      '                thermalStatusChanges = Fields.absentableInt(extensions, "thermal_status_changes"),',
      '                thermalStatusChanges = Fields.absentableInt(extensions, "thermal_status_changes") ?: 0,',
      "transport"),
+    # Round 2 re-audit (m12): the encode half of the same distinction -- a
+    # `null` count re-encoded as a reported zero on the way out, rather than
+    # omitted the way a genuine absence is everywhere else on this frame.
+    # Unpinned before this: the existing "decodes to null not zero" test built
+    # its "older build" frame by stripping the key from an already-encoded
+    # map by hand, so `toExtensions()`'s own null handling was never actually
+    # called with a null value.
+    ("phone: toExtensions re-encodes a null thermal_status_changes as zero",
+     "phone/transport/src/main/kotlin/com/dsrc/transport/PhoneTelemetry.kt",
+     '        thermalStatusChanges?.let { put("thermal_status_changes", JsonValue.Num(it)) }',
+     '        put("thermal_status_changes", JsonValue.Num(thermalStatusChanges ?: 0))',
+     "transport"),
 
     # Task 37 round 2: MINOR findings.
     ("thermal: the two percentile conventions in the report disagree",
      "deployment/jetson/sensors/thermal.py",
      "    def at(fraction: float) -> float:\n"
-     "        if n == 1:\n"
-     "            return ordered[0]\n"
+     "        # `n == 1` needs no special case: `rank` is then always 0, `lo` and\n"
+     "        # `hi` both 0, and the interpolation term is zero -- the general\n"
+     "        # formula already returns `ordered[0]`.\n"
      "        rank = fraction * (n - 1)\n"
      "        lo = int(rank)\n"
      "        hi = min(lo + 1, n - 1)\n"
      "        return ordered[lo] + (ordered[hi] - ordered[lo]) * (rank - lo)",
      "    def at(fraction: float) -> float:\n"
      "        return ordered[min(n - 1, int(fraction * n))]",
+     "python"),
+    # Round 2 re-audit: `basis_counts["stale"]` was initialised alongside
+    # `measured`/`absent` but incremented nowhere -- `stale` is a
+    # `ThermalReading.basis` value `_latest_jetson` assigns only when read,
+    # never while a sample is taken -- so it read as a measurement of
+    # something that never happens (m7).
+    ("thermal: basis_counts carries a stale entry that can never move",
+     "deployment/jetson/sensors/thermal.py",
+     '        self._basis_counts: dict[str, int] = {THERMAL_BASIS_MEASURED: 0, THERMAL_BASIS_ABSENT: 0}',
+     "        self._basis_counts: dict[str, int] = {b: 0 for b in THERMAL_BASES}",
      "python"),
     ("eval_run: a thermal section with no summary prints nothing",
      "deployment/jetson/eval_run.py",
@@ -2019,6 +2129,44 @@ MUTATIONS = [
      "        return []\n"
      '    lines = ["", "## Thermal", ""]\n'
      '    s = thermal.get("summary")',
+     "python"),
+    # Round 2 re-audit: `.get("passes_attempted")` guards the line but
+    # `ev['passes_readable']`/`ev['passes_attempted']` index it, so a record
+    # with the first key and not the second raised `KeyError` instead of
+    # degrading (m8) -- every other read in this function uses `.get`.
+    ("eval_run: a not_evaluable record missing passes_readable raises instead of degrading",
+     "deployment/jetson/eval_run.py",
+     "            if status == RULE_NOT_EVALUABLE:\n"
+     '                missing = ", ".join(ev.get("missing") or [])\n'
+     "                passes = (\n"
+     "                    f\" ({ev.get('passes_readable')} of {ev.get('passes_attempted')} passes fully readable)\"\n"
+     '                    if ev.get("passes_attempted") else ""\n'
+     "                )",
+     "            if status == RULE_NOT_EVALUABLE:\n"
+     '                missing = ", ".join(ev.get("missing") or [])\n'
+     "                passes = (\n"
+     "                    f\" ({ev['passes_readable']} of {ev['passes_attempted']} passes fully readable)\"\n"
+     '                    if ev.get("passes_attempted") else ""\n'
+     "                )",
+     "python"),
+    # Round 2 re-audit: C2's fix reaches this rendering too -- a `fired`
+    # record can now carry `missing` when the observation behind it was
+    # incomplete, and the line must say so rather than reading as a complete
+    # picture.
+    ("eval_run: the fired line drops its incompleteness note",
+     "deployment/jetson/eval_run.py",
+     "            elif status == RULE_FIRED:\n"
+     "                # `missing` can accompany `fired` too (a real transition observed\n"
+     "                # while some cooling device on the same pass, or a later pass,\n"
+     "                # never gave a reading) -- named here so the count is not read as\n"
+     "                # a complete picture when it is not.\n"
+     "                passes = (\n"
+     "                    f\" ({ev.get('passes_readable')} of {ev.get('passes_attempted')} passes fully readable)\"\n"
+     '                    if ev.get("missing") else ""\n'
+     "                )\n"
+     '                lines.append(f"- throttle events, {device}: fired -- {count} transitions{passes}")',
+     "            elif status == RULE_FIRED:\n"
+     '                lines.append(f"- throttle events, {device}: fired -- {count} transitions")',
      "python"),
     ("thermal: the millidegree threshold is a strict inequality",
      "deployment/jetson/sensors/thermal.py",
@@ -2037,7 +2185,7 @@ MUTATIONS = [
      "            unregister(listener)\n"
      "            registered = false\n"
      "        }\n"
-     "        (executor as? ExecutorService)?.shutdown()\n"
+     "        ownExecutor?.shutdown()\n"
      "    }",
      "    fun stop() {\n"
      "        if (registered) {\n"
@@ -2045,6 +2193,56 @@ MUTATIONS = [
      "            registered = false\n"
      "        }\n"
      "    }",
+     "app"),
+    # Round 2 re-audit (m4/m5): the KDoc claimed an injected executor is left
+    # running and only this class's own default one is shut down, but the code
+    # shut down *any* `ExecutorService` passed in, own or injected -- decided
+    # in favour of the KDoc's ownership rule (a shared pool a caller hands in
+    # is the caller's to shut down), which needed an actual ownership flag
+    # rather than a type check to implement.
+    ("phone: stop shuts down a caller-supplied executor too",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalStatusWatcher.kt",
+     "    fun stop() {\n"
+     "        if (registered) {\n"
+     "            unregister(listener)\n"
+     "            registered = false\n"
+     "        }\n"
+     "        ownExecutor?.shutdown()\n"
+     "    }",
+     "    fun stop() {\n"
+     "        if (registered) {\n"
+     "            unregister(listener)\n"
+     "            registered = false\n"
+     "        }\n"
+     "        (activeExecutor as? ExecutorService)?.shutdown()\n"
+     "    }",
+     "app"),
+    ("phone: the thermal watcher's own executor is only shut down when it was started",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalStatusWatcher.kt",
+     "    fun stop() {\n"
+     "        if (registered) {\n"
+     "            unregister(listener)\n"
+     "            registered = false\n"
+     "        }\n"
+     "        ownExecutor?.shutdown()\n"
+     "    }",
+     "    fun stop() {\n"
+     "        if (registered) {\n"
+     "            unregister(listener)\n"
+     "            registered = false\n"
+     "            ownExecutor?.shutdown()\n"
+     "        }\n"
+     "    }",
+     "app"),
+    # Round 2 re-audit (C1 root cause): `changesCount` and `lastTransition`
+    # were two separate lock acquisitions with a binder call
+    # (`power.currentThermalStatus`) between them on the caller's side, so the
+    # listener firing in that window could move the count and the transition
+    # out of step. `snapshot()` reads both under one lock acquisition instead.
+    ("phone: snapshot drops the last transition",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalStatusWatcher.kt",
+     "    fun snapshot(): Snapshot = synchronized(lock) { Snapshot(changes, last) }",
+     "    fun snapshot(): Snapshot = synchronized(lock) { Snapshot(changes, null) }",
      "app"),
 ]
 
