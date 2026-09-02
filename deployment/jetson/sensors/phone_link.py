@@ -784,6 +784,13 @@ class PhoneLink:
                     "received": stats.received,
                     "delivered": stats.delivered,
                     "dropped_inbound": stats.dropped_inbound,
+                    # The only evidence in the system that the peer dropped
+                    # something on its own side of this channel: a gap in the
+                    # sequence numbers this end received, and how many
+                    # numbers the gap actually spans. Computed by `session.py`
+                    # on every arrival and, until now, thrown away here.
+                    "seq_gaps": stats.seq_gaps,
+                    "missing_seqs": stats.missing_seqs,
                     # The term without which the inbound account cannot balance. On
                     # every channel but control the transport pins `received ==
                     # delivered + dropped_inbound + abandoned_inbound`; on control the
@@ -873,6 +880,15 @@ class PhoneLink:
             # is this one, and it was not in it -- the counter was read by two bench
             # harnesses and nothing else.
             "handshake_workers_leaked": self._listener.handshake_workers_leaked,
+            # The acceptor's own record, previously read only by a bench script.
+            # It is the transport's one timestamped failure account -- accept()
+            # retries a transient error rather than reporting it, so this is
+            # the only place those retries and their span are visible at all.
+            # `None` for a `LoopbackAcceptor`, which has no accept-retry
+            # concept at all and so no `stats()` to report.
+            "acceptor": (
+                self._acceptor.stats() if hasattr(self._acceptor, "stats") else None
+            ),
             "refusals": list(self.refusals),
             # Counted, not silently truncated. A run that turned away six hundred
             # dial-ins and one that turned away fifty must not read alike.
