@@ -9,11 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import time
 from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
+from eval_run import pctl as eval_run_pctl
 from policy import sensing_controller
 from policy.sensing_controller import RULE_FIRED, RULE_NOT_EVALUABLE, RULE_QUIET, Inputs, SensingController
 from sensors import thermal
@@ -24,8 +26,14 @@ from sensors.thermal import (
     ABSENT_NO_ZONE_READABLE,
     ABSENT_REASONS,
     ABSENT_SAMPLER_STOPPED,
+    ABSENT_ZONE_DISAPPEARED,
+    HEADROOM_ABSENT_UNSPECIFIED,
+    MISSING_COOLING_STATE,
+    MISSING_STATUS_CHANGES,
+    MISSING_TELEMETRY,
     JetsonThermal,
     ThermalSampler,
+    _pctl,
 )
 from transport.messages import DROP_KEYS, RATE_KEYS, PhoneTelemetry
 
@@ -106,10 +114,10 @@ def test_a_zone_that_will_not_read_is_absent_with_a_reason(tmp_path):
     assert reading["temp_c"] is None
 
 
-# -- 2. the four absence reasons are each reachable and distinct ------------
+# -- 2. the five absence reasons are each reachable and distinct ------------
 
 
-def test_the_four_absence_reasons_are_each_reachable_and_distinct(tmp_path):
+def test_the_five_absence_reasons_are_each_reachable_and_distinct(tmp_path):
     seen: set[str] = set()
 
     # arm 1: the root would not list at all.
@@ -138,8 +146,31 @@ def test_the_four_absence_reasons_are_each_reachable_and_distinct(tmp_path):
     assert reading["reason"] == ABSENT_SAMPLER_STOPPED
     seen.add(reading["reason"])
 
+    # arm 5: the held zone specifically drops out of an otherwise-readable
+    # census -- nine other zones read fine, so this is not "no plausible temp
+    # in any zone" (arm 2's reason). Once a zone has ever been measured,
+    # `latest()` reports it `measured`/`stale` forever (D4) rather than
+    # falling back to absent, so this reason only surfaces in the drive-level
+    # `absent_reasons` rollup, not in a later `latest()` call.
+    disappearing_root = tmp_path / "disappearing"
+    _zone(disappearing_root, 0, "cpu-thermal", "40000")
+    for i in range(1, 10):
+        _zone(disappearing_root, i, f"zone{i}", "41000")
+    jetson = JetsonThermal(root=disappearing_root)
+    sampler = ThermalSampler(sink=None, jetson=jetson, clock=_Clock(100.0))
+    sampler.sample_once()
+    assert sampler.latest(now=100.0)["jetson"]["zone"] == "cpu-thermal"
+    (disappearing_root / "thermal_zone0" / "type").unlink()  # the held zone vanishes
+    sampler.sample_once()
+    absent_reasons = sampler.to_record()["jetson"]["absent_reasons"]
+    assert ABSENT_ZONE_DISAPPEARED in absent_reasons
+    assert sampler.to_record()["jetson"]["zones_seen"] == sorted(
+        ["cpu-thermal"] + [f"zone{i}" for i in range(1, 10)]
+    )
+    seen.add(ABSENT_ZONE_DISAPPEARED)
+
     assert seen == ABSENT_REASONS
-    assert len(seen) == 4
+    assert len(seen) == 5
 
 
 # -- 3. a value that is not a temperature is refused -------------------------
@@ -179,6 +210,8 @@ MAGNITUDE_TABLE = [
     ("47500", 47.5),
     ("47", 47.0),
     ("999", None),          # below the magnitude threshold, so 999.0 C: implausible
+    ("1000", 1.0),          # exactly at the magnitude threshold: millidegrees, not degrees
+    ("-1000", -1.0),        # the same threshold, negative
     ("-40000", -40.0),      # exactly at the plausible floor
     ("125000", 125.0),      # exactly at the plausible ceiling
     ("-40001", None),
@@ -262,6 +295,7 @@ def test_quiet_and_not_evaluable_are_different_records(tmp_path):
     assert not_evaluable == {
         "status": RULE_NOT_EVALUABLE, "count": 0, "last": None,
         "missing": ["cooling_device_cur_state"],
+        "passes_attempted": 0, "passes_readable": 0,
     }
 
 
@@ -411,6 +445,7 @@ def test_eval_run_prints_the_thermal_section(tmp_path):
     clock = _Clock(100.0)
     sampler = ThermalSampler(sink=sink, jetson=JetsonThermal(root=root), interval_s=1.0, clock=clock)
     sampler.sample_once()
+    _cooling(root, 0, "pwm-fan", "1")  # a real transition, so `events` is not vacuously []
     clock.advance(1.0)
     sampler.sample_once()
 
@@ -434,6 +469,7 @@ def test_eval_run_prints_the_thermal_section(tmp_path):
     assert result["thermal"] is not None
     assert result["thermal"]["ticks_by_basis"] == {"measured": 5}
     expected_events = [r for r in sink.records if r["type"] == "thermal_event"]
+    assert len(expected_events) == 1, "the fixture must produce a real event, not an empty list"
     assert result["thermal"]["events"] == expected_events
 
 
@@ -474,6 +510,462 @@ def test_a_pre_task_37_run_does_not_crash_and_is_not_failed(tmp_path):
     result = analyze(run_dir)
     assert result["thermal"] is None
     assert result["overall_pass"] is True
+
+
+# -- confirmed validation findings, task 37 round 2 --------------------------
+
+
+# C1: a redial must not erase the departed handset's events or invent a
+# from-None-to-None one.
+
+
+def test_a_phone_redial_accumulates_instead_of_resetting_the_count(tmp_path):
+    """`PhoneLink._rebind` sets `_telemetry` to `None` on every redial, and the
+    replacement handset's own `thermal_status_changes` restarts at 0. Copying
+    that value straight into the sampler's count erased the departed
+    handset's real transitions and printed an event whose `from`/`to` were
+    both None; this pins that the count survives the redial and that no such
+    event is ever written.
+    """
+    phone = _FakePhone()
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, phone=phone, clock=clock)
+
+    # Old handset: baseline, then one report carrying two transitions (D9).
+    phone.telemetry = _telemetry(thermal_status_changes=0)
+    sampler.sample_once()
+    phone.telemetry = _telemetry(
+        thermal_status_changes=2, thermal_change_from="light", thermal_change_to="severe",
+    )
+    clock.advance(1.0)
+    sampler.sample_once()
+    before = sampler.latest(now=clock.now)["events"]["phone"]
+    assert before["count"] == 2
+    assert before["last"] == {"at_mono": clock.now, "from": "light", "to": "severe"}
+
+    # Redial: telemetry drops to None before the new handset's first report.
+    phone.telemetry = None
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    # New handset's own counter restarts at 0 -- must not compare against the
+    # departed handset's last count of 2.
+    phone.telemetry = _telemetry(thermal_status_changes=0)
+    clock.advance(1.0)
+    sampler.sample_once()
+    after = sampler.latest(now=clock.now)["events"]["phone"]
+    assert after["status"] == RULE_FIRED
+    assert after["count"] == 2, "the old handset's real events must survive the redial"
+    assert after["last"] == before["last"]
+
+    phantom_events = [
+        r for r in sink.records
+        if r["type"] == "thermal_event" and r["device"] == "phone"
+        and r["from"] is None and r["to"] is None
+    ]
+    assert phantom_events == [], "no event may ever carry both from and to null"
+
+    # A genuine transition on the new handset accumulates on top of the old
+    # handset's total rather than restarting from it.
+    phone.telemetry = _telemetry(
+        thermal_status_changes=1, thermal_change_from="nominal", thermal_change_to="light",
+    )
+    clock.advance(1.0)
+    sampler.sample_once()
+    final = sampler.latest(now=clock.now)["events"]["phone"]
+    assert final["count"] == 3
+    assert final["last"] == {"at_mono": clock.now, "from": "nominal", "to": "light"}
+
+
+def test_the_baseline_resets_on_a_redial_even_when_the_new_counters_briefly_coincide(tmp_path):
+    """If the baseline were not cleared when telemetry goes absent, a new
+    handset's first report -- whose own counter starts from its own boot and
+    can already be higher than the departed handset's last value -- would be
+    diffed against that stale value and produce a spurious event straddling
+    two different phones.
+    """
+    phone = _FakePhone()
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, phone=phone, clock=clock)
+
+    phone.telemetry = _telemetry(thermal_status_changes=0)
+    sampler.sample_once()
+    phone.telemetry = _telemetry(thermal_status_changes=1, thermal_change_from="nominal", thermal_change_to="light")
+    clock.advance(1.0)
+    sampler.sample_once()
+    before = sampler.latest(now=clock.now)["events"]["phone"]
+    assert before["count"] == 1
+
+    phone.telemetry = None  # redial
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    # The new handset's own counter is already at 5 on its first report --
+    # unrelated to the departed handset's last value of 1.
+    phone.telemetry = _telemetry(
+        thermal_status_changes=5, thermal_change_from="moderate", thermal_change_to="severe",
+    )
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    after = sampler.latest(now=clock.now)["events"]["phone"]
+    assert after["count"] == 1, "the new handset's first report must only set a baseline, not 4 new events"
+    assert after["last"] == before["last"]
+
+
+def test_a_count_rise_with_no_transition_fields_is_never_emitted_as_an_event(tmp_path):
+    """A delta greater than zero can appear with no redial at all if a report
+    carries a raised `thermal_status_changes` but no `thermal_change_from`/
+    `to` -- that must not synthesize a from-None-to-None event, the shape a
+    copied-not-accumulated count produced across a redial before this fix.
+    """
+    phone = _FakePhone()
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, phone=phone, clock=clock)
+
+    phone.telemetry = _telemetry(thermal_status_changes=0)
+    sampler.sample_once()
+    phone.telemetry = _telemetry(thermal_status_changes=1)  # no from/to carried
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    assert [r for r in sink.records if r["type"] == "thermal_event"] == []
+    assert sampler.latest(now=clock.now)["events"]["phone"]["count"] == 0
+
+
+# C2: cooling readable on some passes and not others is not_evaluable, never
+# quiet.
+
+
+def test_partial_cooling_readability_is_not_evaluable_not_quiet(tmp_path):
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    _cooling(root, 0, "pwm-fan", "0")
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=clock)
+    sampler.sample_once()  # pass 1: readable
+
+    (root / "cooling_device0" / "cur_state").unlink()  # pass 2: denied
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    summary_events = sampler.to_record()["events"]["jetson"]
+    assert summary_events["status"] == RULE_NOT_EVALUABLE
+    assert summary_events["missing"] == [MISSING_COOLING_STATE]
+    assert summary_events["passes_attempted"] == 2
+    assert summary_events["passes_readable"] == 1
+
+    tick_events = sampler.latest(now=clock.now)["events"]["jetson"]
+    assert tick_events["status"] == RULE_NOT_EVALUABLE
+    assert tick_events["passes_attempted"] == 2
+    assert tick_events["passes_readable"] == 1
+
+
+# C3: a cooling device that lists but will not read is named as missing, not
+# folded into "nothing here read".
+
+
+def test_read_cooling_reports_a_listed_device_that_will_not_give_a_state(tmp_path):
+    root = tmp_path / "root"
+    _cooling(root, 0, "pwm-fan", "0")
+    _cooling(root, 1, "tegra-heavy", "0")
+    (root / "cooling_device1" / "cur_state").unlink()
+
+    states, missing = JetsonThermal(root=root).read_cooling()
+    assert states == {"pwm-fan": 0}
+    assert missing == ("tegra-heavy",)
+
+
+def test_read_cooling_reports_an_unparseable_state_as_missing_too(tmp_path):
+    root = tmp_path / "root"
+    _cooling(root, 0, "pwm-fan", "not-a-number")
+
+    states, missing = JetsonThermal(root=root).read_cooling()
+    assert states == {}
+    assert missing == ("pwm-fan",)
+
+
+# M1: the phone half of ThermalSampler is exercised through `sample_once`, not
+# only through `.latest()` on state a test set by hand.
+
+
+def test_no_phone_at_all_reports_not_evaluable_not_quiet(tmp_path):
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    sampler = ThermalSampler(sink=None, phone=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
+    sampler.sample_once()
+
+    tick_events = sampler.latest(now=100.0)["events"]["phone"]
+    assert tick_events == {
+        "status": RULE_NOT_EVALUABLE, "count": 0, "last": None, "missing": [MISSING_TELEMETRY],
+    }
+    summary_events = sampler.to_record()["events"]["phone"]
+    assert summary_events["status"] == RULE_NOT_EVALUABLE
+    assert summary_events["missing"] == [MISSING_TELEMETRY]
+
+
+def test_an_older_phone_build_reports_not_evaluable_not_quiet(tmp_path):
+    """A build that predates this task never sends `thermal_status_changes` at
+    all, decoding to None. Driven through `sample_once`, not `.latest()` set
+    by hand, since `_process_phone_events` is what decides this.
+    """
+    phone = _FakePhone(telemetry=_telemetry(thermal_status_changes=None))
+    sampler = ThermalSampler(sink=None, phone=phone, clock=_Clock(100.0))
+    sampler.sample_once()
+
+    tick_events = sampler.latest(now=100.0)["events"]["phone"]
+    assert tick_events == {
+        "status": RULE_NOT_EVALUABLE, "count": 0, "last": None, "missing": [MISSING_STATUS_CHANGES],
+    }
+
+
+def test_the_populated_phone_branches_are_reached_through_sample_once(tmp_path):
+    """`_accumulate_phone_summary`'s and `_write_sample`'s populated-phone
+    branches, and `_latest_phone_events`'s fired/quiet branch, are only
+    reached by driving `sample_once` against a real telemetry object.
+    """
+    phone = _FakePhone(telemetry_at_mono=50.0)
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, phone=phone, clock=clock)
+
+    phone.telemetry = _telemetry(
+        thermal_status="severe", skin_temp_c=41.5, skin_temp_zone="xo_therm",
+        thermal_headroom_absent="not_a_number", thermal_status_changes=0,
+    )
+    sampler.sample_once()
+
+    record = sampler.to_record()["phone"]
+    assert record["samples"] == 1
+    assert record["status_counts"] == {"severe": 1}
+    assert record["skin_temp_c"]["p50"] == pytest.approx(41.5)
+    assert record["skin_zone"] == "xo_therm"
+    assert record["headroom_absent_counts"] == {"not_a_number": 1}
+
+    sample_line = next(r for r in sink.records if r["type"] == "thermal_sample")
+    assert sample_line["phone"]["status"] == "severe"
+    assert sample_line["phone"]["skin_temp_c"] == pytest.approx(41.5)
+    assert sample_line["phone"]["absent"] is None
+
+    tick_events = sampler.latest(now=clock.now)["events"]["phone"]
+    assert tick_events["status"] == RULE_QUIET  # reported and evaluable, zero transitions so far
+
+
+# M3: the 1 Hz thread itself, and its own exception handler.
+
+
+def test_starting_the_real_thread_produces_samples(tmp_path):
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    sink = _Sink()
+    sampler = ThermalSampler(sink=sink, jetson=JetsonThermal(root=root), interval_s=0.05)
+    sampler.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(sink.records) < 3:
+            time.sleep(0.02)
+    finally:
+        sampler.stop()
+    assert len(sink.records) >= 3
+    assert all(r["type"] == "thermal_sample" for r in sink.records)
+
+
+def test_the_loop_stops_itself_when_a_sample_raises(tmp_path):
+    """`_loop`'s exception handler is the only producer of the 'thread died'
+    half of `ABSENT_SAMPLER_STOPPED` -- proven on the real thread, not by
+    calling `sample_once` directly.
+    """
+
+    class _ExplodingJetson(JetsonThermal):
+        def read_zones(self):
+            raise RuntimeError("sysfs blew up")
+
+    sampler = ThermalSampler(sink=None, jetson=_ExplodingJetson(root=tmp_path), interval_s=0.02)
+    sampler.start()
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline and sampler._running:
+        time.sleep(0.02)
+    # Read before stop(), which sets `_running` False itself regardless of
+    # whether the loop's own exception handler already did -- checking after
+    # stop() would not tell the two apart.
+    still_running_after_the_raise = sampler._running
+    sampler.stop()
+
+    assert still_running_after_the_raise is False
+    reading = sampler.latest(now=time.monotonic())["jetson"]
+    assert reading["reason"] == ABSENT_SAMPLER_STOPPED
+
+
+# M4: the hottest-zone fallback is the entire mitigation for the guessed Orin
+# zone names.
+
+
+def test_select_zone_falls_back_to_the_hottest_when_no_preferred_name_matches(tmp_path):
+    root = tmp_path / "root"
+    _zone(root, 0, "unexpected-a", "30000")
+    _zone(root, 1, "unexpected-b", "55000")
+    _zone(root, 2, "unexpected-c", "40000")
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
+    sampler.sample_once()
+
+    reading = sampler.latest(now=100.0)["jetson"]
+    assert reading["zone"] == "unexpected-b"  # the hottest of the three
+    assert reading["temp_c"] == pytest.approx(55.0)
+    assert sampler.to_record()["jetson"]["selected_by"] == "hottest_at_first_sample"
+
+
+# M5: summary["thermal"]'s own accumulators, asserted against the records
+# that produced them.
+
+
+def test_summary_thermal_accumulators_are_assertable_end_to_end(tmp_path):
+    root = tmp_path / "root"
+    jetson = JetsonThermal(root=root)
+    phone = _FakePhone()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, phone=phone, jetson=jetson, clock=clock)
+
+    sampler.sample_once()  # pass 1: absent -- the root does not exist yet
+
+    _zone(root, 0, "cpu-thermal", "40000")
+    _zone(root, 1, "gpu-thermal", "45000")
+    phone.telemetry = _telemetry(thermal_status="nominal", thermal_headroom_absent="not_a_number")
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 2: measured on two zones, phone present
+
+    _zone(root, 0, "cpu-thermal", "42000")
+    _zone(root, 1, "gpu-thermal", "48000")
+    phone.telemetry = None
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 3: hotter, phone silent again
+
+    record = sampler.to_record()
+
+    jetson_record = record["jetson"]
+    assert jetson_record["samples"] == 3, "every attempted pass, not only the measured ones"
+    assert jetson_record["basis_counts"]["absent"] == 1
+    assert jetson_record["basis_counts"]["measured"] == 2
+    assert jetson_record["absent_reasons"] == {ABSENT_NO_THERMAL_ROOT: 1}
+    assert jetson_record["zones_seen"] == ["cpu-thermal", "gpu-thermal"]
+    assert jetson_record["per_zone_max_c"] == {
+        "cpu-thermal": pytest.approx(42.0), "gpu-thermal": pytest.approx(48.0),
+    }
+    assert jetson_record["temp_c"]["p50"] == pytest.approx(41.0)  # held zone: 40.0, 42.0
+    assert jetson_record["temp_c"]["p95"] == pytest.approx(41.9)
+
+    phone_record = record["phone"]
+    assert phone_record["samples"] == 1, "only the pass with a real telemetry object"
+    assert phone_record["absent_counts"] == {ABSENT_NO_TELEMETRY: 2}, "passes 1 and 3"
+    assert phone_record["headroom_absent_counts"] == {"not_a_number": 1}
+
+
+def test_the_summary_event_record_always_carries_a_missing_list_even_when_empty(tmp_path):
+    """Unlike the tick-level record, the summary-level one always carries
+    `missing`, even empty, because the summary is read on its own with no
+    sibling ticks to compare it against.
+    """
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    _cooling(root, 0, "pwm-fan", "0")
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
+    sampler.sample_once()
+
+    events = sampler.to_record()["events"]["jetson"]
+    assert events["status"] == RULE_QUIET
+    assert events["missing"] == []
+
+
+def test_a_null_headroom_with_no_stated_reason_is_still_counted(tmp_path):
+    """A null `thermal_headroom` with no `thermal_headroom_absent` used to be
+    counted nowhere, so `headroom_absent_counts == {}` could mean either
+    'always answered' or 'never answered and never said why'.
+    """
+    phone = _FakePhone(telemetry=_telemetry(thermal_headroom=None, thermal_headroom_absent=None))
+    sampler = ThermalSampler(sink=None, phone=phone, clock=_Clock(100.0))
+    sampler.sample_once()
+
+    assert sampler.to_record()["phone"]["headroom_absent_counts"] == {HEADROOM_ABSENT_UNSPECIFIED: 1}
+
+
+# M8: the disappearing held zone gets its own reason, not the "nothing at all
+# was plausible" one.
+
+
+def test_a_disappearing_held_zone_is_not_no_zone_readable(tmp_path):
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    for i in range(1, 10):
+        _zone(root, i, f"zone{i}", "41000")
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
+    sampler.sample_once()
+    assert sampler.latest(now=100.0)["jetson"]["zone"] == "cpu-thermal"
+
+    (root / "thermal_zone0" / "type").unlink()  # the held zone vanishes; nine others still read
+    sampler.sample_once()
+
+    record = sampler.to_record()["jetson"]
+    assert record["absent_reasons"] == {ABSENT_ZONE_DISAPPEARED: 1}
+    assert ABSENT_NO_ZONE_READABLE not in record["absent_reasons"]
+    assert len(record["zones_seen"]) == 10  # the nine that still read, plus the one that vanished
+
+
+# M9: the phone status line names every status seen, not only the modal one.
+
+
+def test_report_line_names_every_phone_status_not_only_the_modal_one(tmp_path):
+    from eval_run import analyze, render_markdown
+    from tests.test_eval_run import make_tick, write_run
+
+    root = tmp_path / "sysroot"
+    _zone(root, 0, "cpu-thermal", "40000")
+    clock = _Clock(100.0)
+    phone = _FakePhone()
+    sampler = ThermalSampler(sink=None, phone=phone, jetson=JetsonThermal(root=root), clock=clock)
+
+    for status, n in (("nominal", 100), ("severe", 78)):
+        for _ in range(n):
+            phone.telemetry = _telemetry(thermal_status=status)
+            sampler.sample_once()
+            clock.advance(1.0)
+
+    run_dir = write_run(tmp_path, [make_tick(0)], summary={
+        "ticks": 1, "camera_dropped_frames": 0, "policy_trained": False,
+        "thermal": sampler.to_record(jtop_available=None),
+    })
+    result = analyze(run_dir)
+    md = render_markdown(result, [])
+    assert "severe" in md
+    assert "nominal" in md
+
+
+# MINOR: the two percentile conventions in the same report section must agree.
+
+
+def test_the_two_percentile_conventions_agree():
+    values = [40.0, 41.5, 42.0, 47.5, 50.0, 33.2, 48.9]
+    a = _pctl(values)
+    b = eval_run_pctl(values)
+    assert a["min"] == pytest.approx(b["min"])
+    assert a["mean"] == pytest.approx(b["mean"])
+    assert a["p50"] == pytest.approx(b["p50"])
+    assert a["p95"] == pytest.approx(b["p95"])
+    assert a["max"] == pytest.approx(b["max"])
+
+
+# MINOR: a log whose sampler wrote records but whose summary was never
+# written still gets a "## Thermal" section.
+
+
+def test_thermal_lines_render_something_when_the_summary_is_missing():
+    from eval_run import _thermal_lines
+
+    lines = _thermal_lines({"summary": None, "ticks_by_basis": {"measured": 2, "stale": 168}, "events": []})
+    text = "\n".join(lines)
+    assert "## Thermal" in text
+    assert "stale 168" in text
 
 
 # -- the no-rate-change contract: the controller is byte-identical ----------

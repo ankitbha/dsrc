@@ -43,14 +43,19 @@ THERMAL_BASIS_STALE = "stale"
 THERMAL_BASES = frozenset({THERMAL_BASIS_MEASURED, THERMAL_BASIS_STALE, THERMAL_BASIS_ABSENT})
 
 #: Why a Jetson temperature is absent. Closed: every arm of `JetsonThermal` and
-#: `ThermalSampler` that produces no reading returns one of these four.
+#: `ThermalSampler` that produces no reading returns one of these five.
 ABSENT_NO_THERMAL_ROOT = "no_thermal_root"     # the directory would not list
 ABSENT_NO_ZONE_READABLE = "no_zone_readable"   # listed, no plausible temp in any zone
 ABSENT_NO_SAMPLE_YET = "no_sample_yet"         # running, first pass not finished
 ABSENT_SAMPLER_STOPPED = "sampler_stopped"     # disabled in config, or the thread died
+#: The zone this sampler is holding stopped appearing in an otherwise-readable
+#: census -- distinct from `ABSENT_NO_ZONE_READABLE`, which means nothing at all
+#: was plausible this pass. Nine other zones reading fine while the held one
+#: drops out is not "no plausible temp in any zone".
+ABSENT_ZONE_DISAPPEARED = "zone_disappeared"
 ABSENT_REASONS = frozenset({
     ABSENT_NO_THERMAL_ROOT, ABSENT_NO_ZONE_READABLE,
-    ABSENT_NO_SAMPLE_YET, ABSENT_SAMPLER_STOPPED,
+    ABSENT_NO_SAMPLE_YET, ABSENT_SAMPLER_STOPPED, ABSENT_ZONE_DISAPPEARED,
 })
 
 #: Why the phone's thermal fields are absent, beyond the phone's own per-field
@@ -58,6 +63,14 @@ ABSENT_REASONS = frozenset({
 #: like `sensing_loop.reference_from`'s own `"no_telemetry"` because it answers
 #: the identical question: nothing has arrived from the phone at all.
 ABSENT_NO_TELEMETRY = "no_telemetry"
+
+#: The phone reported no headroom and gave no reason for it -- not one of the
+#: wire's three closed `thermal_headroom_absent` values. Either an older build
+#: that predates the reason field but still predates headroom itself in some
+#: other way, or a bug in a build that should have named a reason. Counting
+#: nothing here would make "always answered" and "never answered and never
+#: said why" the same empty dict.
+HEADROOM_ABSENT_UNSPECIFIED = "unspecified"
 
 #: What `events.<device>` can be missing, when its status is `not_evaluable`.
 #: Closed: three different absences, and the record never merges them.
@@ -160,32 +173,38 @@ class JetsonThermal:
             return {}, ABSENT_NO_ZONE_READABLE
         return census, None
 
-    def read_cooling(self) -> tuple[dict[str, int], bool]:
-        """Every `cooling_device*`'s current state, keyed by its `type`.
-        `(states, readable)`: `readable` is False when nothing here could be
-        read at all -- the caller's cue to report `not_evaluable` rather than
-        a quiet zero.
+    def read_cooling(self) -> tuple[dict[str, int], tuple[str, ...]]:
+        """Every `cooling_device*`'s current state, keyed by its `type`, and
+        the names of devices whose `type` listed but whose `cur_state` did
+        not. `(states, missing)`: a device that listed but would not give a
+        state is not the same as a directory with nothing in it at all -- one
+        readable device among two does not mean the census is complete, and a
+        caller that only asked "did anything read" could not tell the two
+        apart.
         """
         try:
             if not self.root.is_dir():
-                return {}, False
+                return {}, ()
             entries = sorted(self.root.glob("cooling_device*"))
         except OSError:
-            return {}, False
+            return {}, ()
 
         states: dict[str, int] = {}
+        missing: list[str] = []
         for entry in entries:
             name = _read_trimmed(entry / "type")
-            if name is None or name in states:
+            if name is None or name in states or name in missing:
                 continue
             raw = _read_trimmed(entry / "cur_state")
             if raw is None:
+                missing.append(name)
                 continue
             try:
                 states[name] = int(raw)
             except ValueError:
+                missing.append(name)
                 continue
-        return states, bool(states)
+        return states, tuple(missing)
 
     @staticmethod
     def celsius_of(raw: str) -> float | None:
@@ -206,18 +225,24 @@ class JetsonThermal:
 
 def _tick_event_record(
     status: str, count: int, last: dict[str, Any] | None, missing: tuple[str, ...] = (),
+    **extra: Any,
 ) -> dict[str, Any]:
     """One `events.<device>` entry for the per-tick block. `missing` is present
     only on a `not_evaluable` entry, the way `RuleCheck.to_record` emits it.
+    `extra` carries fields specific to one device's `not_evaluable` reading,
+    such as the cooling census's own pass counts -- present only when given,
+    so a device with nothing further to say does not grow new keys.
     """
     record: dict[str, Any] = {"status": status, "count": count, "last": last}
     if missing:
         record["missing"] = list(missing)
+    record.update(extra)
     return record
 
 
 def _summary_event_record(
     status: str, count: int, missing: tuple[str, ...], by_unit: dict[str, int] | None = None,
+    **extra: Any,
 ) -> dict[str, Any]:
     """As `_tick_event_record`, but for the drive-level rollup, where `missing`
     is always present (possibly empty) because the summary is read on its own,
@@ -226,15 +251,28 @@ def _summary_event_record(
     record: dict[str, Any] = {"status": status, "count": count, "missing": list(missing)}
     if by_unit is not None:
         record["by_unit"] = dict(by_unit)
+    record.update(extra)
     return record
 
 
 def _pctl(values: list[float]) -> dict[str, float]:
+    """min/mean/p50/p95/max, linearly interpolating between the two nearest
+    ranks -- the convention `numpy.percentile`'s default computes, and the one
+    `eval_run.pctl` uses. The two must agree: this module's own p50/p95 and
+    `eval_run`'s sit in the same `## Thermal` section, and a nearest-rank
+    number next to a linearly interpolated one would read as one convention
+    when it is two.
+    """
     ordered = sorted(values)
     n = len(ordered)
 
     def at(fraction: float) -> float:
-        return ordered[min(n - 1, int(fraction * n))]
+        if n == 1:
+            return ordered[0]
+        rank = fraction * (n - 1)
+        lo = int(rank)
+        hi = min(lo + 1, n - 1)
+        return ordered[lo] + (ordered[hi] - ordered[lo]) * (rank - lo)
 
     return {
         "min": ordered[0], "mean": sum(ordered) / n,
@@ -286,7 +324,14 @@ class ThermalSampler:
 
         # -- jetson cooling / throttle events ---------------------------------
         self._prev_cooling: dict[str, int] | None = None
-        self._cooling_ever_readable = False
+        #: Passes where a `cooling_device*` entry existed to attempt (a pass
+        #: with no `cooling_device*` directory at all attempts nothing, and
+        #: does not count here) versus passes where every entry attempted also
+        #: read. `quiet` is only reported when the two are equal -- otherwise
+        #: some device was listed but never gave a `cur_state` on at least one
+        #: pass, which is `not_evaluable`, not "readable throughout".
+        self._cooling_passes_attempted = 0
+        self._cooling_passes_readable = 0
         self._jetson_seq = 0
         self._jetson_event_count = 0
         self._jetson_last_event: dict[str, Any] | None = None
@@ -348,13 +393,13 @@ class ThermalSampler:
     def sample_once(self) -> None:
         now = self._now()
         census, zones_reason = self._jetson.read_zones()
-        cooling, cooling_readable = self._jetson.read_cooling()
+        cooling, cooling_missing = self._jetson.read_cooling()
         telemetry = getattr(self._phone, "telemetry", None) if self._phone is not None else None
         telemetry_at = getattr(self._phone, "telemetry_at_mono", None) if self._phone is not None else None
 
         with self._lock:
             jetson_basis, jetson_reason = self._advance_zone_reading(census, zones_reason, now)
-            self._process_cooling(cooling, cooling_readable, census, now)
+            self._process_cooling(cooling, cooling_missing, census, now)
             self._process_phone_events(telemetry, now)
             self._accumulate_phone_summary(telemetry, telemetry_at, now)
             self._samples += 1
@@ -378,15 +423,17 @@ class ThermalSampler:
             self._select_zone(census)
         value = census.get(self._selected_zone) if self._selected_zone else None
         if value is None:
-            # Zones were readable this pass, but the held zone specifically was
-            # not among them -- still "no plausible temp in any zone" from the
-            # point of view of the series this sampler is holding.
-            self._last_zones_reason = ABSENT_NO_ZONE_READABLE
+            # Zones were readable this pass -- census is non-empty, or `reason`
+            # above would already have returned -- but the held zone specifically
+            # was not among them. Other zones reading fine rules out "no
+            # plausible temp in any zone"; this is the held zone dropping out of
+            # an otherwise-readable census, which is a different fact.
+            self._last_zones_reason = ABSENT_ZONE_DISAPPEARED
             self._basis_counts[THERMAL_BASIS_ABSENT] += 1
-            self._absent_reasons[ABSENT_NO_ZONE_READABLE] = (
-                self._absent_reasons.get(ABSENT_NO_ZONE_READABLE, 0) + 1
+            self._absent_reasons[ABSENT_ZONE_DISAPPEARED] = (
+                self._absent_reasons.get(ABSENT_ZONE_DISAPPEARED, 0) + 1
             )
-            return THERMAL_BASIS_ABSENT, ABSENT_NO_ZONE_READABLE
+            return THERMAL_BASIS_ABSENT, ABSENT_ZONE_DISAPPEARED
 
         self._last_census = census
         self._last_sample_mono = now
@@ -406,12 +453,24 @@ class ThermalSampler:
             self._selected_by = "hottest_at_first_sample"
 
     def _process_cooling(
-        self, states: dict[str, int], readable: bool, census: dict[str, float], now: float,
+        self, states: dict[str, int], missing: tuple[str, ...], census: dict[str, float], now: float,
     ) -> None:
-        if not readable:
+        """`states` is whatever `cooling_device*` entries actually gave a
+        `cur_state` this pass; `missing` is every entry that listed a `type`
+        but did not. A pass with no `cooling_device*` directory at all
+        attempts nothing and is not counted either way -- there is no device
+        to have failed. A pass that attempted at least one device counts
+        toward `_cooling_passes_attempted`, and toward `_cooling_passes_readable`
+        only when nothing on it is missing: one device reading fine does not
+        make the census complete while another next to it never answers.
+        """
+        attempted = set(states) | set(missing)
+        if not attempted:
             return
-        self._cooling_ever_readable = True
+        self._cooling_passes_attempted += 1
         self._cooling_devices.update(states)
+        if not missing:
+            self._cooling_passes_readable += 1
         if self._prev_cooling is not None:
             for name, value in states.items():
                 previous = self._prev_cooling.get(name)
@@ -426,29 +485,63 @@ class ThermalSampler:
                         source="cooling_device", unit=name, from_=previous, to=value,
                         temp_c=self._last_selected_celsius, zones=dict(census),
                     )
-        self._prev_cooling = dict(states)
+        # Merged rather than replaced: a device missing on this one pass keeps
+        # the value it last gave, so it is still there to diff against once it
+        # starts reading again, instead of silently forgetting its history.
+        self._prev_cooling = {**(self._prev_cooling or {}), **states}
+
+    def _cooling_fully_readable(self) -> bool:
+        """Whether every `cooling_device*` attempted has read on every pass
+        attempted -- `quiet` is reported only here. Reading on just one pass,
+        or on most of them, is `not_evaluable`: the plan's own three-word
+        vocabulary has no fourth word for "readable most of the time", and
+        rounding that up to `quiet` is exactly the defect this method exists
+        to close.
+        """
+        return (
+            self._cooling_passes_attempted > 0
+            and self._cooling_passes_attempted == self._cooling_passes_readable
+        )
 
     def _process_phone_events(self, telemetry: Any, now: float) -> None:
+        """Counts the phone's own `thermal_status_changes` as a delta against
+        the last report, never as a copy of it. `PhoneLink._rebind` sets
+        `_telemetry` to `None` on every redial, and the handset that answers
+        next starts its own counter from 0 -- comparing that fresh count
+        directly against the departed handset's last value would read as a
+        drop back to zero, erasing every transition the previous handset
+        actually reported. Clearing the baseline on an absent report means
+        the next one, from whichever phone sends it, starts a new comparison
+        instead of diffing against a counter that belonged to a phone that is
+        gone.
+        """
         if telemetry is None:
+            self._prev_status_changes = None
             return
         changes = getattr(telemetry, "thermal_status_changes", None)
         if changes is None:
+            self._prev_status_changes = None
             return
         self._phone_status_changes_ever_seen = True
-        if self._prev_status_changes is not None and changes != self._prev_status_changes:
-            frm = getattr(telemetry, "thermal_change_from", None)
-            to = getattr(telemetry, "thermal_change_to", None)
-            at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)
-            self._phone_event_count = changes
-            self._phone_last_event = {"at_mono": now, "from": frm, "to": to}
-            self._phone_seq += 1
-            self._write_event(
-                device="phone", seq=self._phone_seq, now=now,
-                clock="phone", at_ns=at_ns,
-                source="thermal_status", unit=None, from_=frm, to=to,
-                temp_c=getattr(telemetry, "skin_temp_c", None), zones=None,
-            )
-        self._phone_event_count = changes
+        if self._prev_status_changes is not None:
+            delta = changes - self._prev_status_changes
+            if delta > 0:
+                frm = getattr(telemetry, "thermal_change_from", None)
+                to = getattr(telemetry, "thermal_change_to", None)
+                # Both null is not a transition anyone can describe -- the
+                # shape a copied-not-accumulated count produced across a
+                # redial before this fix, and never a shape worth writing.
+                if frm is not None or to is not None:
+                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)
+                    self._phone_event_count += delta
+                    self._phone_last_event = {"at_mono": now, "from": frm, "to": to}
+                    self._phone_seq += 1
+                    self._write_event(
+                        device="phone", seq=self._phone_seq, now=now,
+                        clock="phone", at_ns=at_ns,
+                        source="thermal_status", unit=None, from_=frm, to=to,
+                        temp_c=getattr(telemetry, "skin_temp_c", None), zones=None,
+                    )
         self._prev_status_changes = changes
 
     def _accumulate_phone_summary(self, telemetry: Any, telemetry_at: float | None, now: float) -> None:
@@ -465,11 +558,13 @@ class ThermalSampler:
         if skin is not None:
             self._phone_skin_temps.append(skin)
             self._phone_skin_zone = getattr(telemetry, "skin_temp_zone", None) or self._phone_skin_zone
-        headroom_absent = getattr(telemetry, "thermal_headroom_absent", None)
-        if headroom_absent is not None:
-            self._phone_headroom_absent_counts[headroom_absent] = (
-                self._phone_headroom_absent_counts.get(headroom_absent, 0) + 1
-            )
+        headroom = getattr(telemetry, "thermal_headroom", None)
+        if headroom is None:
+            # A null headroom with no stated reason is still a null headroom --
+            # counting it nowhere would make "always answered" and "never
+            # answered and never said why" the same empty dict.
+            reason = getattr(telemetry, "thermal_headroom_absent", None) or HEADROOM_ABSENT_UNSPECIFIED
+            self._phone_headroom_absent_counts[reason] = self._phone_headroom_absent_counts.get(reason, 0) + 1
         skin_absent = getattr(telemetry, "skin_temp_absent", None)
         if skin_absent is not None:
             self._phone_skin_absent_counts[skin_absent] = self._phone_skin_absent_counts.get(skin_absent, 0) + 1
@@ -577,8 +672,12 @@ class ThermalSampler:
         }
 
     def _latest_jetson_events(self) -> dict[str, Any]:
-        if not self._cooling_ever_readable:
-            return _tick_event_record(RULE_NOT_EVALUABLE, 0, None, (MISSING_COOLING_STATE,))
+        if not self._cooling_fully_readable():
+            return _tick_event_record(
+                RULE_NOT_EVALUABLE, 0, None, (MISSING_COOLING_STATE,),
+                passes_attempted=self._cooling_passes_attempted,
+                passes_readable=self._cooling_passes_readable,
+            )
         status = RULE_FIRED if self._jetson_event_count > 0 else RULE_QUIET
         return _tick_event_record(status, self._jetson_event_count, self._jetson_last_event)
 
@@ -630,8 +729,12 @@ class ThermalSampler:
         }
 
     def _jetson_events_summary(self) -> dict[str, Any]:
-        if not self._cooling_ever_readable:
-            return _summary_event_record(RULE_NOT_EVALUABLE, 0, (MISSING_COOLING_STATE,), by_unit={})
+        if not self._cooling_fully_readable():
+            return _summary_event_record(
+                RULE_NOT_EVALUABLE, 0, (MISSING_COOLING_STATE,), by_unit={},
+                passes_attempted=self._cooling_passes_attempted,
+                passes_readable=self._cooling_passes_readable,
+            )
         status = RULE_FIRED if self._jetson_event_count > 0 else RULE_QUIET
         return _summary_event_record(status, self._jetson_event_count, (), by_unit=self._jetson_events_by_unit)
 
