@@ -1,6 +1,8 @@
 package com.dsrc.phone.sensors
 
 import android.os.PowerManager
+import com.dsrc.transport.Json
+import com.dsrc.transport.JsonValue
 import com.dsrc.transport.PhoneTelemetry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -21,7 +23,16 @@ class TelemetryReporterTest {
         headroom: Double? = 0.42,
         hereCalls: Long = 0,
         hereErrors: Long = 0,
-    ) = TelemetryReporter.Sample(status, headroom, delivered, dropped, hereCalls, hereErrors)
+        statusChanges: Long = 0,
+        lastTransitionFrom: String? = null,
+        lastTransitionTo: String? = null,
+        lastTransitionAtMonoNs: Long? = null,
+    ) = TelemetryReporter.Sample(
+        thermalStatus = status, thermalHeadroom = headroom, delivered = delivered, dropped = dropped,
+        hereCalls = hereCalls, hereErrors = hereErrors,
+        statusChanges = statusChanges, lastTransitionFrom = lastTransitionFrom,
+        lastTransitionTo = lastTransitionTo, lastTransitionAtMonoNs = lastTransitionAtMonoNs,
+    )
 
     private class Recorder {
         val sent = mutableListOf<PhoneTelemetry>()
@@ -101,13 +112,13 @@ class TelemetryReporterTest {
         // encode a NaN on both sides, so a NaN here would not produce a wrong number -- it
         // would fail the whole telemetry frame and take the thermal status down with it.
         // The phone would go quiet about being hot at the moment it was hottest.
-        assertNull(ThermalReader.headroomOrNull(Float.NaN))
-        assertNull(ThermalReader.headroomOrNull(Float.POSITIVE_INFINITY))
-        assertNull(ThermalReader.headroomOrNull(-1.0f))
-        assertNull(ThermalReader.headroomOrNull(1e9f))
-        assertEquals(0.42, ThermalReader.headroomOrNull(0.42f)!!, 1e-6)
+        assertNull(ThermalReader.headroomOrNull(Float.NaN).value)
+        assertNull(ThermalReader.headroomOrNull(Float.POSITIVE_INFINITY).value)
+        assertNull(ThermalReader.headroomOrNull(-1.0f).value)
+        assertNull(ThermalReader.headroomOrNull(1e9f).value)
+        assertEquals(0.42, ThermalReader.headroomOrNull(0.42f).value!!, 1e-6)
         // Above one is throttling, which is exactly the reading worth having.
-        assertEquals(1.5, ThermalReader.headroomOrNull(1.5f)!!, 1e-6)
+        assertEquals(1.5, ThermalReader.headroomOrNull(1.5f).value!!, 1e-6)
     }
 
     @Test
@@ -192,13 +203,13 @@ class TelemetryReporterTest {
             throw NoSuchMethodError("No virtual method getThermalHeadroom(I)F")
         }
 
-        assertNull(onAndroid10)
+        assertNull(onAndroid10.value)
         assertFalse("the call was made on a platform that does not have it", called)
 
         // And it is made where it exists, or the guard would silence a device that works.
         assertEquals(
             0.42,
-            ThermalReader.headroomIfSupported(sdkInt = 30) { 0.42f }!!,
+            ThermalReader.headroomIfSupported(sdkInt = 30) { 0.42f }.value!!,
             1e-6,
         )
 
@@ -210,8 +221,8 @@ class TelemetryReporterTest {
             android.os.Build.VERSION_CODES.R,
             30,
         )
-        assertNull(ThermalReader.headroomIfSupported(sdkInt = 29) { 0.42f })
-        assertNotNull(ThermalReader.headroomIfSupported(sdkInt = 30) { 0.42f })
+        assertNull(ThermalReader.headroomIfSupported(sdkInt = 29) { 0.42f }.value)
+        assertNotNull(ThermalReader.headroomIfSupported(sdkInt = 30) { 0.42f }.value)
     }
 
     @Test
@@ -253,6 +264,57 @@ class TelemetryReporterTest {
 
         assertEquals(landed.stats.reports, refused.stats.reports)
         assertNotEquals(landed.stats.delivered, refused.stats.delivered)
+    }
+
+    @Test
+    fun `the reported status is the poll, not a watcher's cached transition`() {
+        // The direction test for this task's one behaviour change. A `Sample` can carry a
+        // transition to `severe` (what `ThermalStatusWatcher` last observed) alongside a
+        // `thermalStatus` of `nominal` (what `power.currentThermalStatus` read on this same
+        // poll) -- and the frame must say `nominal`, because `thermalStatus` is the one
+        // field the Jetson's `_thermal_scale` reads. If the listener's value ever reached
+        // that field instead, this task would have become a rate change with no measured
+        // basis, which is exactly what it is not supposed to be.
+        val (r, recorder) = reporter(
+            listOf(
+                sample(status = "nominal"),
+                sample(
+                    status = "nominal", statusChanges = 1,
+                    lastTransitionFrom = "nominal", lastTransitionTo = "severe", lastTransitionAtMonoNs = 42L,
+                ),
+            )
+        )
+        r.report()
+        assertTrue(r.report())
+
+        val sent = recorder.sent.single()
+        assertEquals("nominal", sent.thermalStatus)
+        // The transition is still carried -- this task adds it, it just cannot move the
+        // field the controller's thermal backoff keys on.
+        assertEquals(1L, sent.thermalStatusChanges)
+        assertEquals("severe", sent.thermalChangeTo)
+    }
+
+    @Test
+    fun `a non-finite value never reaches the frame`() {
+        // None of the six fields this task adds are floating point -- two are monotone
+        // counts/timestamps (Long) and four are closed-set reason strings -- so there is no
+        // new NaN-prone path to guard beyond the one this class already had. Reasserted
+        // here rather than assumed, because `thermalHeadroom`'s own guard is exactly the
+        // failure mode this task's whole absent-reason design exists to explain rather than
+        // hide: a NaN would not produce a wrong number, it would fail canonical JSON and
+        // take the whole frame -- transition fields included -- down with it.
+        val telemetry = PhoneTelemetry(
+            captureMonoNs = 0, thermalStatus = "nominal", thermalHeadroom = Double.NaN,
+            achieved = mapOf("camera_hz" to 0.0, "gps_hz" to 0.0, "imu_hz" to 0.0, "here_hz" to 0.0),
+            dropped = mapOf("camera" to 0L, "gps" to 0L, "imu" to 0L, "here" to 0L),
+            hereCalls = 0, hereErrors = 0,
+            thermalStatusChanges = 1, thermalChangeFrom = "nominal", thermalChangeTo = "severe",
+            thermalChangeAtMonoNs = 42L,
+        )
+        val extensions = telemetry.toExtensions()
+        val encoded = Json.encode(JsonValue.Obj(extensions))
+        assertFalse("a bare NaN token must never reach the wire", encoded.contains("NaN"))
     }
 
 }

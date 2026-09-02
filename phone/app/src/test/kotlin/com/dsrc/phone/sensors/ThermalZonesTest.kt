@@ -34,7 +34,7 @@ class ThermalZonesTest {
     @Test
     fun `a millidegree reading becomes degrees`() {
         zone(0, "quiet_therm", "28926")
-        val reading = ThermalZones(root).read()
+        val reading = ThermalZones(root).read().reading
 
         assertEquals(28.926, reading!!.celsius, 1e-9)
         assertEquals("quiet_therm", reading.zone)
@@ -46,7 +46,7 @@ class ThermalZonesTest {
         // but the convention is not universally honoured. 31 is 31 C, not 0.031 C.
         zone(0, "quiet_therm", "31")
 
-        assertEquals(31.0, ThermalZones(root).read()!!.celsius, 1e-9)
+        assertEquals(31.0, ThermalZones(root).read().reading!!.celsius, 1e-9)
     }
 
     @Test
@@ -58,7 +58,7 @@ class ThermalZonesTest {
         zone(1, "msm_therm", "30306")
         zone(2, "skin", "28578")
 
-        val reading = ThermalZones(root).read()
+        val reading = ThermalZones(root).read().reading
         assertEquals("skin", reading!!.zone)
         assertEquals(28.578, reading.celsius, 1e-9)
     }
@@ -73,7 +73,7 @@ class ThermalZonesTest {
         zone(0, "quiet_therm", "28926")
         zone(1, "xo_therm", "30112")
 
-        val reading = ThermalZones(root).read()
+        val reading = ThermalZones(root).read().reading
         assertEquals("xo_therm", reading!!.zone)
         assertEquals(30.112, reading.celsius, 1e-9)
     }
@@ -103,11 +103,35 @@ class ThermalZonesTest {
     }
 
     @Test
+    fun `celsiusOf matches the shared table also stated in Python`() {
+        // The same literal table lives in test_thermal.py's MAGNITUDE_TABLE. One copy read
+        // by both suites is not possible across languages, so a divergence between the two
+        // ports shows as two different expected lists in review rather than a shared
+        // fixture silently drifting.
+        val table = listOf(
+            "47500" to 47.5, "47" to 47.0, "999" to null,
+            "-40000" to -40.0, "125000" to 125.0,
+            "-40001" to null, "125001" to null,
+            "100000000" to null, "-2000000" to null,
+        )
+        for ((raw, expected) in table) {
+            val result = ThermalZones.celsiusOf(raw)
+            if (expected == null) {
+                assertNull("celsiusOf($raw)", result)
+            } else {
+                assertEquals("celsiusOf($raw)", expected, result!!, 1e-9)
+            }
+        }
+    }
+
+    @Test
     fun `a missing root is null, not an exception`() {
         // The expected outcome on a handset whose SELinux policy hides the directory. A
         // throw here would come out of the telemetry sample and take the whole report with
         // it, which is exactly the failure the headroom NaN guard exists to prevent.
-        assertNull(ThermalZones(File(root, "nothing-here")).read())
+        val result = ThermalZones(File(root, "nothing-here")).read()
+        assertNull(result.reading)
+        assertEquals(ThermalZones.ABSENT_NO_ZONES_LISTED, result.absentReason)
     }
 
     @Test
@@ -118,7 +142,7 @@ class ThermalZonesTest {
         zone(0, "skin", null)
         zone(1, "quiet_therm", "28926")
 
-        val reading = ThermalZones(root).read()
+        val reading = ThermalZones(root).read().reading
         assertEquals("quiet_therm", reading!!.zone)
     }
 
@@ -129,7 +153,7 @@ class ThermalZonesTest {
         zone(0, "skin", "100000000")
         zone(1, "quiet_therm", "28926")
 
-        assertEquals("quiet_therm", ThermalZones(root).read()!!.zone)
+        assertEquals("quiet_therm", ThermalZones(root).read().reading!!.zone)
     }
 
     @Test
@@ -139,7 +163,9 @@ class ThermalZonesTest {
         zone(0, "cpuss-0-usr", "33000")
         zone(1, "gpu-usr", "30700")
 
-        assertNull(ThermalZones(root).read())
+        val result = ThermalZones(root).read()
+        assertNull(result.reading)
+        assertEquals(ThermalZones.ABSENT_NO_PREFERRED_ZONE, result.absentReason)
     }
 
     @Test
@@ -148,10 +174,10 @@ class ThermalZonesTest {
         // a cached first sample would report a cold phone for the whole drive.
         zone(0, "skin", "28000")
         val zones = ThermalZones(root)
-        assertEquals(28.0, zones.read()!!.celsius, 1e-9)
+        assertEquals(28.0, zones.read().reading!!.celsius, 1e-9)
 
         File(File(root, "thermal_zone0"), "temp").writeText("41000\n")
-        assertEquals(41.0, zones.read()!!.celsius, 1e-9)
+        assertEquals(41.0, zones.read().reading!!.celsius, 1e-9)
     }
 
     @Test
@@ -161,10 +187,10 @@ class ThermalZonesTest {
         // Pinned by its consequence: a zone appearing after the first read is not picked
         // up, which is only true if the search really did not run again.
         val zones = ThermalZones(root)
-        assertNull(zones.read())
+        assertNull(zones.read().reading)
 
         zone(0, "skin", "28000")
-        assertNull("the zone search ran a second time", zones.read())
+        assertNull("the zone search ran a second time", zones.read().reading)
     }
 
     @Test
@@ -177,9 +203,53 @@ class ThermalZonesTest {
                 File(it, "type").writeText(name)
                 File(it, "temp").writeText("30000")
             }
-            assertEquals(name, ThermalZones(fresh).read()?.zone)
+            assertEquals(name, ThermalZones(fresh).read().reading?.zone)
             fresh.deleteRecursively()
         }
         assertTrue(ThermalZones.PREFERRED.isNotEmpty())
+    }
+
+    // -- each skin-temperature absence carries its own reason -----------------
+
+    @Test
+    fun `no zones listed is its own reason`() {
+        val result = ThermalZones(File(root, "nowhere")).read()
+        assertNull(result.reading)
+        assertEquals(ThermalZones.ABSENT_NO_ZONES_LISTED, result.absentReason)
+    }
+
+    @Test
+    fun `no preferred zone is its own reason`() {
+        zone(0, "cpuss-0-usr", "33000")
+        val result = ThermalZones(root).read()
+        assertNull(result.reading)
+        assertEquals(ThermalZones.ABSENT_NO_PREFERRED_ZONE, result.absentReason)
+    }
+
+    @Test
+    fun `unreadable is its own reason, distinct from never having listed a candidate`() {
+        // The zone resolves once (it read a plausible value during the search), then its
+        // `temp` file stops answering -- the SELinux-revoked-mid-drive case, not the
+        // never-had-a-candidate case above.
+        zone(0, "skin", "28000")
+        val zones = ThermalZones(root)
+        assertNotNull(zones.read().reading)
+
+        File(File(root, "thermal_zone0"), "temp").delete()
+        val result = zones.read()
+        assertNull(result.reading)
+        assertEquals(ThermalZones.ABSENT_UNREADABLE, result.absentReason)
+    }
+
+    @Test
+    fun `implausible is its own reason, distinct from unreadable`() {
+        zone(0, "skin", "28000")
+        val zones = ThermalZones(root)
+        assertNotNull(zones.read().reading)
+
+        File(File(root, "thermal_zone0"), "temp").writeText("100000000")
+        val result = zones.read()
+        assertNull(result.reading)
+        assertEquals(ThermalZones.ABSENT_IMPLAUSIBLE, result.absentReason)
     }
 }

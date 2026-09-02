@@ -29,6 +29,7 @@ import com.dsrc.phone.sensors.HerePipeline
 import com.dsrc.phone.sensors.HttpHereClient
 import com.dsrc.phone.sensors.TelemetryReporter
 import com.dsrc.phone.sensors.ThermalReader
+import com.dsrc.phone.sensors.ThermalStatusWatcher
 import com.dsrc.phone.sensors.ThermalZones
 import com.dsrc.phone.sensors.ImuPipeline
 import com.dsrc.phone.sensors.ImuSource
@@ -71,6 +72,7 @@ class SensingService : LifecycleService() {
     private var imuPipeline: ImuPipeline? = null
     private var herePipeline: HerePipeline? = null
     private var telemetryReporter: TelemetryReporter? = null
+    private var thermalWatcher: ThermalStatusWatcher? = null
     private var sessionLog: SessionLog? = null
 
     /**
@@ -462,6 +464,16 @@ class SensingService : LifecycleService() {
         // report -- and a handset that gained or lost readable zones since the last drive
         // is re-examined rather than trusted from a previous process.
         val thermalZones = ThermalZones()
+        // The one behaviour change in this task: registering this listener. Everything it
+        // observes is additive record-keeping -- `thermalStatus` below keeps reading
+        // `power.currentThermalStatus` on its own poll, never this watcher's cached value.
+        val watcher = ThermalStatusWatcher(
+            register = power::addThermalStatusListener,
+            unregister = power::removeThermalStatusListener,
+            monoClock = SystemClock::elapsedRealtimeNanos,
+        )
+        thermalWatcher = watcher
+        watcher.start()
         val reporter = TelemetryReporter(
             monoClock = SystemClock::elapsedRealtimeNanos,
             sample = {
@@ -473,11 +485,19 @@ class SensingService : LifecycleService() {
                 // Read every report rather than once: the zone is resolved once inside,
                 // but the temperature is the thing being trended and is the whole point.
                 val skin = thermalZones.read()
+                val headroom = ThermalReader.headroomFrom(power)
+                val transition = watcher.lastTransition
                 TelemetryReporter.Sample(
                     thermalStatus = ThermalReader.statusName(power.currentThermalStatus),
-                    thermalHeadroom = ThermalReader.headroomFrom(power),
-                    skinTempC = skin?.celsius,
-                    skinTempZone = skin?.zone,
+                    thermalHeadroom = headroom.value,
+                    headroomAbsent = headroom.absentReason,
+                    skinTempC = skin.reading?.celsius,
+                    skinTempZone = skin.reading?.zone,
+                    skinTempAbsent = skin.absentReason,
+                    statusChanges = watcher.changesCount,
+                    lastTransitionFrom = transition?.fromStatus,
+                    lastTransitionTo = transition?.toStatus,
+                    lastTransitionAtMonoNs = transition?.atMonoNs,
                     // What each modality actually put on the wire.
                     delivered = mapOf(
                         "camera_hz" to cameraSent.sent,
@@ -710,6 +730,7 @@ class SensingService : LifecycleService() {
             release("imu pipeline") { imuPipeline?.stop() }
             release("here pipeline") { herePipeline?.stop() }
             release("telemetry") { telemetryReporter?.stop() }
+            release("thermal watcher") { thermalWatcher?.stop() }
             release("frame sender") { frameSender?.stop() }
             release("encoder") { encodeExecutor?.shutdown() }
             // Stats *after* the stops, and round 5 is why. `abandoned`, `refusedStopped`
@@ -793,6 +814,7 @@ class SensingService : LifecycleService() {
             liveHere = null
             telemetryReporter = null
             liveTelemetry = null
+            thermalWatcher = null
             sessionLog = null
             liveLog = null
             liveImu = null
@@ -817,7 +839,7 @@ class SensingService : LifecycleService() {
                 cameraSource, gpsSource, imuPipeline, imuSource, herePipeline,
                 liveHere, telemetryReporter, liveTelemetry, sessionLog, liveLog,
                 liveImu, liveImuSource, pipeline, gpsPipeline, frameSender,
-                encodeExecutor, link,
+                encodeExecutor, link, thermalWatcher,
             ).size
         }
     }

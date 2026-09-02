@@ -25,7 +25,7 @@ object ThermalReader {
     }
 
     /**
-     * Headroom, or null when the platform will not say.
+     * Headroom, or a named reason there is none.
      *
      * `getThermalHeadroom` returns `NaN` when it has no estimate — too soon after boot, too
      * soon after the last call, or unsupported on the device. `thermal_headroom` is nullable
@@ -33,14 +33,21 @@ object ThermalReader {
      * useless: canonical JSON refuses to encode a NaN on both sides, so a NaN here would not
      * produce a wrong number, it would fail the whole telemetry frame and take the thermal
      * status down with it — the phone would go quiet about being hot at the moment it was
-     * hottest.
+     * hottest. [Headroom.absentReason] is what turns "the platform never answers on this
+     * device" from prose in a docstring into a measured count.
      *
      * A negative or absurd value goes the same way. The API documents `[0, 1]` with values
      * above 1 meaning throttling, and anything outside a generous band is the platform
      * misbehaving rather than a reading.
      */
+    data class Headroom(val value: Double?, val absentReason: String?)
+
+    const val REASON_API_TOO_OLD = "api_too_old"
+    const val REASON_NOT_A_NUMBER = "not_a_number"
+    const val REASON_OUT_OF_BAND = "out_of_band"
+
     /**
-     * Read the headroom from the platform, or null where the platform has no such call.
+     * Read the headroom from the platform, or the reason there is none.
      *
      * `getThermalHeadroom` is API 30 and this app's `minSdk` is 29 — which is a guess about
      * the handset, not a device we have. Called unguarded it raises `NoSuchMethodError` on
@@ -49,13 +56,15 @@ object ThermalReader {
      * rates, no drops, and nothing logged. The status is API 29 and would have been fine on
      * its own, which is what makes losing it to the headroom call the wrong trade.
      */
-    fun headroomFrom(power: PowerManager): Double? {
+    fun headroomFrom(power: PowerManager): Headroom {
         // The guard written where lint can read it. Expressed through `headroomIfSupported`
         // instead, lint sees only a call behind a lambda and an `sdkInt` parameter it cannot
         // trace, and reports the unguarded-call error anyway -- which would mean either
         // suppressing the one check that caught this defect, or losing it. The two are kept
         // in step by a test that asserts they agree at the boundary.
-        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return null
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+            return Headroom(null, REASON_API_TOO_OLD)
+        }
         return headroomOrNull(power.getThermalHeadroom(FORECAST_SECONDS))
     }
 
@@ -71,8 +80,8 @@ object ThermalReader {
      * unguarded. The duplication is two identical comparisons against one constant, and a
      * test asserts they agree at the boundary so they cannot drift apart.
      */
-    internal fun headroomIfSupported(sdkInt: Int, read: () -> Float): Double? {
-        if (sdkInt < android.os.Build.VERSION_CODES.R) return null
+    internal fun headroomIfSupported(sdkInt: Int, read: () -> Float): Headroom {
+        if (sdkInt < android.os.Build.VERSION_CODES.R) return Headroom(null, REASON_API_TOO_OLD)
         return headroomOrNull(read())
     }
 
@@ -84,11 +93,11 @@ object ThermalReader {
      */
     const val FORECAST_SECONDS = 0
 
-    fun headroomOrNull(raw: Float): Double? {
+    fun headroomOrNull(raw: Float): Headroom {
         val value = raw.toDouble()
-        if (!value.isFinite()) return null
-        if (value < 0.0 || value > MAX_PLAUSIBLE_HEADROOM) return null
-        return value
+        if (!value.isFinite()) return Headroom(null, REASON_NOT_A_NUMBER)
+        if (value < 0.0 || value > MAX_PLAUSIBLE_HEADROOM) return Headroom(null, REASON_OUT_OF_BAND)
+        return Headroom(value, null)
     }
 
     /**

@@ -31,11 +31,39 @@ data class PhoneTelemetry(
     val skinTempC: Double? = null,
     /** Which kernel zone [skinTempC] came from. Vendor-named, so it identifies the sensor. */
     val skinTempZone: String? = null,
+    /**
+     * Why [thermalHeadroom] is null, when it is: one of `api_too_old`, `not_a_number` (the
+     * platform's own catch-all for "too soon after boot, too soon after the last call, or
+     * unsupported"), or `out_of_band`. Null exactly when [thermalHeadroom] has a value -- a
+     * value needs no excuse.
+     */
+    val thermalHeadroomAbsent: String? = null,
+    /** As [thermalHeadroomAbsent], for [skinTempC]: `no_zones_listed`, `no_preferred_zone`,
+     * `unreadable`, or `implausible`. */
+    val skinTempAbsent: String? = null,
+    /**
+     * Transitions the phone's thermal-status listener has counted this service run,
+     * independent of [thermalStatus]'s own 1 Hz poll. Sent by every phone build that knows
+     * this field exists, even when it is zero -- an older build omits it, which is the one
+     * way it is absent here.
+     */
+    val thermalStatusChanges: Long = 0,
+    /** The most recent transition's endpoints and when the phone observed it, on the
+     * phone's own clock. All three null before the first transition. */
+    val thermalChangeFrom: String? = null,
+    val thermalChangeTo: String? = null,
+    val thermalChangeAtMonoNs: Long? = null,
 ) {
     fun toExtensions(): Map<String, JsonValue> = buildMap {
         putAll(base())
         skinTempC?.let { put("skin_temp_c", JsonValue.Real(it)) }
         skinTempZone?.let { put("skin_temp_zone", JsonValue.Text(it)) }
+        thermalHeadroomAbsent?.let { put("thermal_headroom_absent", JsonValue.Text(it)) }
+        skinTempAbsent?.let { put("skin_temp_absent", JsonValue.Text(it)) }
+        put("thermal_status_changes", JsonValue.Num(thermalStatusChanges))
+        thermalChangeFrom?.let { put("thermal_change_from", JsonValue.Text(it)) }
+        thermalChangeTo?.let { put("thermal_change_to", JsonValue.Text(it)) }
+        thermalChangeAtMonoNs?.let { put("thermal_change_at_mono_ns", JsonValue.Num(it)) }
     }
 
     private fun base(): Map<String, JsonValue> = mapOf(
@@ -67,6 +95,12 @@ data class PhoneTelemetry(
                     Fields.absentableNumber(extensions, "skin_temp_c"),
                 ),
                 skinTempZone = Fields.absentableString(extensions, "skin_temp_zone"),
+                thermalHeadroomAbsent = Fields.absentableString(extensions, "thermal_headroom_absent"),
+                skinTempAbsent = Fields.absentableString(extensions, "skin_temp_absent"),
+                thermalStatusChanges = Fields.absentableInt(extensions, "thermal_status_changes") ?: 0,
+                thermalChangeFrom = Fields.absentableString(extensions, "thermal_change_from"),
+                thermalChangeTo = Fields.absentableString(extensions, "thermal_change_to"),
+                thermalChangeAtMonoNs = Fields.absentableInt(extensions, "thermal_change_at_mono_ns"),
                 achieved = Fields.requireNestedNumbers(extensions, "achieved", RateCommand.RATE_KEYS),
                 dropped = Fields.requireNestedCounts(extensions, "dropped", DROP_KEYS),
                 hereCalls = Fields.requireCount(extensions, "here_calls"),

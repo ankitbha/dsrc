@@ -35,40 +35,48 @@ class ThermalZones(private val root: File = File(DEFAULT_ROOT)) {
     /** A temperature and the sensor it came from. Neither is useful without the other. */
     data class Reading(val celsius: Double, val zone: String)
 
+    /** What [read] returns: a reading, or the reason there is none. */
+    data class Result(val reading: Reading?, val absentReason: String?)
+
     private var resolved: Zone? = null
+    private var resolvedAbsentReason: String? = null
     private var searched = false
 
     private data class Zone(val temperature: File, val name: String)
+    private data class SearchResult(val zone: Zone?, val absentReason: String?)
 
     /**
-     * The current temperature, or null if this device will not give one.
+     * The current temperature, or the reason this device will not give one.
      *
      * The zone is resolved once and then reused. Rescanning would mean stat-ing sixty-odd
      * directories every second to answer a question whose answer cannot change, and a
      * device that has no usable zone would pay that cost forever to keep learning it has
-     * none -- so a failed search is remembered too.
+     * none -- so a failed search, and why it failed, is remembered too.
      */
-    fun read(): Reading? {
-        val zone = resolve() ?: return null
-        val raw = readTrimmed(zone.temperature) ?: return null
-        val celsius = celsiusOf(raw) ?: return null
-        return Reading(celsius, zone.name)
+    fun read(): Result {
+        val (zone, searchReason) = resolve()
+        if (zone == null) return Result(null, searchReason)
+        val raw = readTrimmed(zone.temperature) ?: return Result(null, ABSENT_UNREADABLE)
+        val celsius = celsiusOf(raw) ?: return Result(null, ABSENT_IMPLAUSIBLE)
+        return Result(Reading(celsius, zone.name), null)
     }
 
-    private fun resolve(): Zone? {
-        if (searched) return resolved
+    private fun resolve(): Pair<Zone?, String?> {
+        if (searched) return resolved to resolvedAbsentReason
         searched = true
-        resolved = search()
-        Log.i(TAG, "thermal zone: ${resolved?.name ?: "none readable"}")
-        return resolved
+        val result = search()
+        resolved = result.zone
+        resolvedAbsentReason = result.absentReason
+        Log.i(TAG, "thermal zone: ${resolved?.name ?: "none readable (${resolvedAbsentReason})"}")
+        return resolved to resolvedAbsentReason
     }
 
-    private fun search(): Zone? {
+    private fun search(): SearchResult {
         val directories = try {
             root.listFiles { file -> file.name.startsWith("thermal_zone") }
         } catch (e: SecurityException) {
             null
-        } ?: return null
+        } ?: return SearchResult(null, ABSENT_NO_ZONES_LISTED)
 
         val byName = mutableMapOf<String, Zone>()
         for (directory in directories) {
@@ -81,9 +89,9 @@ class ThermalZones(private val root: File = File(DEFAULT_ROOT)) {
             byName.putIfAbsent(name, Zone(temperature, name))
         }
         for (candidate in PREFERRED) {
-            byName[candidate]?.let { return it }
+            byName[candidate]?.let { return SearchResult(it, null) }
         }
-        return null
+        return SearchResult(null, ABSENT_NO_PREFERRED_ZONE)
     }
 
     private fun readTrimmed(file: File): String? = try {
@@ -97,6 +105,20 @@ class ThermalZones(private val root: File = File(DEFAULT_ROOT)) {
     companion object {
         const val DEFAULT_ROOT = "/sys/class/thermal"
         private const val TAG = "ThermalZones"
+
+        /**
+         * Why [read] found nothing, closed: the four existing null returns, named where each
+         * already happens. `ABSENT_NO_ZONES_LISTED` is the root not listing at all
+         * (`SecurityException` or absent); `ABSENT_NO_PREFERRED_ZONE` is a root that listed
+         * but named nothing [PREFERRED] recognises with a currently plausible reading;
+         * `ABSENT_UNREADABLE` is the resolved zone's `temp` file failing to read on this
+         * particular call; `ABSENT_IMPLAUSIBLE` is a `temp` file that read but did not parse
+         * or fell outside the plausible band.
+         */
+        const val ABSENT_NO_ZONES_LISTED = "no_zones_listed"
+        const val ABSENT_NO_PREFERRED_ZONE = "no_preferred_zone"
+        const val ABSENT_UNREADABLE = "unreadable"
+        const val ABSENT_IMPLAUSIBLE = "implausible"
 
         /**
          * Zone types to prefer, best first.

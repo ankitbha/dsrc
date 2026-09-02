@@ -98,8 +98,11 @@ class TypedMessagesTest {
             here().toExtensions().keys,
         )
         assertEquals(
+            // `thermal_status_changes` rides along on every frame, even a plain sample with
+            // no transition yet: it is the one new field this task never conditionally
+            // omits, so its absence on the wire means only "an older build sent this".
             setOf("t_capture_mono_ns", "thermal_status", "thermal_headroom", "achieved",
-                "dropped", "here_calls", "here_errors"),
+                "dropped", "here_calls", "here_errors", "thermal_status_changes"),
             telemetry().toExtensions().keys,
         )
         assertEquals(
@@ -361,6 +364,82 @@ class TypedMessagesTest {
         assertFailsWith<MessageError> {
             PhoneTelemetry.fromWire(
                 telemetry().toExtensions() + mapOf("skin_temp_zone" to JsonValue.Num(5)),
+                ByteArray(0),
+            )
+        }
+    }
+
+    @Test
+    fun `a phone with no absence reasons and no transition yet is still accepted`() {
+        // Absent-tolerant on the same terms as skin_temp_c: an older build that has never
+        // heard of these six fields must not have its telemetry refused for omitting them.
+        val extensions = telemetry().toExtensions()
+        assertFalse("thermal_headroom_absent" in extensions)
+        assertFalse("skin_temp_absent" in extensions)
+        assertFalse("thermal_change_from" in extensions)
+        assertFalse("thermal_change_to" in extensions)
+        assertFalse("thermal_change_at_mono_ns" in extensions)
+
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+        assertNull(decoded.thermalHeadroomAbsent)
+        assertNull(decoded.skinTempAbsent)
+        assertNull(decoded.thermalChangeFrom)
+        assertNull(decoded.thermalChangeTo)
+        assertNull(decoded.thermalChangeAtMonoNs)
+    }
+
+    @Test
+    fun `thermal_status_changes is sent even when it is zero`() {
+        // The one field of the six that is never conditionally omitted by this task's own
+        // code: a phone build that knows the field exists always sends it, so its absence
+        // on the wire means only one thing -- an older build.
+        val extensions = telemetry().toExtensions()
+        assertEquals(JsonValue.Num(0), extensions["thermal_status_changes"])
+    }
+
+    @Test
+    fun `an absence reason survives the wire in its own field`() {
+        val extensions = telemetry().copy(
+            thermalHeadroom = null, thermalHeadroomAbsent = "not_a_number",
+            skinTempC = null, skinTempAbsent = "unreadable",
+        ).toExtensions()
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+
+        assertEquals("not_a_number", decoded.thermalHeadroomAbsent)
+        assertEquals("unreadable", decoded.skinTempAbsent)
+    }
+
+    @Test
+    fun `a transition survives the wire in its own three fields`() {
+        val extensions = telemetry().copy(
+            thermalStatusChanges = 3,
+            thermalChangeFrom = "nominal", thermalChangeTo = "severe", thermalChangeAtMonoNs = 123_456L,
+        ).toExtensions()
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+
+        assertEquals(3L, decoded.thermalStatusChanges)
+        assertEquals("nominal", decoded.thermalChangeFrom)
+        assertEquals("severe", decoded.thermalChangeTo)
+        assertEquals(123_456L, decoded.thermalChangeAtMonoNs)
+    }
+
+    @Test
+    fun `a malformed absence reason or transition field is refused rather than shrugged at`() {
+        assertFailsWith<MessageError> {
+            PhoneTelemetry.fromWire(
+                telemetry().toExtensions() + mapOf("thermal_headroom_absent" to JsonValue.Num(1)),
+                ByteArray(0),
+            )
+        }
+        assertFailsWith<MessageError> {
+            PhoneTelemetry.fromWire(
+                telemetry().toExtensions() + mapOf("thermal_status_changes" to JsonValue.Text("three")),
+                ByteArray(0),
+            )
+        }
+        assertFailsWith<MessageError> {
+            PhoneTelemetry.fromWire(
+                telemetry().toExtensions() + mapOf("thermal_change_at_mono_ns" to JsonValue.Text("soon")),
                 ByteArray(0),
             )
         }

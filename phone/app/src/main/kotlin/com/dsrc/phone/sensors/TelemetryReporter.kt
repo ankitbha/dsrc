@@ -43,6 +43,18 @@ class TelemetryReporter(
          */
         val skinTempC: Double? = null,
         val skinTempZone: String? = null,
+        /** Why [thermalHeadroom] is null, or null when it has a value. */
+        val headroomAbsent: String? = null,
+        /** Why [skinTempC] is null, or null when it has a value. */
+        val skinTempAbsent: String? = null,
+        /** [ThermalStatusWatcher.changesCount] as of this sample -- independent of
+         * [thermalStatus], which is this same sample's own poll. */
+        val statusChanges: Long = 0,
+        /** [ThermalStatusWatcher.lastTransition]'s three parts, or all null before the
+         * first transition. */
+        val lastTransitionFrom: String? = null,
+        val lastTransitionTo: String? = null,
+        val lastTransitionAtMonoNs: Long? = null,
     )
 
     /**
@@ -142,6 +154,12 @@ class TelemetryReporter(
                 thermalHeadroom = reading.thermalHeadroom,
                 skinTempC = reading.skinTempC,
                 skinTempZone = reading.skinTempZone,
+                thermalHeadroomAbsent = reading.headroomAbsent,
+                skinTempAbsent = reading.skinTempAbsent,
+                thermalStatusChanges = reading.statusChanges,
+                thermalChangeFrom = reading.lastTransitionFrom,
+                thermalChangeTo = reading.lastTransitionTo,
+                thermalChangeAtMonoNs = reading.lastTransitionAtMonoNs,
                 achieved = achieved,
                 dropped = PhoneTelemetry.DROP_KEYS.associateWith { reading.dropped[it] ?: 0L },
                 hereCalls = reading.hereCalls,
