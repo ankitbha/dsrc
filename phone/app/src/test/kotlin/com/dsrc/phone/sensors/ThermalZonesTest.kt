@@ -110,6 +110,7 @@ class ThermalZonesTest {
         // fixture silently drifting.
         val table = listOf(
             "47500" to 47.5, "47" to 47.0, "999" to null,
+            "1000" to 1.0, "-1000" to -1.0,
             "-40000" to -40.0, "125000" to 125.0,
             "-40001" to null, "125001" to null,
             "100000000" to null, "-2000000" to null,
