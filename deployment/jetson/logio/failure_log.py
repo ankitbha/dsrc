@@ -119,6 +119,16 @@ PHONE_OFFLINE_KINDS = frozenset({
 #: being typed as a constant seconds value.
 QUIET_PASSES_TO_CLOSE = 3
 
+#: The two sources with no counter of their own to scan: `camera.blind_ticks`
+#: and `pipeline.exception` are reported entirely through direct calls
+#: (`note_no_frame`, `note_pipeline_exception`). Their accessors always
+#: return `readable=True` with an empty `by_reason` -- there is nothing for a
+#: scan pass to read -- so `_process_source` must not run its movement or
+#: quiet-streak logic against them; only a direct call or (for
+#: `camera.blind_ticks`) `_check_pseudo_source_quiet`'s own timer may open or
+#: close their episodes.
+PSEUDO_SOURCES = frozenset({"camera.blind_ticks", "pipeline.exception"})
+
 #: The episode cap per source (D10), `phone_link.refusals`' precedent verbatim.
 MAX_EPISODES_PER_SOURCE = 100
 
@@ -547,6 +557,14 @@ def _read_phone_dropped(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
+    if _session_stats_or_none(phone) is None:
+        # `PhoneLink.telemetry` is cleared on a rebind (`_rebind`), not on
+        # session loss -- so while the link is down, it still holds the last
+        # report received before the outage. Reading it without this gate
+        # reports the phone's drop counters as current, unchanged, for the
+        # whole outage, which is exactly the recovery `link.down` exists to
+        # let every phone-side source refuse to claim.
+        return SourceSnapshot(readable=False, missing=MISSING_NO_SESSION)
     telemetry = phone.telemetry
     if telemetry is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_TELEMETRY)
@@ -559,6 +577,10 @@ def _read_phone_here_errors(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
+    if _session_stats_or_none(phone) is None:
+        # See `_read_phone_dropped`: the same stale-snapshot hazard applies
+        # to `here_errors`, read off the same `telemetry` object.
+        return SourceSnapshot(readable=False, missing=MISSING_NO_SESSION)
     telemetry = phone.telemetry
     if telemetry is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_TELEMETRY)
@@ -1124,9 +1146,27 @@ class FailureSampler:
             return
 
         st.last_readable = True
-        st.last_missing = None
+        # `last_missing` is not reset here: it names the reason the most
+        # recent UNREADABLE pass gave, not the current pass. A source read
+        # as `not_evaluable` at some point mid-run and readable again by
+        # teardown must still report what was missing -- clearing it on
+        # every readable pass left every such row with an empty `missing`.
         st.passes_readable += 1
         st.last_readable_t_mono = now
+
+        if source.name in PSEUDO_SOURCES:
+            # `camera.blind_ticks` and `pipeline.exception` report through
+            # `note_no_frame` / `note_pipeline_exception`, not through a
+            # counter this pass can see -- `snap.by_reason` is always empty
+            # by construction. Falling through to the movement logic below
+            # would read that emptiness as "quiet" every pass, and once
+            # either source's episode is open (opened by a direct call),
+            # this pass's own quiet streak would close it as `recovered`
+            # after `quiet_passes_to_close` passes -- regardless of whether
+            # direct calls kept arriving between scans. Only the dedicated
+            # timer (`_check_pseudo_source_quiet`) or a direct call may
+            # close these two sources' episodes.
+            return
 
         if source.scope in ("session", "mixed") and snap.session_id is not None:
             if st.baseline_session_id is not None and snap.session_id != st.baseline_session_id:
@@ -1144,6 +1184,11 @@ class FailureSampler:
         active = False
         delta = 0
         reason: str | None = None
+        #: Per-key deltas for a cumulative, multi-reason source (D5): every
+        #: key that moved this pass, credited its own movement. `None` for a
+        #: predicate source, where `by_reason_total` is credited by `reason`
+        #: alone below, as before.
+        reason_deltas: dict[str, int] | None = None
         if source.cumulative:
             total = sum(snap.by_reason.values())
             delta = total - st.baseline_total
@@ -1160,7 +1205,22 @@ class FailureSampler:
             else:
                 if delta > 0:
                     active = True
+                    # `reason` still names the episode, and keeps naming it
+                    # for the episode's whole life once open (D9) -- but the
+                    # source's own `by_reason_total` is a different question,
+                    # "how many times did each reason occur", and crediting
+                    # only the largest-moving key silently drops any other
+                    # key that moved in the same pass. `wire.decode_errors`,
+                    # `phone.dropped`, `link.session_end` and
+                    # `acceptor.accept_errors` are cumulative and
+                    # multi-reason exactly like `clock.proxied`, so this is
+                    # not a `clock.proxied`-only fix.
                     reason = _dominant_reason(snap.by_reason, st.baseline_by_reason)
+                    reason_deltas = {
+                        key: value - st.baseline_by_reason.get(key, 0)
+                        for key, value in snap.by_reason.items()
+                    }
+                    reason_deltas = {k: v for k, v in reason_deltas.items() if v}
                 st.baseline_total = total
                 st.baseline_by_reason = dict(snap.by_reason)
         else:
@@ -1171,7 +1231,11 @@ class FailureSampler:
 
         if active and reason is not None:
             st.run_total += delta
-            st.by_reason_total[reason] = st.by_reason_total.get(reason, 0) + delta
+            if reason_deltas:
+                for key, value in reason_deltas.items():
+                    st.by_reason_total[key] = st.by_reason_total.get(key, 0) + value
+            else:
+                st.by_reason_total[reason] = st.by_reason_total.get(reason, 0) + delta
             if st.first_t_mono is None:
                 st.first_t_mono = now
             st.last_t_mono = now
@@ -1317,6 +1381,16 @@ class FailureSampler:
         `break`s: nothing will call this again, so a tick left pending or an
         episode left open by THIS call is resolved right away rather than
         waiting on a quiet timer that assumes more ticks might still arrive.
+
+        Does not touch `passes_attempted` / `passes_readable` -- those count
+        the sampler's own 1 Hz scan passes for every source alike, including
+        this one (`_process_source` still runs its readable bookkeeping for
+        `camera.blind_ticks`, only skipping its movement logic; see
+        `PSEUDO_SOURCES`). Incrementing them here too used to inflate the
+        pair with every direct call, so `passes_attempted` for this one
+        source counted scans plus notifications combined and stopped
+        meaning "how many scan passes watched it" the way it does for every
+        other source.
         """
         with self._lock:
             now = self._now()
@@ -1324,10 +1398,6 @@ class FailureSampler:
             self._blind_ticks_total += 1
             self._blind_last_mono = now
             st = self._state["camera.blind_ticks"]
-            st.passes_attempted += 1
-            st.passes_readable += 1
-            st.last_readable = True
-            st.last_readable_t_mono = now
             source = self._by_name["camera.blind_ticks"]
 
             st.run_total += 1
@@ -1355,16 +1425,20 @@ class FailureSampler:
 
     def note_pipeline_exception(self, exc: BaseException) -> None:
         """`worker()`'s `except BaseException`. Writes one `failure_event`
-        and never swallows the exception -- the caller still re-raises."""
+        and never swallows the exception -- the caller still re-raises.
+
+        Leaves `passes_attempted` / `passes_readable` to the scan pass, for
+        the same reason `note_no_frame` does (see its own docstring):
+        `pipeline.exception` is the other direct-notification pseudo-source,
+        and double-counting here would cost it the same meaning loss D7
+        named for `camera.blind_ticks`.
+        """
         with self._lock:
             now = self._now()
             t_wall = self._wall()
             self._pipeline_exception = type(exc).__name__
             self._pipeline_exception_at_mono = now
             st = self._state["pipeline.exception"]
-            st.passes_attempted += 1
-            st.passes_readable += 1
-            st.last_readable = True
             st.run_total += 1
             reason = type(exc).__name__
             st.by_reason_total[reason] = st.by_reason_total.get(reason, 0) + 1

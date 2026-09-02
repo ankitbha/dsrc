@@ -1194,3 +1194,267 @@ class TestPipelineExceptionIsCumulative:
         by_name = {s.name: s for s in REGISTRY}
         assert by_name["pipeline.exception"].cumulative is True
         assert by_name["pipeline.exception"].cumulative == by_name["camera.blind_ticks"].cumulative
+
+
+# ---------------------------------------------------------------------------
+# D1: a direct-notification pseudo-source's episode is governed by its own
+# timer, never by the generic scan's quiet-streak path.
+# ---------------------------------------------------------------------------
+
+
+class TestPseudoSourceEpisodesAreNotClosedByTheGenericScan:
+    """A continuously blind camera interleaves the tick loop's direct
+    `note_no_frame` calls with the sampler's own independent 1 Hz scan
+    thread. `camera.blind_ticks`' accessor always reports an empty
+    `by_reason` -- there is no counter on the scan path for it to read --
+    so a scan pass used to read that emptiness as one quiet pass, and three
+    of them (the default `quiet_passes_to_close`) closed the episode as
+    `recovered` on a fixed schedule tied to the number of scan passes since
+    it opened, regardless of how many direct calls proved the outage was
+    still live in between. On the real drive, an 82 s outage this way
+    became 21 separate `recovered` episodes instead of one open outage."""
+
+    def _closes(self, s, source_name):
+        return [
+            l for l in s._sink.lines
+            if l.get("type") == "failure_event" and l["phase"] == "close" and l["source"] == source_name
+        ]
+
+    def test_scan_passes_do_not_close_an_open_episode_while_direct_calls_keep_arriving(self):
+        now = [0.0]
+        s = sampler(now=now)
+        now[0] = 0.0
+        s.note_no_frame()  # pending
+        now[0] = 0.2
+        s.note_no_frame()  # opens the episode (first_pass_n=2)
+        st = s._state["camera.blind_ticks"]
+        assert st.open_episode is not None
+        opened_episode_id = st.open_episode.episode_id
+
+        # Three scan passes elapse -- enough to have closed the episode
+        # under the old quiet-streak path (`quiet_passes_to_close == 3` by
+        # default), even though the outage itself never actually paused.
+        for t in (1.0, 2.0, 3.0):
+            now[0] = t
+            s.sample_once()
+        assert st.open_episode is not None
+        assert st.open_episode.episode_id == opened_episode_id
+        assert not self._closes(s, "camera.blind_ticks")
+
+        # More direct calls, still well inside the outage, then more scan
+        # passes -- the episode must still be the same one open episode.
+        now[0] = 3.5
+        s.note_no_frame()
+        now[0] = 4.4
+        s.note_no_frame()
+        for t in (5.0, 6.0, 7.0):
+            now[0] = t
+            s.sample_once()
+        assert st.open_episode is not None
+        assert st.open_episode.episode_id == opened_episode_id
+        assert st.open_episode.n == 4
+        assert not self._closes(s, "camera.blind_ticks")
+
+        s.stop()
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        assert row["episodes"] == 1
+        assert row["total"] == 4
+        closes = self._closes(s, "camera.blind_ticks")
+        assert len(closes) == 1
+        assert closes[0]["episode_id"] == opened_episode_id
+        assert closes[0]["outcome"] == OUTCOME_OPEN_AT_END
+        assert closes[0]["n"] == 4
+
+    def test_pipeline_exceptions_open_episode_is_not_closed_by_a_scan_pass_either(self):
+        # `pipeline.exception` is the other direct-notification pseudo-
+        # source and shares the same accessor shape (`_read_pipeline_
+        # exception` always reports an empty `by_reason`), so it is exposed
+        # to the identical hazard even though the drive's own defect
+        # (D1) surfaced through the camera.
+        now = [0.0]
+        s = sampler(now=now)
+        try:
+            raise ValueError("boom")
+        except ValueError as exc:
+            s.note_pipeline_exception(exc)
+        st = s._state["pipeline.exception"]
+        opened_episode_id = st.open_episode.episode_id
+        for t in (1.0, 2.0, 3.0, 4.0):
+            now[0] = t
+            s.sample_once()
+        assert st.open_episode is not None
+        assert st.open_episode.episode_id == opened_episode_id
+        assert not self._closes(s, "pipeline.exception")
+        s.stop()
+        row = s.to_record()["sources"]["pipeline.exception"]
+        assert row["episodes"] == 1
+        closes = self._closes(s, "pipeline.exception")
+        assert len(closes) == 1
+        assert closes[0]["episode_id"] == opened_episode_id
+
+
+# ---------------------------------------------------------------------------
+# D7: `camera.blind_ticks.passes_attempted` counts scan passes only, the way
+# it does for every other of the thirty registry rows -- not scans plus
+# direct notifications combined.
+# ---------------------------------------------------------------------------
+
+
+class TestPseudoSourcePassesAttemptedCountsScanPassesOnly:
+
+    def test_camera_blind_ticks_passes_attempted_ignores_direct_notifications(self):
+        now = [0.0]
+        s = sampler(now=now)
+        for t in (0.0, 1.0, 2.0):
+            now[0] = t
+            s.sample_once()
+        for _ in range(10):
+            s.note_no_frame()
+        s.stop()
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        assert row["passes_attempted"] == 3
+        assert row["passes_readable"] == 3
+        assert row["total"] == 10
+        assert row["status"] == sensing_controller.RULE_FIRED
+
+    def test_pipeline_exception_passes_attempted_ignores_direct_notifications(self):
+        now = [0.0]
+        s = sampler(now=now)
+        for t in (0.0, 1.0):
+            now[0] = t
+            s.sample_once()
+        for msg in ("a", "b", "c"):
+            try:
+                raise ValueError(msg)
+            except ValueError as exc:
+                s.note_pipeline_exception(exc)
+        s.stop()
+        row = s.to_record()["sources"]["pipeline.exception"]
+        assert row["passes_attempted"] == 2
+        assert row["passes_readable"] == 2
+        assert row["total"] == 3
+
+
+# ---------------------------------------------------------------------------
+# D2: `missing` names the reason from the last unreadable pass, and survives
+# the source becoming readable again before teardown.
+# ---------------------------------------------------------------------------
+
+
+class TestMissingSurvivesTheSourceBecomingReadableAgain:
+    """`missing` used to be cleared on every readable pass, so a source
+    unreadable mid-drive and readable again by teardown reported
+    `not_evaluable` naming nothing -- on every drive with a redial, since a
+    redial is exactly a source going unreadable and then readable again."""
+
+    def test_a_source_unreadable_mid_drive_and_readable_at_teardown_still_names_missing(self):
+        phone = FakePhone()
+        s = sampler(phone=phone)
+        s.sample_once()  # readable: session present
+        phone.session = None
+        s.sample_once()  # not evaluable this pass: no session
+        phone.session = _fake_session("s1")
+        s.sample_once()  # readable again, well before teardown
+        s.stop()
+        row = s.to_record()["sources"]["wire.dropped"]
+        assert row["status"] == sensing_controller.RULE_NOT_EVALUABLE
+        assert row["passes_attempted"] == 3
+        assert row["passes_readable"] == 2
+        assert row.get("missing") == [failure_log.MISSING_NO_SESSION]
+
+
+# ---------------------------------------------------------------------------
+# D4: the two phone-telemetry sources go `not_evaluable`, not `quiet`, while
+# the link is down -- `PhoneLink.telemetry` is not cleared on session loss.
+# ---------------------------------------------------------------------------
+
+
+class TestPhoneTelemetrySourcesAreNotEvaluableWhileTheLinkIsDown:
+    """`_read_phone_dropped` and `_read_phone_here_errors` read `PhoneLink.
+    telemetry`, which is cleared on a rebind (`_rebind`), not on session
+    loss. Without a session gate, a stale pre-outage snapshot was read as
+    current for as long as the link stayed down, and both sources reported
+    the phone's failure counters as unchanged -- and therefore `quiet` --
+    through a window this drive never actually observed. `link.down` is
+    supposed to make every phone-side source honest about exactly this."""
+
+    def test_phone_dropped_goes_not_evaluable_when_the_session_drops(self):
+        phone = FakePhone()
+        phone.telemetry = type(
+            "T", (), {"dropped": {"camera": 0, "gps": 0, "imu": 0, "here": 0}, "here_errors": 0},
+        )()
+        s = sampler(phone=phone)
+        s.sample_once()
+        assert s.to_record()["sources"]["phone.dropped"]["status"] == sensing_controller.RULE_QUIET
+
+        phone.session = None  # the link goes down; the stale telemetry object is untouched
+        s.sample_once()
+        row = s.to_record()["sources"]["phone.dropped"]
+        assert row["status"] == sensing_controller.RULE_NOT_EVALUABLE
+        assert row["missing"] == [failure_log.MISSING_NO_SESSION]
+
+    def test_phone_here_errors_goes_not_evaluable_when_the_session_drops(self):
+        phone = FakePhone()
+        phone.telemetry = type("T", (), {"dropped": {}, "here_errors": 0})()
+        s = sampler(phone=phone)
+        s.sample_once()
+        assert s.to_record()["sources"]["phone.here_errors"]["status"] == sensing_controller.RULE_QUIET
+
+        phone.session = None
+        s.sample_once()
+        row = s.to_record()["sources"]["phone.here_errors"]
+        assert row["status"] == sensing_controller.RULE_NOT_EVALUABLE
+        assert row["missing"] == [failure_log.MISSING_NO_SESSION]
+
+
+# ---------------------------------------------------------------------------
+# D5: `by_reason_total` credits every reason that moved on a pass, not only
+# the single largest-moving one.
+# ---------------------------------------------------------------------------
+
+
+class TestByReasonCreditsEveryReasonThatMovedInAPass:
+    """`clock.proxied`'s own counters across a drive gave `{no_samples: 3,
+    only_1: 11, only_2: 11, only_3: 13, only_4: 13}`; the failure log
+    reported `{only_1: 11, only_2: 11, only_3: 11, only_4: 18}`. The reason
+    named on an episode's own record is, and stays, the single dominant one
+    (D9) -- but the source's own `by_reason_total` answers a different
+    question, how many times each reason occurred, and crediting only the
+    dominant reason with a whole pass's total delta silently dropped every
+    other reason that moved in the same pass. The total was right and the
+    breakdown was wrong, which the plan calls worse than an obviously wrong
+    total."""
+
+    def test_a_pass_where_two_reasons_move_together_credits_both(self):
+        phone = FakePhone()
+        s = sampler(phone=phone)
+        phone.adapter.proxy_reasons = {"no_samples": 1, "only_4": 5}
+        s.sample_once()
+        phone.adapter.proxy_reasons = {"no_samples": 1, "only_4": 10, "only_3": 2}
+        s.sample_once()
+        s.stop()
+        row = s.to_record()["sources"]["clock.proxied"]
+        assert row["by_reason"] == {"no_samples": 1, "only_4": 10, "only_3": 2}
+        assert row["total"] == 13
+        assert sum(row["by_reason"].values()) == row["total"]
+
+    def test_the_drives_own_numbers_reconcile_exactly(self):
+        # The exact counters the drive reported, replayed as two passes:
+        # everything moves together in the first pass, and the remaining
+        # `only_3` and `only_4` movement lands in the second.
+        phone = FakePhone()
+        s = sampler(phone=phone)
+        phone.adapter.proxy_reasons = {
+            "no_samples": 3, "only_1": 11, "only_2": 11, "only_3": 11, "only_4": 13,
+        }
+        s.sample_once()
+        phone.adapter.proxy_reasons = {
+            "no_samples": 3, "only_1": 11, "only_2": 11, "only_3": 13, "only_4": 13,
+        }
+        s.sample_once()
+        s.stop()
+        row = s.to_record()["sources"]["clock.proxied"]
+        assert row["by_reason"] == {
+            "no_samples": 3, "only_1": 11, "only_2": 11, "only_3": 13, "only_4": 13,
+        }
+        assert row["total"] == 51
