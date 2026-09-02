@@ -306,6 +306,43 @@ class TestProvenanceAxis:
         assert axis["unanswered_by_reason"] == {"short: 20": 1}
         assert axis["vocabulary_violations"] == {"short: 20": 1}
 
+    def test_a_full_size_map_of_only_substituted_values_does_not_answer(self):
+        """M4: a map that covers every encoder slot by NAME but whose every
+        value is a substituted class (never derived_empty here, but the same
+        exclusion) measured nothing -- a shape check alone reads this as a
+        full house.
+        """
+        from perception import provenance
+
+        encoder_map = {name: provenance.SOURCE_FALLBACK_NEUTRAL for name in self._encoder_map()}
+        ticks = [{"field_sources": encoder_map}]
+        axis = _axis_provenance(ticks).to_record()
+        assert axis["attempted"] == 1
+        assert axis["answered"] == 0
+        assert axis["unanswered_by_reason"] == {provenance.SOURCE_FALLBACK_NEUTRAL: 1}
+        # A recognised class word, not a violation.
+        assert axis["vocabulary_violations"] == {}
+
+    def test_a_full_size_map_of_only_derived_empty_does_not_answer(self):
+        from perception import provenance
+
+        encoder_map = {name: provenance.SOURCE_DERIVED_EMPTY for name in self._encoder_map()}
+        ticks = [{"field_sources": encoder_map}]
+        axis = _axis_provenance(ticks).to_record()
+        assert axis["answered"] == 0
+        assert axis["unanswered_by_reason"] == {provenance.SOURCE_DERIVED_EMPTY: 1}
+
+    def test_a_map_with_one_measured_field_among_substituted_ones_answers(self):
+        from perception import provenance
+
+        encoder_map = {name: provenance.SOURCE_FALLBACK_NEUTRAL for name in self._encoder_map()}
+        first = next(iter(encoder_map))
+        encoder_map[first] = "measured"
+        ticks = [{"field_sources": encoder_map}]
+        axis = _axis_provenance(ticks).to_record()
+        assert axis["answered"] == 1
+        assert axis["unanswered_by_reason"] == {}
+
 
 class TestSessionSummaryShape:
     """Rules 6 and 7: the axis list is complete and in order, and nothing in
@@ -326,7 +363,7 @@ class TestSessionSummaryShape:
             assert set(axis.keys()) == {
                 "axis", "attempted", "answered", "attempted_is", "answered_is",
                 "unanswered_by_reason", "vocabulary", "vocabulary_violations",
-                "unbuildable", "section",
+                "unbuildable", "section", "not_evaluable_by_rule",
             }
 
 
@@ -436,6 +473,88 @@ class TestApiCallsAxis:
         here = _here_calls_by_session(ticks)
         assert here["calls_total"] == 0  # only one observation in the session; nothing to diff
 
+    def test_absent_wins_over_a_present_here_calls_value(self):
+        """M1's mirror-image case: a record that violates the shape rule --
+        `absent` set (telemetry not present) but `here_calls` a real number
+        anyway -- must still census under no_telemetry, not read as answered
+        just because a number happens to be there.
+        """
+        ticks = sensing_ticks(1, telemetry_at=frozenset({0}), here_calls_at={0: 7})
+        ticks[0]["sensing"]["reference"]["absent"] = "no_telemetry"
+        axis = _axis_api_calls(ticks).to_record()
+        assert axis["answered"] == 0
+        assert axis["unanswered_by_reason"] == {"no_telemetry": 1}
+
+    def test_a_field_not_recorded_tick_is_censused_separately_from_no_telemetry(self):
+        """M1: telemetry present (`absent` is `None`) but `here_calls` still
+        null is a shape violation `reference_from` itself never produces --
+        it gets its own word rather than being merged into no_telemetry.
+        """
+        ticks = sensing_ticks(1, telemetry_at=frozenset({0}), here_calls_at={0: 3})
+        ticks[0]["sensing"]["reference"]["here_calls"] = None
+        axis = _axis_api_calls(ticks).to_record()
+        assert axis["answered"] == 0
+        assert axis["unanswered_by_reason"] == {"field_not_recorded": 1}
+        assert axis["unanswered_by_reason"].get("no_telemetry") is None
+
+
+class TestHereCallsNotMeasuredAndBackwards:
+    """C2 and M7: a drive whose log predates `here_calls` must not read as a
+    measured zero, and a counter that decreases within one session must not
+    be silently clamped.
+    """
+
+    def test_calls_total_is_none_when_no_tick_carries_here_calls(self):
+        ticks = [
+            {"sensing": {"reference": {"absent": None, "at_mono": float(i), "age_s": 0.02}},
+             "session_id": 1}
+            for i in range(3)
+        ]  # pre-task-39 shape: reference present, no here_calls/here_errors keys at all
+        here = _here_calls_by_session(ticks)
+        assert here["calls_total"] is None
+        assert here["errors_total"] is None
+        assert here["not_measured"] == "no tick carries here_calls (log predates task 39)"
+
+    def test_sensing_lines_report_not_measured_rather_than_a_measured_zero(self):
+        """C2's real-drive reproduction: `## Sensing` used to print
+        `0 total ... -- mode shadow; a shadow command never reaches
+        setHereQuery` on a drive that never recorded the field at all.
+        """
+        from eval_run import _sensing_lines
+
+        ticks = sensing_ticks(3, mode=SHADOW, telemetry_at=frozenset(range(3)))
+        for t in ticks:
+            t["sensing"]["reference"].pop("here_calls", None)
+            t["sensing"]["reference"].pop("here_errors", None)
+        result = sensing_result(ticks, {})
+        assert result["here"]["calls_total"] is None
+        text = "\n".join(_sensing_lines(result))
+        assert "not measured" in text
+        assert "0 total" not in text
+
+    def test_zero_calls_because_requires_at_least_one_session_with_two_observations(self):
+        ticks = sensing_ticks(1, mode=SHADOW, here_calls_at={0: 0})
+        result = sensing_result(ticks, {})
+        assert result["here"]["calls_total"] == 0
+        assert result["here"]["zero_calls_because"] is None
+
+    def test_zero_calls_because_is_set_with_two_or_more_observations_in_shadow(self):
+        ticks = sensing_ticks(2, mode=SHADOW, here_calls_at={0: 0, 1: 0})
+        result = sensing_result(ticks, {})
+        assert result["here"]["calls_total"] == 0
+        assert result["here"]["zero_calls_because"] is not None
+
+    def test_a_counter_that_decreases_within_one_session_is_reported_not_silently_clamped(self):
+        ticks = sensing_ticks(2, here_calls_at={0: 5, 1: 2})
+        here = _here_calls_by_session(ticks)
+        assert here["counter_went_backwards"] == [1]
+        assert here["calls_total"] == 0  # still clamped for the total, not negative
+
+    def test_no_backwards_session_is_an_empty_list_not_omitted(self):
+        ticks = sensing_ticks(2, here_calls_at={0: 0, 1: 3})
+        here = _here_calls_by_session(ticks)
+        assert here["counter_went_backwards"] == []
+
 
 class TestExpectedFromCommanded:
     def test_doubling_the_commanded_rate_doubles_the_integral(self):
@@ -444,6 +563,17 @@ class TestExpectedFromCommanded:
         doubled = _time_weighted_integral([(t, v * 2) for t, v in points])
         assert doubled == pytest.approx(base * 2)
         assert base > 0
+
+    def test_the_integral_is_weighted_by_the_gap_between_points_not_by_sample_count(self):
+        """Doubling every value alone cannot distinguish a correctly
+        time-weighted integral from any naive aggregate that is merely
+        linear in v (a plain sum, or a sample mean times the span) --
+        doubling v doubles any of those too. This pins the exact
+        gap-weighted value on an unevenly spaced series instead.
+        """
+        points = [(0.0, 2.0), (1.0, 2.0), (5.0, 2.0)]
+        # weights = gaps + [last gap] = [1, 4, 4]; sum(v * w) = 2*1 + 2*4 + 2*4
+        assert _time_weighted_integral(points) == pytest.approx(18.0)
 
 
 class TestTelemetryWindow:
@@ -458,6 +588,15 @@ class TestTelemetryWindow:
         window = _telemetry_window(one_report)
         assert window["observed_median_s"] is None
         assert window["unbuildable"] is not None
+
+    def test_median_reflects_the_actual_gap_not_a_hardcoded_constant(self):
+        """The other median test's gap happens to be 0.1 s, which is also a
+        plausible hardcoded stand-in -- this one uses a different gap (0.2 s,
+        reports every other tick) so a constant-0.1 implementation is caught.
+        """
+        ticks = sensing_ticks(5, telemetry_at=frozenset({0, 2, 4}))
+        window = _telemetry_window([t for t in ticks if t.get("sensing")])
+        assert window["observed_median_s"] == pytest.approx(0.2)
 
 
 class TestComparableAndPercentilesSuppressed:
@@ -488,17 +627,114 @@ class TestComparableAndPercentilesSuppressed:
         assert imu["percentiles_suppressed"] is None
         assert imu["percentiles"]["p50"] is not None
 
+    def test_lambda_per_window_is_persisted_on_the_record(self):
+        """Open item (§9's `lambda_per_window` -- "computed then discarded"):
+        it was used only to decide suppression and never written to the
+        record; it now survives on `rates[key]`.
+        """
+        ticks = sensing_ticks(5, mode=LIVE, telemetry_at=frozenset(range(5)))
+        result = sensing_result(ticks, {})
+        assert result["rates"]["here_hz"]["lambda_per_window"] is not None
+        assert result["rates"]["camera_hz"]["comparable"] is False or \
+            result["rates"]["camera_hz"]["lambda_per_window"] is not None
+
+
+def _minimal_sensing_tick(decided_at_mono: float, at_mono: float, rate_value: float) -> dict[str, Any]:
+    """A hand-built tick carrying only what `sensing_result` reads -- used
+    where a real `SensingLoop` drive cannot easily be steered to an exact
+    `lambda_per_window` (D9's `== 1.0` edge) or to a malformed shape.
+    """
+    from transport.messages import DROP_KEYS
+
+    return {
+        "sensing": {
+            "decided_at_mono": decided_at_mono,
+            "shadow": False,
+            "rates": {"camera_hz": 1.0, "gps_hz": rate_value, "imu_hz": 1.0, "here_hz": 1.0},
+            "reference": {
+                "absent": None, "at_mono": at_mono, "age_s": 0.02,
+                "achieved": {"camera_hz": 1.0, "gps_hz": rate_value, "imu_hz": 1.0, "here_hz": 1.0},
+                "dropped": {k: 0 for k in DROP_KEYS},
+                "here_calls": 0, "here_errors": 0,
+            },
+            "attribution": {"rules": {}, "per_sensor": {}},
+        },
+        "session_id": 1,
+    }
+
+
+class TestLambdaExactlyOne:
+    def test_lambda_exactly_one_reports_percentiles_and_names_the_quantisation(self):
+        """D9: below 1.0 the percentiles are suppressed (already pinned
+        above); AT exactly 1.0 -- one delivery per window -- they are
+        reported, and this is the case that used to leave
+        `percentiles_suppressed` null with no mention of the quantisation.
+        """
+        ticks = [_minimal_sensing_tick(float(i), float(i), 1.0) for i in range(3)]
+        result = sensing_result(ticks, {})
+        row = result["rates"]["gps_hz"]
+        assert row["comparable"] is True
+        assert row["lambda_per_window"] == pytest.approx(1.0)
+        assert row["percentiles"]["p50"] == pytest.approx(1.0)
+        assert row["percentiles"]["p95"] == pytest.approx(1.0)
+        assert row["percentiles_suppressed"] is not None
+        assert "quanti" in row["percentiles_suppressed"]
+
+
+class TestSensingResultRobustness:
+    """MINOR: `sensing_result` used to hard-index `reference`,
+    `decided_at_mono`, `rates[key]` and `attribution`, and crashed on a
+    malformed block -- taking the whole report down with it, including axes
+    that never touch `sensing` at all.
+    """
+
+    def test_does_not_raise_on_a_null_phone_block(self):
+        ticks = sensing_ticks(3, mode=LIVE, telemetry_at=frozenset(range(3)))
+        result = sensing_result(ticks, {"phone": None})  # used to raise AttributeError
+        assert result["here"]["responses_received"] is None
+
+    def test_a_malformed_sensing_block_does_not_abort_the_computation(self):
+        ticks = sensing_ticks(3, mode=LIVE, telemetry_at=frozenset(range(3)))
+        ticks[1]["sensing"] = {}  # no reference/decided_at_mono/rates/attribution at all
+        result = sensing_result(ticks, {})
+        assert result is not None
+        assert result["mode"] in (LIVE, SHADOW)
+
+    def test_session_summary_does_not_raise_on_a_malformed_sensing_block(self):
+        """The same malformed shape reaches the axis builders before
+        `sensing_result` is even called (`session_summary` builds `axes`
+        first) -- both must survive it for the report to survive at all.
+        """
+        ticks = sensing_ticks(3, mode=LIVE, telemetry_at=frozenset(range(3)))
+        ticks[1]["sensing"] = {}
+        loaded = loaded_from(ticks)
+        session = session_summary(loaded, {}, None, phone_log_supplied=False)
+        assert session["sensing"] is not None
+
 
 class TestCommandedByValue:
     def test_census_and_time_mean_over_a_mixed_commanded_series(self):
-        """§7: `camera_hz` at 1.0 on 3 ticks and 5.0 on 1 -- evenly spaced --
-        censuses `{"1.0": 3, "5.0": 1}` with `commanded_distinct == 2`, and
-        the time mean (2.0) is a time mean, not a plain sample mean that
-        happens to agree with it on an evenly spaced series.
+        """§7: `camera_hz` at 1.0 on 3 points and 5.0 on 1, UNEVENLY spaced
+        (the last point holds for 8 s, not 1) so the result is a genuine time
+        mean -- an evenly-spaced fixture here cannot distinguish a time mean
+        from a plain sample mean, which happen to agree whenever every gap is
+        the same size, and this test's name claims that distinction.
         """
-        points = [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (3.0, 5.0)]
+        points = [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (10.0, 5.0)]
         mean = _time_weighted_mean(points)
-        assert mean == pytest.approx(2.0)
+        sample_mean = sum(v for _, v in points) / len(points)
+        assert mean != pytest.approx(sample_mean)
+        # weights = [1, 1, 8, 8]; sum(v*w) = 1+1+8+40 = 50, total weight = 18
+        assert mean == pytest.approx(50 / 18)
+
+    def test_time_weighted_mean_is_not_a_plain_sample_mean(self):
+        points = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (100.0, 12.0)]
+        sample_mean = sum(v for _, v in points) / len(points)
+        # weights = gaps + [last gap] = [1, 1, 98, 98]; sum(v*w) = 12*98 = 1176,
+        # total weight = 198 -- the last point's long hold dominates a plain
+        # sample mean would never reflect.
+        assert _time_weighted_mean(points) != pytest.approx(sample_mean)
+        assert _time_weighted_mean(points) == pytest.approx(1176 / 198)
 
 
 class TestTriggersRulesMissing:
@@ -529,6 +765,19 @@ class TestTriggersAxis:
         axis = _axis_triggers(ticks).to_record()
         assert axis["attempted"] == axis["answered"] == 5
         assert axis["unanswered_by_reason"] == {}
+
+    def test_not_evaluable_reaches_the_axis_record_itself(self):
+        """M5: `{"attempted": 5, "answered": 5, "unanswered_by_reason": {}}`
+        alone is indistinguishable from a drive where every rule fired --
+        `not_evaluable_by_rule` is the axis record's own trace of the rules
+        that never got the chance, without touching rule 2's identity.
+        """
+        ticks = sensing_ticks(5, mode=SHADOW, telemetry_at=frozenset(range(5)))
+        axis = _axis_triggers(ticks).to_record()
+        assert axis["answered"] == axis["attempted"]
+        assert axis["not_evaluable_by_rule"].get("source_disagreement") == 5
+        # rule 2 is unaffected by this field.
+        assert axis["answered"] + sum(axis["unanswered_by_reason"].values()) == axis["attempted"]
 
 
 # --------------------------------------------------------------------------
@@ -585,9 +834,14 @@ class TestReconciliations:
         assert "40" in row["detail"] and "0" in row["detail"]
 
     def test_a_missing_summary_json_is_unavailable_never_held(self):
+        """Ten reconciliations: the nine that need `summary.json` (all
+        `unavailable` here, since it was never written) plus
+        `reference_absent_iff_fields_null` (M1), which needs only tick
+        records and is `unavailable` here because there are none.
+        """
         loaded = loaded_from([])
         recs = [r.to_record() for r in reconciliations(loaded, {})]
-        assert len(recs) == 9
+        assert len(recs) == 10
         assert all(r["status"] == "unavailable" for r in recs)
 
     def test_events_written_matches_open_and_close_records(self):
@@ -658,6 +912,151 @@ class TestReconciliations:
             "here_calls_ge_responses_received"
         ] == "failed"
 
+    def test_source_based_reconciliations_are_unavailable_not_held_when_sources_is_empty(self):
+        """C1: an empty `sources` map makes every source-row reconciliation's
+        `bad` list empty by construction, which used to read as `held` -- a
+        check that compared nothing. It must read `unavailable`.
+        """
+        summary = {"failures": {"sources": {}, "scan": {}, "blind_ticks": 0}}
+        loaded = loaded_from([])
+        recs = {r.to_record()["name"]: r.to_record() for r in reconciliations(loaded, summary)}
+        for name in (
+            "blind_ticks_matches_camera_source",
+            "source_status_fired_iff_total_positive",
+            "source_totals_partition",
+            "source_passes_readable_le_attempted",
+            "events_written_matches_open_and_close_records",
+        ):
+            assert recs[name]["status"] == "unavailable", name
+        # sources_count_is_30 is not one of the seven: 0 == None == 30 is
+        # False, so it already failed loudly rather than holding vacuously.
+        assert recs["sources_count_is_30"]["status"] == "failed"
+
+    def test_here_reconciliation_is_unavailable_when_no_tick_carries_here_calls(self):
+        """C1's real-drive case, reproduced: `calls_total` used to be
+        computed as `0` from a field present on zero ticks, and held against
+        a `responses_received` of `0` -- two zeros that were never actually
+        compared.
+        """
+        ticks = [
+            {"type": "tick", "sensing": {"reference": {"absent": None, "at_mono": float(i)}}}
+            for i in range(5)
+        ]  # no tick carries here_calls at all (pre-task-39 shape)
+        loaded = loaded_from(ticks)
+        summary = {"failures": _failures_summary(), "phone": {"here": {"responses_received": 0}}}
+        recs = {r.to_record()["name"]: r.to_record() for r in reconciliations(loaded, summary)}
+        assert recs["here_calls_ge_responses_received"]["status"] == "unavailable"
+
+    def test_triggers_reconciliation_is_unavailable_not_held_with_zero_sensing_ticks(self):
+        """C1: with no sensing ticks at all, the computed maps and an empty
+        summary rollup are both `{}` -- which used to compare equal and hold
+        on zero decisions, on both sides.
+        """
+        loaded = loaded_from([{"tick_id": 0}])  # no sensing block on any tick
+        summary = {"sensing": {"decisions_by_trigger": {}, "rules_by_status": {}}}
+        recs = {r.to_record()["name"]: r.to_record() for r in reconciliations(loaded, summary)}
+        assert recs["triggers_match_summary"]["status"] == "unavailable"
+
+    def test_source_status_fired_iff_total_positive_holds_and_fails(self):
+        held = reconciliations(loaded_from([]), {"failures": _failures_summary(
+            sources={"a": {**{"status": "fired", "total": 5}}},
+        )})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in held}[
+            "source_status_fired_iff_total_positive"
+        ] == "held"
+        failed = reconciliations(loaded_from([]), {"failures": _failures_summary(
+            # status says FIRED but total is 0 -- disagreement.
+            sources={"a": {"status": "fired", "total": 0}},
+        )})
+        row = {r.to_record()["name"]: r.to_record() for r in failed}[
+            "source_status_fired_iff_total_positive"
+        ]
+        assert row["status"] == "failed"
+        assert "a" in row["detail"]
+
+    def test_source_totals_partition_holds_and_fails(self):
+        held = reconciliations(loaded_from([]), {"failures": _failures_summary(
+            sources={"a": {"kept_total": 2, "suppressed": 1, "below_episode_threshold": 0, "total": 3}},
+        )})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in held}[
+            "source_totals_partition"
+        ] == "held"
+        failed = reconciliations(loaded_from([]), {"failures": _failures_summary(
+            sources={"a": {"kept_total": 2, "suppressed": 1, "below_episode_threshold": 0, "total": 99}},
+        )})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in failed}[
+            "source_totals_partition"
+        ] == "failed"
+
+    def test_source_passes_readable_le_attempted_holds_and_fails(self):
+        held = reconciliations(loaded_from([]), {"failures": _failures_summary(
+            sources={"a": {"passes_readable": 3, "passes_attempted": 5}},
+        )})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in held}[
+            "source_passes_readable_le_attempted"
+        ] == "held"
+        failed = reconciliations(loaded_from([]), {"failures": _failures_summary(
+            # readable exceeds attempted -- impossible, and a real defect.
+            sources={"a": {"passes_readable": 9, "passes_attempted": 5}},
+        )})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in failed}[
+            "source_passes_readable_le_attempted"
+        ] == "failed"
+
+    def test_sources_count_is_30_holds_and_fails(self):
+        held = reconciliations(loaded_from([]), {"failures": _failures_summary()})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in held}[
+            "sources_count_is_30"
+        ] == "held"
+        summary = _failures_summary()
+        del summary["sources"]["source.0"]  # 29 sources, not 30
+        failed = reconciliations(loaded_from([]), {"failures": summary})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in failed}[
+            "sources_count_is_30"
+        ] == "failed"
+
+    def test_thermal_samples_count_holds_and_fails(self):
+        loaded = loaded_from([], thermal_samples=[{"type": "thermal_sample"}] * 5)
+        held = reconciliations(loaded, {"thermal": {"jetson": {"samples": 5}}})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in held}[
+            "thermal_samples_count"
+        ] == "held"
+        failed = reconciliations(loaded, {"thermal": {"jetson": {"samples": 50}}})
+        assert {r.to_record()["name"]: r.to_record()["status"] for r in failed}[
+            "thermal_samples_count"
+        ] == "failed"
+
+    def test_reference_shape_holds_on_a_real_drive(self):
+        ticks = sensing_ticks(4, telemetry_at=frozenset({0, 2}))
+        loaded = loaded_from(ticks)
+        recs = {r.to_record()["name"]: r.to_record() for r in reconciliations(loaded, {})}
+        assert recs["reference_absent_iff_fields_null"]["status"] == "held"
+
+    def test_reference_shape_fails_on_the_shape_violation(self):
+        """M1's shape violation, at the reconciliation level: `absent` set
+        together with a real `here_calls` value on the same record.
+        """
+        ticks = sensing_ticks(2, telemetry_at=frozenset({0, 1}))
+        ticks[0]["sensing"]["reference"]["absent"] = "no_telemetry"
+        loaded = loaded_from(ticks)
+        recs = {r.to_record()["name"]: r.to_record() for r in reconciliations(loaded, {})}
+        assert recs["reference_absent_iff_fields_null"]["status"] == "failed"
+
+    def test_a_failed_reconciliation_is_rendered_keyed_on_its_axis(self):
+        """MINOR / plan §5.4: a failed reconciliation used to be keyed only
+        on its own check name, rendering with no visible connection to the
+        `## Session summary` axis line it contradicts.
+        """
+        from eval_run import _reconciliation_line
+
+        rec = {
+            "name": "blind_ticks_matches_camera_source", "status": "failed",
+            "detail": "40 vs 0",
+        }
+        line = _reconciliation_line(rec)
+        assert line.startswith("- **failures**")
+        assert "blind_ticks_matches_camera_source" in line
+
 
 # --------------------------------------------------------------------------
 # Rendering -- section 6 rules 20-22, and the zero-tick branch (D13)
@@ -697,9 +1096,21 @@ class TestRenderingRules:
         assert "did not answer" in clause_partial
 
     def test_the_answered_count_never_appears_without_the_full_enumeration(self):
-        loaded = loaded_from([{}])
+        """A fixture with zero fully-answered axes cannot detect a renderer
+        that lists only the axes that did NOT answer, because every axis in
+        such a fixture is in that list anyway. This one has at least one
+        fully-answered axis (`latency`, `thermal`) alongside ones that do not
+        (`failures`, `provenance`) and ones that cannot be built (`rates`,
+        `api_calls`, `triggers`, no phone), so the enumeration's coverage
+        actually gets exercised.
+        """
+        from eval_run import _axis_fully_answered, _session_summary_lines
+
+        loaded = loaded_from([{"jetson_ms": 1.0, "thermal": {"jetson": {"basis": "measured"}}}])
         session = session_summary(loaded, {}, None, phone_log_supplied=False)
-        from eval_run import _session_summary_lines
+        fully_answered = {a["axis"] for a in session["axes"] if _axis_fully_answered(a)}
+        assert fully_answered, "fixture must contain at least one fully-answered axis"
+        assert len(fully_answered) < len(AXES), "fixture must also contain a non-answering axis"
 
         lines = _session_summary_lines(session)
         text = "\n".join(lines)
@@ -739,6 +1150,88 @@ class TestRenderingRules:
         genuinely_answered = _axis_thermal([{"thermal": {"jetson": {"basis": "measured"}}}]).to_record()
         assert _axis_fully_answered(genuinely_answered) is True
 
+    def test_overall_clause_separates_did_not_answer_from_could_not_be_built(self):
+        """M2: a phone-less drive's three unbuildable axes (rates, api_calls,
+        triggers) used to be folded into "did not answer" on the `Overall`
+        line, contradicting the `## Session summary` section it points to,
+        which already separates the two.
+        """
+        from eval_run import _overall_clause, _session_summary_lines
+
+        loaded = loaded_from([{"jetson_ms": 1.0}])  # no thermal/failures/provenance block, no sensing
+        session = session_summary(loaded, {}, None, phone_log_supplied=False)
+        by_axis = {a["axis"]: a for a in session["axes"]}
+        for name in ("rates", "api_calls", "triggers"):
+            assert by_axis[name]["unbuildable"] is not None
+
+        clause = _overall_clause(session)
+        # latency fully answers; thermal/failures/provenance do not (attempted
+        # 0 or a field_sources mismatch); rates/api_calls/triggers cannot be
+        # built at all -- did_not == 3, unbuildable == 3, not 6 and 3.
+        assert "3 of 7 instrument axes did not answer" in clause
+        assert "3 could not be built" in clause
+
+        section_text = "\n".join(_session_summary_lines(session))
+        header_line = next(line for line in section_text.splitlines() if line.startswith(f"{len(AXES)} axes"))
+        # The Overall line's counts match the section's own.
+        assert "3 did not, 3 could not be built" in header_line
+
+    def test_rates_headline_uses_an_honest_noun_not_reports(self):
+        """MINOR: `rates.attempted` mixes distinct telemetry reports and
+        no-telemetry TICKS under one count -- rendering it as "reports"
+        claims a unit the count is not purely made of.
+        """
+        from eval_run import _axis_headline_line
+
+        ticks = sensing_ticks(2, telemetry_at=frozenset({1}))  # tick 0: no telemetry; tick 1: a report
+        axis = _axis_rates(ticks).to_record()
+        line = _axis_headline_line(axis, None)
+        assert "telemetry observations" in line
+        assert "reports answered" not in line
+
+    def test_render_markdown_renders_the_sensing_section_end_to_end(self, tmp_path):
+        """M6: the only end-to-end rendering test built ticks with no
+        `sensing` block at all, so `## Sensing` was never actually rendered
+        by any test -- the whole section could be deleted with the suite
+        green.
+        """
+        from eval_run import analyze
+        from tests.test_eval_run import make_tick
+
+        sensing_blocks = sensing_ticks(5, mode=LIVE, telemetry_at=frozenset(range(5)))
+        full_ticks = []
+        for i in range(5):
+            t = make_tick(i)
+            t["sensing"] = sensing_blocks[i]["sensing"]
+            t["session_id"] = sensing_blocks[i]["session_id"]
+            full_ticks.append(t)
+        run_dir = write_run(tmp_path, full_ticks)
+        loaded = load_records(run_dir / "metadata.jsonl")
+        session = session_summary(loaded, _read_summary(run_dir), _read_log_health(run_dir),
+                                   phone_log_supplied=False)
+        result = analyze(run_dir, loaded=loaded)
+        md = render_markdown(result, [], session)
+        assert "## Sensing" in md
+        assert "HERE calls" in md
+        assert "decisions by trigger" in md
+
+    def test_clamped_and_thermal_scaled_ticks_are_rendered(self):
+        """MINOR: `clamped_ticks`/`thermal_scaled_ticks` are computed and
+        written to `report.json` but rendered nowhere.
+        """
+        from eval_run import _sensing_lines
+
+        ticks = sensing_ticks(5, mode=LIVE, telemetry_at=frozenset(range(5)))
+        for t in ticks:
+            t["sensing"]["attribution"].setdefault("per_sensor", {})
+            t["sensing"]["attribution"]["per_sensor"]["camera_hz"] = {"clamped": True, "scale": 0.6}
+        result = sensing_result(ticks, {})
+        assert result["rates"]["camera_hz"]["clamped_ticks"] == 5
+        assert result["rates"]["camera_hz"]["thermal_scaled_ticks"] == 5
+        text = "\n".join(_sensing_lines(result))
+        assert "clamped on 5 ticks" in text
+        assert "thermal-scaled on 5 ticks" in text
+
 
 class TestZeroTickBranch:
     """D13: a drive with no tick records still produces a `report.md`
@@ -764,6 +1257,41 @@ class TestZeroTickBranch:
         assert report_json["analysis"] is None
         assert "session_summary" in report_json
         assert report_json["session_summary"]["axes"]
+
+    def test_zero_tick_report_names_a_dropped_log(self, tmp_path, monkeypatch):
+        """MINOR: `log_health`'s own detail (records dropped, writer status)
+        used to be rendered only inside `## Failures`, which the zero-tick
+        branch never produces -- so the fact that would explain the zero
+        ticks (the log dropped records) never reached the report.
+        """
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            f.write(json.dumps({"type": "failure_scan", "t_mono": 1.0, "ticks_seen": 0}) + "\n")
+        (run_dir / "summary.json").write_text(json.dumps({}))
+        (run_dir / "log_health.json").write_text(json.dumps({"dropped_records": 42, "writer_failure": None}))
+
+        monkeypatch.setattr("sys.argv", ["eval_run.py", str(run_dir), "--no-plots"])
+        main()
+
+        report_md = (run_dir / "report.md").read_text()
+        assert "42 records dropped" in report_md
+
+    def test_metadata_jsonl_present_is_false_when_the_file_never_existed(self, tmp_path, monkeypatch):
+        """MINOR: `inputs.metadata_jsonl` used to be a literal `True` that
+        could never say otherwise.
+        """
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / "summary.json").write_text(json.dumps({}))
+        # No metadata.jsonl written at all.
+
+        monkeypatch.setattr("sys.argv", ["eval_run.py", str(run_dir), "--no-plots"])
+        code = main()
+
+        assert code == 2
+        report_json = json.loads((run_dir / "report.json").read_text())
+        assert report_json["session_summary"]["inputs"]["metadata_jsonl"] is False
 
     def test_analyze_still_raises_systemexit_directly(self, tmp_path):
         from eval_run import analyze

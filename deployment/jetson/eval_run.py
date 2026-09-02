@@ -39,6 +39,7 @@ sys.path.insert(0, str(JETSON_DIR))
 
 import numpy as np  # noqa: E402
 
+from perception import provenance  # noqa: E402
 from policy import sim_contract  # noqa: E402
 from policy.sensing_controller import (  # noqa: E402
     MAX_TELEMETRY_AGE_S,
@@ -1307,11 +1308,30 @@ def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
 
 
 #: The noun each axis's `attempted`/`answered` count over, for the one-line
-#: rendering -- `rates` counts distinct telemetry reports, everything else
-#: counts ticks.
+#: rendering. `rates` is not a pure "reports" count: `attempted` is distinct
+#: telemetry reports plus one per tick that observed none at all (a tick, not
+#: a report), so it is worded as an observation rather than claimed to be a
+#: report count it is not.
 _AXIS_NOUN = {
-    "latency": "ticks", "rates": "reports", "api_calls": "ticks", "triggers": "ticks",
-    "failures": "ticks", "thermal": "ticks", "provenance": "ticks",
+    "latency": "ticks", "rates": "telemetry observations", "api_calls": "ticks",
+    "triggers": "ticks", "failures": "ticks", "thermal": "ticks", "provenance": "ticks",
+}
+
+#: Which `## Session summary` axis each reconciliation contradicts, for
+#: `_reconciliation_line` -- a failed reconciliation used to be keyed only on
+#: its own check name, rendering several lines away from the axis headline it
+#: was about with nothing in the text connecting the two (plan §5.4).
+_RECONCILIATION_AXIS = {
+    "blind_ticks_matches_camera_source": "failures",
+    "source_status_fired_iff_total_positive": "failures",
+    "source_totals_partition": "failures",
+    "source_passes_readable_le_attempted": "failures",
+    "sources_count_is_30": "failures",
+    "events_written_matches_open_and_close_records": "failures",
+    "thermal_samples_count": "thermal",
+    "triggers_match_summary": "triggers",
+    "here_calls_ge_responses_received": "api_calls",
+    "reference_absent_iff_fields_null": "api_calls",
 }
 
 
@@ -1365,8 +1385,9 @@ def _axis_headline_line(axis: dict[str, Any], sensing: dict[str, Any] | None) ->
 
 
 def _reconciliation_line(rec: dict[str, Any]) -> str:
+    axis = _RECONCILIATION_AXIS.get(rec["name"], rec["name"])
     detail = rec.get("detail")
-    prefix = f"- **{rec['name']}**: {rec['status']}"
+    prefix = f"- **{axis}** ({rec['name']}): {rec['status']}"
     return f"{prefix} -- {detail}" if detail else prefix
 
 
@@ -1418,13 +1439,21 @@ def _yes_no(flag: bool) -> str:
 
 
 def _overall_clause(session: dict[str, Any]) -> str:
+    """M2: `unbuildable` axes (no phone on this drive, say) are not axes that
+    "did not answer" -- folding the two together used to make a healthy
+    phone-less drive print "3 of 7 instrument axes did not answer" on this
+    line while the section it points to correctly read "0 did not, 3 could
+    not be built". Both counts are named here so the two can never disagree.
+    """
     axes = session["axes"]
     fully_answered = sum(1 for a in axes if _axis_fully_answered(a))
     if fully_answered == len(axes):
         return f"the five gates; all {len(axes)} instrument axes answered."
+    unbuildable = sum(1 for a in axes if a["unbuildable"] is not None)
+    did_not = len(axes) - fully_answered - unbuildable
     return (
-        f"the five gates. {len(axes) - fully_answered} of {len(axes)} instrument axes "
-        "did not answer; see ## Session summary."
+        f"the five gates. {did_not} of {len(axes)} instrument axes did not answer, "
+        f"{unbuildable} could not be built; see ## Session summary."
     )
 
 
@@ -1451,21 +1480,41 @@ def _sensing_lines(sensing: dict[str, Any] | None) -> list[str]:
         "| rate | commanded distinct | commanded time mean | achieved time mean | comparable | p50 | p95 |",
         "|---|---|---|---|---|---|---|",
     ]
+    # Rendered separately from the table (MINOR): computed, written to
+    # `report.json`, and otherwise rendered nowhere.
+    scaling_notes: list[str] = []
     for key in RATE_KEYS:
         row = sensing["rates"][key]
         comparable = "yes" if row["comparable"] else f"no ({row['not_comparable_because']})"
         p50, p95 = row["percentiles"]["p50"], row["percentiles"]["p95"]
-        if row["percentiles_suppressed"]:
-            p50_str = p95_str = f"suppressed ({row['percentiles_suppressed']})"
+        note = row["percentiles_suppressed"]
+        if p50 is None and p95 is None:
+            # A real suppression (D9, lambda < 1.0): no numbers to show.
+            p50_str = p95_str = f"suppressed ({note})" if note else "n/a"
         else:
-            p50_str = "n/a" if p50 is None else f"{p50:.3f}"
-            p95_str = "n/a" if p95 is None else f"{p95:.3f}"
+            p50_str = f"{p50:.3f}"
+            p95_str = f"{p95:.3f}"
+            if note:
+                # lambda == 1.0 exactly: the numbers ARE reported, and the
+                # quantisation is named beside the table rather than hidden
+                # behind "suppressed" text that would claim there are none.
+                p50_str += " [quantised]"
+                p95_str += " [quantised]"
+                scaling_notes.append(f"- {key}: {note}")
         achieved = row["achieved_time_mean"]
         achieved_str = "n/a" if achieved is None else f"{achieved:.3f}"
+        commanded_str = "n/a" if row["commanded_time_mean"] is None else f"{row['commanded_time_mean']:.3f}"
         lines.append(
-            f"| {key} | {row['commanded_distinct']} | {row['commanded_time_mean']:.3f} | "
+            f"| {key} | {row['commanded_distinct']} | {commanded_str} | "
             f"{achieved_str} | {comparable} | {p50_str} | {p95_str} |"
         )
+        if row["clamped_ticks"] or row["thermal_scaled_ticks"]:
+            scaling_notes.append(
+                f"- {key}: clamped on {row['clamped_ticks']} ticks, "
+                f"thermal-scaled on {row['thermal_scaled_ticks']} ticks"
+            )
+    if scaling_notes:
+        lines += [""] + scaling_notes
     triggers = sensing["triggers"]
     lines += ["", f"- decisions by trigger: {triggers['decisions_by_trigger']}"]
     for rule, statuses in sorted(triggers["rules_by_status"].items()):
@@ -1475,24 +1524,39 @@ def _sensing_lines(sensing: dict[str, Any] | None) -> list[str]:
     if triggers["summary_agrees"] is False:
         lines.append("- WARNING: computed trigger/rule counts disagree with summary.json")
     here = sensing["here"]
-    lines.append(
-        f"- HERE calls: {here['calls_total']} total across {len(here['by_session'])} session(s) "
-        f"({here['uncounted_prefix']} placed before the first observed report in each session, "
-        f"not counted), {here['errors_total']} errors, expected from commanded rate "
-        f"{here['expected_from_commanded']:.2f}, phone-reported responses received "
-        f"{here['responses_received']}"
-        + (f" -- {here['zero_calls_because']}" if here.get("zero_calls_because") else "")
-    )
+    if here.get("not_measured"):
+        lines.append(f"- HERE calls: not measured -- {here['not_measured']}")
+    else:
+        backwards = (
+            f"; counter_went_backwards: {here['counter_went_backwards']}"
+            if here.get("counter_went_backwards") else ""
+        )
+        lines.append(
+            f"- HERE calls: {here['calls_total']} total across {len(here['by_session'])} session(s) "
+            f"({here['uncounted_prefix']} placed before the first observed report in each session, "
+            f"not counted), {here['errors_total']} errors, expected from commanded rate "
+            f"{here['expected_from_commanded']:.2f}, phone-reported responses received "
+            f"{here['responses_received']}"
+            + (f" -- {here['zero_calls_because']}" if here.get("zero_calls_because") else "")
+            + backwards
+        )
     return lines
 
 
 def render_session_summary_only(
     run_dir: Path, session: dict[str, Any], loaded: "LoadedRecords",
+    log_health: dict[str, Any] | None = None,
 ) -> str:
     """The whole `report.md` for a drive with no tick records at all (D13):
     `analyze()` cannot run -- every metric block indexes `ticks` -- but the
     session summary is built from `metadata.jsonl`, `summary.json` and
     `log_health.json` alone, none of which needs a single tick.
+
+    `log_health`'s own detail (records dropped, writer status) is rendered
+    here directly: its only other renderer, `_log_health_lines`, is called
+    from `## Failures`, which this branch never produces -- so a zero-tick
+    drive used to say nothing about the one fact (the log dropped records)
+    that might explain why there are no ticks.
     """
     lines = [
         f"# Run evaluation - {run_dir.name}", "",
@@ -1505,6 +1569,8 @@ def render_session_summary_only(
         "`metadata.jsonl`, `summary.json` and `log_health.json` alone.",
     ]
     lines += _session_summary_lines(session)
+    if log_health is not None:
+        lines += _log_health_lines({"log_health": log_health})
     lines += _sensing_lines(session.get("sensing"))
     lines.append("")
     return "\n".join(lines)
@@ -1754,7 +1820,12 @@ LATENCY_VOCABULARY = frozenset({LATENCY_ABSENT_REASON})
 #: two-word vocabulary (`"no_telemetry"`) plus the controller's own staleness
 #: predicate (`"stale"`, from comparing `age_s` against `MAX_TELEMETRY_AGE_S`).
 RATES_VOCABULARY = frozenset({REFERENCE_NO_TELEMETRY, REFERENCE_STALE})
-API_CALLS_VOCABULARY = frozenset({REFERENCE_NO_TELEMETRY})
+#: `field_not_recorded` is not one of `reference_from`'s own words: it names
+#: the shape violation where `absent` reads `None` (telemetry present) but
+#: `here_calls` is still null, which `reference_from`'s own branches never
+#: produce (task 39's shape rule) but a malformed or hand-built record can.
+API_CALLS_FIELD_NOT_RECORDED = "field_not_recorded"
+API_CALLS_VOCABULARY = frozenset({REFERENCE_NO_TELEMETRY, API_CALLS_FIELD_NOT_RECORDED})
 
 #: `triggers` answers "did this tick's attribution parse", not "did every rule
 #: fire" -- a rule being `not_evaluable` is a legitimate state (D3), not an
@@ -1769,13 +1840,15 @@ TRIGGERS_VOCABULARY = frozenset({TRIGGERS_UNANSWERED_REASON})
 #: `sensors.thermal.THERMAL_BASIS_STALE`.
 THERMAL_FAILURES_VOCABULARY = frozenset({THERMAL_BASIS_STALE}) | ABSENT_REASONS
 
-#: `provenance` has no borrowed vocabulary: it is a statement about the SHAPE
-#: of `field_sources`, not about the class words it contains (that census is
-#: `## Observation quality`'s `by_source`, already rendered elsewhere). A map
-#: of the right size is never counted as a violation; a map of the wrong size
-#: is always one, because there is no vocabulary of legal wrong sizes.
+#: `provenance` states the SHAPE of `field_sources` (a map of the wrong size
+#: is `short`/`long`, no vocabulary of legal wrong sizes exists) and, on a map
+#: of the right size, whether it carries any field that is actually evidence
+#: about this tick. `PROVENANCE_EXCLUDED` is `perception.provenance.SUBSTITUTED`
+#: plus `derived_empty`: a tick whose every field falls in this set measured
+#: nothing, even though its key set matches the encoder contract exactly.
 PROVENANCE_MIXED_REASON = "provenance_fields_mixed"
-PROVENANCE_VOCABULARY = frozenset({PROVENANCE_MIXED_REASON})
+PROVENANCE_EXCLUDED = provenance.SUBSTITUTED | {provenance.SOURCE_DERIVED_EMPTY}
+PROVENANCE_VOCABULARY = frozenset({PROVENANCE_MIXED_REASON}) | PROVENANCE_EXCLUDED
 
 #: The three words `RuleCheck.status` may hold. Duplicated from
 #: `policy.sensing_controller` rather than imported as a set, because that
@@ -1808,6 +1881,13 @@ class AxisResult:
     vocabulary_violations: dict[str, int]
     unbuildable: str | None
     section: str
+    #: Per-rule count of ticks where that rule was legitimately `not_evaluable`
+    #: (D3: not a member of `unanswered_by_reason`, since it does not make the
+    #: tick unanswered). Empty on every axis but `triggers`. Kept off
+    #: `unanswered_by_reason` so rule 2's identity is untouched by it -- the
+    #: `## Sensing` section prints the same census from `sensing_result`, and
+    #: without this field the JSON record itself carried no trace of it.
+    not_evaluable_by_rule: dict[str, int] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -1817,6 +1897,7 @@ class AxisResult:
             "vocabulary": self.vocabulary,
             "vocabulary_violations": dict(self.vocabulary_violations),
             "unbuildable": self.unbuildable, "section": self.section,
+            "not_evaluable_by_rule": dict(self.not_evaluable_by_rule),
         }
 
 
@@ -1833,11 +1914,22 @@ class Reconciliation:
     name: str
     status: str
     detail: str | None = None
+    #: The size of the population actually compared -- a row count or a
+    #: record count, named by `compared_is` (`"rows_compared"` or
+    #: `"records_compared"`). `None` is only for the (rare) reconciliation
+    #: that has not been updated to report one; every reconciliation this
+    #: task's fix touches sets it, and a check whose population is 0 reports
+    #: `"unavailable"`, never `"held"` -- a check that compared nothing is not
+    #: a check that passed.
+    compared: int | None = None
+    compared_is: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         record: dict[str, Any] = {"name": self.name, "status": self.status}
         if self.detail is not None:
             record["detail"] = self.detail
+        if self.compared is not None and self.compared_is is not None:
+            record[self.compared_is] = self.compared
         return record
 
 
@@ -1859,8 +1951,13 @@ def _sensing_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _axis_latency(ticks: list[dict[str, Any]]) -> AxisResult:
     attempted = len(ticks)
-    answered = sum(1 for t in ticks if t.get("jetson_ms") is not None)
-    unanswered = attempted - answered
+    answered = 0
+    unanswered = 0
+    for t in ticks:
+        if t.get("jetson_ms") is not None:
+            answered += 1
+        else:
+            unanswered += 1
     counts = {LATENCY_ABSENT_REASON: unanswered} if unanswered else {}
     census, violations = _census_and_violations(counts, LATENCY_VOCABULARY)
     return AxisResult(
@@ -1934,24 +2031,45 @@ def _axis_failures(ticks: list[dict[str, Any]]) -> AxisResult:
 
 
 def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
+    """Answers "did this tick's provenance map cover the encoder contract
+    *and measure something*" (M4) -- a map of the right shape whose every
+    field is `perception.provenance.SUBSTITUTED` or `derived_empty` is a
+    drive that measured nothing, and a shape check alone reads that as a
+    full house.
+    """
     attempted = len(ticks)
     answered = 0
     encoder_slots = set(sim_contract.encoded_slot_names())
     counts: dict[str, int] = {}
     for t in ticks:
-        keys = set(t.get("field_sources") or {})
-        if keys == encoder_slots:
-            answered += 1
-        elif len(keys) != len(encoder_slots):
-            key = f"short: {len(keys)}" if len(keys) < len(encoder_slots) else f"long: {len(keys)}"
+        field_sources = t.get("field_sources") or {}
+        keys = set(field_sources)
+        if keys != encoder_slots:
+            if len(keys) != len(encoder_slots):
+                key = f"short: {len(keys)}" if len(keys) < len(encoder_slots) else f"long: {len(keys)}"
+            else:
+                key = PROVENANCE_MIXED_REASON
             counts[key] = counts.get(key, 0) + 1
+            continue
+        classes_present = set(field_sources.values())
+        if classes_present - PROVENANCE_EXCLUDED:
+            answered += 1
         else:
-            counts[PROVENANCE_MIXED_REASON] = counts.get(PROVENANCE_MIXED_REASON, 0) + 1
+            # Every field is substituted or derived from an absence: censused
+            # under whichever such class dominates this tick's own map, using
+            # ## Observation quality's own by_source vocabulary rather than a
+            # new word.
+            dominant = Counter(field_sources.values()).most_common(1)[0][0]
+            counts[dominant] = counts.get(dominant, 0) + 1
     census, violations = _census_and_violations(counts, PROVENANCE_VOCABULARY)
     return AxisResult(
         axis="provenance", attempted=attempted, answered=answered,
         attempted_is="ticks",
-        answered_is="ticks whose field_sources key set equals sim_contract.encoded_slot_names()",
+        answered_is=(
+            "ticks whose field_sources key set equals sim_contract.encoded_slot_names() "
+            "and carry at least one field outside perception.provenance.SUBSTITUTED "
+            "union {derived_empty}"
+        ),
         unanswered_by_reason=census, vocabulary="eval_run.PROVENANCE_VOCABULARY",
         vocabulary_violations=violations, unbuildable=None, section="## Observation quality",
     )
@@ -1970,13 +2088,18 @@ def _axis_rates(ticks: list[dict[str, Any]]) -> AxisResult:
     no_telemetry_ticks = 0
     ages_by_report: dict[Any, float | None] = {}
     for t in sensing_ticks:
-        ref = t["sensing"]["reference"]
+        ref = t["sensing"].get("reference") or {}
         if ref.get("absent") is not None:
             no_telemetry_ticks += 1
             continue
         ages_by_report[ref.get("at_mono")] = ref.get("age_s")
-    fresh = sum(1 for age in ages_by_report.values() if _is_fresh(age))
-    stale = len(ages_by_report) - fresh
+    fresh = 0
+    stale = 0
+    for age in ages_by_report.values():
+        if _is_fresh(age):
+            fresh += 1
+        else:
+            stale += 1
     attempted = len(ages_by_report) + no_telemetry_ticks
     counts: dict[str, int] = {}
     if stale:
@@ -1997,26 +2120,41 @@ def _axis_rates(ticks: list[dict[str, Any]]) -> AxisResult:
 
 
 def _axis_api_calls(ticks: list[dict[str, Any]]) -> AxisResult:
+    """Answers "did this tick's telemetry report a HERE call count" (M1).
+    Branches on `reference.absent`, the field that actually says whether
+    telemetry arrived, rather than on `here_calls is None` alone: the two
+    agree under the shape rule (§6 rule 8), but a record that violates it --
+    `absent` set *and* `here_calls` a real number -- must still census under
+    `no_telemetry`, not read as answered.
+    """
     sensing_ticks = _sensing_ticks(ticks)
     if not sensing_ticks:
         return AxisResult(
             axis="api_calls", attempted=None, answered=None,
             attempted_is="ticks carrying a sensing.reference block",
-            answered_is="ticks with here_calls non-null",
+            answered_is="ticks whose reference.absent is None and here_calls is non-null",
             unanswered_by_reason={}, vocabulary="policy.sensing_loop.reference_from",
             vocabulary_violations={}, unbuildable=NOT_A_PHONE_RUN, section="## Sensing",
         )
     attempted = len(sensing_ticks)
-    no_telemetry = sum(
-        1 for t in sensing_ticks if t["sensing"]["reference"].get("here_calls") is None
-    )
-    answered = attempted - no_telemetry
-    counts = {REFERENCE_NO_TELEMETRY: no_telemetry} if no_telemetry else {}
+    answered = 0
+    counts: dict[str, int] = {}
+    for t in sensing_ticks:
+        ref = t["sensing"].get("reference") or {}
+        if ref.get("absent") is not None:
+            counts[REFERENCE_NO_TELEMETRY] = counts.get(REFERENCE_NO_TELEMETRY, 0) + 1
+        elif ref.get("here_calls") is None:
+            # Telemetry was present (absent is None) but here_calls is still
+            # null: the shape rule forbids this, so it is a distinct word
+            # from no_telemetry rather than silently merged into it.
+            counts[API_CALLS_FIELD_NOT_RECORDED] = counts.get(API_CALLS_FIELD_NOT_RECORDED, 0) + 1
+        else:
+            answered += 1
     census, violations = _census_and_violations(counts, API_CALLS_VOCABULARY)
     return AxisResult(
         axis="api_calls", attempted=attempted, answered=answered,
         attempted_is="ticks carrying a sensing.reference block",
-        answered_is="ticks with here_calls non-null",
+        answered_is="ticks whose reference.absent is None and here_calls is non-null",
         unanswered_by_reason=census, vocabulary="policy.sensing_loop.reference_from",
         vocabulary_violations=violations, unbuildable=None, section="## Sensing",
     )
@@ -2035,6 +2173,7 @@ def _axis_triggers(ticks: list[dict[str, Any]]) -> AxisResult:
     attempted = len(sensing_ticks)
     answered = 0
     counts: dict[str, int] = {}
+    not_evaluable_by_rule: dict[str, int] = {}
     for t in sensing_ticks:
         rules = t["sensing"].get("attribution", {}).get("rules", {})
         valid = set(rules) == set(RULES) and all(
@@ -2042,6 +2181,12 @@ def _axis_triggers(ticks: list[dict[str, Any]]) -> AxisResult:
         )
         if valid:
             answered += 1
+            # A rule being not_evaluable is a legitimate state (D3), so it
+            # never moves `unanswered_by_reason` -- but it is real information
+            # this axis record would otherwise carry no trace of at all (M5).
+            for name in RULES:
+                if rules[name].get("status") == RULE_NOT_EVALUABLE:
+                    not_evaluable_by_rule[name] = not_evaluable_by_rule.get(name, 0) + 1
         else:
             counts[TRIGGERS_UNANSWERED_REASON] = counts.get(TRIGGERS_UNANSWERED_REASON, 0) + 1
     census, violations = _census_and_violations(counts, TRIGGERS_VOCABULARY)
@@ -2051,6 +2196,7 @@ def _axis_triggers(ticks: list[dict[str, Any]]) -> AxisResult:
         answered_is="ticks whose attribution carries all four RULES with a valid status",
         unanswered_by_reason=census, vocabulary="policy.sensing_controller.RULES",
         vocabulary_violations=violations, unbuildable=None, section="## Sensing",
+        not_evaluable_by_rule=not_evaluable_by_rule,
     )
 
 
@@ -2082,7 +2228,7 @@ def _distinct_reports(sensing_ticks: list[dict[str, Any]]) -> list[dict[str, Any
     """
     by_at_mono: dict[Any, dict[str, Any]] = {}
     for t in sensing_ticks:
-        ref = t["sensing"]["reference"]
+        ref = t["sensing"].get("reference") or {}
         if ref.get("absent") is None and ref.get("at_mono") is not None:
             by_at_mono[ref["at_mono"]] = ref
     return [by_at_mono[key] for key in sorted(by_at_mono)]
@@ -2213,16 +2359,27 @@ def _here_calls_by_session(ticks: list[dict[str, Any]]) -> dict[str, Any]:
     each session's own delta at zero avoids that, at the cost of not counting
     calls placed before a session's first observed report (`uncounted_prefix`,
     a bound rather than a measurement -- open item 1).
+
+    `calls_total`/`errors_total`/`uncounted_prefix` are `None`, with
+    `not_measured` naming why, when no tick carries `here_calls` at all --
+    a log that predates this field measured nothing, and a `0` there would
+    read as a phone that placed zero calls (C2). A session whose own counter
+    decreases (`last < first`) is still clamped to zero for the total, since
+    a negative call count cannot be reported, but the session is named under
+    `counter_went_backwards` (task 38's own word for the same situation on
+    its own counters, M7) rather than the decrease being silently absorbed.
     """
     by_session: dict[Any, dict[str, list[int]]] = {}
+    ticks_with_here_calls = 0
     for t in ticks:
         sensing = t.get("sensing")
         if sensing is None:
             continue
-        ref = sensing.get("reference", {})
+        ref = sensing.get("reference") or {}
         calls = ref.get("here_calls")
         if calls is None:
             continue
+        ticks_with_here_calls += 1
         errors = ref.get("here_errors") or 0
         bucket = by_session.setdefault(t.get("session_id"), {"calls": [], "errors": []})
         bucket["calls"].append(calls)
@@ -2231,6 +2388,7 @@ def _here_calls_by_session(ticks: list[dict[str, Any]]) -> dict[str, Any]:
     calls_total = 0
     errors_total = 0
     uncounted_prefix = 0
+    backwards_sessions = []
     for session_id, values in by_session.items():
         first_calls, last_calls = values["calls"][0], values["calls"][-1]
         first_errors, last_errors = values["errors"][0], values["errors"][-1]
@@ -2238,12 +2396,20 @@ def _here_calls_by_session(ticks: list[dict[str, Any]]) -> dict[str, Any]:
             "session_id": session_id, "first": first_calls, "last": last_calls,
             "observations": len(values["calls"]),
         })
+        if last_calls - first_calls < 0:
+            backwards_sessions.append(session_id)
         calls_total += max(0, last_calls - first_calls)
         errors_total += max(0, last_errors - first_errors)
         uncounted_prefix += first_calls
+    not_measured = None if ticks_with_here_calls else "no tick carries here_calls (log predates task 39)"
     return {
-        "by_session": rows, "calls_total": calls_total, "errors_total": errors_total,
-        "uncounted_prefix": uncounted_prefix,
+        "by_session": rows,
+        "calls_total": None if not_measured else calls_total,
+        "errors_total": None if not_measured else errors_total,
+        "uncounted_prefix": None if not_measured else uncounted_prefix,
+        "not_measured": not_measured,
+        "counter_went_backwards": backwards_sessions,
+        "ticks_with_here_calls": ticks_with_here_calls,
     }
 
 
@@ -2258,13 +2424,17 @@ def sensing_result(ticks: list[dict[str, Any]], summary: dict[str, Any]) -> dict
 
     sensing_summary = (summary or {}).get("sensing")
     mode_block = (sensing_summary or {}).get("mode") or {}
+    # `ever_live` scans every tick; the fallback below is built from the same
+    # scan rather than the first tick alone, so the two can never contradict
+    # each other -- a drive whose first tick happened to be shadow could
+    # otherwise be reported as a shadow drive while `ever_live` said True.
+    ever_live = any(t["sensing"].get("shadow") is False for t in sensing_ticks)
     mode = mode_block.get("mode")
     if mode is not None:
         mode_source = "summary[sensing].mode.mode"
     else:
-        mode = LIVE if sensing_ticks[0]["sensing"].get("shadow") is False else SHADOW
-        mode_source = "derived from the first tick's own shadow flag (no summary.json)"
-    ever_live = any(t["sensing"].get("shadow") is False for t in sensing_ticks)
+        mode = LIVE if ever_live else SHADOW
+        mode_source = "derived from whether any tick's own shadow flag is False (no summary.json)"
 
     computed_by_trigger, computed_rules_by_status = _tally_triggers(ticks)
     rules_missing = _tally_rules_missing(ticks)
@@ -2282,16 +2452,24 @@ def sensing_result(ticks: list[dict[str, Any]], summary: dict[str, Any]) -> dict
 
     rates: dict[str, Any] = {}
     for key in RATE_KEYS:
-        points = [(t["sensing"]["decided_at_mono"], t["sensing"]["rates"][key]) for t in sensing_ticks]
+        points = [
+            (t["sensing"].get("decided_at_mono"), (t["sensing"].get("rates") or {}).get(key))
+            for t in sensing_ticks
+        ]
+        # A malformed tick (missing decided_at_mono or this rate key) is
+        # dropped rather than raising -- one bad record should not abort the
+        # whole report, including the axes that would have survived it.
+        points = [(t_mono, v) for t_mono, v in points if t_mono is not None and v is not None]
         census = Counter(str(v) for _, v in points)
         commanded_time_mean = _time_weighted_mean(points)
         clamped_ticks = sum(
             1 for t in sensing_ticks
-            if (t["sensing"]["attribution"]["per_sensor"].get(key) or {}).get("clamped")
+            if ((t["sensing"].get("attribution") or {}).get("per_sensor") or {}).get(key, {}).get("clamped")
         )
         thermal_scaled_ticks = sum(
             1 for t in sensing_ticks
-            if (t["sensing"]["attribution"]["per_sensor"].get(key) or {}).get("scale", 1.0) != 1.0
+            if (((t["sensing"].get("attribution") or {}).get("per_sensor") or {}).get(key) or {})
+            .get("scale", 1.0) != 1.0
         )
         entry: dict[str, Any] = {
             "commanded_by_value": dict(census),
@@ -2300,18 +2478,23 @@ def sensing_result(ticks: list[dict[str, Any]], summary: dict[str, Any]) -> dict
             "clamped_ticks": clamped_ticks,
             "thermal_scaled_ticks": thermal_scaled_ticks,
             "achieved_time_mean": None,
+            "lambda_per_window": None,
             "percentiles": {"p50": None, "p95": None},
             "percentiles_suppressed": None,
             "comparable": comparable,
             "not_comparable_because": not_comparable_because,
         }
         if comparable:
-            achieved_points = [(r["at_mono"], r["achieved"][key]) for r in distinct_reports]
+            achieved_points = [
+                (r.get("at_mono"), (r.get("achieved") or {}).get(key)) for r in distinct_reports
+            ]
+            achieved_points = [(t_mono, v) for t_mono, v in achieved_points if t_mono is not None and v is not None]
             entry["achieved_time_mean"] = _time_weighted_mean(achieved_points)
             lambda_per_window = (
-                None if window["observed_median_s"] is None
+                None if window["observed_median_s"] is None or commanded_time_mean is None
                 else commanded_time_mean * window["observed_median_s"]
             )
+            entry["lambda_per_window"] = lambda_per_window
             if lambda_per_window is None:
                 pass
             elif lambda_per_window < 1.0:
@@ -2322,21 +2505,38 @@ def sensing_result(ticks: list[dict[str, Any]], summary: dict[str, Any]) -> dict
                     f"{windows_per_delivery:.0f} windows; a median over per-window rates "
                     "would be 0.0 and is not a statement about the rate"
                 )
-            else:
+            elif achieved_points:
                 stats = pctl([v for _, v in achieved_points])
                 entry["percentiles"] = {"p50": stats["p50"], "p95": stats["p95"]}
+                if lambda_per_window == 1.0:
+                    # D9: the percentiles ARE reported here, unlike the
+                    # `< 1.0` branch above -- this names the quantisation
+                    # rather than hiding the numbers behind it.
+                    entry["percentiles_suppressed"] = (
+                        f"not suppressed, but quantised to multiples of "
+                        f"{1.0 / window['observed_median_s']:g} Hz: commanded "
+                        f"{commanded_time_mean:g} Hz over a {window['observed_median_s']:.3f} s window "
+                        "delivers exactly one event per window"
+                    )
         rates[key] = entry
 
     here = _here_calls_by_session(ticks)
-    here["expected_from_commanded"] = _time_weighted_integral(
-        [(t["sensing"]["decided_at_mono"], t["sensing"]["rates"]["here_hz"]) for t in sensing_ticks]
-    )
-    here["responses_received"] = ((summary or {}).get("phone", {}).get("here", {}) or {}).get(
-        "responses_received"
-    )
+    here_points = [
+        (t["sensing"].get("decided_at_mono"), (t["sensing"].get("rates") or {}).get("here_hz"))
+        for t in sensing_ticks
+    ]
+    here_points = [(t_mono, v) for t_mono, v in here_points if t_mono is not None and v is not None]
+    here["expected_from_commanded"] = _time_weighted_integral(here_points)
+    here["responses_received"] = (
+        ((summary or {}).get("phone") or {}).get("here") or {}
+    ).get("responses_received")
     here["zero_calls_because"] = (
         f"mode {mode}; a shadow command never reaches setHereQuery"
-        if here["calls_total"] == 0 and mode == SHADOW else None
+        if (
+            here["calls_total"] == 0 and mode == SHADOW
+            and any(row["observations"] >= 2 for row in here["by_session"])
+        )
+        else None
     )
 
     return {
@@ -2361,28 +2561,46 @@ def _reconcile_rows(
     name: str, failures_summary: dict[str, Any], predicate: Callable[[str, dict], bool],
     describe: Callable[[list[str]], str],
 ) -> Reconciliation:
+    """C1: `bad` is empty both when every row satisfies `predicate` and when
+    `sources` is empty -- the two used to render identically as `held`. The
+    row count is carried and checked: zero rows compared is `unavailable`,
+    never a check that passed.
+    """
     sources = failures_summary.get("sources") or {}
+    if not sources:
+        return Reconciliation(name, "unavailable", "no source rows to compare",
+                               compared=0, compared_is="rows_compared")
     bad = sorted(name for name, row in sources.items() if not predicate(name, row))
     if not bad:
-        return Reconciliation(name, "held")
-    return Reconciliation(name, "failed", describe(bad))
+        return Reconciliation(name, "held", compared=len(sources), compared_is="rows_compared")
+    return Reconciliation(name, "failed", describe(bad), compared=len(sources), compared_is="rows_compared")
 
 
 def _reconcile_blind_ticks(failures_summary: dict[str, Any]) -> Reconciliation:
+    """C1's narrower case: a `camera.blind_ticks` row present but empty
+    (`row.get("total")` absent) used to compare `None == None` against a
+    missing `blind_ticks` field and read as `held` -- a record carrying
+    neither number. Either side missing is `unavailable`, not a coincidental
+    equality.
+    """
     sources = failures_summary.get("sources") or {}
     row = sources.get("camera.blind_ticks")
     blind_ticks = failures_summary.get("blind_ticks")
-    if row is None:
+    total = None if row is None else row.get("total")
+    if total is None or blind_ticks is None:
         return Reconciliation(
-            "blind_ticks_matches_camera_source", "unavailable", "no camera.blind_ticks source row"
+            "blind_ticks_matches_camera_source", "unavailable",
+            "camera.blind_ticks total or blind_ticks not present in this record",
+            compared=0, compared_is="rows_compared",
         )
-    total = row.get("total")
     if total == blind_ticks:
-        return Reconciliation("blind_ticks_matches_camera_source", "held")
+        return Reconciliation("blind_ticks_matches_camera_source", "held",
+                               compared=1, compared_is="rows_compared")
     return Reconciliation(
         "blind_ticks_matches_camera_source", "failed",
         f'sources["camera.blind_ticks"].total is {total} and blind_ticks is {blind_ticks}, '
         "on the same record; this drive's failure counts are not usable",
+        compared=1, compared_is="rows_compared",
     )
 
 
@@ -2418,9 +2636,10 @@ def _reconcile_source_count(failures_summary: dict[str, Any]) -> Reconciliation:
     scan = failures_summary.get("scan") or {}
     n, scan_n = len(sources), scan.get("sources_n")
     if n == scan_n == 30:
-        return Reconciliation("sources_count_is_30", "held")
+        return Reconciliation("sources_count_is_30", "held", compared=n, compared_is="rows_compared")
     return Reconciliation(
-        "sources_count_is_30", "failed", f"len(sources)={n}, scan.sources_n={scan_n}, expected 30 both"
+        "sources_count_is_30", "failed", f"len(sources)={n}, scan.sources_n={scan_n}, expected 30 both",
+        compared=n, compared_is="rows_compared",
     )
 
 
@@ -2434,15 +2653,25 @@ def _reconcile_events_written(loaded: "LoadedRecords", failures_summary: dict[st
     (open records only), which a truncated log with an odd number of
     `failure_event` lines would satisfy by coincidence and a normal,
     cleanly-closed drive never would.
+
+    C1: `expected` sums over `sources`, so an empty `sources` map made this
+    hold at `0 == 0` even on a drive with no source rows to sum at all.
     """
     sources = failures_summary.get("sources") or {}
+    if not sources:
+        return Reconciliation(
+            "events_written_matches_open_and_close_records", "unavailable",
+            "no source rows to sum events_written over", compared=0, compared_is="rows_compared",
+        )
     expected = sum(row.get("events_written", 0) for row in sources.values())
     actual = sum(1 for r in loaded.failure_events if r.get("phase") in ("open", "close"))
     if expected == actual:
-        return Reconciliation("events_written_matches_open_and_close_records", "held")
+        return Reconciliation("events_written_matches_open_and_close_records", "held",
+                               compared=len(sources), compared_is="rows_compared")
     return Reconciliation(
         "events_written_matches_open_and_close_records", "failed",
         f"sum(events_written)={expected}, open+close failure_event records in metadata.jsonl={actual}",
+        compared=len(sources), compared_is="rows_compared",
     )
 
 
@@ -2455,48 +2684,106 @@ def _reconcile_thermal_samples(loaded: "LoadedRecords", thermal_summary: dict[st
     actual = len(loaded.thermal_samples)
     diff = reported - actual
     if diff in (0, 1):
-        return Reconciliation("thermal_samples_count", "held")
+        return Reconciliation("thermal_samples_count", "held", compared=actual, compared_is="records_compared")
     return Reconciliation(
         "thermal_samples_count", "failed",
         f"summary reports {reported} samples, {actual} thermal_sample records read "
         f"(difference {diff}, expected 0 or 1)",
+        compared=actual, compared_is="records_compared",
     )
 
 
 def _reconcile_triggers(loaded: "LoadedRecords", sensing_summary: dict[str, Any]) -> Reconciliation:
+    """C1: with no sensing ticks at all, both the computed maps and an empty
+    (or absent) summary rollup are `{}`, which used to compare equal and
+    read as `held` -- zero decisions, on both sides.
+    """
+    sensing_ticks_n = len(_sensing_ticks(loaded.ticks))
+    if sensing_ticks_n == 0:
+        return Reconciliation("triggers_match_summary", "unavailable",
+                               "no tick carries a sensing block", compared=0, compared_is="records_compared")
     computed_by_trigger, computed_rules_by_status = _tally_triggers(loaded.ticks)
     summary_by_trigger = sensing_summary.get("decisions_by_trigger")
     summary_rules_by_status = sensing_summary.get("rules_by_status")
     if computed_by_trigger == summary_by_trigger and computed_rules_by_status == summary_rules_by_status:
-        return Reconciliation("triggers_match_summary", "held")
+        return Reconciliation("triggers_match_summary", "held",
+                               compared=sensing_ticks_n, compared_is="records_compared")
     return Reconciliation(
         "triggers_match_summary", "failed",
         f"decisions_by_trigger: computed {computed_by_trigger} vs summary {summary_by_trigger}; "
         f"rules_by_status: computed {computed_rules_by_status} vs summary {summary_rules_by_status}",
+        compared=sensing_ticks_n, compared_is="records_compared",
     )
 
 
 def _reconcile_here_vs_responses(loaded: "LoadedRecords", phone_summary: dict[str, Any]) -> Reconciliation:
+    """C1: the real task-38 drive held here because `calls_total` was
+    computed as `0` from a `here_calls` field present on zero ticks, against
+    a `responses_received` of `0` -- two zeros that were never compared.
+    `_here_calls_by_session` now reports `calls_total` as `None`, with a
+    named reason, when no tick carried the field at all.
+    """
     responses = (phone_summary.get("here") or {}).get("responses_received")
-    if responses is None:
-        return Reconciliation(
-            "here_calls_ge_responses_received", "unavailable",
-            "summary[phone][here] carries no responses_received",
+    here = _here_calls_by_session(loaded.ticks)
+    calls_total = here["calls_total"]
+    if responses is None or calls_total is None:
+        reason = (
+            "summary[phone][here] carries no responses_received" if responses is None
+            else here["not_measured"]
         )
-    calls_total = _here_calls_by_session(loaded.ticks)["calls_total"]
+        return Reconciliation("here_calls_ge_responses_received", "unavailable", reason,
+                               compared=0, compared_is="records_compared")
     if calls_total >= responses:
-        return Reconciliation("here_calls_ge_responses_received", "held")
+        return Reconciliation("here_calls_ge_responses_received", "held",
+                               compared=here["ticks_with_here_calls"], compared_is="records_compared")
     return Reconciliation(
         "here_calls_ge_responses_received", "failed",
         f"here.calls_total={calls_total} < summary[phone][here].responses_received={responses}",
+        compared=here["ticks_with_here_calls"], compared_is="records_compared",
+    )
+
+
+def _reconcile_reference_shape(loaded: "LoadedRecords") -> Reconciliation:
+    """§6 rule 8, across every tick: `sensing.reference.absent` is `None` if
+    and only if `achieved`, `dropped`, `here_calls` and `here_errors` are all
+    non-null. Needs only tick records, never `summary.json` -- M1's fix,
+    since `api_calls` branches on `absent` and a record that violates this
+    shape would otherwise be silently miscounted rather than flagged.
+    """
+    sensing_ticks = _sensing_ticks(loaded.ticks)
+    if not sensing_ticks:
+        return Reconciliation(
+            "reference_absent_iff_fields_null", "unavailable",
+            "no tick carries a sensing block", compared=0, compared_is="records_compared",
+        )
+    bad = 0
+    for t in sensing_ticks:
+        ref = t["sensing"].get("reference") or {}
+        present = ref.get("absent") is None
+        fields_present = (
+            ref.get("achieved") is not None and ref.get("dropped") is not None
+            and ref.get("here_calls") is not None and ref.get("here_errors") is not None
+        )
+        if present != fields_present:
+            bad += 1
+    if bad == 0:
+        return Reconciliation("reference_absent_iff_fields_null", "held",
+                               compared=len(sensing_ticks), compared_is="records_compared")
+    return Reconciliation(
+        "reference_absent_iff_fields_null", "failed",
+        f"{bad} of {len(sensing_ticks)} ticks have reference.absent disagreeing with whether "
+        "achieved/dropped/here_calls/here_errors are all non-null",
+        compared=len(sensing_ticks), compared_is="records_compared",
     )
 
 
 def reconciliations(loaded: "LoadedRecords", summary: dict[str, Any]) -> list[Reconciliation]:
-    """The nine cross-checks §6 rules 11-19 name. Every one needs
+    """The nine cross-checks §6 rules 11-19 name, plus `reference_absent_iff_fields_null`
+    (M1, §6 rule 8 restated as a reconciliation). The first nine all need
     `summary.json`; the five within `summary["failures"]` need that block
     specifically. A missing input reports `unavailable`, never `held` --
-    an absent summary is not a passed check (mutation pin 9).
+    an absent summary is not a passed check (mutation pin 9). The tenth needs
+    only tick records and runs unconditionally.
     """
     out: list[Reconciliation] = []
     failures_summary = (summary or {}).get("failures")
@@ -2549,18 +2836,25 @@ def reconciliations(loaded: "LoadedRecords", summary: dict[str, Any]) -> list[Re
             Reconciliation("here_calls_ge_responses_received", "unavailable",
                             "summary.json carries no phone block")
         )
+    out.append(_reconcile_reference_shape(loaded))
     return out
 
 
 def session_summary(
     loaded: "LoadedRecords", summary: dict[str, Any], log_health: dict[str, Any] | None,
-    *, phone_log_supplied: bool,
+    *, phone_log_supplied: bool, metadata_jsonl_present: bool = True,
 ) -> dict[str, Any]:
-    """The `## Session summary` section's data: seven axes, nine
+    """The `## Session summary` section's data: seven axes, ten
     reconciliations, which inputs were available, and the sensing detail
     behind three of the axes. Built before `analyze()` can even be attempted
     (D13) -- every axis indexes `loaded.ticks` directly, never `analyze`'s
     output.
+
+    `metadata_jsonl_present` defaults to `True` for a caller that has already
+    read the file successfully (every existing caller); `main()` is the one
+    caller that can pass `False`, for the run directory that never wrote the
+    file at all -- previously `inputs.metadata_jsonl` was a literal `True`
+    that could never say otherwise.
     """
     ticks = loaded.ticks
     axes = [_AXIS_BUILDERS[name](ticks) for name in AXES]
@@ -2568,7 +2862,7 @@ def session_summary(
         "axes": [a.to_record() for a in axes],
         "reconciliations": [r.to_record() for r in reconciliations(loaded, summary)],
         "inputs": {
-            "metadata_jsonl": True,
+            "metadata_jsonl": metadata_jsonl_present,
             "summary_json": bool(summary),
             "log_health_json": log_health is not None,
             "phone_log": phone_log_supplied,
@@ -2593,12 +2887,21 @@ def main() -> int:
     # Built before `analyze` can even be attempted (D13): every axis indexes
     # `loaded.ticks` directly, so a drive with no tick records still gets a
     # `## Session summary` rather than nothing but `analyze`'s SystemExit.
-    loaded = load_records(run_dir / "metadata.jsonl")
+    metadata_path = run_dir / "metadata.jsonl"
+    metadata_jsonl_present = metadata_path.exists()
+    loaded = (
+        load_records(metadata_path) if metadata_jsonl_present
+        else LoadedRecords(ticks=[], scenario=None, timebase_estimates=[], unparseable=0,
+                           thermal_samples=[], thermal_events=[])
+    )
     summary = _read_summary(run_dir)
     log_health = _read_log_health(run_dir)
-    session = session_summary(loaded, summary, log_health, phone_log_supplied=phone_log is not None)
+    session = session_summary(
+        loaded, summary, log_health, phone_log_supplied=phone_log is not None,
+        metadata_jsonl_present=metadata_jsonl_present,
+    )
     if not loaded.ticks:
-        report_md = render_session_summary_only(run_dir, session, loaded)
+        report_md = render_session_summary_only(run_dir, session, loaded, log_health)
         (run_dir / "report.md").write_text(report_md)
         (run_dir / "report.json").write_text(json.dumps(
             {

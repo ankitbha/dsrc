@@ -794,6 +794,24 @@ class TestTickOutcomeToRecord:
         assert record["decision_inputs"]["ego_acceleration"] == 3.0
         assert record["reference"] == outcome.reference
 
+    def test_the_key_set_is_exactly_these_fifteen(self):
+        """The other two tests in this class each check a subset of keys by
+        name, so a new key added anywhere in `to_record()` -- not just inside
+        `reference`, which `TestReferenceShapeRule` already fences -- would
+        reach neither. This is the fence one level up, on the tick record
+        itself.
+        """
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        phone = Phone()
+        outcome = loop.on_tick(tick(), phone)
+        record = outcome.to_record()
+        assert set(record) == {
+            "rates", "trigger", "rules_fired", "reasons", "thermal_scale", "clamped",
+            "here_radius_m", "attribution", "decided_at_mono", "decision_inputs",
+            "reference", "shadow", "advisory_sent", "command_sent", "send_reason",
+        }
+
 
 class DriftingClock:
     """Advances by a fixed step on every read, never on request.
