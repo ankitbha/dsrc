@@ -1419,8 +1419,97 @@ Written as part of the implementation, not added afterwards.
     transitions were injected rather than provoked, and the platform's severity
     thresholds are internal to its thermal service, so how much heat would have been
     needed cannot be stated from this device.
-38. Failure event log: GPS dropout, HERE failure or quota exhaustion, dropped
-    frames, transport stalls, with recovery outcome.
+38. ~~Failure event log: GPS dropout, HERE failure or quota exhaustion, dropped
+    frames, transport stalls, with recovery outcome.~~
+    **The plan's first section was an inventory, and it is what the task turned on: 186 failures
+    are already detected across the two devices, and almost none of them can be read.** Four of
+    the 186 record when the failure happened. None records an episode -- a second endpoint and an
+    outcome. Several have no reader at all: the metadata logger's own write-failure and
+    dropped-record counters are set in five places and read nowhere outside that module, the only
+    pre-existing failure record type is written by one line and read by nothing, and the
+    sequence-gap counters -- the system's sole cross-device loss evidence -- were omitted by hand
+    from the record that carries them off the device. Two failures were detected nowhere: the tick
+    loop's no-frame branch counted nothing, so a drive blind for 110 of 120 seconds wrote the
+    artefact of one that was never blind, and the worker was `try/finally` with no `except`, so an
+    exception still ran teardown and wrote a summary that read like a clean short run. The task
+    adds one stream as a **projection of counters that already exist**, not a second detector:
+    where the log and a counter disagree the counter is right and the log names the disagreement.
+    Its vocabulary is imported rather than invented -- task 34's three rule words, task 33's basis
+    words -- and exactly one closed set is new, whose third member is the point: an episode is
+    `recovered`, `open_at_end`, or **`unobservable`**, because a source that stopped being readable
+    must never report a recovery nobody witnessed.
+    **Three validation rounds, a fix round, a re-audit, and a second fix round.** The first round
+    found the feature able to report `quiet` on a drive where the camera went blind 40 times, with
+    "blind ticks: 40" printed three lines away and nothing reconciling them; a single continuous
+    outage counted as 30 discarded episodes, because the cap check returned before constructing the
+    episode so nothing was ever marked open; and **five of six wiring points unpinned**, so the
+    entire feature could be absent with every test passing. **The re-audit then found the fix round
+    had introduced a critical regression**: the backwards-counter record was changed from one entry
+    to a list so repeated occurrences would accumulate, and the consumer was not changed, so
+    rendering raised and **no `report.md` was written at all**. Worse in combination -- the same
+    round's other fix was **inert**. It declared the camera's dropped-frame counter session-scoped
+    so a redial would stop being read as a backwards jump, but the gate also requires a session id
+    and that accessor never supplied one, so a redial still recorded the false step, and that step
+    now crashed the report. One redial, no report. The re-audit also defeated the round's own
+    structural pins: wrapping either failure-recording call in a dead branch left all 1,849 tests
+    passing, silencing the log entirely -- this task's defect class, in the code that reports it.
+    **Experiment**, 300 s and 1,073 ticks on the real Jetson with an induced 82-second link outage,
+    the phone's first session relayed via nyc and the second direct after the redial. **The drive found
+    seven defects that 1,858 Python and 443 Kotlin tests did not**, and the sharpest is the section's own
+    defect class arriving through a door no test opened: a camera that delivered no frame for 82 seconds
+    was recorded as **21 separate recoveries**, opening on an exact 4.001 s period, each closing
+    `recovered` after about 2.15 s and together covering 45.2 s of the outage. The source is fed by direct
+    notification, so its scan accessor reports "nothing moved" by construction, and the generic path read
+    that as quiet and closed the episode every three passes; its own three-second timer never fired. Three
+    further defects made the record misstate what happened: every `not_evaluable` row whose source
+    recovered printed `-- missing ;` and named nothing, because the reason is cleared on the readable
+    path; the report printed the *readable* count inside a sentence about unreadable passes, overstating
+    one unobserved window 150-fold; and two phone-side sources reported themselves readable through the
+    entire outage from a pre-outage snapshot, because the link clears telemetry on rebind rather than on
+    session loss. A `by_reason` breakdown also dropped one reason entirely while its total stayed correct.
+    **What the drive confirmed carries equal weight.** The accounting invariant held on **30 of 30**
+    sources against real counters, with the one non-zero third term appearing exactly where it was added
+    for. The redial produced no false backwards step, and `report.md` rendered in full -- the crash that a
+    backwards step caused two days earlier did not recur, though a backwards step also did not occur, so
+    that fix remains untested in the field. The wire cost was **exactly 0 bytes**, verified against the
+    diff rather than asserted. And the per-tick block was blind to the whole outage while the 1 Hz scan
+    stream carried it, which is the plan's own sampling decision confirmed on real data. Byte costs: the
+    two per-record figures the plan named as the ones to check were exact at 131 B and 197 B; the summary
+    missed by **77.8%** (7,899 estimated against 14,045 measured), a third of it from the 28-versus-30
+    source count and the rest from five fields the plan's sample row did not carry. The drive could not
+    exercise `open_at_end` or `unobservable` -- no episode was open at teardown, and none was open when
+    its source went unreadable -- nor the worker-exception path, nor any HERE source, the build having no
+    key by design.
+    **The method lesson: check which file the instrument reads.** Nine false readings across this
+    task and the last came from measurement harnesses rather than from the code under test -- stale
+    bytecode, two partial tree copies collecting fewer tests than the baseline, a shell modifier
+    that mangled a build task name so an empty results directory read as "no failures", a quoting
+    error that read as a compile failure, a units error comparing two clocks, and a listing that
+    reported no differences because two machines sorted with different collation. The last was
+    mine: I refuted an agent's claim that a platform class could not be extended by running `javap`
+    against the mock jar used at test *runtime*, when the compiler resolves sources against the
+    `compileSdk` jar, where the class is `ACC_FINAL`. The agent was right and my evidence came from
+    the wrong file. The rule that survives all nine: reproduce the baseline count and kill a
+    known-bad control before quoting a verdict, and confirm which artefact the tool actually reads.
+    **Open:** four registry pins outside this section resolve but catch nothing -- each mutation
+    leaves the suite green -- and a fifth has never compiled, its mutation text naming a parameter
+    of a different function; all five are recorded rather than fixed, by decision, since closing
+    them means writing tests in four unrelated subsystems. Four of the eight phone failure kinds
+    are untested: `imu.timebase_mismatched` for two independently verified reasons (the sensor class
+    is final on the compile classpath, and the mock jar's accessor is compiled to return a constant
+    with no field or constructor to change it, so the source's dispatch cannot match in any JVM
+    test), and three more reachable only through the Android service lifecycle. Closing any of them
+    needs a mocking library or Robolectric, which is a dependency decision taken deliberately and
+    declined. **The plan itself is wrong in eight places**, all recorded: it says "twenty-eight
+    sources" throughout while its own table and the code have 30, and 28 is exactly the number of
+    rows whose device is the Jetson -- one device's rows written as the total, so every derived
+    figure carries the error; its cross-check test is impossible as written, since the ten phone log kinds and the
+    two phone-device registry rows are disjoint sets; two open items describe mechanisms that do not
+    exist, one of which is the direct cause of the inert fix above; the summary byte estimate does
+    not reproduce; a stated reading rule is not checkable from the records as emitted; a
+    reconciliation test it specifies was never written; and its record specification still lists two
+    scan-block aggregates that were deliberately removed for being constant by construction, one of
+    them a literal nothing could ever increment.
 39. Session summary generator: latency percentiles, achieved versus commanded
     rates, API calls made, trigger counts, failure counts.
 
