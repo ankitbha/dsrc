@@ -95,12 +95,21 @@ PREFERRED_ZONE_TYPES = (
 
 def _read_trimmed(path: Path) -> str | None:
     """A sysfs file's stripped contents, or None for anything that stops it:
-    missing, unreadable, or empty. Never raises -- a permission denial on one
-    zone must not take the whole sample down.
+    missing, unreadable, would-block, or empty. Never raises -- a permission
+    denial or a would-block on one zone must not take the whole sample down.
+
+    `TypeError` is caught alongside `OSError` because a read that would block
+    surfaces through the buffered text layer as `None` rather than as an
+    ordinary `OSError`, and stripping that `None` raises `TypeError` instead
+    -- measured on three of this Orin's nine zones, on every pass. Reading
+    through `os.open`/`os.read` directly would turn the same would-block into
+    an ordinary `OSError` like any other zone's failure, but that path has
+    not been exercised on the hardware, so this catches the failure actually
+    seen.
     """
     try:
         text = path.read_text().strip()
-    except OSError:
+    except (OSError, TypeError):
         return None
     return text or None
 

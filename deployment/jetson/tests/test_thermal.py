@@ -95,6 +95,25 @@ class _FakePhone:
         self.telemetry_at_mono = telemetry_at_mono
 
 
+# -- round 3: measured on the device -----------------------------------------
+
+
+def test_read_trimmed_catches_a_would_block_type_error():
+    """Measured on the device: three of this Orin's nine zones answer EAGAIN
+    on every pass, and a read that would block surfaces through the buffered
+    text layer as `None` rather than as an `OSError` -- `str.strip()` on that
+    `None` then raises `TypeError`, which the old `except OSError` did not
+    catch. `_read_trimmed`'s own docstring promises it never raises; this
+    pins that promise directly, without a device.
+    """
+
+    class _WouldBlock:
+        def read_text(self) -> str:
+            raise TypeError("can't concat NoneType to bytes")
+
+    assert thermal._read_trimmed(_WouldBlock()) is None
+
+
 # -- 1. a zone that will not read is absent with a reason, not a zero --------
 
 
