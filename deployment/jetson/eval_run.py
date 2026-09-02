@@ -409,9 +409,10 @@ def thermal_result(
     summary: dict[str, Any],
 ) -> dict[str, Any] | None:
     """The thermal section: the summary's own rollup plus what only the raw
-    records can say. `None` for a run recorded before this task -- not a
-    failed drive, the same reading `latency["jetson_ms_source"]` gives a run
-    that predates the jetson/e2e split.
+    records can say. `None` when the log carries no thermal records or
+    summary block at all -- not a failed drive, the same reading
+    `latency["jetson_ms_source"]` gives a run that predates the jetson/e2e
+    split.
 
     `ticks_by_basis` counts the Jetson's own per-tick `basis` -- the phone's
     tick block carries no single `basis` field, so it is not pooled in here.
@@ -824,10 +825,11 @@ def render_plots(result: dict[str, Any], run_dir: Path) -> list[str]:
 
 
 def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
-    """The `## Thermal` section. Task 33 recorded a measurement with no
-    surface and task 36 repeated it; this is the section that closes it for
-    a third measurement rather than a third silent one. Absent entirely for a
-    run this task predates, rather than a section reporting zeros.
+    """The `## Thermal` section: a measurement with nowhere to go is as good
+    as unmeasured, so this prints the sampler's own summary rather than
+    leaving it in summary.json for nobody to read. Absent entirely when
+    `thermal` carries no summary -- the log has no thermal records at all --
+    rather than a section printing zeros.
     """
     if not thermal or not thermal.get("summary"):
         return []

@@ -289,20 +289,20 @@ class TelemetryReporterTest {
 
         val sent = recorder.sent.single()
         assertEquals("nominal", sent.thermalStatus)
-        // The transition is still carried -- this task adds it, it just cannot move the
-        // field the controller's thermal backoff keys on.
+        // The transition is still carried; it just cannot move the field the controller's
+        // thermal backoff keys on.
         assertEquals(1L, sent.thermalStatusChanges)
         assertEquals("severe", sent.thermalChangeTo)
     }
 
     @Test
     fun `a non-finite value never reaches the frame`() {
-        // None of the six fields this task adds are floating point -- two are monotone
-        // counts/timestamps (Long) and four are closed-set reason strings -- so there is no
-        // new NaN-prone path to guard beyond the one this class already had. Reasserted
-        // here rather than assumed, because `thermalHeadroom`'s own guard is exactly the
-        // failure mode this task's whole absent-reason design exists to explain rather than
-        // hide: a NaN would not produce a wrong number, it would fail canonical JSON and
+        // The six new PhoneTelemetry fields are two monotone counts/timestamps (Long) and
+        // four closed-set reason strings -- none of them floating point, so there is no new
+        // NaN-prone path to guard beyond the one this class already had. Reasserted here
+        // rather than assumed, because `thermalHeadroom`'s own guard is exactly the failure
+        // mode an absent-reason exists to explain rather than hide: a NaN would not produce
+        // a wrong number, it would fail canonical JSON and
         // take the whole frame -- transition fields included -- down with it.
         val telemetry = PhoneTelemetry(
             captureMonoNs = 0, thermalStatus = "nominal", thermalHeadroom = Double.NaN,
