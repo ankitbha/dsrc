@@ -204,6 +204,28 @@ plots with PASS/FAIL gates, and its `## Thermal` section is not gated -- no
 peak-temperature threshold has been measured yet, and a run recorded before
 this existed reports `thermal: null` rather than a failure.
 
+The failure event log gives the failures this repository already detects --
+GPS dropout, HERE quota exhaustion, dropped frames, transport stalls -- a time
+axis, an episode and a reader, without instrumenting any of them a second
+time: `type: failure_scan` is a 1 Hz record, written whether or not anything
+failed, so "nothing failed" is distinguishable from "nothing was watching";
+`type: failure_event` is two records per episode (`phase: "open"` and
+`phase: "close"`), the close carrying a `recovered` / `open_at_end` /
+`unobservable` outcome -- `unobservable` for a source that stopped being
+readable while the episode was open, so a lost instrument is never reported as
+a recovery nobody observed. A per-tick `failures` block beside `thermal`
+names what was open at decision time and how fresh that view is;
+`summary["failures"]` rolls the whole run up by source, three-word status
+(`fired`/`quiet`/`not_evaluable`) included. `log_health.json` is a separate
+file, not a `summary.json` key, carrying the metadata logger's own final
+state (`dropped_records`, `writer_failure`) -- written after `close()`, since
+`write_summary` runs before the logger's last drops are known. `eval_run.py`'s
+`## Failures` section, between `## Thermal` and `## GPS`, renders all of it,
+plus the phone's own failures (a fourth `SessionLog` line shape, rate-capped,
+read only when a `--phone-log` is supplied) under a `phone (offline)` heading.
+A run recorded before this existed reports `failures: null` rather than a
+failure, the same convention `## Thermal` set.
+
 ## 10. Simulated-drive test harness
 
 Closed-loop hardware-free validation: real dashcam footage through the
