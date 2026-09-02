@@ -504,7 +504,15 @@ def _join_failure_episodes(failure_events: list[dict]) -> list[dict]:
             "closed": close_record is not None,
             "outcome": close_record.get("outcome") if close_record else None,
             "duration_s": close_record.get("duration_s") if close_record else None,
-            "n": close_record.get("n") if close_record else open_record.get("first_pass_n"),
+            # `n` is occurrences over the WHOLE episode -- only the close
+            # record says that, so an episode with none is `None` rather than
+            # standing in the movement on its opening pass alone, which
+            # `first_pass_n` already names on its own key. The two used to
+            # share this one key, so a truncated log's still-open episode
+            # read as if it had definitely closed after exactly one pass's
+            # worth of occurrences.
+            "n": close_record.get("n") if close_record else None,
+            "first_pass_n": open_record.get("first_pass_n"),
         })
     return episodes
 
@@ -837,8 +845,16 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
         inbound_advisories, shown, phone_failures = load_phone_log(phone_log_path)
         phone_join = join_phone_log(ticks, timebase_estimates, inbound_advisories, shown)
     failures = failures_result(ticks, loaded, summary, run_dir)
-    if failures is not None:
-        failures["phone"] = phone_failures
+    if phone_log_path is not None:
+        if failures is None:
+            # The Jetson-side log predates the failure event log entirely --
+            # no tick block, no scan or event records, no summary, no
+            # log_health.json -- but the phone's own failures were pulled
+            # independently of the run directory (D11) and must not be
+            # dropped just because the Jetson side has nothing to add.
+            failures = {"phone": phone_failures, "jetson_predates_failure_log": True}
+        else:
+            failures["phone"] = phone_failures
     return {
         "run_dir": str(run_dir),
         "scenario": {
@@ -1067,6 +1083,15 @@ def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+#: `SessionLog.MAX_LINES_PER_KIND`, ported: how many `offerFailure` lines of
+#: one `kind` the phone will ever write in a session. A kind that reaches it
+#: stops writing lines at all -- not even a `suppressed` count on a later
+#: line, because there is no later accepted line for the count to ride on --
+#: so this reader's own total goes on undercounting past this point, and
+#: `report.md` says so rather than presenting the total as complete.
+PHONE_FAILURE_LIFETIME_CAP = 64
+
+
 def _phone_failure_lines(failures: dict[str, Any]) -> list[str]:
     """The one line naming the phone's own failures, read only offline
     (D11) -- appended regardless of how much the Jetson side has to say,
@@ -1078,10 +1103,25 @@ def _phone_failure_lines(failures: dict[str, Any]) -> list[str]:
     if not phone_failures:
         return ["- phone (offline): 0 failure lines in the session log"]
     by_kind: dict[str, int] = {}
+    lines_by_kind: dict[str, int] = {}
     for record in phone_failures:
         kind = record.get("kind", "?")
-        by_kind[kind] = by_kind.get(kind, 0) + int(record.get("n", 1))
-    breakdown = ", ".join(f"{kind} {n}" for kind, n in sorted(by_kind.items()))
+        # D12's own compensation: an occurrence the per-second rate cap held
+        # back rides forward on the next accepted line's `suppressed` count.
+        # Reading `n` alone silently discards it.
+        occurrences = int(record.get("n", 1)) + int(record.get("suppressed", 0))
+        by_kind[kind] = by_kind.get(kind, 0) + occurrences
+        lines_by_kind[kind] = lines_by_kind.get(kind, 0) + 1
+    parts = []
+    for kind, n in sorted(by_kind.items()):
+        note = ""
+        if lines_by_kind[kind] >= PHONE_FAILURE_LIFETIME_CAP:
+            # Past this many lines the phone stops writing this kind
+            # altogether (D12's lifetime cap), so nothing -- not even a
+            # `suppressed` count -- says how many more happened.
+            note = " (reached the phone's per-kind lifetime cap; further occurrences, if any, are not recorded)"
+        parts.append(f"{kind} {n}{note}")
+    breakdown = ", ".join(parts)
     return [f"- phone (offline): {breakdown}"]
 
 
@@ -1106,6 +1146,19 @@ def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
     if not failures:
         return []
     lines = ["", "## Failures", ""]
+
+    if failures.get("jetson_predates_failure_log"):
+        # Distinct from "no summary was written" below: that line means a
+        # run that HAD this feature did not reach its normal teardown. This
+        # one means the Jetson-side log never had the feature at all -- a
+        # different fact, and the wrong one would blame a wiring bug that
+        # does not exist here.
+        lines.append(
+            "- this run's Jetson-side log predates the failure event log; "
+            "only the phone's own failures, if supplied, are shown below"
+        )
+        return lines + _phone_failure_lines(failures)
+
     s = failures.get("summary")
 
     if not s:
@@ -1153,9 +1206,18 @@ def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
         if status == RULE_FIRED:
             longest = max(durations_by_source[name]) if durations_by_source.get(name) else None
             longest_note = f", longest {longest:.1f} s" if longest is not None else ""
+            # A cumulative source's `total` is real occurrences: a counter
+            # moved that many times. A predicate source's `total` is passes
+            # the condition held -- a sticky error active for a whole 180 s
+            # drive reports 178, one per second it stayed true, and calling
+            # that "occurrences" reads as 178 distinct failures rather than
+            # one that lasted. `row` predates this distinction on a run
+            # recorded before it existed, so the default keeps that
+            # reading (`True`) rather than silently reclassifying it.
+            quantity = "occurrences" if row.get("cumulative", True) else "passes with the condition active"
             lines.append(
                 f"- {name}: FIRED -- {row.get('episodes', 0)} episode(s), "
-                f"{row.get('total', 0)} occurrences{longest_note}"
+                f"{row.get('total', 0)} {quantity}{longest_note}"
             )
         elif status == RULE_NOT_EVALUABLE:
             missing = ", ".join(row.get("missing") or [])

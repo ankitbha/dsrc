@@ -4,7 +4,14 @@ import json
 
 import pytest
 
-from eval_run import analyze, join_phone_log, load_phone_log, render_markdown, stage_timings
+from eval_run import (
+    _join_failure_episodes,
+    analyze,
+    join_phone_log,
+    load_phone_log,
+    render_markdown,
+    stage_timings,
+)
 
 T0 = 1_750_000_000.0
 RATE_HZ = 30.0
@@ -751,6 +758,98 @@ class TestPhoneFailuresJoinOffline:
         markdown = render_markdown(result, [])
         assert "phone (offline)" in markdown
         assert "link.dial_failed 3" in markdown
+
+    def test_a_suppressed_count_is_added_to_n_not_dropped(self, tmp_path):
+        # M9(a): D12's compensation -- an occurrence the per-second rate cap
+        # held back rides forward on the next accepted line's `suppressed`
+        # field. Summing `n` alone throws that count away.
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(3)])
+        _append_lines(run_dir, [
+            {"type": "failure_scan", "seq": 1, "t_wall": 1.0, "t_mono": 1.0,
+             "session_id": None, "ticks_seen": 3, "sources_n": 30,
+             "sources_readable": 30, "unreadable": [], "open": []},
+        ])
+        phone_log = write_phone_log(tmp_path, [
+            {"dir": "fail", "at_mono_ns": 1, "at_wall_ns": 2,
+             "kind": "link.dial_failed", "n": 1, "detail": "x", "suppressed": 0},
+            {"dir": "fail", "at_mono_ns": 2_000_000_000, "at_wall_ns": 2,
+             "kind": "link.dial_failed", "n": 1, "detail": "x", "suppressed": 99},
+        ])
+        result = analyze(run_dir, phone_log)
+        markdown = render_markdown(result, [])
+        assert "link.dial_failed 101" in markdown
+
+    def test_a_kind_at_its_lifetime_cap_is_flagged_as_possibly_incomplete(self, tmp_path):
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(3)])
+        _append_lines(run_dir, [
+            {"type": "failure_scan", "seq": 1, "t_wall": 1.0, "t_mono": 1.0,
+             "session_id": None, "ticks_seen": 3, "sources_n": 30,
+             "sources_readable": 30, "unreadable": [], "open": []},
+        ])
+        phone_log = write_phone_log(tmp_path, [
+            {"dir": "fail", "at_mono_ns": i * 1_000_000_000, "at_wall_ns": 2,
+             "kind": "link.dial_failed", "n": 1, "detail": "x", "suppressed": 0}
+            for i in range(64)
+        ])
+        result = analyze(run_dir, phone_log)
+        markdown = render_markdown(result, [])
+        assert "link.dial_failed 64" in markdown
+        assert "lifetime cap" in markdown
+
+    def test_a_jetson_log_predating_this_feature_still_shows_phone_failures(self, tmp_path):
+        # MINOR: `failures_result` returns `None` for a Jetson log with no
+        # tick block, no scan/event records and no summary -- `analyze` used
+        # to skip assigning `phone` in exactly that case, so a real
+        # `--phone-log` was silently dropped rather than shown on its own.
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(3)])
+        phone_log = write_phone_log(tmp_path, [
+            {"dir": "fail", "at_mono_ns": 1, "at_wall_ns": 2,
+             "kind": "link.dial_failed", "n": 3, "detail": "ConnectException"},
+        ])
+        result = analyze(run_dir, phone_log)
+        assert result["failures"] is not None
+        markdown = render_markdown(result, [])
+        assert "## Failures" in markdown
+        assert "predates the failure event log" in markdown
+        assert "link.dial_failed 3" in markdown
+        # Must not read as a truncated run -- that message names a different
+        # cause and would send a reader looking for a wiring bug that is not
+        # there.
+        assert "did not reach its normal teardown" not in markdown
+
+
+class TestJoinFailureEpisodesKeepsNAndFirstPassNSeparate:
+    """M9(b): `n` used to mean two different quantities depending on whether
+    the episode had closed -- occurrences over the whole episode when it
+    had, movement on the opening pass alone when it had not -- under one
+    key. A reader could not tell which it was looking at without also
+    checking `closed`."""
+
+    def test_a_closed_episode_reports_n_from_the_close_record(self):
+        events = [
+            {"phase": "open", "episode_id": 1, "source": "gps.not_fresh", "reason": "stale",
+             "device": "jetson", "t_mono": 1.0, "first_pass_n": 1},
+            {"phase": "close", "episode_id": 1, "source": "gps.not_fresh", "outcome": "recovered",
+             "duration_s": 3.0, "n": 12, "t_mono": 4.0},
+        ]
+        episode = _join_failure_episodes(events)[0]
+        assert episode["closed"] is True
+        assert episode["n"] == 12
+        assert episode["first_pass_n"] == 1
+
+    def test_an_open_episode_reports_n_as_none_not_first_pass_n(self):
+        # The log was truncated before this episode's close record -- `n`
+        # (occurrences over the whole episode) is genuinely unknown, and
+        # standing in `first_pass_n` (the opening pass's own movement) used
+        # to claim a number for it anyway.
+        events = [
+            {"phase": "open", "episode_id": 2, "source": "gps.not_fresh", "reason": "stale",
+             "device": "jetson", "t_mono": 1.0, "first_pass_n": 5},
+        ]
+        episode = _join_failure_episodes(events)[0]
+        assert episode["closed"] is False
+        assert episode["n"] is None
+        assert episode["first_pass_n"] == 5
 
 
 class TestStageTimings:
