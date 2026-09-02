@@ -21,6 +21,8 @@ from logio import failure_log
 from logio.failure_log import (
     MAX_EPISODES_PER_SOURCE,
     MISSING,
+    OUTCOME_OPEN_AT_END,
+    OUTCOME_RECOVERED,
     OUTCOME_UNOBSERVABLE,
     OUTCOMES,
     REGISTRY,
@@ -34,6 +36,7 @@ from sensors import time_sync
 from sensors.camera_stream import CameraStream
 from sensors.gps_reader import GpsReader
 from sensors.phone_link import PhoneLink
+from sensors.phone_source import PhoneCameraStream
 from transport.messages import MessageRouter
 from transport.session import Session
 from transport.tcp import TcpAcceptor
@@ -83,7 +86,14 @@ def real_phone_pair():
 
 class TestRegistryAccessorsResolve:
     """A renamed counter fails here and nowhere else -- this is the test that
-    would have caught the task-37 class of defect at plan time."""
+    would have caught the task-37 class of defect at plan time.
+
+    The old version of this test asserted only "readable, or unreadable with
+    a named reason" -- and MISSING accepts five different words, so a rename
+    that flips a source from readable to not_evaluable still satisfies it.
+    This asserts an explicit expected-readable set instead, so a rename shows
+    up as that set changing rather than as a still-passing test.
+    """
 
     def test_every_accessor_returns_a_readable_or_named_missing_snapshot(self, tmp_path):
         gps = GpsReader()
@@ -97,20 +107,60 @@ class TestRegistryAccessorsResolve:
         try:
             ctx = failure_log._Context(
                 phone=phone, camera=camera, gps=gps,
-                blind_ticks_total=0, pipeline_exception=None,
                 pass_session_id=phone.session.session_id,
             )
-            for source in REGISTRY:
+            registry = failure_log.build_registry(camera=camera)
+            # Four of the thirty rows are not readable against this fixture,
+            # and each for a fact this fixture states rather than one it
+            # forgot: `camera` is a local `CameraStream`, which has no
+            # `.decode_failures` or `.failure` (only a phone-fed
+            # `PhoneCameraStream` does -- see the test below); and `phone`
+            # has never received a telemetry frame, so `phone.telemetry` is
+            # still `None`.
+            not_readable_here = {
+                "camera.decode_failures", "camera.reader_failure",
+                "phone.dropped", "phone.here_errors",
+            }
+            expected_readable = {s.name for s in registry} - not_readable_here
+            actually_readable = set()
+            for source in registry:
                 snap = source.read(ctx)
                 assert isinstance(snap, SourceSnapshot), source.name
                 if snap.readable:
+                    actually_readable.add(source.name)
                     for value in snap.by_reason.values():
                         assert isinstance(value, int), source.name
                 else:
                     assert snap.missing in MISSING, source.name
+            assert actually_readable == expected_readable
         finally:
             phone.stop()
             logger.close()
+
+    def test_the_phone_fed_camera_sources_are_readable_against_a_real_phonecamerastream(self):
+        # The two sources `hasattr`-gated out above are D4's own point: a
+        # typed accessor still has to be exercised against the real object it
+        # names, not just against the one backend that lacks the field. Never
+        # started -- every field these two accessors read is set in
+        # `PhoneCameraStream.__init__`, so no reader thread is needed.
+        phone = real_phone_pair()
+        try:
+            camera = PhoneCameraStream(phone.router, phone.adapter)
+            registry = failure_log.build_registry(camera=camera)
+            by_name = {s.name: s for s in registry}
+            ctx = failure_log._Context(
+                phone=None, camera=camera, gps=None, pass_session_id=None,
+            )
+            for name in ("camera.decode_failures", "camera.reader_failure"):
+                snap = by_name[name].read(ctx)
+                assert snap.readable, name
+            # And the scope this camera earns for the source it changes:
+            # `hasattr(camera, "decode_failures")` is True here, so
+            # `camera.dropped_unconsumed` must come out session-scoped (C2),
+            # not the "run" scope a local `CameraStream` gets.
+            assert by_name["camera.dropped_unconsumed"].scope == "session"
+        finally:
+            phone.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +233,23 @@ class FakeGps:
         return FakeFix()
 
 
+class FakeCamera:
+    """Stands in for `PhoneCameraStream` wherever a test only needs to move
+    `decode_failures`. Carries every mandatory attribute the registry's
+    camera accessors now read directly (`dropped_frames`, `file_recoveries`,
+    `end_of_stream`, `failure`) -- a bare object with only `decode_failures`
+    set used to work by accident, back when `_read_camera_dropped_unconsumed`
+    read through a defaulting `getattr`; direct attribute access (M1) means a
+    test double has to carry the real shape."""
+
+    def __init__(self, *, decode_failures: int = 0) -> None:
+        self.decode_failures = decode_failures
+        self.dropped_frames = 0
+        self.file_recoveries = 0
+        self.end_of_stream = False
+        self.failure: str | None = None
+
+
 class TestEpisodesFromMovement:
 
     def test_a_counter_advancing_over_three_passes_is_one_episode(self):
@@ -211,7 +278,7 @@ class TestEpisodesFromMovement:
         s = sampler(gps=gps, quiet_passes_to_close=3)
         # Use camera.decode_failures instead: it IS event_records=True, so
         # the open record is observable directly.
-        camera = type("C", (), {"decode_failures": 0})()
+        camera = FakeCamera()
         s2 = sampler(camera=camera)
         s2.sample_once()
         camera.decode_failures = 5
@@ -240,7 +307,7 @@ class TestEpisodesFromMovement:
 class TestCloseThreshold:
 
     def test_a_still_gap_shorter_than_the_threshold_does_not_split_the_episode(self):
-        camera = type("C", (), {"decode_failures": 0})()
+        camera = FakeCamera()
         s = sampler(camera=camera, quiet_passes_to_close=3)
         s.sample_once()
         camera.decode_failures = 3
@@ -257,7 +324,7 @@ class TestCloseThreshold:
         assert closes[0]["n"] == 7
 
     def test_the_close_threshold_is_derived_from_interval_s(self):
-        camera = type("C", (), {"decode_failures": 0})()
+        camera = FakeCamera()
         now = [0.0]
         s = sampler(camera=camera, now=now, interval_s=0.2, quiet_passes_to_close=3)
         s.sample_once()
@@ -293,7 +360,7 @@ class TestCloseThreshold:
 class TestUnobservable:
 
     def test_a_source_that_stops_being_readable_closes_as_unobservable(self):
-        camera = type("C", (), {"decode_failures": 0})()
+        camera = FakeCamera()
         t = [0.0]
         s = FailureSampler(Sink(), camera=camera, clock=lambda: t[0], wall_clock=lambda: t[0])
         s.sample_once()                 # t=0: readable, quiet
@@ -315,20 +382,27 @@ class TestUnobservable:
         assert closes[0]["duration_s"] == 1.0
 
     def test_all_three_outcomes_are_reachable_and_distinct(self):
+        # M2: `recovered` and `open_at_end` are adjacent, same-typed string
+        # literals whose only call sites are the two `_close_episode` calls
+        # this test drives -- asserting only `seen == OUTCOMES` lets a swap
+        # between them through, since both memberships are still hit and the
+        # SET is unchanged either way. Each construction's outcome is
+        # asserted by name for exactly that reason.
         seen = set()
 
         # recovered
-        camera = type("C", (), {"decode_failures": 0})()
+        camera = FakeCamera()
         s = sampler(camera=camera, quiet_passes_to_close=1)
         s.sample_once()
         camera.decode_failures = 1
         s.sample_once()
         s.sample_once()  # one quiet pass closes it (threshold=1)
         closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert closes[0]["outcome"] == OUTCOME_RECOVERED
         seen.add(closes[0]["outcome"])
 
         # unobservable
-        camera2 = type("C", (), {"decode_failures": 0})()
+        camera2 = FakeCamera()
         s2 = FailureSampler(Sink(), camera=camera2)
         s2.sample_once()
         camera2.decode_failures = 1
@@ -336,16 +410,18 @@ class TestUnobservable:
         s2._camera = None
         s2.sample_once()
         closes2 = [l for l in s2._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert closes2[0]["outcome"] == OUTCOME_UNOBSERVABLE
         seen.add(closes2[0]["outcome"])
 
         # open_at_end
-        camera3 = type("C", (), {"decode_failures": 0})()
+        camera3 = FakeCamera()
         s3 = FailureSampler(Sink(), camera=camera3)
         s3.sample_once()
         camera3.decode_failures = 1
         s3.sample_once()
         s3.stop()
         closes3 = [l for l in s3._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert closes3[0]["outcome"] == OUTCOME_OPEN_AT_END
         seen.add(closes3[0]["outcome"])
 
         assert seen == OUTCOMES
@@ -434,8 +510,26 @@ class TestSessionScopedResetOnRedial:
         s.stop()
         record = s.to_record()
         assert "here.reader_failures" in record["counter_went_backwards"]
-        step = record["counter_went_backwards"]["here.reader_failures"]
-        assert step["from"] == 5 and step["to"] == 2
+        occurrences = record["counter_went_backwards"]["here.reader_failures"]
+        assert len(occurrences) == 1
+        assert occurrences[0]["from"] == 5 and occurrences[0]["to"] == 2
+
+    def test_repeated_backwards_steps_accumulate_instead_of_overwriting(self):
+        # C2: `_backwards[name] = {...}` used to overwrite, so N occurrences
+        # left one entry and nothing counted how many times it happened.
+        phone = FakePhone()
+        s = sampler(phone=phone)
+        phone.here_failures = 5
+        s.sample_once()
+        phone.here_failures = 2
+        s.sample_once()
+        phone.here_failures = 9
+        s.sample_once()
+        phone.here_failures = 1
+        s.sample_once()
+        s.stop()
+        occurrences = s.to_record()["counter_went_backwards"]["here.reader_failures"]
+        assert [(o["from"], o["to"]) for o in occurrences] == [(5, 2), (9, 1)]
 
     def test_a_pass_that_straddles_a_rebind_is_not_evaluable(self):
         phone = FakePhone(session_id="s1")
@@ -450,7 +544,11 @@ class TestSessionScopedResetOnRedial:
             # the exact race D15 exists to catch.
             return SourceSnapshot(readable=True, by_reason=dict(snap.by_reason), session_id="a-different-session")
 
-        here_source = next(src for src in REGISTRY if src.name == "here.refused")
+        # Patched on the SAMPLER's own registry, not the module-level
+        # `REGISTRY`: `FailureSampler` builds its own copy from the camera it
+        # was given (C2's `build_registry`), so mutating a `Source` in the
+        # module tuple would patch an object nothing here reads.
+        here_source = s._by_name["here.refused"]
         object.__setattr__(here_source, "read", torn_read)
         try:
             s.sample_once()
@@ -458,6 +556,9 @@ class TestSessionScopedResetOnRedial:
             object.__setattr__(here_source, "read", real_read)
         row = s.to_record()["sources"]["here.refused"]
         assert row["status"] == sensing_controller.RULE_NOT_EVALUABLE
+        # M10: the plan's test 11 specifies the reason, not just the status
+        # word -- any unreadable cause satisfied the status-only assertion.
+        assert row["missing"] == [failure_log.MISSING_SESSION_MOVED]
 
 
 # ---------------------------------------------------------------------------
@@ -596,8 +697,9 @@ class TestReasonVocabulary:
         phone = FakePhone()
         phone.here.refused_by_reason = {"unparseable": 1, "http_error:status 429": 2}
         phone.telemetry = type("T", (), {"dropped": {"camera": 1, "gps": 0, "imu": 0, "here": 0}, "here_errors": 1})()
-        camera = type("C", (), {"decode_failures": 1, "dropped_frames": 1, "file_recoveries": 1,
-                                 "end_of_stream": False, "failure": None})()
+        camera = FakeCamera(decode_failures=1)
+        camera.dropped_frames = 1
+        camera.file_recoveries = 1
         gps = FakeGps()
         gps.diagnostics.parse_errors = 1
         s = sampler(phone=phone, camera=camera, gps=gps)
@@ -618,7 +720,7 @@ class TestReasonVocabulary:
 class TestEpisodeCap:
 
     def test_the_cap_counts_what_it_does_not_keep(self):
-        camera = type("C", (), {"decode_failures": 0})()
+        camera = FakeCamera()
         s = sampler(camera=camera, quiet_passes_to_close=1)
         total = 0
         for i in range(150):
@@ -630,6 +732,166 @@ class TestEpisodeCap:
         row = s.to_record()["sources"]["camera.decode_failures"]
         assert row["episodes"] == MAX_EPISODES_PER_SOURCE
         assert row["episodes_not_kept"] == 150 - MAX_EPISODES_PER_SOURCE
+
+    def test_one_continuous_outage_past_the_cap_is_one_not_kept_episode_not_thirty(self):
+        # C3: this fixture's own episode is exactly one movement pass, so it
+        # cannot tell "episodes counted" from "movement passes counted" --
+        # `test_the_cap_counts_what_it_does_not_keep` above passes on both the
+        # broken and the fixed code for that reason. Here, ONE outage moves on
+        # every pass for 30 passes straight (no quiet gap), which the bug
+        # reported as 30 discarded episodes instead of the one it actually is.
+        camera = FakeCamera()
+        s = sampler(camera=camera, quiet_passes_to_close=1)
+        total = 0
+        for i in range(MAX_EPISODES_PER_SOURCE):
+            total += 1
+            camera.decode_failures = total
+            s.sample_once()
+            s.sample_once()  # closes at the cap, kept
+        assert s.to_record()["sources"]["camera.decode_failures"]["episodes"] == MAX_EPISODES_PER_SOURCE
+
+        for _ in range(30):
+            total += 1
+            camera.decode_failures = total
+            s.sample_once()  # one continuous outage, past the cap
+        s.stop()
+        row = s.to_record()["sources"]["camera.decode_failures"]
+        assert row["episodes"] == MAX_EPISODES_PER_SOURCE
+        assert row["episodes_not_kept"] == 1
+        assert row["suppressed"] == 30
+        assert row["total"] == MAX_EPISODES_PER_SOURCE + 30
+        assert row["kept_total"] + row["suppressed"] + row["below_episode_threshold"] == row["total"]
+
+
+# ---------------------------------------------------------------------------
+# M7: bound_s, events_written, and detail truncation actually reach a record.
+# ---------------------------------------------------------------------------
+
+
+class TestDetailCapping:
+
+    def test_short_text_is_not_truncated(self):
+        text, truncated = failure_log._capped("short")
+        assert text == "short"
+        assert truncated is False
+
+    def test_none_stays_none(self):
+        assert failure_log._capped(None) == (None, False)
+
+    def test_long_text_is_cut_to_the_cap_and_the_flag_is_set(self):
+        text, truncated = failure_log._capped("x" * (failure_log.DETAIL_MAX_LEN + 50))
+        assert len(text) == failure_log.DETAIL_MAX_LEN
+        assert truncated is True
+
+    def test_a_truncated_detail_is_counted_on_the_source_row(self):
+        # M7: `_capped`'s truncation flag was discarded at all six call
+        # sites, so no record anywhere said a detail had been cut. Drives
+        # `_read_camera_reader_failure`, one of the six, through a real pass.
+        camera = FakeCamera()
+        camera.failure = "x" * (failure_log.DETAIL_MAX_LEN + 10)
+        s = sampler(camera=camera)
+        s.sample_once()
+        row = s.to_record()["sources"]["camera.reader_failure"]
+        assert row["truncated_details"] == 1
+
+        opens = [
+            l for l in s._sink.lines
+            if l.get("type") == "failure_event" and l["phase"] == "open" and l["source"] == "camera.reader_failure"
+        ]
+        assert len(opens[0]["detail"]) == failure_log.DETAIL_MAX_LEN
+
+
+class TestEventsWrittenCountsRecords:
+
+    def test_events_written_counts_the_open_and_close_lines(self):
+        camera = FakeCamera()
+        s = sampler(camera=camera, quiet_passes_to_close=1)
+        s.sample_once()
+        camera.decode_failures = 3
+        s.sample_once()   # opens -- event_records=True for camera.decode_failures
+        s.sample_once()   # closes (threshold=1)
+        row = s.to_record()["sources"]["camera.decode_failures"]
+        events = [
+            l for l in s._sink.lines
+            if l.get("type") == "failure_event" and l["source"] == "camera.decode_failures"
+        ]
+        assert len(events) == 2
+        assert row["events_written"] == 2
+
+    def test_a_source_with_no_event_records_never_writes_one_and_never_counts_one(self):
+        # `gps.parse_errors` carries `event_records=False` -- an episode still
+        # opens and closes for it, but `events_written` must stay 0.
+        gps = FakeGps()
+        s = sampler(gps=gps)
+        s.sample_once()
+        gps.diagnostics.parse_errors = 4
+        s.sample_once()
+        s.stop()
+        row = s.to_record()["sources"]["gps.parse_errors"]
+        assert row["episodes"] == 1
+        assert row["events_written"] == 0
+        assert not any(l.get("source") == "gps.parse_errors" for l in s._sink.lines if l.get("type") == "failure_event")
+
+
+class TestARaisingAccessorCostsOnlyItsOwnSource:
+    """M8: latent today (no accessor is known to raise), fixed anyway because
+    the structure -- one raise stops the whole registry loop, freezing every
+    later source's reading at whatever its last successful pass left it with
+    -- makes the next accessor added a silent kill switch."""
+
+    def test_a_raising_source_reads_not_evaluable_and_later_sources_still_run(self):
+        gps = FakeGps()
+        s = sampler(gps=gps)
+
+        def boom(ctx):
+            raise RuntimeError("accessor bug")
+
+        # `gps.parse_errors` sits before `gps.rate_unconfigured` in the
+        # registry -- breaking the first proves the second still ran.
+        parse_errors_source = s._by_name["gps.parse_errors"]
+        object.__setattr__(parse_errors_source, "read", boom)
+        try:
+            s.sample_once()
+        finally:
+            object.__setattr__(parse_errors_source, "read", failure_log._read_gps_parse_errors)
+
+        record = s.to_record()
+        broken = record["sources"]["gps.parse_errors"]
+        assert broken["status"] == sensing_controller.RULE_NOT_EVALUABLE
+        assert broken["missing"] == [failure_log.MISSING_ACCESSOR_RAISED]
+        later = record["sources"]["gps.rate_unconfigured"]
+        assert later["passes_attempted"] == 1
+        assert later["passes_readable"] == 1
+
+    def test_the_scan_record_is_still_written_after_a_raising_source(self):
+        sink = Sink()
+        gps = FakeGps()
+        s = sampler(sink, gps=gps)
+
+        def boom(ctx):
+            raise RuntimeError("accessor bug")
+
+        object.__setattr__(s._by_name["gps.parse_errors"], "read", boom)
+        s.sample_once()
+        scans = [l for l in sink.lines if l["type"] == "failure_scan"]
+        assert len(scans) == 1
+        assert scans[0]["seq"] == 1
+
+
+class TestOpenRecordBoundS:
+
+    def test_bound_s_equals_the_samplers_own_interval(self):
+        camera = FakeCamera()
+        s = sampler(camera=camera, interval_s=0.5)
+        s.sample_once()
+        camera.decode_failures = 1
+        s.sample_once()
+        opens = [
+            l for l in s._sink.lines
+            if l.get("type") == "failure_event" and l["phase"] == "open" and l["source"] == "camera.decode_failures"
+        ]
+        assert opens[0]["bound_s"] == 0.5
+        assert opens[0]["basis"] == failure_log.FAILURE_BASIS_MEASURED
 
 
 # ---------------------------------------------------------------------------
@@ -653,12 +915,88 @@ class TestInputsUnchanged:
 
 class TestBlindTicks:
 
-    def test_a_single_blind_tick_opens_nothing(self):
+    def test_a_single_blind_tick_is_credited_immediately_but_opens_no_episode(self):
+        # C1: a lone blind tick used to go uncredited until a second one
+        # arrived to pair with, so `blind_ticks` (40) and this source's own
+        # `total` (0) disagreed and `status` read `quiet` on a drive the
+        # camera went blind on. Every call is now credited the instant it is
+        # seen; the two-tick rule still governs only whether an episode opens.
         s = sampler()
         s.note_no_frame()
         record = s.to_record()
         assert record["blind_ticks"] == 1
-        assert record["sources"]["camera.blind_ticks"]["total"] == 0
+        row = record["sources"]["camera.blind_ticks"]
+        assert row["total"] == 1
+        assert row["episodes"] == 0
+        assert row["status"] == sensing_controller.RULE_FIRED
+
+    def test_a_single_blind_tick_with_no_second_one_is_below_the_episode_threshold(self):
+        now = [0.0]
+        s = sampler(now=now)
+        s.note_no_frame()
+        now[0] += s._close_after_s + 0.01
+        s.sample_once()  # the quiet timer resolves the pending tick
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        assert row["total"] == 1
+        assert row["episodes"] == 0
+        assert row["below_episode_threshold"] == 1
+        # The reading rule this row makes checkable (C1's fix): every
+        # occurrence in `total` lands in exactly one of the three.
+        assert row["kept_total"] + row["suppressed"] + row["below_episode_threshold"] == row["total"]
+
+    def test_end_of_stream_resolves_a_pending_tick_immediately(self):
+        # `end_of_stream` used to be accepted and never read. The tick loop's
+        # last call for a drive passes it -- no further call is coming, so a
+        # tick left pending by THIS call must not wait on a quiet timer that
+        # assumes one might still arrive.
+        s = sampler()
+        s.note_no_frame(end_of_stream=True)
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        assert row["total"] == 1
+        assert row["below_episode_threshold"] == 1
+        assert row["episodes"] == 0
+
+    def test_end_of_stream_closes_an_open_episode_immediately(self):
+        s = sampler()
+        s.note_no_frame()
+        s.note_no_frame()  # opens the episode (first_pass_n=2)
+        s.note_no_frame(end_of_stream=True)
+        record = s.to_record()
+        row = record["sources"]["camera.blind_ticks"]
+        assert row["total"] == 3
+        assert row["episodes"] == 1
+        assert record["outcomes"].get(OUTCOME_OPEN_AT_END) == 1
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert closes[0]["outcome"] == OUTCOME_OPEN_AT_END
+        assert closes[0]["n"] == 3
+
+    def test_a_pending_tick_at_stop_is_resolved_not_dropped(self):
+        # The run ends some other way (a tick-loop exception, say) while a
+        # tick is still pending -- `stop()` must not lose it either.
+        s = sampler()
+        s.note_no_frame()
+        s.stop()
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        assert row["total"] == 1
+        assert row["below_episode_threshold"] == 1
+
+    def test_two_blind_ticks_an_hour_apart_do_not_pair_into_one_episode(self):
+        # MINOR: `_check_pseudo_source_quiet`'s `self._blind_pending = False`
+        # clears a resolved pending tick so a later, unrelated one starts its
+        # own wait rather than pairing with it. Without it, two isolated
+        # ticks separated by an hour would still open an episode together.
+        now = [0.0]
+        s = sampler(now=now)
+        s.note_no_frame()
+        now[0] += s._close_after_s + 0.01
+        s.sample_once()   # resolves the first tick as below_episode_threshold
+        now[0] += 3600.0
+        s.note_no_frame()  # an unrelated, later tick -- must start pending again
+        record = s.to_record()
+        row = record["sources"]["camera.blind_ticks"]
+        assert row["episodes"] == 0
+        assert row["below_episode_threshold"] == 1
+        assert row["total"] == 2
 
     def test_four_consecutive_blind_ticks_are_one_episode_of_four(self):
         s = sampler()

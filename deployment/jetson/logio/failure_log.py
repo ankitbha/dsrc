@@ -83,9 +83,16 @@ MISSING_NO_SESSION = "session"        # a link exists, no session is bound
 MISSING_NO_TELEMETRY = "telemetry"    # spelled as sensing_loop.reference_from's is
 MISSING_SESSION_MOVED = "session_changed"  # the pass straddled a rebind (D15)
 MISSING_NO_SOURCE = "source"          # the object itself is absent this run
+#: The accessor itself raised. No live trigger is known -- every accessor
+#: guards the object it reads being absent or closed before touching a field
+#: on it -- but an accessor added later that does not is a silent kill
+#: switch without this: one raise would stop `_process_source` before it
+#: reaches every source after it in the registry, freezing their `quiet`
+#: reading forever rather than reporting the one that actually failed.
+MISSING_ACCESSOR_RAISED = "accessor_raised"
 MISSING = frozenset({
     MISSING_NO_PHONE, MISSING_NO_SESSION, MISSING_NO_TELEMETRY,
-    MISSING_SESSION_MOVED, MISSING_NO_SOURCE,
+    MISSING_SESSION_MOVED, MISSING_NO_SOURCE, MISSING_ACCESSOR_RAISED,
 })
 
 #: The instrument disagreeing with the counter it reads. Never clamped -- see the
@@ -164,6 +171,12 @@ class SourceSnapshot:
     value: float | None = None
     channel: str | None = None
     detail: str | None = None
+    #: Whether `detail` was already longer than `DETAIL_MAX_LEN` and was cut
+    #: down by the accessor's own call to `_capped`. Carried alongside
+    #: `detail` itself so `_open_episode` -- the one place a `SourceSnapshot`
+    #: is turned into an `Episode` -- can count it on the source's row
+    #: without re-running `_capped` a second time on text already cut.
+    detail_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -237,9 +250,19 @@ class Episode:
     closed_t_mono: float | None = None
     closed_t_wall: float | None = None
     outcome: str | None = None
+    #: False for an episode opened past `MAX_EPISODES_PER_SOURCE` (D10): it
+    #: still runs the close logic and accumulates `n` like any other episode,
+    #: but writes no `failure_event` record and does not count toward the
+    #: source's own `episodes` total -- only toward `episodes_not_kept` and
+    #: `suppressed`, which is what makes it "not kept" rather than "missing".
+    kept: bool = True
 
     def open_record(self, device: str) -> dict[str, Any]:
-        detail, _ = _capped(self.detail)
+        # `self.detail` is already capped -- the accessor that produced it, or
+        # `note_pipeline_exception`, ran it through `_capped` once, and
+        # `_open_episode` counted the truncation then. Re-capping already-cut
+        # text here would be a second, redundant pass that could only ever be
+        # a no-op.
         return {
             "type": "failure_event", "phase": "open", "episode_id": self.episode_id,
             "source": self.source, "reason": self.reason, "device": device,
@@ -247,7 +270,7 @@ class Episode:
             "basis": self.basis, "bound_s": self.bound_s,
             "session_id": self.session_id, "tick_id": self.tick_id,
             "channel": self.channel, "value": self.value,
-            "first_pass_n": self.first_pass_n, "detail": detail,
+            "first_pass_n": self.first_pass_n, "detail": self.detail,
         }
 
     def close_record(self, device: str, *, close_after_s: float) -> dict[str, Any]:
@@ -278,6 +301,24 @@ class _SourceState:
     episodes_closed: int = 0
     episodes_not_kept: int = 0
     events_written: int = 0
+    #: Occurrences credited to `run_total` that a closed, KEPT episode's own
+    #: `n` accounts for. Kept separately from `episodes_closed` (a count of
+    #: episodes) because the reconciliation this field exists for --
+    #: `kept_total + suppressed + below_episode_threshold == run_total`, in
+    #: `to_record`'s row -- needs the occurrence count, not the episode count.
+    kept_n_total: int = 0
+    #: Occurrences absorbed by an episode that closed with `kept=False`: past
+    #: the cap (D10), the condition still happened, and this is where those
+    #: occurrences are still counted after `_open_episode` stopped writing a
+    #: record for them.
+    suppressed_total: int = 0
+    #: `camera.blind_ticks` only: a single no-frame tick that `note_no_frame`
+    #: credited to `run_total` immediately but that never paired with a
+    #: second tick within the quiet window, so no episode ever enclosed it.
+    below_episode_threshold: int = 0
+    #: How many episodes on this source carried a `detail` longer than
+    #: `DETAIL_MAX_LEN` and had it cut by `_capped`.
+    truncated_details: int = 0
     first_t_mono: float | None = None
     last_t_mono: float | None = None
     last_missing: str | None = None
@@ -305,13 +346,16 @@ class _Context:
     phone: Any
     camera: Any
     gps: Any
-    blind_ticks_total: int
-    pipeline_exception: str | None
     pass_session_id: Any
 
 
 def _phone_session(phone: Any) -> Any:
-    return getattr(phone, "session", None) if phone is not None else None
+    # `PhoneLink.session` is set in `__init__` and never deleted -- `None`
+    # until a session binds, never absent as an attribute -- so this reads it
+    # directly rather than through `getattr` with a default, which would
+    # accept an object with no `session` attribute at all as silently as one
+    # that has not bound yet, and would hide the attribute from `ty`.
+    return phone.session if phone is not None else None
 
 
 def _fixed(reason_word: str, total: int) -> SourceSnapshot:
@@ -322,12 +366,14 @@ def _fixed(reason_word: str, total: int) -> SourceSnapshot:
 
 
 def _read_camera_dropped_unconsumed(ctx: _Context) -> SourceSnapshot:
+    # `dropped_frames` is a property on both camera backends (`CameraStream`
+    # and `PhoneCameraStream` alike) -- read directly rather than through
+    # `getattr` with a default, which would turn a renamed property into a
+    # silent `None` instead of an `AttributeError` at the one place that
+    # would notice.
     if ctx.camera is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
-    total = getattr(ctx.camera, "dropped_frames", None)
-    if total is None:
-        return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
-    return _fixed("unconsumed", int(total))
+    return _fixed("unconsumed", int(ctx.camera.dropped_frames))
 
 
 def _read_camera_decode_failures(ctx: _Context) -> SourceSnapshot:
@@ -340,31 +386,34 @@ def _read_camera_decode_failures(ctx: _Context) -> SourceSnapshot:
 
 
 def _read_camera_file_recoveries(ctx: _Context) -> SourceSnapshot:
+    # `file_recoveries` is likewise present on both backends -- see
+    # `_read_camera_dropped_unconsumed`.
     if ctx.camera is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
-    total = getattr(ctx.camera, "file_recoveries", None)
-    if total is None:
-        return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
-    return _fixed("decoder_poisoned", int(total))
+    return _fixed("decoder_poisoned", int(ctx.camera.file_recoveries))
 
 
 def _read_camera_end_of_stream(ctx: _Context) -> SourceSnapshot:
+    # Also present on both backends -- `run_demo`'s own tick loop reads
+    # `camera.end_of_stream` unconditionally, regardless of which one is live.
     if ctx.camera is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
-    active = bool(getattr(ctx.camera, "end_of_stream", False))
+    active = bool(ctx.camera.end_of_stream)
     return SourceSnapshot(readable=True, by_reason={"end_of_stream": 1} if active else {})
 
 
 def _read_camera_reader_failure(ctx: _Context) -> SourceSnapshot:
     if ctx.camera is None or not hasattr(ctx.camera, "failure"):
         # Only a phone-fed source (`_PhoneSource`) has a `.failure` field --
-        # a local `CameraStream` has no reader thread that can name one.
+        # a local `CameraStream` has no reader thread that can name one. This
+        # `hasattr` stays: the two backends genuinely differ here, which is
+        # what `dropped_frames` and `file_recoveries` above do not.
         return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
     failure = ctx.camera.failure
-    detail, _ = _capped(failure)
+    detail, truncated = _capped(failure)
     return SourceSnapshot(
         readable=True, session_id=ctx.pass_session_id, detail=detail,
-        by_reason={detail: 1} if detail else {},
+        detail_truncated=truncated, by_reason={detail: 1} if detail else {},
     )
 
 
@@ -384,10 +433,13 @@ def _read_gps_not_fresh(ctx: _Context) -> SourceSnapshot:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
     if not ctx.gps.is_stale():
         return SourceSnapshot(readable=True, by_reason={})
+    # `latest()` returns a `GpsFix` on every backend (`GpsReader`,
+    # `PhoneGpsReader`, `SimulatedGps`) -- `t_mono` and `valid` are dataclass
+    # fields with defaults, never absent, so read directly.
     fix = ctx.gps.latest()
-    if getattr(fix, "t_mono", 0.0) <= 0.0:
+    if fix.t_mono <= 0.0:
         reason = "absent"
-    elif not getattr(fix, "valid", False):
+    elif not fix.valid:
         reason = "invalid"
     else:
         reason = "stale"
@@ -418,8 +470,11 @@ def _read_gps_last_error(ctx: _Context) -> SourceSnapshot:
     if ctx.gps is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
     last_error = ctx.gps.diagnostics.last_error
-    detail, _ = _capped(last_error or None)
-    return SourceSnapshot(readable=True, detail=detail, by_reason={detail: 1} if detail else {})
+    detail, truncated = _capped(last_error or None)
+    return SourceSnapshot(
+        readable=True, detail=detail, detail_truncated=truncated,
+        by_reason={detail: 1} if detail else {},
+    )
 
 
 def _read_gps_rate_unconfigured(ctx: _Context) -> SourceSnapshot:
@@ -449,8 +504,10 @@ def _here_refused_reason_valid(reason: str) -> bool:
 
 
 def _read_here_refused(ctx: _Context) -> SourceSnapshot:
+    # `PhoneLink.here` is constructed in `__init__` and rebuilt whole on a
+    # redial (D14) -- never absent as an attribute, so read directly.
     phone = ctx.phone
-    if phone is None or getattr(phone, "here", None) is None:
+    if phone is None or phone.here is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
     by_reason = dict(phone.here.refused_by_reason)
     return SourceSnapshot(readable=True, by_reason=by_reason, session_id=ctx.pass_session_id)
@@ -461,16 +518,17 @@ def _read_here_reader_failures(ctx: _Context) -> SourceSnapshot:
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
     total = int(phone.here_failures)
-    detail, _ = _capped(phone.here_failure)
+    detail, truncated = _capped(phone.here_failure)
     key = detail if detail is not None else "here_reader_failed"
     return SourceSnapshot(
         readable=True, by_reason={key: total} if total else {}, detail=detail,
+        detail_truncated=truncated,
     )
 
 
 def _read_here_proxied_stamps(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
-    if phone is None or getattr(phone, "here", None) is None:
+    if phone is None or phone.here is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
     total = int(phone.here.proxied_stamps)
     return SourceSnapshot(
@@ -482,13 +540,16 @@ def _read_here_proxied_stamps(ctx: _Context) -> SourceSnapshot:
 
 
 def _read_phone_dropped(ctx: _Context) -> SourceSnapshot:
+    # `PhoneLink.telemetry` is a property backed by a field set in `__init__`
+    # -- `None` until the first report arrives, never an absent attribute --
+    # so this reads it directly rather than through `getattr` with a default.
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
-    telemetry = getattr(phone, "telemetry", None)
+    telemetry = phone.telemetry
     if telemetry is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_TELEMETRY)
-    dropped = getattr(telemetry, "dropped", None) or {}
+    dropped = telemetry.dropped or {}
     by_reason = {k: int(v) for k, v in dropped.items() if k in DROP_KEYS}
     return SourceSnapshot(readable=True, by_reason=by_reason, session_id=ctx.pass_session_id)
 
@@ -497,10 +558,10 @@ def _read_phone_here_errors(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
-    telemetry = getattr(phone, "telemetry", None)
+    telemetry = phone.telemetry
     if telemetry is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_TELEMETRY)
-    total = int(getattr(telemetry, "here_errors", 0))
+    total = int(telemetry.here_errors)
     return SourceSnapshot(
         readable=True, by_reason={"here_error": total} if total else {}, session_id=ctx.pass_session_id,
     )
@@ -513,8 +574,9 @@ def _read_link_down(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
+    # `Session.is_closed` is a property every `Session` has -- read directly.
     session = _phone_session(phone)
-    down = session is None or bool(getattr(session, "is_closed", False))
+    down = session is None or bool(session.is_closed)
     return SourceSnapshot(readable=True, by_reason={"no_session": 1} if down else {})
 
 
@@ -531,11 +593,15 @@ def _read_link_session_end(ctx: _Context) -> SourceSnapshot:
         if reason is not None:
             by_reason[reason] = by_reason.get(reason, 0) + 1
     session = _phone_session(phone)
-    if session is not None and bool(getattr(session, "is_closed", False)) and phone.supervisor_ended is not None:
+    if session is not None and bool(session.is_closed) and phone.supervisor_ended is not None:
         # The current, terminal session: it ended and nothing replaced it.
         # An `end_reason` here is a fact this drive is done with, so it is
         # counted once, not once per pass it stays terminal.
-        reason = getattr(session, "end_reason", None)
+        reason = session.end_reason
+        # `end_reason` is a `SessionEndReason | None` -- `.value` unwraps the
+        # enum member to its string; a plain string (a test double that
+        # skips the enum) or `None` passes through this `getattr` unchanged,
+        # which is the one place here duck-typing a Union is legitimate.
         reason = getattr(reason, "value", reason)
         if reason is not None:
             key = f"{reason}:final"
@@ -553,9 +619,12 @@ def _read_link_refusals(ctx: _Context) -> SourceSnapshot:
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
     total = len(phone.refusals) + phone.refusals_not_kept
-    detail, _ = _capped(phone.refusals[-1] if phone.refusals else None)
+    detail, truncated = _capped(phone.refusals[-1] if phone.refusals else None)
     key = detail if detail is not None else "refused"
-    return SourceSnapshot(readable=True, by_reason={key: total} if total else {}, detail=detail)
+    return SourceSnapshot(
+        readable=True, by_reason={key: total} if total else {}, detail=detail,
+        detail_truncated=truncated,
+    )
 
 
 def _read_link_displaced(ctx: _Context) -> SourceSnapshot:
@@ -604,7 +673,7 @@ def _read_link_supervisor_ended(ctx: _Context) -> SourceSnapshot:
 
 def _session_stats_or_none(phone: Any) -> Any:
     session = _phone_session(phone)
-    if session is None or bool(getattr(session, "is_closed", False)):
+    if session is None or bool(session.is_closed):
         return None
     return session.stats()
 
@@ -650,7 +719,9 @@ def _read_wire_decode_errors(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
-    router = getattr(phone, "router", None)
+    # `PhoneLink.router` is set in `__init__` and rebuilt on a redial -- never
+    # absent, so read directly rather than through `getattr`.
+    router = phone.router
     if router is None or _session_stats_or_none(phone) is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SESSION)
     per_channel = router.stats()
@@ -670,7 +741,9 @@ def _read_wire_send_rejected(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
-    router = getattr(phone, "router", None)
+    # `PhoneLink.router` is set in `__init__` and rebuilt on a redial -- never
+    # absent, so read directly rather than through `getattr`.
+    router = phone.router
     if router is None or _session_stats_or_none(phone) is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SESSION)
     per_channel = router.stats()
@@ -688,7 +761,10 @@ def _read_acceptor_accept_errors(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
-    acceptor = getattr(phone, "_acceptor", None)
+    # `PhoneLink._acceptor` is a constructor argument, always set -- read
+    # directly. `hasattr(acceptor, "stats")` stays: `TcpAcceptor` and
+    # `LoopbackAcceptor` genuinely differ here.
+    acceptor = phone._acceptor
     if acceptor is None or not hasattr(acceptor, "stats"):
         # `LoopbackAcceptor` has no accept-retry concept and so no `stats()`
         # -- readable in production, where a real `TcpAcceptor` always sits
@@ -704,7 +780,9 @@ def _read_clock_proxied(ctx: _Context) -> SourceSnapshot:
     phone = ctx.phone
     if phone is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_PHONE)
-    adapter = getattr(phone, "adapter", None)
+    # `PhoneLink.adapter` is constructed in `__init__` and rebuilt on a
+    # redial -- never absent, so read directly.
+    adapter = phone.adapter
     if adapter is None:
         return SourceSnapshot(readable=False, missing=MISSING_NO_SOURCE)
     by_reason = dict(adapter.proxy_reasons)
@@ -723,73 +801,97 @@ def _read_pipeline_exception(ctx: _Context) -> SourceSnapshot:
 # The table in plans/plan_task38_failure_log.md enumerates thirty rows under a
 # heading that says "twenty-eight". All thirty are built here: the table is
 # the concrete spec and the prose count is the part that disagrees with it.
-# See the implementation report for the discrepancy in full.
 # ---------------------------------------------------------------------------
 
-REGISTRY: tuple[Source, ...] = (
-    Source("camera.blind_ticks", _read_camera_blind_ticks, None, "no_frame",
-           "run", True, True, "jetson"),
-    Source("camera.dropped_unconsumed", _read_camera_dropped_unconsumed, None, "unconsumed",
-           "run", True, False, "jetson"),
-    Source("camera.decode_failures", _read_camera_decode_failures, None, "jpeg_decode",
-           "session", True, True, "jetson"),
-    Source("camera.file_recoveries", _read_camera_file_recoveries, None, "decoder_poisoned",
-           "run", True, False, "jetson"),
-    Source("camera.end_of_stream", _read_camera_end_of_stream, None, "end_of_stream",
-           "run", False, True, "jetson"),
-    Source("camera.reader_failure", _read_camera_reader_failure, None, None,
-           "session", False, True, "jetson"),
-    Source("gps.not_fresh", _read_gps_not_fresh,
-           frozenset({"stale", "invalid", "absent"}), None,
-           "run", False, True, "jetson"),
-    Source("gps.parse_errors", _read_gps_parse_errors, None, "nmea_parse",
-           "run", True, False, "jetson"),
-    Source("gps.ingest_errors", _read_gps_ingest_errors, None, "ingest_raised",
-           "run", True, False, "jetson"),
-    Source("gps.last_error", _read_gps_last_error, None, None,
-           "run", False, False, "jetson"),
-    Source("gps.rate_unconfigured", _read_gps_rate_unconfigured, None, "ubx_rate_config_failed",
-           "run", False, False, "jetson"),
-    Source("here.refused", _read_here_refused, _here_refused_reason_valid, None,
-           "session", True, True, "jetson"),
-    Source("here.reader_failures", _read_here_reader_failures, None, None,
-           "run", True, True, "jetson"),
-    Source("here.proxied_stamps", _read_here_proxied_stamps, None, "proxy",
-           "session", True, False, "jetson"),
-    Source("phone.dropped", _read_phone_dropped, frozenset(DROP_KEYS), None,
-           "mixed", True, True, "phone"),
-    Source("phone.here_errors", _read_phone_here_errors, None, "here_error",
-           "session", True, True, "phone"),
-    Source("link.down", _read_link_down, None, "no_session",
-           "run", False, True, "jetson"),
-    Source("link.session_end", _read_link_session_end, _link_session_end_valid, None,
-           "run", True, True, "jetson"),
-    Source("link.refusals", _read_link_refusals, None, None,
-           "run", True, False, "jetson"),
-    Source("link.displaced", _read_link_displaced, None, "displaced",
-           "run", True, True, "jetson"),
-    Source("link.workers_leaked", _read_link_workers_leaked, None, "handshake_worker_leaked",
-           "run", True, False, "jetson"),
-    Source("link.sends_lost", _read_link_sends_lost, frozenset({"no_session", "refused"}), None,
-           "run", True, False, "jetson"),
-    Source("link.supervisor_ended", _read_link_supervisor_ended, _supervisor_ended_valid, None,
-           "run", False, True, "jetson"),
-    Source("wire.dropped", _read_wire_dropped, frozenset({"outbound", "inbound"}), None,
-           "session", True, True, "jetson"),
-    Source("wire.seq_gaps", _read_wire_seq_gaps, None, "seq_gap",
-           "session", True, True, "jetson"),
-    Source("wire.decode_errors", _read_wire_decode_errors, frozenset(REASONS), None,
-           "session", True, True, "jetson"),
-    Source("wire.send_rejected", _read_wire_send_rejected, frozenset(REASONS), None,
-           "session", True, False, "jetson"),
-    Source("acceptor.accept_errors", _read_acceptor_accept_errors, None, None,
-           "run", True, False, "jetson"),
-    Source("clock.proxied", _read_clock_proxied, None, None,
-           "session", True, False, "jetson"),
-    Source("pipeline.exception", _read_pipeline_exception, None, None,
-           "run", False, True, "jetson"),
-)
 
+def build_registry(*, camera: Any = None) -> tuple[Source, ...]:
+    """The registry, built for the camera backend actually in use.
+
+    Every row is fixed except one. `camera.dropped_unconsumed` reads
+    `camera.dropped_frames`, and what that counter means depends on which
+    backend produced it: a local `CameraStream` never rebinds, so its own
+    `_drop_counter` only ever grows for the life of the run -- `scope="run"`.
+    `PhoneCameraStream._on_rebound` resets the same field to zero on every
+    redial by design, the same reset `camera.decode_failures` already
+    accounts for with `scope="session"` -- so a `camera` built from a phone
+    needs the same scope here, or the sampler reads a design reset as a real
+    anomaly and reports `counter_went_backwards` on every redial.
+    `hasattr(camera, "decode_failures")` is the same duck-typing
+    `_read_camera_decode_failures` and `_read_camera_reader_failure` already
+    use to tell the two backends apart.
+    """
+    camera_dropped_scope = "session" if hasattr(camera, "decode_failures") else "run"
+    return (
+        Source("camera.blind_ticks", _read_camera_blind_ticks, None, "no_frame",
+               "run", True, True, "jetson"),
+        Source("camera.dropped_unconsumed", _read_camera_dropped_unconsumed, None, "unconsumed",
+               camera_dropped_scope, True, False, "jetson"),
+        Source("camera.decode_failures", _read_camera_decode_failures, None, "jpeg_decode",
+               "session", True, True, "jetson"),
+        Source("camera.file_recoveries", _read_camera_file_recoveries, None, "decoder_poisoned",
+               "run", True, False, "jetson"),
+        Source("camera.end_of_stream", _read_camera_end_of_stream, None, "end_of_stream",
+               "run", False, True, "jetson"),
+        Source("camera.reader_failure", _read_camera_reader_failure, None, None,
+               "session", False, True, "jetson"),
+        Source("gps.not_fresh", _read_gps_not_fresh,
+               frozenset({"stale", "invalid", "absent"}), None,
+               "run", False, True, "jetson"),
+        Source("gps.parse_errors", _read_gps_parse_errors, None, "nmea_parse",
+               "run", True, False, "jetson"),
+        Source("gps.ingest_errors", _read_gps_ingest_errors, None, "ingest_raised",
+               "run", True, False, "jetson"),
+        Source("gps.last_error", _read_gps_last_error, None, None,
+               "run", False, False, "jetson"),
+        Source("gps.rate_unconfigured", _read_gps_rate_unconfigured, None, "ubx_rate_config_failed",
+               "run", False, False, "jetson"),
+        Source("here.refused", _read_here_refused, _here_refused_reason_valid, None,
+               "session", True, True, "jetson"),
+        Source("here.reader_failures", _read_here_reader_failures, None, None,
+               "run", True, True, "jetson"),
+        Source("here.proxied_stamps", _read_here_proxied_stamps, None, "proxy",
+               "session", True, False, "jetson"),
+        Source("phone.dropped", _read_phone_dropped, frozenset(DROP_KEYS), None,
+               "mixed", True, True, "phone"),
+        Source("phone.here_errors", _read_phone_here_errors, None, "here_error",
+               "session", True, True, "phone"),
+        Source("link.down", _read_link_down, None, "no_session",
+               "run", False, True, "jetson"),
+        Source("link.session_end", _read_link_session_end, _link_session_end_valid, None,
+               "run", True, True, "jetson"),
+        Source("link.refusals", _read_link_refusals, None, None,
+               "run", True, False, "jetson"),
+        Source("link.displaced", _read_link_displaced, None, "displaced",
+               "run", True, True, "jetson"),
+        Source("link.workers_leaked", _read_link_workers_leaked, None, "handshake_worker_leaked",
+               "run", True, False, "jetson"),
+        Source("link.sends_lost", _read_link_sends_lost, frozenset({"no_session", "refused"}), None,
+               "run", True, False, "jetson"),
+        Source("link.supervisor_ended", _read_link_supervisor_ended, _supervisor_ended_valid, None,
+               "run", False, True, "jetson"),
+        Source("wire.dropped", _read_wire_dropped, frozenset({"outbound", "inbound"}), None,
+               "session", True, True, "jetson"),
+        Source("wire.seq_gaps", _read_wire_seq_gaps, None, "seq_gap",
+               "session", True, True, "jetson"),
+        Source("wire.decode_errors", _read_wire_decode_errors, frozenset(REASONS), None,
+               "session", True, True, "jetson"),
+        Source("wire.send_rejected", _read_wire_send_rejected, frozenset(REASONS), None,
+               "session", True, False, "jetson"),
+        Source("acceptor.accept_errors", _read_acceptor_accept_errors, None, None,
+               "run", True, False, "jetson"),
+        Source("clock.proxied", _read_clock_proxied, None, None,
+               "session", True, False, "jetson"),
+        Source("pipeline.exception", _read_pipeline_exception, None, None,
+               "run", False, True, "jetson"),
+    )
+
+
+#: The default registry, for callers with no camera to build it around --
+#: `TestRegistryAccessorsResolve` and every other test that only needs the
+#: fixed 30 rows. `FailureSampler` builds its own from the camera it was
+#: actually given (see `build_registry`'s own docstring) rather than reading
+#: this one.
+REGISTRY: tuple[Source, ...] = build_registry()
 _BY_NAME: dict[str, Source] = {s.name: s for s in REGISTRY}
 
 
@@ -865,14 +967,24 @@ class FailureSampler:
         self._running = False
         self._lock = threading.Lock()
 
-        self._state: dict[str, _SourceState] = {s.name: _SourceState() for s in REGISTRY}
+        # Built from the camera this sampler was actually given (C2): a
+        # module-level `REGISTRY` cannot know whether `camera.dropped_frames`
+        # is going to reset on a redial, because that depends on which
+        # backend this run constructed.
+        self._registry: tuple[Source, ...] = build_registry(camera=camera)
+        self._by_name: dict[str, Source] = {s.name: s for s in self._registry}
+        self._state: dict[str, _SourceState] = {s.name: _SourceState() for s in self._registry}
         self._next_episode_id = 1
         self._passes = 0
         self._seq = 0
         self._last_pass_mono: float | None = None
         self._interval_samples: list[float] = []
         self._last_tick_counter: int | None = None
-        self._backwards: dict[str, dict[str, Any]] = {}
+        #: Every occurrence of a `run`-scoped counter going backwards, per
+        #: source, in the order seen -- a list rather than the last value
+        #: overwriting the ones before it, so N redials of a source that
+        #: should have been session-scoped leave N entries, not one.
+        self._backwards: dict[str, list[dict[str, Any]]] = {}
         self._outcome_counts: dict[str, int] = {}
 
         # -- the two direct-notification pseudo-sources --------------------
@@ -901,6 +1013,16 @@ class FailureSampler:
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         with self._lock:
+            if self._blind_pending:
+                # A single blind tick was credited to `run_total` (in
+                # `note_no_frame`) but never got the chance to pair with a
+                # second one, or be resolved by a later `end_of_stream` call
+                # or a quiet-timer pass -- the run ended first. Resolved here
+                # rather than left dangling, or the teardown reconciliation
+                # `kept_total + suppressed + below_episode_threshold ==
+                # run_total` comes up one short for `camera.blind_ticks`.
+                self._blind_pending = False
+                self._state["camera.blind_ticks"].below_episode_threshold += 1
             self._close_all_open(outcome=OUTCOME_OPEN_AT_END)
 
     def _loop(self) -> None:
@@ -918,15 +1040,22 @@ class FailureSampler:
     # -- one pass ------------------------------------------------------------
 
     def sample_once(self) -> None:
+        """One pass over the registry.
+
+        The pass-level counters (`_seq`, `_last_pass_mono`, `_passes`, the
+        interval samples) commit together, after the registry loop -- not
+        split, with some set before the loop and `_passes` only after it, the
+        way a pass that raised partway through would leave them disagreeing
+        about whether a pass had happened at all, and every source after the
+        raise would keep whatever reading its last successful pass left it
+        with, forever. Every accessor is guarded individually in
+        `_process_source`, so this should not be reachable; the counters
+        commit together anyway, as the second line of defence for a failure
+        mode neither guard was proven to need.
+        """
         now = self._now()
         t_wall = self._wall()
         with self._lock:
-            if self._last_pass_mono is not None:
-                self._interval_samples.append(now - self._last_pass_mono)
-            self._last_pass_mono = now
-            self._seq += 1
-            seq = self._seq
-
             phone = self._phone
             pass_session_id = None
             session = _phone_session(phone)
@@ -945,18 +1074,21 @@ class FailureSampler:
 
             ctx = _Context(
                 phone=phone, camera=self._camera, gps=self._gps,
-                blind_ticks_total=self._blind_ticks_total,
-                pipeline_exception=self._pipeline_exception,
                 pass_session_id=pass_session_id,
             )
-            for source in REGISTRY:
+            for source in self._registry:
                 self._process_source(source, ctx, now, t_wall)
             self._check_pseudo_source_quiet(now, t_wall)
 
+            if self._last_pass_mono is not None:
+                self._interval_samples.append(now - self._last_pass_mono)
+            self._last_pass_mono = now
+            self._seq += 1
+            seq = self._seq
             self._passes += 1
-            unreadable = [s.name for s in REGISTRY if not self._state[s.name].last_readable]
-            open_sources = [s.name for s in REGISTRY if self._state[s.name].open_episode is not None]
-            sources_n = len(REGISTRY)
+            unreadable = [s.name for s in self._registry if not self._state[s.name].last_readable]
+            open_sources = [s.name for s in self._registry if self._state[s.name].open_episode is not None]
+            sources_n = len(self._registry)
             record = {
                 "type": "failure_scan", "seq": seq, "t_wall": t_wall, "t_mono": now,
                 "session_id": pass_session_id, "ticks_seen": ticks_seen,
@@ -969,7 +1101,13 @@ class FailureSampler:
     def _process_source(self, source: Source, ctx: _Context, now: float, t_wall: float) -> None:
         st = self._state[source.name]
         st.passes_attempted += 1
-        snap = source.read(ctx)
+        try:
+            snap = source.read(ctx)
+        except Exception:
+            # Every source after this one in the registry still gets its own
+            # pass -- an accessor's own bug costs this one source a reading,
+            # not the rest of the scan.
+            snap = SourceSnapshot(readable=False, missing=MISSING_ACCESSOR_RAISED)
 
         if snap.readable and snap.session_id is not None and ctx.pass_session_id is not None \
                 and snap.session_id != ctx.pass_session_id:
@@ -1010,9 +1148,12 @@ class FailureSampler:
             total = sum(snap.by_reason.values())
             delta = total - st.baseline_total
             if delta < 0:
-                self._backwards[source.name] = {
-                    "from": st.baseline_total, "to": total, "t_mono": now,
-                }
+                # Appended, not assigned: a `run`-scoped source that should
+                # have been `session`-scoped goes backwards on every redial,
+                # and overwriting this entry left N redials looking like one.
+                self._backwards.setdefault(source.name, []).append(
+                    {"from": st.baseline_total, "to": total, "t_mono": now}
+                )
                 st.baseline_total = total
                 st.baseline_by_reason = dict(snap.by_reason)
                 active = False
@@ -1057,33 +1198,55 @@ class FailureSampler:
         st = self._state["camera.blind_ticks"]
         if self._blind_last_mono is not None and now - self._blind_last_mono >= self._close_after_s:
             if st.open_episode is not None:
-                self._close_episode(st, _BY_NAME["camera.blind_ticks"], now, t_wall, OUTCOME_RECOVERED)
-            # A single blind tick with nothing following it within the quiet
-            # window was never worth an episode -- forgotten rather than
-            # left to pair, much later, with an unrelated one.
+                self._close_episode(st, self._by_name["camera.blind_ticks"], now, t_wall, OUTCOME_RECOVERED)
+            elif self._blind_pending:
+                # A single blind tick with nothing following it within the
+                # quiet window was never worth an episode -- it was credited
+                # to `run_total` the instant `note_no_frame` saw it, and is
+                # named here so the teardown reconciliation still balances
+                # rather than losing it.
+                st.below_episode_threshold += 1
             self._blind_pending = False
 
     def _open_episode(
         self, st: _SourceState, source: Source, now: float, t_wall: float,
         reason: str, first_pass_n: int, session_id: Any, snap: SourceSnapshot,
     ) -> None:
+        """Start an episode -- always, even past the cap (D10).
+
+        `_episode_count(st) >= MAX_EPISODES_PER_SOURCE` used to `return`
+        before constructing anything, leaving `st.open_episode` at `None`.
+        The next movement pass then found no open episode and called this
+        method again, so one outage that kept moving past the cap counted as
+        one `episodes_not_kept` per pass rather than once. A suppressed
+        episode is still built and still assigned to `st.open_episode`, so
+        the continuation branch in `_process_source` (`ep.n += delta`) runs
+        for it exactly as it does for a kept one, and the cap is decided once,
+        here, rather than re-decided on every pass that follows.
+        """
         tick_id = None
         if self._pipeline is not None:
             tick_id = getattr(self._pipeline, "_tick_counter", None)
-        if self._episode_count(st) >= MAX_EPISODES_PER_SOURCE:
-            st.episodes_not_kept += 1
-            return
+        if snap.detail_truncated:
+            st.truncated_details += 1
+        kept = self._episode_count(st) < MAX_EPISODES_PER_SOURCE
         episode = Episode(
             episode_id=self._next_episode_id, source=source.name, reason=reason,
             opened_t_mono=now, opened_t_wall=t_wall, last_t_mono=now,
             n=first_pass_n, first_pass_n=first_pass_n, session_id=session_id,
             tick_id=tick_id, basis=FAILURE_BASIS_MEASURED, bound_s=self._interval_s,
-            value=snap.value, channel=snap.channel, detail=snap.detail,
+            value=snap.value, channel=snap.channel, detail=snap.detail, kept=kept,
         )
         self._next_episode_id += 1
         st.open_episode = episode
         if source.name == "camera.blind_ticks":
             self._blind_last_mono = now
+        if not kept:
+            # Counted once, at the moment this episode is decided to be over
+            # the cap -- not once per pass it goes on moving, which is the
+            # defect this docstring names.
+            st.episodes_not_kept += 1
+            return
         if source.event_records and self._sink is not None:
             self._sink.write(episode.open_record(source.device))
             st.events_written += 1
@@ -1107,7 +1270,14 @@ class FailureSampler:
         episode.outcome = outcome
         st.open_episode = None
         st.quiet_streak = 0
+        if not episode.kept:
+            # Its occurrences still count -- toward `suppressed`, not toward
+            # a kept episode's own total -- but it never had a record and
+            # never counted as one of the source's `episodes`.
+            st.suppressed_total += episode.n
+            return
         st.episodes_closed += 1
+        st.kept_n_total += episode.n
         self._outcome_counts[outcome] = self._outcome_counts.get(outcome, 0) + 1
         if source.event_records and self._sink is not None:
             self._sink.write(episode.close_record(source.device, close_after_s=self._close_after_s))
@@ -1116,7 +1286,7 @@ class FailureSampler:
     def _close_all_open(self, *, outcome: str) -> None:
         now = self._now()
         t_wall = self._wall()
-        for source in REGISTRY:
+        for source in self._registry:
             st = self._state[source.name]
             if st.open_episode is not None:
                 self._close_episode(st, source, now, t_wall, outcome)
@@ -1127,12 +1297,26 @@ class FailureSampler:
         """The tick loop's `frame is None` branch, which it already takes.
         Does not wait for the sampler's own pass -- see the module docstring.
 
-        The first blind tick of a run of them opens nothing: a single missed
-        poll at 5 Hz is ordinary and not worth an episode. The second is what
-        confirms it is a run rather than a blip, and the episode it opens is
-        credited with both -- `first_pass_n=2` -- so `n` never undercounts
-        `blind_ticks` by the one tick that was, correctly, held back while
-        waiting to see if a second would follow.
+        Every call is credited to `run_total` immediately, so
+        `camera.blind_ticks`' own total always equals the number of times
+        this was called -- it used to be credited only once a second tick
+        arrived to pair with, which left a lone blind tick (no second one
+        before `close_after_s` elapsed) never credited at all: `blind_ticks`
+        and the source's own `total` disagreed, and `status` read `quiet` on
+        a drive the camera went blind on.
+
+        The two-tick rule now governs only whether an EPISODE opens -- a
+        single missed poll at 5 Hz is ordinary and not worth one. A lone
+        credited tick that never pairs within the quiet window is counted in
+        `below_episode_threshold` instead (`_check_pseudo_source_quiet`, or
+        here directly when `end_of_stream` says no second tick is coming),
+        which is what keeps `sum(episode.n) + suppressed +
+        below_episode_threshold == run_total` checkable.
+
+        `end_of_stream` marks the call the tick loop makes right before it
+        `break`s: nothing will call this again, so a tick left pending or an
+        episode left open by THIS call is resolved right away rather than
+        waiting on a quiet timer that assumes more ticks might still arrive.
         """
         with self._lock:
             now = self._now()
@@ -1143,26 +1327,31 @@ class FailureSampler:
             st.passes_attempted += 1
             st.passes_readable += 1
             st.last_readable = True
-            source = _BY_NAME["camera.blind_ticks"]
+            st.last_readable_t_mono = now
+            source = self._by_name["camera.blind_ticks"]
+
+            st.run_total += 1
+            st.by_reason_total["no_frame"] = st.by_reason_total.get("no_frame", 0) + 1
+            if st.first_t_mono is None:
+                st.first_t_mono = now
+            st.last_t_mono = now
+
             if st.open_episode is not None:
-                st.run_total += 1
-                st.by_reason_total["no_frame"] = st.by_reason_total.get("no_frame", 0) + 1
-                st.last_t_mono = now
                 st.open_episode.n += 1
                 st.open_episode.last_t_mono = now
             elif self._blind_pending:
                 self._blind_pending = False
-                st.run_total += 2
-                st.by_reason_total["no_frame"] = st.by_reason_total.get("no_frame", 0) + 2
-                if st.first_t_mono is None:
-                    st.first_t_mono = now
-                st.last_t_mono = now
                 self._open_episode(
                     st, source, now, t_wall, "no_frame", 2, None,
                     SourceSnapshot(readable=True),
                 )
+            elif end_of_stream:
+                st.below_episode_threshold += 1
             else:
                 self._blind_pending = True
+
+            if end_of_stream and st.open_episode is not None:
+                self._close_episode(st, source, now, t_wall, OUTCOME_OPEN_AT_END)
 
     def note_pipeline_exception(self, exc: BaseException) -> None:
         """`worker()`'s `except BaseException`. Writes one `failure_event`
@@ -1182,12 +1371,12 @@ class FailureSampler:
             if st.first_t_mono is None:
                 st.first_t_mono = now
             st.last_t_mono = now
-            source = _BY_NAME["pipeline.exception"]
-            detail, _ = _capped(str(exc))
+            source = self._by_name["pipeline.exception"]
+            detail, truncated = _capped(str(exc))
             if st.open_episode is None:
                 self._open_episode(
                     st, source, now, t_wall, reason, 1, None,
-                    SourceSnapshot(readable=True, detail=detail),
+                    SourceSnapshot(readable=True, detail=detail, detail_truncated=truncated),
                 )
 
     # -- per tick --------------------------------------------------------------
@@ -1204,9 +1393,12 @@ class FailureSampler:
                 }
             age = now - self._last_pass_mono
             basis = FAILURE_BASIS_MEASURED if age <= 2 * self._interval_s else FAILURE_BASIS_STALE
-            open_sources = [s.name for s in REGISTRY if self._state[s.name].open_episode is not None]
-            unreadable_n = sum(1 for s in REGISTRY if not self._state[s.name].last_readable)
-            episodes_total = sum(st.episodes_closed + (1 if st.open_episode else 0) for st in self._state.values())
+            open_sources = [s.name for s in self._registry if self._state[s.name].open_episode is not None]
+            unreadable_n = sum(1 for s in self._registry if not self._state[s.name].last_readable)
+            episodes_total = sum(
+                st.episodes_closed + (1 if st.open_episode is not None and st.open_episode.kept else 0)
+                for st in self._state.values()
+            )
             return {
                 "open": open_sources, "open_n": len(open_sources), "episodes": episodes_total,
                 "scan_age_s": round(age, 3), "basis": basis, "unreadable_n": unreadable_n,
@@ -1219,7 +1411,7 @@ class FailureSampler:
         """`summary["failures"]`, written once at the end of a run."""
         with self._lock:
             sources: dict[str, Any] = {}
-            for source in REGISTRY:
+            for source in self._registry:
                 st = self._state[source.name]
                 if st.run_total > 0:
                     status = RULE_FIRED
@@ -1227,17 +1419,40 @@ class FailureSampler:
                     status = RULE_NOT_EVALUABLE
                 else:
                     status = RULE_QUIET
+                open_ep = st.open_episode
+                open_kept_n = open_ep.n if (open_ep is not None and open_ep.kept) else 0
+                open_suppressed_n = open_ep.n if (open_ep is not None and not open_ep.kept) else 0
                 row: dict[str, Any] = {
                     "status": status,
                     "passes_attempted": st.passes_attempted,
                     "passes_readable": st.passes_readable,
-                    "episodes": st.episodes_closed + (1 if st.open_episode else 0),
+                    "episodes": st.episodes_closed + (1 if open_ep is not None and open_ep.kept else 0),
                     "total": st.run_total,
+                    # A cumulative source's `total` is occurrences: a real
+                    # counter moved that many times. A predicate source's
+                    # `total` is passes: `delta = 1` once per pass the
+                    # condition holds, so a sticky error active for the whole
+                    # drive reports one "occurrence" per second it stayed
+                    # true. Carried so a reader (`report.md`) can name the
+                    # quantity for what it is instead of calling both
+                    # "occurrences".
+                    "cumulative": source.cumulative,
                     "by_reason": dict(st.by_reason_total),
                     "first_t_mono": st.first_t_mono,
                     "last_t_mono": st.last_t_mono,
                     "events_written": st.events_written,
                     "episodes_not_kept": st.episodes_not_kept,
+                    # The reading rule this row makes checkable: `kept_total +
+                    # suppressed + below_episode_threshold == total`. Every
+                    # occurrence `total` counts lands in exactly one of the
+                    # three -- inside a kept episode's own `n`, inside a
+                    # suppressed (over-the-cap) episode's `n`, or, for
+                    # `camera.blind_ticks` only, never enclosed in an episode
+                    # at all.
+                    "kept_total": st.kept_n_total + open_kept_n,
+                    "suppressed": st.suppressed_total + open_suppressed_n,
+                    "below_episode_threshold": st.below_episode_threshold,
+                    "truncated_details": st.truncated_details,
                 }
                 if status == RULE_NOT_EVALUABLE and st.last_missing:
                     row["missing"] = [st.last_missing]
@@ -1245,12 +1460,10 @@ class FailureSampler:
             outcomes = dict(self._outcome_counts)
 
             interval_stats = _pctl(self._interval_samples) or {"p50": None, "p95": None, "max": None}
-            basis_counts = {FAILURE_BASIS_MEASURED: self._passes, FAILURE_BASIS_STALE: 0, FAILURE_BASIS_ABSENT: 0}
             return {
                 "scan": {
                     "passes": self._passes, "seq_last": self._seq,
-                    "interval_s": interval_stats, "basis_counts": basis_counts,
-                    "absent_reasons": {}, "sources_n": len(REGISTRY),
+                    "interval_s": interval_stats, "sources_n": len(self._registry),
                 },
                 "sources": sources,
                 "outcomes": outcomes,
