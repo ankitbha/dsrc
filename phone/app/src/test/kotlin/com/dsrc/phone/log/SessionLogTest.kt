@@ -309,14 +309,20 @@ class SessionLogTest {
         // admission bound: `queue.offer()` is called at most once per `kind`
         // per second (two, at worst, if two occurrences straddle a
         // wall-clock-second boundary -- `atMonoNs / 1_000_000_000L` is an
-        // integer bucket, not a sliding window), so a fault repeating far
-        // faster than that cannot out-compete a header for this queue's
-        // depth no matter how large the burst is. Across `FailureKinds`'
-        // ten members that is at most 20 admitted lines a second, and at
-        // most 640 for the life of a session once every kind has reached
-        // its own 64-line lifetime cap ([SessionLog.MAX_LINES_PER_KIND] x
-        // 10) -- against a queue this test never lets run dry, since
-        // `log.start()` keeps the drain thread pulling throughout.
+        // integer bucket, not a sliding window) PROVIDED that call succeeds.
+        // The per-second bookkeeping commits only after `enqueueLine`
+        // returns `true`, so a kind whose line the queue refuses has not
+        // spent that second's budget and is offered again on its next
+        // occurrence -- this test's queue never refuses anything
+        // (`log.start()` keeps the drain thread pulling throughout), which
+        // is why the bound holds here. So a fault repeating far faster than
+        // that cannot out-compete a header for this queue's depth no matter
+        // how large the burst is, as long as the queue keeps accepting.
+        // Across `FailureKinds`' ten members that is at most 20 admitted
+        // lines a second, and at most 640 for the life of a session once
+        // every kind has reached its own 64-line lifetime cap
+        // ([SessionLog.MAX_LINES_PER_KIND] x 10) -- against a queue this
+        // test never lets run dry.
         val log = log(depth = 4)
         log.start()
         repeat(5_000) { log.offerFailure("link.dial_failed", atMonoNs = 0, atWallNs = 0) }
