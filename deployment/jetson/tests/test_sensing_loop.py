@@ -644,13 +644,14 @@ class TestDecisionInputsCarriesEveryField:
             assert len(outcome.to_record()["decision_inputs"]) == 17
 
 
-def _telemetry(**achieved_and_dropped) -> PhoneTelemetry:
-    achieved = achieved_and_dropped.get(
+def _telemetry(**overrides) -> PhoneTelemetry:
+    achieved = overrides.get(
         "achieved", {"camera_hz": 4.97, "gps_hz": 1.0, "imu_hz": 49.8, "here_hz": 0.0})
-    dropped = achieved_and_dropped.get("dropped", {"camera": 61, "gps": 0, "imu": 0, "here": 0})
+    dropped = overrides.get("dropped", {"camera": 61, "gps": 0, "imu": 0, "here": 0})
     return PhoneTelemetry(
         t_capture_mono_ns=0, thermal_status="nominal", thermal_headroom=None,
-        achieved=achieved, dropped=dropped, here_calls=0, here_errors=0,
+        achieved=achieved, dropped=dropped,
+        here_calls=overrides.get("here_calls", 0), here_errors=overrides.get("here_errors", 0),
     )
 
 
@@ -663,14 +664,14 @@ class TestReferenceFromPhone:
     def test_no_phone_at_all_is_named_absent(self):
         assert reference_from(None, now=1000.0) == {
             "achieved": None, "dropped": None, "age_s": None, "at_mono": None,
-            "absent": "no_telemetry",
+            "here_calls": None, "here_errors": None, "absent": "no_telemetry",
         }
 
     def test_a_phone_that_never_reported_is_named_absent_not_zero(self):
         record = reference_from(Phone(), now=1000.0)
         assert record == {
             "achieved": None, "dropped": None, "age_s": None, "at_mono": None,
-            "absent": "no_telemetry",
+            "here_calls": None, "here_errors": None, "absent": "no_telemetry",
         }
 
     def test_a_phone_that_reported_echoes_achieved_dropped_and_age(self):
@@ -683,6 +684,19 @@ class TestReferenceFromPhone:
         assert record["age_s"] == pytest.approx(0.41)
         assert record["at_mono"] == 999.59
         assert record["absent"] is None
+
+    def test_a_phone_that_reported_echoes_here_calls_and_errors(self):
+        phone = Phone()
+        phone.telemetry = _telemetry(here_calls=9, here_errors=1)
+        phone.telemetry_at_mono = 999.59
+        record = reference_from(phone, now=1000.0)
+        assert record["here_calls"] == 9
+        assert record["here_errors"] == 1
+
+    def test_a_phone_never_heard_from_has_placed_no_calls_not_zero_calls(self):
+        record = reference_from(Phone(), now=1000.0)
+        assert record["here_calls"] is None
+        assert record["here_errors"] is None
 
     def test_on_tick_wires_the_reference_from_the_phone(self):
         clock = Clock()
@@ -701,8 +715,48 @@ class TestReferenceFromPhone:
         outcome = loop.on_tick(tick(), None)
         assert outcome.reference == {
             "achieved": None, "dropped": None, "age_s": None, "at_mono": None,
-            "absent": "no_telemetry",
+            "here_calls": None, "here_errors": None, "absent": "no_telemetry",
         }
+
+
+PRE_TASK_39_REFERENCE_KEYS = frozenset({"achieved", "dropped", "age_s", "at_mono", "absent"})
+
+
+class TestReferenceShapeRule:
+    """`reference["absent"] is None` if and only if `achieved`, `dropped`,
+    `here_calls` and `here_errors` are all not None -- all five fields are on
+    the same object, so a phone never heard from cannot report zero API
+    calls, and a phone that has reported cannot be missing them.
+    """
+
+    def test_the_absent_branch_nulls_all_four_fields_together(self):
+        record = reference_from(None, now=1000.0)
+        assert record["absent"] is not None
+        assert record["achieved"] is None
+        assert record["dropped"] is None
+        assert record["here_calls"] is None
+        assert record["here_errors"] is None
+
+    def test_the_present_branch_never_nulls_here_calls_or_here_errors(self):
+        phone = Phone()
+        phone.telemetry = _telemetry(here_calls=0, here_errors=0)
+        phone.telemetry_at_mono = 999.59
+        record = reference_from(phone, now=1000.0)
+        assert record["absent"] is None
+        assert record["here_calls"] is not None
+        assert record["here_errors"] is not None
+
+    def test_the_record_differs_from_the_pre_task_39_shape_in_exactly_two_keys(self):
+        """Fences the record change (task 39 §8): adding the two fields must
+        not touch any of the five keys `reference_from` carried before it.
+        """
+        present = reference_from(Phone(), now=1000.0)
+        phone = Phone()
+        phone.telemetry = _telemetry()
+        phone.telemetry_at_mono = 999.0
+        present_with_phone = reference_from(phone, now=1000.0)
+        for record in (present, present_with_phone):
+            assert set(record) == PRE_TASK_39_REFERENCE_KEYS | {"here_calls", "here_errors"}
 
 
 class TestTickOutcomeToRecord:

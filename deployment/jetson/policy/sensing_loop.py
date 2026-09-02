@@ -202,17 +202,25 @@ def reference_from(phone: Any, *, now: float) -> dict[str, Any]:
     telemetry rate re-reports on every tick, and an age recomputed against a
     fresh `now` each time never reveals that the underlying report did not
     change.
+
+    `here_calls`/`here_errors` are the phone's own count of HERE HTTP calls
+    placed and non-2xx responses, cumulative for its service run. They have
+    crossed the wire on every telemetry frame since task 27 and reached no
+    reader on this side before this task. Null together with everything else
+    on the absent branch: a phone never heard from has not placed zero calls.
     """
     telemetry = getattr(phone, "telemetry", None)
     if telemetry is None:
         return {"achieved": None, "dropped": None, "age_s": None, "at_mono": None,
-                "absent": "no_telemetry"}
+                "here_calls": None, "here_errors": None, "absent": "no_telemetry"}
     telemetry_at = getattr(phone, "telemetry_at_mono", None)
     return {
         "achieved": {key: telemetry.achieved[key] for key in RATE_KEYS},
         "dropped": {key: telemetry.dropped[key] for key in DROP_KEYS},
         "age_s": None if telemetry_at is None else now - telemetry_at,
         "at_mono": telemetry_at,
+        "here_calls": telemetry.here_calls,
+        "here_errors": telemetry.here_errors,
         "absent": None,
     }
 

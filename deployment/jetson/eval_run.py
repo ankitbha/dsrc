@@ -32,7 +32,7 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 JETSON_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(JETSON_DIR))
@@ -40,8 +40,17 @@ sys.path.insert(0, str(JETSON_DIR))
 import numpy as np  # noqa: E402
 
 from policy import sim_contract  # noqa: E402
-from policy.sensing_controller import RULE_FIRED, RULE_NOT_EVALUABLE  # noqa: E402
-from sensors.time_sync import StageTiming  # noqa: E402
+from policy.sensing_controller import (  # noqa: E402
+    MAX_TELEMETRY_AGE_S,
+    RULE_FIRED,
+    RULE_NOT_EVALUABLE,
+    RULE_QUIET,
+    RULES,
+)
+from policy.shadow_mode import LIVE, SHADOW  # noqa: E402
+from sensors.thermal import ABSENT_REASONS, THERMAL_BASIS_STALE  # noqa: E402
+from sensors.time_sync import STAGE_BASIS_MEASURED, StageTiming  # noqa: E402
+from transport.messages import RATE_KEYS  # noqa: E402
 from transport.timebase import (  # noqa: E402
     MAX_ACCEPTABLE_RTT_NS,
     MIN_OFFSET_SAMPLES,
@@ -517,6 +526,32 @@ def _join_failure_episodes(failure_events: list[dict]) -> list[dict]:
     return episodes
 
 
+def _read_summary(run_dir: Path) -> dict[str, Any]:
+    """`summary.json`'s contents, or `{}` when it was never written -- a run
+    that did not reach `close()` (run_demo.py:708 is the last statement
+    before it) has no summary at all, and every reader downstream of this
+    treats that the same way it treats a summary missing one key.
+    """
+    summary_path = run_dir / "summary.json"
+    if summary_path.exists():
+        return json.loads(summary_path.read_text())
+    return {}
+
+
+def _read_log_health(run_dir: Path) -> dict[str, Any] | None:
+    """`log_health.json`'s contents, or `None` when it was never written or
+    did not parse. Written after `close()`, so it can be absent even on a
+    run whose `summary.json` exists.
+    """
+    health_path = run_dir / "log_health.json"
+    if health_path.exists():
+        try:
+            return json.loads(health_path.read_text())
+        except ValueError:
+            return None
+    return None
+
+
 def failures_result(
     ticks: list[dict[str, Any]], loaded: "LoadedRecords", summary: dict[str, Any],
     run_dir: Path | None = None,
@@ -527,14 +562,7 @@ def failures_result(
     `thermal_result` gives a run that predates it.
     """
     has_tick_block = any(t.get("failures") is not None for t in ticks)
-    log_health = None
-    if run_dir is not None:
-        health_path = run_dir / "log_health.json"
-        if health_path.exists():
-            try:
-                log_health = json.loads(health_path.read_text())
-            except ValueError:
-                log_health = None
+    log_health = None if run_dir is None else _read_log_health(run_dir)
     if not has_tick_block and not loaded.failure_scans and not loaded.failure_events \
             and "failures" not in summary and log_health is None:
         return None
@@ -572,7 +600,9 @@ def in_dropout_affected(elapsed_s: float, dropouts: list[tuple[float, float]]) -
     return any(a <= elapsed_s < b + DROPOUT_RECOVERY_MARGIN_S for a, b in dropouts)
 
 
-def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]:
+def analyze(
+    run_dir: Path, phone_log_path: Path | None = None, *, loaded: "LoadedRecords | None" = None,
+) -> dict[str, Any]:
     """All metrics + gates as a JSON-able dict (report rendering is separate).
 
     `phone_log_path` is optional: a run with no phone behind it, or one whose
@@ -580,8 +610,13 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     eight Jetson-side stages every tick already carries. When it is supplied,
     the two logs are joined into a ten-stage table that adds `return` and
     `render`, the two facts only the phone witnesses.
+
+    `loaded` lets a caller that has already read `metadata.jsonl` (`main()`,
+    which needs it before deciding whether this function can even run) pass
+    the same `LoadedRecords` in rather than paying for a second parse.
     """
-    loaded = load_records(run_dir / "metadata.jsonl")
+    if loaded is None:
+        loaded = load_records(run_dir / "metadata.jsonl")
     ticks = loaded.ticks
     scenario, timebase_estimates = loaded.scenario, loaded.timebase_estimates
     unparseable = loaded.unparseable
@@ -597,10 +632,7 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
             f"({len(loaded.failure_scans)} failure_scan, {len(loaded.failure_events)} "
             "failure_event records present)"
         )
-    summary = {}
-    summary_path = run_dir / "summary.json"
-    if summary_path.exists():
-        summary = json.loads(summary_path.read_text())
+    summary = _read_summary(run_dir)
 
     # What the run said it produced against what survived to be read. The summary is
     # written by `write_summary` before `close()` flushes the log, so a run that lost
@@ -1274,7 +1306,211 @@ def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
     return lines
 
 
-def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
+#: The noun each axis's `attempted`/`answered` count over, for the one-line
+#: rendering -- `rates` counts distinct telemetry reports, everything else
+#: counts ticks.
+_AXIS_NOUN = {
+    "latency": "ticks", "rates": "reports", "api_calls": "ticks", "triggers": "ticks",
+    "failures": "ticks", "thermal": "ticks", "provenance": "ticks",
+}
+
+
+def _axis_fully_answered(axis: dict[str, Any]) -> bool:
+    return (
+        axis["unbuildable"] is None
+        and axis["attempted"] not in (None, 0)
+        and axis["answered"] == axis["attempted"]
+    )
+
+
+def _axis_extra_clause(axis_name: str, sensing: dict[str, Any] | None) -> str:
+    """The one piece of context that does not fit the generic `answered of
+    attempted` shape: which rules were legitimately `not_evaluable` (a state
+    that is not "unanswered", D3) and why `rates` may have nothing to compare
+    achieved against (D8, a shadow drive).
+    """
+    if sensing is None:
+        return ""
+    if axis_name == "triggers":
+        bits = []
+        for rule, statuses in sorted(sensing["triggers"]["rules_by_status"].items()):
+            n = statuses.get(RULE_NOT_EVALUABLE, 0)
+            if not n:
+                continue
+            missing = sensing["triggers"]["rules_missing"].get(rule) or {}
+            missing_str = ", ".join(sorted(missing)) if missing else "an input"
+            bits.append(f"{rule} was not_evaluable on {n} of them, missing {missing_str}")
+        return (" " + "; ".join(bits) + ".") if bits else ""
+    if axis_name == "rates" and not sensing["ever_live"]:
+        return (
+            f" Commanded rates were never applied (mode {sensing['mode']} on "
+            f"{sensing['ticks']} of {sensing['ticks']} decisions), so achieved is "
+            "not a shortfall against them."
+        )
+    return ""
+
+
+def _axis_headline_line(axis: dict[str, Any], sensing: dict[str, Any] | None) -> str:
+    name, section = axis["axis"], axis["section"]
+    if axis["unbuildable"] is not None:
+        return f"- **{name}**: not built -- {axis['unbuildable']}. See {section}."
+    noun = _AXIS_NOUN[name]
+    reason = ", ".join(f"{word} {n}" for word, n in sorted(axis["unanswered_by_reason"].items()))
+    line = f"- **{name}**: {axis['answered']} of {axis['attempted']} {noun} answered"
+    if reason:
+        line += f" -- {reason}"
+    line += "."
+    line += _axis_extra_clause(name, sensing)
+    return line + f" See {section}."
+
+
+def _reconciliation_line(rec: dict[str, Any]) -> str:
+    detail = rec.get("detail")
+    prefix = f"- **{rec['name']}**: {rec['status']}"
+    return f"{prefix} -- {detail}" if detail else prefix
+
+
+def _session_summary_lines(session: dict[str, Any]) -> list[str]:
+    """`## Session summary`: every axis, always -- rule 22 forbids counting
+    how many answered without enumerating the ones that did not, on the same
+    lines, so the enumeration is never partial.
+    """
+    axes = session["axes"]
+    sensing = session.get("sensing")
+    fully_answered = [a for a in axes if _axis_fully_answered(a)]
+    unbuildable = [a for a in axes if a["unbuildable"] is not None]
+    did_not = [a for a in axes if a not in fully_answered and a not in unbuildable]
+    lines = [
+        "", "## Session summary", "",
+        f"{len(axes)} axes, {len(fully_answered)} answered. "
+        f"{len(did_not)} did not, {len(unbuildable)} could not be built.",
+        "",
+    ]
+    lines += [_axis_headline_line(axis, sensing) for axis in axes]
+
+    recs = session["reconciliations"]
+    held = [r for r in recs if r["status"] == "held"]
+    failed = [r for r in recs if r["status"] == "failed"]
+    unavailable = [r for r in recs if r["status"] == "unavailable"]
+    lines += [
+        "",
+        f"{len(recs)} reconciliations, {len(held)} held, {len(failed)} failed, "
+        f"{len(unavailable)} unavailable.",
+        "",
+    ]
+    lines += [_reconciliation_line(rec) for rec in recs if rec["status"] != "held"]
+
+    inputs = session["inputs"]
+    lines += [
+        "",
+        f"Inputs: metadata.jsonl {_yes_no(inputs['metadata_jsonl'])}, "
+        f"summary.json {_yes_no(inputs['summary_json'])}, "
+        f"log_health.json {_yes_no(inputs['log_health_json'])}, "
+        f"phone log {_yes_no(inputs['phone_log'])}.",
+    ]
+    return lines
+
+
+def _yes_no(flag: bool) -> str:
+    return "yes" if flag else "no"
+
+
+def _overall_clause(session: dict[str, Any]) -> str:
+    axes = session["axes"]
+    fully_answered = sum(1 for a in axes if _axis_fully_answered(a))
+    if fully_answered == len(axes):
+        return f"the five gates; all {len(axes)} instrument axes answered."
+    return (
+        f"the five gates. {len(axes) - fully_answered} of {len(axes)} instrument axes "
+        "did not answer; see ## Session summary."
+    )
+
+
+def _sensing_lines(sensing: dict[str, Any] | None) -> list[str]:
+    """`## Sensing`: the rate, trigger and HERE detail behind three axes that
+    have no other section of their own.
+    """
+    if sensing is None:
+        return []
+    lines = [
+        "", "## Sensing", "",
+        f"- mode: {sensing['mode']} ({sensing['mode_source']}); ever live: {sensing['ever_live']}",
+    ]
+    window = sensing["telemetry_window"]
+    if window["unbuildable"]:
+        lines.append(f"- telemetry window: unbuildable -- {window['unbuildable']}")
+    else:
+        lines.append(
+            f"- telemetry window: observed median {window['observed_median_s']:.3f} s "
+            f"over {window['reports']} distinct reports"
+        )
+    lines += [
+        "",
+        "| rate | commanded distinct | commanded time mean | achieved time mean | comparable | p50 | p95 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for key in RATE_KEYS:
+        row = sensing["rates"][key]
+        comparable = "yes" if row["comparable"] else f"no ({row['not_comparable_because']})"
+        p50, p95 = row["percentiles"]["p50"], row["percentiles"]["p95"]
+        if row["percentiles_suppressed"]:
+            p50_str = p95_str = f"suppressed ({row['percentiles_suppressed']})"
+        else:
+            p50_str = "n/a" if p50 is None else f"{p50:.3f}"
+            p95_str = "n/a" if p95 is None else f"{p95:.3f}"
+        achieved = row["achieved_time_mean"]
+        achieved_str = "n/a" if achieved is None else f"{achieved:.3f}"
+        lines.append(
+            f"| {key} | {row['commanded_distinct']} | {row['commanded_time_mean']:.3f} | "
+            f"{achieved_str} | {comparable} | {p50_str} | {p95_str} |"
+        )
+    triggers = sensing["triggers"]
+    lines += ["", f"- decisions by trigger: {triggers['decisions_by_trigger']}"]
+    for rule, statuses in sorted(triggers["rules_by_status"].items()):
+        missing = triggers["rules_missing"].get(rule)
+        missing_str = f"; missing {missing}" if missing else ""
+        lines.append(f"- {rule}: {statuses}{missing_str}")
+    if triggers["summary_agrees"] is False:
+        lines.append("- WARNING: computed trigger/rule counts disagree with summary.json")
+    here = sensing["here"]
+    lines.append(
+        f"- HERE calls: {here['calls_total']} total across {len(here['by_session'])} session(s) "
+        f"({here['uncounted_prefix']} placed before the first observed report in each session, "
+        f"not counted), {here['errors_total']} errors, expected from commanded rate "
+        f"{here['expected_from_commanded']:.2f}, phone-reported responses received "
+        f"{here['responses_received']}"
+        + (f" -- {here['zero_calls_because']}" if here.get("zero_calls_because") else "")
+    )
+    return lines
+
+
+def render_session_summary_only(
+    run_dir: Path, session: dict[str, Any], loaded: "LoadedRecords",
+) -> str:
+    """The whole `report.md` for a drive with no tick records at all (D13):
+    `analyze()` cannot run -- every metric block indexes `ticks` -- but the
+    session summary is built from `metadata.jsonl`, `summary.json` and
+    `log_health.json` alone, none of which needs a single tick.
+    """
+    lines = [
+        f"# Run evaluation - {run_dir.name}", "",
+        f"0 ticks read from {run_dir / 'metadata.jsonl'} "
+        f"({len(loaded.failure_scans)} failure_scan, {len(loaded.failure_events)} "
+        "failure_event records present)",
+        "",
+        "No tick records exist for this drive, so none of the metric sections below can be "
+        "built -- `analyze()` raises on a zero-tick drive by design. This section reads "
+        "`metadata.jsonl`, `summary.json` and `log_health.json` alone.",
+    ]
+    lines += _session_summary_lines(session)
+    lines += _sensing_lines(session.get("sensing"))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_markdown(
+    result: dict[str, Any], plots: list[str], session: dict[str, Any] | None = None,
+) -> str:
     r = result
     lines = [f"# Run evaluation - {Path(r['run_dir']).name}", ""]
     if r["scenario"]["description"]:
@@ -1291,6 +1527,13 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         f"{r['n_ticks']} ticks over {r['duration_s']} s "
         f"(median {r['tick_rate_hz_median']} Hz, "
         f"{r['camera_dropped_frames']} camera frames dropped)",
+    ]
+    # Placed above ## Gates (D2): a reader who reads one section reads the
+    # first one, and that used to be the verdict this section exists to
+    # qualify.
+    if session is not None:
+        lines += _session_summary_lines(session)
+    lines += [
         "",
         "## Gates",
         "",
@@ -1308,9 +1551,12 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
             f"{integrity.get('unparseable_lines')} unparseable lines | 0 missing | "
             f"**FAIL** |"
         )
+    overall_line = f"**Overall: {'PASS' if r['overall_pass'] else 'FAIL'}**"
+    if session is not None:
+        overall_line += f" -- {_overall_clause(session)}"
     lines += [
         "",
-        f"**Overall: {'PASS' if r['overall_pass'] else 'FAIL'}**",
+        overall_line,
         "",
         "## Latency (full run)",
         "",
@@ -1455,6 +1701,8 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         f"- confidence labels: {a['confidence_labels']}",
         f"- head distributions: {json.dumps(a['head_distributions'], indent=2)}",
     ]
+    if session is not None:
+        lines += _sensing_lines(session.get("sensing"))
     join = r.get("phone_join")
     if join is not None:
         return_ms = [
@@ -1482,6 +1730,851 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
     return "\n".join(lines)
 
 
+#: The seven instruments a drive runs, in the order the summary lists them.
+#: Fixed: an axis that cannot be built appears with `attempted: null` and a
+#: named missing input, never by being absent from the list (rule 6).
+AXES = ("latency", "rates", "api_calls", "triggers", "failures", "thermal", "provenance")
+
+#: Reused across the two axes whose census comes off `policy.sensing_loop.reference_from`:
+#: a report is either fresh, stale by the controller's own predicate, or never
+#: arrived at all.
+REFERENCE_NO_TELEMETRY = "no_telemetry"
+REFERENCE_STALE = "stale"
+
+#: The `latency` axis has no closed vocabulary of its own: `jetson_ms` is either
+#: on the tick or it is not, and the one wording used when it is not is the same
+#: one `latency["jetson_ms_source"]` already renders. Owned here, not in
+#: `sensors.time_sync`, which has no such combined constant (see final report).
+LATENCY_ABSENT_REASON = "absent from this run; e2e used"
+LATENCY_VOCABULARY = frozenset({LATENCY_ABSENT_REASON})
+
+#: `rates`/`api_calls` census words, both traceable to `reference_from`'s own
+#: two-word vocabulary (`"no_telemetry"`) plus the controller's own staleness
+#: predicate (`"stale"`, from comparing `age_s` against `MAX_TELEMETRY_AGE_S`).
+RATES_VOCABULARY = frozenset({REFERENCE_NO_TELEMETRY, REFERENCE_STALE})
+API_CALLS_VOCABULARY = frozenset({REFERENCE_NO_TELEMETRY})
+
+#: `triggers` answers "did this tick's attribution parse", not "did every rule
+#: fire" -- a rule being `not_evaluable` is a legitimate state (D3), not an
+#: unanswered tick. The one way a tick fails to answer is a malformed shape:
+#: not exactly the four `RULES`, or a status outside the three-word set.
+TRIGGERS_UNANSWERED_REASON = "invalid_attribution_shape"
+TRIGGERS_VOCABULARY = frozenset({TRIGGERS_UNANSWERED_REASON})
+
+#: `thermal`/`failures` share one vocabulary: `sensors.thermal.ABSENT_REASONS`
+#: (six words, reused verbatim by `logio.failure_log` for its own per-tick
+#: `basis`) plus the `stale` word both modules also share via
+#: `sensors.thermal.THERMAL_BASIS_STALE`.
+THERMAL_FAILURES_VOCABULARY = frozenset({THERMAL_BASIS_STALE}) | ABSENT_REASONS
+
+#: `provenance` has no borrowed vocabulary: it is a statement about the SHAPE
+#: of `field_sources`, not about the class words it contains (that census is
+#: `## Observation quality`'s `by_source`, already rendered elsewhere). A map
+#: of the right size is never counted as a violation; a map of the wrong size
+#: is always one, because there is no vocabulary of legal wrong sizes.
+PROVENANCE_MIXED_REASON = "provenance_fields_mixed"
+PROVENANCE_VOCABULARY = frozenset({PROVENANCE_MIXED_REASON})
+
+#: The three words `RuleCheck.status` may hold. Duplicated from
+#: `policy.sensing_controller` rather than imported as a set, because that
+#: module states them as three separate names, not one collection.
+VALID_RULE_STATUSES = frozenset({RULE_FIRED, RULE_QUIET, RULE_NOT_EVALUABLE})
+
+#: Why an axis whose instrument depends on a phone cannot be built at all --
+#: distinct from `attempted: 0`, which is a real fact about a drive that DID
+#: have the instrument and measured nothing (task 37's drive). A drive with no
+#: phone has no rates/api_calls/triggers axis to be zero.
+NOT_A_PHONE_RUN = "no tick carries a sensing block (not a phone run)"
+
+
+@dataclass(frozen=True)
+class AxisResult:
+    """One session-summary axis: two independently counted integers and,
+    only when they differ, the census of the axis's own reason words (§2/§3).
+
+    Never a ratio, a percentage or a single summarising word -- see
+    `session_summary`'s own shape test for the enforcement of that.
+    """
+
+    axis: str
+    attempted: int | None
+    answered: int | None
+    attempted_is: str
+    answered_is: str
+    unanswered_by_reason: dict[str, int]
+    vocabulary: str
+    vocabulary_violations: dict[str, int]
+    unbuildable: str | None
+    section: str
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "axis": self.axis, "attempted": self.attempted, "answered": self.answered,
+            "attempted_is": self.attempted_is, "answered_is": self.answered_is,
+            "unanswered_by_reason": dict(self.unanswered_by_reason),
+            "vocabulary": self.vocabulary,
+            "vocabulary_violations": dict(self.vocabulary_violations),
+            "unbuildable": self.unbuildable, "section": self.section,
+        }
+
+
+@dataclass(frozen=True)
+class Reconciliation:
+    """One cross-check between two accounts of the same fact (§6 rules 11-19).
+
+    `status` is `"held"`, `"failed"` (both sides computed and disagree -- the
+    `detail` names both numbers) or `"unavailable"` (one side could not be
+    computed at all -- the `detail` names which input was missing). Never
+    resolved in either direction: a disagreement is reported, not decided (D12).
+    """
+
+    name: str
+    status: str
+    detail: str | None = None
+
+    def to_record(self) -> dict[str, Any]:
+        record: dict[str, Any] = {"name": self.name, "status": self.status}
+        if self.detail is not None:
+            record["detail"] = self.detail
+        return record
+
+
+def _census_and_violations(
+    counts: dict[str, int], vocabulary: frozenset[str],
+) -> tuple[dict[str, int], dict[str, int]]:
+    """`unanswered_by_reason` keeps every key verbatim; `vocabulary_violations`
+    is the subset not in `vocabulary`, at the same count (§2, §6 rule 3) -- a
+    word outside the declared set is counted, never absorbed into one already
+    in it.
+    """
+    violations = {k: v for k, v in counts.items() if k not in vocabulary}
+    return dict(counts), violations
+
+
+def _sensing_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [t for t in ticks if t.get("sensing") is not None]
+
+
+def _axis_latency(ticks: list[dict[str, Any]]) -> AxisResult:
+    attempted = len(ticks)
+    answered = sum(1 for t in ticks if t.get("jetson_ms") is not None)
+    unanswered = attempted - answered
+    counts = {LATENCY_ABSENT_REASON: unanswered} if unanswered else {}
+    census, violations = _census_and_violations(counts, LATENCY_VOCABULARY)
+    return AxisResult(
+        axis="latency", attempted=attempted, answered=answered,
+        attempted_is="ticks", answered_is="ticks with jetson_ms non-null",
+        unanswered_by_reason=census, vocabulary="eval_run.LATENCY_VOCABULARY",
+        vocabulary_violations=violations, unbuildable=None,
+        section="## Latency (full run)",
+    )
+
+
+def _axis_thermal(ticks: list[dict[str, Any]]) -> AxisResult:
+    attempted = 0
+    answered = 0
+    counts: dict[str, int] = {}
+    for t in ticks:
+        block = t.get("thermal")
+        if not block:
+            continue
+        jetson = block.get("jetson") or {}
+        basis = jetson.get("basis")
+        if basis is None:
+            continue
+        attempted += 1
+        if basis == STAGE_BASIS_MEASURED:
+            answered += 1
+        elif basis == THERMAL_BASIS_STALE:
+            counts[THERMAL_BASIS_STALE] = counts.get(THERMAL_BASIS_STALE, 0) + 1
+        else:
+            reason = jetson.get("reason") or "unstated"
+            counts[reason] = counts.get(reason, 0) + 1
+    census, violations = _census_and_violations(counts, THERMAL_FAILURES_VOCABULARY)
+    return AxisResult(
+        axis="thermal", attempted=attempted, answered=answered,
+        attempted_is="ticks carrying a thermal block",
+        answered_is="ticks whose thermal.jetson.basis is measured",
+        unanswered_by_reason=census,
+        vocabulary="sensors.thermal.ABSENT_REASONS (+ sensors.thermal.THERMAL_BASIS_STALE)",
+        vocabulary_violations=violations, unbuildable=None, section="## Thermal",
+    )
+
+
+def _axis_failures(ticks: list[dict[str, Any]]) -> AxisResult:
+    attempted = 0
+    answered = 0
+    counts: dict[str, int] = {}
+    for t in ticks:
+        block = t.get("failures")
+        if not block:
+            continue
+        basis = block.get("basis")
+        if basis is None:
+            continue
+        attempted += 1
+        if basis == STAGE_BASIS_MEASURED:
+            answered += 1
+        elif basis == THERMAL_BASIS_STALE:
+            counts[THERMAL_BASIS_STALE] = counts.get(THERMAL_BASIS_STALE, 0) + 1
+        else:
+            reason = block.get("reason") or "unstated"
+            counts[reason] = counts.get(reason, 0) + 1
+    census, violations = _census_and_violations(counts, THERMAL_FAILURES_VOCABULARY)
+    return AxisResult(
+        axis="failures", attempted=attempted, answered=answered,
+        attempted_is="ticks carrying a failures block",
+        answered_is="ticks whose failures.basis is measured",
+        unanswered_by_reason=census,
+        vocabulary="sensors.thermal.ABSENT_REASONS (+ sensors.thermal.THERMAL_BASIS_STALE)",
+        vocabulary_violations=violations, unbuildable=None, section="## Failures",
+    )
+
+
+def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
+    attempted = len(ticks)
+    answered = 0
+    encoder_slots = set(sim_contract.encoded_slot_names())
+    counts: dict[str, int] = {}
+    for t in ticks:
+        keys = set(t.get("field_sources") or {})
+        if keys == encoder_slots:
+            answered += 1
+        elif len(keys) != len(encoder_slots):
+            key = f"short: {len(keys)}" if len(keys) < len(encoder_slots) else f"long: {len(keys)}"
+            counts[key] = counts.get(key, 0) + 1
+        else:
+            counts[PROVENANCE_MIXED_REASON] = counts.get(PROVENANCE_MIXED_REASON, 0) + 1
+    census, violations = _census_and_violations(counts, PROVENANCE_VOCABULARY)
+    return AxisResult(
+        axis="provenance", attempted=attempted, answered=answered,
+        attempted_is="ticks",
+        answered_is="ticks whose field_sources key set equals sim_contract.encoded_slot_names()",
+        unanswered_by_reason=census, vocabulary="eval_run.PROVENANCE_VOCABULARY",
+        vocabulary_violations=violations, unbuildable=None, section="## Observation quality",
+    )
+
+
+def _axis_rates(ticks: list[dict[str, Any]]) -> AxisResult:
+    sensing_ticks = _sensing_ticks(ticks)
+    if not sensing_ticks:
+        return AxisResult(
+            axis="rates", attempted=None, answered=None,
+            attempted_is="distinct telemetry reports observed (sensing.reference.at_mono)",
+            answered_is="reports fresh by the controller's own staleness predicate",
+            unanswered_by_reason={}, vocabulary="policy.sensing_loop.reference_from",
+            vocabulary_violations={}, unbuildable=NOT_A_PHONE_RUN, section="## Sensing",
+        )
+    no_telemetry_ticks = 0
+    ages_by_report: dict[Any, float | None] = {}
+    for t in sensing_ticks:
+        ref = t["sensing"]["reference"]
+        if ref.get("absent") is not None:
+            no_telemetry_ticks += 1
+            continue
+        ages_by_report[ref.get("at_mono")] = ref.get("age_s")
+    fresh = sum(1 for age in ages_by_report.values() if _is_fresh(age))
+    stale = len(ages_by_report) - fresh
+    attempted = len(ages_by_report) + no_telemetry_ticks
+    counts: dict[str, int] = {}
+    if stale:
+        counts[REFERENCE_STALE] = stale
+    if no_telemetry_ticks:
+        counts[REFERENCE_NO_TELEMETRY] = no_telemetry_ticks
+    census, violations = _census_and_violations(counts, RATES_VOCABULARY)
+    return AxisResult(
+        axis="rates", attempted=attempted, answered=fresh,
+        attempted_is=(
+            "distinct telemetry reports observed (sensing.reference.at_mono), "
+            "plus one per tick observing no telemetry"
+        ),
+        answered_is="reports fresh by the controller's own staleness predicate",
+        unanswered_by_reason=census, vocabulary="policy.sensing_loop.reference_from",
+        vocabulary_violations=violations, unbuildable=None, section="## Sensing",
+    )
+
+
+def _axis_api_calls(ticks: list[dict[str, Any]]) -> AxisResult:
+    sensing_ticks = _sensing_ticks(ticks)
+    if not sensing_ticks:
+        return AxisResult(
+            axis="api_calls", attempted=None, answered=None,
+            attempted_is="ticks carrying a sensing.reference block",
+            answered_is="ticks with here_calls non-null",
+            unanswered_by_reason={}, vocabulary="policy.sensing_loop.reference_from",
+            vocabulary_violations={}, unbuildable=NOT_A_PHONE_RUN, section="## Sensing",
+        )
+    attempted = len(sensing_ticks)
+    no_telemetry = sum(
+        1 for t in sensing_ticks if t["sensing"]["reference"].get("here_calls") is None
+    )
+    answered = attempted - no_telemetry
+    counts = {REFERENCE_NO_TELEMETRY: no_telemetry} if no_telemetry else {}
+    census, violations = _census_and_violations(counts, API_CALLS_VOCABULARY)
+    return AxisResult(
+        axis="api_calls", attempted=attempted, answered=answered,
+        attempted_is="ticks carrying a sensing.reference block",
+        answered_is="ticks with here_calls non-null",
+        unanswered_by_reason=census, vocabulary="policy.sensing_loop.reference_from",
+        vocabulary_violations=violations, unbuildable=None, section="## Sensing",
+    )
+
+
+def _axis_triggers(ticks: list[dict[str, Any]]) -> AxisResult:
+    sensing_ticks = _sensing_ticks(ticks)
+    if not sensing_ticks:
+        return AxisResult(
+            axis="triggers", attempted=None, answered=None,
+            attempted_is="ticks carrying a sensing block",
+            answered_is="ticks whose attribution carries all four RULES with a valid status",
+            unanswered_by_reason={}, vocabulary="policy.sensing_controller.RULES",
+            vocabulary_violations={}, unbuildable=NOT_A_PHONE_RUN, section="## Sensing",
+        )
+    attempted = len(sensing_ticks)
+    answered = 0
+    counts: dict[str, int] = {}
+    for t in sensing_ticks:
+        rules = t["sensing"].get("attribution", {}).get("rules", {})
+        valid = set(rules) == set(RULES) and all(
+            rules[name].get("status") in VALID_RULE_STATUSES for name in RULES
+        )
+        if valid:
+            answered += 1
+        else:
+            counts[TRIGGERS_UNANSWERED_REASON] = counts.get(TRIGGERS_UNANSWERED_REASON, 0) + 1
+    census, violations = _census_and_violations(counts, TRIGGERS_VOCABULARY)
+    return AxisResult(
+        axis="triggers", attempted=attempted, answered=answered,
+        attempted_is="ticks carrying a sensing block",
+        answered_is="ticks whose attribution carries all four RULES with a valid status",
+        unanswered_by_reason=census, vocabulary="policy.sensing_controller.RULES",
+        vocabulary_violations=violations, unbuildable=None, section="## Sensing",
+    )
+
+
+_AXIS_BUILDERS: dict[str, Callable[[list[dict[str, Any]]], AxisResult]] = {
+    "latency": _axis_latency,
+    "rates": _axis_rates,
+    "api_calls": _axis_api_calls,
+    "triggers": _axis_triggers,
+    "failures": _axis_failures,
+    "thermal": _axis_thermal,
+    "provenance": _axis_provenance,
+}
+
+
+def _is_fresh(age_s: float | None) -> bool:
+    """The incumbent's own staleness predicate (`score_shadow._is_stale_report`,
+    negated): a report is fresh when its age is finite and within
+    `MAX_TELEMETRY_AGE_S`. An age that is `None` or non-finite is not fresh --
+    there is nothing to confirm freshness from.
+    """
+    return age_s is not None and math.isfinite(age_s) and abs(age_s) <= MAX_TELEMETRY_AGE_S
+
+
+def _distinct_reports(sensing_ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One `reference` per distinct `at_mono`, in arrival order (D7). The
+    content behind two ticks sharing an `at_mono` is identical --
+    `PhoneLink.telemetry` holds one report at a time -- so keeping the last
+    tick's copy loses nothing.
+    """
+    by_at_mono: dict[Any, dict[str, Any]] = {}
+    for t in sensing_ticks:
+        ref = t["sensing"]["reference"]
+        if ref.get("absent") is None and ref.get("at_mono") is not None:
+            by_at_mono[ref["at_mono"]] = ref
+    return [by_at_mono[key] for key in sorted(by_at_mono)]
+
+
+def _telemetry_window(sensing_ticks: list[dict[str, Any]]) -> dict[str, Any]:
+    """The median gap between distinct telemetry arrivals (D10) -- measured
+    from the arrival instants this side observed, not mirrored from the
+    phone's own `PERIOD_MS` constant. Unbuildable on fewer than two reports:
+    a single arrival has no gap to measure.
+    """
+    at_monos = sorted({r["at_mono"] for r in _distinct_reports(sensing_ticks)})
+    reports = len(at_monos)
+    if reports < 2:
+        return {
+            "observed_median_s": None, "reports": reports,
+            "unbuildable": "fewer than two distinct telemetry reports",
+        }
+    diffs = sorted(b - a for a, b in zip(at_monos, at_monos[1:]))
+    mid = len(diffs) // 2
+    median = diffs[mid] if len(diffs) % 2 else (diffs[mid - 1] + diffs[mid]) / 2.0
+    return {"observed_median_s": median, "reports": reports, "unbuildable": None}
+
+
+def _time_weighted_weights(times: list[float]) -> list[float]:
+    """One weight per point in `times` (already sorted): the gap to the next
+    point, and, for the last point, the gap immediately before it again --
+    the best available estimate of how long its value would have held, since
+    a drive's own tick spacing is usually close to constant and there is no
+    later point to measure it from. A single point gets weight 1.0 (any
+    positive constant works, since it cancels in a mean).
+    """
+    if len(times) == 1:
+        return [1.0]
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    return gaps + [gaps[-1]]
+
+
+def _time_weighted_mean(points: list[tuple[float, float]]) -> float | None:
+    """Mean of `value`, weighted by how long (wall/monotonic seconds) it held
+    -- not a mean over samples, which would overweight whatever period
+    happened to produce more ticks. On an evenly spaced series this reduces
+    to the ordinary sample mean.
+    """
+    if not points:
+        return None
+    ordered = sorted(points, key=lambda p: p[0])
+    weights = _time_weighted_weights([t for t, _ in ordered])
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return float(ordered[-1][1])
+    return sum(v * w for (_, v), w in zip(ordered, weights)) / total_weight
+
+
+def _time_weighted_integral(points: list[tuple[float, float]]) -> float:
+    """`sum(value * weight)` over the same weighting as `_time_weighted_mean`
+    -- the expected count of events a rate would produce over the span
+    covered.
+    """
+    if len(points) < 2:
+        return 0.0
+    ordered = sorted(points, key=lambda p: p[0])
+    weights = _time_weighted_weights([t for t, _ in ordered])
+    return sum(v * w for (_, v), w in zip(ordered, weights))
+
+
+def _comparable(ever_live: bool, distinct_reports: list[dict[str, Any]], ticks: int) -> tuple[bool, str | None]:
+    """Whether achieved is a meaningful comparison against commanded (D8).
+    False on a pure-shadow drive -- the phone was never told to run the
+    commanded rates at all (`ConfigApplier.apply` returns before touching any
+    rate on the shadow branch) -- and false when there is no fresh telemetry
+    to compare, or too little of it to say anything about a window.
+    """
+    if not ever_live:
+        return False, f"mode shadow on {ticks} of {ticks} decisions"
+    if not distinct_reports:
+        return False, "no fresh telemetry report observed"
+    if len(distinct_reports) < 2:
+        return False, "fewer than two distinct telemetry reports; the window is unmeasurable"
+    return True, None
+
+
+def _tally_triggers(ticks: list[dict[str, Any]]) -> tuple[dict[str, int], dict[str, dict[str, int]]]:
+    """`decisions_by_trigger` and `rules_by_status`, computed from tick
+    records alone -- the same rollup `SensingLoop` keeps live, recomputed
+    here so a log can be cross-checked against its own summary (reconciliation
+    18) rather than trusted on its word.
+    """
+    by_trigger: dict[str, int] = {}
+    rules_by_status: dict[str, dict[str, int]] = {}
+    for t in ticks:
+        sensing = t.get("sensing")
+        if sensing is None:
+            continue
+        trigger = sensing.get("trigger")
+        by_trigger[trigger] = by_trigger.get(trigger, 0) + 1
+        for rule_name, check in sensing.get("attribution", {}).get("rules", {}).items():
+            counts = rules_by_status.setdefault(rule_name, {})
+            status = check.get("status")
+            counts[status] = counts.get(status, 0) + 1
+    return by_trigger, rules_by_status
+
+
+def _tally_rules_missing(ticks: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """`{rule: {missing_field: n}}`, over ticks where that rule was
+    `not_evaluable` -- the field name a `not_evaluable` verdict names, not
+    just how often it fired (§7's own fixture for this).
+    """
+    out: dict[str, dict[str, int]] = {}
+    for t in ticks:
+        sensing = t.get("sensing")
+        if sensing is None:
+            continue
+        for rule_name, check in sensing.get("attribution", {}).get("rules", {}).items():
+            if check.get("status") != RULE_NOT_EVALUABLE:
+                continue
+            for field_name in check.get("missing") or ():
+                bucket = out.setdefault(rule_name, {})
+                bucket[field_name] = bucket.get(field_name, 0) + 1
+    return out
+
+
+def _here_calls_by_session(ticks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-`session_id`, `last - first` of `here_calls`/`here_errors`, summed
+    (D11). `PhoneLink._rebind` clears telemetry on every redial and a
+    different handset's `HerePipeline.calls` restarts at zero, so `last -
+    first` ACROSS a redial can be negative; splitting by session and clamping
+    each session's own delta at zero avoids that, at the cost of not counting
+    calls placed before a session's first observed report (`uncounted_prefix`,
+    a bound rather than a measurement -- open item 1).
+    """
+    by_session: dict[Any, dict[str, list[int]]] = {}
+    for t in ticks:
+        sensing = t.get("sensing")
+        if sensing is None:
+            continue
+        ref = sensing.get("reference", {})
+        calls = ref.get("here_calls")
+        if calls is None:
+            continue
+        errors = ref.get("here_errors") or 0
+        bucket = by_session.setdefault(t.get("session_id"), {"calls": [], "errors": []})
+        bucket["calls"].append(calls)
+        bucket["errors"].append(errors)
+    rows = []
+    calls_total = 0
+    errors_total = 0
+    uncounted_prefix = 0
+    for session_id, values in by_session.items():
+        first_calls, last_calls = values["calls"][0], values["calls"][-1]
+        first_errors, last_errors = values["errors"][0], values["errors"][-1]
+        rows.append({
+            "session_id": session_id, "first": first_calls, "last": last_calls,
+            "observations": len(values["calls"]),
+        })
+        calls_total += max(0, last_calls - first_calls)
+        errors_total += max(0, last_errors - first_errors)
+        uncounted_prefix += first_calls
+    return {
+        "by_session": rows, "calls_total": calls_total, "errors_total": errors_total,
+        "uncounted_prefix": uncounted_prefix,
+    }
+
+
+def sensing_result(ticks: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, Any] | None:
+    """The rate, trigger and HERE detail behind the `rates`/`triggers`/
+    `api_calls` axes -- `None` on a run with no phone at all, the same
+    reading `thermal_result` gives a run that predates thermal.
+    """
+    sensing_ticks = _sensing_ticks(ticks)
+    if not sensing_ticks:
+        return None
+
+    sensing_summary = (summary or {}).get("sensing")
+    mode_block = (sensing_summary or {}).get("mode") or {}
+    mode = mode_block.get("mode")
+    if mode is not None:
+        mode_source = "summary[sensing].mode.mode"
+    else:
+        mode = LIVE if sensing_ticks[0]["sensing"].get("shadow") is False else SHADOW
+        mode_source = "derived from the first tick's own shadow flag (no summary.json)"
+    ever_live = any(t["sensing"].get("shadow") is False for t in sensing_ticks)
+
+    computed_by_trigger, computed_rules_by_status = _tally_triggers(ticks)
+    rules_missing = _tally_rules_missing(ticks)
+    triggers_summary_agrees = (
+        None if sensing_summary is None
+        else (
+            computed_by_trigger == sensing_summary.get("decisions_by_trigger")
+            and computed_rules_by_status == sensing_summary.get("rules_by_status")
+        )
+    )
+
+    window = _telemetry_window(sensing_ticks)
+    distinct_reports = _distinct_reports(sensing_ticks)
+    comparable, not_comparable_because = _comparable(ever_live, distinct_reports, len(sensing_ticks))
+
+    rates: dict[str, Any] = {}
+    for key in RATE_KEYS:
+        points = [(t["sensing"]["decided_at_mono"], t["sensing"]["rates"][key]) for t in sensing_ticks]
+        census = Counter(str(v) for _, v in points)
+        commanded_time_mean = _time_weighted_mean(points)
+        clamped_ticks = sum(
+            1 for t in sensing_ticks
+            if (t["sensing"]["attribution"]["per_sensor"].get(key) or {}).get("clamped")
+        )
+        thermal_scaled_ticks = sum(
+            1 for t in sensing_ticks
+            if (t["sensing"]["attribution"]["per_sensor"].get(key) or {}).get("scale", 1.0) != 1.0
+        )
+        entry: dict[str, Any] = {
+            "commanded_by_value": dict(census),
+            "commanded_distinct": len(census),
+            "commanded_time_mean": commanded_time_mean,
+            "clamped_ticks": clamped_ticks,
+            "thermal_scaled_ticks": thermal_scaled_ticks,
+            "achieved_time_mean": None,
+            "percentiles": {"p50": None, "p95": None},
+            "percentiles_suppressed": None,
+            "comparable": comparable,
+            "not_comparable_because": not_comparable_because,
+        }
+        if comparable:
+            achieved_points = [(r["at_mono"], r["achieved"][key]) for r in distinct_reports]
+            entry["achieved_time_mean"] = _time_weighted_mean(achieved_points)
+            lambda_per_window = (
+                None if window["observed_median_s"] is None
+                else commanded_time_mean * window["observed_median_s"]
+            )
+            if lambda_per_window is None:
+                pass
+            elif lambda_per_window < 1.0:
+                windows_per_delivery = 1.0 / lambda_per_window if lambda_per_window > 0 else float("inf")
+                entry["percentiles_suppressed"] = (
+                    f"commanded {commanded_time_mean:g} Hz over a "
+                    f"{window['observed_median_s']:.3f} s window is one delivery per "
+                    f"{windows_per_delivery:.0f} windows; a median over per-window rates "
+                    "would be 0.0 and is not a statement about the rate"
+                )
+            else:
+                stats = pctl([v for _, v in achieved_points])
+                entry["percentiles"] = {"p50": stats["p50"], "p95": stats["p95"]}
+        rates[key] = entry
+
+    here = _here_calls_by_session(ticks)
+    here["expected_from_commanded"] = _time_weighted_integral(
+        [(t["sensing"]["decided_at_mono"], t["sensing"]["rates"]["here_hz"]) for t in sensing_ticks]
+    )
+    here["responses_received"] = ((summary or {}).get("phone", {}).get("here", {}) or {}).get(
+        "responses_received"
+    )
+    here["zero_calls_because"] = (
+        f"mode {mode}; a shadow command never reaches setHereQuery"
+        if here["calls_total"] == 0 and mode == SHADOW else None
+    )
+
+    return {
+        "present": True,
+        "ticks": len(sensing_ticks),
+        "mode": mode,
+        "mode_source": mode_source,
+        "ever_live": ever_live,
+        "telemetry_window": window,
+        "rates": rates,
+        "triggers": {
+            "decisions_by_trigger": computed_by_trigger,
+            "rules_by_status": computed_rules_by_status,
+            "rules_missing": rules_missing,
+            "summary_agrees": triggers_summary_agrees,
+        },
+        "here": here,
+    }
+
+
+def _reconcile_rows(
+    name: str, failures_summary: dict[str, Any], predicate: Callable[[str, dict], bool],
+    describe: Callable[[list[str]], str],
+) -> Reconciliation:
+    sources = failures_summary.get("sources") or {}
+    bad = sorted(name for name, row in sources.items() if not predicate(name, row))
+    if not bad:
+        return Reconciliation(name, "held")
+    return Reconciliation(name, "failed", describe(bad))
+
+
+def _reconcile_blind_ticks(failures_summary: dict[str, Any]) -> Reconciliation:
+    sources = failures_summary.get("sources") or {}
+    row = sources.get("camera.blind_ticks")
+    blind_ticks = failures_summary.get("blind_ticks")
+    if row is None:
+        return Reconciliation(
+            "blind_ticks_matches_camera_source", "unavailable", "no camera.blind_ticks source row"
+        )
+    total = row.get("total")
+    if total == blind_ticks:
+        return Reconciliation("blind_ticks_matches_camera_source", "held")
+    return Reconciliation(
+        "blind_ticks_matches_camera_source", "failed",
+        f'sources["camera.blind_ticks"].total is {total} and blind_ticks is {blind_ticks}, '
+        "on the same record; this drive's failure counts are not usable",
+    )
+
+
+def _reconcile_source_status(failures_summary: dict[str, Any]) -> Reconciliation:
+    return _reconcile_rows(
+        "source_status_fired_iff_total_positive", failures_summary,
+        lambda name, row: (row.get("status") == RULE_FIRED) == (row.get("total", 0) > 0),
+        lambda bad: f"status disagrees with total on: {bad}",
+    )
+
+
+def _reconcile_source_totals(failures_summary: dict[str, Any]) -> Reconciliation:
+    return _reconcile_rows(
+        "source_totals_partition", failures_summary,
+        lambda name, row: (
+            row.get("kept_total", 0) + row.get("suppressed", 0) + row.get("below_episode_threshold", 0)
+            == row.get("total", 0)
+        ),
+        lambda bad: f"kept_total + suppressed + below_episode_threshold != total on: {bad}",
+    )
+
+
+def _reconcile_passes(failures_summary: dict[str, Any]) -> Reconciliation:
+    return _reconcile_rows(
+        "source_passes_readable_le_attempted", failures_summary,
+        lambda name, row: row.get("passes_readable", 0) <= row.get("passes_attempted", 0),
+        lambda bad: f"passes_readable > passes_attempted on: {bad}",
+    )
+
+
+def _reconcile_source_count(failures_summary: dict[str, Any]) -> Reconciliation:
+    sources = failures_summary.get("sources") or {}
+    scan = failures_summary.get("scan") or {}
+    n, scan_n = len(sources), scan.get("sources_n")
+    if n == scan_n == 30:
+        return Reconciliation("sources_count_is_30", "held")
+    return Reconciliation(
+        "sources_count_is_30", "failed", f"len(sources)={n}, scan.sources_n={scan_n}, expected 30 both"
+    )
+
+
+def _reconcile_events_written(loaded: "LoadedRecords", failures_summary: dict[str, Any]) -> Reconciliation:
+    """`FailureLog._open_episode`/`_close_episode` each increment `events_written`
+    once, on every write to the sink (`logio/failure_log.py:1313-1316,1344-1348)`
+    -- once per open, once per close -- so the identity is against every
+    `failure_event` record, not the `open` half of it alone. Verified against
+    a real drive (31 open + 31 close = 62 records, `events_written` summed to
+    62): the plan this task implements against states the narrower identity
+    (open records only), which a truncated log with an odd number of
+    `failure_event` lines would satisfy by coincidence and a normal,
+    cleanly-closed drive never would.
+    """
+    sources = failures_summary.get("sources") or {}
+    expected = sum(row.get("events_written", 0) for row in sources.values())
+    actual = sum(1 for r in loaded.failure_events if r.get("phase") in ("open", "close"))
+    if expected == actual:
+        return Reconciliation("events_written_matches_open_and_close_records", "held")
+    return Reconciliation(
+        "events_written_matches_open_and_close_records", "failed",
+        f"sum(events_written)={expected}, open+close failure_event records in metadata.jsonl={actual}",
+    )
+
+
+def _reconcile_thermal_samples(loaded: "LoadedRecords", thermal_summary: dict[str, Any]) -> Reconciliation:
+    reported = (thermal_summary.get("jetson") or {}).get("samples")
+    if reported is None:
+        return Reconciliation(
+            "thermal_samples_count", "unavailable", "summary[thermal][jetson] carries no samples count"
+        )
+    actual = len(loaded.thermal_samples)
+    diff = reported - actual
+    if diff in (0, 1):
+        return Reconciliation("thermal_samples_count", "held")
+    return Reconciliation(
+        "thermal_samples_count", "failed",
+        f"summary reports {reported} samples, {actual} thermal_sample records read "
+        f"(difference {diff}, expected 0 or 1)",
+    )
+
+
+def _reconcile_triggers(loaded: "LoadedRecords", sensing_summary: dict[str, Any]) -> Reconciliation:
+    computed_by_trigger, computed_rules_by_status = _tally_triggers(loaded.ticks)
+    summary_by_trigger = sensing_summary.get("decisions_by_trigger")
+    summary_rules_by_status = sensing_summary.get("rules_by_status")
+    if computed_by_trigger == summary_by_trigger and computed_rules_by_status == summary_rules_by_status:
+        return Reconciliation("triggers_match_summary", "held")
+    return Reconciliation(
+        "triggers_match_summary", "failed",
+        f"decisions_by_trigger: computed {computed_by_trigger} vs summary {summary_by_trigger}; "
+        f"rules_by_status: computed {computed_rules_by_status} vs summary {summary_rules_by_status}",
+    )
+
+
+def _reconcile_here_vs_responses(loaded: "LoadedRecords", phone_summary: dict[str, Any]) -> Reconciliation:
+    responses = (phone_summary.get("here") or {}).get("responses_received")
+    if responses is None:
+        return Reconciliation(
+            "here_calls_ge_responses_received", "unavailable",
+            "summary[phone][here] carries no responses_received",
+        )
+    calls_total = _here_calls_by_session(loaded.ticks)["calls_total"]
+    if calls_total >= responses:
+        return Reconciliation("here_calls_ge_responses_received", "held")
+    return Reconciliation(
+        "here_calls_ge_responses_received", "failed",
+        f"here.calls_total={calls_total} < summary[phone][here].responses_received={responses}",
+    )
+
+
+def reconciliations(loaded: "LoadedRecords", summary: dict[str, Any]) -> list[Reconciliation]:
+    """The nine cross-checks §6 rules 11-19 name. Every one needs
+    `summary.json`; the five within `summary["failures"]` need that block
+    specifically. A missing input reports `unavailable`, never `held` --
+    an absent summary is not a passed check (mutation pin 9).
+    """
+    out: list[Reconciliation] = []
+    failures_summary = (summary or {}).get("failures")
+    if not failures_summary:
+        reason = "summary.json not written" if not summary else "summary.json carries no failures block"
+        out += [
+            Reconciliation("blind_ticks_matches_camera_source", "unavailable", reason),
+            Reconciliation("source_status_fired_iff_total_positive", "unavailable", reason),
+            Reconciliation("source_totals_partition", "unavailable", reason),
+            Reconciliation("source_passes_readable_le_attempted", "unavailable", reason),
+            Reconciliation("sources_count_is_30", "unavailable", reason),
+        ]
+    else:
+        out += [
+            _reconcile_blind_ticks(failures_summary),
+            _reconcile_source_status(failures_summary),
+            _reconcile_source_totals(failures_summary),
+            _reconcile_passes(failures_summary),
+            _reconcile_source_count(failures_summary),
+        ]
+
+    if not summary:
+        reason = "summary.json not written"
+        out += [
+            Reconciliation("events_written_matches_open_and_close_records", "unavailable", reason),
+            Reconciliation("thermal_samples_count", "unavailable", reason),
+            Reconciliation("triggers_match_summary", "unavailable", reason),
+            Reconciliation("here_calls_ge_responses_received", "unavailable", reason),
+        ]
+    else:
+        out.append(
+            _reconcile_events_written(loaded, failures_summary)
+            if failures_summary else
+            Reconciliation("events_written_matches_open_and_close_records", "unavailable",
+                            "summary.json carries no failures block")
+        )
+        thermal_summary = summary.get("thermal")
+        out.append(
+            _reconcile_thermal_samples(loaded, thermal_summary) if thermal_summary else
+            Reconciliation("thermal_samples_count", "unavailable", "summary.json carries no thermal block")
+        )
+        sensing_summary = summary.get("sensing")
+        out.append(
+            _reconcile_triggers(loaded, sensing_summary) if sensing_summary else
+            Reconciliation("triggers_match_summary", "unavailable", "summary.json carries no sensing block")
+        )
+        phone_summary = summary.get("phone")
+        out.append(
+            _reconcile_here_vs_responses(loaded, phone_summary) if phone_summary else
+            Reconciliation("here_calls_ge_responses_received", "unavailable",
+                            "summary.json carries no phone block")
+        )
+    return out
+
+
+def session_summary(
+    loaded: "LoadedRecords", summary: dict[str, Any], log_health: dict[str, Any] | None,
+    *, phone_log_supplied: bool,
+) -> dict[str, Any]:
+    """The `## Session summary` section's data: seven axes, nine
+    reconciliations, which inputs were available, and the sensing detail
+    behind three of the axes. Built before `analyze()` can even be attempted
+    (D13) -- every axis indexes `loaded.ticks` directly, never `analyze`'s
+    output.
+    """
+    ticks = loaded.ticks
+    axes = [_AXIS_BUILDERS[name](ticks) for name in AXES]
+    return {
+        "axes": [a.to_record() for a in axes],
+        "reconciliations": [r.to_record() for r in reconciliations(loaded, summary)],
+        "inputs": {
+            "metadata_jsonl": True,
+            "summary_json": bool(summary),
+            "log_health_json": log_health is not None,
+            "phone_log": phone_log_supplied,
+        },
+        "sensing": sensing_result(ticks, summary),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir", help="run directory containing metadata.jsonl")
@@ -1493,12 +2586,36 @@ def main() -> int:
     )
     args = parser.parse_args()
     run_dir = Path(args.run_dir).expanduser()
+    phone_log = args.phone_log.expanduser() if args.phone_log else None
 
-    result = analyze(run_dir, args.phone_log.expanduser() if args.phone_log else None)
+    # Built before `analyze` can even be attempted (D13): every axis indexes
+    # `loaded.ticks` directly, so a drive with no tick records still gets a
+    # `## Session summary` rather than nothing but `analyze`'s SystemExit.
+    loaded = load_records(run_dir / "metadata.jsonl")
+    summary = _read_summary(run_dir)
+    log_health = _read_log_health(run_dir)
+    session = session_summary(loaded, summary, log_health, phone_log_supplied=phone_log is not None)
+    if not loaded.ticks:
+        report_md = render_session_summary_only(run_dir, session, loaded)
+        (run_dir / "report.md").write_text(report_md)
+        (run_dir / "report.json").write_text(json.dumps(
+            {
+                "run_dir": str(run_dir), "n_ticks": 0, "session_summary": session,
+                "analysis": None,
+                "analysis_absent": "no tick records; every metric block indexes ticks",
+            },
+            indent=2,
+        ))
+        print(report_md)
+        print(f"[eval] wrote {run_dir / 'report.md'}, report.json (no tick records)")
+        return 2
+
+    result = analyze(run_dir, phone_log, loaded=loaded)
     plots = [] if args.no_plots else render_plots(result, run_dir)
-    report_md = render_markdown(result, plots)
+    report_md = render_markdown(result, plots, session)
     (run_dir / "report.md").write_text(report_md)
     json_result = {k: v for k, v in result.items() if not k.startswith("_")}
+    json_result["session_summary"] = session
     (run_dir / "report.json").write_text(json.dumps(json_result, indent=2))
 
     print(report_md)
