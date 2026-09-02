@@ -210,10 +210,13 @@ axis, an episode and a reader, without instrumenting any of them a second
 time: `type: failure_scan` is a 1 Hz record, written whether or not anything
 failed, so "nothing failed" is distinguishable from "nothing was watching";
 `type: failure_event` is two records per episode (`phase: "open"` and
-`phase: "close"`), the close carrying a `recovered` / `open_at_end` /
-`unobservable` outcome -- `unobservable` for a source that stopped being
-readable while the episode was open, so a lost instrument is never reported as
-a recovery nobody observed. A per-tick `failures` block beside `thermal`
+`phase: "close"`) for the 17 registry rows with `event_records=True`; for the
+other 13 the episode still opens, runs and closes, but only the summary row
+in `summary["failures"]["sources"]` proves it, since it never writes a
+`failure_event` line at all. The close record carries a `recovered` /
+`open_at_end` / `unobservable` outcome -- `unobservable` for a source that
+stopped being readable while the episode was open, so a lost instrument is
+never reported as a recovery nobody observed. A per-tick `failures` block beside `thermal`
 names what was open at decision time and how fresh that view is;
 `summary["failures"]` rolls the whole run up by source, three-word status
 (`fired`/`quiet`/`not_evaluable`) included. `log_health.json` is a separate
