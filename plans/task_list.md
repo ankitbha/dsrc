@@ -1328,7 +1328,97 @@ Written as part of the implementation, not added afterwards.
     manufactured state, since no evidence key a rule can carry on every non-evaluable
     tick is boolean or mixed-type. `summarise({})` reports 0.0 missingness for an empty
     map, unreachable from the builder and unchanged from before.
-37. Thermal and throttle-event log for both devices.
+37. ~~Thermal and throttle-event log for both devices.~~
+    **The two devices were in opposite states, and finding that out was the plan's
+    first job.** The phone's thermal input was already live: it reads the platform
+    status and its own zones once a second, sends both on the telemetry channel, and
+    the controller maps them to the multiplier applied to the camera and HERE rates.
+    Task 34's drive had already confirmed the whole chain, since its thermal rule was
+    quiet on 899 of 899 ticks and quiet requires a scale of exactly 1.0. The Jetson,
+    by contrast, had **no thermal reading at all**, and the one sampler adjacent to it
+    degraded to a silent no-op when its optional import failed, wrote records nothing
+    collected, and had no test. So the task was a record on one device and a
+    measurement on the other. A temperature sample is task 33's stage timing
+    (**measured**, **stale** with an age, or **absent with a named reason**) and a
+    throttle event is task 34's rule attribution (**fired**, **quiet**, or **not
+    evaluable with its missing inputs named**) -- `count` is 0 on both quiet and not
+    evaluable, so the status word carries the distinction and the count never does.
+    Behaviour changed in exactly one place, a status-change listener on the phone; no
+    commanded rate moves on either device.
+    **Three validation rounds and three fix rounds.** A phone redial erased the drive's
+    throttle count and wrote a phantom event, because the sampler copied the phone's
+    counter instead of accumulating and a redial restarts it at zero -- a drive on which
+    the phone reached `severe` printed `quiet -- 0 status transitions` with three event
+    lines in the log, violating the plan's own rule that the count equals the number of
+    event lines, in both directions at once. A Jetson whose cooling devices were readable
+    **once** in 180 passes produced a record byte-identical to one readable on all 180,
+    because the flag was set and never cleared. The report printed a `stale` count that
+    could never be non-zero while omitting the count that carried the signal, so a
+    sampler that died 10 s into a 180 s drive rendered identically to a healthy
+    10-second drive. The phone half of the module was never executed by the Python suite
+    at all. **The second fix round existed mainly to undo the first round's regression:**
+    refusing to say `quiet` on partially observed cooling devices was right, but the same
+    change zeroed a real, already-logged throttle count and discarded `fired`, so a drive
+    that observed and recorded throttling reported that it said nothing about whether the
+    Jetson throttled. The last defect found by reading a fix rather than running it: the
+    phone's count and its last transition were read under two separate locks with a
+    binder call between them, so a transition could be counted with its description
+    missing -- and on the first transition of any run that needs no race at all, because
+    the description is still null when the count reaches one.
+    **The experiment proved the feature was inert on the one Jetson it was written for.**
+    150 s on the real Orin at the deployed commit: 1,200 ticks over five drives told the
+    story, but the first drive alone settled it -- **751 ticks, 0 sample records, 0 event
+    records**, every tick reading `absent`, reason `sampler_stopped`. Three of that
+    machine's nine thermal zones answer `EAGAIN`, which surfaces through the buffered
+    text layer as a `TypeError` that the reader's `except OSError` did not catch, so the
+    sampler thread died on its first pass. **The fixtures could not have caught it**:
+    they make a zone unreadable by deleting the file or denying permission, and both
+    raise `OSError`. The blast radius was worse than the crash -- one sysfs quirk took
+    the *phone's* thermal record down with the Jetson's, on a drive where the phone was
+    connected and delivering telemetry throughout. **What the vocabulary did right is the
+    reason to keep it**: nothing read `quiet`, nothing read as a zero, and the report
+    said outright that the drive answered nothing. The failure was recorded as a failure.
+    **The census settled the plan's largest unknown and broke its estimate.** Nine zones,
+    six usable, and **13 cooling devices where the estimate assumed 3** -- the entire 39%
+    overrun in sample-record size, against per-item figures that were right to a tenth of
+    a byte (22.7 per zone, 23.5 per device). The wire cost was exact at +68 B/s. Zone
+    selection used the preferred-name arm and picked `tj-thermal`; the hottest-zone
+    fallback, which exists precisely because nobody knew these names, never ran. Thermal
+    headroom became a counted fact rather than a source comment's assertion: **not a
+    number on 456 of 456 and 297 of 297 reports**, on a handset whose thermal HAL is
+    connected and answering. The independence property held under a real 54.98 s tick
+    stall -- 55 samples at 1.005 to 1.009 s spacing, with the phone's age climbing 1.6 to
+    45.9 s on the face of each record.
+    **After the repo fix, a confirmation drive on the same Orin**: 1,200 ticks, 241
+    samples, `measured 241, absent 0`, zero ticks reading `sampler_stopped`, and the
+    sampler's mean interval corrected from 1.0091 s to 1.0003 s. The `quiet` line now
+    carries the evidence for its own claim -- `241 of 241 passes fully readable` -- where
+    before it asserted "readable throughout" and printed the counters only on the branch
+    where the claim was *not* being made.
+    **The method lesson: a fixture's failure mode has to be the field's.** A deleted file
+    and a denied permission both raise one exception; the real device raised a different
+    one, and every test passed while the feature did nothing. The second lesson is about
+    instruments: **five distinct false readings** were produced by measurement harnesses
+    on this task alone -- stale bytecode, a shell modifier that mangled a build task name
+    so an empty results directory read as no failures, two partial tree copies that
+    collected fewer tests than the baseline, and a stall analysis that compared two
+    different clocks and reported a clean-looking zero. Every one was caught by the same
+    rule: reproduce the baseline count and kill a known-bad control before quoting any
+    verdict. A sixth near-miss came from `sort` collation differing between two machines,
+    which made identical trees look 60 lines apart.
+    **Open:** the Jetson's `fired` arm never ran in the field -- all 13 cooling devices
+    held constant across every drive, so the event-writing path and its byte estimate are
+    confirmed by tests only. `stale` was never produced on any of 8,718 ticks, and
+    `read_error` is unreachable through the `EAGAIN` zones because the absence is
+    absorbed per node before it can raise. The guard that stops a Jetson read failure
+    nulling the phone's record was never exercised in the field, because no Jetson read
+    failed. Two transitions inside one telemetry period stayed unexercised: the
+    instrument sets the floor, since each injection round trip costs about a second. And
+    no real thermal excursion was reached on either device -- 1,560 s of sustained
+    streaming took the handset to 43.9 C skin with its status still nominal, the phone's
+    transitions were injected rather than provoked, and the platform's severity
+    thresholds are internal to its thermal service, so how much heat would have been
+    needed cannot be stated from this device.
 38. Failure event log: GPS dropout, HERE failure or quota exhaustion, dropped
     frames, transport stalls, with recovery outcome.
 39. Session summary generator: latency percentiles, achieved versus commanded
