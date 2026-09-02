@@ -192,11 +192,17 @@ per-tick `stage_ms`/`jetson_ms`/`link_ms`/`e2e_ms`/`fps` (system metrics, where
 proxied rather than converted), `vehicles` with
 per-track distance/method (perception metrics), `obs` + `field_sources` +
 `obs_diagnostics.missingness` (observation quality), `head_probs`/`confidence`
-(policy), and `type: system` records with power/utilization from jtop.
-`summary.json` aggregates p50/p95; `bench_results.md` is the static-compute
-table; replay agreement comes from `replay_summary.json`; `eval_run.py`
-turns any run dir into `report.md`/`report.json` + timeline plots with
-PASS/FAIL gates.
+(policy), `type: system` records with power/utilization from jtop, and a
+per-tick `thermal` block (Jetson temperature and both devices' throttle-event
+status) beside `type: thermal_sample` (the Jetson's 1 Hz temperature and
+cooling-state series, independent of the tick loop) and `type: thermal_event`
+(one line per throttle transition, on either device). `summary.json`
+aggregates p50/p95, including a `thermal` rollup; `bench_results.md` is the
+static-compute table; replay agreement comes from `replay_summary.json`;
+`eval_run.py` turns any run dir into `report.md`/`report.json` + timeline
+plots with PASS/FAIL gates, and its `## Thermal` section is not gated -- no
+peak-temperature threshold has been measured yet, and a run recorded before
+this existed reports `thermal: null` rather than a failure.
 
 ## 10. Simulated-drive test harness
 
