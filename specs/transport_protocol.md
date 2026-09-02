@@ -340,7 +340,7 @@ by the sender's transport rather than by the message.
 | `here` | `request_url`, `status`, `content_type`, `query_lat`, `query_lon`, `query_radius_m`, `t_request_mono_ns`, `t_response_mono_ns` | response body bytes |
 | `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `headway_target_s`, `lane_text`, `merge_text`, `traffic_text`, `confidence`, `confidence_label`, `action` | empty |
 | `rate_cmd` | `rates`, `trigger`, `shadow` | empty |
-| `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors`, `skin_temp_c`*, `skin_temp_zone`* | empty |
+| `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors`, `skin_temp_c`*, `skin_temp_zone`*, `thermal_headroom_absent`*, `skin_temp_absent`*, `thermal_status_changes`*, `thermal_change_from`*, `thermal_change_to`*, `thermal_change_at_mono_ns`* | empty |
 | `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns`, `t_peer_wire_mono_ns`, `prev_exchange_id`*, `t_prev_pong_wire_mono_ns`*, `t_prev_pong_recv_mono_ns`* | empty |
 
 The fields above marked `*`, like `skin_temp_c` and `skin_temp_zone` below,
@@ -409,6 +409,30 @@ conventionally use for skin -- is a different sensor reading 1.2 °C lower.
 Comparing a bare `skin_temp_c` across two handsets is therefore meaningless. Both
 fields are null together, and whether they can be read at all is a per-device
 SELinux decision.
+
+`thermal_headroom_absent` and `skin_temp_absent` are marked `*` for the same
+reason `skin_temp_c` is: a receiver MUST accept telemetry that omits them.
+Each carries exactly one string when its companion field is null, and is
+itself absent when the companion field has a value -- a value needs no
+excuse. `thermal_headroom_absent` is one of `api_too_old`, `not_a_number` (the
+platform's own catch-all for "too soon after boot, too soon after the last
+call, or unsupported"), or `out_of_band`. `skin_temp_absent` is one of
+`no_zones_listed`, `no_preferred_zone`, `unreadable`, or `implausible`. A
+`null` headroom or skin reading on its own answers only "no number"; the
+paired reason answers "which of several different causes produced it".
+
+`thermal_status_changes` and the `thermal_change_*` trio are marked `*` for
+the same absent-tolerance reason, but differ in *which* absence they mean.
+`thermal_status_changes` is a monotone count of thermal-status transitions a
+listener has observed since the phone came up, independent of
+`thermal_status`'s own once-a-second poll; a phone build that knows the field
+exists always sends it, even when it is zero, so its absence means only "an
+older build". `thermal_change_from`, `thermal_change_to` and
+`thermal_change_at_mono_ns` name the most recent transition and are absent
+together before the first one occurs; if the count rises by more than one
+between two frames, an intermediate transition happened between them without
+its own record -- the count says so, even though only the latest transition's
+endpoints are carried.
 
 **These three nested objects are additive.** Every listed key must be present,
 and an unrecognised key is **ignored, not refused**. The sensor set will grow,

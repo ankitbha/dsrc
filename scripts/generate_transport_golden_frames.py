@@ -295,6 +295,26 @@ MESSAGES = [
             t_encode_start_mono_ns=1_000_000_020, t_encode_done_mono_ns=1_000_000_035,
         ),
     ),
+    # Task 37's one wire addition: six absent-tolerant fields on `telemetry`, none of
+    # them touching the frames above -- `message_telemetry` and
+    # `message_telemetry_with_skin` stay byte-identical without them. This case is the
+    # both-reasons, mid-transition shape: a headroom and a skin reading the phone
+    # cannot give, and a status transition in progress.
+    (
+        "message_telemetry_with_transition",
+        "phone telemetry carrying both absence reasons and a status transition",
+        PhoneTelemetry(
+            t_capture_mono_ns=1_000_000_012, thermal_status="severe",
+            thermal_headroom=None, thermal_headroom_absent="not_a_number",
+            achieved={"camera_hz": 1.5, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.05},
+            dropped={"camera": 0, "gps": 0, "imu": 0, "here": 0},
+            here_calls=12, here_errors=0,
+            skin_temp_c=None, skin_temp_absent="unreadable",
+            thermal_status_changes=3,
+            thermal_change_from="nominal", thermal_change_to="severe",
+            thermal_change_at_mono_ns=987_654_321,
+        ),
+    ),
     (
         "message_time_sync_ping_with_prev",
         "a ping carrying the previous exchange: the trio a responder needs to "

@@ -606,6 +606,24 @@ class PhoneTelemetry:
     #: because zone names do not mean what they look like.
     skin_temp_c: float | None = None
     skin_temp_zone: str | None = None
+    #: Why `thermal_headroom` is null, when it is: one of `api_too_old`,
+    #: `not_a_number` (the platform's own catch-all for "too soon after boot,
+    #: too soon after the last call, or unsupported"), or `out_of_band`. Absent
+    #: exactly when `thermal_headroom` is present -- a value needs no excuse.
+    thermal_headroom_absent: str | None = None
+    #: As `thermal_headroom_absent`, for `skin_temp_c`: one of `no_zones_listed`,
+    #: `no_preferred_zone`, `unreadable`, `implausible`.
+    skin_temp_absent: str | None = None
+    #: Transitions `ThermalStatusWatcher` has counted this service run,
+    #: independent of `thermal_status`'s own 1 Hz poll. Sent by every phone
+    #: build that knows this field exists, even when it is zero -- only an
+    #: older build omits it, which is the one way it is absent here.
+    thermal_status_changes: int | None = None
+    #: The most recent transition's endpoints and when the phone observed it,
+    #: on the phone's own clock. All three null before the first transition.
+    thermal_change_from: str | None = None
+    thermal_change_to: str | None = None
+    thermal_change_at_mono_ns: int | None = None
 
     CHANNEL: ClassVar[Channel] = Channel.TELEMETRY
 
@@ -635,6 +653,36 @@ class PhoneTelemetry:
                     if self.skin_temp_zone is not None
                     else {}
                 ),
+                **(
+                    {"thermal_headroom_absent": self.thermal_headroom_absent}
+                    if self.thermal_headroom_absent is not None
+                    else {}
+                ),
+                **(
+                    {"skin_temp_absent": self.skin_temp_absent}
+                    if self.skin_temp_absent is not None
+                    else {}
+                ),
+                **(
+                    {"thermal_status_changes": self.thermal_status_changes}
+                    if self.thermal_status_changes is not None
+                    else {}
+                ),
+                **(
+                    {"thermal_change_from": self.thermal_change_from}
+                    if self.thermal_change_from is not None
+                    else {}
+                ),
+                **(
+                    {"thermal_change_to": self.thermal_change_to}
+                    if self.thermal_change_to is not None
+                    else {}
+                ),
+                **(
+                    {"thermal_change_at_mono_ns": self.thermal_change_at_mono_ns}
+                    if self.thermal_change_at_mono_ns is not None
+                    else {}
+                ),
             },
             b"",
         )
@@ -650,6 +698,12 @@ class PhoneTelemetry:
             # does not write them, and requiring them would refuse all of its telemetry.
             skin_temp_c=absentable_number(extensions, "skin_temp_c"),
             skin_temp_zone=absentable_str(extensions, "skin_temp_zone"),
+            thermal_headroom_absent=absentable_str(extensions, "thermal_headroom_absent"),
+            skin_temp_absent=absentable_str(extensions, "skin_temp_absent"),
+            thermal_status_changes=absentable_int(extensions, "thermal_status_changes"),
+            thermal_change_from=absentable_str(extensions, "thermal_change_from"),
+            thermal_change_to=absentable_str(extensions, "thermal_change_to"),
+            thermal_change_at_mono_ns=absentable_int(extensions, "thermal_change_at_mono_ns"),
             achieved=require_mapping_of_numbers(extensions, "achieved", RATE_KEYS),
             dropped=require_mapping_of_ints(extensions, "dropped", DROP_KEYS),
             here_calls=check_count(require(extensions, "here_calls"), "here_calls"),
