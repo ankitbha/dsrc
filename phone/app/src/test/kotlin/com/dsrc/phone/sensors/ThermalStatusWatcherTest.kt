@@ -112,4 +112,21 @@ class ThermalStatusWatcherTest {
         w.stop()
         assertEquals(0, unregisterCalls)
     }
+
+    @Test
+    fun `stop shuts down an executor service of its own`() {
+        // The default `executor` this class creates for itself is a single-thread pool with
+        // its own dedicated thread; `resourcesHeldAfterTeardown` counts the `thermalWatcher`
+        // field, not that thread, so nothing else in `SensingService`'s census can see it
+        // leaked. An injected plain `Executor` -- this file's own `inlineExecutor` -- has no
+        // `shutdown()` to call and is left alone; only an `ExecutorService` is this class's
+        // to shut down.
+        val pool = java.util.concurrent.Executors.newSingleThreadExecutor()
+        val w = ThermalStatusWatcher(
+            register = { _, _ -> }, unregister = {}, monoClock = { 0L }, executor = pool,
+        )
+        w.start()
+        w.stop()
+        assertTrue(pool.isShutdown)
+    }
 }

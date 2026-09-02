@@ -2,6 +2,7 @@ package com.dsrc.phone.sensors
 
 import android.os.PowerManager
 import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 /**
@@ -67,11 +68,20 @@ class ThermalStatusWatcher(
         registered = true
     }
 
-    /** Unregisters the listener it registered. Idempotent: a second call does nothing. */
+    /**
+     * Unregisters the listener it registered, and shuts down the default executor's
+     * background thread. Idempotent: a second call does nothing further. An injected
+     * executor -- a test's inline one, or a caller's own pool -- is left running; only the
+     * single-thread pool this class creates for itself by default is this class's to shut
+     * down, the same `encodeExecutor?.shutdown()` convention `SensingService` uses for its
+     * own executor field.
+     */
     fun stop() {
-        if (!registered) return
-        unregister(listener)
-        registered = false
+        if (registered) {
+            unregister(listener)
+            registered = false
+        }
+        (executor as? ExecutorService)?.shutdown()
     }
 
     val changesCount: Long get() = synchronized(lock) { changes }
