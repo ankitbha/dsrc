@@ -2799,9 +2799,7 @@ MUTATIONS = [
      "python"),
     ("summary: the blind-tick reconciliation is not checked",
      "deployment/jetson/eval_run.py",
-     '    total = row.get("total")\n'
      "    if total == blind_ticks:",
-     '    total = row.get("total")\n'
      "    if True:",
      "python"),
     ("summary: a missing summary.json is reported as a held reconciliation",
@@ -2829,6 +2827,183 @@ MUTATIONS = [
      "            if reason not in THERMAL_FAILURES_VOCABULARY:\n"
      "                reason = sorted(THERMAL_FAILURES_VOCABULARY)[0]\n"
      "            counts[reason] = counts.get(reason, 0) + 1",
+     "python"),
+
+    # Task 39's validation round (C1/C2 criticals; M1-M7 majors; the MINOR and
+    # TEST GAPS items). Every entry below was verified against a mutated
+    # mirror before being added here, matching the process the entries above
+    # it describe.
+    ("summary: a source-row reconciliation holds when there are no rows to compare",
+     "deployment/jetson/eval_run.py",
+     '    sources = failures_summary.get("sources") or {}\n'
+     "    if not sources:\n"
+     '        return Reconciliation(name, "unavailable", "no source rows to compare",\n'
+     '                               compared=0, compared_is="rows_compared")',
+     '    sources = failures_summary.get("sources") or {}\n'
+     "    if False:\n"
+     '        return Reconciliation(name, "unavailable", "no source rows to compare",\n'
+     '                               compared=0, compared_is="rows_compared")',
+     "python"),
+    ("summary: blind_ticks holds when neither number is actually present",
+     "deployment/jetson/eval_run.py",
+     '    total = None if row is None else row.get("total")\n'
+     "    if total is None or blind_ticks is None:",
+     '    total = None if row is None else row.get("total")\n'
+     "    if False:",
+     "python"),
+    ("summary: events_written holds when there are no source rows to sum",
+     "deployment/jetson/eval_run.py",
+     '    sources = failures_summary.get("sources") or {}\n'
+     "    if not sources:\n"
+     "        return Reconciliation(\n"
+     '            "events_written_matches_open_and_close_records", "unavailable",\n'
+     '            "no source rows to sum events_written over", compared=0, compared_is="rows_compared",\n'
+     "        )",
+     '    sources = failures_summary.get("sources") or {}\n'
+     "    if False:\n"
+     "        return Reconciliation(\n"
+     '            "events_written_matches_open_and_close_records", "unavailable",\n'
+     '            "no source rows to sum events_written over", compared=0, compared_is="rows_compared",\n'
+     "        )",
+     "python"),
+    ("summary: triggers_match_summary holds when there are no sensing ticks",
+     "deployment/jetson/eval_run.py",
+     "    sensing_ticks_n = len(_sensing_ticks(loaded.ticks))\n"
+     "    if sensing_ticks_n == 0:",
+     "    sensing_ticks_n = len(_sensing_ticks(loaded.ticks))\n"
+     "    if False:",
+     "python"),
+    ("summary: here_calls_ge_responses_received holds when no tick carries here_calls",
+     "deployment/jetson/eval_run.py",
+     "    if responses is None or calls_total is None:",
+     "    if responses is None:",
+     "python"),
+    ("api_calls: no_telemetry is keyed on here_calls rather than reference.absent",
+     "deployment/jetson/eval_run.py",
+     '        if ref.get("absent") is not None:\n'
+     "            counts[REFERENCE_NO_TELEMETRY] = counts.get(REFERENCE_NO_TELEMETRY, 0) + 1\n"
+     '        elif ref.get("here_calls") is None:',
+     '        if ref.get("here_calls") is None:\n'
+     "            counts[REFERENCE_NO_TELEMETRY] = counts.get(REFERENCE_NO_TELEMETRY, 0) + 1\n"
+     '        elif ref.get("here_calls") is None:',
+     "python"),
+    ("api_calls: a shape violation is merged into no_telemetry instead of censused separately",
+     "deployment/jetson/eval_run.py",
+     "counts[API_CALLS_FIELD_NOT_RECORDED] = counts.get(API_CALLS_FIELD_NOT_RECORDED, 0) + 1",
+     "counts[REFERENCE_NO_TELEMETRY] = counts.get(REFERENCE_NO_TELEMETRY, 0) + 1",
+     "python"),
+    ("summary: the Overall line folds unbuildable axes into did-not-answer",
+     "deployment/jetson/eval_run.py",
+     "    did_not = len(axes) - fully_answered - unbuildable",
+     "    did_not = len(axes) - fully_answered",
+     "python"),
+    ("provenance: a full-size map of only substituted values still answers",
+     "deployment/jetson/eval_run.py",
+     "        classes_present = set(field_sources.values())\n"
+     "        if classes_present - PROVENANCE_EXCLUDED:",
+     "        classes_present = set(field_sources.values())\n"
+     "        if True:",
+     "python"),
+    ("triggers: the not-evaluable-by-rule census is dropped from the axis record",
+     "deployment/jetson/eval_run.py",
+     "            for name in RULES:\n"
+     '                if rules[name].get("status") == RULE_NOT_EVALUABLE:\n'
+     "                    not_evaluable_by_rule[name] = not_evaluable_by_rule.get(name, 0) + 1",
+     "            pass",
+     "python"),
+    ("summary: ## Sensing is never appended to report.md",
+     "deployment/jetson/eval_run.py",
+     "    if session is not None:\n"
+     '        lines += _sensing_lines(session.get("sensing"))\n'
+     "    join = r.get(\"phone_join\")",
+     "    if False:\n"
+     '        lines += _sensing_lines(session.get("sensing"))\n'
+     "    join = r.get(\"phone_join\")",
+     "python"),
+    ("summary: a HERE counter that decreases within a session is silently clamped",
+     "deployment/jetson/eval_run.py",
+     "        if last_calls - first_calls < 0:\n"
+     "            backwards_sessions.append(session_id)",
+     "        if False:\n"
+     "            backwards_sessions.append(session_id)",
+     "python"),
+    ("summary: a drive that never recorded here_calls reports a measured zero",
+     "deployment/jetson/eval_run.py",
+     '        "calls_total": None if not_measured else calls_total,',
+     '        "calls_total": calls_total,',
+     "python"),
+    ("summary: zero_calls_because fires without two observations to support it",
+     "deployment/jetson/eval_run.py",
+     "        if (\n"
+     '            here["calls_total"] == 0 and mode == SHADOW\n'
+     '            and any(row["observations"] >= 2 for row in here["by_session"])\n'
+     "        )",
+     "        if (\n"
+     '            here["calls_total"] == 0 and mode == SHADOW\n'
+     "        )",
+     "python"),
+    ("summary: a failed reconciliation is keyed on its check name, not its axis",
+     "deployment/jetson/eval_run.py",
+     '    axis = _RECONCILIATION_AXIS.get(rec["name"], rec["name"])',
+     '    axis = rec["name"]',
+     "python"),
+    ("summary: the zero-tick report never names a dropped log",
+     "deployment/jetson/eval_run.py",
+     "    if log_health is not None:\n"
+     '        lines += _log_health_lines({"log_health": log_health})',
+     "    if False:\n"
+     '        lines += _log_health_lines({"log_health": log_health})',
+     "python"),
+    ("summary: inputs.metadata_jsonl is a literal True",
+     "deployment/jetson/eval_run.py",
+     '            "metadata_jsonl": metadata_jsonl_present,',
+     '            "metadata_jsonl": True,',
+     "python"),
+    ("summary: the rates axis headline claims a noun (reports) its count is not purely made of",
+     "deployment/jetson/eval_run.py",
+     '"rates": "telemetry observations"',
+     '"rates": "reports"',
+     "python"),
+    ("summary: lambda_per_window is computed and then discarded",
+     "deployment/jetson/eval_run.py",
+     '            entry["lambda_per_window"] = lambda_per_window',
+     "            pass",
+     "python"),
+    ("summary: the quantisation at lambda == 1.0 is not named",
+     "deployment/jetson/eval_run.py",
+     "                if lambda_per_window == 1.0:",
+     "                if False:",
+     "python"),
+    ("summary: clamped_ticks and thermal_scaled_ticks are rendered nowhere",
+     "deployment/jetson/eval_run.py",
+     '        if row["clamped_ticks"] or row["thermal_scaled_ticks"]:',
+     "        if False:",
+     "python"),
+    ("sensing_result: a null summary[phone] block raises AttributeError",
+     "deployment/jetson/eval_run.py",
+     '    here["responses_received"] = (\n'
+     '        ((summary or {}).get("phone") or {}).get("here") or {}\n'
+     '    ).get("responses_received")',
+     '    here["responses_received"] = ((summary or {}).get("phone", {}).get("here", {}) or {}).get(\n'
+     '        "responses_received"\n'
+     "    )",
+     "python"),
+    ("rates axis: a malformed sensing block raises KeyError instead of degrading",
+     "deployment/jetson/eval_run.py",
+     '        ref = t["sensing"].get("reference") or {}\n'
+     '        if ref.get("absent") is not None:\n'
+     "            no_telemetry_ticks += 1",
+     '        ref = t["sensing"]["reference"]\n'
+     '        if ref.get("absent") is not None:\n'
+     "            no_telemetry_ticks += 1",
+     "python"),
+    ("sensing_result: a malformed sensing block raises KeyError instead of degrading",
+     "deployment/jetson/eval_run.py",
+     "        points = [\n"
+     '            (t["sensing"].get("decided_at_mono"), (t["sensing"].get("rates") or {}).get(key))\n'
+     "            for t in sensing_ticks\n"
+     "        ]",
+     '        points = [(t["sensing"]["decided_at_mono"], t["sensing"]["rates"][key]) for t in sensing_ticks]',
      "python"),
 ]
 
