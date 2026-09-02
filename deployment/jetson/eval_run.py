@@ -416,10 +416,12 @@ def thermal_result(
 
     `ticks_by_basis` counts the Jetson's own per-tick `basis` -- the phone's
     tick block carries no single `basis` field, so it is not pooled in here.
-    `sample_gaps_s` is the interval between consecutive `thermal_sample`
-    lines, which is how a sampler thread that died partway through a run
-    becomes visible: a healthy 1 Hz thread reports every gap near 1.0 s, and a
-    stalled one reports a max far past it.
+    It is also the real signal for a sampler thread that died partway through
+    a run: `sample_gaps_s` cannot show that, because a gap exists only between
+    two samples that were actually written, so a sampler that stops writing
+    simply produces a shorter list of gaps that are each still close to 1.0 s
+    -- the stall shows up as ticks reporting `stale` for the rest of the run,
+    which is what `ticks_by_basis` counts.
     """
     has_tick_block = any(t.get("thermal") is not None for t in ticks)
     if not has_tick_block and not thermal_samples and not thermal_events and "thermal" not in summary:
@@ -828,69 +830,96 @@ def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
     """The `## Thermal` section: a measurement with nowhere to go is as good
     as unmeasured, so this prints the sampler's own summary rather than
     leaving it in summary.json for nobody to read. Absent entirely when
-    `thermal` carries no summary -- the log has no thermal records at all --
-    rather than a section printing zeros.
-    """
-    if not thermal or not thermal.get("summary"):
-        return []
-    s = thermal["summary"]
-    lines = ["", "## Thermal", ""]
+    `thermal` itself is `None` -- the log has no thermal records at all.
 
-    jetson = s.get("jetson") or {}
-    temp = jetson.get("temp_c")
-    basis = jetson.get("basis_counts") or {}
-    if temp is not None:
-        per_zone_max = jetson.get("per_zone_max_c") or {}
-        hottest = max(per_zone_max, key=per_zone_max.get) if per_zone_max else None
-        peak = (
-            f"; {len(jetson.get('zones_seen') or [])} zones read, hottest at peak "
-            f"{hottest} {per_zone_max[hottest]:.1f} C" if hottest else ""
-        )
+    A log whose sampler wrote records but whose summary was never written
+    (the run did not reach its normal teardown) still gets a section, built
+    from `ticks_by_basis` and `events` -- the raw records, not the summary
+    `None` would otherwise hide entirely.
+    """
+    if not thermal:
+        return []
+    lines = ["", "## Thermal", ""]
+    s = thermal.get("summary")
+
+    if not s:
         lines.append(
-            f"- jetson {jetson.get('selected_zone')}: p50 {temp['p50']:.1f} C, "
-            f"p95 {temp['p95']:.1f} C, max {temp['max']:.1f} C over "
-            f"{jetson.get('samples', 0)} samples (measured {basis.get('measured', 0)}, "
-            f"stale {basis.get('stale', 0)}, absent {basis.get('absent', 0)}{peak})"
+            "- thermal records exist for this drive but no summary was written "
+            "(the run likely did not reach its normal teardown)"
         )
     else:
-        lines.append(f"- jetson: no temperature reached over {jetson.get('samples', 0)} samples")
-
-    phone = s.get("phone") or {}
-    n_phone = phone.get("samples", 0)
-    status_counts = phone.get("status_counts") or {}
-    if status_counts:
-        dominant = max(status_counts, key=status_counts.get)
-        skin = phone.get("skin_temp_c")
-        skin_str = (
-            f"; skin {phone.get('skin_zone')} p50 {skin['p50']:.1f} C, max {skin['max']:.1f} C"
-            if skin else ""
-        )
-        lines.append(f"- phone: {dominant} on {status_counts[dominant]} of {n_phone} reports{skin_str}")
-    headroom_absent = phone.get("headroom_absent_counts") or {}
-    if headroom_absent:
-        lines.append(
-            f"- phone headroom: not reported on {sum(headroom_absent.values())} of "
-            f"{n_phone} reports ({', '.join(sorted(headroom_absent))})"
-        )
-
-    events = s.get("events") or {}
-    for device in ("jetson", "phone"):
-        ev = events.get(device) or {}
-        status, count = ev.get("status"), ev.get("count", 0)
-        if status == RULE_NOT_EVALUABLE:
-            missing = ", ".join(ev.get("missing") or [])
-            lines.append(
-                f"- throttle events, {device}: NOT EVALUABLE -- missing {missing}; "
-                f"this drive says nothing about whether the {device} throttled"
+        jetson = s.get("jetson") or {}
+        temp = jetson.get("temp_c")
+        basis = jetson.get("basis_counts") or {}
+        if temp is not None:
+            per_zone_max = jetson.get("per_zone_max_c") or {}
+            hottest = max(per_zone_max, key=per_zone_max.get) if per_zone_max else None
+            peak = (
+                f"; {len(jetson.get('zones_seen') or [])} zones read, hottest at peak "
+                f"{hottest} {per_zone_max[hottest]:.1f} C" if hottest else ""
             )
-        elif status == RULE_FIRED:
-            lines.append(f"- throttle events, {device}: fired -- {count} transitions")
-        elif device == "jetson":
-            lines.append(f"- throttle events, jetson: quiet -- cooling devices readable throughout, "
-                         f"{count} transitions")
+            lines.append(
+                f"- jetson {jetson.get('selected_zone')}: p50 {temp['p50']:.1f} C, "
+                f"p95 {temp['p95']:.1f} C, max {temp['max']:.1f} C over "
+                f"{jetson.get('samples', 0)} samples (measured {basis.get('measured', 0)}, "
+                f"absent {basis.get('absent', 0)}{peak})"
+            )
         else:
-            lines.append(f"- throttle events, phone: quiet -- {count} status transitions "
-                         f"in {n_phone} reports")
+            lines.append(f"- jetson: no temperature reached over {jetson.get('samples', 0)} samples")
+
+        phone = s.get("phone") or {}
+        n_phone = phone.get("samples", 0)
+        status_counts = phone.get("status_counts") or {}
+        if status_counts:
+            # Every status seen, not only the modal one -- a build that spent
+            # 78 of 178 reports `severe` must not render as if it never left
+            # `nominal`.
+            breakdown = ", ".join(
+                f"{status} {n}" for status, n in sorted(status_counts.items(), key=lambda kv: -kv[1])
+            )
+            skin = phone.get("skin_temp_c")
+            skin_str = (
+                f"; skin {phone.get('skin_zone')} p50 {skin['p50']:.1f} C, max {skin['max']:.1f} C"
+                if skin else ""
+            )
+            lines.append(f"- phone: {breakdown} of {n_phone} reports{skin_str}")
+        headroom_absent = phone.get("headroom_absent_counts") or {}
+        if headroom_absent:
+            lines.append(
+                f"- phone headroom: not reported on {sum(headroom_absent.values())} of "
+                f"{n_phone} reports ({', '.join(sorted(headroom_absent))})"
+            )
+
+        events = s.get("events") or {}
+        for device in ("jetson", "phone"):
+            ev = events.get(device) or {}
+            status, count = ev.get("status"), ev.get("count", 0)
+            if status == RULE_NOT_EVALUABLE:
+                missing = ", ".join(ev.get("missing") or [])
+                passes = (
+                    f" ({ev['passes_readable']} of {ev['passes_attempted']} passes fully readable)"
+                    if ev.get("passes_attempted") else ""
+                )
+                lines.append(
+                    f"- throttle events, {device}: NOT EVALUABLE -- missing {missing}{passes}; "
+                    f"this drive says nothing about whether the {device} throttled"
+                )
+            elif status == RULE_FIRED:
+                lines.append(f"- throttle events, {device}: fired -- {count} transitions")
+            elif device == "jetson":
+                lines.append(f"- throttle events, jetson: quiet -- cooling devices readable throughout, "
+                             f"{count} transitions")
+            else:
+                lines.append(f"- throttle events, phone: quiet -- {count} status transitions "
+                             f"in {n_phone} reports")
+
+    ticks_by_basis = thermal.get("ticks_by_basis") or {}
+    if ticks_by_basis:
+        # The real signal for a sampler thread that died partway through the
+        # run (see `thermal_result`'s docstring): `sample_gaps_s` cannot show
+        # it, because a gap exists only between samples that were written.
+        parts = ", ".join(f"{basis} {n}" for basis, n in sorted(ticks_by_basis.items()))
+        lines.append(f"- jetson thermal seen by ticks: {parts}")
     return lines
 
 
