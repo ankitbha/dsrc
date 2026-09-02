@@ -2749,12 +2749,27 @@ def _reconcile_reference_shape(loaded: "LoadedRecords") -> Reconciliation:
     non-null. Needs only tick records, never `summary.json` -- M1's fix,
     since `api_calls` branches on `absent` and a record that violates this
     shape would otherwise be silently miscounted rather than flagged.
+
+    A log recorded before task 39 has `achieved`/`dropped` (pre-existing)
+    but no `here_calls`/`here_errors` KEY at all -- not a value nulled by
+    `reference_from`, a key that did not exist when the record was written.
+    That is the same backward-compatibility shape `api_calls`/`here` already
+    carve out (M1/C2): checked here the same way, by whether any tick's
+    `reference` carries the key at all, rather than reported as a shape
+    violation on every telemetry-present tick of every log this task
+    predates.
     """
     sensing_ticks = _sensing_ticks(loaded.ticks)
     if not sensing_ticks:
         return Reconciliation(
             "reference_absent_iff_fields_null", "unavailable",
             "no tick carries a sensing block", compared=0, compared_is="records_compared",
+        )
+    if not any("here_calls" in (t["sensing"].get("reference") or {}) for t in sensing_ticks):
+        return Reconciliation(
+            "reference_absent_iff_fields_null", "unavailable",
+            "no tick carries here_calls (log predates task 39)",
+            compared=0, compared_is="records_compared",
         )
     bad = 0
     for t in sensing_ticks:

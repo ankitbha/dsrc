@@ -1042,6 +1042,24 @@ class TestReconciliations:
         recs = {r.to_record()["name"]: r.to_record() for r in reconciliations(loaded, {})}
         assert recs["reference_absent_iff_fields_null"]["status"] == "failed"
 
+    def test_reference_shape_is_unavailable_on_a_log_that_predates_here_calls(self):
+        """A real pre-task-39 drive: `achieved`/`dropped` are present (they
+        pre-date this task) but `here_calls`/`here_errors` are not keys on
+        the record at all, on every tick where telemetry genuinely arrived.
+        That is not a shape violation -- it is a schema this rule postdates
+        -- and reporting it as `failed` would fail on every log recorded
+        before this task, the same backward-compatibility gap M1/C2 already
+        closed one level up, in `api_calls` and the HERE block.
+        """
+        ticks = sensing_ticks(3, telemetry_at=frozenset(range(3)))
+        for t in ticks:
+            t["sensing"]["reference"].pop("here_calls", None)
+            t["sensing"]["reference"].pop("here_errors", None)
+        loaded = loaded_from(ticks)
+        recs = {r.to_record()["name"]: r.to_record() for r in reconciliations(loaded, {})}
+        assert recs["reference_absent_iff_fields_null"]["status"] == "unavailable"
+        assert "predates task 39" in recs["reference_absent_iff_fields_null"]["detail"]
+
     def test_a_failed_reconciliation_is_rendered_keyed_on_its_axis(self):
         """MINOR / plan §5.4: a failed reconciliation used to be keyed only
         on its own check name, rendering with no visible connection to the
