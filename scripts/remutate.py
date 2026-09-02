@@ -1956,17 +1956,94 @@ MUTATIONS = [
      "    thermal_sampler.stop()\n"
      "    return result",
      "python"),
-    ("thermal: the sampler loop does not mark itself stopped when a sample raises",
+    # Round 3 re-audit: the comment's own promise -- "must not take the
+    # pipeline down with it" -- was false. Killing the thread on its first bad
+    # pass took the whole thermal log down for the rest of the drive,
+    # including the phone's own record, which never touches sysfs at all. The
+    # fix isolates each device's own read (the two entries below) and keeps
+    # the loop itself running past whatever still reaches this handler.
+    ("thermal: the sampler loop kills the thread on any failed pass",
      "deployment/jetson/sensors/thermal.py",
      "            except Exception:\n"
-     "                # A sysfs read misbehaving must not take the pipeline down with\n"
-     "                # it. `_running` goes false, so a tick after this reports\n"
-     "                # `sampler_stopped` rather than quietly repeating the last\n"
-     "                # value forever.\n"
+     "                # Either device's own read is already isolated inside\n"
+     "                # `sample_once`, so reaching here means something else failed\n"
+     "                # -- the sink, say. Either way, this one pass is skipped and\n"
+     "                # the loop keeps running at the same pace, exactly as if it\n"
+     "                # had not been attempted: `sampler_stopped` is reserved for a\n"
+     "                # sampler that was actually asked to stop or never started,\n"
+     "                # not for one that lost a pass.\n"
+     "                pass",
+     "            except Exception:\n"
      "                self._running = False\n"
      "                return",
-     "            except Exception:\n"
-     "                return",
+     "python"),
+    ("thermal: a jetson zone-read failure is not isolated from the rest of the pass",
+     "deployment/jetson/sensors/thermal.py",
+     "        census, zones_reason = _safe_call(self._jetson.read_zones, ({}, ABSENT_READ_ERROR))",
+     "        census, zones_reason = self._jetson.read_zones()",
+     "python"),
+    ("thermal: a jetson cooling-read failure is not isolated from the rest of the pass",
+     "deployment/jetson/sensors/thermal.py",
+     "        cooling, cooling_missing = _safe_call(self._jetson.read_cooling, ({}, ()))",
+     "        cooling, cooling_missing = self._jetson.read_cooling()",
+     "python"),
+    ("thermal: a jetson read failure is reported as no zone readable instead of its own reason",
+     "deployment/jetson/sensors/thermal.py",
+     "        census, zones_reason = _safe_call(self._jetson.read_zones, ({}, ABSENT_READ_ERROR))",
+     "        census, zones_reason = _safe_call(self._jetson.read_zones, ({}, ABSENT_NO_ZONE_READABLE))",
+     "python"),
+    ("thermal: the wait after a pass does not subtract its own duration",
+     "deployment/jetson/sensors/thermal.py",
+     "            elapsed = time.monotonic() - pass_started\n"
+     "            self._stop_event.wait(max(0.0, self._interval_s - elapsed))",
+     "            self._stop_event.wait(self._interval_s)",
+     "python"),
+    ("thermal: the quiet jetson tick record carries no pass-count evidence",
+     "deployment/jetson/sensors/thermal.py",
+     "        # `quiet` is a claim of full observation, exactly like `not_evaluable`\n"
+     "        # is a claim of its absence -- both need the same pass counters as\n"
+     "        # evidence, or the claim can only be taken on faith.\n"
+     "        return _tick_event_record(\n"
+     "            RULE_QUIET, 0, None,\n"
+     "            passes_attempted=self._cooling_passes_attempted,\n"
+     "            passes_readable=self._cooling_passes_readable,\n"
+     "        )",
+     "        # `quiet` is a claim of full observation, exactly like `not_evaluable`\n"
+     "        # is a claim of its absence -- both need the same pass counters as\n"
+     "        # evidence, or the claim can only be taken on faith.\n"
+     "        return _tick_event_record(RULE_QUIET, 0, None)",
+     "python"),
+    ("thermal: the quiet jetson summary record carries no pass-count evidence",
+     "deployment/jetson/sensors/thermal.py",
+     "        return _summary_event_record(\n"
+     "            RULE_QUIET, 0, (), by_unit=self._jetson_events_by_unit,\n"
+     "            passes_attempted=self._cooling_passes_attempted,\n"
+     "            passes_readable=self._cooling_passes_readable,\n"
+     "        )",
+     "        return _summary_event_record(RULE_QUIET, 0, (), by_unit=self._jetson_events_by_unit)",
+     "python"),
+    ("eval_run: the quiet jetson line drops its pass counters",
+     "deployment/jetson/eval_run.py",
+     "            elif device == \"jetson\":\n"
+     "                # `quiet` is a claim of full observation, so it carries the\n"
+     "                # same pass counters `not_evaluable` does -- a reader can\n"
+     "                # check \"readable throughout\" instead of taking it on faith.\n"
+     "                passes = (\n"
+     "                    f\" ({ev.get('passes_readable')} of {ev.get('passes_attempted')} passes fully readable)\"\n"
+     "                    if ev.get(\"passes_attempted\") else \"\"\n"
+     "                )\n"
+     "                lines.append(f\"- throttle events, jetson: quiet -- cooling devices readable throughout, \"\n"
+     "                             f\"{count} transitions{passes}\")",
+     "            elif device == \"jetson\":\n"
+     "                lines.append(f\"- throttle events, jetson: quiet -- cooling devices readable throughout, \"\n"
+     "                             f\"{count} transitions\")",
+     "python"),
+    ("thermal: _read_trimmed does not catch a would-block TypeError",
+     "deployment/jetson/sensors/thermal.py",
+     "    except (OSError, TypeError):\n"
+     "        return None",
+     "    except OSError:\n"
+     "        return None",
      "python"),
     ("thermal: the hottest-zone fallback picks the coolest zone instead",
      "deployment/jetson/sensors/thermal.py",
