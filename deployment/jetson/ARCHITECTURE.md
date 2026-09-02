@@ -229,6 +229,20 @@ read only when a `--phone-log` is supplied) under a `phone (offline)` heading.
 A run recorded before this existed reports `failures: null` rather than a
 failure, the same convention `## Thermal` set.
 
+`report.md` opens with a `## Session summary` section, above `## Gates`:
+seven instrument axes (latency, rates, API calls, triggers, failures,
+thermal, provenance), each reporting two independently counted integers --
+`answered` of `attempted` -- and the census of its own reason words when they
+differ, never a percentage or a single health word. Nine cross-record
+reconciliations follow, each `held`, `failed` (both numbers named, neither
+resolved) or `unavailable` (an input, usually `summary.json`, was missing). A
+`## Sensing` section, between `## Advisory` and `## Phone join`, renders the
+rate/trigger/HERE detail behind three of those axes. `here_calls` and
+`here_errors` -- the phone's own count of HERE HTTP calls placed and non-2xx
+responses, on the wire since task 27 -- now ride on every tick's per-tick
+`sensing.reference` block alongside `achieved`/`dropped`, null together with
+the rest of that block on a phone never heard from.
+
 ## 10. Simulated-drive test harness
 
 Closed-loop hardware-free validation: real dashcam footage through the

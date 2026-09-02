@@ -1178,15 +1178,16 @@ MUTATIONS = [
     # against a manufactured "achieved nothing" reading is scored against data
     # that does not exist. Caught by the absence test, which requires all three
     # fields null together rather than a zeroed achieved map.
-    # Re-anchored: `at_mono` was added to the same dict literal, which moved
-    # this line and split it in two.
+    # Re-anchored twice now: `at_mono` moved this line once, and task 39's
+    # `here_calls`/`here_errors` (added to the same dict literal, on both
+    # branches) moved it again.
     ("sensing_loop: the reference block reports 0.0 achieved when the phone never reported",
      "deployment/jetson/policy/sensing_loop.py",
      '        return {"achieved": None, "dropped": None, "age_s": None, "at_mono": None,\n'
-     '                "absent": "no_telemetry"}',
+     '                "here_calls": None, "here_errors": None, "absent": "no_telemetry"}',
      '        return {"achieved": {key: 0.0 for key in RATE_KEYS},'
      ' "dropped": {key: 0 for key in DROP_KEYS},\n'
-     '                "age_s": None, "at_mono": None, "absent": "no_telemetry"}',
+     '                "here_calls": None, "here_errors": None, "absent": "no_telemetry"}',
      "python"),
     # The defect class this task exists for, reproduced directly: folding a
     # rule's not-evaluable ticks into "agree" is exactly "this candidate was
@@ -2738,6 +2739,96 @@ MUTATIONS = [
      "            st.passes_readable += 1\n"
      "            st.last_readable = True\n"
      "            st.run_total += 1",
+     "python"),
+
+    # Task 39. Session summary: seven instrument axes (answered of attempted,
+    # plus a reason census when they differ, never a ratio or a health word),
+    # nine cross-record reconciliations, and the two new fields on
+    # `reference_from`. Every entry below was verified against a mutated
+    # mirror before being added here, not merely written down.
+    ("summary: a zero-answering axis is dropped from the headline list",
+     "deployment/jetson/eval_run.py",
+     '        axis["unbuildable"] is None\n'
+     '        and axis["attempted"] not in (None, 0)\n'
+     '        and axis["answered"] == axis["attempted"]',
+     '        axis["unbuildable"] is None\n'
+     '        and axis["attempted"] is not None\n'
+     '        and axis["answered"] == axis["attempted"]',
+     "python"),
+    ("summary: an axis's census is derived by subtraction",
+     "deployment/jetson/eval_run.py",
+     '    census, violations = _census_and_violations(counts, THERMAL_FAILURES_VOCABULARY)\n'
+     '    return AxisResult(\n'
+     '        axis="thermal", attempted=attempted, answered=answered,\n'
+     '        attempted_is="ticks carrying a thermal block",\n'
+     '        answered_is="ticks whose thermal.jetson.basis is measured",\n'
+     '        unanswered_by_reason=census,',
+     '    census, violations = _census_and_violations(counts, THERMAL_FAILURES_VOCABULARY)\n'
+     '    return AxisResult(\n'
+     '        axis="thermal", attempted=attempted, answered=answered,\n'
+     '        attempted_is="ticks carrying a thermal block",\n'
+     '        answered_is="ticks whose thermal.jetson.basis is measured",\n'
+     '        unanswered_by_reason={"unanswered": attempted - answered},',
+     "python"),
+    ("sensing_loop: a phone never heard from reports zero API calls",
+     "deployment/jetson/policy/sensing_loop.py",
+     '                "here_calls": None, "here_errors": None, "absent": "no_telemetry"}',
+     '                "here_calls": 0, "here_errors": None, "absent": "no_telemetry"}',
+     "python"),
+    ("summary: achieved is averaged over ticks rather than reports",
+     "deployment/jetson/eval_run.py",
+     '            by_at_mono[ref["at_mono"]] = ref',
+     '            by_at_mono[id(ref)] = ref',
+     "python"),
+    ("summary: percentiles are reported for a modality slower than the window",
+     "deployment/jetson/eval_run.py",
+     "            elif lambda_per_window < 1.0:",
+     "            elif False:",
+     "python"),
+    ("summary: achieved is compared to commanded on a shadow drive",
+     "deployment/jetson/eval_run.py",
+     '    if not ever_live:\n'
+     '        return False, f"mode shadow on {ticks} of {ticks} decisions"',
+     '    if False:\n'
+     '        return False, f"mode shadow on {ticks} of {ticks} decisions"',
+     "python"),
+    ("summary: a HERE counter that restarts at zero is differenced across the redial",
+     "deployment/jetson/eval_run.py",
+     '        bucket = by_session.setdefault(t.get("session_id"), {"calls": [], "errors": []})',
+     '        bucket = by_session.setdefault(None, {"calls": [], "errors": []})',
+     "python"),
+    ("summary: the blind-tick reconciliation is not checked",
+     "deployment/jetson/eval_run.py",
+     '    total = row.get("total")\n'
+     "    if total == blind_ticks:",
+     '    total = row.get("total")\n'
+     "    if True:",
+     "python"),
+    ("summary: a missing summary.json is reported as a held reconciliation",
+     "deployment/jetson/eval_run.py",
+     '            Reconciliation("blind_ticks_matches_camera_source", "unavailable", reason),',
+     '            Reconciliation("blind_ticks_matches_camera_source", "held"),',
+     "python"),
+    ("eval_run: a zero-tick drive produces no report",
+     "deployment/jetson/eval_run.py",
+     "    if not loaded.ticks:",
+     "    if False:",
+     "python"),
+    ("eval_run: the Overall line drops its axis clause",
+     "deployment/jetson/eval_run.py",
+     "    if session is not None:\n"
+     '        overall_line += f" -- {_overall_clause(session)}"',
+     "    if session is not None:\n"
+     "        pass  # clause dropped",
+     "python"),
+    ("summary: a vocabulary violation is absorbed into a known key",
+     "deployment/jetson/eval_run.py",
+     '            reason = jetson.get("reason") or "unstated"\n'
+     "            counts[reason] = counts.get(reason, 0) + 1",
+     '            reason = jetson.get("reason") or "unstated"\n'
+     "            if reason not in THERMAL_FAILURES_VOCABULARY:\n"
+     "                reason = sorted(THERMAL_FAILURES_VOCABULARY)[0]\n"
+     "            counts[reason] = counts.get(reason, 0) + 1",
      "python"),
 ]
 
