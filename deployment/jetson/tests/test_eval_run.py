@@ -664,8 +664,7 @@ class TestFailuresSectionRendersOnRealRecordShapes:
             "failures": {
                 "scan": {"passes": 5, "seq_last": 5,
                          "interval_s": {"p50": 1.0, "p95": 1.0, "max": 1.0},
-                         "basis_counts": {"measured": 5, "stale": 0, "absent": 0},
-                         "absent_reasons": {}, "sources_n": 30},
+                         "sources_n": 30},
                 "sources": {
                     "gps.not_fresh": {
                         "status": "fired", "passes_attempted": 5, "passes_readable": 5,
@@ -710,6 +709,41 @@ class TestFailuresSectionRendersOnRealRecordShapes:
         assert "3.0" in markdown or "duration" in markdown.lower()
         assert "NOT EVALUABLE" in markdown
         assert "gps.not_fresh" in markdown
+
+
+class TestCounterWentBackwardsRendersEachStep:
+    """C1: `_backwards` changed from `dict[str, dict]` to `dict[str, list[dict]]`
+    (accumulating one entry per occurrence instead of the last one
+    overwriting the rest), and `_failure_lines` was not updated to match --
+    `step.get("from")` on a list element that is itself a list raised
+    `AttributeError`, so `render_markdown` never returned and no
+    `report.md` was written for any drive whose counter went backwards. The
+    only fixture this block had was an empty dict, whose loop body never
+    runs either way."""
+
+    def test_two_backwards_steps_on_one_source_both_render(self, tmp_path):
+        run_dir = write_run(tmp_path, [make_tick(i) for i in range(2)], summary={
+            "ticks": 2, "camera_dropped_frames": 0, "policy_trained": False,
+            "failures": {
+                "scan": {"passes": 2, "seq_last": 2,
+                         "interval_s": {"p50": 1.0, "p95": 1.0, "max": 1.0},
+                         "sources_n": 30},
+                "sources": {},
+                "outcomes": {},
+                "counter_went_backwards": {
+                    "camera.dropped_unconsumed": [
+                        {"from": 40, "to": 3, "t_mono": 1.0},
+                        {"from": 9, "to": 1, "t_mono": 2.0},
+                    ],
+                },
+                "blind_ticks": 0, "pipeline_exception": None,
+            },
+        })
+        result = analyze(run_dir)
+        markdown = render_markdown(result, [])
+        assert "## Failures" in markdown
+        assert "camera.dropped_unconsumed: counter went backwards, 40 -> 3" in markdown
+        assert "camera.dropped_unconsumed: counter went backwards, 9 -> 1" in markdown
 
 
 class TestLogHealthReachesTheReport:

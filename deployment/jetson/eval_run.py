@@ -1233,11 +1233,12 @@ def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
             )
 
     backwards = s.get("counter_went_backwards") or {}
-    for name, step in backwards.items():
-        lines.append(
-            f"- {name}: counter went backwards, {step.get('from')} -> {step.get('to')} "
-            "(the counter is right; this record is the one that is wrong)"
-        )
+    for name, steps in backwards.items():
+        for step in steps:
+            lines.append(
+                f"- {name}: counter went backwards, {step.get('from')} -> {step.get('to')} "
+                "(the counter is right; this record is the one that is wrong)"
+            )
 
     lines.append(
         f"- blind ticks: {s.get('blind_ticks', 0)}; "
