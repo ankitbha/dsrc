@@ -43,19 +43,26 @@ THERMAL_BASIS_STALE = "stale"
 THERMAL_BASES = frozenset({THERMAL_BASIS_MEASURED, THERMAL_BASIS_STALE, THERMAL_BASIS_ABSENT})
 
 #: Why a Jetson temperature is absent. Closed: every arm of `JetsonThermal` and
-#: `ThermalSampler` that produces no reading returns one of these five.
+#: `ThermalSampler` that produces no reading returns one of these six.
 ABSENT_NO_THERMAL_ROOT = "no_thermal_root"     # the directory would not list
 ABSENT_NO_ZONE_READABLE = "no_zone_readable"   # listed, no plausible temp in any zone
 ABSENT_NO_SAMPLE_YET = "no_sample_yet"         # running, first pass not finished
-ABSENT_SAMPLER_STOPPED = "sampler_stopped"     # disabled in config, or the thread died
+ABSENT_SAMPLER_STOPPED = "sampler_stopped"     # disabled in config, never started, or told to stop
 #: The zone this sampler is holding stopped appearing in an otherwise-readable
 #: census -- distinct from `ABSENT_NO_ZONE_READABLE`, which means nothing at all
 #: was plausible this pass. Nine other zones reading fine while the held one
 #: drops out is not "no plausible temp in any zone".
 ABSENT_ZONE_DISAPPEARED = "zone_disappeared"
+#: One pass's own read raised an unexpected error -- distinct from every
+#: other reason above, all of which are ordinary "nothing to read" outcomes
+#: rather than a raise. This pass is recorded absent for this reason and the
+#: sampler keeps running; it names a single bad pass, never a sampler that
+#: has stopped.
+ABSENT_READ_ERROR = "read_error"
 ABSENT_REASONS = frozenset({
     ABSENT_NO_THERMAL_ROOT, ABSENT_NO_ZONE_READABLE,
     ABSENT_NO_SAMPLE_YET, ABSENT_SAMPLER_STOPPED, ABSENT_ZONE_DISAPPEARED,
+    ABSENT_READ_ERROR,
 })
 
 #: Why the phone's thermal fields are absent, beyond the phone's own per-field
@@ -112,6 +119,19 @@ def _read_trimmed(path: Path) -> str | None:
     except (OSError, TypeError):
         return None
     return text or None
+
+
+def _safe_call(fn: Any, default: Any) -> Any:
+    """Runs `fn()`, returning `default` for any exception it raises instead of
+    propagating it. Isolates one device's own read from the rest of the pass:
+    a Jetson-side sysfs quirk raising here must not stop the phone's own
+    processing later in the same pass, and must not reach `_loop` and take
+    the sampler thread down with it.
+    """
+    try:
+        return fn()
+    except Exception:
+        return default
 
 
 @dataclass(frozen=True)
@@ -416,23 +436,32 @@ class ThermalSampler:
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
+            pass_started = time.monotonic()
             try:
                 self.sample_once()
             except Exception:
-                # A sysfs read misbehaving must not take the pipeline down with
-                # it. `_running` goes false, so a tick after this reports
-                # `sampler_stopped` rather than quietly repeating the last
-                # value forever.
-                self._running = False
-                return
-            self._stop_event.wait(self._interval_s)
+                # Either device's own read is already isolated inside
+                # `sample_once`, so reaching here means something else failed
+                # -- the sink, say. Either way, this one pass is skipped and
+                # the loop keeps running at the same pace, exactly as if it
+                # had not been attempted: `sampler_stopped` is reserved for a
+                # sampler that was actually asked to stop or never started,
+                # not for one that lost a pass.
+                pass
+            elapsed = time.monotonic() - pass_started
+            self._stop_event.wait(max(0.0, self._interval_s - elapsed))
+        self._running = False
 
     # -- one pass, on the thread or driven directly by a test -------------------
 
     def sample_once(self) -> None:
         now = self._now()
-        census, zones_reason = self._jetson.read_zones()
-        cooling, cooling_missing = self._jetson.read_cooling()
+        # Each device's own read is isolated from the other: a Jetson-side
+        # sysfs quirk raising here must not stop the phone-side processing
+        # below in the same pass, and the failed read is recorded as this
+        # pass's own absence rather than propagated.
+        census, zones_reason = _safe_call(self._jetson.read_zones, ({}, ABSENT_READ_ERROR))
+        cooling, cooling_missing = _safe_call(self._jetson.read_cooling, ({}, ()))
         telemetry = getattr(self._phone, "telemetry", None) if self._phone is not None else None
         telemetry_at = getattr(self._phone, "telemetry_at_mono", None) if self._phone is not None else None
 

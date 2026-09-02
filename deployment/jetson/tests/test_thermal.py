@@ -24,6 +24,7 @@ from sensors.thermal import (
     ABSENT_NO_TELEMETRY,
     ABSENT_NO_THERMAL_ROOT,
     ABSENT_NO_ZONE_READABLE,
+    ABSENT_READ_ERROR,
     ABSENT_REASONS,
     ABSENT_SAMPLER_STOPPED,
     ABSENT_ZONE_DISAPPEARED,
@@ -133,10 +134,10 @@ def test_a_zone_that_will_not_read_is_absent_with_a_reason(tmp_path):
     assert reading["temp_c"] is None
 
 
-# -- 2. the five absence reasons are each reachable and distinct ------------
+# -- 2. the six absence reasons are each reachable and distinct -------------
 
 
-def test_the_five_absence_reasons_are_each_reachable_and_distinct(tmp_path):
+def test_the_six_absence_reasons_are_each_reachable_and_distinct(tmp_path):
     seen: set[str] = set()
 
     # arm 1: the root would not list at all.
@@ -188,8 +189,20 @@ def test_the_five_absence_reasons_are_each_reachable_and_distinct(tmp_path):
     )
     seen.add(ABSENT_ZONE_DISAPPEARED)
 
+    # arm 6: the read itself raises, rather than merely finding nothing --
+    # the sysfs quirk measured on the device, reproduced without one.
+    class _ExplodingJetson(JetsonThermal):
+        def read_zones(self):
+            raise RuntimeError("sysfs blew up")
+
+    exploding = ThermalSampler(sink=None, jetson=_ExplodingJetson(root=tmp_path), clock=_Clock(100.0))
+    exploding.sample_once()
+    reading = exploding.latest(now=100.0)["jetson"]
+    assert reading["reason"] == ABSENT_READ_ERROR
+    seen.add(reading["reason"])
+
     assert seen == ABSENT_REASONS
-    assert len(seen) == 5
+    assert len(seen) == 6
 
 
 # -- 3. a value that is not a temperature is refused -------------------------
@@ -987,10 +1000,14 @@ def test_starting_the_real_thread_produces_samples(tmp_path):
     assert all(r["type"] == "thermal_sample" for r in sink.records)
 
 
-def test_the_loop_stops_itself_when_a_sample_raises(tmp_path):
-    """`_loop`'s exception handler is the only producer of the 'thread died'
-    half of `ABSENT_SAMPLER_STOPPED` -- proven on the real thread, not by
-    calling `sample_once` directly.
+def test_the_loop_survives_a_pass_that_raises(tmp_path):
+    """Round 3: `_loop` used to catch a raising pass by setting `_running`
+    false and returning, killing the thread on its first bad pass. A sysfs
+    read misbehaving must not take the pipeline down with it, so the fix
+    keeps the thread alive and attempting a fresh pass every interval --
+    `sampler_stopped` is reserved for a sampler that was actually asked to
+    stop or never started, not for one that lost a pass. Proven on the real
+    thread, not by calling `sample_once` directly.
     """
 
     class _ExplodingJetson(JetsonThermal):
@@ -999,18 +1016,171 @@ def test_the_loop_stops_itself_when_a_sample_raises(tmp_path):
 
     sampler = ThermalSampler(sink=None, jetson=_ExplodingJetson(root=tmp_path), interval_s=0.02)
     sampler.start()
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline and sampler._running:
-        time.sleep(0.02)
-    # Read before stop(), which sets `_running` False itself regardless of
-    # whether the loop's own exception handler already did -- checking after
-    # stop() would not tell the two apart.
-    still_running_after_the_raise = sampler._running
-    sampler.stop()
+    try:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and sampler.to_record()["jetson"]["samples"] < 5:
+            time.sleep(0.02)
+        samples_attempted = sampler.to_record()["jetson"]["samples"]
+        still_running = sampler._running
+    finally:
+        sampler.stop()
 
-    assert still_running_after_the_raise is False
+    assert still_running is True, "a failing pass must not stop the thread"
+    assert samples_attempted >= 5, "the loop must keep attempting a fresh pass every interval"
     reading = sampler.latest(now=time.monotonic())["jetson"]
-    assert reading["reason"] == ABSENT_SAMPLER_STOPPED
+    assert reading["basis"] == "absent"
+    assert reading["reason"] == ABSENT_READ_ERROR
+
+
+def test_a_jetson_read_failure_does_not_null_the_phones_record(tmp_path):
+    """Round 3: the same `except Exception` that killed the thread also meant
+    a Jetson-side raise, happening before the phone is processed in the same
+    pass, silently discarded that pass's phone telemetry too -- on a drive
+    where the Jetson's zones never once read, the phone's own counters never
+    advanced past zero, and its summary reported `not_evaluable`/`missing
+    telemetry` on a run where the phone was connected the entire time. Driven
+    directly through `sample_once`, isolating the claim from the thread's own
+    survival, which the test above already covers.
+    """
+
+    class _ExplodingJetson(JetsonThermal):
+        def read_zones(self):
+            raise RuntimeError("sysfs blew up")
+
+    phone = _FakePhone()
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, phone=phone, jetson=_ExplodingJetson(root=tmp_path), clock=clock)
+
+    phone.telemetry = _telemetry(thermal_status="nominal", thermal_status_changes=0)
+    sampler.sample_once()
+    clock.advance(1.0)
+    phone.telemetry = _telemetry(
+        thermal_status="nominal", thermal_status_changes=1,
+        thermal_change_from="nominal", thermal_change_to="light",
+    )
+    sampler.sample_once()
+
+    phone_record = sampler.to_record()["phone"]
+    assert phone_record["samples"] == 2, "phone processing must run even while the jetson read raises"
+
+    phone_events = sampler.latest(now=clock.now)["events"]["phone"]
+    assert phone_events["status"] == RULE_FIRED
+    assert phone_events["count"] == 1
+
+    jetson_record = sampler.to_record()["jetson"]
+    assert jetson_record["absent_reasons"] == {ABSENT_READ_ERROR: 2}
+
+    sample_lines = [r for r in sink.records if r["type"] == "thermal_sample"]
+    assert len(sample_lines) == 2, "a pass still writes its sample record even when the jetson read raised"
+    assert sample_lines[-1]["phone"]["status"] == "nominal"
+
+
+def test_a_failing_cooling_read_does_not_null_the_zone_reading(tmp_path):
+    """Round 3: the Jetson's own two reads, zones and cooling, are isolated
+    from each other -- a `cooling_device*` read raising must not take the
+    zone census (or the phone's record) down with it.
+    """
+
+    class _ExplodingCooling(JetsonThermal):
+        def read_cooling(self):
+            raise RuntimeError("cooling sysfs blew up")
+
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    phone = _FakePhone()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, phone=phone, jetson=_ExplodingCooling(root=root), clock=clock)
+
+    phone.telemetry = _telemetry(thermal_status="nominal", thermal_status_changes=0)
+    sampler.sample_once()
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    jetson_reading = sampler.latest(now=clock.now)["jetson"]
+    assert jetson_reading["basis"] == "measured"
+    assert jetson_reading["temp_c"] == pytest.approx(40.0)
+
+    phone_record = sampler.to_record()["phone"]
+    assert phone_record["samples"] == 2
+
+
+def test_the_loop_survives_a_sink_that_raises(tmp_path):
+    """Round 3: a raise from outside either device's own read -- the sink
+    itself, here -- reaches `_loop`'s own catch-all rather than either
+    device's isolation. The thread must keep running at the same pace
+    afterward rather than dying on the first write that fails.
+    """
+
+    class _FlakySink:
+        def __init__(self) -> None:
+            self.records: list[dict] = []
+            self._raise_next = True
+
+        def write(self, record: dict) -> None:
+            if self._raise_next:
+                self._raise_next = False
+                raise OSError("disk full")
+            self.records.append(record)
+
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    sink = _FlakySink()
+    sampler = ThermalSampler(sink=sink, jetson=JetsonThermal(root=root), interval_s=0.02)
+    sampler.start()
+    try:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and len(sink.records) < 3:
+            time.sleep(0.02)
+        still_running = sampler._running
+    finally:
+        sampler.stop()
+
+    assert still_running is True
+    assert len(sink.records) >= 3, "the loop must keep running past the sink's first failure"
+
+
+def test_the_sampler_subtracts_pass_duration_from_the_wait(tmp_path):
+    """Round 3: the wait after each pass used to be the full configured
+    interval regardless of how long the pass itself took, so the sampler ran
+    measurably slower than its stated rate (measured mean 1.0091 s at a
+    1.0 s interval). A pass with a known, non-trivial duration must not add
+    that duration on top of the wait.
+    """
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+
+    class _SlowJetson(JetsonThermal):
+        def read_zones(self):
+            time.sleep(0.05)
+            return super().read_zones()
+
+    class _TimestampingSink:
+        def __init__(self) -> None:
+            self.at: list[float] = []
+
+        def write(self, record: dict) -> None:
+            self.at.append(time.monotonic())
+
+    sink = _TimestampingSink()
+    interval_s = 0.1
+    sampler = ThermalSampler(sink=sink, jetson=_SlowJetson(root=root), interval_s=interval_s)
+    sampler.start()
+    try:
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline and len(sink.at) < 8:
+            time.sleep(0.02)
+    finally:
+        sampler.stop()
+
+    assert len(sink.at) >= 8
+    intervals = [b - a for a, b in zip(sink.at, sink.at[1:])]
+    mean_interval = sum(intervals) / len(intervals)
+    # Without the fix this would be roughly interval_s + 0.05 (~0.15 s); with
+    # it, the pass's own duration counts against the wait.
+    assert mean_interval < interval_s + 0.03, (
+        f"mean interval {mean_interval:.4f}s indicates the pass duration was not subtracted"
+    )
 
 
 # M4: the hottest-zone fallback is the entire mitigation for the guessed Orin
