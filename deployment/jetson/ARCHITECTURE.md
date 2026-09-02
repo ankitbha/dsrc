@@ -233,9 +233,12 @@ failure, the same convention `## Thermal` set.
 seven instrument axes (latency, rates, API calls, triggers, failures,
 thermal, provenance), each reporting two independently counted integers --
 `answered` of `attempted` -- and the census of its own reason words when they
-differ, never a percentage or a single health word. Nine cross-record
+differ, never a percentage or a single health word. Ten cross-record
 reconciliations follow, each `held`, `failed` (both numbers named, neither
-resolved) or `unavailable` (an input, usually `summary.json`, was missing). A
+resolved) or `unavailable` (an input, usually `summary.json`, was missing --
+a population of zero records compared is also `unavailable`, never `held`).
+The tenth needs only tick records and checks the reference shape rule below.
+A
 `## Sensing` section, between `## Advisory` and `## Phone join`, renders the
 rate/trigger/HERE detail behind three of those axes. `here_calls` and
 `here_errors` -- the phone's own count of HERE HTTP calls placed and non-2xx
