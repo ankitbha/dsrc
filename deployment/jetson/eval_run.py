@@ -30,6 +30,7 @@ import json
 import math
 import sys
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -67,11 +68,31 @@ GATE_VEHICLE_TICK_FRACTION = 0.50
 DROPOUT_RECOVERY_MARGIN_S = 2.5  # stale_after_s + one fix interval
 
 
-def load_records(
-    metadata_path: Path,
-) -> tuple[list[dict], dict | None, list[dict], int, list[dict], list[dict]]:
-    """Ticks, the scenario, the timebase_estimate lines, how many lines would
-    not parse, the thermal_sample lines, and the thermal_event lines.
+@dataclass(frozen=True)
+class LoadedRecords:
+    """Every record `load_records` sorts a `metadata.jsonl` line into, one
+    field per record type.
+
+    A frozen dataclass rather than the seven-wide tuple this replaced (D18):
+    the tuple was six wide and unpacked positionally at two call sites, three
+    of its members were already `list[dict]` and a fourth would be --
+    adjacent, same-typed, and a mis-ordered unpack type-checks and passes most
+    tests. Growth from here on is a new field, not a new position.
+    """
+
+    ticks: list[dict]
+    scenario: dict | None
+    timebase_estimates: list[dict]
+    unparseable: int
+    thermal_samples: list[dict]
+    thermal_events: list[dict]
+    failure_scans: list[dict] = field(default_factory=list)
+    failure_events: list[dict] = field(default_factory=list)
+
+
+def load_records(metadata_path: Path) -> LoadedRecords:
+    """Every record type `metadata.jsonl` carries, sorted by `type`, plus how
+    many lines would not parse at all.
 
     The count is returned rather than swallowed. `MetadataLogger` buffers a mebibyte
     and flushes only in `close()`, and there is a path where `close()` never runs --
@@ -84,6 +105,8 @@ def load_records(
     timebase_estimates: list[dict] = []
     thermal_samples: list[dict] = []
     thermal_events: list[dict] = []
+    failure_scans: list[dict] = []
+    failure_events: list[dict] = []
     unparseable = 0
     with open(metadata_path) as f:
         for line in f:
@@ -92,31 +115,42 @@ def load_records(
             except ValueError:
                 unparseable += 1
                 continue
-            if record.get("type") == "tick":
+            record_type = record.get("type")
+            if record_type == "tick":
                 ticks.append(record)
-            elif record.get("type") == "scenario":
+            elif record_type == "scenario":
                 scenario = record
-            elif record.get("type") == "timebase_estimate":
+            elif record_type == "timebase_estimate":
                 timebase_estimates.append(record)
-            elif record.get("type") == "thermal_sample":
+            elif record_type == "thermal_sample":
                 thermal_samples.append(record)
-            elif record.get("type") == "thermal_event":
+            elif record_type == "thermal_event":
                 thermal_events.append(record)
-    return ticks, scenario, timebase_estimates, unparseable, thermal_samples, thermal_events
+            elif record_type == "failure_scan":
+                failure_scans.append(record)
+            elif record_type == "failure_event":
+                failure_events.append(record)
+    return LoadedRecords(
+        ticks=ticks, scenario=scenario, timebase_estimates=timebase_estimates,
+        unparseable=unparseable, thermal_samples=thermal_samples, thermal_events=thermal_events,
+        failure_scans=failure_scans, failure_events=failure_events,
+    )
 
 
-def load_phone_log(phone_log_path: Path) -> tuple[list[dict], list[dict]]:
-    """Inbound advisory lines and advisory_shown lines from a phone's session
-    log, ignoring everything else the file holds.
+def load_phone_log(phone_log_path: Path) -> tuple[list[dict], list[dict], list[dict]]:
+    """Inbound advisory lines, advisory_shown lines, and failure lines from a
+    phone's session log, ignoring everything else the file holds.
 
     Every outbound line `SessionLog` writes is a bare frame header -- the
     canonical JSON that went on the wire, verbatim, with no wrapper -- so it
-    carries no `dir` key at all. The two line shapes this join wants both do,
-    which is what tells them apart from an outbound line and from each other
-    without this reader having to know every line shape a later task adds.
+    carries no `dir` key at all. The three line shapes this reader wants all
+    do, which is what tells them apart from an outbound line and from each
+    other without this reader having to know every line shape a later task
+    adds.
     """
     inbound_advisories: list[dict] = []
     shown: list[dict] = []
+    failures: list[dict] = []
     with open(phone_log_path) as f:
         for line in f:
             try:
@@ -128,7 +162,9 @@ def load_phone_log(phone_log_path: Path) -> tuple[list[dict], list[dict]]:
                 inbound_advisories.append(record)
             elif direction == "shown":
                 shown.append(record)
-    return inbound_advisories, shown
+            elif direction == "fail":
+                failures.append(record)
+    return inbound_advisories, shown, failures
 
 
 def _reconstruct_estimate(record: dict) -> TimebaseEstimate:
@@ -447,6 +483,83 @@ def thermal_result(
     }
 
 
+def _join_failure_episodes(failure_events: list[dict]) -> list[dict]:
+    """Pair every `open` record with its `close`, by `episode_id`.
+
+    An `open` with no matching `close` is kept, with `closed=False` -- the
+    reading rule is that this means the log was truncated (`stop()` closes
+    every open episode before `to_record()` runs), not that the episode is
+    still open. A validator checks this against `summary["failures"]`
+    directly; this function only reports what pairs and what does not.
+    """
+    opens = {r["episode_id"]: r for r in failure_events if r.get("phase") == "open"}
+    closes = {r["episode_id"]: r for r in failure_events if r.get("phase") == "close"}
+    episodes = []
+    for episode_id, open_record in sorted(opens.items()):
+        close_record = closes.get(episode_id)
+        episodes.append({
+            "episode_id": episode_id, "source": open_record.get("source"),
+            "reason": open_record.get("reason"), "device": open_record.get("device"),
+            "opened_t_mono": open_record.get("t_mono"),
+            "closed": close_record is not None,
+            "outcome": close_record.get("outcome") if close_record else None,
+            "duration_s": close_record.get("duration_s") if close_record else None,
+            "n": close_record.get("n") if close_record else open_record.get("first_pass_n"),
+        })
+    return episodes
+
+
+def failures_result(
+    ticks: list[dict[str, Any]], loaded: "LoadedRecords", summary: dict[str, Any],
+    run_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """The failures section: the sampler's own summary rollup plus what only
+    the raw records can say. `None` when the log carries no failure records
+    and no summary block at all -- not a failed drive, the same reading
+    `thermal_result` gives a run that predates it.
+    """
+    has_tick_block = any(t.get("failures") is not None for t in ticks)
+    log_health = None
+    if run_dir is not None:
+        health_path = run_dir / "log_health.json"
+        if health_path.exists():
+            try:
+                log_health = json.loads(health_path.read_text())
+            except ValueError:
+                log_health = None
+    if not has_tick_block and not loaded.failure_scans and not loaded.failure_events \
+            and "failures" not in summary and log_health is None:
+        return None
+
+    ordered = sorted(r["t_mono"] for r in loaded.failure_scans if "t_mono" in r)
+    scan_gaps = [b - a for a, b in zip(ordered, ordered[1:])]
+
+    ticks_seen_values = [
+        r["ticks_seen"] for r in loaded.failure_scans if r.get("ticks_seen") is not None
+    ]
+
+    ticks_by_basis: dict[str, int] = {}
+    for t in ticks:
+        block = t.get("failures")
+        if not block:
+            continue
+        basis = block.get("basis")
+        if basis is not None:
+            ticks_by_basis[basis] = ticks_by_basis.get(basis, 0) + 1
+
+    return {
+        "summary": summary.get("failures"),
+        "scan_gaps_s": pctl(scan_gaps) if scan_gaps else None,
+        "ticks_seen_per_pass": (
+            {"p50": pctl(ticks_seen_values)["p50"], "min": min(ticks_seen_values)}
+            if ticks_seen_values else None
+        ),
+        "ticks_by_basis": ticks_by_basis,
+        "episodes": _join_failure_episodes(loaded.failure_events),
+        "log_health": log_health,
+    }
+
+
 def in_dropout_affected(elapsed_s: float, dropouts: list[tuple[float, float]]) -> bool:
     return any(a <= elapsed_s < b + DROPOUT_RECOVERY_MARGIN_S for a, b in dropouts)
 
@@ -460,11 +573,22 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     the two logs are joined into a ten-stage table that adds `return` and
     `render`, the two facts only the phone witnesses.
     """
-    ticks, scenario, timebase_estimates, unparseable, thermal_samples, thermal_events = load_records(
-        run_dir / "metadata.jsonl"
-    )
+    loaded = load_records(run_dir / "metadata.jsonl")
+    ticks = loaded.ticks
+    scenario, timebase_estimates = loaded.scenario, loaded.timebase_estimates
+    unparseable = loaded.unparseable
+    thermal_samples, thermal_events = loaded.thermal_samples, loaded.thermal_events
     if not ticks:
-        raise SystemExit(f"no tick records in {run_dir / 'metadata.jsonl'}")
+        # A drive that produced no ticks at all -- the camera never delivered a
+        # frame -- is exactly the drive with the most failures, and this task
+        # does not make analysis tolerate it (open item 1). What it does add:
+        # naming what the log holds anyway, so the exit message is not silent
+        # about the one thing this task guarantees survives a zero-tick run.
+        raise SystemExit(
+            f"no tick records in {run_dir / 'metadata.jsonl'} "
+            f"({len(loaded.failure_scans)} failure_scan, {len(loaded.failure_events)} "
+            "failure_event records present)"
+        )
     summary = {}
     summary_path = run_dir / "summary.json"
     if summary_path.exists():
@@ -707,10 +831,14 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
     applicable = [g["pass"] for g in gates.values() if g["pass"] is not None]
     overall = all(applicable) if applicable else False
 
-    phone_join = (
-        None if phone_log_path is None
-        else join_phone_log(ticks, timebase_estimates, *load_phone_log(phone_log_path))
-    )
+    phone_join = None
+    phone_failures: list[dict] | None = None
+    if phone_log_path is not None:
+        inbound_advisories, shown, phone_failures = load_phone_log(phone_log_path)
+        phone_join = join_phone_log(ticks, timebase_estimates, inbound_advisories, shown)
+    failures = failures_result(ticks, loaded, summary, run_dir)
+    if failures is not None:
+        failures["phone"] = phone_failures
     return {
         "run_dir": str(run_dir),
         "scenario": {
@@ -743,6 +871,7 @@ def analyze(run_dir: Path, phone_log_path: Path | None = None) -> dict[str, Any]
             phone_join["rows"] if phone_join and phone_join.get("rows") else ticks
         ),
         "thermal": thermal_result(ticks, thermal_samples, thermal_events, summary),
+        "failures": failures,
         "_sim_truth": sim_truth,  # stripped before JSON dump
         "_ticks": ticks,
     }
@@ -938,6 +1067,127 @@ def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
     return lines
 
 
+def _phone_failure_lines(failures: dict[str, Any]) -> list[str]:
+    """The one line naming the phone's own failures, read only offline
+    (D11) -- appended regardless of how much the Jetson side has to say,
+    since the phone's session log is pulled independently of the run
+    directory."""
+    phone_failures = failures.get("phone")
+    if phone_failures is None:
+        return ["- phone-side failures: not read (no --phone-log)"]
+    if not phone_failures:
+        return ["- phone (offline): 0 failure lines in the session log"]
+    by_kind: dict[str, int] = {}
+    for record in phone_failures:
+        kind = record.get("kind", "?")
+        by_kind[kind] = by_kind.get(kind, 0) + int(record.get("n", 1))
+    breakdown = ", ".join(f"{kind} {n}" for kind, n in sorted(by_kind.items()))
+    return [f"- phone (offline): {breakdown}"]
+
+
+def _log_health_lines(failures: dict[str, Any]) -> list[str]:
+    """The metadata logger's own final state (D16), read from `log_health.json`
+    rather than from `summary["failures"]` -- see that file's own docstring
+    for why the two must stay separate."""
+    log_health = failures.get("log_health")
+    if log_health is None:
+        return []
+    writer = "writer healthy" if log_health.get("writer_failure") is None else \
+        f"writer failed: {log_health['writer_failure']}"
+    return [f"- log: {log_health.get('dropped_records', 0)} records dropped, {writer}"]
+
+
+def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
+    """The `## Failures` section. Absent entirely when `failures` itself is
+    `None` -- the log carries no failure records at all, the reading a
+    pre-task-38 run gets (task 33 and task 36 both shipped a measurement
+    with no surface; this exists so that mistake is not repeated a third
+    time)."""
+    if not failures:
+        return []
+    lines = ["", "## Failures", ""]
+    s = failures.get("summary")
+
+    if not s:
+        lines.append(
+            "- failure records exist for this drive but no summary was written "
+            "(the run likely did not reach its normal teardown)"
+        )
+        return lines + _log_health_lines(failures) + _phone_failure_lines(failures)
+
+    scan = s.get("scan") or {}
+    interval = scan.get("interval_s") or {}
+    if interval.get("p50") is not None:
+        lines.append(
+            f"- {scan.get('sources_n', 0)} sources scanned on {scan.get('passes', 0)} passes; "
+            f"scan interval p50 {interval['p50']:.3f} s, max {interval.get('max', 0):.3f} s"
+        )
+    else:
+        lines.append(
+            f"- failure sampling: NOT EVALUABLE -- sampler_stopped; "
+            "this drive says nothing about whether anything failed"
+        )
+        return lines + _log_health_lines(failures) + _phone_failure_lines(failures)
+
+    ticks_seen = failures.get("ticks_seen_per_pass")
+    if ticks_seen is not None:
+        stall_note = "" if ticks_seen.get("min", 0) > 0 else " -- the tick loop stalled at least once"
+        lines.append(
+            f"- ticks seen per pass: p50 {ticks_seen.get('p50')}, min {ticks_seen.get('min')}{stall_note}"
+        )
+
+    episodes = failures.get("episodes") or []
+    outcomes = s.get("outcomes") or {}
+    if episodes or outcomes:
+        by_outcome = ", ".join(f"{n} {name.replace('_', ' ')}" for name, n in sorted(outcomes.items()))
+        lines.append(f"- {len(episodes)} episodes: {by_outcome}" if by_outcome else f"- {len(episodes)} episodes")
+
+    durations_by_source: dict[str, list[float]] = {}
+    for episode in episodes:
+        if episode.get("duration_s") is not None:
+            durations_by_source.setdefault(episode["source"], []).append(episode["duration_s"])
+
+    sources = s.get("sources") or {}
+    for name, row in sorted(sources.items()):
+        status = row.get("status")
+        if status == RULE_FIRED:
+            longest = max(durations_by_source[name]) if durations_by_source.get(name) else None
+            longest_note = f", longest {longest:.1f} s" if longest is not None else ""
+            lines.append(
+                f"- {name}: FIRED -- {row.get('episodes', 0)} episode(s), "
+                f"{row.get('total', 0)} occurrences{longest_note}"
+            )
+        elif status == RULE_NOT_EVALUABLE:
+            missing = ", ".join(row.get("missing") or [])
+            lines.append(
+                f"- {name}: NOT EVALUABLE on {row.get('passes_readable', 0)} of "
+                f"{row.get('passes_attempted', 0)} passes -- missing {missing}; "
+                f"this drive says nothing about {name}'s failures during that window"
+            )
+        else:
+            lines.append(
+                f"- {name}: quiet -- readable on {row.get('passes_readable', 0)} of "
+                f"{row.get('passes_attempted', 0)} passes"
+            )
+
+    backwards = s.get("counter_went_backwards") or {}
+    for name, step in backwards.items():
+        lines.append(
+            f"- {name}: counter went backwards, {step.get('from')} -> {step.get('to')} "
+            "(the counter is right; this record is the one that is wrong)"
+        )
+
+    lines.append(
+        f"- blind ticks: {s.get('blind_ticks', 0)}; "
+        f"pipeline exception: {s.get('pipeline_exception') or 'none'}"
+    )
+
+    lines += _log_health_lines(failures)
+    lines.append("- thermal failures are recorded separately -- see ## Thermal")
+    lines += _phone_failure_lines(failures)
+    return lines
+
+
 def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
     r = result
     lines = [f"# Run evaluation - {Path(r['run_dir']).name}", ""]
@@ -1089,6 +1339,7 @@ def render_markdown(result: dict[str, Any], plots: list[str]) -> str:
         f"{r['observation']['top_fallback_fields']}",
     ]
     lines += _thermal_lines(r.get("thermal"))
+    lines += _failure_lines(r.get("failures"))
     lines += [
         "",
         "## GPS",

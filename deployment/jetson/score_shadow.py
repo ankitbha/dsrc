@@ -544,7 +544,8 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
         # Jetson metadata log at all -- has nothing for `load_records` to
         # open. Named refusal, not `load_records`' own FileNotFoundError.
         return {"run": str(run_dir), "refused": REFUSAL_NO_METADATA}
-    ticks, _scenario, _timebase, unparseable, _thermal_samples, _thermal_events = load_records(metadata_path)
+    loaded = load_records(metadata_path)
+    ticks, unparseable = loaded.ticks, loaded.unparseable
     sensing_ticks = _sensing_ticks(ticks)
 
     refusal, refusal_detail = _log_refusal(ticks, sensing_ticks)
