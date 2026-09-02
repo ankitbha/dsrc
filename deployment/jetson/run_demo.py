@@ -375,7 +375,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
 
     camera.start()
 
-    logger = video_logger = stats_sampler = None
+    logger = video_logger = stats_sampler = thermal_sampler = None
     telemetry = None
     run_dir = None
     if config["telemetry"]["enabled"]:
@@ -387,6 +387,12 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             video_logger = VideoLogger(run_dir, fps=config["camera"]["fps"])
         if config["logio"]["system_stats"]:
             stats_sampler = SystemStatsSampler(logger, config["logio"]["system_stats_interval_s"]).start()
+        if config["logio"]["thermal"]:
+            from sensors.thermal import ThermalSampler
+
+            thermal_sampler = ThermalSampler(
+                logger, phone=phone, interval_s=config["logio"]["thermal_interval_s"],
+            ).start()
         print(f"[run] logging to {run_dir}")
 
     if gps is not None:
@@ -524,6 +530,8 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                     record["session_id"] = session_id
                 if outcome is not None:
                     record["sensing"] = outcome.to_record()
+                if thermal_sampler is not None:
+                    record["thermal"] = thermal_sampler.latest()
                 logger.write(record)
                 if phone is not None:
                     _log_timebase_estimates(logger, phone, last_estimate_ids, session_id)
@@ -610,6 +618,10 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # commands were all refused and one where nothing needed sending write
             # the same tick log otherwise.
             summary["sensing"] = sensing.to_record()
+        if thermal_sampler is not None:
+            summary["thermal"] = thermal_sampler.to_record(
+                jtop_available=stats_sampler.available if stats_sampler is not None else None
+            )
         if phone is not None:
             # Which clock produced the stamps and how the offset was obtained.
             # Without it a run where every stamp took the proxy path and one where
@@ -625,6 +637,8 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             video_logger.close()
         if stats_sampler is not None:
             stats_sampler.stop()
+        if thermal_sampler is not None:
+            thermal_sampler.stop()
         if logger is not None:
             logger.write_summary(summary)
             logger.close()
