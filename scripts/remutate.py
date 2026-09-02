@@ -2548,6 +2548,96 @@ MUTATIONS = [
      "            )",
      "            Unit",
      "app"),
+
+    # -- this round's fixes (C1, M1, M2, M3, m1, m2, M4) -----------------------
+
+    ("eval_run: a backwards-step list is read as a single step, not iterated",
+     "deployment/jetson/eval_run.py",
+     "    backwards = s.get(\"counter_went_backwards\") or {}\n"
+     "    for name, steps in backwards.items():\n"
+     "        for step in steps:\n"
+     "            lines.append(\n"
+     "                f\"- {name}: counter went backwards, {step.get('from')} -> {step.get('to')} \"\n"
+     "                \"(the counter is right; this record is the one that is wrong)\"\n"
+     "            )",
+     "    backwards = s.get(\"counter_went_backwards\") or {}\n"
+     "    for name, step in backwards.items():\n"
+     "        lines.append(\n"
+     "            f\"- {name}: counter went backwards, {step.get('from')} -> {step.get('to')} \"\n"
+     "            \"(the counter is right; this record is the one that is wrong)\"\n"
+     "        )",
+     "python"),
+    ("failures: a second pipeline exception while one episode is open is not counted",
+     "deployment/jetson/logio/failure_log.py",
+     "            if st.open_episode is None:\n"
+     "                self._open_episode(\n"
+     "                    st, source, now, t_wall, reason, 1, None,\n"
+     "                    SourceSnapshot(readable=True, detail=detail, detail_truncated=truncated),\n"
+     "                )\n"
+     "            else:\n"
+     "                st.open_episode.n += 1\n"
+     "                st.open_episode.last_t_mono = now",
+     "            if st.open_episode is None:\n"
+     "                self._open_episode(\n"
+     "                    st, source, now, t_wall, reason, 1, None,\n"
+     "                    SourceSnapshot(readable=True, detail=detail, detail_truncated=truncated),\n"
+     "                )",
+     "python"),
+    ("failures: camera.dropped_unconsumed never attaches a session id, so a redial diffs it",
+     "deployment/jetson/logio/failure_log.py",
+     "    snap = _fixed(\"unconsumed\", int(ctx.camera.dropped_frames))\n"
+     "    return SourceSnapshot(readable=True, by_reason=snap.by_reason, session_id=ctx.pass_session_id)",
+     "    return _fixed(\"unconsumed\", int(ctx.camera.dropped_frames))",
+     "python"),
+    ("failures: pipeline.exception is declared non-cumulative",
+     "deployment/jetson/logio/failure_log.py",
+     "        Source(\"pipeline.exception\", _read_pipeline_exception, None, None,\n"
+     "               \"run\", True, True, \"jetson\"),",
+     "        Source(\"pipeline.exception\", _read_pipeline_exception, None, None,\n"
+     "               \"run\", False, True, \"jetson\"),",
+     "python"),
+    ("failures: MISSING silently drops a declared reason",
+     "deployment/jetson/logio/failure_log.py",
+     "MISSING = frozenset({\n"
+     "    MISSING_NO_PHONE, MISSING_NO_SESSION, MISSING_NO_TELEMETRY,\n"
+     "    MISSING_SESSION_MOVED, MISSING_NO_SOURCE, MISSING_ACCESSOR_RAISED,\n"
+     "})",
+     "MISSING = frozenset({\n"
+     "    MISSING_NO_PHONE, MISSING_NO_SESSION, MISSING_NO_TELEMETRY,\n"
+     "    MISSING_SESSION_MOVED, MISSING_NO_SOURCE,\n"
+     "})",
+     "python"),
+    ("run_demo: the tick-loop exception is recorded but never reaches the caller",
+     "deployment/jetson/run_demo.py",
+     "            if failures is not None:\n"
+     "                failures.note_pipeline_exception(exc)\n"
+     "            raise",
+     "            if failures is not None:\n"
+     "                failures.note_pipeline_exception(exc)\n"
+     "            if True:\n"
+     "                return\n"
+     "            raise",
+     "python"),
+    ("run_demo: a blind tick is never counted",
+     "deployment/jetson/run_demo.py",
+     "            if frame is None:\n"
+     "                if failures is not None:\n"
+     "                    failures.note_no_frame(end_of_stream=camera.end_of_stream)\n"
+     "                if camera.end_of_stream:",
+     "            if frame is None:\n"
+     "                if 0:\n"
+     "                    if failures is not None:\n"
+     "                        failures.note_no_frame(end_of_stream=camera.end_of_stream)\n"
+     "                if camera.end_of_stream:",
+     "python"),
+    ("app: no IMU hardware is never reported as a failure",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ImuSource.kt",
+     "            Log.w(TAG, \"no IMU: accelerometer=$accelerometer gyroscope=$gyroscope\")\n"
+     "            onFailure(FailureKinds.IMU_NO_HARDWARE, \"accelerometer=$accelerometer gyroscope=$gyroscope\")\n"
+     "            return",
+     "            Log.w(TAG, \"no IMU: accelerometer=$accelerometer gyroscope=$gyroscope\")\n"
+     "            return",
+     "app"),
 ]
 
 RESULTS = {
