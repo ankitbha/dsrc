@@ -389,12 +389,21 @@ class TypedMessagesTest {
     }
 
     @Test
-    fun `thermal_status_changes is sent even when it is zero`() {
-        // The one field of the six that is never conditionally omitted by this task's own
-        // code: a phone build that knows the field exists always sends it, so its absence
-        // on the wire means only one thing -- an older build.
+    fun `thermal_status_changes is sent when it is a real, if zero, count`() {
+        // `TelemetryReporter.Sample.statusChanges` is a non-null `Long`, so a live phone
+        // always has a real count by the time it builds a frame -- zero included, since a
+        // count is not the same absence as never having reported one at all.
         val extensions = telemetry().toExtensions()
         assertEquals(JsonValue.Num(0), extensions["thermal_status_changes"])
+    }
+
+    @Test
+    fun `a null thermal_status_changes is omitted from the wire, not encoded as zero`() {
+        // The encode half of the distinction `fromWire` makes on decode: a genuinely unknown
+        // count -- `thermalStatusChanges = null`, not merely zero -- must not round-trip
+        // through this side as a reported zero.
+        val extensions = telemetry().copy(thermalStatusChanges = null).toExtensions()
+        assertFalse(extensions.containsKey("thermal_status_changes"))
     }
 
     @Test
