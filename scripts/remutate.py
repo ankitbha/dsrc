@@ -136,10 +136,11 @@ MUTATIONS = [
      '        runCatching { record("{}") }', "transport"),
     ("telemetry: the api-30 guard is removed",
      "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalReader.kt",
-     "        if (sdkInt < android.os.Build.VERSION_CODES.R) return null", "", "app"),
+     "        if (sdkInt < android.os.Build.VERSION_CODES.R) return Headroom(null, REASON_API_TOO_OLD)",
+     "", "app"),
     ("telemetry: a NaN headroom reaches the wire",
      "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalReader.kt",
-     "        if (!value.isFinite()) return null", "", "app"),
+     "        if (!value.isFinite()) return Headroom(null, REASON_NOT_A_NUMBER)", "", "app"),
     ("telemetry: achieved is a raw delta rather than a rate",
      "phone/app/src/main/kotlin/com/dsrc/phone/sensors/TelemetryReporter.kt",
      "            if (delta <= 0L) 0.0 else delta * 1e9 / elapsedNs", "            delta.toDouble()", "app"),
@@ -1668,6 +1669,61 @@ MUTATIONS = [
      '        + (f" of {pf} provenance-tagged fields" if pf is not None else "")\n'
      '    )\n',
      "python"),
+
+    # Task 37: thermal and throttle-event log for both devices.
+    ("thermal: an unreadable zone reports 0.0 instead of absent",
+     "deployment/jetson/sensors/thermal.py",
+     "            return THERMAL_BASIS_ABSENT, zones_reason",
+     "            self._last_sample_mono = now\n"
+     "            self._last_selected_celsius = 0.0\n"
+     "            return THERMAL_BASIS_MEASURED, None",
+     "python"),
+    ("thermal: a stale reading is reported as measured",
+     "deployment/jetson/sensors/thermal.py",
+     "            basis = THERMAL_BASIS_MEASURED if age <= 2 * self._interval_s else THERMAL_BASIS_STALE",
+     "            basis = THERMAL_BASIS_MEASURED",
+     "python"),
+    ("thermal: the freshness bound is a typed 2.0 rather than 2 x interval",
+     "deployment/jetson/sensors/thermal.py",
+     "age <= 2 * self._interval_s",
+     "age <= 2.0",
+     "python"),
+    ("thermal: an unobservable event stream is reported as quiet",
+     "deployment/jetson/sensors/thermal.py",
+     "            return _tick_event_record(RULE_NOT_EVALUABLE, 0, None, (MISSING_COOLING_STATE,))",
+     "            return _tick_event_record(RULE_QUIET, 0, None, ())",
+     "python"),
+    ("thermal: the jetson event count is derived by subtraction rather than counted",
+     "deployment/jetson/sensors/thermal.py",
+     "                    self._jetson_event_count += 1",
+     "                    self._jetson_event_count = self._samples - self._basis_counts[THERMAL_BASIS_MEASURED]",
+     "python"),
+    ("thermal: at_mono is read fresh rather than the phone's own report instant",
+     "deployment/jetson/sensors/thermal.py",
+     '            "skin_temp_absent": getattr(telemetry, "skin_temp_absent", None),\n'
+     '            "at_mono": telemetry_at,\n'
+     '            "absent": None,\n'
+     "        }",
+     '            "skin_temp_absent": getattr(telemetry, "skin_temp_absent", None),\n'
+     '            "at_mono": self._now(),\n'
+     '            "absent": None,\n'
+     "        }",
+     "python"),
+    ("phone: the reported status comes from the listener, not the poll",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/TelemetryReporter.kt",
+     "                thermalStatus = reading.thermalStatus,",
+     "                thermalStatus = reading.lastTransitionTo ?: reading.thermalStatus,",
+     "app"),
+    ("phone: a headroom absence collapses two distinct causes into one reason",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalReader.kt",
+     "        if (value < 0.0 || value > MAX_PLAUSIBLE_HEADROOM) return Headroom(null, REASON_OUT_OF_BAND)",
+     "        if (value < 0.0 || value > MAX_PLAUSIBLE_HEADROOM) return Headroom(null, REASON_NOT_A_NUMBER)",
+     "app"),
+    ("phone: the watcher is nulled but not unregistered",
+     "phone/app/src/main/kotlin/com/dsrc/phone/sensors/ThermalStatusWatcher.kt",
+     "        if (!registered) return\n        unregister(listener)\n        registered = false",
+     "        if (!registered) return\n        registered = false",
+     "app"),
 ]
 
 RESULTS = {
