@@ -1193,7 +1193,28 @@ def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
     outcomes = s.get("outcomes") or {}
     if episodes or outcomes:
         by_outcome = ", ".join(f"{n} {name.replace('_', ' ')}" for name, n in sorted(outcomes.items()))
-        lines.append(f"- {len(episodes)} episodes: {by_outcome}" if by_outcome else f"- {len(episodes)} episodes")
+        closed_total = sum(outcomes.values())
+        if len(episodes) == closed_total:
+            # The common case: every closed episode belongs to a source with
+            # `event_records=True`, so the open/close records this reader
+            # joined and the summary's own closed count agree, and one
+            # number describes both.
+            lines.append(f"- {len(episodes)} episodes: {by_outcome}" if by_outcome else f"- {len(episodes)} episodes")
+        else:
+            # `episodes` counts the open/close record pairs this reader
+            # joined from the log, which exist only for a source with
+            # `event_records=True`. `closed_total` is the summary's own
+            # count of every episode that closed, on every source. The two
+            # differ by exactly the episodes closed on a source with
+            # `event_records=False`, which never wrote a record to join --
+            # naming both numbers instead of one avoids implying they count
+            # the same population.
+            lines.append(
+                f"- {len(episodes)} episodes recorded (open and close events); "
+                f"{closed_total} episodes closed in total"
+                + (f": {by_outcome}" if by_outcome else "")
+                + f" -- {closed_total - len(episodes)} closed on a source with no event record"
+            )
 
     durations_by_source: dict[str, list[float]] = {}
     for episode in episodes:
@@ -1221,9 +1242,11 @@ def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
             )
         elif status == RULE_NOT_EVALUABLE:
             missing = ", ".join(row.get("missing") or [])
+            passes_attempted = row.get("passes_attempted", 0)
+            passes_unreadable = passes_attempted - row.get("passes_readable", 0)
             lines.append(
-                f"- {name}: NOT EVALUABLE on {row.get('passes_readable', 0)} of "
-                f"{row.get('passes_attempted', 0)} passes -- missing {missing}; "
+                f"- {name}: NOT EVALUABLE on {passes_unreadable} of "
+                f"{passes_attempted} passes -- missing {missing}; "
                 f"this drive says nothing about {name}'s failures during that window"
             )
         else:

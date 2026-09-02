@@ -777,6 +777,79 @@ class TestFiredRowQuantityMatchesItsDeclaredCumulativeFlag:
         assert "passes with the condition active" not in text
 
 
+class TestNotEvaluableLineNamesTheUnreadableCount:
+    """D3: the NOT EVALUABLE line rendered `passes_readable` in the slot
+    that names how many passes the source was NOT readable -- the correct
+    quantity is `passes_attempted - passes_readable`. On the drive,
+    `phone.here_errors` was unreadable on 2 of 301 passes and the line
+    asserted 299; `wire.decode_errors` and `wire.send_rejected` were
+    unreadable on 80 and the line asserted 221."""
+
+    def test_the_numerator_is_the_unreadable_pass_count_not_the_readable_one(self):
+        failures = {
+            "summary": {
+                "scan": {"passes": 301, "seq_last": 301, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {
+                    "phone.here_errors": {
+                        "status": "not_evaluable", "passes_attempted": 301, "passes_readable": 299,
+                        "episodes": 0, "total": 0, "by_reason": {}, "missing": ["session"],
+                    },
+                    "wire.decode_errors": {
+                        "status": "not_evaluable", "passes_attempted": 301, "passes_readable": 221,
+                        "episodes": 0, "total": 0, "by_reason": {}, "missing": ["session"],
+                    },
+                },
+                "outcomes": {}, "counter_went_backwards": {},
+                "blind_ticks": 0, "pipeline_exception": None,
+            },
+        }
+        text = "\n".join(_failure_lines(failures))
+        assert "phone.here_errors: NOT EVALUABLE on 2 of 301 passes" in text
+        assert "wire.decode_errors: NOT EVALUABLE on 80 of 301 passes" in text
+        assert "NOT EVALUABLE on 299 of 301 passes" not in text
+        assert "NOT EVALUABLE on 221 of 301 passes" not in text
+
+
+class TestEpisodesLineNamesTwoQuantitiesWhenTheyDisagree:
+    """D6: `episodes` (the open/close record pairs a reader can join from
+    the log -- only a source with `event_records=True` writes one) and the
+    summary's own `outcomes` total (every episode that closed, on every
+    source) are two different populations that happen to agree whenever no
+    `event_records=False` source closed an episode. `31 episodes: 34
+    recovered` presented one number standing in for both."""
+
+    def test_matching_counts_render_the_single_number_line(self):
+        failures = {
+            "episodes": [{"source": "gps.not_fresh", "duration_s": 1.0}],
+            "summary": {
+                "scan": {"passes": 1, "seq_last": 1, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {},
+                "outcomes": {"recovered": 1},
+                "counter_went_backwards": {}, "blind_ticks": 0, "pipeline_exception": None,
+            },
+        }
+        text = "\n".join(_failure_lines(failures))
+        assert "- 1 episodes: 1 recovered" in text
+
+    def test_disagreeing_counts_name_both_populations(self):
+        failures = {
+            "episodes": [{"source": "gps.not_fresh", "duration_s": 1.0} for _ in range(31)],
+            "summary": {
+                "scan": {"passes": 1, "seq_last": 1, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {},
+                "outcomes": {"recovered": 30, "open_at_end": 1, "unobservable": 3},
+                "counter_went_backwards": {}, "blind_ticks": 0, "pipeline_exception": None,
+            },
+        }
+        text = "\n".join(_failure_lines(failures))
+        assert "31 episodes recorded" in text
+        assert "34 episodes closed in total" in text
+        assert "3 closed on a source with no event record" in text
+        # The old single-number line must not appear -- it would silently
+        # claim the two populations are one.
+        assert "31 episodes: " not in text
+
+
 class TestLogHealthReachesTheReport:
 
     def test_a_dead_writer_is_named_in_the_failures_section(self, tmp_path):
