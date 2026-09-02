@@ -104,6 +104,8 @@ logio:
   system_stats_interval_s: 5.0
   thermal: true                      # /sys/class/thermal sampling + throttle events
   thermal_interval_s: 1.0            # freshness bound on the tick block is 2x this
+  failures: true                     # failure episode log + 1 Hz scan records
+  failure_interval_s: 1.0            # freshness bound on the tick block is 2x this
 
 loop:
   target_hz: 0                       # 0 = run as fast as the detector allows

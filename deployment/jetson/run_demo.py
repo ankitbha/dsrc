@@ -261,6 +261,29 @@ def _thermal_summary(thermal_sampler, stats_sampler) -> dict[str, Any] | None:
     )
 
 
+def _write_log_health(logger, run_dir: Path) -> None:
+    """`log_health.json`: the metadata logger's own final state, in a file of
+    its own rather than a key in `summary.json`.
+
+    `write_summary` opens `summary.json` with `"w"`, so folding this in would
+    truncate a good summary if this write failed, and `dropped_records` is
+    only finalised inside `close()`, which runs after `write_summary` -- so a
+    summary can never carry the logger's own final drop count. Written after
+    `close()` so `writer_failure` and `dropped_records` are whatever they will
+    ever be, and `bytes_on_disk` is the flushed, closed file's real size.
+    """
+    health = {
+        "t_wall": time.time(), "t_mono": time.monotonic(),
+        "dropped_records": logger.dropped_records,
+        "writer_failure": logger.writer_failure,
+        "queue_depth": logger._queue.maxsize,
+        "thread_alive_at_close": logger._thread.is_alive(),
+        "path": logger.path.name,
+        "bytes_on_disk": logger.path.stat().st_size if logger.path.exists() else 0,
+    }
+    (run_dir / "log_health.json").write_text(json.dumps(health, indent=2))
+
+
 def apply_scenario(config: dict, args: argparse.Namespace) -> dict | None:
     """Load a simulated-drive scenario and fold it into config/args.
 
@@ -395,7 +418,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
 
     camera.start()
 
-    logger = video_logger = stats_sampler = thermal_sampler = None
+    logger = video_logger = stats_sampler = thermal_sampler = failures = None
     telemetry = None
     run_dir = None
     if config["telemetry"]["enabled"]:
@@ -412,6 +435,13 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
 
             thermal_sampler = ThermalSampler(
                 logger, phone=phone, interval_s=config["logio"]["thermal_interval_s"],
+            ).start()
+        if config["logio"]["failures"]:
+            from logio.failure_log import FailureSampler
+
+            failures = FailureSampler(
+                logger, phone=phone, camera=camera, gps=gps, pipeline=pipeline,
+                interval_s=config["logio"]["failure_interval_s"],
             ).start()
         print(f"[run] logging to {run_dir}")
 
@@ -484,6 +514,14 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         nonlocal last_print
         try:
             _tick_loop()
+        except BaseException as exc:  # noqa: BLE001
+            # Recorded and re-raised, never swallowed. `BaseException` rather
+            # than `Exception` because `KeyboardInterrupt` reaching this thread
+            # is itself a fact worth recording, and catching it to record it
+            # costs nothing when the `raise` below puts it straight back.
+            if failures is not None:
+                failures.note_pipeline_exception(exc)
+            raise
         finally:
             # `stop.set()` used to be the last statement of the body, so anything
             # that raised took the thread out without it. The main loop is
@@ -514,6 +552,8 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 break
             frame = camera.wait_for_fresh(timeout=1.0)
             if frame is None:
+                if failures is not None:
+                    failures.note_no_frame(end_of_stream=camera.end_of_stream)
                 if camera.end_of_stream:
                     break
                 continue
@@ -552,6 +592,8 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                     record["sensing"] = outcome.to_record()
                 if thermal_sampler is not None:
                     record["thermal"] = thermal_sampler.latest()
+                if failures is not None:
+                    record["failures"] = failures.latest()
                 logger.write(record)
                 if phone is not None:
                     _log_timebase_estimates(logger, phone, last_estimate_ids, session_id)
@@ -641,6 +683,12 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         thermal_summary = _thermal_summary(thermal_sampler, stats_sampler)
         if thermal_summary is not None:
             summary["thermal"] = thermal_summary
+        if failures is not None:
+            # Stopped before it is read, for the reason `_thermal_summary`
+            # gives for its own sampler: stopping joins the thread, so its
+            # last records are on disk before `to_record()` reads its state.
+            failures.stop()
+            summary["failures"] = failures.to_record()
         if phone is not None:
             # Which clock produced the stamps and how the offset was obtained.
             # Without it a run where every stamp took the proxy path and one where
@@ -659,6 +707,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         if logger is not None:
             logger.write_summary(summary)
             logger.close()
+            _write_log_health(logger, logger.run_dir)
             print(f"[run] logs: {logger.run_dir}")
         if telemetry is not None:
             telemetry.close()
