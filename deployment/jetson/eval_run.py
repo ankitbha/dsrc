@@ -915,8 +915,15 @@ def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
                 )
                 lines.append(f"- throttle events, {device}: fired -- {count} transitions{passes}")
             elif device == "jetson":
+                # `quiet` is a claim of full observation, so it carries the
+                # same pass counters `not_evaluable` does -- a reader can
+                # check "readable throughout" instead of taking it on faith.
+                passes = (
+                    f" ({ev.get('passes_readable')} of {ev.get('passes_attempted')} passes fully readable)"
+                    if ev.get("passes_attempted") else ""
+                )
                 lines.append(f"- throttle events, jetson: quiet -- cooling devices readable throughout, "
-                             f"{count} transitions")
+                             f"{count} transitions{passes}")
             else:
                 lines.append(f"- throttle events, phone: quiet -- {count} status transitions "
                              f"in {n_phone} reports")

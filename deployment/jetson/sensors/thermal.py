@@ -770,7 +770,14 @@ class ThermalSampler:
                 passes_attempted=self._cooling_passes_attempted,
                 passes_readable=self._cooling_passes_readable,
             )
-        return _tick_event_record(RULE_QUIET, 0, None)
+        # `quiet` is a claim of full observation, exactly like `not_evaluable`
+        # is a claim of its absence -- both need the same pass counters as
+        # evidence, or the claim can only be taken on faith.
+        return _tick_event_record(
+            RULE_QUIET, 0, None,
+            passes_attempted=self._cooling_passes_attempted,
+            passes_readable=self._cooling_passes_readable,
+        )
 
     def _latest_phone_events(self) -> dict[str, Any]:
         telemetry = getattr(self._phone, "telemetry", None) if self._phone is not None else None
@@ -840,7 +847,11 @@ class ThermalSampler:
                 passes_attempted=self._cooling_passes_attempted,
                 passes_readable=self._cooling_passes_readable,
             )
-        return _summary_event_record(RULE_QUIET, 0, (), by_unit=self._jetson_events_by_unit)
+        return _summary_event_record(
+            RULE_QUIET, 0, (), by_unit=self._jetson_events_by_unit,
+            passes_attempted=self._cooling_passes_attempted,
+            passes_readable=self._cooling_passes_readable,
+        )
 
     def _phone_events_summary(self) -> dict[str, Any]:
         if self._phone_samples == 0 and not self._phone_status_changes_ever_seen:

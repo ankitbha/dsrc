@@ -316,7 +316,13 @@ def test_quiet_and_not_evaluable_are_different_records(tmp_path):
     sampler.sample_once()
     sampler.sample_once()
     quiet = sampler.latest(now=100.0)["events"]["jetson"]
-    assert quiet == {"status": RULE_QUIET, "count": 0, "last": None}
+    # `quiet` carries the same pass counters `not_evaluable` does below --
+    # the claim "readable throughout" needs the evidence that would let a
+    # reader check it, not just the bare zero count.
+    assert quiet == {
+        "status": RULE_QUIET, "count": 0, "last": None,
+        "passes_attempted": 2, "passes_readable": 2,
+    }
 
     # Half B: no cooling device exists to read at all.
     unreadable_root = tmp_path / "unreadable"
@@ -1262,6 +1268,28 @@ def test_the_summary_event_record_always_carries_a_missing_list_even_when_empty(
     assert events["missing"] == []
 
 
+def test_the_summary_quiet_record_carries_its_own_pass_counters(tmp_path):
+    """Round 3: `not_evaluable` carried `passes_attempted`/`passes_readable`
+    as the evidence for its claim, but `quiet` -- the claim of the opposite,
+    that the cooling devices were readable the whole time -- carried none, so
+    the counters appeared only when the claim being made was the one in
+    doubt. Pins the summary-level half; the tick-level half is pinned above.
+    """
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    _cooling(root, 0, "pwm-fan", "0")
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=clock)
+    for _ in range(3):
+        sampler.sample_once()
+        clock.advance(1.0)
+
+    events = sampler.to_record()["events"]["jetson"]
+    assert events["status"] == RULE_QUIET
+    assert events["passes_attempted"] == 3
+    assert events["passes_readable"] == 3
+
+
 def test_a_null_headroom_with_no_stated_reason_is_still_counted(tmp_path):
     """A null `thermal_headroom` with no `thermal_headroom_absent` used to be
     counted nowhere, so `headroom_absent_counts == {}` could mean either
@@ -1383,6 +1411,35 @@ def test_the_fired_line_names_the_pass_counts_when_incomplete(tmp_path):
     })
     md = render_markdown(analyze(run_dir), [])
     assert "throttle events, jetson: fired -- 1 transitions (2 of 3 passes fully readable)" in md
+
+
+def test_the_quiet_line_names_the_pass_counts(tmp_path):
+    """Round 3: the "quiet" line printed a bare "0 transitions" that a reader
+    could not check against anything -- fixed by carrying the same pass
+    counters the "fired" and "not evaluable" lines already carry, and
+    rendering them here too.
+    """
+    from eval_run import analyze, render_markdown
+    from tests.test_eval_run import make_tick, write_run
+
+    root = tmp_path / "sysroot"
+    _zone(root, 0, "cpu-thermal", "40000")
+    _cooling(root, 0, "pwm-fan", "0")
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=clock)
+    for _ in range(3):
+        sampler.sample_once()
+        clock.advance(1.0)
+
+    run_dir = write_run(tmp_path, [make_tick(0)], summary={
+        "ticks": 1, "camera_dropped_frames": 0, "policy_trained": False,
+        "thermal": sampler.to_record(jtop_available=None),
+    })
+    md = render_markdown(analyze(run_dir), [])
+    assert (
+        "throttle events, jetson: quiet -- cooling devices readable throughout, "
+        "0 transitions (3 of 3 passes fully readable)"
+    ) in md
 
 
 # MINOR: the two percentile conventions in the same report section must agree.
