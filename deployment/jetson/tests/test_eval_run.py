@@ -5,6 +5,7 @@ import json
 import pytest
 
 from eval_run import (
+    _failure_lines,
     _join_failure_episodes,
     analyze,
     join_phone_log,
@@ -744,6 +745,36 @@ class TestCounterWentBackwardsRendersEachStep:
         assert "## Failures" in markdown
         assert "camera.dropped_unconsumed: counter went backwards, 40 -> 3" in markdown
         assert "camera.dropped_unconsumed: counter went backwards, 9 -> 1" in markdown
+
+
+class TestFiredRowQuantityMatchesItsDeclaredCumulativeFlag:
+    """m1: `pipeline.exception` was declared `cumulative=False` in the
+    registry while `note_pipeline_exception` credits one real occurrence per
+    call, the same way `camera.blind_ticks` (`cumulative=True`) does. A
+    source's declared flag is what `_failure_lines` reads to choose between
+    "occurrences" and "passes with the condition active" -- disagreeing with
+    what `total` actually counts made the rendered report describe three
+    exceptions as three seconds the condition happened to still be true."""
+
+    def test_a_cumulative_source_reports_occurrences_not_passes(self):
+        failures = {
+            "summary": {
+                "scan": {"passes": 3, "seq_last": 3, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {
+                    "pipeline.exception": {
+                        "status": "fired", "passes_attempted": 3, "passes_readable": 3,
+                        "episodes": 1, "total": 3, "by_reason": {"RuntimeError": 3},
+                        "cumulative": True, "first_t_mono": 1.0, "last_t_mono": 3.0,
+                        "events_written": 2, "episodes_not_kept": 0,
+                    },
+                },
+                "outcomes": {}, "counter_went_backwards": {},
+                "blind_ticks": 0, "pipeline_exception": "RuntimeError",
+            },
+        }
+        text = "\n".join(_failure_lines(failures))
+        assert "pipeline.exception: FIRED -- 1 episode(s), 3 occurrences" in text
+        assert "passes with the condition active" not in text
 
 
 class TestLogHealthReachesTheReport:

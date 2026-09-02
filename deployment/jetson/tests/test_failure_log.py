@@ -1180,3 +1180,17 @@ class TestAccountingInvariantAcrossAllSources:
         # must land as three occurrences, not collapse to the first one.
         assert record["sources"]["pipeline.exception"]["total"] == 3
         assert record["sources"]["pipeline.exception"]["kept_total"] == 3
+
+
+class TestPipelineExceptionIsCumulative:
+    """m1: `pipeline.exception` counts one real occurrence per call, the same
+    way `camera.blind_ticks` does -- both are direct-notification pseudo-
+    sources with no counter of their own to diff. `camera.blind_ticks`
+    declares `cumulative=True`; `pipeline.exception` declared `False`, which
+    disagreed with what `total` actually counts and made `report.md`
+    describe three exceptions as "3 passes with the condition active"."""
+
+    def test_the_registry_declares_it_cumulative(self):
+        by_name = {s.name: s for s in REGISTRY}
+        assert by_name["pipeline.exception"].cumulative is True
+        assert by_name["pipeline.exception"].cumulative == by_name["camera.blind_ticks"].cumulative
