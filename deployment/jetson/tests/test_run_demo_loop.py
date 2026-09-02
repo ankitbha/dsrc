@@ -606,6 +606,94 @@ class _FiniteCamera:
         return frame
 
 
+class _SilentCamera:
+    """Never delivers a frame and never sets `end_of_stream`, so the only way
+    a `run_live` drive against this camera ends is the `--duration-s`
+    deadline. Exercises `note_no_frame` through the real tick loop, not the
+    `worker_for` transcription."""
+
+    def __init__(self) -> None:
+        self.dropped_frames = 0
+        self.file_recoveries = 0
+        self.source = "test"
+        self.end_of_stream = False
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def wait_for_fresh(self, timeout: float = 1.0):
+        time.sleep(0.02)
+        return None
+
+
+def _build_real_pipeline(tmp_path):
+    """A real `PerceptionPolicyPipeline` with a stub detector, built once for
+    every test in this file that drives `run_live` itself rather than a
+    transcription of the code inside it."""
+    from perception.distance import DistanceEstimator
+    from perception.observation_builder import BuilderConfig, ObservationBuilder
+    from perception.tracker import IouTracker
+    from pipeline import PerceptionPolicyPipeline
+    from policy.actor_runtime import ActorRuntime
+    from policy.advisory import AdvisoryDecoder
+    from policy.export_policy import build_random, export
+
+    class FakeDetector:
+        def infer(self, image):
+            return []
+
+        def warmup(self, iterations: int = 1) -> float:
+            return 0.0
+
+    bundle_prefix = tmp_path / "bundle" / "actor_policy"
+    bundle_prefix.parent.mkdir()
+    actor_obj, info = build_random(seed=0)
+    export(actor_obj, info, str(bundle_prefix))
+    actor = ActorRuntime(str(bundle_prefix))
+
+    pipeline = PerceptionPolicyPipeline(
+        detector=FakeDetector(),
+        tracker=IouTracker(min_hits=2),
+        distance=DistanceEstimator(
+            fx_px=800.0, cx_px=640.0, horizon_y_px=360.0, camera_height_m=1.25, ema_alpha=0.6,
+        ),
+        builder=ObservationBuilder(BuilderConfig()),
+        actor=actor,
+        advisory_decoder=AdvisoryDecoder(units="mph"),
+    )
+    return pipeline, actor
+
+
+def _real_drive_config(tmp_path):
+    config = run_demo.load_config(str(run_demo.JETSON_DIR / "config.yaml"))
+    config["telemetry"]["enabled"] = False
+    config["v2v"]["enabled"] = False
+    config["ui"]["display"] = False
+    config["logio"]["video"] = False
+    config["logio"]["system_stats"] = False
+    config["logio"]["thermal"] = False
+    config["logio"]["nmea"] = False
+    config["logio"]["metadata"] = True
+    config["logio"]["failures"] = True
+    config["logio"]["failure_interval_s"] = 0.02
+    config["paths"]["log_dir"] = str(tmp_path / "logs")
+    return config
+
+
+def _real_drive_args(**overrides):
+    base = dict(
+        duration_s=0.0, headless=True, live_rates=False, max_ticks=0,
+        no_gps=True, no_log=False, phone=False, phone_host="0.0.0.0",
+        phone_port=0, phone_wait_s=0.0, print_every=1.0, rate_heartbeat_s=1.0,
+        require_gps=False, sim_gps=None, source=None,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
 class TestRunLiveFailureSamplerIntegration:
     """M3: five of `run_live`'s six failure-sampler wiring points had no
     test executing them with a real sampler -- only the literal source-text
@@ -617,60 +705,13 @@ class TestRunLiveFailureSamplerIntegration:
     """
 
     def test_a_real_drive_writes_a_failure_summary_tick_block_and_log_health(self, tmp_path, monkeypatch):
-        from perception.distance import DistanceEstimator
-        from perception.observation_builder import BuilderConfig, ObservationBuilder
-        from perception.tracker import IouTracker
-        from pipeline import PerceptionPolicyPipeline
-        from policy.actor_runtime import ActorRuntime
-        from policy.advisory import AdvisoryDecoder
-        from policy.export_policy import build_random, export
-
-        class FakeDetector:
-            def infer(self, image):
-                return []
-
-            def warmup(self, iterations: int = 1) -> float:
-                return 0.0
-
-        bundle_prefix = tmp_path / "bundle" / "actor_policy"
-        bundle_prefix.parent.mkdir()
-        actor_obj, info = build_random(seed=0)
-        export(actor_obj, info, str(bundle_prefix))
-        actor = ActorRuntime(str(bundle_prefix))
-
-        pipeline = PerceptionPolicyPipeline(
-            detector=FakeDetector(),
-            tracker=IouTracker(min_hits=2),
-            distance=DistanceEstimator(
-                fx_px=800.0, cx_px=640.0, horizon_y_px=360.0, camera_height_m=1.25, ema_alpha=0.6,
-            ),
-            builder=ObservationBuilder(BuilderConfig()),
-            actor=actor,
-            advisory_decoder=AdvisoryDecoder(units="mph"),
-        )
+        pipeline, actor = _build_real_pipeline(tmp_path)
         camera = _FiniteCamera(n_frames=6)
 
         monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
 
-        config = run_demo.load_config(str(run_demo.JETSON_DIR / "config.yaml"))
-        config["telemetry"]["enabled"] = False
-        config["v2v"]["enabled"] = False
-        config["ui"]["display"] = False
-        config["logio"]["video"] = False
-        config["logio"]["system_stats"] = False
-        config["logio"]["thermal"] = False
-        config["logio"]["nmea"] = False
-        config["logio"]["metadata"] = True
-        config["logio"]["failures"] = True
-        config["logio"]["failure_interval_s"] = 0.02
-        config["paths"]["log_dir"] = str(tmp_path / "logs")
-
-        args = argparse.Namespace(
-            duration_s=0.0, headless=True, live_rates=False, max_ticks=0,
-            no_gps=True, no_log=False, phone=False, phone_host="0.0.0.0",
-            phone_port=0, phone_wait_s=0.0, print_every=1.0, rate_heartbeat_s=1.0,
-            require_gps=False, sim_gps=None, source=None,
-        )
+        config = _real_drive_config(tmp_path)
+        args = _real_drive_args()
 
         rc = run_demo.run_live(config, args)
         assert rc == 0
@@ -702,6 +743,103 @@ class TestRunLiveFailureSamplerIntegration:
         health = json.loads((run_dir / "log_health.json").read_text())
         assert health["writer_failure"] is None
         assert health["path"] == "metadata.jsonl"
+
+
+class TestWorkerExceptionReachesTheRealThread:
+    """M3: `test_run_live_wires_the_except_and_the_reraise` above proves a
+    shape -- that `note_pipeline_exception` appears somewhere in the handler's
+    subtree and that the handler's last statement is a bare `raise` -- and
+    `TestWorkerRecordsAndReraises` proves a behaviour, but only on
+    `worker_for`, a hand transcription of `run_live`'s own `worker()`. Neither
+    one runs if `run_live`'s actual handler is mutated to keep both shapes
+    while breaking what they mean: wrapping the `note_pipeline_exception`
+    call in `if 0:` still has the call in the AST, and inserting `if True:
+    return` before the final `raise` leaves that `raise` exactly where the
+    AST check looks for it, without ever reaching it. This drives `run_live`
+    for real, so both mutants fail here.
+    """
+
+    def test_the_exception_reaches_the_threads_own_hook_and_is_recorded(self, tmp_path, monkeypatch):
+        import threading
+
+        pipeline, actor = _build_real_pipeline(tmp_path)
+
+        def raising_step(*args, **kwargs):
+            raise RuntimeError("perception blew up")
+
+        monkeypatch.setattr(pipeline, "step", raising_step)
+        camera = _FiniteCamera(n_frames=3)
+        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
+
+        caught: list[BaseException] = []
+        # `threading.excepthook` is what an uncaught exception on a
+        # background thread actually reaches -- the default one prints to
+        # stderr and nothing programmatic ever sees it. Capturing it here
+        # is the only way to observe, from outside `run_live`, whether the
+        # `raise` in `worker()`'s `except` clause was actually reached
+        # rather than swallowed by a mutation that keeps the statement but
+        # returns before it.
+        monkeypatch.setattr(threading, "excepthook", lambda args: caught.append(args.exc_value))
+
+        config = _real_drive_config(tmp_path)
+        args = _real_drive_args()
+        rc = run_demo.run_live(config, args)
+        assert rc == 0
+
+        assert len(caught) == 1, "the exception must reach the thread's own excepthook exactly once"
+        assert isinstance(caught[0], RuntimeError)
+        assert str(caught[0]) == "perception blew up"
+
+        run_dir = next((tmp_path / "logs").iterdir())
+        summary = json.loads((run_dir / "summary.json").read_text())
+        assert summary["failures"]["pipeline_exception"] == "RuntimeError"
+
+        records = [
+            json.loads(line) for line in (run_dir / "metadata.jsonl").read_text().splitlines() if line.strip()
+        ]
+        opens = [
+            r for r in records
+            if r.get("type") == "failure_event" and r.get("phase") == "open"
+            and r.get("source") == "pipeline.exception"
+        ]
+        assert len(opens) == 1
+
+
+class TestSilentCameraNoteNoFrameReachesTheRealLoop:
+    """M3's other half: `test_run_live_calls_note_no_frame_before_the_end_of_stream_check`
+    checks statement order inside `run_live`'s own `if frame is None:` block,
+    and `ast.walk` finds a call inside a dead `if 0:` branch or an
+    uninvoked lambda just as readily as a reachable one. This drives a camera
+    that never yields a frame through the real tick loop and asserts the
+    sampler actually recorded it."""
+
+    def test_a_silent_camera_is_recorded_through_the_real_tick_loop(self, tmp_path, monkeypatch):
+        pipeline, actor = _build_real_pipeline(tmp_path)
+        camera = _SilentCamera()
+        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
+
+        config = _real_drive_config(tmp_path)
+        # No `end_of_stream` is coming from this camera -- the deadline is the
+        # only thing that ends the drive.
+        args = _real_drive_args(duration_s=0.3)
+        rc = run_demo.run_live(config, args)
+        assert rc == 0
+
+        run_dir = next((tmp_path / "logs").iterdir())
+        summary = json.loads((run_dir / "summary.json").read_text())
+        assert summary["failures"]["blind_ticks"] > 0
+
+        records = [
+            json.loads(line) for line in (run_dir / "metadata.jsonl").read_text().splitlines() if line.strip()
+        ]
+        # A drive the camera never delivered a single frame on writes no tick
+        # records at all -- the failure log is the only record of it.
+        assert not any(r.get("type") == "tick" for r in records)
+        opens = [
+            r for r in records
+            if r.get("type") == "failure_event" and r.get("source") == "camera.blind_ticks"
+        ]
+        assert len(opens) >= 1
 
 
 class TestTickSessionId:
