@@ -615,11 +615,18 @@ def test_the_baseline_resets_on_a_redial_even_when_the_new_counters_briefly_coin
     assert after["last"] == before["last"]
 
 
-def test_a_count_rise_with_no_transition_fields_is_never_emitted_as_an_event(tmp_path):
+def test_a_count_rise_with_no_transition_fields_is_still_counted_and_logged(tmp_path):
     """A delta greater than zero can appear with no redial at all if a report
     carries a raised `thermal_status_changes` but no `thermal_change_from`/
-    `to` -- that must not synthesize a from-None-to-None event, the shape a
-    copied-not-accumulated count produced across a redial before this fix.
+    `to` -- reachable from a torn read on the phone (`changesCount` and
+    `lastTransition` are two separate lock acquisitions with the status poll
+    between them, so the very first transition of a service run can land with
+    the count already at 1 and the transition still null) as well as an older
+    build. Round 2: this used to be discarded outright, which is a different
+    defect from the redial case above -- there, `_prev_status_changes` is
+    `None` and no delta is computed at all; here a real baseline exists and a
+    real rise happened, so it must be counted and logged, with the missing
+    descriptors named absent rather than invented.
     """
     phone = _FakePhone()
     sink = _Sink()
@@ -632,12 +639,79 @@ def test_a_count_rise_with_no_transition_fields_is_never_emitted_as_an_event(tmp
     clock.advance(1.0)
     sampler.sample_once()
 
-    assert [r for r in sink.records if r["type"] == "thermal_event"] == []
-    assert sampler.latest(now=clock.now)["events"]["phone"]["count"] == 0
+    events = [r for r in sink.records if r["type"] == "thermal_event"]
+    assert len(events) == 1
+    assert events[0]["from"] is None
+    assert events[0]["to"] is None
+
+    tick_events = sampler.latest(now=clock.now)["events"]["phone"]
+    assert tick_events["status"] == RULE_FIRED
+    assert tick_events["count"] == 1
+
+    summary = sampler.to_record()["events"]["phone"]
+    assert summary["count"] == 1
+    assert summary["count_without_descriptors"] == 1
+
+
+def test_a_half_described_transition_is_not_counted_as_without_descriptors(tmp_path):
+    """Only a rise with *neither* endpoint named counts toward
+    `count_without_descriptors` -- one whose `from` (or `to`) survived the
+    read still describes something, and folding it into the same bucket as a
+    fully-absent one would hide the difference between "nothing came
+    through" and "half of it did".
+    """
+    phone = _FakePhone()
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, phone=phone, clock=clock)
+
+    phone.telemetry = _telemetry(thermal_status_changes=0)
+    sampler.sample_once()
+    phone.telemetry = _telemetry(thermal_status_changes=1, thermal_change_from="nominal", thermal_change_to=None)
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    events = [r for r in sink.records if r["type"] == "thermal_event"]
+    assert len(events) == 1
+    assert events[0]["from"] == "nominal"
+    assert events[0]["to"] is None
+
+    summary = sampler.to_record()["events"]["phone"]
+    assert summary["count"] == 1
+    assert summary["count_without_descriptors"] == 0
+
+
+def test_a_multi_transition_gap_is_recorded_in_the_summary(tmp_path):
+    """D9: a report carrying a rise of more than one collapses to a single
+    `thermal_event` line -- only the most recent transition is nameable -- so
+    `sum(count)` legitimately does not equal the number of lines here, the
+    plan's own stated exception. The gap itself must still be visible rather
+    than only inferable by cross-referencing the count against the lines.
+    """
+    phone = _FakePhone()
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, phone=phone, clock=clock)
+
+    phone.telemetry = _telemetry(thermal_status_changes=0)
+    sampler.sample_once()
+    phone.telemetry = _telemetry(
+        thermal_status_changes=2, thermal_change_from="light", thermal_change_to="severe",
+    )
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    events = [r for r in sink.records if r["type"] == "thermal_event"]
+    assert len(events) == 1, "only the most recent transition is nameable"
+
+    summary = sampler.to_record()["events"]["phone"]
+    assert summary["count"] == 2
+    assert summary["gap_events"] == 1
 
 
 # C2: cooling readable on some passes and not others is not_evaluable, never
-# quiet.
+# quiet -- unless a real transition fired, which must survive the same
+# incomplete observation instead of being reported as zero.
 
 
 def test_partial_cooling_readability_is_not_evaluable_not_quiet(tmp_path):
@@ -662,6 +736,127 @@ def test_partial_cooling_readability_is_not_evaluable_not_quiet(tmp_path):
     assert tick_events["status"] == RULE_NOT_EVALUABLE
     assert tick_events["passes_attempted"] == 2
     assert tick_events["passes_readable"] == 1
+
+
+def test_a_fired_jetson_event_survives_a_later_unreadable_pass(tmp_path):
+    """Round 2's own regression: `pwm-fan` reads 0 then 1 (one real
+    `thermal_event` line), then a later pass cannot read `cur_state` at all.
+    Reporting `not_evaluable`/`count: 0` here would discard a transition this
+    sampler actually observed and logged -- the incompleteness belongs beside
+    the real count, in `missing` and the pass counters, not in place of it.
+    """
+    root = tmp_path / "root"
+    _cooling(root, 0, "pwm-fan", "0")
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, jetson=JetsonThermal(root=root), clock=clock)
+    sampler.sample_once()  # pass 1: readable, state 0
+
+    _cooling(root, 0, "pwm-fan", "1")
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 2: readable, state 1 -- one event
+
+    (root / "cooling_device0" / "cur_state").unlink()
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 3: cur_state will not read
+
+    events = [r for r in sink.records if r["type"] == "thermal_event"]
+    assert len(events) == 1
+
+    tick = sampler.latest(now=clock.now)["events"]["jetson"]
+    assert tick["status"] == RULE_FIRED
+    assert tick["count"] == 1
+    assert tick["missing"] == [MISSING_COOLING_STATE]
+    assert tick["passes_attempted"] == 3
+    assert tick["passes_readable"] == 2
+
+    summary = sampler.to_record()["events"]["jetson"]
+    assert summary["status"] == RULE_FIRED
+    assert summary["count"] == 1
+    assert summary["by_unit"] == {"pwm-fan": 1}
+    assert summary["missing"] == [MISSING_COOLING_STATE]
+    assert summary["passes_attempted"] == 3
+    assert summary["passes_readable"] == 2
+
+
+# Round 2 M1: a cooling device whose own `type` stops reading is attempted
+# and unreadable, not filed as nothing having been attempted at all.
+
+
+def test_a_cooling_device_whose_type_stops_reading_counts_as_attempted(tmp_path):
+    root = tmp_path / "root"
+    _cooling(root, 0, "pwm-fan", "0")
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=clock)
+    sampler.sample_once()  # pass 1: readable
+
+    (root / "cooling_device0" / "type").unlink()
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 2: `type` itself will not read
+
+    (root / "cooling_device0" / "type").write_text("pwm-fan")
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 3: readable again
+
+    summary = sampler.to_record()["events"]["jetson"]
+    assert summary["status"] == RULE_NOT_EVALUABLE
+    assert summary["passes_attempted"] == 3
+    assert summary["passes_readable"] == 2
+
+
+def test_read_cooling_reports_a_device_whose_type_will_not_read_as_missing(tmp_path):
+    root = tmp_path / "root"
+    directory = root / "cooling_device0"
+    directory.mkdir(parents=True)
+    (directory / "cur_state").write_text("0")  # no `type` file at all
+
+    states, missing = JetsonThermal(root=root).read_cooling()
+    assert states == {}
+    assert missing == ("cooling_device0",)
+
+
+# Round 2 m9: a device sharing a `type` name with one that failed to read
+# still gets its own attempt, rather than being skipped because the name is
+# in `missing`.
+
+
+def test_a_second_device_sharing_a_failed_names_type_still_gets_read(tmp_path):
+    root = tmp_path / "root"
+    _cooling(root, 0, "pwm-fan", "0")
+    (root / "cooling_device0" / "cur_state").unlink()  # listed, unreadable
+    _cooling(root, 1, "pwm-fan", "1")  # same type name, readable
+
+    states, missing = JetsonThermal(root=root).read_cooling()
+    assert states == {"pwm-fan": 1}
+    assert missing == ("pwm-fan",)
+
+
+def test_prev_cooling_merges_rather_than_replaces_across_a_missed_pass(tmp_path):
+    """A device that fails to read on one pass keeps the value it last gave,
+    so a real transition spanning the gap is still detected once it reads
+    again -- replacing the whole map on that pass instead of merging into it
+    would forget the device entirely and miss the transition.
+    """
+    root = tmp_path / "root"
+    _cooling(root, 0, "pwm-fan", "0")
+    _cooling(root, 1, "tegra-heavy", "0")
+    sink = _Sink()
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=sink, jetson=JetsonThermal(root=root), clock=clock)
+    sampler.sample_once()  # pass 1: both read, state 0
+
+    (root / "cooling_device1" / "cur_state").unlink()  # pass 2: tegra-heavy unreadable
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    _cooling(root, 1, "tegra-heavy", "1")  # pass 3: reads again, now 1
+    clock.advance(1.0)
+    sampler.sample_once()
+
+    events = [r for r in sink.records if r["type"] == "thermal_event" and r["unit"] == "tegra-heavy"]
+    assert len(events) == 1
+    assert events[0]["from"] == 0
+    assert events[0]["to"] == 1
 
 
 # C3: a cooling device that lists but will not read is named as missing, not
@@ -939,13 +1134,78 @@ def test_report_line_names_every_phone_status_not_only_the_modal_one(tmp_path):
     md = render_markdown(result, [])
     assert "severe" in md
     assert "nominal" in md
+    # The counts themselves, not only that both names appear: the line is
+    # sorted by descending count, so the more frequent status is named first.
+    assert "nominal 100" in md
+    assert "severe 78" in md
+    assert md.index("nominal 100") < md.index("severe 78")
+
+
+def test_the_not_evaluable_line_names_the_pass_counts(tmp_path):
+    from eval_run import analyze, render_markdown
+    from tests.test_eval_run import make_tick, write_run
+
+    root = tmp_path / "sysroot"
+    _zone(root, 0, "cpu-thermal", "40000")
+    _cooling(root, 0, "pwm-fan", "0")
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=clock)
+    sampler.sample_once()  # pass 1: readable
+
+    (root / "cooling_device0" / "cur_state").unlink()
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 2: unreadable
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 3: unreadable
+
+    run_dir = write_run(tmp_path, [make_tick(0)], summary={
+        "ticks": 1, "camera_dropped_frames": 0, "policy_trained": False,
+        "thermal": sampler.to_record(jtop_available=None),
+    })
+    md = render_markdown(analyze(run_dir), [])
+    assert "(1 of 3 passes fully readable)" in md
+
+
+def test_the_fired_line_names_the_pass_counts_when_incomplete(tmp_path):
+    """C2's tick/summary fix reaches `eval_run`'s rendering too: a real count
+    observed under incomplete observation must say so on the "fired" line,
+    not only on the "not evaluable" one.
+    """
+    from eval_run import analyze, render_markdown
+    from tests.test_eval_run import make_tick, write_run
+
+    root = tmp_path / "sysroot"
+    _cooling(root, 0, "pwm-fan", "0")
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=clock)
+    sampler.sample_once()  # pass 1: readable, state 0
+
+    _cooling(root, 0, "pwm-fan", "1")
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 2: readable, state 1 -- fires
+
+    (root / "cooling_device0" / "cur_state").unlink()
+    clock.advance(1.0)
+    sampler.sample_once()  # pass 3: unreadable
+
+    run_dir = write_run(tmp_path, [make_tick(0)], summary={
+        "ticks": 1, "camera_dropped_frames": 0, "policy_trained": False,
+        "thermal": sampler.to_record(jtop_available=None),
+    })
+    md = render_markdown(analyze(run_dir), [])
+    assert "throttle events, jetson: fired -- 1 transitions (2 of 3 passes fully readable)" in md
 
 
 # MINOR: the two percentile conventions in the same report section must agree.
 
 
 def test_the_two_percentile_conventions_agree():
-    values = [40.0, 41.5, 42.0, 47.5, 50.0, 33.2, 48.9]
+    # n = 8, not 7: with an odd sample count, `0.5 * (n - 1)` is always a
+    # whole number, so p50 lands on a real value under both a nearest-rank
+    # and a linearly-interpolated convention and the assertion below cannot
+    # tell the two apart. An even count makes both p50 and p95 land between
+    # two ranks, so both assertions actually exercise the interpolation.
+    values = [40.0, 41.5, 42.0, 47.5, 50.0, 33.2, 48.9, 45.0]
     a = _pctl(values)
     b = eval_run_pctl(values)
     assert a["min"] == pytest.approx(b["min"])
@@ -966,6 +1226,50 @@ def test_thermal_lines_render_something_when_the_summary_is_missing():
     text = "\n".join(lines)
     assert "## Thermal" in text
     assert "stale 168" in text
+    assert "no summary was written" in text
+
+
+# m7: `basis_counts` carries no "stale" entry that is 0 by construction.
+
+
+def test_basis_counts_has_no_entry_that_can_never_be_incremented(tmp_path):
+    """`stale` is a `ThermalReading.basis` value `_latest_jetson` assigns only
+    when its own caller asks for a reading -- never while a sample is being
+    taken, which is the only time this accumulator is touched. There is no
+    code path that could ever move it, so it does not belong in the JSON
+    where it would read as a measurement of something that happens.
+    """
+    root = tmp_path / "root"
+    _zone(root, 0, "cpu-thermal", "40000")
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
+    sampler.sample_once()
+    assert set(sampler.to_record()["jetson"]["basis_counts"]) == {
+        thermal.THERMAL_BASIS_MEASURED, thermal.THERMAL_BASIS_ABSENT,
+    }
+
+
+# m8: `_thermal_lines` must not raise on a record that carries
+# `passes_attempted` without its sibling `passes_readable`.
+
+
+def test_thermal_lines_do_not_crash_on_a_partial_passes_record():
+    from eval_run import _thermal_lines
+
+    lines = _thermal_lines({
+        "summary": {
+            "jetson": {"samples": 0, "temp_c": None},
+            "phone": {"samples": 0},
+            "events": {
+                "jetson": {
+                    "status": RULE_NOT_EVALUABLE, "count": 0,
+                    "missing": [MISSING_COOLING_STATE], "passes_attempted": 2,
+                },
+                "phone": {"status": RULE_QUIET, "count": 0},
+            },
+        },
+        "ticks_by_basis": {},
+    })
+    assert any("NOT EVALUABLE" in line for line in lines)
 
 
 # -- the no-rate-change contract: the controller is byte-identical ----------

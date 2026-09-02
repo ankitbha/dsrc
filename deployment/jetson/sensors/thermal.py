@@ -181,6 +181,18 @@ class JetsonThermal:
         readable device among two does not mean the census is complete, and a
         caller that only asked "did anything read" could not tell the two
         apart.
+
+        A device whose own `type` will not read is entered into `missing`
+        keyed by its directory name, the same as one whose `cur_state` will
+        not: both listed and neither gave a usable reading, so both count as
+        attempted. Without this, such a device fell into neither `states` nor
+        `missing`, which a caller cannot tell apart from a root with no
+        `cooling_device*` entries at all.
+
+        Deduplication against a repeated `type` name only ever skips a device
+        that already has a state in `states` -- not one recorded in `missing`
+        -- so a device sharing a name with one that failed to read still gets
+        its own attempt.
         """
         try:
             if not self.root.is_dir():
@@ -193,7 +205,10 @@ class JetsonThermal:
         missing: list[str] = []
         for entry in entries:
             name = _read_trimmed(entry / "type")
-            if name is None or name in states or name in missing:
+            if name is None:
+                missing.append(entry.name)
+                continue
+            if name in states:
                 continue
             raw = _read_trimmed(entry / "cur_state")
             if raw is None:
@@ -267,8 +282,9 @@ def _pctl(values: list[float]) -> dict[str, float]:
     n = len(ordered)
 
     def at(fraction: float) -> float:
-        if n == 1:
-            return ordered[0]
+        # `n == 1` needs no special case: `rank` is then always 0, `lo` and
+        # `hi` both 0, and the interpolation term is zero -- the general
+        # formula already returns `ordered[0]`.
         rank = fraction * (n - 1)
         lo = int(rank)
         hi = min(lo + 1, n - 1)
@@ -343,6 +359,17 @@ class ThermalSampler:
         self._phone_event_count = 0
         self._phone_last_event: dict[str, Any] | None = None
         self._phone_status_changes_ever_seen = False
+        #: Rises counted with neither `thermal_change_from` nor `_to` carried
+        #: -- reachable from a torn read on the phone (D9's own transition
+        #: fields sit behind a separate lock acquisition from the count that
+        #: moved with them) as well as an older build. Counted apart from
+        #: `_phone_event_count` rather than subtracted from it, so the total
+        #: stays the number of real transitions either way.
+        self._phone_count_without_descriptors = 0
+        #: Passes where the rise was more than one, so only the most recent
+        #: transition could be named and the ones between it and the last
+        #: report have no `thermal_event` line of their own (D9).
+        self._phone_gap_events = 0
 
         # -- summary accumulators ----------------------------------------------
         self._samples = 0
@@ -350,7 +377,10 @@ class ThermalSampler:
         self._zones_seen: set[str] = set()
         self._per_zone_max: dict[str, float] = {}
         self._cooling_devices: set[str] = set()
-        self._basis_counts: dict[str, int] = {b: 0 for b in THERMAL_BASES}
+        #: `stale` is a `ThermalReading.basis` value `_latest_jetson` assigns
+        #: only when its own caller asks for a reading, never while a sample
+        #: is being taken -- there is no pass here that could ever set it.
+        self._basis_counts: dict[str, int] = {THERMAL_BASIS_MEASURED: 0, THERMAL_BASIS_ABSENT: 0}
         self._absent_reasons: dict[str, int] = {}
 
         self._phone_samples = 0
@@ -528,19 +558,29 @@ class ThermalSampler:
             if delta > 0:
                 frm = getattr(telemetry, "thermal_change_from", None)
                 to = getattr(telemetry, "thermal_change_to", None)
-                # Both null is not a transition anyone can describe, and
-                # never worth writing as one.
-                if frm is not None or to is not None:
-                    at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)
-                    self._phone_event_count += delta
-                    self._phone_last_event = {"at_mono": now, "from": frm, "to": to}
-                    self._phone_seq += 1
-                    self._write_event(
-                        device="phone", seq=self._phone_seq, now=now,
-                        clock="phone", at_ns=at_ns,
-                        source="thermal_status", unit=None, from_=frm, to=to,
-                        temp_c=getattr(telemetry, "skin_temp_c", None), zones=None,
-                    )
+                # A rise is real evidence a transition happened even when
+                # neither endpoint survived the report: on the phone,
+                # `changesCount` and `lastTransition` are two separate reads
+                # of the watcher's lock with the status poll between them, so
+                # the very first transition of a service run can land with
+                # the count already at 1 and the transition still null.
+                # Discarding the rise here instead of naming it absent would
+                # lose it for good -- the baseline below still advances past
+                # it, so no later report ever sees the gap again.
+                at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)
+                self._phone_event_count += delta
+                self._phone_last_event = {"at_mono": now, "from": frm, "to": to}
+                self._phone_seq += 1
+                if frm is None and to is None:
+                    self._phone_count_without_descriptors += delta
+                if delta > 1:
+                    self._phone_gap_events += 1
+                self._write_event(
+                    device="phone", seq=self._phone_seq, now=now,
+                    clock="phone", at_ns=at_ns,
+                    source="thermal_status", unit=None, from_=frm, to=to,
+                    temp_c=getattr(telemetry, "skin_temp_c", None), zones=None,
+                )
         self._prev_status_changes = changes
 
     def _accumulate_phone_summary(self, telemetry: Any, telemetry_at: float | None, now: float) -> None:
@@ -671,14 +711,28 @@ class ThermalSampler:
         }
 
     def _latest_jetson_events(self) -> dict[str, Any]:
+        # A transition this sampler actually observed and logged is `fired`
+        # regardless of whether some other cooling device on the same pass,
+        # or a later pass, ever gave a reading -- that incompleteness rides
+        # along in `missing` and the pass counters instead of erasing the
+        # count. `not_evaluable` is reserved for zero transitions with
+        # incomplete observation, where there is nothing else to report.
+        if self._jetson_event_count > 0:
+            if self._cooling_fully_readable():
+                return _tick_event_record(RULE_FIRED, self._jetson_event_count, self._jetson_last_event)
+            return _tick_event_record(
+                RULE_FIRED, self._jetson_event_count, self._jetson_last_event,
+                (MISSING_COOLING_STATE,),
+                passes_attempted=self._cooling_passes_attempted,
+                passes_readable=self._cooling_passes_readable,
+            )
         if not self._cooling_fully_readable():
             return _tick_event_record(
                 RULE_NOT_EVALUABLE, 0, None, (MISSING_COOLING_STATE,),
                 passes_attempted=self._cooling_passes_attempted,
                 passes_readable=self._cooling_passes_readable,
             )
-        status = RULE_FIRED if self._jetson_event_count > 0 else RULE_QUIET
-        return _tick_event_record(status, self._jetson_event_count, self._jetson_last_event)
+        return _tick_event_record(RULE_QUIET, 0, None)
 
     def _latest_phone_events(self) -> dict[str, Any]:
         telemetry = getattr(self._phone, "telemetry", None) if self._phone is not None else None
@@ -728,14 +782,27 @@ class ThermalSampler:
         }
 
     def _jetson_events_summary(self) -> dict[str, Any]:
+        # As `_latest_jetson_events`: a real count outranks incomplete
+        # observation, which is carried alongside it rather than in place of
+        # it.
+        if self._jetson_event_count > 0:
+            if self._cooling_fully_readable():
+                return _summary_event_record(
+                    RULE_FIRED, self._jetson_event_count, (), by_unit=self._jetson_events_by_unit,
+                )
+            return _summary_event_record(
+                RULE_FIRED, self._jetson_event_count, (MISSING_COOLING_STATE,),
+                by_unit=self._jetson_events_by_unit,
+                passes_attempted=self._cooling_passes_attempted,
+                passes_readable=self._cooling_passes_readable,
+            )
         if not self._cooling_fully_readable():
             return _summary_event_record(
                 RULE_NOT_EVALUABLE, 0, (MISSING_COOLING_STATE,), by_unit={},
                 passes_attempted=self._cooling_passes_attempted,
                 passes_readable=self._cooling_passes_readable,
             )
-        status = RULE_FIRED if self._jetson_event_count > 0 else RULE_QUIET
-        return _summary_event_record(status, self._jetson_event_count, (), by_unit=self._jetson_events_by_unit)
+        return _summary_event_record(RULE_QUIET, 0, (), by_unit=self._jetson_events_by_unit)
 
     def _phone_events_summary(self) -> dict[str, Any]:
         if self._phone_samples == 0 and not self._phone_status_changes_ever_seen:
@@ -743,4 +810,8 @@ class ThermalSampler:
         if not self._phone_status_changes_ever_seen:
             return _summary_event_record(RULE_NOT_EVALUABLE, 0, (MISSING_STATUS_CHANGES,))
         status = RULE_FIRED if self._phone_event_count > 0 else RULE_QUIET
-        return _summary_event_record(status, self._phone_event_count, ())
+        return _summary_event_record(
+            status, self._phone_event_count, (),
+            count_without_descriptors=self._phone_count_without_descriptors,
+            gap_events=self._phone_gap_events,
+        )

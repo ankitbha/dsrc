@@ -897,7 +897,7 @@ def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
             if status == RULE_NOT_EVALUABLE:
                 missing = ", ".join(ev.get("missing") or [])
                 passes = (
-                    f" ({ev['passes_readable']} of {ev['passes_attempted']} passes fully readable)"
+                    f" ({ev.get('passes_readable')} of {ev.get('passes_attempted')} passes fully readable)"
                     if ev.get("passes_attempted") else ""
                 )
                 lines.append(
@@ -905,7 +905,15 @@ def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
                     f"this drive says nothing about whether the {device} throttled"
                 )
             elif status == RULE_FIRED:
-                lines.append(f"- throttle events, {device}: fired -- {count} transitions")
+                # `missing` can accompany `fired` too (a real transition observed
+                # while some cooling device on the same pass, or a later pass,
+                # never gave a reading) -- named here so the count is not read as
+                # a complete picture when it is not.
+                passes = (
+                    f" ({ev.get('passes_readable')} of {ev.get('passes_attempted')} passes fully readable)"
+                    if ev.get("missing") else ""
+                )
+                lines.append(f"- throttle events, {device}: fired -- {count} transitions{passes}")
             elif device == "jetson":
                 lines.append(f"- throttle events, jetson: quiet -- cooling devices readable throughout, "
                              f"{count} transitions")
