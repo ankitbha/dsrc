@@ -619,6 +619,12 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # the same tick log otherwise.
             summary["sensing"] = sensing.to_record()
         if thermal_sampler is not None:
+            # Stopped before its own record is read: the sampler's thread runs
+            # independently of everything else in this block, and reading
+            # `to_record()` first can race a sample the thread is mid-way
+            # through writing, so `samples` here would undercount the
+            # `thermal_sample` lines already on disk by one.
+            thermal_sampler.stop()
             summary["thermal"] = thermal_sampler.to_record(
                 jtop_available=stats_sampler.available if stats_sampler is not None else None
             )
@@ -637,8 +643,6 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             video_logger.close()
         if stats_sampler is not None:
             stats_sampler.stop()
-        if thermal_sampler is not None:
-            thermal_sampler.stop()
         if logger is not None:
             logger.write_summary(summary)
             logger.close()

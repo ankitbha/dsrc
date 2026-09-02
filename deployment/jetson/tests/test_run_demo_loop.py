@@ -247,6 +247,51 @@ class TestTheSensingRecordIsBuiltByTickOutcome:
         assert 'record["sensing"] = outcome.to_record()' in source
 
 
+class TestThermalSamplerIntegration:
+    """`run_live`'s four thermal integration points: constructing the sampler
+    under its config gate, writing the tick block, writing the summary block,
+    and stopping it in the `finally`. Like `TestTheSensingRecordIsBuiltByTickOutcome`
+    above, none of these need the detector/policy bundle/config/camera
+    machinery a full run does, so this asserts the literal wiring rather than
+    driving one.
+    """
+
+    def test_the_sampler_is_constructed_under_its_config_gate(self):
+        import inspect
+
+        source = inspect.getsource(run_demo.run_live)
+        assert 'if config["logio"]["thermal"]:' in source
+        assert "thermal_sampler = ThermalSampler(" in source
+
+    def test_the_tick_writes_the_samplers_own_block(self):
+        # Also the boundary of the mutation named "the tick's thermal block
+        # reads sensing.reference instead of the sampler": that substitution
+        # can only be written here, where `outcome` is in scope -- thermal.py
+        # itself has no `sensing` concept to read from.
+        import inspect
+
+        source = inspect.getsource(run_demo.run_live)
+        assert 'record["thermal"] = thermal_sampler.latest()' in source
+
+    def test_the_summary_writes_the_samplers_own_record(self):
+        import inspect
+
+        source = inspect.getsource(run_demo.run_live)
+        assert 'summary["thermal"] = thermal_sampler.to_record(' in source
+
+    def test_the_sampler_is_stopped_before_its_record_is_read(self):
+        # Stopped before `to_record()`, not after: reading the snapshot while
+        # the thread might still be mid-write would undercount the
+        # `thermal_sample` lines already on disk by one.
+        import inspect
+
+        source = inspect.getsource(run_demo.run_live)
+        assert "thermal_sampler.stop()" in source
+        assert source.index("thermal_sampler.stop()") < source.index(
+            'summary["thermal"] = thermal_sampler.to_record('
+        )
+
+
 class TestTickSessionId:
     """`run_live` used to read `phone.session.session_id` twice -- once for the
     tick record, once inside `_log_timebase_estimates` -- and a rebind between
