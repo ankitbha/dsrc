@@ -436,6 +436,29 @@ class TestTheAccelerationProvenanceMatchesTheBranchTaken:
         assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
         assert result.obs["ego_acceleration"] == pytest.approx(0.0, abs=1e-6)
 
+    def test_speed_slope_refuses_a_stale_window_on_its_own_authority(self):
+        """`_speed_slope` carries its own `if not gps_fresh: return 0.0,
+        False` rather than trusting the window to already be empty by the
+        time it is called with `gps_fresh=False`. Every other test in this
+        class reaches `_speed_slope` through `build`, which clears the
+        window on the same tick it would pass `gps_fresh=False` in, so a
+        window with samples never actually reaches this guard through
+        `build`. Populate the window directly and call `_speed_slope`
+        itself, bypassing `build`, so the guard is exercised on a window it
+        did not clear.
+        """
+        builder = ObservationBuilder(BuilderConfig())
+        t = 1000.0
+        for i in range(5):
+            builder._ego.speed_samples.append((t + i * 0.2, 20.0 - 3.0 * i * 0.2))
+        span = builder._ego.speed_samples[-1][0] - builder._ego.speed_samples[0][0]
+        assert len(builder._ego.speed_samples) >= 3
+        assert span > 0.3
+
+        accel, derived = builder._speed_slope(False)
+        assert derived is False
+        assert accel == pytest.approx(0.0)
+
 
 class TestCoverageAndMissingness:
     """`field_sources` after this task covers all 39 encoder slots, and
