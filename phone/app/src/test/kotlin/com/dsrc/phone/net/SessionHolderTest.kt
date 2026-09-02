@@ -1,9 +1,12 @@
 package com.dsrc.phone.net
 
 import com.dsrc.phone.config.LinkConfig
+import com.dsrc.phone.log.FailureKinds
+import com.dsrc.phone.log.SessionLog
 import com.dsrc.transport.Channels
 import com.dsrc.transport.Frame
 import com.dsrc.transport.Framing
+import com.dsrc.transport.Json
 import com.dsrc.transport.JsonValue
 import com.dsrc.transport.Protocol
 import com.dsrc.transport.Session
@@ -15,12 +18,14 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.nio.file.Files
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -660,6 +665,47 @@ class SessionHolderTest {
         // Whatever the field holds, `isUp` must be false once the session is not running.
         waitFor { !holder.isUp }
         assertFalse(holder.isUp)
+    }
+
+    @Test
+    fun `a failure detected while the link is down is still written`() {
+        // D11's whole reason to exist: the phone failure that matters most is the link
+        // being down, and that is precisely the condition nothing can be sent to the
+        // Jetson during. This proves the local session log is the one place that
+        // survives it -- with no session ever established at all.
+        val dir = Files.createTempDirectory("session-holder-failure").toFile()
+        closers += { dir.deleteRecursively() }
+        val log = SessionLog(File(dir, "drive.jsonl"))
+        log.start()
+        closers += { log.stop() }
+
+        val holder = SessionHolder(
+            config = LinkConfig(host = "127.0.0.1", port = 1, firstBackoffMs = 30_000, maxBackoffMs = 30_000),
+            deviceId = "phone-test",
+            monoClock = { System.nanoTime() },
+            wallClock = { System.currentTimeMillis() * 1_000_000L },
+            onFrame = { _, _, _ -> },
+            onFailure = { kind, atMonoNs, atWallNs, detail -> log.offerFailure(kind, atMonoNs, atWallNs, detail = detail) },
+            dial = { throw IOException("refused") },
+            sleeper = { Thread.sleep(50) },
+        )
+        closers += { holder.stop() }
+
+        holder.start()
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline && holder.stats().dialFailures == 0L) {
+            Thread.sleep(20)
+        }
+        holder.stop()
+        log.stop()
+
+        assertTrue("never dialled at all -- this test proves nothing", holder.stats().dialFailures > 0)
+        val lines = File(dir, "drive.jsonl").readLines()
+        val failLines = lines.map { Json.decode(it) as JsonValue.Obj }
+            .filter { (it.entries["dir"] as? JsonValue.Text)?.value == "fail" }
+        assertTrue("no failure line reached the log despite the link never coming up", failLines.isNotEmpty())
+        val kinds = failLines.map { (it.entries["kind"] as JsonValue.Text).value }
+        assertTrue(kinds.all { it == FailureKinds.LINK_DIAL_FAILED })
     }
 
 }

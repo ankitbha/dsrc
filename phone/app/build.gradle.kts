@@ -206,4 +206,13 @@ tasks.withType<Test>().configureEach {
     val sourceManifest = layout.projectDirectory.file("src/main/AndroidManifest.xml")
     inputs.file(sourceManifest).withPropertyName("sourceManifest")
     systemProperty("dsrc.manifest", sourceManifest.asFile.absolutePath)
+
+    // `FailureKinds.InteropTest` spawns Python to compare `FailureKinds.ALL` against
+    // `PHONE_OFFLINE_KINDS`, the way `:transport:test`'s own DifferentialTest already
+    // does for the wire's refusal reasons -- see that module's build script. Declared
+    // as an input for the same reason: without it, editing only the Python side leaves
+    // this task UP-TO-DATE and the one test built to catch that drift never re-runs.
+    val repoRoot = rootProject.layout.projectDirectory.dir("..")
+    systemProperty("dsrc.repoRoot", repoRoot.asFile.absolutePath)
+    inputs.file(repoRoot.file("deployment/jetson/logio/failure_log.py")).withPropertyName("failureLogPy")
 }

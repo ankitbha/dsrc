@@ -244,4 +244,95 @@ class SessionLogTest {
         assertEquals(0, lines().size)
     }
 
+    // -- the fourth line shape: offerFailure -------------------------------------
+
+    @Test
+    fun `a failure line is written and is a distinct shape`() {
+        val log = log()
+        log.start()
+        log.offer("""{"ch":"gps","seq":1}""")
+        log.offerFailure("link.dial_failed", atMonoNs = 100, atWallNs = 200, detail = "refused")
+        log.offerAdvisoryShown(captureMonoNs = 1, shownMonoNs = 2)
+        log.offerInbound(1, 2, anAdvisoryHeader())
+        log.stop()
+
+        val decoded = lines().map { Json.decode(it) as JsonValue.Obj }
+        val failLine = decoded.single { (it.entries["dir"] as? JsonValue.Text)?.value == "fail" }
+        assertEquals("link.dial_failed", (failLine.entries.getValue("kind") as JsonValue.Text).value)
+        assertEquals(100L, (failLine.entries.getValue("at_mono_ns") as JsonValue.Num).value)
+        assertEquals(200L, (failLine.entries.getValue("at_wall_ns") as JsonValue.Num).value)
+        assertEquals(1L, (failLine.entries.getValue("n") as JsonValue.Num).value)
+        assertEquals("refused", (failLine.entries.getValue("detail") as JsonValue.Text).value)
+        assertEquals(0L, (failLine.entries.getValue("suppressed") as JsonValue.Num).value)
+
+        // The three existing shapes are unchanged byte for byte.
+        val outbound = decoded.first { "dir" !in it.entries }
+        assertEquals("""{"ch":"gps","seq":1}""", Json.encode(outbound))
+        val shown = decoded.single { (it.entries["dir"] as? JsonValue.Text)?.value == "shown" }
+        assertEquals(1L, (shown.entries.getValue("t_capture_mono_ns") as JsonValue.Num).value)
+        val inbound = decoded.single { (it.entries["dir"] as? JsonValue.Text)?.value == "in" }
+        assertEquals(1L, (inbound.entries.getValue("recv_mono_ns") as JsonValue.Num).value)
+    }
+
+    @Test
+    fun `the rate cap holds and counts what it suppressed`() {
+        // D12's stated loss: within one second, only the first of a kind is written;
+        // the rest are held back and their count travels forward onto the next
+        // ACCEPTED line of that kind, whenever that is.
+        val log = log()
+        log.start()
+        repeat(100) { log.offerFailure("link.dial_failed", atMonoNs = 1_000_000_000L, atWallNs = 0) }
+        // A different second: this one is accepted, and carries what the first
+        // second held back.
+        log.offerFailure("link.dial_failed", atMonoNs = 2_000_000_000L, atWallNs = 0)
+        log.stop()
+
+        val decoded = lines().map { Json.decode(it) as JsonValue.Obj }
+        assertEquals("only one line per kind per second reaches the file", 2, decoded.size)
+        val suppressed = decoded.map { (it.entries.getValue("suppressed") as JsonValue.Num).value }
+        assertEquals(listOf(0L, 99L), suppressed)
+    }
+
+    @Test
+    fun `a saturated failure rate does not displace frame headers`() {
+        // The direction test for behaviour change 3. A queue this shallow drops the
+        // frame HEADER when full, which is the file's whole reason to exist -- so
+        // the property worth pinning is that a burst of failures cannot compete
+        // for that queue's depth no matter how large the burst is. All 5,000 share
+        // one second, so the rate cap holds every one but the first back before
+        // any of them reaches `queue.offer()` at all: `droppedQueueFull` staying
+        // at zero is the proof that nothing here ever pressured the queue a real
+        // header offer shares.
+        val log = log(depth = 4)
+        log.start()
+        repeat(5_000) { log.offerFailure("link.dial_failed", atMonoNs = 0, atWallNs = 0) }
+        log.stop()
+
+        val stats = log.stats
+        assertEquals("only the first of the burst should ever have reached the queue", 1L, stats.written)
+        assertEquals(4_999L, stats.failuresSuppressed)
+        assertEquals(
+            "a burst that never touched queue.offer() still reported queue pressure",
+            0L, stats.droppedQueueFull,
+        )
+    }
+
+    @Test
+    fun `the per-kind lifetime cap is separate from the per-second one`() {
+        val log = log()
+        log.start()
+        // One per second, well past the lifetime cap.
+        for (second in 0 until SessionLog.MAX_LINES_PER_KIND + 10) {
+            log.offerFailure("link.dial_failed", atMonoNs = second * 1_000_000_000L, atWallNs = 0)
+        }
+        log.stop()
+
+        val written = lines().map { Json.decode(it) as JsonValue.Obj }
+        assertEquals(SessionLog.MAX_LINES_PER_KIND, written.size)
+        // Ten occurrences arrived one per second, past the lifetime cap, each on
+        // its own second -- so each is suppressed individually rather than
+        // sharing a per-second bucket with anything else.
+        assertEquals(10L, log.stats.failuresSuppressed)
+    }
+
 }
