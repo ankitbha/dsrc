@@ -3005,6 +3005,21 @@ MUTATIONS = [
      "        ]",
      '        points = [(t["sensing"]["decided_at_mono"], t["sensing"]["rates"][key]) for t in sensing_ticks]',
      "python"),
+    ("reference shape reconciliation: a pre-task-39 log fails rather than reads unavailable",
+     "deployment/jetson/eval_run.py",
+     '    if not any("here_calls" in (t["sensing"].get("reference") or {}) for t in sensing_ticks):\n'
+     "        return Reconciliation(\n"
+     '            "reference_absent_iff_fields_null", "unavailable",\n'
+     '            "no tick carries here_calls (log predates task 39)",\n'
+     '            compared=0, compared_is="records_compared",\n'
+     "        )",
+     "    if False:\n"
+     "        return Reconciliation(\n"
+     '            "reference_absent_iff_fields_null", "unavailable",\n'
+     '            "no tick carries here_calls (log predates task 39)",\n'
+     '            compared=0, compared_is="records_compared",\n'
+     "        )",
+     "python"),
 ]
 
 RESULTS = {
