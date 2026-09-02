@@ -906,9 +906,16 @@ class SensingService : LifecycleService() {
             Log.e(TAG, "releasing $what failed; continuing with the rest", t)
             // `sessionLog` (the field, not yet nulled -- that happens in
             // onSensingDown's own `finally`, after every release step here has
-            // run) is still draining for every failure this catch can reach:
-            // "session log" is itself the last content release before that
-            // `finally`, so nothing after it can fail here.
+            // run) is still draining for every OTHER failure this catch can
+            // reach: "session log" is the last content release before that
+            // `finally`, so nothing AFTER it can fail here. A failure IN the
+            // "session log" release itself is the one case this does not
+            // cover: `SessionLog.stop()` sets `running = false` as its first
+            // statement, before anything in it can throw, so `offerFailure`
+            // below finds the log already stopped and counts this call as
+            // `droppedNotRunning` rather than writing it -- the log cannot
+            // record its own death, the same gap `onSensingDown`'s `finally`
+            // names for the resource census that runs after this method.
             sessionLog?.offerFailure(
                 FailureKinds.SERVICE_TEARDOWN_FAILED,
                 SystemClock.elapsedRealtimeNanos(), wallClockNanos(),

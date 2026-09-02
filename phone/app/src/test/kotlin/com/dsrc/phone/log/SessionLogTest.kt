@@ -5,6 +5,7 @@ import com.dsrc.transport.JsonValue
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -294,15 +295,28 @@ class SessionLogTest {
     }
 
     @Test
-    fun `a saturated failure rate does not displace frame headers`() {
-        // The direction test for behaviour change 3. A queue this shallow drops the
-        // frame HEADER when full, which is the file's whole reason to exist -- so
-        // the property worth pinning is that a burst of failures cannot compete
-        // for that queue's depth no matter how large the burst is. All 5,000 share
-        // one second, so the rate cap holds every one but the first back before
-        // any of them reaches `queue.offer()` at all: `droppedQueueFull` staying
-        // at zero is the proof that nothing here ever pressured the queue a real
-        // header offer shares.
+    fun `a burst of failures never reaches queue offer beyond the rate caps own admission`() {
+        // Renamed from "a saturated failure rate does not displace frame
+        // headers": that name claims a comparison this test never makes --
+        // it offers no header lines at all, so it cannot show one surviving
+        // beside a failure burst. A version that DID offer headers (27,000
+        // of them, as fast as a JVM loop allows, into this same 128-deep
+        // queue) dropped 26,586 of them in the CONTROL run with no failures
+        // offered at all -- the fixture's own failure mode, not the field's,
+        // since a bare loop can out-drive the writer thread regardless of
+        // what else is competing for the queue. What this test actually
+        // shows, and the only claim it makes, is the rate cap's own
+        // admission bound: `queue.offer()` is called at most once per `kind`
+        // per second (two, at worst, if two occurrences straddle a
+        // wall-clock-second boundary -- `atMonoNs / 1_000_000_000L` is an
+        // integer bucket, not a sliding window), so a fault repeating far
+        // faster than that cannot out-compete a header for this queue's
+        // depth no matter how large the burst is. Across `FailureKinds`'
+        // ten members that is at most 20 admitted lines a second, and at
+        // most 640 for the life of a session once every kind has reached
+        // its own 64-line lifetime cap ([SessionLog.MAX_LINES_PER_KIND] x
+        // 10) -- against a queue this test never lets run dry, since
+        // `log.start()` keeps the drain thread pulling throughout.
         val log = log(depth = 4)
         log.start()
         repeat(5_000) { log.offerFailure("link.dial_failed", atMonoNs = 0, atWallNs = 0) }
@@ -333,6 +347,92 @@ class SessionLogTest {
         // its own second -- so each is suppressed individually rather than
         // sharing a per-second bucket with anything else.
         assertEquals(10L, log.stats.failuresSuppressed)
+    }
+
+    @Test
+    fun `a failure line the queue never accepted does not burn its rate-cap slot`() {
+        // The rate-cap bookkeeping used to commit before enqueueLine ran, so
+        // a line enqueueLine then dropped still consumed its per-second slot
+        // and its per-kind lifetime slot for a line nothing wrote. Never
+        // started, so `enqueueLine` refuses every offer as droppedNotRunning
+        // -- a fully deterministic way to make it fail, unlike racing a
+        // shallow queue against the drain thread.
+        val log = log()
+        log.offerFailure("link.dial_failed", atMonoNs = 1_000_000_000L, atWallNs = 0)
+        log.start()
+        // Same kind, same second as the dropped call above. If that call had
+        // committed `lastAcceptedFailureSecond`, this one would read as a
+        // duplicate within the second and be suppressed instead of written.
+        log.offerFailure("link.dial_failed", atMonoNs = 1_000_000_000L, atWallNs = 0)
+        log.stop()
+
+        // The second call arrives after `start()`, so it must be WRITTEN, not
+        // dropped -- proving that the first (dropped) call did not leave the
+        // rate cap thinking `link.dial_failed` was already accepted this
+        // second, which would have suppressed this one as a same-second
+        // duplicate instead.
+        assertEquals(1, lines().size)
+        assertEquals(1L, log.stats.droppedNotRunning)
+        assertEquals(0L, log.stats.failuresSuppressed)
+    }
+
+    @Test
+    fun `a write failure is recorded as log_self once a later write succeeds`() {
+        // M5: `FailureKinds.LOG_SELF` and the `monoClock`/`wallClock` constructor
+        // parameters added for it are exercised by no caller and no test today.
+        //
+        // A directory refuses new files while it is not writable, so the first
+        // offered header fails to write -- `write()`'s own catch calls
+        // `offerFailure(LOG_SELF, monoClock(), wallClock(), ...)`, which queues
+        // the failure line itself. That queued line needs the directory
+        // writable too, and the drain thread would otherwise retry it (and
+        // fail again) within microseconds of the first failure -- far faster
+        // than a test thread can react by sleeping. `monoClock` is the
+        // argument evaluated first, so making IT block turns that race into
+        // an explicit rendezvous: the drain thread parks there with the
+        // failure already recorded and the log.self record not yet built,
+        // and only proceeds once the test thread has fixed the directory.
+        val firstCallStarted = java.util.concurrent.CountDownLatch(1)
+        val directoryFixed = java.util.concurrent.CountDownLatch(1)
+        var calls = 0L
+        val monoClock: () -> Long = {
+            calls++
+            val thisCall = calls
+            if (thisCall == 1L) {
+                firstCallStarted.countDown()
+                directoryFixed.await(2, java.util.concurrent.TimeUnit.SECONDS)
+            }
+            thisCall * 1_000_000_000L
+        }
+        val log = SessionLog(File(dir, "drive.jsonl"), monoClock = monoClock, wallClock = { 0L })
+
+        assertTrue("test setup: could not make the directory read-only", dir.setWritable(false))
+        log.start()
+        log.offer("""{"ch":"gps","seq":1}""")
+        assertTrue("the first write never failed", firstCallStarted.await(2, java.util.concurrent.TimeUnit.SECONDS))
+        dir.setWritable(true)
+        directoryFixed.countDown()
+        // `directoryFixed.countDown()` only wakes the parked drain thread; it
+        // does not wait for it to run. `stop()`'s `running = false` is a plain
+        // assignment with nothing to schedule, so without this the test
+        // thread routinely set it before the OS got around to resuming the
+        // parked thread -- and `enqueueLine`'s own `!running` check then
+        // dropped the log.self line the whole rendezvous above was for.
+        val deadline = System.currentTimeMillis() + 2_000
+        while (log.stats.written < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5)
+        }
+        log.offer("""{"ch":"gps","seq":2}""")
+        log.stop()
+
+        val decoded = lines().map { Json.decode(it) as JsonValue.Obj }
+        val failLine = decoded.singleOrNull { (it.entries["dir"] as? JsonValue.Text)?.value == "fail" }
+        assertNotNull("no log.self line reached the file", failLine)
+        assertEquals(
+            FailureKinds.LOG_SELF,
+            (failLine!!.entries.getValue("kind") as JsonValue.Text).value,
+        )
+        assertTrue("a write failure must be counted", log.stats.failures > 0)
     }
 
 }

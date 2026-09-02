@@ -97,7 +97,14 @@ class SessionLog(
      * — and the honest response is to drop this line and count it, because the alternative
      * is back-pressure onto whichever sensing thread happened to call.
      */
-    fun offer(headerJson: String) = enqueueLine(headerJson)
+    fun offer(headerJson: String) {
+        // A block body, deliberately: `enqueueLine` now reports whether the
+        // line was queued (`offerFailure` needs that to gate its own rate-cap
+        // bookkeeping), and an expression body here would leak that `Boolean`
+        // as this method's own return type. `offer` has never had a result to
+        // report -- the queued-or-dropped outcome is `stats`' job.
+        enqueueLine(headerJson)
+    }
 
     /**
      * Record one inbound frame, with the reader's own receipt stamps.
@@ -160,7 +167,19 @@ class SessionLog(
      * would only add uncertainty nothing here needs.
      */
     fun offerFailure(kind: String, atMonoNs: Long, atWallNs: Long, n: Long = 1, detail: String? = null) {
-        val suppressedBefore: Long
+        // The whole decision -- check the cap, build the line, enqueue it,
+        // and only then commit the rate-cap bookkeeping -- runs under one
+        // lock acquisition. `lock` is a plain monitor and `enqueueLine`'s own
+        // `synchronized(lock)` blocks re-enter it on the same thread rather
+        // than deadlocking, so nesting costs nothing and keeps the decision
+        // atomic against another thread offering the same `kind`.
+        //
+        // The bookkeeping used to commit BEFORE `enqueueLine` ran, so a line
+        // that `enqueueLine` then dropped (a full queue, or a log already
+        // stopped) still burned one of the `MAX_LINES_PER_KIND` lifetime
+        // slots for a line nothing ever wrote, and lost the `suppressed`
+        // count it was carrying forward -- the next kind's genuine
+        // occurrence rode on nothing.
         synchronized(lock) {
             val writtenSoFar = writtenPerKind.getOrDefault(kind, 0)
             val second = atMonoNs / 1_000_000_000L
@@ -169,25 +188,28 @@ class SessionLog(
                 failuresSuppressed++
                 return
             }
-            suppressedBefore = suppressedSinceAccepted.remove(kind) ?: 0L
+            val suppressedBefore = suppressedSinceAccepted[kind] ?: 0L
+            val wrapped = JsonValue.Obj(
+                mapOf(
+                    "dir" to JsonValue.Text("fail"),
+                    "at_mono_ns" to JsonValue.Num(atMonoNs),
+                    "at_wall_ns" to JsonValue.Num(atWallNs),
+                    "kind" to JsonValue.Text(kind),
+                    "n" to JsonValue.Num(n),
+                    "detail" to (detail?.let { JsonValue.Text(it) } ?: JsonValue.Null),
+                    "suppressed" to JsonValue.Num(suppressedBefore),
+                )
+            )
+            if (!enqueueLine(Json.encode(wrapped))) {
+                return
+            }
+            suppressedSinceAccepted.remove(kind)
             lastAcceptedFailureSecond[kind] = second
             writtenPerKind[kind] = writtenSoFar + 1
         }
-        val wrapped = JsonValue.Obj(
-            mapOf(
-                "dir" to JsonValue.Text("fail"),
-                "at_mono_ns" to JsonValue.Num(atMonoNs),
-                "at_wall_ns" to JsonValue.Num(atWallNs),
-                "kind" to JsonValue.Text(kind),
-                "n" to JsonValue.Num(n),
-                "detail" to (detail?.let { JsonValue.Text(it) } ?: JsonValue.Null),
-                "suppressed" to JsonValue.Num(suppressedBefore),
-            )
-        )
-        enqueueLine(Json.encode(wrapped))
     }
 
-    private fun enqueueLine(line: String) {
+    private fun enqueueLine(line: String): Boolean {
         if (!running) {
             // Counted, not dropped in silence. A frame the transport wrote after the log
             // was stopped -- teardown releases them in an order, and the link outlives the
@@ -195,11 +217,13 @@ class SessionLog(
             // missing frames and still call itself complete. That is the one thing this
             // class has to be right about.
             synchronized(lock) { droppedNotRunning++ }
-            return
+            return false
         }
         if (!queue.offer(line)) {
             synchronized(lock) { droppedQueueFull++ }
+            return false
         }
+        return true
     }
 
     private fun drain() {

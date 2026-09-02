@@ -708,4 +708,45 @@ class SessionHolderTest {
         assertTrue(kinds.all { it == FailureKinds.LINK_DIAL_FAILED })
     }
 
+    @Test
+    fun `the peer ending the session is recorded as link_session_ended`() {
+        // M5: `FailureKinds.LINK_SESSION_ENDED` is emitted from `Session`'s own
+        // `onEnd` callback, which deleting individually SURVIVED the whole suite --
+        // nothing exercised a session actually ending through a real `SessionHolder`.
+        val dir = Files.createTempDirectory("session-holder-ended").toFile()
+        closers += { dir.deleteRecursively() }
+        val log = SessionLog(File(dir, "drive.jsonl"))
+        log.start()
+        closers += { log.stop() }
+
+        val peer = PeerServer()
+        val holder = SessionHolder(
+            config = LinkConfig(host = "127.0.0.1", port = peer.port, firstBackoffMs = 30_000, maxBackoffMs = 30_000),
+            deviceId = "phone-test",
+            monoClock = { System.nanoTime() },
+            wallClock = { System.currentTimeMillis() * 1_000_000L },
+            onFrame = { _, _, _ -> },
+            onFailure = { kind, atMonoNs, atWallNs, detail -> log.offerFailure(kind, atMonoNs, atWallNs, detail = detail) },
+            dial = SessionHolder::dialTcp,
+            sleeper = { Thread.sleep(50) },
+        )
+        closers += { holder.stop() }
+        holder.start()
+        waitFor { holder.isUp }
+
+        // The peer closes its own side -- the ordinary way a link ends -- which
+        // `Session` reports through `onEnd` on the phone's side.
+        peer.sessions.first().close()
+        waitFor { holder.stats().sessionsEnded > 0 }
+        holder.stop()
+        log.stop()
+
+        val lines = File(dir, "drive.jsonl").readLines()
+        val failLines = lines.map { Json.decode(it) as JsonValue.Obj }
+            .filter { (it.entries["dir"] as? JsonValue.Text)?.value == "fail" }
+        assertTrue("no failure line reached the log after the peer ended the session", failLines.isNotEmpty())
+        val kinds = failLines.map { (it.entries["kind"] as JsonValue.Text).value }
+        assertTrue(kinds.contains(FailureKinds.LINK_SESSION_ENDED))
+    }
+
 }
