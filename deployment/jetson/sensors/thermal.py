@@ -528,9 +528,8 @@ class ThermalSampler:
             if delta > 0:
                 frm = getattr(telemetry, "thermal_change_from", None)
                 to = getattr(telemetry, "thermal_change_to", None)
-                # Both null is not a transition anyone can describe -- the
-                # shape a copied-not-accumulated count produced across a
-                # redial before this fix, and never a shape worth writing.
+                # Both null is not a transition anyone can describe, and
+                # never worth writing as one.
                 if frm is not None or to is not None:
                     at_ns = getattr(telemetry, "thermal_change_at_mono_ns", None)
                     self._phone_event_count += delta
