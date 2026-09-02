@@ -1396,9 +1396,11 @@ def _session_summary_lines(session: dict[str, Any]) -> list[str]:
         "",
         f"{len(recs)} reconciliations, {len(held)} held, {len(failed)} failed, "
         f"{len(unavailable)} unavailable.",
-        "",
     ]
-    lines += [_reconciliation_line(rec) for rec in recs if rec["status"] != "held"]
+    not_held = [_reconciliation_line(rec) for rec in recs if rec["status"] != "held"]
+    if not_held:
+        lines.append("")
+        lines += not_held
 
     inputs = session["inputs"]
     lines += [
