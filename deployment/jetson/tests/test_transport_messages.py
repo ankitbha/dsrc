@@ -1051,6 +1051,18 @@ def test_a_null_count_reports_a_null_reason_not_a_type_error():
     assert other.value.reason == "null_not_allowed"
 
 
+def test_a_null_thermal_status_reports_a_null_reason_not_a_type_error():
+    """`require_str` checks null before type for the same reason `require_int`
+    and `require_bool` do -- a null value is refused with `null_not_allowed`,
+    not `wrong_type`, which the type check alone would also raise but under
+    the wrong reason."""
+    extensions, payload = a_telemetry().to_wire()
+    extensions["thermal_status"] = None
+    with pytest.raises(MessageError) as caught:
+        decode_message(Channel.TELEMETRY, extensions, payload)
+    assert caught.value.reason == "null_not_allowed"
+
+
 def test_to_wire_never_raises_so_a_caller_can_predict_it():
     """A pure projection. It used to coerce counts with int(), and then to
     validate them -- which made telemetry the one message whose encoder checked
