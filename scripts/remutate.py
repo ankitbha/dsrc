@@ -2407,6 +2407,147 @@ MUTATIONS = [
      "            if (writtenSoFar >= MAX_LINES_PER_KIND || lastAcceptedFailureSecond[kind] == second) {",
      "            if (false) {",
      "app"),
+
+    # Task 38, round 2: the failure sampler's own `run_live` wiring, on the
+    # same precedent as the thermal sampler's pins above -- M3 found five of
+    # six wiring points reachable by no test, this being the mechanism.
+    ("run_demo: the failure sampler is never constructed",
+     "deployment/jetson/run_demo.py",
+     '        if config["logio"]["failures"]:',
+     '        if False and config["logio"]["failures"]:',
+     "python"),
+    ("run_demo: the tick's failures block is never written",
+     "deployment/jetson/run_demo.py",
+     '                if failures is not None:\n'
+     '                    record["failures"] = failures.latest()',
+     '                if failures is not None:\n'
+     '                    record["_failures_disabled"] = failures.latest()',
+     "python"),
+    ("run_demo: the drive summary never gets a failures block",
+     "deployment/jetson/run_demo.py",
+     '            failures.stop()\n'
+     '            summary["failures"] = failures.to_record()',
+     '            failures.stop()\n'
+     '            summary["_failures_disabled"] = failures.to_record()',
+     "python"),
+    ("run_demo: log_health.json is never written",
+     "deployment/jetson/run_demo.py",
+     "            logger.close()\n"
+     "            _write_log_health(logger, logger.run_dir)",
+     "            logger.close()",
+     "python"),
+
+    # Task 38's validation round: the 14 findings the validator confirmed by
+    # reproducing them, each pinned so the specific defect cannot come back.
+    ("failures: a lone blind tick is never credited to the source's own total",
+     "deployment/jetson/logio/failure_log.py",
+     "            st.run_total += 1\n"
+     '            st.by_reason_total["no_frame"] = st.by_reason_total.get("no_frame", 0) + 1\n'
+     "            if st.first_t_mono is None:\n"
+     "                st.first_t_mono = now\n"
+     "            st.last_t_mono = now\n\n"
+     "            if st.open_episode is not None:\n"
+     "                st.open_episode.n += 1\n"
+     "                st.open_episode.last_t_mono = now\n"
+     "            elif self._blind_pending:",
+     "            if st.open_episode is not None:\n"
+     "                st.run_total += 1\n"
+     '                st.by_reason_total["no_frame"] = st.by_reason_total.get("no_frame", 0) + 1\n'
+     "                st.last_t_mono = now\n"
+     "                st.open_episode.n += 1\n"
+     "                st.open_episode.last_t_mono = now\n"
+     "            elif self._blind_pending:",
+     "python"),
+    ("failures: camera.dropped_unconsumed is always run-scoped",
+     "deployment/jetson/logio/failure_log.py",
+     'camera_dropped_scope = "session" if hasattr(camera, "decode_failures") else "run"',
+     'camera_dropped_scope = "run"',
+     "python"),
+    ("failures: a backwards step overwrites the previous one instead of accumulating",
+     "deployment/jetson/logio/failure_log.py",
+     "                self._backwards.setdefault(source.name, []).append(\n"
+     '                    {"from": st.baseline_total, "to": total, "t_mono": now}\n'
+     "                )",
+     "                self._backwards[source.name] = [\n"
+     '                    {"from": st.baseline_total, "to": total, "t_mono": now}\n'
+     "                ]",
+     "python"),
+    ("failures: an episode past the cap is opened again on every later movement pass",
+     "deployment/jetson/logio/failure_log.py",
+     "        kept = self._episode_count(st) < MAX_EPISODES_PER_SOURCE",
+     "        kept = True",
+     "python"),
+    ("failures: a suppressed episode's occurrences are not counted anywhere",
+     "deployment/jetson/logio/failure_log.py",
+     "        if not episode.kept:\n"
+     "            # Its occurrences still count -- toward `suppressed`, not toward\n"
+     "            # a kept episode's own total -- but it never had a record and\n"
+     "            # never counted as one of the source's `episodes`.\n"
+     "            st.suppressed_total += episode.n\n"
+     "            return",
+     "        if not episode.kept:\n"
+     "            return",
+     "python"),
+    ("failures: a raising accessor stops the whole pass rather than costing one source",
+     "deployment/jetson/logio/failure_log.py",
+     "        try:\n"
+     "            snap = source.read(ctx)\n"
+     "        except Exception:\n"
+     "            # Every source after this one in the registry still gets its own\n"
+     "            # pass -- an accessor's own bug costs this one source a reading,\n"
+     "            # not the rest of the scan.\n"
+     "            snap = SourceSnapshot(readable=False, missing=MISSING_ACCESSOR_RAISED)",
+     "        snap = source.read(ctx)\n"
+     "        if False:\n"
+     "            snap = SourceSnapshot(readable=False, missing=MISSING_ACCESSOR_RAISED)",
+     "python"),
+    ("failures: a truncated detail is never counted",
+     "deployment/jetson/logio/failure_log.py",
+     "        if snap.detail_truncated:\n"
+     "            st.truncated_details += 1",
+     "        if False:\n"
+     "            st.truncated_details += 1",
+     "python"),
+    ("eval_run: a suppressed occurrence is dropped from the phone's own total",
+     "deployment/jetson/eval_run.py",
+     'occurrences = int(record.get("n", 1)) + int(record.get("suppressed", 0))',
+     'occurrences = int(record.get("n", 1))',
+     "python"),
+    ("eval_run: a still-open episode reports first_pass_n as its final occurrence count",
+     "deployment/jetson/eval_run.py",
+     '            "n": close_record.get("n") if close_record else None,',
+     '            "n": close_record.get("n") if close_record else open_record.get("first_pass_n"),',
+     "python"),
+    ("eval_run: a phone log is dropped when the jetson log predates the failure event log",
+     "deployment/jetson/eval_run.py",
+     "    if phone_log_path is not None:\n"
+     "        if failures is None:",
+     "    if phone_log_path is not None and failures is not None:\n"
+     "        if failures is None:",
+     "python"),
+    ("phone: a line dropped by the queue still burns its rate-cap slot",
+     "phone/app/src/main/kotlin/com/dsrc/phone/log/SessionLog.kt",
+     "            if (!enqueueLine(Json.encode(wrapped))) {\n"
+     "                return\n"
+     "            }\n"
+     "            suppressedSinceAccepted.remove(kind)",
+     "            enqueueLine(Json.encode(wrapped))\n"
+     "            suppressedSinceAccepted.remove(kind)",
+     "app"),
+    ("app: the peer ending the session is not reported as a failure",
+     "phone/app/src/main/kotlin/com/dsrc/phone/net/SessionHolder.kt",
+     "                        sessionsEnded.incrementAndGet()\n"
+     "                        onFailure(FailureKinds.LINK_SESSION_ENDED, monoClock(), wallClock(), end.toString())",
+     "                        sessionsEnded.incrementAndGet()",
+     "app"),
+    ("phone: a write failure is not reported as log.self",
+     "phone/app/src/main/kotlin/com/dsrc/phone/log/SessionLog.kt",
+     "            offerFailure(\n"
+     "                FailureKinds.LOG_SELF, monoClock(), wallClock(),\n"
+     '                detail = "${e.javaClass.simpleName}: ${e.message}",\n'
+     "            )",
+     "            Unit",
+     "app"),
 ]
 
 RESULTS = {
