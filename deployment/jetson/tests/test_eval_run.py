@@ -5,6 +5,7 @@ import json
 import pytest
 
 from eval_run import (
+    GATE_TICK_COVERAGE_MISSING_FRACTION,
     _failure_lines,
     _join_failure_episodes,
     analyze,
@@ -245,7 +246,7 @@ class TestATruncatedLogIsNotACompleteRun:
                                      "policy_trained": False})
         result = analyze(run_dir)
 
-        assert result["log_integrity"]["missing_ticks"] == 60
+        assert result["log_integrity"]["tick_ids_absent_from_log"] == 60
         assert result["log_integrity"]["log_complete"] is False
         assert result["overall_pass"] is False
 
@@ -253,8 +254,62 @@ class TestATruncatedLogIsNotACompleteRun:
         # The fix must not fail every run: a complete log reports complete.
         integrity = analyze(write_run(tmp_path, [make_tick(i) for i in range(40)]))["log_integrity"]
         assert integrity["log_complete"] is True
-        assert integrity["missing_ticks"] == 0
+        assert integrity["tick_ids_absent_from_log"] == 0
         assert integrity["unparseable_lines"] == 0
+
+    def test_a_summary_with_no_tick_count_is_unmeasurable_not_complete(self, tmp_path):
+        """A5: `summary["ticks"]` absent leaves `shortfall` at `None`, which
+        the old code folded straight into `log_complete: True` -- an
+        unmeasured drive certifying as a measured, complete one. It must
+        instead read as a third state that does not pass the verdict.
+        """
+        # `summary={}` would fall back to `write_run`'s own default (an empty
+        # dict is falsy) -- a truthy dict with no "ticks" key is what actually
+        # exercises the unmeasurable branch.
+        run_dir = write_run(
+            tmp_path, [make_tick(i) for i in range(40)],
+            summary={"camera_dropped_frames": 0, "policy_trained": False},
+        )
+        result = analyze(run_dir)
+        assert result["log_integrity"]["ticks_the_run_reported"] is None
+        assert result["log_integrity"]["log_complete"] is None
+        assert result["overall_pass"] is False
+
+
+class TestTickCoverageGate:
+    """A5: `log_integrity` compares the log against what the run itself
+    reported producing, so a real outage that reduces both sides together is
+    invisible to it -- `missing_ticks` reads zero by construction. This gate
+    reads the gap distribution instead, so a real interruption fails it even
+    when the run's own reported tick count and every ratio-based gate agree
+    nothing is missing.
+    """
+
+    def test_a_real_outage_fails_the_gate_and_the_overall_verdict(self, tmp_path):
+        ticks = [make_tick(i) for i in range(90)]
+        # A 10 s gap after tick 40 (300 ticks' worth at 30 Hz) -- every tick
+        # keeps its own relative spacing, just shifted forward in time.
+        for t in ticks[40:]:
+            t["t_wall"] += 10.0
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+
+        gate = result["gates"]["tick_coverage"]
+        assert gate["pass"] is False
+        assert gate["value"] > GATE_TICK_COVERAGE_MISSING_FRACTION
+        # The ratio-based gates this outage does not touch still read healthy --
+        # the point of the finding: nothing else in the report says a span of
+        # the drive is missing.
+        assert result["gates"]["latency_jetson_p95"]["pass"] is True
+        assert result["overall_pass"] is False
+
+    def test_an_uninterrupted_run_passes_the_gate(self, tmp_path):
+        ticks = [make_tick(i) for i in range(90)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        gate = result["gates"]["tick_coverage"]
+        assert gate["pass"] is True
+        assert gate["value"] == 0.0
 
 
 # -- joining the phone's own log against the Jetson's ticks -----------------

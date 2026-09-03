@@ -75,6 +75,11 @@ GATE_MIN_RATE_HZ = 25.0
 GATE_GPS_FRESH_FRACTION = 0.95
 GATE_GPS_SPEED_RMSE_MPS = 1.0
 GATE_VEHICLE_TICK_FRACTION = 0.50
+#: A ratio, not a raw tick count, so the threshold reads the same regardless
+#: of a drive's length: `_tick_coverage`'s missing_ticks over its own
+#: expected_ticks (actual plus missing) -- the fraction of the drive's
+#: expected span that a gap this large or bigger would have to have cost.
+GATE_TICK_COVERAGE_MISSING_FRACTION = 0.05
 DROPOUT_RECOVERY_MARGIN_S = 2.5  # stale_after_s + one fix interval
 
 
@@ -637,6 +642,50 @@ def in_dropout_affected(elapsed_s: float, dropouts: list[tuple[float, float]]) -
     return any(a <= elapsed_s < b + DROPOUT_RECOVERY_MARGIN_S for a, b in dropouts)
 
 
+def _log_integrity(
+    ticks: list[dict[str, Any]], summary: dict[str, Any], unparseable: int,
+) -> dict[str, Any]:
+    """What the run said it produced against what survived to be read. The
+    summary is written by `write_summary` before `close()` flushes the log,
+    so a run that lost its buffer states its own tick count beside a file
+    that is short of it, and this check compares the two directly rather
+    than by subtraction against anything else.
+
+    This compares the log against what the run itself reported producing --
+    it has no way to see a tick the run never produced at all. An
+    interruption that stops tick production reduces `ticks_read` and
+    `summary["ticks"]` together, so `tick_ids_absent_from_log` reads zero on
+    a drive that lost a real span of ticks to an outage; `_tick_coverage`,
+    built from the gap distribution rather than a reported count, is what
+    catches that.
+
+    `log_complete` is `True` when every tick the run reported is present and
+    every line parsed; `False` when the log is short of that count or a line
+    failed to parse; and `None` when there is nothing to compare against at
+    all (`summary["ticks"]` absent, or not a positive int) -- a third state,
+    distinct from both, because a drive whose completeness cannot be
+    measured is not the same fact as one measured complete and must not
+    read as a pass.
+    """
+    expected_ticks = summary.get("ticks")
+    shortfall = None
+    if isinstance(expected_ticks, int) and expected_ticks > 0:
+        shortfall = expected_ticks - len(ticks)
+    if unparseable != 0 or (shortfall is not None and shortfall != 0):
+        log_complete = False
+    elif shortfall is None:
+        log_complete = None
+    else:
+        log_complete = True
+    return {
+        "ticks_read": len(ticks),
+        "ticks_the_run_reported": expected_ticks,
+        "tick_ids_absent_from_log": shortfall,
+        "unparseable_lines": unparseable,
+        "log_complete": log_complete,
+    }
+
+
 def analyze(
     run_dir: Path, phone_log_path: Path | None = None, *, loaded: "LoadedRecords | None" = None,
 ) -> dict[str, Any]:
@@ -670,25 +719,7 @@ def analyze(
             "failure_event records present)"
         )
     summary = _read_summary(run_dir)
-
-    # What the run said it produced against what survived to be read. The summary is
-    # written by `write_summary` before `close()` flushes the log, so a run that lost
-    # its buffer states its own tick count beside a file that is short of it -- and
-    # the gap went unread, so the report certified a run whose records were missing
-    # with the evidence sitting in the same directory. Counted from the records, never
-    # by subtraction, and reported whether or not it is zero.
-    expected_ticks = summary.get("ticks")
-    shortfall = None
-    if isinstance(expected_ticks, int) and expected_ticks > 0:
-        shortfall = expected_ticks - len(ticks)
-    integrity = {
-        "ticks_read": len(ticks),
-        "ticks_the_run_reported": expected_ticks,
-        "missing_ticks": shortfall,
-        "unparseable_lines": unparseable,
-        # The one gate. A short or truncated log is not a run that passed.
-        "log_complete": bool(unparseable == 0 and (shortfall is None or shortfall == 0)),
-    }
+    integrity = _log_integrity(ticks, summary, unparseable)
 
     t_wall = np.array([t["t_wall"] for t in ticks])
     duration_s = float(t_wall[-1] - t_wall[0]) if len(ticks) > 1 else 0.0
@@ -905,6 +936,22 @@ def analyze(
         f">= {GATE_VEHICLE_TICK_FRACTION}",
         perception["ticks_with_vehicle_fraction"] >= GATE_VEHICLE_TICK_FRACTION,
     )
+    # A check on tick PRODUCTION rather than on any one instrument: every
+    # other gate is a ratio over the ticks that exist, which is blind by
+    # construction to a stretch where none were produced at all, because
+    # that destroys the numerator and denominator together. `None` (fewer
+    # than three ticks, or the run's clock never advanced) is not applicable
+    # rather than a manufactured pass or fail.
+    coverage = _tick_coverage(ticks)
+    coverage_fraction = (
+        coverage["missing_ticks"] / coverage["expected_ticks"] if coverage else None
+    )
+    gate(
+        "tick_coverage",
+        round(coverage_fraction, 4) if coverage_fraction is not None else None,
+        f"<= {GATE_TICK_COVERAGE_MISSING_FRACTION} missing/expected",
+        coverage_fraction <= GATE_TICK_COVERAGE_MISSING_FRACTION if coverage_fraction is not None else None,
+    )
     applicable = [g["pass"] for g in gates.values() if g["pass"] is not None]
     overall = all(applicable) if applicable else False
 
@@ -944,8 +991,10 @@ def analyze(
         "gates": gates,
         # A run whose log is short did not pass; it was not fully read. Folded into
         # the verdict rather than reported beside it, because a field nobody looks at
-        # is the failure this whole check exists to close.
-        "overall_pass": overall and integrity["log_complete"],
+        # is the failure this whole check exists to close. `log_complete` can also be
+        # `None` (nothing to compare against) -- coerced to a plain bool here so an
+        # unmeasured drive reads as a fail, not as `null` sitting where a verdict goes.
+        "overall_pass": bool(overall and integrity["log_complete"]),
         "phone_join": phone_join,
         # Sourced from the joined rows when a phone log was supplied, because those
         # carry `return` and `render` as well -- the two stages only the phone
@@ -1754,12 +1803,18 @@ def render_markdown(
         verdict = "n/a" if g["pass"] is None else ("PASS" if g["pass"] else "**FAIL**")
         lines.append(f"| {name} | {g['value']} | {g['threshold']} | {verdict} |")
     integrity = r.get("log_integrity", {})
-    if not integrity.get("log_complete", True):
+    if integrity.get("log_complete") is False:
         lines.append(
             f"| log complete | read {integrity.get('ticks_read')} of "
             f"{integrity.get('ticks_the_run_reported')} ticks, "
             f"{integrity.get('unparseable_lines')} unparseable lines | 0 missing | "
             f"**FAIL** |"
+        )
+    elif integrity.get("log_complete") is None:
+        lines.append(
+            f"| log complete | read {integrity.get('ticks_read')} ticks; the run's own "
+            "summary carries no tick count to compare against | 0 missing | "
+            f"**FAIL (unmeasurable)** |"
         )
     overall_line = f"**Overall: {'PASS' if r['overall_pass'] else 'FAIL'}**"
     if session is not None:
