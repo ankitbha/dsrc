@@ -1638,6 +1638,60 @@ something the instrumentation now asserts. Further audit rounds do not shrink th
   `missingness` reclassification: `eval_run` reads `obs_diagnostics.missingness` from the tick
   records, so both take effect on the next capture rather than on re-analysis of an old log.
 
+### PAUSED 2026-09-03 — section G validation loop, mid-batch
+
+**The blocking unknown: no mutation verdict produced in this loop is trustworthy yet.**
+
+`scripts/remutate.py`'s `run(kind)` calls `subprocess.run(...)` on the Python arm and **discards the
+result** — only the Gradle arm assigns it — and `failing_tests` swallows `ElementTree.ParseError`
+with a bare `continue`. So an empty name list means both "no test failed" and "no test ran", and the
+caller prints `*** SURVIVED ***` for both. Confirmed by direct reproduction: **no XML at all**
+(pytest never started — bad flag, crash, OOM, conftest import failure), **XML truncated mid-write**
+(killed run, full disk), and **zero tests collected** (the partial-tree-copy shape) each yield `[]`
+and print SURVIVED, indistinguishable from a genuine survival.
+
+This is section G's own recurring defect — a record that cannot distinguish a failure from a
+success — living inside the instrument that certifies section G. `failing_tests`' own docstring
+states the principle it violates: *"A harness that reports a false SURVIVED is the same failure as
+one that reports a false CAUGHT."* `run()`'s docstring says naming the failing test settles the
+ambiguity; it settles a false CAUGHT, and the false-SURVIVED asymmetry was never closed.
+
+**How to settle it.** Three changes, then a re-run: capture the returncode on the Python arm (pytest
+0 and 1 are the only valid inputs to a verdict — 2/3/4/5 are a third state, print `INCONCLUSIVE`,
+and count it in `survived` so the exit code still fails); treat a missing or unparseable XML as
+inconclusive rather than zero failures; cross-check the collected testcase count against the
+expected baseline, which catches the partial-tree case independently. **Then re-run every SURVIVED
+verdict this loop produced.** That is minutes, not a round. Until it is done, every clean mutation
+result recorded above — including the ones used as evidence for accepting fixes — is unverified.
+
+**Where the work stopped.** Branch `main`, HEAD `f1a7f73`, clean tree, **26 commits ahead of origin
+and nothing pushed**; baseline for the loop was `c8ef736`. Suite **2059 passed**; registry **372
+anchors, all resolving exactly once**. An implementation subagent was mid-batch on the two items
+below when the pause landed — its work may or may not have been committed, so **check `git log` and
+`git status` before assuming either**.
+
+**Outstanding, in resume order:**
+
+1. **The harness fix above.** Everything else waits on it.
+2. **A20** — `observation_builder.py`: `cooperation["segment_target_speed"]` and
+   `obs["nearby_av_mean_speed"]` hold the **same float** and are classed `feed_derived` and
+   `measured`. That is the A19 defect recreated by the fix for its sibling.
+3. **Reverse `feed_derived`.** `segment_target_speed`, `nearby_av_mean_speed` and `nearby_av_density`
+   should all be `SOURCE_DERIVED`, which also closes A20. `SOURCE_FEED` is documented at
+   `feed_fusion.py:26` as the **reserved** name for whatever eventually owns a field, and
+   `observation_builder.py:350` states the traffic feed owns no observation field; writing a
+   `feed`-family class contradicts both. `nearby_av_density` divides a count by a config constant and
+   is not a reading. `nearby_av_count` stays `measured` and keeps peers in `PRIMARY_EVIDENCE`.
+
+**Traps already mapped, do not re-derive.** `remutate.py` edits files in place: a `git status` showing
+one modified file during a run is a live mutant, not lost work — check for the `.remutate-restore`
+sidecar before touching anything, and never `git add -A` while it runs. Any stray `.py` under the
+repo root becomes a test case via `test_no_undefined_names.py`'s `REPO.rglob("*.py")` and fails the
+suite if it has an undefined name. `eval_run.py` reads `obs_diagnostics.missingness` from the tick
+records, so provenance fixes cannot be verified by re-analysing an old drive — verify against the
+builder. Five real drives and every fixture built during the loop are in the session scratchpad,
+which is disposable; they are re-fetchable from `jetson:/home/edge/dsrc_logs/`.
+
 ## H. Colocation and integration — **[COLOCATED]**
 
 Everything above is done before the devices meet.
