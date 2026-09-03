@@ -129,21 +129,43 @@ def test_peers_populate_cooperation_fields(builder: ObservationBuilder) -> None:
     # hardcoded zero count as a reading, understating missingness. It now
     # carries `merge_pressure`'s own class unconditionally.
     #
-    # `segment_target_speed` and `nearby_av_density` are each computed from
-    # an external feed (another vehicle's beacon: a mean of peer speeds, a
-    # count over a config constant) rather than read by this vehicle's own
-    # sensors, so neither is `measured` either -- both are `feed_derived`.
-    # This split (peers present, no leader vehicle) is still the only tick
-    # shape that can catch the nested `cooperation.*` entries copying the
-    # wrong flat field's class: on a no-peer tick all three coincide at
+    # A20: this test then briefly asserted `segment_target_speed` and
+    # `nearby_av_density` were `feed_derived`, on the reasoning that a peer
+    # beacon is an external feed. That reclassed `segment_target_speed`
+    # without reclassing `nearby_av_mean_speed` -- the identical float,
+    # `av_mean_speed`, read through two different keys -- so the two
+    # disagreed about the same value, A19's own shape recreated by A18's
+    # fix. `feed_derived` was also wrong on its own terms: `SOURCE_FEED` is
+    # reserved for the traffic feed, which owns no observation field (see
+    # the comment above `cooperation`'s own construction), and a mean or a
+    # quotient computed from `nearby_av_count` is not a reading either way
+    # -- `nearby_av_count` itself, a direct count of receptions, is what
+    # stays `measured` and carries a peers tick's primary evidence. All
+    # three -- `segment_target_speed`, `nearby_av_mean_speed`,
+    # `nearby_av_density` -- are `derived`, agreeing with each other. This
+    # split (peers present, no leader vehicle) is still the only tick shape
+    # that can catch the nested `cooperation.*` entries copying the wrong
+    # flat field's class: on a no-peer tick all three coincide at
     # `fallback_neutral`.
-    assert src["segment_target_speed"] == "feed_derived"
-    assert src["nearby_av_density"] == "feed_derived"
+    assert src["segment_target_speed"] == "derived"
+    assert src["nearby_av_mean_speed"] == "derived"
+    assert src["nearby_av_density"] == "derived"
     assert src["downstream_congestion_estimate"] == "fallback_neutral"
     assert src["merge_pressure"] == "fallback_neutral"
     assert src["cooperation.segment_target_speed"] == src["segment_target_speed"]
     assert src["cooperation.merge_pressure"] == src["merge_pressure"]
     assert src["cooperation.downstream_congestion_estimate"] == src["downstream_congestion_estimate"]
+
+
+def test_no_field_ever_carries_a_feed_class(builder: ObservationBuilder) -> None:
+    # A20: `SOURCE_FEED` is reserved for the traffic feed, which the comment
+    # above `cooperation`'s own construction documents as owning no
+    # observation field -- a V2V peer beacon is not the traffic feed, and
+    # nothing in this builder should ever write "feed_derived".
+    peers = [PeerState(peer_id="a", distance_m=80.0, speed_mps=24.0, lane_id=1)]
+    for peer_list in ([], peers):
+        result = builder.build([], fresh_fix(20.0), time.monotonic(), peer_list)
+        assert provenance.SOURCE_FEED not in result.field_sources.values()
 
 
 def test_uncongested_low_speed_flag_mirrors_etiquette(builder: ObservationBuilder) -> None:

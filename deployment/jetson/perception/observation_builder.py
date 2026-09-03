@@ -466,13 +466,23 @@ class ObservationBuilder:
             # as `merge_pressure` unconditionally, not one keyed on `peers`.
             "downstream_congestion_estimate": provenance.SOURCE_FALLBACK_NEUTRAL,
             "merge_pressure": provenance.SOURCE_FALLBACK_NEUTRAL,
-            # `segment_target_speed` (the mean of peer beacons' own speeds)
-            # and, below, `nearby_av_density` (peer count over a config
-            # constant) are each computed from an external feed -- another
-            # vehicle's beacon -- not a reading this vehicle's own sensors
-            # took, so neither is `measured`.
+            # A20: `segment_target_speed` (the mean of peer beacons' own
+            # speeds) is the same float as `nearby_av_mean_speed` below --
+            # `feed_derived` here, against `nearby_av_count`'s own class
+            # (`measured`) on that one, was A19's shape recreated by A18's
+            # own fix: two fields holding one value with disagreeing
+            # provenance. `feed_derived` was also the wrong class regardless
+            # of that: `SOURCE_FEED` is reserved for the traffic feed, which
+            # `feed_fusion.own` and the comment below both document as
+            # owning no observation field -- writing it here would assert
+            # HERE data reached the vector on a peers drive, which never
+            # happens. `nearby_av_count`, a direct count of receptions,
+            # already stays `measured` and carries the primary evidence a
+            # peers tick has; the mean and the quotient below are each
+            # computed from it, not a reading on their own, so both are
+            # `derived`.
             "segment_target_speed": (
-                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_FEED
+                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
             ),
             # `approximated`, not `derived`. The formula mirrors
             # `src/safety/etiquette.py`, but the simulator feeds it a SEGMENT density
@@ -500,9 +510,15 @@ class ObservationBuilder:
             # A count over a config constant, not a reading this vehicle
             # took -- same reasoning as `segment_target_speed` above.
             "nearby_av_density": (
-                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_FEED
+                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
             ),
-            "nearby_av_mean_speed": src["nearby_av_count"],
+            # A20: the same float as `segment_target_speed` above (both are
+            # `av_mean_speed`), so it carries the same class rather than
+            # `nearby_av_count`'s -- inheriting the count's own `measured`
+            # made the mean of it claim to be a reading too.
+            "nearby_av_mean_speed": (
+                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
+            ),
         }
         for key, value in defaults.items():
             src.setdefault(key, value)
