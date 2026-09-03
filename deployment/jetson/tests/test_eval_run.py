@@ -163,6 +163,26 @@ def test_empty_traffic_fails_perception_gate(tmp_path):
     assert result["perception"]["leader_present_fraction"] == 0.0
 
 
+def test_no_leader_and_no_tracks_are_absent_not_a_zeroed_out_gap(tmp_path):
+    """B1: `pctl([])` returns all zeros, and a `leader_gap_m` of `{p50: 0.0,
+    mean: 0.0}` states the vehicle ahead is touching the bumper -- not the
+    same fact as "no leader was ever observed". `stage_timings` already
+    avoids exactly this shape for its own stats; the perception block must
+    too.
+    """
+    ticks = [make_tick(i, leader_gap=None) for i in range(60)]
+    run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+    result = analyze(run_dir)
+    assert result["perception"]["leader_gap_m"] is None
+    assert result["perception"]["track_lifetime_s"] is None
+
+    md = render_markdown(result, [])
+    assert "no leader observed on any tick" in md
+    assert "no tracks" in md
+    assert "gap p50 0.0 m" not in md
+    assert "0 tracks, lifetime p50 0.0 s" not in md
+
+
 def test_the_gate_is_on_the_jetson_segment_not_end_to_end(tmp_path):
     """The one behaviour change to a published number, and it had no test.
 

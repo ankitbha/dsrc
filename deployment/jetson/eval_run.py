@@ -764,13 +764,17 @@ def analyze(
         "ticks_with_vehicle_fraction": float(np.mean([n > 0 for n in n_vehicles])),
         "mean_vehicles_per_tick": float(np.mean(n_vehicles)),
         "leader_present_fraction": float(np.mean(leader_present)),
-        "leader_gap_m": pctl(finite_gaps),
+        # `None`, not a zeroed-out `pctl([])`, when no tick ever had a leader
+        # or a track: a gap of 0.0 m states the vehicle ahead is touching the
+        # bumper, and `stage_timings` already avoids this exact shape for the
+        # same reason.
+        "leader_gap_m": pctl(finite_gaps) if finite_gaps else None,
         "leader_rel_speed_measured_fraction": (
             float(np.mean(rel_measured)) if rel_measured else 0.0
         ),
         "distance_method_counts": dict(method_counts),
         "unique_tracks": len(track_spans),
-        "track_lifetime_s": pctl(lifetimes_s),
+        "track_lifetime_s": pctl(lifetimes_s) if lifetimes_s else None,
     }
 
     # --- observation quality ----------------------------------------------
@@ -1880,19 +1884,26 @@ def render_markdown(
                     lines.append(f"- `{name}` x{n}: {why}")
 
     p = r["perception"]
+    leader_gap_line = (
+        f"gap p50 {p['leader_gap_m']['p50']:.1f} m (min-side mean {p['leader_gap_m']['mean']:.1f} m)"
+        if p["leader_gap_m"] is not None else "no leader observed on any tick"
+    )
+    track_lifetime_line = (
+        f"{p['unique_tracks']} tracks, lifetime p50 {p['track_lifetime_s']['p50']:.1f} s "
+        f"(p95 {p['track_lifetime_s']['p95']:.1f} s)"
+        if p["track_lifetime_s"] is not None else "no tracks"
+    )
     lines += [
         "",
         "## Perception",
         "",
         f"- ticks with >= 1 tracked vehicle: {p['ticks_with_vehicle_fraction']:.1%} "
         f"(mean {p['mean_vehicles_per_tick']:.2f}/tick)",
-        f"- leader present: {p['leader_present_fraction']:.1%} of ticks; "
-        f"gap p50 {p['leader_gap_m']['p50']:.1f} m (min-side mean {p['leader_gap_m']['mean']:.1f} m)",
+        f"- leader present: {p['leader_present_fraction']:.1%} of ticks; {leader_gap_line}",
         f"- leader relative speed measured (vs neutral fallback): "
         f"{p['leader_rel_speed_measured_fraction']:.1%} of leader ticks",
         f"- distance methods: {p['distance_method_counts']}",
-        f"- {p['unique_tracks']} tracks, lifetime p50 {p['track_lifetime_s']['p50']:.1f} s "
-        f"(p95 {p['track_lifetime_s']['p95']:.1f} s)",
+        f"- {track_lifetime_line}",
         "",
         "## Observation quality",
         "",
