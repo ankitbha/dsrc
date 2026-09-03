@@ -307,6 +307,12 @@ def _render_stage(receipt: dict, shown_record: dict | None) -> StageTiming:
     return StageTiming.measured((shown_ns - recv_ns) / 1e6, clock="phone")
 
 
+#: Used for both a `return` and a `render` stage on a Jetson tick whose
+#: advisory the phone never logged as received -- the join has nothing more
+#: specific to say than that the far side of the exchange is missing.
+NO_ADVISORY_FOR_TICK_REASON = "the phone logged no advisory for this frame"
+
+
 def join_phone_log(
     ticks: list[dict],
     timebase_estimates: list[dict],
@@ -318,9 +324,17 @@ def join_phone_log(
     nanosecond key `AdvisoryMessage.t_capture_mono_ns` carries on both ends of
     the exchange (`run_phone_drive.py` already joins the same way).
 
-    An inbound advisory with no matching tick is counted rather than dropped
-    silently: nothing about a mismatch here says which side is wrong, but a
-    reader needs to know it happened.
+    The join is checked in both directions. An inbound advisory with no
+    matching tick is counted under `unmatched` rather than dropped silently.
+    A Jetson tick whose advisory never came back is the opposite miss --
+    `jetson_ticks_with_no_advisory` counts them, and each one still gets a
+    row, with `return` and `render` recorded `absent`, so its eight Jetson
+    stages are not discarded along with the two the phone would have
+    supplied. Without this, `rows` -- the population every per-stage
+    statistic in the report is computed over -- silently excludes every tick
+    whose return trip failed, which is not a random sample: a tick goes
+    unmatched exactly when the link was down, so the surviving population is
+    conditioned on the link having worked.
     """
     ticks_by_capture_ns = {
         t["t_capture_mono_ns"]: t for t in ticks if "t_capture_mono_ns" in t
@@ -332,6 +346,7 @@ def join_phone_log(
             shown_by_capture_ns[capture_ns] = record
 
     rows: list[dict[str, Any]] = []
+    matched_capture_ns: set[int] = set()
     unmatched = 0
     for record in inbound_advisories:
         header = record.get("header", {})
@@ -340,6 +355,7 @@ def join_phone_log(
         if tick is None:
             unmatched += 1
             continue
+        matched_capture_ns.add(capture_ns)
         stages = dict(tick.get("stages", {}))
         stages["return"] = _return_stage(
             header, record, timebase_estimates, session_id=tick.get("session_id"),
@@ -352,10 +368,30 @@ def join_phone_log(
             "tick_id": tick.get("tick_id"),
             "stages": stages,
         })
+
+    # `matched` counts rows produced above -- one per advisory that found a
+    # tick, same meaning as before this join was checked in both directions.
+    matched = len(rows)
+
+    absent_return = StageTiming.absent(clock="cross", reason=NO_ADVISORY_FOR_TICK_REASON).to_record()
+    absent_render = StageTiming.absent(clock="phone", reason=NO_ADVISORY_FOR_TICK_REASON).to_record()
+    for capture_ns, tick in ticks_by_capture_ns.items():
+        if capture_ns in matched_capture_ns:
+            continue
+        stages = dict(tick.get("stages", {}))
+        stages["return"] = dict(absent_return)
+        stages["render"] = dict(absent_render)
+        rows.append({
+            "t_capture_mono_ns": capture_ns,
+            "tick_id": tick.get("tick_id"),
+            "stages": stages,
+        })
+
     return {
         "advisories_seen_by_the_phone": len(inbound_advisories),
-        "matched": len(rows),
+        "matched": matched,
         "unmatched": unmatched,
+        "jetson_ticks_with_no_advisory": len(ticks_by_capture_ns) - len(matched_capture_ns),
         "rows": rows,
     }
 
@@ -1893,6 +1929,8 @@ def render_markdown(
             "",
             f"- advisories the phone logged as received: {join['advisories_seen_by_the_phone']}",
             f"- matched to a Jetson tick: {join['matched']}; unmatched: {join['unmatched']}",
+            f"- Jetson ticks with no returned advisory: {join['jetson_ticks_with_no_advisory']} "
+            "(return/render absent on these rows; the tick's own stages still count)",
             f"- return_ms measured on {len(return_ms)} of {join['matched']} matched rows"
             + (f" (p50 {sorted(return_ms)[len(return_ms) // 2]:.1f} ms)" if return_ms else ""),
             f"- render_ms measured on {len(render_ms)} of {join['matched']} matched rows"

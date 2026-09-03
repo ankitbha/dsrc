@@ -351,6 +351,44 @@ class TestJoinPhoneLog:
         assert result["unmatched"] == 1
         assert result["advisories_seen_by_the_phone"] == 1
 
+    def test_a_jetson_tick_whose_advisory_never_returned_still_gets_a_row(self):
+        """The join checked in the other direction: a tick with no matching
+        inbound advisory used to vanish from `rows` entirely, along with
+        every Jetson-side stage it carried -- and `rows` is the whole
+        population `stage_timings` is computed over. The dropped tick's own
+        stages must survive; only `return`/`render` -- the two stages only
+        the phone can supply -- are absent.
+        """
+        matched_tick = {"tick_id": 1, "t_capture_mono_ns": 100, "stages": {"detect": {"ms": 1.0}}}
+        orphaned_tick = {"tick_id": 2, "t_capture_mono_ns": 200, "stages": {"detect": {"ms": 2.0}}}
+        advisory = an_inbound_advisory(capture_ns=100, wire_ns=None, recv_ns=300, recv_wall_ns=400)
+
+        result = join_phone_log([matched_tick, orphaned_tick], [], [advisory], [])
+
+        assert result["matched"] == 1
+        assert result["unmatched"] == 0
+        assert result["jetson_ticks_with_no_advisory"] == 1
+        assert len(result["rows"]) == 2
+
+        orphaned_row = next(r for r in result["rows"] if r["tick_id"] == 2)
+        assert orphaned_row["stages"]["detect"] == {"ms": 2.0}  # the Jetson-side stage survives
+        assert orphaned_row["stages"]["return"]["basis"] == "absent"
+        assert orphaned_row["stages"]["return"]["ms"] is None
+        assert orphaned_row["stages"]["render"]["basis"] == "absent"
+        assert orphaned_row["stages"]["render"]["ms"] is None
+
+        # The matched tick's own reason differs -- it went through the real
+        # `_return_stage` path (absent here only because this advisory
+        # carries no wire stamp), not the generic no-advisory-at-all reason.
+        matched_row = next(r for r in result["rows"] if r["tick_id"] == 1)
+        assert matched_row["stages"]["return"]["reason"] == "advisory carried no wire stamp"
+
+    def test_a_run_with_no_orphaned_ticks_reports_zero_not_omitted(self):
+        tick = {"tick_id": 1, "t_capture_mono_ns": 100, "stages": {}}
+        advisory = an_inbound_advisory(capture_ns=100, wire_ns=None, recv_ns=300, recv_wall_ns=400)
+        result = join_phone_log([tick], [], [advisory], [])
+        assert result["jetson_ticks_with_no_advisory"] == 0
+
     def test_return_is_absent_without_a_wire_stamp(self):
         tick = {"t_capture_mono_ns": 100, "stages": {}}
         advisory = an_inbound_advisory(capture_ns=100, wire_ns=None, recv_ns=300, recv_wall_ns=400)
