@@ -122,14 +122,24 @@ def test_peers_populate_cooperation_fields(builder: ObservationBuilder) -> None:
     assert obs["nearby_av_mean_speed"] == pytest.approx(25.0)
     assert obs["cooperation"]["segment_target_speed"] == pytest.approx(25.0)
     assert obs["nearby_av_lane_distribution"] == {"1": 0.5, "2": 0.5}
-    # With peers present, `segment_target_speed` and
-    # `downstream_congestion_estimate` become `measured` while
-    # `merge_pressure` -- never actually computed from a peer -- stays
-    # `fallback_neutral`. That split is the only tick shape that can catch
-    # the nested `cooperation.*` entries copying the wrong flat field's
-    # class: on a no-peer tick all three classes coincide.
-    assert src["segment_target_speed"] == "measured"
-    assert src["downstream_congestion_estimate"] == "measured"
+    # A18: this test used to assert `downstream_congestion_estimate ==
+    # "measured"` with peers present. That was wrong -- nothing is ever
+    # read into it; it is the literal 0.0 in both branches of
+    # `cooperation`, exactly like `merge_pressure` -- and it is what let a
+    # hardcoded zero count as a reading, understating missingness. It now
+    # carries `merge_pressure`'s own class unconditionally.
+    #
+    # `segment_target_speed` and `nearby_av_density` are each computed from
+    # an external feed (another vehicle's beacon: a mean of peer speeds, a
+    # count over a config constant) rather than read by this vehicle's own
+    # sensors, so neither is `measured` either -- both are `feed_derived`.
+    # This split (peers present, no leader vehicle) is still the only tick
+    # shape that can catch the nested `cooperation.*` entries copying the
+    # wrong flat field's class: on a no-peer tick all three coincide at
+    # `fallback_neutral`.
+    assert src["segment_target_speed"] == "feed_derived"
+    assert src["nearby_av_density"] == "feed_derived"
+    assert src["downstream_congestion_estimate"] == "fallback_neutral"
     assert src["merge_pressure"] == "fallback_neutral"
     assert src["cooperation.segment_target_speed"] == src["segment_target_speed"]
     assert src["cooperation.merge_pressure"] == src["merge_pressure"]
@@ -494,12 +504,20 @@ class TestCoverageAndMissingness:
         `local_queue_estimate` leaving the fallback set into `derived_empty`
         (D5), +3 cooperation slots, +3 lane slots -- all six neutral on a
         lone instrumented car with no peers.
+
+        A19: this test used to pin 0.667 (26/39). That value was wrong --
+        `target_lane_front_gap` and `ego_headway_s` were hardcoded to
+        `derived` regardless of whether a leader vehicle existed, so on a
+        no-vehicle tick like this one they read as evidence about a leader
+        that was never there. Both now inherit `leader_gap`'s own class
+        (here `fallback_neutral`, since `leader_gap` is `INF`), moving two
+        more fields into the fallback set: 28/39 = 0.718.
         """
         builder, t = self._warmed_up()
         result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1)
 
         assert result.diagnostics["provenance"]["fields"] == 39
-        assert result.diagnostics["missingness"] == 0.667
+        assert result.diagnostics["missingness"] == 0.718
         assert result.diagnostics["provenance"]["by_source"]["derived_empty"] == 3
         assert result.diagnostics["provenance"]["covers_encoder"] is True
 
@@ -514,6 +532,12 @@ class TestCoverageAndMissingness:
         assert result.field_sources["active_vehicle_count_local"] == provenance.SOURCE_DERIVED_EMPTY
         assert result.field_sources["local_queue_estimate"] == provenance.SOURCE_DERIVED_EMPTY
         assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
+        # A19: no leader on this tick, so both fields that hold the same
+        # float as `leader_gap` (or a formula over it) must carry
+        # `leader_gap`'s own class, not a fixed `derived`.
+        assert result.field_sources["target_lane_front_gap"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert result.field_sources["ego_headway_s"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert result.field_sources["target_lane_front_gap"] == result.field_sources["leader_gap"]
 
     def test_peers_with_lane_id_make_the_lane_slots_derived(self):
         builder, t = self._warmed_up()

@@ -437,7 +437,17 @@ class ObservationBuilder:
         defaults = {
             "is_active": provenance.SOURCE_STATIC_CONFIG,
             "ego_lane": provenance.SOURCE_STATIC_CONFIG,
-            "ego_headway_s": provenance.SOURCE_DERIVED,
+            # A19: the same float as `leader_gap` (`target_lane_front_gap`)
+            # or computed from it (`ego_headway_s`), so each carries
+            # `leader_gap`'s own class rather than a fixed one -- a fixed
+            # `derived` here read as evidence on a tick where `leader_gap`
+            # itself was `fallback_neutral` (no leader in range), which is
+            # the same float holding two different provenance claims.
+            "ego_headway_s": (
+                provenance.SOURCE_FALLBACK_NEUTRAL
+                if not math.isfinite(leader_gap) or provenance.is_substituted(src["ego_speed"])
+                else provenance.SOURCE_DERIVED
+            ),
             "target_headway_s": provenance.SOURCE_STATIC_CONFIG,
             "time_since_last_lane_change": provenance.SOURCE_FALLBACK_NEUTRAL,
             "lane_changes_last_km": provenance.SOURCE_FALLBACK_NEUTRAL,
@@ -447,15 +457,22 @@ class ObservationBuilder:
             "follower_relative_speed": provenance.SOURCE_FALLBACK_NEUTRAL,
             "left_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
             "right_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "target_lane_front_gap": provenance.SOURCE_DERIVED,
+            "target_lane_front_gap": src["leader_gap"],
             "target_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
             "target_lane_rear_required_decel": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "downstream_congestion_estimate": (
-                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_MEASURED
-            ),
+            # A18: nothing is ever read into `downstream_congestion_estimate`
+            # -- it is the literal 0.0 in both branches of `cooperation`,
+            # exactly like `merge_pressure` -- so it carries the same class
+            # as `merge_pressure` unconditionally, not one keyed on `peers`.
+            "downstream_congestion_estimate": provenance.SOURCE_FALLBACK_NEUTRAL,
             "merge_pressure": provenance.SOURCE_FALLBACK_NEUTRAL,
+            # `segment_target_speed` (the mean of peer beacons' own speeds)
+            # and, below, `nearby_av_density` (peer count over a config
+            # constant) are each computed from an external feed -- another
+            # vehicle's beacon -- not a reading this vehicle's own sensors
+            # took, so neither is `measured`.
             "segment_target_speed": (
-                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_MEASURED
+                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_FEED
             ),
             # `approximated`, not `derived`. The formula mirrors
             # `src/safety/etiquette.py`, but the simulator feeds it a SEGMENT density
@@ -480,7 +497,11 @@ class ObservationBuilder:
                 else provenance.SOURCE_FALLBACK_NEUTRAL
             ),
             "active_av_count_local": src["nearby_av_count"],
-            "nearby_av_density": src["nearby_av_count"],
+            # A count over a config constant, not a reading this vehicle
+            # took -- same reasoning as `segment_target_speed` above.
+            "nearby_av_density": (
+                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_FEED
+            ),
             "nearby_av_mean_speed": src["nearby_av_count"],
         }
         for key, value in defaults.items():
