@@ -1660,9 +1660,23 @@ ambiguity; it settles a false CAUGHT, and the false-SURVIVED asymmetry was never
 0 and 1 are the only valid inputs to a verdict — 2/3/4/5 are a third state, print `INCONCLUSIVE`,
 and count it in `survived` so the exit code still fails); treat a missing or unparseable XML as
 inconclusive rather than zero failures; cross-check the collected testcase count against the
-expected baseline, which catches the partial-tree case independently. **Then re-run every SURVIVED
-verdict this loop produced.** That is minutes, not a round. Until it is done, every clean mutation
-result recorded above — including the ones used as evidence for accepting fixes — is unverified.
+expected baseline, which catches the partial-tree case independently.
+
+**STATUS: the fix is built and validated, but is UNCOMMITTED** — it is the `scripts/remutate.py` in
+the modified-files table below. Re-running the loop's fifteen affected pins against it gives
+**all fifteen CAUGHT, `survived: 0`**, so no verdict this loop relied on was a false clean.
+
+**It proved itself on first use, which is the part worth keeping.** The first re-run returned
+**13 of 15 `INCONCLUSIVE`** rather than CAUGHT. That was not a harness bug: the collected-count check
+correctly detected that the tree under test no longer matched its baseline, because a test had been
+added to `deployment/jetson/tests/` concurrently and moved the real count from 2059 to 2060 mid-run.
+Under the old harness that same condition would have printed `SURVIVED` — a false clean, silently.
+The check caught, on its first outing, an instance of the exact failure it was written for.
+
+**One maintenance burden it introduces:** `EXPECTED_PYTHON_TESTCASES` is a hardcoded 2060 and goes
+stale the moment a test is added, turning every pin `INCONCLUSIVE` until someone updates it. That
+failure is loud and self-explaining, which is the right direction, but it should probably derive the
+baseline from a clean run rather than a literal.
 
 **Where the work stopped.** Branch `main`, HEAD `902ee08` (this commit), **27 commits ahead of origin
 and nothing pushed**; baseline for the loop was `c8ef736`. Suite **2059 passed**; registry **372
