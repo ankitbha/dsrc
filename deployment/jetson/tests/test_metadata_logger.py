@@ -97,6 +97,57 @@ class TestCloseAlwaysReturns:
         )
 
 
+class UnanticipatedlyBrokenFile:
+    """A failure mode outside the two the original except clause named."""
+
+    def write(self, _):
+        raise RuntimeError("neither a full card, a closed handle, nor a read-only mount")
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class TestAnUnanticipatedFailureIsStillCaught:
+    """B5: `except (OSError, ValueError)` caught only the two anticipated
+    failure modes -- anything else killed the thread exactly as unguarded,
+    with `writer_failure` left unset, indistinguishable from a writer that
+    is merely slow.
+    """
+
+    def test_a_runtime_error_still_sets_writer_failure(self, tmp_path):
+        logger = _logger(tmp_path)
+        logger._file = UnanticipatedlyBrokenFile()
+        logger.write({"type": "tick", "tick_id": 0})
+        logger._thread.join(timeout=5.0)
+        assert not logger._thread.is_alive(), "the writer should have stopped"
+        assert logger.writer_failure is not None
+        assert "RuntimeError" in logger.writer_failure
+
+    def test_every_offered_record_is_accounted_for_not_just_the_queued_ones(self, tmp_path):
+        # B6: the one record the writer had already popped off the queue
+        # when it raised is not in the queue for close()'s own qsize()
+        # count to see -- it must be counted at the point of failure
+        # instead, or it vanishes uncounted. The writer is driven to death
+        # on its own first record, then joined, before the rest are
+        # offered -- so none of them race close()'s own `put(None)`.
+        logger = _logger(tmp_path)
+        logger._file = UnanticipatedlyBrokenFile()
+        logger.write({"type": "tick", "tick_id": 0})
+        logger._thread.join(timeout=5.0)
+        assert not logger._thread.is_alive()
+        assert logger.dropped_records == 1
+
+        for i in range(1, 10):
+            logger.write({"type": "tick", "tick_id": i})
+        logger.close()
+
+        assert logger.dropped_records == 10
+        assert logger.path.read_text() == ""
+
+
 class TestTheHealthyPathStillWorks:
 
     def test_records_reach_the_file_and_close_flushes_them(self, tmp_path):

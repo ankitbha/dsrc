@@ -1257,6 +1257,12 @@ def _phone_failure_lines(failures: dict[str, Any]) -> list[str]:
     return [f"- phone (offline): {breakdown}"]
 
 
+#: Distinguishes "the key is absent" from "the key is present and null" in
+#: `_log_health_lines` -- `dict.get`'s own default cannot, since `None` is
+#: the genuinely healthy value the field carries when it IS present.
+_WRITER_FAILURE_ABSENT = object()
+
+
 def _log_health_lines(failures: dict[str, Any]) -> list[str]:
     """The metadata logger's own final state (D16), read from `log_health.json`
     rather than from `summary["failures"]` -- see that file's own docstring
@@ -1264,8 +1270,16 @@ def _log_health_lines(failures: dict[str, Any]) -> list[str]:
     log_health = failures.get("log_health")
     if log_health is None:
         return []
-    writer = "writer healthy" if log_health.get("writer_failure") is None else \
-        f"writer failed: {log_health['writer_failure']}"
+    writer_failure = log_health.get("writer_failure", _WRITER_FAILURE_ABSENT)
+    if writer_failure is _WRITER_FAILURE_ABSENT:
+        # A log from before this field existed, or a log_health.json this
+        # reader was handed without it -- absent is not the same fact as
+        # healthy, and must not read as one.
+        writer = "writer status unknown (this log carries no writer_failure field)"
+    elif writer_failure is None:
+        writer = "writer healthy"
+    else:
+        writer = f"writer failed: {writer_failure}"
     return [f"- log: {log_health.get('dropped_records', 0)} records dropped, {writer}"]
 
 

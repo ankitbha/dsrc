@@ -91,6 +91,14 @@ class MetadataLogger:
                 # The writer is not draining. Nothing to be gained by waiting on it.
                 self.writer_failure = self.writer_failure or "queue full at close"
             self._thread.join(timeout=5.0)
+        elif self.writer_failure is None and not self._queue.empty():
+            # The thread is already dead, recorded no reason for it, and the
+            # queue still holds records it never got to -- it died before
+            # its own exception handler could run, or was never started
+            # cleanly. A dead thread with nothing left queued is the
+            # ordinary case of a run that never wrote anything at all, and
+            # is not treated as a failure here.
+            self.writer_failure = "writer thread died with no recorded reason"
         # Whatever the writer did, this side flushes and closes its own handle.
         try:
             self._file.flush()
@@ -111,12 +119,20 @@ class MetadataLogger:
                 return
             try:
                 self._file.write(item + "\n")
-            except (OSError, ValueError) as exc:
-                # A full card, a closed handle, a read-only mount. Unguarded, the
-                # first one killed this thread and took `close()` with it. Recorded
-                # and the loop ends deliberately, so `close()` sees a dead thread and
-                # says so rather than waiting on it.
+            except BaseException as exc:
+                # Not just the two anticipated types (a full card, a closed
+                # handle, a read-only mount): an exception this narrow catch
+                # did not expect used to kill the thread exactly as
+                # unguarded, with writer_failure left unset -- indistinguishable
+                # from a healthy writer that simply has not been asked to
+                # stop yet. Recorded and the loop ends deliberately, so
+                # `close()` sees a dead thread and says so rather than
+                # waiting on it. The record this call had already popped
+                # off the queue is counted here: `close()`'s own
+                # `qsize()` can never see it, since by the time `close()`
+                # runs it is no longer queued.
                 self.writer_failure = f"{type(exc).__name__}: {exc}"
+                self.dropped_records += 1
                 return
 
 

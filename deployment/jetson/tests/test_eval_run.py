@@ -8,6 +8,7 @@ from eval_run import (
     GATE_TICK_COVERAGE_MISSING_FRACTION,
     _failure_lines,
     _join_failure_episodes,
+    _log_health_lines,
     analyze,
     join_phone_log,
     load_phone_log,
@@ -1117,6 +1118,30 @@ class TestLogHealthReachesTheReport:
         assert "## Failures" in markdown
         assert "7 records dropped" in markdown
         assert "writer failed" in markdown
+
+
+class TestLogHealthAbsentWriterFailureIsUnknownNotHealthy:
+    """B7: `log_health.get("writer_failure") is None` reads both "the field
+    is present and null" (genuinely healthy) and "the field is entirely
+    absent" (a log from before it existed) as the same "writer healthy"
+    line. Absent is not the same fact as healthy.
+    """
+
+    def test_an_absent_field_reads_as_unknown(self):
+        text = "\n".join(_log_health_lines({"log_health": {}}))
+        assert "writer healthy" not in text
+        assert "unknown" in text
+        assert "0 records dropped" in text
+
+    def test_a_present_null_field_still_reads_as_healthy(self):
+        text = "\n".join(_log_health_lines({"log_health": {"writer_failure": None}}))
+        assert "writer healthy" in text
+
+    def test_a_present_failure_still_reads_as_failed(self):
+        text = "\n".join(
+            _log_health_lines({"log_health": {"writer_failure": "OSError: boom"}})
+        )
+        assert "writer failed: OSError: boom" in text
 
 
 class TestPhoneFailuresJoinOffline:
