@@ -84,11 +84,15 @@ class FakeTelemetry:
 class FakePhone:
     """A phone that reports a cool, nominal status throughout -- so thermal
     backoff (an orthogonal rule) never confounds the rates these tests
-    compare against `IDLE_RATES`/`ACTIVE_RATES` directly.
+    compare against `IDLE_RATES`/`ACTIVE_RATES` directly. `telemetry_at_mono`
+    is set to the same instant `inputs_from` is about to compute `now`
+    against, so the report always reads as fresh rather than of unknown age.
     """
 
     telemetry = FakeTelemetry()
-    telemetry_at_mono = None
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.telemetry_at_mono = now
 
 
 class TestTheAccelerometerPathChangesNoRate:
@@ -101,7 +105,7 @@ class TestTheAccelerometerPathChangesNoRate:
     def _decide(self, builder: ObservationBuilder, gps: GpsFix, t: float):
         obs_result = builder.build([], gps, t)
         tick = FakeTick(obs_result=obs_result)
-        inputs = inputs_from(tick, FakePhone(), now=t)
+        inputs = inputs_from(tick, FakePhone(t), now=t)
         controller = SensingController(clock=Clock(t))
         return controller.decide(inputs), obs_result
 
@@ -154,7 +158,7 @@ class TestTheStaleWindowGuardIsTheOneRateChange:
             clock.advance(dt)
             obs_result = builder.build([], gps, clock.t)
             tick = FakeTick(obs_result=obs_result)
-            inputs = inputs_from(tick, FakePhone(), now=clock.t)
+            inputs = inputs_from(tick, FakePhone(clock.t), now=clock.t)
             return controller.decide(inputs), obs_result
 
         # Phase 1: hard braking under fresh GPS, well past the dwell, so the

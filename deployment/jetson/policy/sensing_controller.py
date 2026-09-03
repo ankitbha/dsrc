@@ -153,17 +153,31 @@ RULES = (Trigger.EVENT, Trigger.NARROW_MARGIN, Trigger.DISAGREEMENT, Trigger.THE
 #: Why the thermal rule backed the rates off, when it did. Closed set: `status` covers
 #: both a named status below `nominal` and a missing status defaulting to `unknown`;
 #: `skin_warm`/`skin_hot` claim the word only when the skin reading strictly lowered
-#: the scale the status alone had already reached; `no_telemetry`/`stale_telemetry`
-#: are the two ways silence is read as the `unknown` tier rather than as `nominal`.
+#: the scale the status alone had already reached; `no_telemetry`/`stale_telemetry`/
+#: `unstamped_telemetry` are the three ways silence -- total, aged-out, or unstamped --
+#: is read as the `unknown` tier rather than as `nominal`.
 THERMAL_CAUSE_STATUS = "status"
 THERMAL_CAUSE_SKIN_WARM = "skin_warm"
 THERMAL_CAUSE_SKIN_HOT = "skin_hot"
 THERMAL_CAUSE_NO_TELEMETRY = "no_telemetry"
 THERMAL_CAUSE_STALE_TELEMETRY = "stale_telemetry"
+#: A status or skin reading with no age attached -- neither known-fresh nor
+#: known-stale, because there is nothing to check `MAX_TELEMETRY_AGE_S`
+#: against. Reached through a torn read of a phone link's telemetry and its
+#: arrival time as two separate values (see `inputs_from`'s own fix for the
+#: race), not through an ordinary missing report, which is `no_telemetry`.
+THERMAL_CAUSE_UNSTAMPED_TELEMETRY = "unstamped_telemetry"
 THERMAL_CAUSES = frozenset({
     THERMAL_CAUSE_STATUS, THERMAL_CAUSE_SKIN_WARM, THERMAL_CAUSE_SKIN_HOT,
-    THERMAL_CAUSE_NO_TELEMETRY, THERMAL_CAUSE_STALE_TELEMETRY,
+    THERMAL_CAUSE_NO_TELEMETRY, THERMAL_CAUSE_STALE_TELEMETRY, THERMAL_CAUSE_UNSTAMPED_TELEMETRY,
 })
+
+#: The `"telemetry"` word `_thermal_scale`'s evidence carries: `"absent"` (no
+#: status or skin reading at all), `"unstamped"` (a reading with no age to
+#: check), `"stale"` (aged past `MAX_TELEMETRY_AGE_S`), or `"fresh"` (checked
+#: and within it). Closed, so a reader censusing this field never needs a
+#: fifth bucket for an unrecognised word.
+THERMAL_TELEMETRY_STATES = frozenset({"absent", "unstamped", "stale", "fresh"})
 
 
 @dataclass(frozen=True)
@@ -743,13 +757,25 @@ class SensingController:
                        "telemetry": "absent", "telemetry_age_s": None}
             return THERMAL_SCALE["unknown"], THERMAL_CAUSE_NO_TELEMETRY, evidence
 
+        age = inputs.telemetry_age_s
+        if age is None:
+            # A status or a skin reading with no age attached is not a fresh
+            # report -- there is nothing to check `MAX_TELEMETRY_AGE_S`
+            # against, so it cannot be confirmed fresh, and it is not the
+            # total silence `no_telemetry` names either. Silence is not
+            # nominal, and neither is a reading of unknown age.
+            reasons.append("thermal unstamped: status or skin reading carries no age")
+            evidence = {"thermal_status": inputs.thermal_status,
+                       "skin_temp_c": inputs.skin_temp_c,
+                       "telemetry": "unstamped", "telemetry_age_s": None}
+            return THERMAL_SCALE["unknown"], THERMAL_CAUSE_UNSTAMPED_TELEMETRY, evidence
+
         # abs(), because `PhoneGpsReader.is_stale` states the rule outright and
         # there are now four such predicates in this codebase: a stamp from this
         # clock's future is not fresh. Not reachable through PhoneLink today --
         # the age comes from the Jetson's own monotonic clock -- but a predicate
         # that disagrees with its siblings is one caller away from mattering.
-        age = inputs.telemetry_age_s
-        if age is not None and (not math.isfinite(age) or abs(age) > MAX_TELEMETRY_AGE_S):
+        if not math.isfinite(age) or abs(age) > MAX_TELEMETRY_AGE_S:
             # A report that has aged out is no report. The phone's telemetry thread
             # can die while the session stays healthy, and one `nominal` from
             # minutes ago would otherwise pin full rates for the rest of the drive.

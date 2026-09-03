@@ -140,8 +140,20 @@ def inputs_from(tick: Any, phone: Any, *, now: float) -> Inputs:
     src = tick.obs_result.field_sources
     diagnostics = tick.obs_result.diagnostics
     feed = tick.obs_result.feed
-    telemetry = getattr(phone, "telemetry", None)
-    telemetry_at = getattr(phone, "telemetry_at_mono", None)
+    # `telemetry` and `telemetry_at_mono` are two separate properties on a
+    # real `PhoneLink`, each reading its own held state independently -- a
+    # rebind landing between the two calls can pair one report's status
+    # with a different report's age, or a real status with no age at all.
+    # `telemetry_pair`, where the phone object provides it, reads both from
+    # one snapshot so they always describe the same report. A simple test
+    # double with no such method (its two attributes are ordinary, non-racing
+    # values) falls back to reading them separately, exactly as before.
+    telemetry_pair = getattr(phone, "telemetry_pair", None)
+    if telemetry_pair is not None:
+        telemetry, telemetry_at = telemetry_pair()
+    else:
+        telemetry = getattr(phone, "telemetry", None)
+        telemetry_at = getattr(phone, "telemetry_at_mono", None)
 
     ego_acceleration_source = src.get("ego_acceleration", provenance.SOURCE_UNATTRIBUTED)
     ego_speed_source = src.get("ego_speed", provenance.SOURCE_UNATTRIBUTED)

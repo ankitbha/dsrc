@@ -280,6 +280,19 @@ class PhoneLink:
         held = self._telemetry
         return None if held is None else held[1]
 
+    def telemetry_pair(self) -> tuple[Any, float | None]:
+        """`(telemetry, telemetry_at_mono)` from one read of `_telemetry`.
+
+        `telemetry` and `telemetry_at_mono` above each read `_telemetry`
+        independently, so a rebind (`_telemetry = None`, or a fresh report
+        replacing it) landing between two separate property reads can pair
+        one report's status with another report's age -- or a real report's
+        status with no age at all. A caller that needs the two to describe
+        the same report calls this once instead.
+        """
+        held = self._telemetry
+        return (None, None) if held is None else held
+
     @property
     def imu(self) -> Any:
         held = self._imu

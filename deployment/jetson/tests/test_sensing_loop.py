@@ -432,6 +432,45 @@ class TestInputsFromATick:
         assert inputs.thermal_status is None
         assert inputs.telemetry_age_s is None
 
+    def test_inputs_from_prefers_an_atomic_telemetry_pair_when_offered(self):
+        """A3: `telemetry` and `telemetry_at_mono` are two separate reads on
+        a real `PhoneLink`, and a rebind landing between them can pair one
+        report's status with a different report's age. `inputs_from` must
+        read `telemetry_pair()` instead, where the phone object offers one,
+        rather than the two properties -- this pins that it actually does,
+        by giving the two routes different answers and checking which one
+        wins.
+        """
+
+        class _PhoneWithAtomicPair:
+            # The two properties disagree with `telemetry_pair` on purpose:
+            # a caller falling back to them, instead of calling the atomic
+            # method, is caught by the mismatch below.
+            telemetry = type("T", (), {"thermal_status": "severe", "skin_temp_c": 55.0})()
+            telemetry_at_mono = 1.0
+
+            def telemetry_pair(self):
+                return (
+                    type("T", (), {"thermal_status": "nominal", "skin_temp_c": 25.0})(),
+                    999.0,
+                )
+
+        inputs = inputs_from(tick(), _PhoneWithAtomicPair(), now=1000.0)
+        assert inputs.thermal_status == "nominal"
+        assert inputs.telemetry_age_s == pytest.approx(1.0)  # 1000.0 - 999.0
+
+    def test_inputs_from_falls_back_to_the_two_properties_without_telemetry_pair(self):
+        """A simple test double with no `telemetry_pair` (its two attributes
+        are ordinary, non-racing values) must keep working exactly as
+        before.
+        """
+        phone = Phone()
+        phone.telemetry = type("T", (), {"thermal_status": "moderate", "skin_temp_c": 41.0})()
+        phone.telemetry_at_mono = 997.0
+        inputs = inputs_from(tick(), phone, now=1000.0)
+        assert inputs.thermal_status == "moderate"
+        assert inputs.telemetry_age_s == pytest.approx(3.0)
+
 
 class TestInputsFromATickCarriesTheBuildersOwnProvenance:
     """`inputs_from` reads `field_sources` by name, one obs key per `Inputs`

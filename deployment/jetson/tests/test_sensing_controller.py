@@ -36,6 +36,7 @@ from policy.sensing_controller import (
     THERMAL_CAUSE_SKIN_WARM,
     THERMAL_CAUSE_STALE_TELEMETRY,
     THERMAL_CAUSE_STATUS,
+    THERMAL_CAUSE_UNSTAMPED_TELEMETRY,
     THERMAL_CAUSES,
     THERMAL_SCALE,
     THERMAL_SCALED_KEYS,
@@ -69,9 +70,13 @@ def settled(controller: SensingController, clock: Clock, inputs: Inputs,
 
 
 def calm(**over) -> Inputs:
+    # `telemetry_age_s` defaults to a known-fresh age: `calm()` means a
+    # nominal drive with a real, current telemetry report, not one whose
+    # age happens to be unknown -- a caller testing the unstamped-telemetry
+    # path passes `telemetry_age_s=None` explicitly.
     fields = dict(ego_acceleration=0.0, ego_speed=20.0, policy_margin=0.9,
                   feed_congestion=0.1, camera_density_bin=2,
-                  thermal_status="nominal", skin_temp_c=30.0)
+                  thermal_status="nominal", skin_temp_c=30.0, telemetry_age_s=0.5)
     fields.update(over)
     return Inputs(**fields)
 
@@ -1089,6 +1094,40 @@ class TestThermalCause:
         )
         check = decision.attribution.rules[Trigger.THERMAL]
         assert check.evidence["cause"] == THERMAL_CAUSE_STALE_TELEMETRY
+
+    def test_a_status_with_no_age_is_unstamped_not_fresh(self):
+        """A3: a null `telemetry_age_s` used to fall through every staleness
+        check (`age is not None and ...`) straight to `"telemetry": "fresh"`
+        -- an age that cannot be checked against `MAX_TELEMETRY_AGE_S` at all
+        was labelled the same as one that was checked and passed.
+        """
+        decision = SensingController(clock=Clock()).decide(
+            calm(thermal_status="nominal", telemetry_age_s=None)
+        )
+        check = decision.attribution.rules[Trigger.THERMAL]
+        assert check.evidence["cause"] == THERMAL_CAUSE_UNSTAMPED_TELEMETRY
+        assert check.evidence["telemetry"] == "unstamped"
+        assert check.evidence["scale"] == THERMAL_SCALE["unknown"]
+
+    def test_unstamped_and_stale_are_reached_from_the_same_nominal_status(self):
+        """The same `thermal_status="nominal"` reaches three different
+        causes depending only on `telemetry_age_s` -- proof the three are
+        genuinely distinguished on age, not on the status carried beside it.
+        """
+        fresh = SensingController(clock=Clock()).decide(
+            calm(thermal_status="nominal", telemetry_age_s=1.0)
+        )
+        unstamped = SensingController(clock=Clock()).decide(
+            calm(thermal_status="nominal", telemetry_age_s=None)
+        )
+        stale = SensingController(clock=Clock()).decide(
+            calm(thermal_status="nominal", telemetry_age_s=MAX_TELEMETRY_AGE_S + 1.0)
+        )
+        assert fresh.attribution.rules[Trigger.THERMAL].evidence["cause"] is None
+        assert (unstamped.attribution.rules[Trigger.THERMAL].evidence["cause"]
+                == THERMAL_CAUSE_UNSTAMPED_TELEMETRY)
+        assert (stale.attribution.rules[Trigger.THERMAL].evidence["cause"]
+                == THERMAL_CAUSE_STALE_TELEMETRY)
 
     def test_total_silence_is_no_telemetry(self):
         decision = SensingController(clock=Clock()).decide(

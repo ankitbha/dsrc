@@ -1623,11 +1623,12 @@ def test_thermal_lines_do_not_crash_on_a_partial_passes_record():
 
 
 def test_the_controller_is_byte_identical_after_this_task():
-    """Task 34's round-2 method: replay a large number of randomized `Inputs`
-    through `SensingController.decide` and hash every `Decision.to_record()`.
-    This task does not touch `sensing_controller.py` at all, so the digest
-    below must be exact -- it is the one test that would catch D1 (folding the
-    Jetson's temperature into `_thermal_scale`) being taken by accident.
+    """Replays a large number of randomized `Inputs` through
+    `SensingController.decide` and hashes every `Decision.to_record()`. The
+    digest is pinned exactly: anything that changes `sensing_controller.py`'s
+    own logic -- intentionally or by accident -- moves it, so a change that
+    was not supposed to touch the controller at all shows up here even when
+    every other test in this file is unaffected.
     """
     state = {"t": 1000.0}
 
@@ -1662,4 +1663,8 @@ def test_the_controller_is_byte_identical_after_this_task():
         )
         records.append(controller.decide(inputs).to_record())
     digest = hashlib.md5(json.dumps(records, sort_keys=True, default=str).encode()).hexdigest()
-    assert digest == "c884167b75931f2c07db6a5d2983d982"
+    # `telemetry_age_s` is drawn as `None` above on some fraction of ticks,
+    # independently of `thermal_status` and `skin_temp_c` -- `_thermal_scale`
+    # used to score that combination as though the report were fresh; it now
+    # reads `unknown`, moving `Decision.to_record()` on every draw that hits it.
+    assert digest == "bb1cb86fa04187b0374d3820e96f7f08"

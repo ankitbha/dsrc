@@ -842,6 +842,49 @@ def test_telemetry_carries_its_arrival_time():
         phone.close()
 
 
+class TestTelemetryPairIsAtomic:
+    """A3: `telemetry` and `telemetry_at_mono` each read `_telemetry`
+    independently -- a rebind landing between the two calls can pair a
+    stale report's status with a null age (or the reverse). `telemetry_pair`
+    reads `_telemetry` once so the two values it returns always describe the
+    same report.
+    """
+
+    def test_no_report_is_a_null_pair_not_a_mismatch(self):
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        assert link.telemetry_pair() == (None, None)
+
+    def test_the_pair_matches_the_report_it_was_read_from(self):
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        message = SimpleNamespace(thermal_status="moderate", skin_temp_c=38.0)
+        link._telemetry = (message, 12345.0)
+        telemetry, at_mono = link.telemetry_pair()
+        assert telemetry is message
+        assert at_mono == 12345.0
+
+    def test_a_rebind_between_the_two_properties_cannot_tear_the_pair(self):
+        """The two separate properties are still individually correct at
+        any instant, so this drives the exact defect directly: read
+        `telemetry` first, rebind, then read `telemetry_at_mono` -- the
+        combination a caller doing two separate reads would see -- and show
+        it disagrees with `telemetry_pair`'s single, un-torn read taken
+        before the rebind.
+        """
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        first_message = SimpleNamespace(thermal_status="moderate", skin_temp_c=38.0)
+        link._telemetry = (first_message, 12345.0)
+
+        telemetry, at_mono = link.telemetry_pair()  # read before the rebind
+        status_seen_first = link.telemetry  # a caller's first of two separate reads
+        link._telemetry = None  # the rebind, landing between the two reads
+        age_seen_second = link.telemetry_at_mono  # the caller's second read
+
+        assert (telemetry, at_mono) == (first_message, 12345.0)
+        assert status_seen_first is first_message and age_seen_second is None, (
+            "two separate property reads pair a stale status with a null age"
+        )
+
+
 class LoopbackPhone:
     """A loopback client that speaks the protocol, standing in for the app."""
 
