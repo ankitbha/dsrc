@@ -358,12 +358,21 @@ class TestSessionSummaryShape:
     def test_no_field_is_a_ratio_percentage_or_health_word(self):
         loaded = loaded_from([{"jetson_ms": 1.0}])
         session = session_summary(loaded, {}, None, phone_log_supplied=False)
-        assert set(session.keys()) == {"axes", "reconciliations", "inputs", "sensing"}
+        assert set(session.keys()) == {
+            "axes", "tick_coverage", "reconciliations", "inputs", "sensing",
+        }
+        # `tick_coverage` (D1) is counts and durations only -- no ratio field
+        # (the hardware-drive round's rule 7 concern, restated for it).
+        if session["tick_coverage"] is not None:
+            assert set(session["tick_coverage"].keys()) == {
+                "actual_ticks", "span_s", "median_gap_s", "largest_gap_s",
+                "next_largest_gap_s", "gap_multiple", "missing_ticks", "expected_ticks",
+            }
         for axis in session["axes"]:
             assert set(axis.keys()) == {
                 "axis", "attempted", "answered", "attempted_is", "answered_is",
                 "unanswered_by_reason", "vocabulary", "vocabulary_violations",
-                "unbuildable", "section", "not_evaluable_by_rule",
+                "unbuildable", "section", "not_evaluable_by_rule", "zero_attempted_context",
             }
 
 

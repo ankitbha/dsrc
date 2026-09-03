@@ -1170,12 +1170,19 @@ def _log_health_lines(failures: dict[str, Any]) -> list[str]:
     return [f"- log: {log_health.get('dropped_records', 0)} records dropped, {writer}"]
 
 
-def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
+def _failure_lines(failures: dict[str, Any] | None, thermal_section_present: bool = True) -> list[str]:
     """The `## Failures` section. Absent entirely when `failures` itself is
     `None` -- the log carries no failure records at all, the reading a
     pre-task-38 run gets (task 33 and task 36 both shipped a measurement
     with no surface; this exists so that mistake is not repeated a third
-    time)."""
+    time).
+
+    `thermal_section_present` (default `True`, matching every pre-existing
+    call site) is whether `## Thermal` will actually render in the same
+    document -- this section used to point at it unconditionally, which on
+    a drive with no thermal records at all pointed at a section that does
+    not exist (the hardware-drive round's D3).
+    """
     if not failures:
         return []
     lines = ["", "## Failures", ""]
@@ -1302,7 +1309,11 @@ def _failure_lines(failures: dict[str, Any] | None) -> list[str]:
     )
 
     lines += _log_health_lines(failures)
-    lines.append("- thermal failures are recorded separately -- see ## Thermal")
+    lines.append(
+        "- thermal failures are recorded separately -- see ## Thermal" if thermal_section_present
+        else "- thermal failures are recorded separately, but this drive has no ## Thermal "
+             "section (no thermal records at all)"
+    )
     lines += _phone_failure_lines(failures)
     return lines
 
@@ -1343,45 +1354,80 @@ def _axis_fully_answered(axis: dict[str, Any]) -> bool:
     )
 
 
-def _axis_extra_clause(axis_name: str, sensing: dict[str, Any] | None) -> str:
-    """The one piece of context that does not fit the generic `answered of
-    attempted` shape: which rules were legitimately `not_evaluable` (a state
-    that is not "unanswered", D3) and why `rates` may have nothing to compare
-    achieved against (D8, a shadow drive).
+def _axis_extra_clause(axis: dict[str, Any], context: dict[str, Any] | None) -> str:
+    """The context that does not fit the generic `answered of attempted`
+    shape: which rules were legitimately `not_evaluable` (a state that is
+    not "unanswered", plan D3) and why `rates` may have nothing to compare
+    achieved against (plan D8, a shadow drive) -- both read off `sensing`,
+    when it is known.
+
+    Two more, read off the axis record and `context["thermal"]` directly,
+    from the hardware-drive validation round rather than the plan:
+    `failures`'s own per-source unreadability census (that round's D2), and
+    `thermal`'s jetson-only scope when the phone half of the same instrument
+    answered nothing at all (that round's D8).
     """
-    if sensing is None:
-        return ""
-    if axis_name == "triggers":
-        bits = []
-        for rule, statuses in sorted(sensing["triggers"]["rules_by_status"].items()):
-            n = statuses.get(RULE_NOT_EVALUABLE, 0)
-            if not n:
-                continue
-            missing = sensing["triggers"]["rules_missing"].get(rule) or {}
-            missing_str = ", ".join(sorted(missing)) if missing else "an input"
-            bits.append(f"{rule} was not_evaluable on {n} of them, missing {missing_str}")
-        return (" " + "; ".join(bits) + ".") if bits else ""
-    if axis_name == "rates" and not sensing["ever_live"]:
+    context = context or {}
+    sensing = context.get("sensing")
+    name = axis["axis"]
+    if sensing is not None:
+        if name == "triggers":
+            bits = []
+            for rule, statuses in sorted(sensing["triggers"]["rules_by_status"].items()):
+                n = statuses.get(RULE_NOT_EVALUABLE, 0)
+                if not n:
+                    continue
+                missing = sensing["triggers"]["rules_missing"].get(rule) or {}
+                missing_str = ", ".join(sorted(missing)) if missing else "an input"
+                bits.append(f"{rule} was not_evaluable on {n} of them, missing {missing_str}")
+            return (" " + "; ".join(bits) + ".") if bits else ""
+        if name == "rates" and not sensing["ever_live"]:
+            return (
+                f" Commanded rates were never applied (mode {sensing['mode']} on "
+                f"{sensing['ticks']} of {sensing['ticks']} decisions), so achieved is "
+                "not a shortfall against them."
+            )
+    if name == "failures" and axis.get("not_evaluable_by_rule"):
+        sources = axis["not_evaluable_by_rule"]
+        total_unreadable = sum(sources.values())
         return (
-            f" Commanded rates were never applied (mode {sensing['mode']} on "
-            f"{sensing['ticks']} of {sensing['ticks']} decisions), so achieved is "
-            "not a shortfall against them."
+            f" {len(sources)} of the underlying failure sources were not fully readable "
+            f"on every pass ({total_unreadable} source-passes unreadable across them) -- "
+            "see ## Failures for which."
         )
+    if name == "thermal":
+        phone = ((context.get("thermal") or {}).get("summary") or {}).get("phone") or {}
+        n_phone = phone.get("samples", 0)
+        headroom_absent = sum((phone.get("headroom_absent_counts") or {}).values())
+        if n_phone and headroom_absent == n_phone:
+            return (
+                f" This counts the jetson zone only: the phone half of the same instrument "
+                f"answered none of its {n_phone} reports."
+            )
     return ""
 
 
-def _axis_headline_line(axis: dict[str, Any], sensing: dict[str, Any] | None) -> str:
+def _axis_headline_line(axis: dict[str, Any], context: dict[str, Any] | None) -> str:
     name, section = axis["axis"], axis["section"]
+    rendered_sections = (context or {}).get("rendered_sections")
+    pointer = (
+        f" See {section}." if rendered_sections is None or section in rendered_sections
+        else f" {section} does not appear in this report."
+    )
     if axis["unbuildable"] is not None:
-        return f"- **{name}**: not built -- {axis['unbuildable']}. See {section}."
+        return f"- **{name}**: not built -- {axis['unbuildable']}.{pointer}"
     noun = _AXIS_NOUN[name]
     reason = ", ".join(f"{word} {n}" for word, n in sorted(axis["unanswered_by_reason"].items()))
+    if not reason and axis["attempted"] == 0 and axis.get("zero_attempted_context"):
+        # The one shape whose census is structurally empty (no per-tick
+        # record to read a reason off) -- the hardware-drive round's D4.
+        reason = axis["zero_attempted_context"]
     line = f"- **{name}**: {axis['answered']} of {axis['attempted']} {noun} answered"
     if reason:
         line += f" -- {reason}"
     line += "."
-    line += _axis_extra_clause(name, sensing)
-    return line + f" See {section}."
+    line += _axis_extra_clause(axis, context)
+    return line + pointer
 
 
 def _reconciliation_line(rec: dict[str, Any]) -> str:
@@ -1391,13 +1437,44 @@ def _reconciliation_line(rec: dict[str, Any]) -> str:
     return f"{prefix} -- {detail}" if detail else prefix
 
 
-def _session_summary_lines(session: dict[str, Any]) -> list[str]:
+def _tick_coverage_line(coverage: dict[str, Any] | None) -> list[str]:
+    """The one line the hardware-drive round's D1 exists for: a check on
+    tick PRODUCTION, placed in the first few lines of `## Session summary`
+    so an interruption long enough to matter cannot hide behind seven axes
+    that are all, individually, ratios of ticks that DO exist. Absent
+    (rather than a manufactured zero) on fewer than three ticks -- there is
+    no gap distribution to read a median from.
+    """
+    if coverage is None:
+        return []
+    largest = coverage["largest_gap_s"]
+    next_largest = coverage["next_largest_gap_s"]
+    missing = coverage["missing_ticks"]
+    expected = coverage["expected_ticks"]
+    fraction = f" ({missing / expected:.1%} of {expected} expected)" if missing and expected else ""
+    return [
+        f"Tick coverage: {coverage['actual_ticks']} ticks read over {coverage['span_s']:.2f} s "
+        f"(median inter-tick gap {coverage['median_gap_s'] * 1000:.1f} ms); largest gap "
+        f"{largest:.2f} s (next-largest {next_largest:.2f} s), costing an estimated "
+        f"{missing} tick(s) at {coverage['gap_multiple']:g}x the median or bigger{fraction}.",
+        "",
+    ]
+
+
+def _session_summary_lines(session: dict[str, Any], context: dict[str, Any] | None = None) -> list[str]:
     """`## Session summary`: every axis, always -- rule 22 forbids counting
     how many answered without enumerating the ones that did not, on the same
     lines, so the enumeration is never partial.
+
+    `context` carries `sensing`, `thermal` and `rendered_sections` for the
+    axis headlines (`_axis_headline_line`/`_axis_extra_clause`); a caller
+    that does not pass one (every pre-existing call site) gets the same
+    reading as before -- `sensing` from `session` itself, no thermal detail,
+    and every axis's named section assumed present.
     """
     axes = session["axes"]
-    sensing = session.get("sensing")
+    if context is None:
+        context = {"sensing": session.get("sensing"), "thermal": None, "rendered_sections": None}
     fully_answered = [a for a in axes if _axis_fully_answered(a)]
     unbuildable = [a for a in axes if a["unbuildable"] is not None]
     did_not = [a for a in axes if a not in fully_answered and a not in unbuildable]
@@ -1407,7 +1484,8 @@ def _session_summary_lines(session: dict[str, Any]) -> list[str]:
         f"{len(did_not)} did not, {len(unbuildable)} could not be built.",
         "",
     ]
-    lines += [_axis_headline_line(axis, sensing) for axis in axes]
+    lines += _tick_coverage_line(session.get("tick_coverage"))
+    lines += [_axis_headline_line(axis, context) for axis in axes]
 
     recs = session["reconciliations"]
     held = [r for r in recs if r["status"] == "held"]
@@ -1568,10 +1646,17 @@ def render_session_summary_only(
         "built -- `analyze()` raises on a zero-tick drive by design. This section reads "
         "`metadata.jsonl`, `summary.json` and `log_health.json` alone.",
     ]
-    lines += _session_summary_lines(session)
+    sensing = session.get("sensing")
+    # This branch never reaches `analyze()`, so `## Thermal` and `## Failures`
+    # never render here regardless of what those axes' `section` fields say
+    # (the hardware-drive round's D3) -- `## Sensing` is the only one of the
+    # three that can, and only when the drive has a phone.
+    rendered_sections = frozenset({"## Sensing"}) if sensing is not None else frozenset()
+    context = {"sensing": sensing, "thermal": None, "rendered_sections": rendered_sections}
+    lines += _session_summary_lines(session, context)
     if log_health is not None:
         lines += _log_health_lines({"log_health": log_health})
-    lines += _sensing_lines(session.get("sensing"))
+    lines += _sensing_lines(sensing)
     lines.append("")
     return "\n".join(lines)
 
@@ -1596,11 +1681,30 @@ def render_markdown(
         f"(median {r['tick_rate_hz_median']} Hz, "
         f"{r['camera_dropped_frames']} camera frames dropped)",
     ]
+    # `## Thermal`/`## Failures`/`## Sensing` are each conditional further
+    # down in this function -- computed here, before the axis headlines are
+    # rendered, so an axis whose named `section` will not actually appear in
+    # this document says so instead of pointing at nothing (the
+    # hardware-drive round's D3). The other four sections below are
+    # unconditional.
+    rendered_sections = {"## Latency (full run)", "## Observation quality"}
+    if r.get("thermal"):
+        rendered_sections.add("## Thermal")
+    if r.get("failures"):
+        rendered_sections.add("## Failures")
+    if session is not None and session.get("sensing") is not None:
+        rendered_sections.add("## Sensing")
+    context = None
+    if session is not None:
+        context = {
+            "sensing": session.get("sensing"), "thermal": r.get("thermal"),
+            "rendered_sections": frozenset(rendered_sections),
+        }
     # Placed above ## Gates (D2): a reader who reads one section reads the
     # first one, and that used to be the verdict this section exists to
     # qualify.
     if session is not None:
-        lines += _session_summary_lines(session)
+        lines += _session_summary_lines(session, context)
     lines += [
         "",
         "## Gates",
@@ -1739,7 +1843,7 @@ def render_markdown(
         f"{r['observation']['top_fallback_fields']}",
     ]
     lines += _thermal_lines(r.get("thermal"))
-    lines += _failure_lines(r.get("failures"))
+    lines += _failure_lines(r.get("failures"), bool(r.get("thermal")))
     lines += [
         "",
         "## GPS",
@@ -1843,12 +1947,34 @@ THERMAL_FAILURES_VOCABULARY = frozenset({THERMAL_BASIS_STALE}) | ABSENT_REASONS
 #: `provenance` states the SHAPE of `field_sources` (a map of the wrong size
 #: is `short`/`long`, no vocabulary of legal wrong sizes exists) and, on a map
 #: of the right size, whether it carries any field that is actually evidence
-#: about this tick. `PROVENANCE_EXCLUDED` is `perception.provenance.SUBSTITUTED`
-#: plus `derived_empty`: a tick whose every field falls in this set measured
-#: nothing, even though its key set matches the encoder contract exactly.
+#: about this tick.
+#:
+#: D7: `sim_contract`'s always-derived slots (`ego_headway_s`,
+#: `target_lane_front_gap`, `uncongested_low_speed_flag`) carry `derived` or
+#: `approximated` on every tick of every drive, regardless of whether the
+#: quantities they were computed from were themselves measured or
+#: substituted -- `field_sources` records the class assigned to a field, not
+#: the provenance of that field's own inputs, so a tick built entirely from
+#: `fallback_neutral` values still shows a non-excluded class on these three
+#: and this axis answered `749 of 749` on a drive that measured nothing.
+#: Excluding `derived`/`approximated` from evidence on their own fixes the
+#: false positive without needing a dependency graph: a tick "answers" only
+#: when some OTHER field in the same map carries a genuinely primary class
+#: (`PROVENANCE_PRIMARY_EVIDENCE`, below) -- which a real derivation would
+#: have been built from, since there is no input to `derived`/`approximated`
+#: outside this same map.
 PROVENANCE_MIXED_REASON = "provenance_fields_mixed"
-PROVENANCE_EXCLUDED = provenance.SUBSTITUTED | {provenance.SOURCE_DERIVED_EMPTY}
+PROVENANCE_EXCLUDED = provenance.SUBSTITUTED | {
+    provenance.SOURCE_DERIVED_EMPTY, provenance.SOURCE_DERIVED, provenance.SOURCE_APPROXIMATED,
+}
 PROVENANCE_VOCABULARY = frozenset({PROVENANCE_MIXED_REASON}) | PROVENANCE_EXCLUDED
+#: The classes that are themselves a reading this tick (directly, or from an
+#: external feed) rather than something computed or substituted -- the
+#: positive test `_axis_provenance` actually applies (D7).
+PROVENANCE_PRIMARY_EVIDENCE = frozenset({
+    provenance.SOURCE_MEASURED, provenance.SOURCE_MEASURED_CONVERTED,
+    provenance.SOURCE_MEASURED_ARRIVAL_PROXY, provenance.SOURCE_FEED,
+})
 
 #: The three words `RuleCheck.status` may hold. Duplicated from
 #: `policy.sensing_controller` rather than imported as a set, because that
@@ -1860,6 +1986,16 @@ VALID_RULE_STATUSES = frozenset({RULE_FIRED, RULE_QUIET, RULE_NOT_EVALUABLE})
 #: have the instrument and measured nothing (task 37's drive). A drive with no
 #: phone has no rates/api_calls/triggers axis to be zero.
 NOT_A_PHONE_RUN = "no tick carries a sensing block (not a phone run)"
+
+#: D6: distinct from `NOT_A_PHONE_RUN` -- a phone run, on a log recorded
+#: before `here_calls`/`here_errors` existed. Shared verbatim by
+#: `_axis_api_calls`'s `unbuildable`, `_here_calls_by_session`'s
+#: `not_measured`, and `_reconcile_reference_shape`'s `unavailable` detail,
+#: so the three surfaces that used to classify this shape three different
+#: ways (unbuildable nowhere on the axis; a measured zero on the HERE line;
+#: a shape violation on the reconciliation) now name the same fact in the
+#: same words.
+HERE_CALLS_PREDATES_TASK_39 = "no tick carries here_calls (log predates task 39)"
 
 
 @dataclass(frozen=True)
@@ -1881,13 +2017,24 @@ class AxisResult:
     vocabulary_violations: dict[str, int]
     unbuildable: str | None
     section: str
-    #: Per-rule count of ticks where that rule was legitimately `not_evaluable`
-    #: (D3: not a member of `unanswered_by_reason`, since it does not make the
-    #: tick unanswered). Empty on every axis but `triggers`. Kept off
-    #: `unanswered_by_reason` so rule 2's identity is untouched by it -- the
-    #: `## Sensing` section prints the same census from `sensing_result`, and
-    #: without this field the JSON record itself carried no trace of it.
+    #: An auxiliary census that never touches rule 2's identity (kept off
+    #: `unanswered_by_reason` on purpose): per-rule count of ticks where that
+    #: rule was legitimately `not_evaluable` on `triggers`; per-source count
+    #: of unreadable passes (`passes_attempted - passes_readable`, from
+    #: `summary["failures"]["sources"]`) on `failures` (D2 -- `failures`
+    #: previously had no equivalent, so a tick-level freshness count of
+    #: `749 of 749 answered` could stand beside `620 of 930 source-passes
+    #: unreadable` in `## Failures` with nothing on the axis record itself
+    #: saying so). Empty on the other five axes.
     not_evaluable_by_rule: dict[str, int] = field(default_factory=dict)
+    #: Set only when `attempted == 0` (`thermal`/`failures`): the one shape
+    #: where the reason census is structurally empty, because there are no
+    #: per-tick records to read a reason off (D4). Distinguishes "this
+    #: instrument was never configured for this drive" from the more severe
+    #: "summary.json shows this instrument ran, but no tick carries its
+    #: block at all" -- worse than any tick reading `absent`, and otherwise
+    #: indistinguishable from ordinary non-use.
+    zero_attempted_context: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -1898,6 +2045,7 @@ class AxisResult:
             "vocabulary_violations": dict(self.vocabulary_violations),
             "unbuildable": self.unbuildable, "section": self.section,
             "not_evaluable_by_rule": dict(self.not_evaluable_by_rule),
+            "zero_attempted_context": self.zero_attempted_context,
         }
 
 
@@ -1969,7 +2117,23 @@ def _axis_latency(ticks: list[dict[str, Any]]) -> AxisResult:
     )
 
 
-def _axis_thermal(ticks: list[dict[str, Any]]) -> AxisResult:
+#: D4's two `zero_attempted_context` messages, shared by `thermal` and
+#: `failures` -- both read `attempted == 0` off per-tick records, so the
+#: only other fact available to explain it is whether `summary.json` itself
+#: carries a block for the instrument.
+def _zero_attempted_context(summary: dict[str, Any] | None, name: str) -> str:
+    if (summary or {}).get(name):
+        return (
+            f"summary.json carries a {name!r} block for this drive, but no tick "
+            f"carries a {name} block at all -- worse than any tick reading absent"
+        )
+    return (
+        f"no tick carries a {name} block and summary.json carries no {name!r} "
+        f"block either ({name} was not enabled for this drive)"
+    )
+
+
+def _axis_thermal(ticks: list[dict[str, Any]], summary: dict[str, Any] | None = None) -> AxisResult:
     attempted = 0
     answered = 0
     counts: dict[str, int] = {}
@@ -1997,10 +2161,13 @@ def _axis_thermal(ticks: list[dict[str, Any]]) -> AxisResult:
         unanswered_by_reason=census,
         vocabulary="sensors.thermal.ABSENT_REASONS (+ sensors.thermal.THERMAL_BASIS_STALE)",
         vocabulary_violations=violations, unbuildable=None, section="## Thermal",
+        zero_attempted_context=(
+            _zero_attempted_context(summary, "thermal") if attempted == 0 else None
+        ),
     )
 
 
-def _axis_failures(ticks: list[dict[str, Any]]) -> AxisResult:
+def _axis_failures(ticks: list[dict[str, Any]], summary: dict[str, Any] | None = None) -> AxisResult:
     attempted = 0
     answered = 0
     counts: dict[str, int] = {}
@@ -2020,6 +2187,19 @@ def _axis_failures(ticks: list[dict[str, Any]]) -> AxisResult:
             reason = block.get("reason") or "unstated"
             counts[reason] = counts.get(reason, 0) + 1
     census, violations = _census_and_violations(counts, THERMAL_FAILURES_VOCABULARY)
+    # D2: `answered`/`attempted` above are a tick-level FRESHNESS count
+    # (`failures.basis`) -- they say nothing about whether the underlying
+    # failure SOURCES could be read at all, which is a different population
+    # `## Failures` already reports per source. `not_evaluable_by_rule`
+    # (reused here keyed by source name, not by rule) carries that second
+    # population onto the axis record itself, the way `triggers` already
+    # does for its own rules -- without touching rule 2's identity, since it
+    # is not part of `unanswered_by_reason`.
+    not_evaluable_sources: dict[str, int] = {}
+    for source_name, row in (((summary or {}).get("failures") or {}).get("sources") or {}).items():
+        unreadable = (row.get("passes_attempted", 0) or 0) - (row.get("passes_readable", 0) or 0)
+        if unreadable > 0:
+            not_evaluable_sources[source_name] = unreadable
     return AxisResult(
         axis="failures", attempted=attempted, answered=answered,
         attempted_is="ticks carrying a failures block",
@@ -2027,15 +2207,20 @@ def _axis_failures(ticks: list[dict[str, Any]]) -> AxisResult:
         unanswered_by_reason=census,
         vocabulary="sensors.thermal.ABSENT_REASONS (+ sensors.thermal.THERMAL_BASIS_STALE)",
         vocabulary_violations=violations, unbuildable=None, section="## Failures",
+        not_evaluable_by_rule=not_evaluable_sources,
+        zero_attempted_context=(
+            _zero_attempted_context(summary, "failures") if attempted == 0 else None
+        ),
     )
 
 
 def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
     """Answers "did this tick's provenance map cover the encoder contract
     *and measure something*" (M4) -- a map of the right shape whose every
-    field is `perception.provenance.SUBSTITUTED` or `derived_empty` is a
-    drive that measured nothing, and a shape check alone reads that as a
-    full house.
+    field is `perception.provenance.SUBSTITUTED`, `derived_empty`, or
+    `derived`/`approximated` with no primary evidence anywhere else in the
+    map (D7) is a drive that measured nothing, and a shape check alone reads
+    that as a full house.
     """
     attempted = len(ticks)
     answered = 0
@@ -2052,13 +2237,18 @@ def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
             counts[key] = counts.get(key, 0) + 1
             continue
         classes_present = set(field_sources.values())
-        if classes_present - PROVENANCE_EXCLUDED:
+        # D7: `derived`/`approximated` are not primary evidence on their own
+        # (see PROVENANCE_PRIMARY_EVIDENCE's docstring) -- a tick answers
+        # only when some field carries a class that is actually a reading,
+        # which is what a genuine derivation would have been built from.
+        if classes_present & PROVENANCE_PRIMARY_EVIDENCE:
             answered += 1
         else:
-            # Every field is substituted or derived from an absence: censused
-            # under whichever such class dominates this tick's own map, using
-            # ## Observation quality's own by_source vocabulary rather than a
-            # new word.
+            # Every field is substituted, derived from an absence, or
+            # derived/approximated with nothing else in the map to have been
+            # derived from: censused under whichever such class dominates
+            # this tick's own map, using ## Observation quality's own
+            # by_source vocabulary rather than a new word.
             dominant = Counter(field_sources.values()).most_common(1)[0][0]
             counts[dominant] = counts.get(dominant, 0) + 1
     census, violations = _census_and_violations(counts, PROVENANCE_VOCABULARY)
@@ -2067,8 +2257,7 @@ def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
         attempted_is="ticks",
         answered_is=(
             "ticks whose field_sources key set equals sim_contract.encoded_slot_names() "
-            "and carry at least one field outside perception.provenance.SUBSTITUTED "
-            "union {derived_empty}"
+            "and carry at least one field in eval_run.PROVENANCE_PRIMARY_EVIDENCE"
         ),
         unanswered_by_reason=census, vocabulary="eval_run.PROVENANCE_VOCABULARY",
         vocabulary_violations=violations, unbuildable=None, section="## Observation quality",
@@ -2136,6 +2325,22 @@ def _axis_api_calls(ticks: list[dict[str, Any]]) -> AxisResult:
             unanswered_by_reason={}, vocabulary="policy.sensing_loop.reference_from",
             vocabulary_violations={}, unbuildable=NOT_A_PHONE_RUN, section="## Sensing",
         )
+    # D6: a phone run whose log predates `here_calls`/`here_errors` (neither
+    # key exists on `reference`, on any tick -- distinct from the modern
+    # `absent` branch, which sets the keys present but null) is a different
+    # fact from a phone that failed to answer: it is a build the field could
+    # not have reached. `_here_calls_by_session`/`_reconcile_reference_shape`
+    # already carve this out; the axis previously did not, and counted every
+    # such tick under `field_not_recorded` -- a real answered/unanswered
+    # count for a shape that could never have answered at all.
+    if not any("here_calls" in (t["sensing"].get("reference") or {}) for t in sensing_ticks):
+        return AxisResult(
+            axis="api_calls", attempted=None, answered=None,
+            attempted_is="ticks carrying a sensing.reference block",
+            answered_is="ticks whose reference.absent is None and here_calls is non-null",
+            unanswered_by_reason={}, vocabulary="policy.sensing_loop.reference_from",
+            vocabulary_violations={}, unbuildable=HERE_CALLS_PREDATES_TASK_39, section="## Sensing",
+        )
     attempted = len(sensing_ticks)
     answered = 0
     counts: dict[str, int] = {}
@@ -2200,7 +2405,10 @@ def _axis_triggers(ticks: list[dict[str, Any]]) -> AxisResult:
     )
 
 
-_AXIS_BUILDERS: dict[str, Callable[[list[dict[str, Any]]], AxisResult]] = {
+#: `thermal`/`failures` take an optional `summary` second argument (D2/D4);
+#: the other five take `ticks` alone. `session_summary` special-cases the
+#: call, so the type here is deliberately loose rather than a lie.
+_AXIS_BUILDERS: dict[str, Callable[..., AxisResult]] = {
     "latency": _axis_latency,
     "rates": _axis_rates,
     "api_calls": _axis_api_calls,
@@ -2401,7 +2609,7 @@ def _here_calls_by_session(ticks: list[dict[str, Any]]) -> dict[str, Any]:
         calls_total += max(0, last_calls - first_calls)
         errors_total += max(0, last_errors - first_errors)
         uncounted_prefix += first_calls
-    not_measured = None if ticks_with_here_calls else "no tick carries here_calls (log predates task 39)"
+    not_measured = None if ticks_with_here_calls else HERE_CALLS_PREDATES_TASK_39
     return {
         "by_session": rows,
         "calls_total": None if not_measured else calls_total,
@@ -2413,10 +2621,18 @@ def _here_calls_by_session(ticks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def sensing_result(ticks: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, Any] | None:
+def sensing_result(
+    ticks: list[dict[str, Any]], summary: dict[str, Any],
+    *, phone_offline_kinds: frozenset[str] = frozenset(),
+) -> dict[str, Any] | None:
     """The rate, trigger and HERE detail behind the `rates`/`triggers`/
     `api_calls` axes -- `None` on a run with no phone at all, the same
     reading `thermal_result` gives a run that predates thermal.
+
+    `phone_offline_kinds` (D5) is the phone's own session-log failure kinds
+    (`PHONE_OFFLINE_KINDS`), when known -- used only to widen
+    `here["zero_calls_because"]`; empty leaves that computation exactly as
+    it was before D5.
     """
     sensing_ticks = _sensing_ticks(ticks)
     if not sensing_ticks:
@@ -2530,14 +2746,25 @@ def sensing_result(ticks: list[dict[str, Any]], summary: dict[str, Any]) -> dict
     here["responses_received"] = (
         ((summary or {}).get("phone") or {}).get("here") or {}
     ).get("responses_received")
-    here["zero_calls_because"] = (
-        f"mode {mode}; a shadow command never reaches setHereQuery"
-        if (
-            here["calls_total"] == 0 and mode == SHADOW
-            and any(row["observations"] >= 2 for row in here["by_session"])
-        )
-        else None
-    )
+    # D5: a shadow mode and a missing HERE API key are both, independently,
+    # sufficient to place zero calls, and only reporting the first invites a
+    # false counterfactual -- "a live-mode drive would have placed the ~N
+    # calls this line computes as expected" -- when the build could not have
+    # placed any regardless of mode. Both true causes are named when both
+    # apply; neither is preferred over the other, per D12.
+    zero_calls_causes: list[str] = []
+    if (
+        here["calls_total"] == 0
+        and any(row["observations"] >= 2 for row in here["by_session"])
+    ):
+        if mode == SHADOW:
+            zero_calls_causes.append(f"mode {mode}; a shadow command never reaches setHereQuery")
+        if "here.unconfigured" in phone_offline_kinds:
+            zero_calls_causes.append(
+                "the phone recorded here.unconfigured (no HERE API key in this build); "
+                "a live-mode drive would also place zero calls"
+            )
+    here["zero_calls_because"] = "; and ".join(zero_calls_causes) if zero_calls_causes else None
 
     return {
         "present": True,
@@ -2768,7 +2995,7 @@ def _reconcile_reference_shape(loaded: "LoadedRecords") -> Reconciliation:
     if not any("here_calls" in (t["sensing"].get("reference") or {}) for t in sensing_ticks):
         return Reconciliation(
             "reference_absent_iff_fields_null", "unavailable",
-            "no tick carries here_calls (log predates task 39)",
+            HERE_CALLS_PREDATES_TASK_39,
             compared=0, compared_is="records_compared",
         )
     bad = 0
@@ -2855,26 +3082,112 @@ def reconciliations(loaded: "LoadedRecords", summary: dict[str, Any]) -> list[Re
     return out
 
 
+#: D1's default: how many times the median inter-tick gap a gap has to be
+#: before `_tick_coverage` treats it as an interruption rather than
+#: ordinary jitter. Verified against three real drives -- see
+#: `_tick_coverage`'s own docstring for the numbers.
+TICK_COVERAGE_GAP_MULTIPLE = 3.0
+
+
+def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_COVERAGE_GAP_MULTIPLE) -> dict[str, Any] | None:
+    """A check on tick PRODUCTION itself, not on any one instrument (D1).
+
+    Every axis in this module reports `answered of attempted` over the ticks
+    that exist -- a ratio of that form is blind by construction to an event
+    that stops ticks from being produced at all, because it destroys
+    `attempted` and `answered` together. A 54.58 s link outage on a real
+    drive cost about 270 ticks, and the only trace of it anywhere in
+    `## Session summary` was `no_telemetry` on two axes plus ten held
+    reconciliations -- nothing that says a stretch of the drive is simply
+    missing.
+
+    **The first shape tried for this was wrong, and measuring it is what
+    caught it.** `expected = span_s * (actual_ticks / span_s)` is
+    `actual_ticks` by algebra, on every drive, healthy or not -- verified
+    against the real outage log: 1229 actual against 1229.0 "expected", a
+    zero-width miss. That is the same defect this section has already
+    removed twice (a `stale` count nothing could increment; a `basis_counts`
+    literal): an aggregate that is constant by construction is not a
+    measurement, and a mean tick rate computed from the same span it is then
+    multiplied back into can only ever reproduce the tick count it started
+    from.
+
+    **What this reads instead is the GAP distribution.** `median_gap_s` is
+    the median of every inter-tick wall-clock gap -- robust to one outlier,
+    so it stands in for the drive's ordinary cadence even across a long
+    stall. `missing_ticks` sums, over every gap more than `gap_multiple`
+    times that median, how many ticks the ordinary cadence would have
+    produced in that gap beyond the one tick bounding it; a uniformly paced
+    drive scores zero regardless of its tick count or span, because nothing
+    but an actual pause in production can move it. Verified against three
+    real drives' tick records: a drive with an induced 54.58 s outage scores
+    269 missing of 1229 read (largest gap 270x the median); a historical
+    drive with its own, unrelated 85.22 s gap scores 421 of 1073; a drive
+    with no induced fault scores 0 of 749 (largest gap 1.5x the median).
+    """
+    t_wall = sorted(t["t_wall"] for t in ticks if t.get("t_wall") is not None)
+    if len(t_wall) < 3:
+        return None
+    gaps = [b - a for a, b in zip(t_wall, t_wall[1:])]
+    span_s = t_wall[-1] - t_wall[0]
+    sorted_gaps = sorted(gaps)
+    mid = len(sorted_gaps) // 2
+    median_gap_s = (
+        sorted_gaps[mid] if len(sorted_gaps) % 2 else (sorted_gaps[mid - 1] + sorted_gaps[mid]) / 2.0
+    )
+    largest_gap_s = sorted_gaps[-1]
+    next_largest_gap_s = sorted_gaps[-2]
+    missing_ticks = 0
+    if median_gap_s > 0:
+        threshold = gap_multiple * median_gap_s
+        for g in gaps:
+            if g > threshold:
+                missing_ticks += round(g / median_gap_s) - 1
+    actual_ticks = len(t_wall)
+    return {
+        "actual_ticks": actual_ticks,
+        "span_s": span_s,
+        "median_gap_s": median_gap_s,
+        "largest_gap_s": largest_gap_s,
+        "next_largest_gap_s": next_largest_gap_s,
+        "gap_multiple": gap_multiple,
+        "missing_ticks": missing_ticks,
+        "expected_ticks": actual_ticks + missing_ticks,
+    }
+
+
 def session_summary(
     loaded: "LoadedRecords", summary: dict[str, Any], log_health: dict[str, Any] | None,
     *, phone_log_supplied: bool, metadata_jsonl_present: bool = True,
+    phone_offline_kinds: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
-    """The `## Session summary` section's data: seven axes, ten
-    reconciliations, which inputs were available, and the sensing detail
-    behind three of the axes. Built before `analyze()` can even be attempted
-    (D13) -- every axis indexes `loaded.ticks` directly, never `analyze`'s
-    output.
+    """The `## Session summary` section's data: seven axes, a tick-coverage
+    check, ten reconciliations, which inputs were available, and the sensing
+    detail behind three of the axes. Built before `analyze()` can even be
+    attempted (D13) -- every axis indexes `loaded.ticks` directly, never
+    `analyze`'s output.
 
     `metadata_jsonl_present` defaults to `True` for a caller that has already
     read the file successfully (every existing caller); `main()` is the one
     caller that can pass `False`, for the run directory that never wrote the
     file at all -- previously `inputs.metadata_jsonl` was a literal `True`
     that could never say otherwise.
+
+    `phone_offline_kinds` (D5) is the set of `kind` words the phone's own
+    session log recorded (`here.unconfigured` among them) -- known only
+    after `analyze()` has joined that log, so `main()` passes it in on a
+    second call for a drive with ticks, and it stays empty for the zero-tick
+    branch, which never reaches that join.
     """
     ticks = loaded.ticks
-    axes = [_AXIS_BUILDERS[name](ticks) for name in AXES]
+    axes = [
+        _AXIS_BUILDERS[name](ticks, summary) if name in ("thermal", "failures")
+        else _AXIS_BUILDERS[name](ticks)
+        for name in AXES
+    ]
     return {
         "axes": [a.to_record() for a in axes],
+        "tick_coverage": _tick_coverage(ticks),
         "reconciliations": [r.to_record() for r in reconciliations(loaded, summary)],
         "inputs": {
             "metadata_jsonl": metadata_jsonl_present,
@@ -2882,7 +3195,7 @@ def session_summary(
             "log_health_json": log_health is not None,
             "phone_log": phone_log_supplied,
         },
-        "sensing": sensing_result(ticks, summary),
+        "sensing": sensing_result(ticks, summary, phone_offline_kinds=phone_offline_kinds),
     }
 
 
@@ -2911,11 +3224,11 @@ def main() -> int:
     )
     summary = _read_summary(run_dir)
     log_health = _read_log_health(run_dir)
-    session = session_summary(
-        loaded, summary, log_health, phone_log_supplied=phone_log is not None,
-        metadata_jsonl_present=metadata_jsonl_present,
-    )
     if not loaded.ticks:
+        session = session_summary(
+            loaded, summary, log_health, phone_log_supplied=phone_log is not None,
+            metadata_jsonl_present=metadata_jsonl_present,
+        )
         report_md = render_session_summary_only(run_dir, session, loaded, log_health)
         (run_dir / "report.md").write_text(report_md)
         (run_dir / "report.json").write_text(json.dumps(
@@ -2931,6 +3244,18 @@ def main() -> int:
         return 2
 
     result = analyze(run_dir, phone_log, loaded=loaded)
+    # Built AFTER `analyze()` here (unlike the zero-tick branch above, which
+    # cannot reach it): the phone's own session-log failure kinds are known
+    # only once `analyze()` has joined that log, and `here.unconfigured`
+    # among them is what lets `sensing_result` name a build with no HERE API
+    # key as a cause independent of shadow mode (D5).
+    phone_offline_kinds = frozenset(
+        record.get("kind") for record in (result.get("failures") or {}).get("phone") or []
+    )
+    session = session_summary(
+        loaded, summary, log_health, phone_log_supplied=phone_log is not None,
+        metadata_jsonl_present=metadata_jsonl_present, phone_offline_kinds=phone_offline_kinds,
+    )
     plots = [] if args.no_plots else render_plots(result, run_dir)
     report_md = render_markdown(result, plots, session)
     (run_dir / "report.md").write_text(report_md)
