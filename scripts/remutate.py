@@ -42,6 +42,21 @@ GRADLE = ["env", "JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Con
 # comes back. An entry that asserts nothing directly is worse than a note saying which
 # entry covers it.
 MUTATIONS = [
+    ("provenance: a computed class counts as evidence, so an all-substituted drive answers",
+     "deployment/jetson/eval_run.py",
+     "        if classes_present & PROVENANCE_PRIMARY_EVIDENCE:",
+     "        if classes_present - (provenance.SUBSTITUTED | {provenance.SOURCE_DERIVED_EMPTY}):",
+     "python"),
+    ("summary: the failures axis drops its unreadable-source census",
+     "deployment/jetson/eval_run.py",
+     "        if unreadable > 0:\n            not_evaluable_sources[source_name] = unreadable",
+     "        if False:\n            not_evaluable_sources[source_name] = unreadable",
+     "python"),
+    ("summary: an axis points at a section whether or not it was rendered",
+     "deployment/jetson/eval_run.py",
+     '        f" See {section}." if rendered_sections is None or section in rendered_sections',
+     '        f" See {section}." if True',
+     "python"),
     ("inbound: a delivery failure is filed as delivered",
      "phone/transport/src/main/kotlin/com/dsrc/transport/Session.kt",
      '            lastDeliveryFailure = "${t.javaClass.name}: ${t.message}"\n            deliveryFailures.incrementAndGet()\n            inbound.countFailed(frame.channel)',
@@ -2897,13 +2912,6 @@ MUTATIONS = [
      "    did_not = len(axes) - fully_answered - unbuildable",
      "    did_not = len(axes) - fully_answered",
      "python"),
-    ("provenance: a full-size map of only substituted values still answers",
-     "deployment/jetson/eval_run.py",
-     "        classes_present = set(field_sources.values())\n"
-     "        if classes_present - PROVENANCE_EXCLUDED:",
-     "        classes_present = set(field_sources.values())\n"
-     "        if True:",
-     "python"),
     ("triggers: the not-evaluable-by-rule census is dropped from the axis record",
      "deployment/jetson/eval_run.py",
      "            for name in RULES:\n"
@@ -2934,13 +2942,8 @@ MUTATIONS = [
      "python"),
     ("summary: zero_calls_because fires without two observations to support it",
      "deployment/jetson/eval_run.py",
-     "        if (\n"
-     '            here["calls_total"] == 0 and mode == SHADOW\n'
-     '            and any(row["observations"] >= 2 for row in here["by_session"])\n'
-     "        )",
-     "        if (\n"
-     '            here["calls_total"] == 0 and mode == SHADOW\n'
-     "        )",
+     '        and any(row["observations"] >= 2 for row in here["by_session"])',
+     "        and True",
      "python"),
     ("summary: a failed reconciliation is keyed on its check name, not its axis",
      "deployment/jetson/eval_run.py",
@@ -3007,18 +3010,8 @@ MUTATIONS = [
      "python"),
     ("reference shape reconciliation: a pre-task-39 log fails rather than reads unavailable",
      "deployment/jetson/eval_run.py",
-     '    if not any("here_calls" in (t["sensing"].get("reference") or {}) for t in sensing_ticks):\n'
-     "        return Reconciliation(\n"
-     '            "reference_absent_iff_fields_null", "unavailable",\n'
-     '            "no tick carries here_calls (log predates task 39)",\n'
-     '            compared=0, compared_is="records_compared",\n'
-     "        )",
-     "    if False:\n"
-     "        return Reconciliation(\n"
-     '            "reference_absent_iff_fields_null", "unavailable",\n'
-     '            "no tick carries here_calls (log predates task 39)",\n'
-     '            compared=0, compared_is="records_compared",\n'
-     "        )",
+     '            "reference_absent_iff_fields_null", "unavailable",\n            HERE_CALLS_PREDATES_TASK_39,',
+     '            "reference_absent_iff_fields_null", "failed",\n            HERE_CALLS_PREDATES_TASK_39,',
      "python"),
 ]
 
