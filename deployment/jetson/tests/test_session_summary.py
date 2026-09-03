@@ -18,6 +18,8 @@ import pytest
 
 from eval_run import (
     AXES,
+    _axis_headline_line,
+    _zero_attempted_context,
     _tick_coverage,
     LoadedRecords,
     _axis_api_calls,
@@ -1468,3 +1470,56 @@ class TestProvenanceNeedsPrimaryEvidence:
         fs = self._map()
         assert fs["ego_headway_s"] == provenance.SOURCE_DERIVED
         assert self._axis(fs).answered == 0
+
+
+class TestAZeroOfZeroAxisSaysWhy:
+    """D4. `attempted == 0` is the one shape where the reason census is
+    structurally empty, so the axis line carries no cause unless one is put
+    there. It is also the shape a sampler that died on its first pass takes
+    at its worst -- the drive that produced `thermal: 0 of 0 ticks answered`
+    with no reason, pointing at a section that was not rendered.
+    """
+
+    def test_a_disabled_instrument_is_distinguished_from_one_that_ran_and_failed(self):
+        enabled = _zero_attempted_context({"thermal": {"jetson": {"samples": 0}}}, "thermal")
+        never_on = _zero_attempted_context({}, "thermal")
+        assert enabled != never_on
+        assert "summary.json carries a 'thermal' block" in enabled
+        assert "not enabled for this drive" in never_on
+
+    def test_the_reason_reaches_the_rendered_axis_line(self):
+        axis = {
+            "axis": "thermal", "attempted": 0, "answered": 0, "unanswered_by_reason": {},
+            "vocabulary_violations": {}, "unbuildable": None, "section": "## Thermal",
+            "not_evaluable_by_rule": {}, "attempted_is": "ticks", "answered_is": "measured",
+            "zero_attempted_context": "no tick carries a thermal block and summary.json "
+                                      "carries no 'thermal' block either",
+        }
+        line = _axis_headline_line(axis, None)
+        assert "0 of 0" in line
+        assert "carries no 'thermal' block either" in line
+
+
+class TestFailuresAxisCarriesSourceReadability:
+    """D2. The axis counts ticks whose `failures.basis` is measured -- a
+    freshness property. Whether the failure log could read its own sources
+    is a different population, and on a real drive 20 of 30 sources were
+    unreadable on every pass while the axis read `749 of 749 answered`.
+    """
+
+    def test_unreadable_sources_reach_the_axis_record(self):
+        summary = {"failures": {"sources": {
+            "wire.dropped": {"passes_attempted": 31, "passes_readable": 0},
+            "camera.blind_ticks": {"passes_attempted": 31, "passes_readable": 31},
+        }}}
+        ticks = [{"type": "tick", "failures": {"basis": "measured"}}]
+        axis = _axis_failures(ticks, summary)
+        assert axis.answered == 1 and axis.attempted == 1
+        assert axis.not_evaluable_by_rule == {"wire.dropped": 31}
+
+    def test_a_fully_readable_drive_carries_an_empty_census(self):
+        summary = {"failures": {"sources": {
+            "camera.blind_ticks": {"passes_attempted": 31, "passes_readable": 31},
+        }}}
+        axis = _axis_failures([{"type": "tick", "failures": {"basis": "measured"}}], summary)
+        assert axis.not_evaluable_by_rule == {}
