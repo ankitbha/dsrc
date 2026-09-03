@@ -74,6 +74,12 @@ class Decline:
 
     NO_READING = "no_reading"
     NOT_OK = "feed_outcome"
+    #: The reading's age was never measured at all -- distinct from `STALE`,
+    #: which asserts a measured age exceeded the bound. `_fresh` reads
+    #: `None` as "not fresh" for the comparison it does, but "not fresh" is
+    #: not the same claim as "measured old"; a decline must not assert an
+    #: age that does not exist.
+    NO_AGE = "feed_age_unknown"
     STALE = "feed_stale"
     OFF_CORRIDOR = "off_corridor"
     NO_SPEEDS = "no_speed_pair"
@@ -142,6 +148,8 @@ def own(
         return FeedOwnership(declined=Decline.NO_READING)
     if reading.outcome != Outcome.OK or reading.link is None:
         return FeedOwnership(declined=Decline.NOT_OK, **_provenance(reading))
+    if reading.response_age_s is None:
+        return FeedOwnership(declined=Decline.NO_AGE, **_provenance(reading))
     if not _fresh(reading, max_age_s):
         return FeedOwnership(declined=Decline.STALE, **_provenance(reading))
     if reading.link_cross_track_m is None or reading.link_cross_track_m > max_cross_track_m:

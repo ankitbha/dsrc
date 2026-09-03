@@ -133,6 +133,17 @@ class TestAging:
         owned = own(reading(response_age_s=-(feed_fusion.MAX_FEED_AGE_S + 1.0)))
         assert owned.declined == Decline.STALE
 
+    def test_an_unmeasured_age_is_declined_as_unknown_not_stale(self):
+        """B9: `_fresh` reads a null age as "not fresh" for the comparison
+        it makes, but `own` used to fold that straight into `Decline.STALE`
+        -- asserting the reading was measured and found too old when its
+        age was never measured at all.
+        """
+        owned = own(reading(response_age_s=None))
+        assert owned.declined == Decline.NO_AGE
+        assert owned.declined != Decline.STALE
+        assert owned.downstream_congestion is None
+
     def test_a_proxied_stamp_still_owns_but_says_so(self):
         # Proxying is normal in the opening seconds. The field is usable; a run
         # that cannot tell it was aged on a proxy cannot say how much of its feed
