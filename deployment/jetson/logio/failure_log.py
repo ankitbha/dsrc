@@ -121,13 +121,24 @@ QUIET_PASSES_TO_CLOSE = 3
 
 #: The two sources with no counter of their own to scan: `camera.blind_ticks`
 #: and `pipeline.exception` are reported entirely through direct calls
-#: (`note_no_frame`, `note_pipeline_exception`). Their accessors always
-#: return `readable=True` with an empty `by_reason` -- there is nothing for a
-#: scan pass to read -- so `_process_source` must not run its movement or
-#: quiet-streak logic against them; only a direct call or (for
-#: `camera.blind_ticks`) `_check_pseudo_source_quiet`'s own timer may open or
-#: close their episodes.
+#: (`note_no_frame`, `note_frame`, `note_pipeline_exception`). Their
+#: accessors always return `readable=True` with an empty `by_reason` -- there
+#: is nothing for a scan pass to read -- so `_process_source` must not run
+#: its movement or quiet-streak logic against them; only a direct call or
+#: (for `camera.blind_ticks`) `_check_pseudo_source_quiet`'s own timer may
+#: open or close their episodes.
 PSEUDO_SOURCES = frozenset({"camera.blind_ticks", "pipeline.exception"})
+
+#: How long an unbroken streak of `note_no_frame` calls must span before it
+#: becomes an episode, and also the quiet bound used to close an open blind
+#: episode once notifications stop arriving. Every other source closes on
+#: `close_after_s`; `camera.blind_ticks` cannot, because a single failed
+#: `wait_for_fresh` call can legitimately block for several seconds, longer
+#: than `close_after_s` itself -- closing on that bound would end an episode
+#: between two notifications that both belong to the same outage. The value
+#: has margin over both the periods this sampler must be correct at (up to
+#: 5 s) and the longest period observed on a real drive (about 4 s).
+BLIND_EPISODE_MIN_S = 10.0
 
 #: The episode cap per source (D10), `phone_link.refusals`' precedent verbatim.
 MAX_EPISODES_PER_SOURCE = 100
@@ -322,9 +333,10 @@ class _SourceState:
     #: occurrences are still counted after `_open_episode` stopped writing a
     #: record for them.
     suppressed_total: int = 0
-    #: `camera.blind_ticks` only: a single no-frame tick that `note_no_frame`
-    #: credited to `run_total` immediately but that never paired with a
-    #: second tick within the quiet window, so no episode ever enclosed it.
+    #: `camera.blind_ticks` only: no-frame ticks that `note_no_frame` credited
+    #: to `run_total` immediately but whose streak resolved (a frame arrived,
+    #: or the run ended) before it ran long enough to become an episode, so
+    #: no episode ever enclosed them.
     below_episode_threshold: int = 0
     #: How many episodes on this source carried a `detail` longer than
     #: `DETAIL_MAX_LEN` and had it cut by `_capped`.
@@ -949,11 +961,11 @@ def _pctl(values: list[float]) -> dict[str, float] | None:
 
 
 class FailureSampler:
-    """The 1 Hz thread that turns the registry into episodes, plus two direct
-    entry points (`note_no_frame`, `note_pipeline_exception`) the tick loop
-    calls for the two sources this repository detects nowhere else -- see the
-    module docstring's account of the two failures the log's own honesty
-    depends on.
+    """The 1 Hz thread that turns the registry into episodes, plus the direct
+    entry points (`note_no_frame`, `note_frame`, `note_pipeline_exception`)
+    the tick loop calls for the two sources this repository detects nowhere
+    else -- see the module docstring's account of the two failures the log's
+    own honesty depends on.
 
     Shaped like `ThermalSampler`: `start()` / `stop()`, `latest(now)` for the
     per-tick block, `to_record()` for the summary, one lock guarding every
@@ -1011,12 +1023,18 @@ class FailureSampler:
 
         # -- the two direct-notification pseudo-sources --------------------
         self._blind_ticks_total = 0
-        #: True for exactly one no-frame tick that has not yet been joined by
-        #: a second: the first blind tick of a possible outage, not yet worth
-        #: an episode. Cleared either by a second tick arriving (which opens
-        #: the episode, crediting both) or by the quiet timer in
-        #: `_check_pseudo_source_quiet` deciding none is coming.
-        self._blind_pending = False
+        #: The `t_mono` of the first `note_no_frame` call in the current
+        #: blind streak, or `None` when the camera is not currently blind.
+        #: Marks where an episode would be back-dated to if this streak goes
+        #: on to become one. Cleared by `note_frame` (the streak ended in a
+        #: frame), by promotion to an episode once the streak reaches
+        #: `BLIND_EPISODE_MIN_S`, or by `end_of_stream` closing it out.
+        self._blind_since: float | None = None
+        #: How many `note_no_frame` calls belong to the streak named by
+        #: `_blind_since`. Becomes the opened episode's `n` on promotion, or
+        #: is credited to `below_episode_threshold` if the streak resolves
+        #: (via `note_frame` or `end_of_stream`) before reaching that point.
+        self._blind_count = 0
         self._blind_last_mono: float | None = None
         self._pipeline_exception: str | None = None
         self._pipeline_exception_at_mono: float | None = None
@@ -1035,16 +1053,28 @@ class FailureSampler:
         if self._thread is not None:
             self._thread.join(timeout=3.0)
         with self._lock:
-            if self._blind_pending:
-                # A single blind tick was credited to `run_total` (in
-                # `note_no_frame`) but never got the chance to pair with a
-                # second one, or be resolved by a later `end_of_stream` call
-                # or a quiet-timer pass -- the run ended first. Resolved here
-                # rather than left dangling, or the teardown reconciliation
-                # `kept_total + suppressed + below_episode_threshold ==
-                # run_total` comes up one short for `camera.blind_ticks`.
-                self._blind_pending = False
-                self._state["camera.blind_ticks"].below_episode_threshold += 1
+            st = self._state["camera.blind_ticks"]
+            if self._blind_since is not None and st.open_episode is None:
+                # A blind streak was under way (credited to `run_total` as it
+                # happened) but the run ended before either `note_frame` or a
+                # quiet pass got to decide its fate. If it had already run
+                # long enough to be an episode, open it now, back-dated to
+                # its first tick, so `_close_all_open` below closes it as
+                # `open_at_end` like any other episode still running at
+                # teardown. Otherwise it was never worth one, and its ticks
+                # go to `below_episode_threshold` so `kept_total + suppressed
+                # + below_episode_threshold == run_total` still balances.
+                now = self._now()
+                if now - self._blind_since >= BLIND_EPISODE_MIN_S:
+                    self._open_episode(
+                        st, self._by_name["camera.blind_ticks"], self._blind_since,
+                        self._wall(), "no_frame", self._blind_count, None,
+                        SourceSnapshot(readable=True),
+                    )
+                else:
+                    st.below_episode_threshold += self._blind_count
+                self._blind_since = None
+                self._blind_count = 0
             self._close_all_open(outcome=OUTCOME_OPEN_AT_END)
 
     def _loop(self) -> None:
@@ -1252,25 +1282,41 @@ class FailureSampler:
                 self._close_episode(st, source, now, t_wall, OUTCOME_RECOVERED)
 
     def _check_pseudo_source_quiet(self, now: float, t_wall: float) -> None:
-        """The two direct-notification sources open the moment their own
-        condition occurs (see `note_no_frame` / `note_pipeline_exception`),
-        so this pass only ever needs to check whether one has gone quiet
-        long enough to close -- the same `close_after_s` bound every other
-        source uses, applied to elapsed time instead of consecutive passes,
-        because nothing repolls a pseudo-source between direct calls.
+        """`camera.blind_ticks` opens and closes entirely off direct calls
+        (`note_no_frame`, `note_frame`) rather than this pass's own scan, so
+        there are two things left for a scan pass to notice between calls:
+
+        A blind streak that has now run long enough to become an episode
+        even though nothing has called `note_no_frame` again to notice --
+        promoted here, back-dated to its first tick, exactly as
+        `note_no_frame` would promote it on its own next call.
+
+        An *open* episode that has gone quiet for `BLIND_EPISODE_MIN_S` with
+        no further notification and no `note_frame` call. That silence does
+        not mean the camera recovered -- it means this drive has stopped
+        saying anything about the window, which could be a recovered camera
+        or one still blind but failing slowly enough to notify less often
+        than the bound. Recovery is only ever reported when `note_frame`
+        observes a frame; a close driven by silence alone is `unobservable`.
         """
         st = self._state["camera.blind_ticks"]
-        if self._blind_last_mono is not None and now - self._blind_last_mono >= self._close_after_s:
-            if st.open_episode is not None:
-                self._close_episode(st, self._by_name["camera.blind_ticks"], now, t_wall, OUTCOME_RECOVERED)
-            elif self._blind_pending:
-                # A single blind tick with nothing following it within the
-                # quiet window was never worth an episode -- it was credited
-                # to `run_total` the instant `note_no_frame` saw it, and is
-                # named here so the teardown reconciliation still balances
-                # rather than losing it.
-                st.below_episode_threshold += 1
-            self._blind_pending = False
+        if st.open_episode is None and self._blind_since is not None:
+            if now - self._blind_since >= BLIND_EPISODE_MIN_S:
+                last_mono = self._blind_last_mono
+                self._open_episode(
+                    st, self._by_name["camera.blind_ticks"], self._blind_since, t_wall,
+                    "no_frame", self._blind_count, None, SourceSnapshot(readable=True),
+                )
+                st.open_episode.last_t_mono = last_mono
+                self._blind_since = None
+                self._blind_count = 0
+            return
+        if (
+            st.open_episode is not None
+            and self._blind_last_mono is not None
+            and now - self._blind_last_mono >= BLIND_EPISODE_MIN_S
+        ):
+            self._close_episode(st, self._by_name["camera.blind_ticks"], now, t_wall, OUTCOME_UNOBSERVABLE)
 
     def _open_episode(
         self, st: _SourceState, source: Source, now: float, t_wall: float,
@@ -1303,8 +1349,6 @@ class FailureSampler:
         )
         self._next_episode_id += 1
         st.open_episode = episode
-        if source.name == "camera.blind_ticks":
-            self._blind_last_mono = now
         if not kept:
             # Counted once, at the moment this episode is decided to be over
             # the cap -- not once per pass it goes on moving, which is the
@@ -1344,7 +1388,14 @@ class FailureSampler:
         st.kept_n_total += episode.n
         self._outcome_counts[outcome] = self._outcome_counts.get(outcome, 0) + 1
         if source.event_records and self._sink is not None:
-            self._sink.write(episode.close_record(source.device, close_after_s=self._close_after_s))
+            # `camera.blind_ticks` closes on its own bound (`BLIND_EPISODE_MIN_S`,
+            # see its docstring), not the sampler-wide `close_after_s` every
+            # scanned source uses -- the record should name the bound that
+            # actually governed this close, not the one that did not apply.
+            close_after_s = (
+                BLIND_EPISODE_MIN_S if source.name == "camera.blind_ticks" else self._close_after_s
+            )
+            self._sink.write(episode.close_record(source.device, close_after_s=close_after_s))
             st.events_written += 1
 
     def _close_all_open(self, *, outcome: str) -> None:
@@ -1363,24 +1414,27 @@ class FailureSampler:
 
         Every call is credited to `run_total` immediately, so
         `camera.blind_ticks`' own total always equals the number of times
-        this was called -- it used to be credited only once a second tick
-        arrived to pair with, which left a lone blind tick (no second one
-        before `close_after_s` elapsed) never credited at all: `blind_ticks`
-        and the source's own `total` disagreed, and `status` read `quiet` on
-        a drive the camera went blind on.
+        this was called.
 
-        The two-tick rule now governs only whether an EPISODE opens -- a
-        single missed poll at 5 Hz is ordinary and not worth one. A lone
-        credited tick that never pairs within the quiet window is counted in
-        `below_episode_threshold` instead (`_check_pseudo_source_quiet`, or
-        here directly when `end_of_stream` says no second tick is coming),
-        which is what keeps `sum(episode.n) + suppressed +
-        below_episode_threshold == run_total` checkable.
+        An episode opens once an unbroken blind streak has run for
+        `BLIND_EPISODE_MIN_S`, back-dated to the streak's first tick
+        (`_blind_since`) -- not on a fixed tick count, because the failed-read
+        period this camera produces is not fixed either. A streak that never
+        reaches the threshold is not worth an episode; its ticks are counted
+        in `below_episode_threshold` once the streak is known to be over
+        (`note_frame` observing a frame, or `end_of_stream` here), which is
+        what keeps `sum(episode.n) + suppressed + below_episode_threshold ==
+        run_total` checkable.
 
-        `end_of_stream` marks the call the tick loop makes right before it
-        `break`s: nothing will call this again, so a tick left pending or an
-        episode left open by THIS call is resolved right away rather than
-        waiting on a quiet timer that assumes more ticks might still arrive.
+        This call never reports a recovery. Closing an open episode as
+        `recovered` happens only in `note_frame`, when a frame is actually
+        observed -- the previous design closed on this method's own quiet
+        timer, which reported `recovered` whenever notifications merely
+        stopped arriving often enough, including while the camera was still
+        blind. `end_of_stream` is the one exception: nothing will call this
+        again, so an episode left open here is closed as `open_at_end`
+        rather than left for a quiet timer that assumes more ticks might
+        still come.
 
         Does not touch `passes_attempted` / `passes_readable` -- those count
         the sampler's own 1 Hz scan passes for every source alike, including
@@ -1409,19 +1463,52 @@ class FailureSampler:
             if st.open_episode is not None:
                 st.open_episode.n += 1
                 st.open_episode.last_t_mono = now
-            elif self._blind_pending:
-                self._blind_pending = False
-                self._open_episode(
-                    st, source, now, t_wall, "no_frame", 2, None,
-                    SourceSnapshot(readable=True),
-                )
-            elif end_of_stream:
-                st.below_episode_threshold += 1
             else:
-                self._blind_pending = True
+                if self._blind_since is None:
+                    self._blind_since = now
+                    self._blind_count = 0
+                self._blind_count += 1
+                if now - self._blind_since >= BLIND_EPISODE_MIN_S:
+                    self._open_episode(
+                        st, source, self._blind_since, t_wall, "no_frame",
+                        self._blind_count, None, SourceSnapshot(readable=True),
+                    )
+                    st.open_episode.last_t_mono = now
+                    self._blind_since = None
+                    self._blind_count = 0
+                elif end_of_stream:
+                    st.below_episode_threshold += self._blind_count
+                    self._blind_since = None
+                    self._blind_count = 0
 
             if end_of_stream and st.open_episode is not None:
                 self._close_episode(st, source, now, t_wall, OUTCOME_OPEN_AT_END)
+
+    def note_frame(self) -> None:
+        """The tick loop's success path, called once a frame actually
+        arrives -- the observation the old design had no way to make, and
+        the only evidence this sampler ever has that the camera recovered.
+
+        Closes an open blind episode as `recovered`, back-dated to
+        `_blind_last_mono` (the last notified tick), because that is the
+        last instant the outage is known to have still been going; the time
+        between that tick and this frame arriving is dead time neither
+        blind nor demonstrably working. A streak that had not yet reached
+        `BLIND_EPISODE_MIN_S` is resolved into `below_episode_threshold`
+        instead, the same way `end_of_stream` resolves one in `note_no_frame`.
+        Either way the streak is over: `_blind_since` and `_blind_count`
+        are cleared unconditionally.
+        """
+        with self._lock:
+            st = self._state["camera.blind_ticks"]
+            source = self._by_name["camera.blind_ticks"]
+            if st.open_episode is not None:
+                close_mono = self._blind_last_mono if self._blind_last_mono is not None else self._now()
+                self._close_episode(st, source, close_mono, self._wall(), OUTCOME_RECOVERED)
+            elif self._blind_since is not None:
+                st.below_episode_threshold += self._blind_count
+            self._blind_since = None
+            self._blind_count = 0
 
     def note_pipeline_exception(self, exc: BaseException) -> None:
         """`worker()`'s `except BaseException`. Writes one `failure_event`

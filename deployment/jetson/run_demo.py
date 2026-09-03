@@ -557,6 +557,8 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 if camera.end_of_stream:
                     break
                 continue
+            if failures is not None:
+                failures.note_frame()
             fix = gps.latest() if gps is not None else GpsFix()
             peers = None
             if v2v is not None:

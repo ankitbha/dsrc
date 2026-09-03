@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 import run_demo
+from logio.failure_log import BLIND_EPISODE_MIN_S
 
 
 # ---------------------------------------------------------------------------
@@ -820,8 +821,11 @@ class TestSilentCameraNoteNoFrameReachesTheRealLoop:
 
         config = _real_drive_config(tmp_path)
         # No `end_of_stream` is coming from this camera -- the deadline is the
-        # only thing that ends the drive.
-        args = _real_drive_args(duration_s=0.3)
+        # only thing that ends the drive. The duration has to clear
+        # `BLIND_EPISODE_MIN_S` for real, or the blind streak below never runs
+        # long enough to become an episode -- this drives the real clock, not
+        # a fake one, so the run genuinely takes this long.
+        args = _real_drive_args(duration_s=BLIND_EPISODE_MIN_S + 0.5)
         rc = run_demo.run_live(config, args)
         assert rc == 0
 

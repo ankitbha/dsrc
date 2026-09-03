@@ -1019,7 +1019,8 @@ class TestBlindTicks:
         # arrived to pair with, so `blind_ticks` (40) and this source's own
         # `total` (0) disagreed and `status` read `quiet` on a drive the
         # camera went blind on. Every call is now credited the instant it is
-        # seen; the two-tick rule still governs only whether an episode opens.
+        # seen; a streak still has to run for `BLIND_EPISODE_MIN_S` before it
+        # is worth an episode.
         s = sampler()
         s.note_no_frame()
         record = s.to_record()
@@ -1029,12 +1030,17 @@ class TestBlindTicks:
         assert row["episodes"] == 0
         assert row["status"] == sensing_controller.RULE_FIRED
 
-    def test_a_single_blind_tick_with_no_second_one_is_below_the_episode_threshold(self):
+    def test_a_single_blind_tick_resolved_by_a_frame_is_below_the_episode_threshold(self):
+        # Recovery is only ever reported when a frame is actually observed
+        # (`note_frame`) -- there is no quiet timer left that can resolve a
+        # short streak on its own, because the tick loop always calls either
+        # `note_no_frame` or `note_frame` on every tick; nothing goes silent
+        # without one of them saying so.
         now = [0.0]
         s = sampler(now=now)
         s.note_no_frame()
-        now[0] += s._close_after_s + 0.01
-        s.sample_once()  # the quiet timer resolves the pending tick
+        now[0] += 0.5
+        s.note_frame()
         row = s.to_record()["sources"]["camera.blind_ticks"]
         assert row["total"] == 1
         assert row["episodes"] == 0
@@ -1056,9 +1062,12 @@ class TestBlindTicks:
         assert row["episodes"] == 0
 
     def test_end_of_stream_closes_an_open_episode_immediately(self):
-        s = sampler()
+        now = [0.0]
+        s = sampler(now=now)
         s.note_no_frame()
-        s.note_no_frame()  # opens the episode (first_pass_n=2)
+        now[0] = failure_log.BLIND_EPISODE_MIN_S + 1.0
+        s.note_no_frame()  # the streak has now run long enough to open the episode
+        now[0] += 5.0
         s.note_no_frame(end_of_stream=True)
         record = s.to_record()
         row = record["sources"]["camera.blind_ticks"]
@@ -1079,27 +1088,53 @@ class TestBlindTicks:
         assert row["total"] == 1
         assert row["below_episode_threshold"] == 1
 
-    def test_two_blind_ticks_an_hour_apart_do_not_pair_into_one_episode(self):
-        # MINOR: `_check_pseudo_source_quiet`'s `self._blind_pending = False`
-        # clears a resolved pending tick so a later, unrelated one starts its
-        # own wait rather than pairing with it. Without it, two isolated
-        # ticks separated by an hour would still open an episode together.
+    def test_a_streak_already_past_threshold_at_stop_is_promoted_then_closed(self):
+        # The run ends (some other way than `end_of_stream`, e.g. the tick
+        # loop's own deadline) while a blind streak is under way and has
+        # already run long enough to be an episode, but nothing has called
+        # `note_no_frame` again since to notice. `stop()` must promote it
+        # before closing it, not silently drop it into below-threshold.
         now = [0.0]
         s = sampler(now=now)
         s.note_no_frame()
-        now[0] += s._close_after_s + 0.01
-        s.sample_once()   # resolves the first tick as below_episode_threshold
+        now[0] = failure_log.BLIND_EPISODE_MIN_S + 5.0
+        s.stop()
+        record = s.to_record()
+        row = record["sources"]["camera.blind_ticks"]
+        assert row["episodes"] == 1
+        assert row["below_episode_threshold"] == 0
+        assert record["outcomes"].get(OUTCOME_OPEN_AT_END) == 1
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert closes[0]["n"] == 1
+
+    def test_two_blind_ticks_an_hour_apart_do_not_pair_into_one_episode(self):
+        # Each isolated tick is resolved by its own `note_frame` call, the
+        # way the real tick loop resolves one -- a later, unrelated tick must
+        # start its own streak rather than being folded into the first.
+        now = [0.0]
+        s = sampler(now=now)
+        s.note_no_frame()
+        now[0] += 0.1
+        s.note_frame()  # resolves the first tick as below_episode_threshold
         now[0] += 3600.0
-        s.note_no_frame()  # an unrelated, later tick -- must start pending again
+        s.note_no_frame()  # an unrelated, later tick -- starts its own streak
+        now[0] += 0.1
+        s.note_frame()
         record = s.to_record()
         row = record["sources"]["camera.blind_ticks"]
         assert row["episodes"] == 0
-        assert row["below_episode_threshold"] == 1
+        assert row["below_episode_threshold"] == 2
         assert row["total"] == 2
 
-    def test_four_consecutive_blind_ticks_are_one_episode_of_four(self):
-        s = sampler()
-        for _ in range(4):
+    def test_four_consecutive_blind_ticks_spanning_the_threshold_are_one_episode_of_four(self):
+        # The rule is duration, not tick count: four ticks whose span reaches
+        # `BLIND_EPISODE_MIN_S` are one episode of four, back-dated to the
+        # first of them.
+        now = [0.0]
+        s = sampler(now=now)
+        period = failure_log.BLIND_EPISODE_MIN_S / 3.0
+        for i in range(4):
+            now[0] = i * period
             s.note_no_frame()
         s.stop()
         record = s.to_record()
@@ -1107,6 +1142,74 @@ class TestBlindTicks:
         assert record["sources"]["camera.blind_ticks"]["total"] == 4
         closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
         assert closes[0]["n"] == 4
+
+    @pytest.mark.parametrize("period", [0.2, 1.0, 3.0, 3.5, 4.001, 5.0])
+    def test_one_continuous_blackout_gives_exactly_one_episode_at_every_failed_read_period(self, period):
+        # The acceptance test the redesign exists to pass: a single 82 s
+        # blackout must read as one episode no matter how far apart the
+        # camera's own failed-read notifications land -- including 4.001 s,
+        # the period a real drive's log shows, which is wider than
+        # `close_after_s` (3.0 s) and used to fragment into several episodes
+        # under the old quiet-timer close.
+        blackout_s = 82.0
+        scan_interval = 1.0
+        now = [0.0]
+        s = sampler(now=now, interval_s=scan_interval)
+        t = 0.0
+        next_scan = scan_interval
+        next_note = 0.0
+        while t < blackout_s:
+            t = min(next_scan, next_note)
+            now[0] = t
+            if abs(t - next_note) < 1e-9:
+                s.note_no_frame()
+                next_note += period
+            if abs(t - next_scan) < 1e-9:
+                s.sample_once()
+                next_scan += scan_interval
+        now[0] = blackout_s + 0.01
+        s.note_no_frame(end_of_stream=True)
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert row["episodes"] == 1
+        assert len(closes) == 1
+        assert closes[0]["outcome"] == OUTCOME_OPEN_AT_END
+        assert closes[0]["duration_s"] == pytest.approx(blackout_s, abs=1.0)
+
+    def test_a_camera_that_recovers_mid_run_reads_recovered_not_unobservable(self):
+        # The other half of the acceptance test: a real recovery must still
+        # read `recovered`. The old design got this direction right and the
+        # outage direction wrong; a fix that only ever says `unobservable`
+        # would get this direction wrong instead.
+        now = [0.0]
+        s = sampler(now=now)
+        for i in range(21):
+            now[0] = float(i)
+            s.note_no_frame()
+            s.sample_once()
+        now[0] = 21.0
+        s.note_frame()
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert row["episodes"] == 1
+        assert closes[0]["outcome"] == OUTCOME_RECOVERED
+        assert closes[0]["duration_s"] == pytest.approx(20.0, abs=0.5)
+
+    def test_silence_with_no_observed_frame_closes_as_unobservable_not_recovered(self):
+        # An open episode that goes quiet for `BLIND_EPISODE_MIN_S` with no
+        # further notification and no `note_frame` call is not evidence the
+        # camera recovered -- the drive says nothing about that window.
+        now = [0.0]
+        s = sampler(now=now)
+        for i in range(21):
+            now[0] = float(i)
+            s.note_no_frame()
+        now[0] = 21.0 + failure_log.BLIND_EPISODE_MIN_S
+        s.sample_once()  # nothing further arrives; the quiet bound alone closes it
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert row["episodes"] == 1
+        assert closes[0]["outcome"] == OUTCOME_UNOBSERVABLE
 
     def test_the_tick_loop_exception_is_recorded(self):
         s = sampler()
@@ -1221,21 +1324,23 @@ class TestPseudoSourceEpisodesAreNotClosedByTheGenericScan:
         ]
 
     def test_scan_passes_do_not_close_an_open_episode_while_direct_calls_keep_arriving(self):
+        min_s = failure_log.BLIND_EPISODE_MIN_S
         now = [0.0]
         s = sampler(now=now)
         now[0] = 0.0
         s.note_no_frame()  # pending
-        now[0] = 0.2
-        s.note_no_frame()  # opens the episode (first_pass_n=2)
+        now[0] = min_s + 0.1
+        s.note_no_frame()  # the streak has run long enough now: opens, n=2, back-dated to 0.0
         st = s._state["camera.blind_ticks"]
         assert st.open_episode is not None
         opened_episode_id = st.open_episode.episode_id
 
-        # Three scan passes elapse -- enough to have closed the episode
-        # under the old quiet-streak path (`quiet_passes_to_close == 3` by
-        # default), even though the outage itself never actually paused.
-        for t in (1.0, 2.0, 3.0):
-            now[0] = t
+        # Three scan passes elapse, each well inside `BLIND_EPISODE_MIN_S` of
+        # the last direct call -- not enough silence to close the episode,
+        # even though a scan pass has nothing of its own to read for this
+        # source and the outage itself never actually paused.
+        for dt in (2.0, 4.0, 6.0):
+            now[0] = min_s + 0.1 + dt
             s.sample_once()
         assert st.open_episode is not None
         assert st.open_episode.episode_id == opened_episode_id
@@ -1243,12 +1348,12 @@ class TestPseudoSourceEpisodesAreNotClosedByTheGenericScan:
 
         # More direct calls, still well inside the outage, then more scan
         # passes -- the episode must still be the same one open episode.
-        now[0] = 3.5
+        now[0] = min_s + 6.5
         s.note_no_frame()
-        now[0] = 4.4
+        now[0] = min_s + 7.4
         s.note_no_frame()
-        for t in (5.0, 6.0, 7.0):
-            now[0] = t
+        for dt in (1.6, 3.6, 5.6):
+            now[0] = min_s + 7.4 + dt
             s.sample_once()
         assert st.open_episode is not None
         assert st.open_episode.episode_id == opened_episode_id
