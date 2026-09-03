@@ -263,6 +263,38 @@ class TestReadZonesNamesEveryDroppedZone:
             "soc0-thermal": thermal.ZONE_IMPLAUSIBLE,
         }
 
+    def test_an_unreadable_type_is_keyed_by_directory_name_not_a_type_string(self, tmp_path):
+        """The unreadable-`temp` branch keys `missing` by the zone's own
+        `type` string, which DID read. The unreadable-`type` branch has
+        no type string to key by at all, so it must fall back to the
+        zone's directory name instead -- the two halves of `zones_missing`
+        live in different name spaces, and this pins that difference
+        explicitly rather than leaving it incidental. Mutation testing
+        found the unreadable-`type` branch itself unpinned: deleting it
+        passed every existing zone/thermal test, because with nothing
+        recorded in `missing`, the zone's temp reading (still parseable)
+        silently entered `census` keyed by `None` instead.
+        """
+        root = tmp_path / "root"
+        _zone(root, 0, "gpu-thermal", temp=None)  # temp unreadable; type DID read
+
+        # A zone directory with a readable `temp` but no `type` file at all --
+        # simulated directly, since `_zone` always writes `type`.
+        type_unreadable_dir = root / "thermal_zone1"
+        type_unreadable_dir.mkdir(parents=True)
+        (type_unreadable_dir / "temp").write_text("40000")
+
+        census, missing, reason = JetsonThermal(root=root).read_zones()
+        missing_by_key = dict(missing)
+
+        assert reason == ABSENT_NO_ZONE_READABLE
+        assert census == {}
+        assert None not in missing_by_key and None not in census
+        # Keyed by the zone's own type string -- it read fine.
+        assert missing_by_key["gpu-thermal"] == thermal.ZONE_UNREADABLE
+        # Keyed by the directory name -- there is no type string to use.
+        assert missing_by_key["thermal_zone1"] == thermal.ZONE_UNREADABLE
+
     def test_the_sampler_counts_the_dropped_zones_kept_apart_by_cause(self, tmp_path):
         root = tmp_path / "root"
         _zone(root, 0, "cpu-thermal", "40000")
