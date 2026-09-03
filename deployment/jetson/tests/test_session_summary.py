@@ -18,6 +18,7 @@ import pytest
 
 from eval_run import (
     AXES,
+    _tick_coverage,
     LoadedRecords,
     _axis_api_calls,
     _axis_failures,
@@ -1365,3 +1366,54 @@ class TestZeroBehaviourChange:
         assert "## Sensing" not in md
         assert md.count("**Overall: PASS**") == 1
         assert " -- the five gates" not in md
+
+
+# --------------------------------------------------------------------------
+# The hardware-drive round: a summary built from ratios cannot see an event
+# that stops the records being produced (D1), and four axes that read a
+# healthy line while the section they point at reports the opposite.
+# --------------------------------------------------------------------------
+
+
+def _ticks_at(gaps_s: list[float]) -> list[dict[str, Any]]:
+    """Tick records whose wall clocks are separated by `gaps_s`."""
+    t, out = 1000.0, []
+    for i, gap in enumerate([0.0] + gaps_s):
+        t += gap
+        out.append({"type": "tick", "tick_id": i, "t_wall": t, "e2e_ms": 10.0})
+    return out
+
+
+class TestTickCoverageSeesWhatTheAxesCannot:
+    """D1. Ticks come from phone frames, so an outage destroys `attempted`
+    and `answered` together and every axis still reports fully answered. The
+    coverage line reads the gap distribution, which is the only place in the
+    records where the missing ticks leave a trace.
+    """
+
+    def test_an_uninterrupted_run_reports_no_missing_ticks(self):
+        cov = _tick_coverage(_ticks_at([0.2] * 50))
+        assert cov["missing_ticks"] == 0
+        assert cov["actual_ticks"] == cov["expected_ticks"]
+
+    def test_one_long_gap_is_counted_and_the_next_largest_is_named_beside_it(self):
+        # 20 ticks at 0.2 s, one 54.58 s hole, 20 more -- the shape the real
+        # degraded drive produced, where the next-largest gap was 0.31 s.
+        cov = _tick_coverage(_ticks_at([0.2] * 20 + [54.58] + [0.2] * 20))
+        assert cov["largest_gap_s"] == pytest.approx(54.58)
+        assert cov["next_largest_gap_s"] == pytest.approx(0.2)
+        assert cov["missing_ticks"] > 250
+        assert cov["expected_ticks"] > cov["actual_ticks"]
+
+    def test_the_estimate_is_not_span_times_rate_which_could_never_fail(self):
+        # `expected = span x achieved rate` is algebraically forced: the rate
+        # is derived from the same span and the same count, so it equals the
+        # actual on every drive, outage or not. The interrupted run must not
+        # reproduce that identity.
+        cov = _tick_coverage(_ticks_at([0.2] * 20 + [54.58] + [0.2] * 20))
+        span, actual = cov["span_s"], cov["actual_ticks"]
+        forced = span * ((actual - 1) / span)
+        assert cov["expected_ticks"] > forced + 1
+
+    def test_fewer_than_three_ticks_is_absent_not_a_manufactured_zero(self):
+        assert _tick_coverage(_ticks_at([0.2])) is None
