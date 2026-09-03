@@ -166,23 +166,43 @@ def _replay_incumbent(sensing_ticks: list[dict]) -> tuple[dict[str, Any], list[d
     own replayed `to_record()` per tick -- reused for `vs_incumbent` rather
     than replayed a second time, so the comparison is against literally the
     run the identity check just certified.
+
+    The comparison iterates `record` (the replay's own keys), not `sensing`
+    (the log's), so it is checked in both directions: `k not in sensing`
+    catches a key the log is missing entirely, which `sensing.get(k) != v`
+    could not -- a key deleted from the log defaults to `None` there and
+    compares equal to a field whose real value happens to be `None`. It does
+    not, and cannot, cover the reverse: `advisory_sent`, `command_sent`,
+    `decision_inputs`, `reference`, `send_reason` and `shadow` are on every
+    logged tick but never in what `Decision.to_record()` produces, so there
+    is nothing for a replay to check them against. `compared` and
+    `log_only` name that boundary directly, so `status: ok` is not read as
+    covering a tick record it never touched -- `shadow` in particular
+    governs `_segments`' own live/shadow split, so a corrupted log there
+    changes the whole scoring segmentation with no identity check able to
+    see it.
     """
     clock = ReplayClock()
     controller = SensingController(clock=clock)
     replayed: list[dict[str, Any]] = []
     mismatched = 0
     first_mismatch: dict[str, Any] | None = None
-    for t in sensing_ticks:
+    compared = 0
+    log_only: list[str] = []
+    for i, t in enumerate(sensing_ticks):
         sensing = t["sensing"]
         inputs = Inputs.from_record(sensing["decision_inputs"])
         clock.set(sensing["decided_at_mono"])
         record = controller.decide(inputs).to_record()
         replayed.append(record)
-        differing = [k for k, v in record.items() if sensing.get(k) != v]
+        differing = [k for k in record if k not in sensing or sensing[k] != record[k]]
         if differing:
             mismatched += 1
             if first_mismatch is None:
                 first_mismatch = {"tick_id": t.get("tick_id"), "keys": differing}
+        if i == 0:
+            compared = len(record)
+            log_only = sorted(set(sensing) - set(record))
     status = "ok" if mismatched == 0 else "failed"
     return (
         {
@@ -190,6 +210,8 @@ def _replay_incumbent(sensing_ticks: list[dict]) -> tuple[dict[str, Any], list[d
             "ticks": len(sensing_ticks),
             "mismatched": mismatched,
             "first_mismatch": first_mismatch,
+            "compared": compared,
+            "log_only": log_only,
         },
         replayed,
     )
@@ -650,7 +672,8 @@ def render_table(result: dict[str, Any]) -> str:
         lines.append(f"  tick_coverage: actual={tc['actual_ticks']} missing={missing} "
                      f"({fraction:.1%} of {expected} expected)")
     ri = result["replay_identity"]
-    lines.append(f"  replay_identity: {ri['status']} ({ri['mismatched']}/{ri['ticks']} mismatched)")
+    lines.append(f"  replay_identity: {ri['status']} ({ri['mismatched']}/{ri['ticks']} mismatched, "
+                 f"{ri['compared']} keys compared, {len(ri['log_only'])} log-only: {ri['log_only']})")
     if ri["status"] != "ok":
         lines.append(f"    first mismatch: {ri['first_mismatch']}")
         return "\n".join(lines)

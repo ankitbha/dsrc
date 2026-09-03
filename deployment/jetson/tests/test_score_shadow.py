@@ -331,6 +331,11 @@ class TestReplayIdentityGate:
         result = score_shadow.score(run_dir)
         assert result["replay_identity"] == {
             "status": "ok", "ticks": 12, "mismatched": 0, "first_mismatch": None,
+            "compared": 9,
+            "log_only": [
+                "advisory_sent", "command_sent", "decision_inputs", "reference",
+                "send_reason", "shadow",
+            ],
         }
 
     def test_failure_log_records_mixed_into_the_file_do_not_confuse_the_ticks(self, tmp_path):
@@ -348,8 +353,61 @@ class TestReplayIdentityGate:
         result = score_shadow.score(run_dir)
         assert result["replay_identity"] == {
             "status": "ok", "ticks": 12, "mismatched": 0, "first_mismatch": None,
+            "compared": 9,
+            "log_only": [
+                "advisory_sent", "command_sent", "decision_inputs", "reference",
+                "send_reason", "shadow",
+            ],
         }
         assert result.get("refused") is None
+
+    def test_a_key_deleted_from_the_log_is_not_masked_by_a_real_none(self, tmp_path):
+        """B3: `sensing.get(k) != v` defaults a missing key to `None`, which
+        compares equal to a field whose real replayed value also happens to
+        be `None` -- a key genuinely deleted from the log was
+        indistinguishable from one that legitimately holds no value.
+        `here_radius_m` is `None` whenever there is no position fix, so
+        deleting it after doctoring the inputs to produce exactly that
+        value used to pass the gate.
+        """
+        run_dir = write_run(tmp_path, n=1)
+        lines = (run_dir / "metadata.jsonl").read_text().splitlines()
+        records = [json.loads(line) for line in lines]
+        di = records[0]["sensing"]["decision_inputs"]
+        di["position_valid"] = False
+        di["lat"] = None
+        di["lon"] = None
+        del records[0]["sensing"]["here_radius_m"]
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+
+        result = score_shadow.score(run_dir)
+        assert result["replay_identity"]["status"] == "failed"
+        assert result["replay_identity"]["mismatched"] == 1
+        assert "here_radius_m" in result["replay_identity"]["first_mismatch"]["keys"]
+
+    def test_a_shadow_flip_is_named_as_log_only_not_silently_passed(self, tmp_path):
+        """B3: flipping `shadow` changes `_segments`' own live/shadow split,
+        but `shadow` is on every logged tick and never in what
+        `Decision.to_record()` produces, so no replay can check it. The
+        fix is not to fabricate a check where none is possible; it is to
+        name the boundary so `status: ok` is not read as covering it.
+        """
+        run_dir = write_run(tmp_path, n=6)
+        lines = (run_dir / "metadata.jsonl").read_text().splitlines()
+        records = [json.loads(line) for line in lines]
+        for r in records:
+            r["sensing"]["shadow"] = not r["sensing"]["shadow"]
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+
+        result = score_shadow.score(run_dir)
+        assert result["replay_identity"]["status"] == "ok"
+        assert "shadow" in result["replay_identity"]["log_only"]
+        table = score_shadow.render_table(result)
+        assert "log-only" in table
 
     def test_a_corrupted_tick_fails_the_gate_and_names_it(self, tmp_path):
         run_dir = write_run(tmp_path, n=12)
