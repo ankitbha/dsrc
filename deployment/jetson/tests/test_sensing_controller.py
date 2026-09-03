@@ -1096,10 +1096,11 @@ class TestThermalCause:
         assert check.evidence["cause"] == THERMAL_CAUSE_STALE_TELEMETRY
 
     def test_a_status_with_no_age_is_unstamped_not_fresh(self):
-        """A3: a null `telemetry_age_s` used to fall through every staleness
-        check (`age is not None and ...`) straight to `"telemetry": "fresh"`
-        -- an age that cannot be checked against `MAX_TELEMETRY_AGE_S` at all
-        was labelled the same as one that was checked and passed.
+        """A null `telemetry_age_s` guarded as `age is not None and ...`
+        falls through every staleness check straight to
+        `"telemetry": "fresh"`, labelling an age that cannot be checked
+        against `MAX_TELEMETRY_AGE_S` the same as one that was checked and
+        passed.
         """
         decision = SensingController(clock=Clock()).decide(
             calm(thermal_status="nominal", telemetry_age_s=None)

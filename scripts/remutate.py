@@ -612,12 +612,10 @@ MUTATIONS = [
      "            and gps_age <= cfg.gps_stale_after_s",
      "python"),
     # Joint round 6: what the phone does with a command, and what reads the logs.
-    # Moved by the A5 three-state change: `log_complete` is now a small
-    # if/elif/else block, not one expression. Renamed to the fact this
-    # specific mutation tests -- it forces the UNMEASURABLE branch
-    # (`shortfall is None`, nothing to compare against) to read complete,
-    # which is a different fact from a genuinely truncated log; that fact
-    # has its own pin immediately below, on the untouched `False` branch.
+    # Forces the UNMEASURABLE branch (`shortfall is None`, nothing to
+    # compare against) to read complete. That is a different fact from a
+    # genuinely truncated log, which has its own pin immediately below on
+    # the `False` branch.
     ("eval: an unmeasurable log is analysed as a complete run",
      "deployment/jetson/eval_run.py",
      "        log_complete = None",
@@ -633,12 +631,10 @@ MUTATIONS = [
      "                unparseable += 1\n                continue",
      "                continue",
      "python"),
-    # Moved by A5, then again by the tick-coverage redesign, which added a
-    # third, independent term (`coverage_untrustworthy`) folded in the same
-    # way `log_complete` already was. A single pin on this line could not
-    # tell "log_complete stopped mattering" apart from "coverage_untrustworthy
-    # stopped mattering", so it is now two -- one per term, each dropping
-    # only that term and leaving the others in place.
+    # Two pins on one line, not one: `overall_pass` folds in two
+    # independent terms (`log_complete` and `coverage_untrustworthy`), and a
+    # single pin could not tell one of them ceasing to matter apart from the
+    # other. Each drops only its own term and leaves the rest in place.
     ("eval: a short log does not fail the run",
      "deployment/jetson/eval_run.py",
      '        "overall_pass": bool(overall and integrity["log_complete"] and not coverage_untrustworthy),',
@@ -649,21 +645,19 @@ MUTATIONS = [
      '        "overall_pass": bool(overall and integrity["log_complete"] and not coverage_untrustworthy),',
      '        "overall_pass": bool(overall and integrity["log_complete"]),',
      "python"),
-    # Unreachable from the initial deployment commit until the tick-coverage
-    # decline for a missing tick_id was added: `analyze()` crashed on the
-    # direct subscript three hundred lines earlier, before that decline was
-    # ever reached, on every drive and every fixture for the project's whole
-    # history. Nothing pinned this because nothing could exercise it.
+    # `analyze()` reads `tick_id` through `.get` so a tick without one
+    # degrades. A direct subscript raises three hundred lines before
+    # `_tick_coverage`'s own decline for a missing `tick_id` is reached,
+    # which puts that decline out of reach on every drive and fixture.
     ("eval_run: a tick with no tick_id crashes analyze() instead of degrading",
      "deployment/jetson/eval_run.py",
      '        tick_id = t.get("tick_id")',
      '        tick_id = t["tick_id"]',
      "python"),
-    # Round 5's audit: correctness held in all three `_tick_id_trust_reason`
-    # shapes, but two of the three checks had no mutation pinning them.
-    # Removing the third (`if b <= a: ... "a restart"`) is an equivalent
-    # mutant -- the duplicate branch already returns on `b == a`, so no
-    # input distinguishes the two -- and is deliberately left unpinned.
+    # Two of `_tick_id_trust_reason`'s three checks. The third
+    # (`if b <= a: ... "a restart"`) is deliberately left unpinned: removing
+    # it is an equivalent mutant, since the duplicate check already returns
+    # on `b == a` and no input distinguishes the two.
     ("eval_run: a null tick_id reaches the ordering check instead of declining",
      "deployment/jetson/eval_run.py",
      "    if any(i is None for i in ids):\n"
@@ -686,18 +680,17 @@ MUTATIONS = [
     # Joint round 7: claims against behaviour, and what grows over a long drive.
     # The tick log is the only per-tick collection with no cap -- 5,251 bytes a
     # record, 567 MB/hour at 30 fps -- and its writer had no guard at all.
-    # B5 widened the catch from two anticipated exception types to
-    # `BaseException`, which is now precisely the defect this pin names:
-    # narrowing it back to `(OSError, ValueError)` is what "kills the
-    # writer silently" on anything else again.
+    # The writer's catch is deliberately `BaseException`. Narrowing it back
+    # to the two anticipated types is what kills the writer silently on
+    # anything else, which is the defect this pin names.
     ("logger: a failed write kills the writer silently",
      "deployment/jetson/logio/metadata_logger.py",
      "            except BaseException as exc:",
      "            except (OSError, ValueError) as exc:",
      "python"),
-    # B6: the record already popped off the queue when the write raised is
-    # not `close()`'s own `qsize()` to find -- by the time `close()` runs it
-    # is no longer queued -- so nothing pinned it before this.
+    # The record already popped off the queue when the write raised is not
+    # `close()`'s own `qsize()` to find -- by the time `close()` runs it is
+    # no longer queued -- so only this pin covers it.
     ("logger: a record already popped off the queue when the write fails is not counted",
      "deployment/jetson/logio/metadata_logger.py",
      "                self.writer_failure = f\"{type(exc).__name__}: {exc}\"\n"
@@ -2063,12 +2056,9 @@ MUTATIONS = [
      "                self._running = False\n"
      "                return",
      "python"),
-    # Both re-anchored: A2 gave `read_zones` a third return value
-    # (`zones_missing`), which moved the call onto its own line inside
-    # `_safe_call(...)`'s parentheses. Both pins anchor on that same
-    # three-line call with different mutations -- each anchor still
-    # resolves exactly once on its own, the same way the two single-line
-    # anchors they replace always did.
+    # Both pins anchor on the same three-line `_safe_call` invocation with
+    # different mutations; each anchor still resolves exactly once on its
+    # own.
     ("thermal: a jetson zone-read failure is not isolated from the rest of the pass",
      "deployment/jetson/sensors/thermal.py",
      "        census, zones_missing, zones_reason = _safe_call(\n"
@@ -2319,9 +2309,6 @@ MUTATIONS = [
     # `ev['passes_readable']`/`ev['passes_attempted']` index it, so a record
     # with the first key and not the second raised `KeyError` instead of
     # degrading (m8) -- every other read in this function uses `.get`.
-    # Moved by B2 (the `missing` fallback text) and B12. Re-anchored to the
-    # current block; the mutation is the same defect (a hard index raises on
-    # a record that is missing the key, instead of degrading).
     ("eval_run: a not_evaluable record missing passes_readable raises instead of degrading",
      "deployment/jetson/eval_run.py",
      "            if status == RULE_NOT_EVALUABLE:\n"
@@ -2536,11 +2523,9 @@ MUTATIONS = [
 
     # Task 38's validation round: the 14 findings the validator confirmed by
     # reproducing them, each pinned so the specific defect cannot come back.
-    # Re-anchored: the camera-blindness redesign replaced the two-tick
-    # `elif self._blind_pending:` branch with a duration-based streak
-    # (`_blind_since`/`_blind_count`), but the property this pin guards is
-    # unchanged -- every call is still credited to `run_total` etc.
-    # unconditionally, before the open-episode branch is even looked at.
+    # The property this pin guards: every call is credited to `run_total`
+    # and to `by_reason_total` unconditionally, before the open-episode
+    # branch below is looked at.
     ("failures: a lone blind tick is never credited to the source's own total",
      "deployment/jetson/logio/failure_log.py",
      "            st.run_total += 1\n"
@@ -2820,12 +2805,11 @@ MUTATIONS = [
      "        if len(episodes) == closed_total:",
      "        if True:",
      "python"),
-    # Re-anchored: `note_frame` (the camera-blindness redesign's new direct
-    # entry point) opens with the identical two-line
-    # `st = ...; source = ...` pair, so the old anchor now matches twice.
-    # Extended by one more line (`st.run_total += 1`, `note_no_frame`'s own
-    # next statement, which `note_frame` does not share) to stay unique to
-    # the call this pin is actually about.
+    # `note_frame` opens with the identical `st = ...; source = ...` pair,
+    # so a two-line anchor matches in both places. The anchor carries
+    # `st.run_total += 1` as well -- `note_no_frame`'s own next statement,
+    # which `note_frame` does not share -- to stay unique to the call this
+    # pin is about.
     ("failures: camera.blind_ticks.passes_attempted also counts direct notifications",
      "deployment/jetson/logio/failure_log.py",
      "            st = self._state[\"camera.blind_ticks\"]\n"
@@ -3096,10 +3080,6 @@ MUTATIONS = [
      '        if ref.get("absent") is not None:\n'
      "            no_telemetry_ticks += 1",
      "python"),
-    # Re-anchored: A12 added a third element (the tick's own `camera_hz`,
-    # for the gap cap's sampling period) to this comprehension and renamed
-    # it `raw`, `points` now being built from `raw` on the next line. The
-    # property is unchanged -- a malformed tick must degrade, not raise.
     ("sensing_result: a malformed sensing block raises KeyError instead of degrading",
      "deployment/jetson/eval_run.py",
      "        raw = [\n"
@@ -3140,12 +3120,12 @@ def failing_tests(kind):
     Python pins as SURVIVED while they were being caught perfectly well. A harness that
     reports a false SURVIVED is the same failure as one that reports a false CAUGHT.
 
-    That asymmetry was only half closed. No XML at all, an XML file truncated
-    mid-write (a killed run, a full disk), and a genuine zero-failures result
-    all used to produce the identical empty list this returned outright --
-    and `run()` read all three as SURVIVED, the same verdict a real pass gets.
-    The third element here is False for either of the first two, so the
-    caller can tell "nothing failed" from "nothing was observed" apart.
+    No XML at all, an XML file truncated mid-write (a killed run, a full
+    disk), and a genuine zero-failures result all produce the same empty
+    name list, and an empty list on its own reads as SURVIVED -- the verdict
+    a real pass gets. The third element returned here is False for either of
+    the first two, so the caller can tell "nothing failed" apart from
+    "nothing was observed".
     """
     names = []
     total = 0
@@ -3223,14 +3203,13 @@ def run(kind):
 
     Naming the failing test settles it. A mutation that is caught says which assertion
     caught it, and one that is "caught" by an unrelated failure is now visible as such
-    instead of counting as a pass. That settles a false CAUGHT; it does nothing for a
-    false SURVIVED, which needs its own check: the Python arm used to discard its own
-    subprocess result outright (only the Gradle arm ever looked at one), so a pytest
-    process that never started a test run at all -- a bad flag, a crash, an OOM kill, a
-    conftest import failure, an XML truncated by a killed run, a partial-tree-copy that
-    collects 18 testcases instead of the whole suite -- produced the identical `[]`
-    failing_tests() returns for a real pass, and every one of those was reported
-    SURVIVED alongside the mutations the suite genuinely caught nothing for.
+    instead of counting as a pass. That settles a false CAUGHT; a false SURVIVED
+    needs its own check. A pytest process that never started a test run at all -- a
+    bad flag, a crash, an OOM kill, a conftest import failure, an XML truncated by a
+    killed run, a partial tree copy that collects 18 testcases instead of the whole
+    suite -- returns the same empty `failing_tests()` list a real pass does. The
+    subprocess returncode and the collected testcase count are both checked here so
+    those are reported INCONCLUSIVE rather than SURVIVED.
     """
     for base in RESULTS[kind]:
         if base.exists():

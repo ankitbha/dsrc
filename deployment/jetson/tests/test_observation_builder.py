@@ -122,28 +122,16 @@ def test_peers_populate_cooperation_fields(builder: ObservationBuilder) -> None:
     assert obs["nearby_av_mean_speed"] == pytest.approx(25.0)
     assert obs["cooperation"]["segment_target_speed"] == pytest.approx(25.0)
     assert obs["nearby_av_lane_distribution"] == {"1": 0.5, "2": 0.5}
-    # A18: this test used to assert `downstream_congestion_estimate ==
-    # "measured"` with peers present. That was wrong -- nothing is ever
-    # read into it; it is the literal 0.0 in both branches of
-    # `cooperation`, exactly like `merge_pressure` -- and it is what let a
-    # hardcoded zero count as a reading, understating missingness. It now
-    # carries `merge_pressure`'s own class unconditionally.
+    # `nearby_av_count`, a direct count of receptions, is the primary
+    # evidence a peers tick has and is the one that stays `measured`. The
+    # mean (`segment_target_speed` and `nearby_av_mean_speed` are the same
+    # float read through two keys) and the quotient (`nearby_av_density`)
+    # are computed from that count rather than read, so all three are
+    # `derived` and agree with each other.
+    # `downstream_congestion_estimate` is the literal 0.0 in both branches
+    # of `cooperation`, exactly like `merge_pressure`, and never a reading.
     #
-    # A20: this test then briefly asserted `segment_target_speed` and
-    # `nearby_av_density` were `feed_derived`, on the reasoning that a peer
-    # beacon is an external feed. That reclassed `segment_target_speed`
-    # without reclassing `nearby_av_mean_speed` -- the identical float,
-    # `av_mean_speed`, read through two different keys -- so the two
-    # disagreed about the same value, A19's own shape recreated by A18's
-    # fix. `feed_derived` was also wrong on its own terms: `SOURCE_FEED` is
-    # reserved for the traffic feed, which owns no observation field (see
-    # the comment above `cooperation`'s own construction), and a mean or a
-    # quotient computed from `nearby_av_count` is not a reading either way
-    # -- `nearby_av_count` itself, a direct count of receptions, is what
-    # stays `measured` and carries a peers tick's primary evidence. All
-    # three -- `segment_target_speed`, `nearby_av_mean_speed`,
-    # `nearby_av_density` -- are `derived`, agreeing with each other. This
-    # split (peers present, no leader vehicle) is still the only tick shape
+    # This tick shape -- peers present, no leader vehicle -- is the only one
     # that can catch the nested `cooperation.*` entries copying the wrong
     # flat field's class: on a no-peer tick all three coincide at
     # `fallback_neutral`.
@@ -158,9 +146,9 @@ def test_peers_populate_cooperation_fields(builder: ObservationBuilder) -> None:
 
 
 def test_no_field_ever_carries_a_feed_class(builder: ObservationBuilder) -> None:
-    # A20: `SOURCE_FEED` is reserved for the traffic feed, which the comment
+    # `SOURCE_FEED` is reserved for the traffic feed, which the comment
     # above `cooperation`'s own construction documents as owning no
-    # observation field -- a V2V peer beacon is not the traffic feed, and
+    # observation field. A V2V peer beacon is not the traffic feed, so
     # nothing in this builder should ever write "feed_derived".
     peers = [PeerState(peer_id="a", distance_m=80.0, speed_mps=24.0, lane_id=1)]
     for peer_list in ([], peers):
@@ -527,13 +515,10 @@ class TestCoverageAndMissingness:
         (D5), +3 cooperation slots, +3 lane slots -- all six neutral on a
         lone instrumented car with no peers.
 
-        A19: this test used to pin 0.667 (26/39). That value was wrong --
-        `target_lane_front_gap` and `ego_headway_s` were hardcoded to
-        `derived` regardless of whether a leader vehicle existed, so on a
-        no-vehicle tick like this one they read as evidence about a leader
-        that was never there. Both now inherit `leader_gap`'s own class
-        (here `fallback_neutral`, since `leader_gap` is `INF`), moving two
-        more fields into the fallback set: 28/39 = 0.718.
+        `target_lane_front_gap` and `ego_headway_s` each inherit
+        `leader_gap`'s own class rather than a fixed `derived`, so on a
+        no-vehicle tick like this one (`leader_gap` is `INF`) both are
+        `fallback_neutral` and belong to the fallback set: 28/39 = 0.718.
         """
         builder, t = self._warmed_up()
         result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1)
@@ -554,9 +539,9 @@ class TestCoverageAndMissingness:
         assert result.field_sources["active_vehicle_count_local"] == provenance.SOURCE_DERIVED_EMPTY
         assert result.field_sources["local_queue_estimate"] == provenance.SOURCE_DERIVED_EMPTY
         assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
-        # A19: no leader on this tick, so both fields that hold the same
-        # float as `leader_gap` (or a formula over it) must carry
-        # `leader_gap`'s own class, not a fixed `derived`.
+        # No leader on this tick, so both fields that hold the same float
+        # as `leader_gap` (or a formula over it) must carry `leader_gap`'s
+        # own class, not a fixed `derived`.
         assert result.field_sources["target_lane_front_gap"] == provenance.SOURCE_FALLBACK_NEUTRAL
         assert result.field_sources["ego_headway_s"] == provenance.SOURCE_FALLBACK_NEUTRAL
         assert result.field_sources["target_lane_front_gap"] == result.field_sources["leader_gap"]

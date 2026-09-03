@@ -235,16 +235,15 @@ def test_a_value_that_is_not_a_temperature_is_refused(tmp_path):
     assert dict(missing) == {"skin": thermal.ZONE_IMPLAUSIBLE, "quiet_therm": thermal.ZONE_IMPLAUSIBLE}
 
 
-# -- A2: a dropped zone is named, not silently absorbed into a shorter census -
+# -- a dropped zone is named, not silently absorbed into a shorter census -----
 
 
 class TestReadZonesNamesEveryDroppedZone:
-    """The old `read_zones` dropped a zone whose `type`/`temp` would not
-    read and a zone whose value fell outside the plausible band into the
-    same `continue`, with `reason` staying `None` as long as at least one
-    zone answered -- a 2-of-4 read looked identical to a complete one with
-    only two zones to report, and the two failure causes were
-    indistinguishable from each other.
+    """A zone whose `type`/`temp` will not read and a zone whose value falls
+    outside the plausible band are two different failures, and `reason`
+    stays `None` as long as at least one zone answers. Unless both are named
+    in `missing`, a 2-of-4 read is indistinguishable from a complete read
+    with only two zones to report, and the two causes from each other.
     """
 
     def test_an_unreadable_zone_and_an_implausible_reading_are_both_named(self, tmp_path):
@@ -1491,7 +1490,7 @@ def test_the_not_evaluable_line_names_the_pass_counts(tmp_path):
 
 
 def test_the_throttle_not_evaluable_line_names_its_own_absent_reason():
-    """B2: the same unguarded `", ".join(ev.get("missing") or [])` pattern
+    """The same unguarded `", ".join(ev.get("missing") or [])` pattern
     as the failure-source rows -- an empty `missing` list renders `--
     missing ;`, reachable on a log from a build that predates this field.
     """
@@ -1573,10 +1572,10 @@ def test_the_quiet_line_names_the_pass_counts(tmp_path):
 
 
 def test_the_zones_read_line_names_a_zone_that_never_once_answered(tmp_path):
-    """A2: `zones_seen` only ever held zones that gave a plausible reading
-    at least once -- a zone that was listed and attempted on every pass but
-    never answered left no trace in this line at all. The report must count
-    it in the denominator and name it, not just report the numerator alone.
+    """`zones_seen` only ever holds zones that gave a plausible reading at
+    least once, so a zone listed and attempted on every pass but never
+    answering leaves no trace in this line. The report must count it in the
+    denominator and name it, not report the numerator alone.
     """
     from eval_run import analyze, render_markdown
     from tests.test_eval_run import make_tick, write_run
@@ -1719,7 +1718,7 @@ def test_the_controller_is_byte_identical_after_this_task():
         records.append(controller.decide(inputs).to_record())
     digest = hashlib.md5(json.dumps(records, sort_keys=True, default=str).encode()).hexdigest()
     # `telemetry_age_s` is drawn as `None` above on some fraction of ticks,
-    # independently of `thermal_status` and `skin_temp_c` -- `_thermal_scale`
-    # used to score that combination as though the report were fresh; it now
-    # reads `unknown`, moving `Decision.to_record()` on every draw that hits it.
+    # independently of `thermal_status` and `skin_temp_c`. `_thermal_scale`
+    # reads that combination as `unknown` rather than fresh, which moves
+    # `Decision.to_record()` on every draw that hits it.
     assert digest == "bb1cb86fa04187b0374d3820e96f7f08"

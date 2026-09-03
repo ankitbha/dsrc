@@ -433,13 +433,12 @@ class TestInputsFromATick:
         assert inputs.telemetry_age_s is None
 
     def test_inputs_from_prefers_an_atomic_telemetry_pair_when_offered(self):
-        """A3: `telemetry` and `telemetry_at_mono` are two separate reads on
-        a real `PhoneLink`, and a rebind landing between them can pair one
+        """`telemetry` and `telemetry_at_mono` are two separate reads on a
+        real `PhoneLink`, and a rebind landing between them can pair one
         report's status with a different report's age. `inputs_from` must
-        read `telemetry_pair()` instead, where the phone object offers one,
-        rather than the two properties -- this pins that it actually does,
-        by giving the two routes different answers and checking which one
-        wins.
+        read `telemetry_pair()` where the phone object offers one, rather
+        than the two properties. The two routes are given different answers
+        here so which one is taken is visible in the result.
         """
 
         class _PhoneWithAtomicPair:

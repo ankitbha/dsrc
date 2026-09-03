@@ -1145,12 +1145,11 @@ class TestBlindTicks:
 
     @pytest.mark.parametrize("period", [0.2, 1.0, 3.0, 3.5, 4.001, 5.0])
     def test_one_continuous_blackout_gives_exactly_one_episode_at_every_failed_read_period(self, period):
-        # The acceptance test the redesign exists to pass: a single 82 s
-        # blackout must read as one episode no matter how far apart the
-        # camera's own failed-read notifications land -- including 4.001 s,
-        # the period a real drive's log shows, which is wider than
-        # `close_after_s` (3.0 s) and used to fragment into several episodes
-        # under the old quiet-timer close.
+        # A single 82 s blackout must read as one episode no matter how far
+        # apart the camera's own failed-read notifications land -- including
+        # 4.001 s, the period a real drive's log shows. That period is wider
+        # than `close_after_s` (3.0 s), so a close driven by that bound
+        # fragments one blackout into several episodes.
         blackout_s = 82.0
         scan_interval = 1.0
         now = [0.0]
@@ -1177,10 +1176,9 @@ class TestBlindTicks:
         assert closes[0]["duration_s"] == pytest.approx(blackout_s, abs=1.0)
 
     def test_a_camera_that_recovers_mid_run_reads_recovered_not_unobservable(self):
-        # The other half of the acceptance test: a real recovery must still
-        # read `recovered`. The old design got this direction right and the
-        # outage direction wrong; a fix that only ever says `unobservable`
-        # would get this direction wrong instead.
+        # The other direction: a real recovery must still read `recovered`.
+        # A close that only ever reports `unobservable` would satisfy the
+        # blackout test above and get this case wrong.
         now = [0.0]
         s = sampler(now=now)
         for i in range(21):
@@ -1212,14 +1210,14 @@ class TestBlindTicks:
         assert closes[0]["outcome"] == OUTCOME_UNOBSERVABLE
 
     def test_an_unobservable_close_reports_when_blindness_was_last_confirmed_not_the_last_scan(self):
-        # A16: `last_readable_t_mono` advances on every ordinary scan pass
+        # `last_readable_t_mono` advances on every ordinary scan pass
         # regardless of this pseudo-source's real state -- its accessor
         # always reports readable=True (PSEUDO_SOURCES) -- so it carries no
         # information about the camera at all. Using it as the unobservable
-        # close's own instant credited every scan pass that ran after the
-        # tick loop had already died with no more evidence, overstating the
-        # observed blindness by however long the sampler kept scanning past
-        # the last real notification.
+        # close's own instant credits every scan pass that ran after the
+        # tick loop died with no further evidence, overstating the observed
+        # blindness by however long the sampler kept scanning past the last
+        # real notification.
         now = [0.0]
         s = sampler(now=now)
         # Notifications every 1.0 s from t=2 to t=16 (15 of them); the
@@ -1275,13 +1273,13 @@ class TestBlindTicks:
         assert closes[0]["n"] == 3
 
     def test_an_instantaneous_exception_followed_by_healthy_running_reports_zero_duration(self):
-        # A17: pipeline.exception has no scan-based or quiet-streak close of
-        # its own (PSEUDO_SOURCES), so a single exception's episode stayed
-        # open until teardown regardless of how long the run then ran
-        # healthy -- reporting a multi-thousand-second failure for an
-        # instant. The outcome word (open_at_end) already says no recovery
-        # was ever observed; the duration must not also claim the healthy
-        # time in between.
+        # pipeline.exception has no scan-based or quiet-streak close of its
+        # own (PSEUDO_SOURCES), so a single exception's episode stays open
+        # until teardown regardless of how long the run then runs healthy.
+        # Closing it at teardown's own instant reports a multi-thousand-
+        # second failure for an instantaneous one. The outcome word
+        # (open_at_end) already says no recovery was ever observed; the
+        # duration must not also claim the healthy time in between.
         now = [0.0]
         s = sampler(now=now)
         now[0] = 10.0

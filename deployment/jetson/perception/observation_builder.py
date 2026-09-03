@@ -437,12 +437,10 @@ class ObservationBuilder:
         defaults = {
             "is_active": provenance.SOURCE_STATIC_CONFIG,
             "ego_lane": provenance.SOURCE_STATIC_CONFIG,
-            # A19: the same float as `leader_gap` (`target_lane_front_gap`)
-            # or computed from it (`ego_headway_s`), so each carries
-            # `leader_gap`'s own class rather than a fixed one -- a fixed
-            # `derived` here read as evidence on a tick where `leader_gap`
-            # itself was `fallback_neutral` (no leader in range), which is
-            # the same float holding two different provenance claims.
+            # Computed from `leader_gap`, so it carries that value's own
+            # class rather than a fixed one: with no leader in range, or an
+            # ego speed that was substituted rather than measured, the
+            # headway is a neutral fallback and not evidence.
             "ego_headway_s": (
                 provenance.SOURCE_FALLBACK_NEUTRAL
                 if not math.isfinite(leader_gap) or provenance.is_substituted(src["ego_speed"])
@@ -460,27 +458,20 @@ class ObservationBuilder:
             "target_lane_front_gap": src["leader_gap"],
             "target_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
             "target_lane_rear_required_decel": provenance.SOURCE_FALLBACK_NEUTRAL,
-            # A18: nothing is ever read into `downstream_congestion_estimate`
-            # -- it is the literal 0.0 in both branches of `cooperation`,
-            # exactly like `merge_pressure` -- so it carries the same class
-            # as `merge_pressure` unconditionally, not one keyed on `peers`.
+            # Nothing is ever read into `downstream_congestion_estimate`: it
+            # is the literal 0.0 in both branches of `cooperation`, exactly
+            # like `merge_pressure`. Its class is therefore unconditional,
+            # not keyed on whether peers were received.
             "downstream_congestion_estimate": provenance.SOURCE_FALLBACK_NEUTRAL,
             "merge_pressure": provenance.SOURCE_FALLBACK_NEUTRAL,
-            # A20: `segment_target_speed` (the mean of peer beacons' own
-            # speeds) is the same float as `nearby_av_mean_speed` below --
-            # `feed_derived` here, against `nearby_av_count`'s own class
-            # (`measured`) on that one, was A19's shape recreated by A18's
-            # own fix: two fields holding one value with disagreeing
-            # provenance. `feed_derived` was also the wrong class regardless
-            # of that: `SOURCE_FEED` is reserved for the traffic feed, which
-            # `feed_fusion.own` and the comment below both document as
-            # owning no observation field -- writing it here would assert
-            # HERE data reached the vector on a peers drive, which never
-            # happens. `nearby_av_count`, a direct count of receptions,
-            # already stays `measured` and carries the primary evidence a
-            # peers tick has; the mean and the quotient below are each
-            # computed from it, not a reading on their own, so both are
-            # `derived`.
+            # The mean of the peer beacons' own speeds, computed over the
+            # receptions `nearby_av_count` counts rather than read directly,
+            # so `derived` and not `measured`. `nearby_av_count` keeps
+            # `measured` and carries the primary evidence a peers tick has.
+            # A feed class would be wrong here in any case: `SOURCE_FEED` is
+            # reserved for the traffic feed, which owns no observation field
+            # (`feed_fusion.own`), so writing it would assert HERE data
+            # reached the vector on a peers drive.
             "segment_target_speed": (
                 provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
             ),
@@ -512,10 +503,10 @@ class ObservationBuilder:
             "nearby_av_density": (
                 provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
             ),
-            # A20: the same float as `segment_target_speed` above (both are
-            # `av_mean_speed`), so it carries the same class rather than
-            # `nearby_av_count`'s -- inheriting the count's own `measured`
-            # made the mean of it claim to be a reading too.
+            # The same float as `segment_target_speed` above (both are
+            # `av_mean_speed`), so it carries that class rather than
+            # `nearby_av_count`'s: a mean over the count is not itself a
+            # reading.
             "nearby_av_mean_speed": (
                 provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
             ),

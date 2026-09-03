@@ -1454,10 +1454,10 @@ class FailureSampler:
 
         This call never reports a recovery. Closing an open episode as
         `recovered` happens only in `note_frame`, when a frame is actually
-        observed -- the previous design closed on this method's own quiet
-        timer, which reported `recovered` whenever notifications merely
-        stopped arriving often enough, including while the camera was still
-        blind. `end_of_stream` is the one exception: nothing will call this
+        observed: notifications merely stopping does not tell a recovered
+        camera apart from one still blind but failing slowly enough to
+        notify less often than the bound. `end_of_stream` is the one
+        exception: nothing will call this
         again, so an episode left open here is closed as `open_at_end`
         rather than left for a quiet timer that assumes more ticks might
         still come.
@@ -1512,8 +1512,8 @@ class FailureSampler:
 
     def note_frame(self) -> None:
         """The tick loop's success path, called once a frame actually
-        arrives -- the observation the old design had no way to make, and
-        the only evidence this sampler ever has that the camera recovered.
+        arrives -- the only evidence this sampler ever has that the camera
+        recovered.
 
         Closes an open blind episode as `recovered`, back-dated to
         `_blind_last_mono` (the last notified tick), because that is the

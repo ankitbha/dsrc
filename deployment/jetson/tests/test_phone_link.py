@@ -843,7 +843,7 @@ def test_telemetry_carries_its_arrival_time():
 
 
 class TestTelemetryPairIsAtomic:
-    """A3: `telemetry` and `telemetry_at_mono` each read `_telemetry`
+    """`telemetry` and `telemetry_at_mono` each read `_telemetry`
     independently -- a rebind landing between the two calls can pair a
     stale report's status with a null age (or the reverse). `telemetry_pair`
     reads `_telemetry` once so the two values it returns always describe the

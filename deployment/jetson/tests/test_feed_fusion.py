@@ -134,10 +134,10 @@ class TestAging:
         assert owned.declined == Decline.STALE
 
     def test_an_unmeasured_age_is_declined_as_unknown_not_stale(self):
-        """B9: `_fresh` reads a null age as "not fresh" for the comparison
-        it makes, but `own` used to fold that straight into `Decline.STALE`
-        -- asserting the reading was measured and found too old when its
-        age was never measured at all.
+        """`_fresh` reads a null age as "not fresh" for the comparison it
+        makes. Folding that into `Decline.STALE` would assert the reading
+        was measured and found too old when its age was never measured at
+        all.
         """
         owned = own(reading(response_age_s=None))
         assert owned.declined == Decline.NO_AGE

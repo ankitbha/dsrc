@@ -324,11 +324,10 @@ class TestRefusals:
         assert not (run_dir / "shadow_score.json").exists()
 
     def test_a_log_missing_shadow_refuses_by_name_instead_of_crashing(self, tmp_path):
-        """B4: `_segments` subscripts `sensing["shadow"]` directly, with no
-        `.get` -- a log carrying `decision_inputs`/`decided_at_mono` but not
-        `shadow` used to raise `KeyError` deep inside `_segments`, bypassing
-        `_log_refusal` entirely, which validated the input side of a tick
-        but nothing on the output side.
+        """`_segments` subscripts `sensing["shadow"]` directly, with no
+        `.get`, so a log carrying `decision_inputs`/`decided_at_mono` but
+        not `shadow` raises `KeyError` deep inside it unless `_log_refusal`
+        checks the output side of a tick as well as the input side.
         """
         run_dir = tmp_path / "no_shadow"
         run_dir.mkdir()
@@ -400,13 +399,13 @@ class TestReplayIdentityGate:
         assert result.get("refused") is None
 
     def test_a_key_deleted_from_the_log_is_not_masked_by_a_real_none(self, tmp_path):
-        """B3: `sensing.get(k) != v` defaults a missing key to `None`, which
+        """`sensing.get(k) != v` defaults a missing key to `None`, which
         compares equal to a field whose real replayed value also happens to
-        be `None` -- a key genuinely deleted from the log was
+        be `None`, making a key genuinely deleted from the log
         indistinguishable from one that legitimately holds no value.
-        `here_radius_m` is `None` whenever there is no position fix, so
-        deleting it after doctoring the inputs to produce exactly that
-        value used to pass the gate.
+        `here_radius_m` is `None` whenever there is no position fix, so this
+        doctors the inputs to produce exactly that value and then deletes
+        the key.
         """
         run_dir = write_run(tmp_path, n=1)
         lines = (run_dir / "metadata.jsonl").read_text().splitlines()
@@ -426,11 +425,11 @@ class TestReplayIdentityGate:
         assert "here_radius_m" in result["replay_identity"]["first_mismatch"]["keys"]
 
     def test_a_shadow_flip_is_named_as_log_only_not_silently_passed(self, tmp_path):
-        """B3: flipping `shadow` changes `_segments`' own live/shadow split,
-        but `shadow` is on every logged tick and never in what
-        `Decision.to_record()` produces, so no replay can check it. The
-        fix is not to fabricate a check where none is possible; it is to
-        name the boundary so `status: ok` is not read as covering it.
+        """Flipping `shadow` changes `_segments`' own live/shadow split, but
+        `shadow` is on every logged tick and never in what
+        `Decision.to_record()` produces, so no replay can check it. Rather
+        than fabricate a check where none is possible, the boundary is
+        named, so `status: ok` is not read as covering it.
         """
         run_dir = write_run(tmp_path, n=6)
         lines = (run_dir / "metadata.jsonl").read_text().splitlines()
@@ -529,7 +528,7 @@ def _inject_t_wall(run_dir: Path, *, base: float = 1000.0, period: float = 0.1) 
 
 
 class TestTickCoverage:
-    """A8: `log_truncation` compares the log against a count the run itself
+    """`log_truncation` compares the log against a count the run itself
     reported, so an outage that stops tick production reduces both sides
     together and reads zero missing by construction. `tick_coverage`
     (ported from `eval_run._tick_coverage`) reads the sensing ticks' own gap

@@ -375,8 +375,9 @@ def join_phone_log(
             "stages": stages,
         })
 
-    # `matched` counts rows produced above -- one per advisory that found a
-    # tick, same meaning as before this join was checked in both directions.
+    # One row per advisory that found a tick. Taken here, before the
+    # unmatched Jetson ticks below are appended, so `matched` keeps that
+    # meaning rather than becoming a count of all rows.
     matched = len(rows)
 
     absent_return = StageTiming.absent(clock="cross", reason=NO_ADVISORY_FOR_TICK_REASON).to_record()
@@ -2713,13 +2714,13 @@ def _time_weighted_weights(
     manufactures an interruption that was never one or hides one that was,
     depending only on which regime holds the majority of points.
 
-    A per-point value used to stand in for its own sampling period directly
-    (`1 / value`), which is wrong whenever the two differ: a commanded rate
-    of 0.2 Hz describes how often something else should run, not how often
-    THIS point itself was sampled, which is once per tick regardless of what
-    it commands. `1 / value` for `here_hz` = 0.2 implied a 5 s period and a
-    15 s cap, crediting up to three HERE calls' worth of no distinction to a
-    stretch where the phone was actually unreachable the whole time.
+    A point's own value is not its sampling period, and `1 / value` must
+    not be passed here whenever the two differ: a commanded rate of 0.2 Hz
+    describes how often something else should run, not how often THIS point
+    was sampled, which is once per tick regardless of what it commands.
+    `1 / here_hz` at 0.2 Hz implies a 5 s period and a 15 s cap, crediting
+    up to three HERE calls' worth of held value to a stretch where the
+    phone was unreachable throughout.
 
     Falls back to `TICK_COVERAGE_GAP_MULTIPLE * median(gaps)` when
     `sample_period_s` is not given, is a non-positive scalar, or (as a list)
@@ -3026,7 +3027,7 @@ def sensing_result(
         # Every rate is commanded once per sensing tick, so the series' own
         # sampling period is the tick period implied by THAT tick's
         # `camera_hz` -- not `1 / v`, which is the rate `key` itself
-        # commands, not how often a new reading of it arrives (A12).
+        # commands, not how often a new reading of it arrives.
         sample_periods = [(1.0 / cam_hz) if cam_hz else None for _, _, cam_hz in raw]
         census = Counter(str(v) for _, v in points)
         commanded_stat = _time_weighted_mean(points, sample_periods)
@@ -3065,7 +3066,7 @@ def sensing_result(
             # An achieved reading arrives once per telemetry report, not once
             # per tick -- its own sampling period is the report interval
             # already measured in `window`, a single constant for the whole
-            # series rather than a per-point one (A12).
+            # series rather than a per-point one.
             achieved_stat = _time_weighted_mean(achieved_points, window["observed_median_s"])
             entry["achieved_time_mean"] = achieved_stat.value
             entry["achieved_span_s"] = achieved_stat.span_s
@@ -3112,7 +3113,7 @@ def sensing_result(
     here_raw = [(t_mono, v, cam_hz) for t_mono, v, cam_hz in here_raw if t_mono is not None and v is not None]
     here_points = [(t_mono, v) for t_mono, v, _ in here_raw]
     # Commanded `here_hz` is also a per-tick reading -- see the identical
-    # comment in the `RATE_KEYS` loop above (A12).
+    # comment in the `RATE_KEYS` loop above.
     here_sample_periods = [(1.0 / cam_hz) if cam_hz else None for _, _, cam_hz in here_raw]
     here_stat = _time_weighted_integral(here_points, here_sample_periods)
     here["expected_from_commanded"] = here_stat.value
@@ -3571,15 +3572,15 @@ def _ticks_never_produced(
     different order than they are already in -- the clock moved backward,
     or otherwise out of sequence, somewhere in the log, and every width
     computed from it below would describe a gap that did not happen this
-    way. A 2 s backward step with nothing actually lost used to read as
-    0.2308 missing and fail a drive that lost nothing.
+    way. Without this check a 2 s backward step with nothing actually lost
+    reads as 0.2308 missing and fails a drive that lost nothing.
 
     A gap can hold both a real interruption and a separately deleted record
     at once: the id delta already counts the deleted one exactly, in
     `_ticks_absent_from_log`, so only the width beyond what that deletion
-    alone would produce is credited here -- crediting the whole width
-    regardless of `id_delta` used to report a single deleted record inside
-    an 85 s outage as 1 tick missing instead of the outage's own size.
+    alone would produce is credited here. Crediting the whole width
+    regardless of `id_delta` reports a single deleted record inside an 85 s
+    outage as 1 tick missing instead of the outage's own size.
 
     Verified against real drives: a drive with an induced 54.58 s outage and
     intact ids scores 269 of 1229 this way; a historical drive with its own
@@ -3655,11 +3656,11 @@ def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_CO
     idling at a slower, legitimate rate look identical to a hole count: both
     are consecutive ids with a wide gap between them, and only the width
     -- read against what the drive was doing immediately around it, not one
-    global figure -- tells them apart. Summing the two into one number was
-    tried and was wrong: it double-counted a deletion that happened to sit
-    inside a real outage, and it made a drive's own coverage indistinguishable
-    from `log_integrity`, which already answers the first question from the
-    run's self-reported count. Each is reported on its own, including
+    global figure -- tells them apart. The two must not be summed: one
+    number double-counts a deletion sitting inside a real outage, and makes
+    a drive's own coverage indistinguishable from `log_integrity`, which
+    already answers the first question from the run's self-reported count.
+    Each is reported on its own, including
     `None` with its own named reason when its own trust conditions fail, and
     a caller should not add them together or let one stand in for the other.
     """

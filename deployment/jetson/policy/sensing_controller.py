@@ -163,9 +163,9 @@ THERMAL_CAUSE_NO_TELEMETRY = "no_telemetry"
 THERMAL_CAUSE_STALE_TELEMETRY = "stale_telemetry"
 #: A status or skin reading with no age attached -- neither known-fresh nor
 #: known-stale, because there is nothing to check `MAX_TELEMETRY_AGE_S`
-#: against. Reached through a torn read of a phone link's telemetry and its
-#: arrival time as two separate values (see `inputs_from`'s own fix for the
-#: race), not through an ordinary missing report, which is `no_telemetry`.
+#: against. Reached when a reading and its arrival time are read as two
+#: separate values and one arrives without the other, not through an
+#: ordinary missing report, which is `no_telemetry`.
 THERMAL_CAUSE_UNSTAMPED_TELEMETRY = "unstamped_telemetry"
 THERMAL_CAUSES = frozenset({
     THERMAL_CAUSE_STATUS, THERMAL_CAUSE_SKIN_WARM, THERMAL_CAUSE_SKIN_HOT,

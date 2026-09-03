@@ -166,7 +166,7 @@ def test_empty_traffic_fails_perception_gate(tmp_path):
 
 
 def test_no_leader_and_no_tracks_are_absent_not_a_zeroed_out_gap(tmp_path):
-    """B1: `pctl([])` returns all zeros, and a `leader_gap_m` of `{p50: 0.0,
+    """`pctl([])` returns all zeros, and a `leader_gap_m` of `{p50: 0.0,
     mean: 0.0}` states the vehicle ahead is touching the bumper -- not the
     same fact as "no leader was ever observed". `stage_timings` already
     avoids exactly this shape for its own stats; the perception block must
@@ -280,10 +280,10 @@ class TestATruncatedLogIsNotACompleteRun:
         assert integrity["unparseable_lines"] == 0
 
     def test_a_summary_with_no_tick_count_is_unmeasurable_not_complete(self, tmp_path):
-        """A5: `summary["ticks"]` absent leaves `shortfall` at `None`, which
-        the old code folded straight into `log_complete: True` -- an
-        unmeasured drive certifying as a measured, complete one. It must
-        instead read as a third state that does not pass the verdict.
+        """`summary["ticks"]` absent leaves `shortfall` at `None`. Folding
+        that into `log_complete: True` would certify an unmeasured drive as
+        a measured, complete one, so it reads instead as a third state that
+        does not pass the verdict.
         """
         # `summary={}` would fall back to `write_run`'s own default (an empty
         # dict is falsy) -- a truthy dict with no "ticks" key is what actually
@@ -299,7 +299,7 @@ class TestATruncatedLogIsNotACompleteRun:
 
 
 class TestTickCoverageGate:
-    """A5: `log_integrity` compares the log against what the run itself
+    """`log_integrity` compares the log against what the run itself
     reported producing, so a real outage that reduces both sides together is
     invisible to it -- its own shortfall reads zero by construction. The
     `tick_coverage_never_produced` gate reads the gap distribution instead,
@@ -338,11 +338,11 @@ class TestTickCoverageGate:
 
 
 class TestTickCoverageDistinguishesRateChangeFromLoss:
-    """A9/A10/A11: a single population median assumes one characteristic
-    period. A controller legitimately running at more than one rate has no
-    such period (A9/A10); a loss spread evenly across a drive never widens
-    any one gap past a multiple of the median at all (A11). Both are size
-    questions a gap-shape heuristic answers wrong in opposite directions.
+    """A single population median assumes one characteristic period. A
+    controller legitimately running at more than one rate has no such
+    period; a loss spread evenly across a drive never widens any one gap
+    past a multiple of the median at all. A gap-shape heuristic answers
+    those two wrong in opposite directions.
     """
 
     def test_a_legitimate_rate_change_reports_zero_missing(self, tmp_path):
@@ -365,8 +365,8 @@ class TestTickCoverageDistinguishesRateChangeFromLoss:
         # Every third tick deleted -- no single gap stands out (each
         # surviving gap is a uniform multiple of the base period, well under
         # the gap_multiple threshold), so the never-produced axis cannot see
-        # this at all. tick_id itself holes exactly where a tick used to be,
-        # which is exactly what the absent-from-log axis reads.
+        # this at all. tick_id itself holes exactly where a tick was
+        # deleted, which is what the absent-from-log axis reads.
         kept = [t for i, t in enumerate(all_ticks) if i % 3 != 2]
         run_dir = write_run(
             tmp_path, kept, scenario=scenario_record(),
@@ -381,11 +381,9 @@ class TestTickCoverageDistinguishesRateChangeFromLoss:
 
 
 class TestTickCoverageGateIsNoneWhenUnmeasurable:
-    """B13: `coverage_fraction is not None else None` mutated to `else True`
-    left every existing test passing -- a drive whose coverage cannot be
-    computed at all (fewer than three ticks) would then render the gate as
-    a pass rather than not applicable, the same silent-pass shape
-    `log_complete`'s three-state fix (A5) exists to rule out.
+    """A drive whose coverage cannot be computed at all (fewer than three
+    ticks) must render both gates as not applicable, never as a pass -- the
+    same silent-pass shape `log_complete`'s three states rule out.
     """
 
     def test_a_two_tick_drive_leaves_the_gate_not_applicable(self, tmp_path):
@@ -420,12 +418,11 @@ class TestUntrustworthyIdsDoNotSilentlyPassOverall:
 
 
 class TestAnalyzeSurvivesTicksWithNoTickId:
-    """A drive whose ticks carry no tick_id at all used to crash `analyze()`
-    itself -- in the unrelated track-span accumulation, which hard-indexed
-    `t["tick_id"]` -- before ever reaching tick_coverage's own decline for
-    exactly this shape. That made the decline dead code no drive could
-    actually exercise end to end: the report was never produced, so nothing
-    downstream of it (the gates, `overall_pass`) ever ran either.
+    """A drive whose ticks carry no tick_id at all must still produce a
+    report. The track-span accumulation reads `tick_id` for every vehicle
+    sighting, well before tick_coverage's own decline for exactly this
+    shape; hard-indexing it there raises, and the report, the gates and
+    `overall_pass` are then never reached at all.
     """
 
     def test_a_log_with_no_tick_id_produces_a_report_not_a_crash(self, tmp_path):
@@ -434,7 +431,7 @@ class TestAnalyzeSurvivesTicksWithNoTickId:
             del t["tick_id"]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
 
-        result = analyze(run_dir)  # used to raise KeyError('tick_id')
+        result = analyze(run_dir)
 
         # Every tick in this fixture carries exactly one vehicle (the
         # default leader), so all ten sightings are excluded from the
@@ -550,12 +547,12 @@ class TestJoinPhoneLog:
         assert result["advisories_seen_by_the_phone"] == 1
 
     def test_a_jetson_tick_whose_advisory_never_returned_still_gets_a_row(self):
-        """The join checked in the other direction: a tick with no matching
-        inbound advisory used to vanish from `rows` entirely, along with
-        every Jetson-side stage it carried -- and `rows` is the whole
-        population `stage_timings` is computed over. The dropped tick's own
-        stages must survive; only `return`/`render` -- the two stages only
-        the phone can supply -- are absent.
+        """The join checked in the other direction. Dropping a tick with no
+        matching inbound advisory would take every Jetson-side stage it
+        carried with it, and `rows` is the whole population
+        `stage_timings` is computed over. The tick's own stages must
+        survive; only `return`/`render` -- the two stages only the phone can
+        supply -- are absent.
         """
         matched_tick = {"tick_id": 1, "t_capture_mono_ns": 100, "stages": {"detect": {"ms": 1.0}}}
         orphaned_tick = {"tick_id": 2, "t_capture_mono_ns": 200, "stages": {"detect": {"ms": 2.0}}}
@@ -1014,11 +1011,11 @@ class TestFiredRowQuantityMatchesItsDeclaredCumulativeFlag:
 
 
 class TestFiredLineNamesAnUnobservableOutcome:
-    """B12: a source that went unwatchable while its condition was still
-    active closes its episode with outcome `unobservable`, not `recovered`
-    -- but the FIRED line rendered only the duration ("longest 3.0 s"),
-    which a reader reads as a resolution. The aggregate `outcomes` line
-    does carry `1 unobservable`; the per-source line did not.
+    """A source that went unwatchable while its condition was still active
+    closes its episode with outcome `unobservable`, not `recovered`. The
+    per-source FIRED line must name that outcome: a bare duration
+    ("longest 3.0 s") reads as a resolution, and the aggregate `outcomes`
+    line is the only other place it appears.
     """
 
     def test_an_unobservable_outcome_and_the_unreadable_pass_count_are_named(self):
@@ -1099,12 +1096,11 @@ class TestNotEvaluableLineNamesTheUnreadableCount:
 
 
 class TestFiredWithNoEpisodeNamesItsOwnSpan:
-    """A7: a `camera.blind_ticks` (or any source) that fired but never
-    formed a single episode -- one continuous 82 s blackout and 21 isolated
-    drops scattered over 294 s -- render identically (`episodes 0, total
-    21, below_threshold 21`) on every count `_failure_lines` prints,
-    differing only in `first_t_mono`/`last_t_mono`, which appeared nowhere
-    in the report before this.
+    """A `camera.blind_ticks` (or any source) that fired but never formed a
+    single episode renders identically for a continuous 82 s blackout and
+    for 21 isolated drops scattered over 294 s (`episodes 0, total 21,
+    below_threshold 21`) on every count `_failure_lines` prints.
+    `first_t_mono`/`last_t_mono` are the only fields that tell them apart.
     """
 
     def test_a_continuous_condition_and_scattered_drops_are_told_apart(self):
@@ -1169,12 +1165,11 @@ class TestFiredWithNoEpisodeNamesItsOwnSpan:
 
 
 class TestNotEvaluableWithNoReasonNamesItsOwnAbsence:
-    """B2: a `not_evaluable` row with an empty (or absent) `missing` list
-    rendered `-- missing ;`, on a record that names no reason at all --
-    reachable on a log from a build that predates `missing` being written.
-    Every other row on every other drive carries a real reason; this one
-    must at least say it carries none, not print an empty list as though it
-    were one.
+    """A `not_evaluable` row with an empty (or absent) `missing` list names
+    no reason at all -- reachable on a log from a build that predates
+    `missing` being written. Every other row on every other drive carries a
+    real reason, so this one must say it carries none rather than render an
+    empty list (`-- missing ;`) as though it were one.
     """
 
     def test_an_empty_missing_list_renders_a_named_absence_not_a_bare_semicolon(self):
@@ -1255,10 +1250,10 @@ class TestLogHealthReachesTheReport:
 
 
 class TestLogHealthAbsentWriterFailureIsUnknownNotHealthy:
-    """B7: `log_health.get("writer_failure") is None` reads both "the field
-    is present and null" (genuinely healthy) and "the field is entirely
-    absent" (a log from before it existed) as the same "writer healthy"
-    line. Absent is not the same fact as healthy.
+    """`log_health.get("writer_failure") is None` cannot tell "the field is
+    present and null" (genuinely healthy) from "the field is entirely
+    absent" (a log from before it existed); both would render the same
+    "writer healthy" line. Absent is not the same fact as healthy.
     """
 
     def test_an_absent_field_reads_as_unknown(self):

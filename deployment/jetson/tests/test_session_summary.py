@@ -586,10 +586,10 @@ class TestExpectedFromCommanded:
         gap-weighted value on an unevenly spaced series instead.
         """
         points = [(0.0, 2.0), (1.0, 2.0), (5.0, 2.0)]
-        # A12: the caller supplies the series' own sampling period per point
-        # (here, 1 / 2.0 = 0.5 s -- as if each point's own value were also
-        # its sampling rate, the case A9 originally covered), not a
-        # population median -- cap = 3 * 0.5 = 1.5 s. gaps = [1, 4]; capped =
+        # The caller supplies the series' own sampling period per point
+        # (here 1 / 2.0 = 0.5 s, standing in for a series whose own value
+        # is also its sampling rate), not a population median -- so
+        # cap = 3 * 0.5 = 1.5 s. gaps = [1, 4]; capped =
         # [1, 1.5] (the second gap exceeds 1.5 s); trailing weight is also
         # capped at 1.5. weights = [1, 1.5, 1.5]; sum(v*w) = 2*1+2*1.5+2*1.5 = 8
         periods = [1.0 / v for _, v in points]
@@ -600,7 +600,7 @@ class TestExpectedFromCommanded:
 
 
 class TestOutageWeightCapping:
-    """A1: a gap spanning a stretch with no ticks at all (the system was not
+    """A gap spanning a stretch with no ticks at all (the system was not
     running) must not be credited, in full, to whatever value the point
     before it held.
     """
@@ -630,17 +630,16 @@ class TestOutageWeightCapping:
 
 
 class TestPerPointRateCapping:
-    """A9/A12: `_time_weighted_weights`'s cap must not come from a single
-    population median, which assumes one characteristic period -- wrong for
-    a controller built to run at more than one rate (idle vs active, or
+    """`_time_weighted_weights`'s cap must not come from a single population
+    median, which assumes one characteristic period -- wrong for a
+    controller built to run at more than one rate (idle vs active, or
     thermally scaled as low as 0.15x). Capping a slow regime's gaps at a
     multiple of a fast regime's median period truncates every one of them,
     biasing the mean toward whichever regime holds the majority of points.
-    The cap comes from a `sample_period_s` the caller supplies per point --
-    for a per-tick series that is the tick period implied by `camera_hz` at
-    that point (A12), which these tests stand in for directly as `1 / v`,
-    since the series here legitimately runs at two different rates and `v`
-    is one of them.
+    The cap comes instead from a `sample_period_s` the caller supplies per
+    point -- for a per-tick series, the tick period implied by `camera_hz`
+    at that point. These tests stand in for it directly as `1 / v`, since
+    the series here legitimately runs at two rates and `v` is one of them.
     """
 
     def test_a_minority_slow_regime_is_not_truncated_by_the_fast_majority(self):
@@ -838,7 +837,7 @@ class TestCommandedByValue:
         from a plain sample mean, which happen to agree whenever every gap is
         the same size, and this test's name claims that distinction.
 
-        A12: `camera_hz` is the one rate whose own value IS its own sampling
+        `camera_hz` is the one rate whose own value IS its own sampling
         period, since a per-tick series is sampled once per tick and
         `camera_hz` commands the tick rate itself -- so `1 / value` is passed
         explicitly as `sample_period_s` here rather than a population
@@ -864,7 +863,7 @@ class TestCommandedByValue:
         sample_mean = sum(v for _, v in points) / len(points)
         # weights = gaps + [last gap] = [1, 1, 3, 3]; sum(v*w) = 12*3 = 36,
         # total weight = 8 -- the last point's held value still dominates,
-        # but its long, mostly-unobserved hold is no longer credited whole.
+        # but its long, mostly-unobserved hold is not credited whole.
         assert _time_weighted_mean(points).value != pytest.approx(sample_mean)
         assert _time_weighted_mean(points).value == pytest.approx(36 / 8)
 
@@ -1558,13 +1557,11 @@ class TestTickCoverageSeesWhatTheAxesCannot:
 
 
 class TestTickCoverageReportsTwoQuestionsNotOne:
-    """The revised design (superseding the exact-count-only redesign that
-    preceded it): `ticks_absent_from_log` (ids, exact) and
-    `ticks_never_produced` (gap widths, an estimate) answer different
-    questions and are never summed into one number. An outage that removes
-    no records leaves no id hole at all -- an exact id count is
-    structurally blind to it, which is the reason the estimate exists
-    rather than evidence the estimate should be deleted.
+    """`ticks_absent_from_log` (ids, exact) and `ticks_never_produced` (gap
+    widths, an estimate) answer different questions and are never summed
+    into one number. An outage that removes no records leaves no id hole at
+    all, so an exact id count is structurally blind to it -- which is why
+    the estimate exists alongside it.
     """
 
     def test_a_deletion_only_drive_reports_the_exact_count_and_no_phantom_never_produced(self):
@@ -1574,10 +1571,10 @@ class TestTickCoverageReportsTwoQuestionsNotOne:
         # values are exactly what the steady cadence would have given them,
         # so the gap a deletion leaves is not ALSO evidence of a pause --
         # ticks_never_produced must not re-count the same loss the id hole
-        # already counts exactly (A13: a deleted record inside a real
-        # outage used to erase almost the whole outage from the estimate;
-        # this is the same mechanism with no outage at all, so the estimate
-        # must land on exactly zero, not just "less than before").
+        # already counts exactly. Crediting a gap's full width would let a
+        # deleted record inside a real outage erase almost the whole outage
+        # from the estimate; this is the same mechanism with no outage at
+        # all, so the estimate must land on exactly zero.
         # A trailing block (ids 1000..1009) is left fully intact so the
         # highest surviving id is proof the deleted tail ids existed too --
         # the exact count is blind to a hole it cannot see evidence for,
@@ -1593,7 +1590,7 @@ class TestTickCoverageReportsTwoQuestionsNotOne:
         assert cov["ticks_never_produced"] == 0
 
     def test_the_local_reference_uses_the_leading_cadence_not_a_pooled_average(self):
-        # A15/B15: a rate transition sits right where the drive was also
+        # A rate transition sits right where the drive was also
         # interrupted. Pooling gaps from both sides of the interruption
         # into one median describes a cadence the drive never ran at --
         # only the leading side (what the drive was actually doing up to
@@ -1614,14 +1611,14 @@ class TestTickCoverageReportsTwoQuestionsNotOne:
         assert cov["ticks_never_produced"] == 24
 
     def test_a_backward_clock_step_with_nothing_lost_declines_rather_than_reporting_loss(self):
-        # A14: production order (tick_id, and the order ticks were written)
+        # Production order (tick_id, and the order ticks were written)
         # is intact and nothing was lost, but partway through, t_wall reads
         # a value behind its own neighbours (an NTP correction, a re-synced
         # clock). Sorting these same ticks by t_wall would then put them in
         # a different order than they are already in, so the estimate must
         # decline rather than manufacture a loss from a width that never
-        # happened this way. A 2 s step like this used to read as 0.2308
-        # missing and fail a drive that lost nothing.
+        # happened this way. Without the decline, a 2 s step like this
+        # reads as 0.2308 missing and fails a drive that lost nothing.
         n = 300
         t_walls = [1000.0 + i * 0.1 for i in range(n)]
         t_walls[150] -= 2.0
@@ -1635,8 +1632,8 @@ class TestTickCoverageReportsTwoQuestionsNotOne:
         assert cov["ticks_never_produced_reason"] is not None
 
     def test_half_null_ids_decline_both_axes_with_a_named_reason(self):
-        # The validator confirmed the old code silently reported 0 for
-        # this shape rather than refusing to guess.
+        # Ids alternate present and absent: neither axis can be counted
+        # from this, and reporting 0 would read as "nothing missing".
         ticks = [
             {
                 "type": "tick", "tick_id": (i if i % 2 == 0 else None),

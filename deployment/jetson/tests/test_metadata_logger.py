@@ -98,7 +98,7 @@ class TestCloseAlwaysReturns:
 
 
 class UnanticipatedlyBrokenFile:
-    """A failure mode outside the two the original except clause named."""
+    """A failure mode outside the two the write path anticipates."""
 
     def write(self, _):
         raise RuntimeError("neither a full card, a closed handle, nor a read-only mount")
@@ -111,8 +111,8 @@ class UnanticipatedlyBrokenFile:
 
 
 class TestAnUnanticipatedFailureIsStillCaught:
-    """B5: `except (OSError, ValueError)` caught only the two anticipated
-    failure modes -- anything else killed the thread exactly as unguarded,
+    """`except (OSError, ValueError)` would catch only the two anticipated
+    failure modes. Anything else kills the thread exactly as if unguarded,
     with `writer_failure` left unset, indistinguishable from a writer that
     is merely slow.
     """
@@ -127,7 +127,7 @@ class TestAnUnanticipatedFailureIsStillCaught:
         assert "RuntimeError" in logger.writer_failure
 
     def test_every_offered_record_is_accounted_for_not_just_the_queued_ones(self, tmp_path):
-        # B6: the one record the writer had already popped off the queue
+        # The one record the writer had already popped off the queue
         # when it raised is not in the queue for close()'s own qsize()
         # count to see -- it must be counted at the point of failure
         # instead, or it vanishes uncounted. The writer is driven to death

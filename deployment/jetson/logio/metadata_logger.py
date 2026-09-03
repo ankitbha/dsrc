@@ -120,17 +120,15 @@ class MetadataLogger:
             try:
                 self._file.write(item + "\n")
             except BaseException as exc:
-                # Not just the two anticipated types (a full card, a closed
-                # handle, a read-only mount): an exception this narrow catch
-                # did not expect used to kill the thread exactly as
-                # unguarded, with writer_failure left unset -- indistinguishable
-                # from a healthy writer that simply has not been asked to
-                # stop yet. Recorded and the loop ends deliberately, so
-                # `close()` sees a dead thread and says so rather than
-                # waiting on it. The record this call had already popped
-                # off the queue is counted here: `close()`'s own
-                # `qsize()` can never see it, since by the time `close()`
-                # runs it is no longer queued.
+                # Broad on purpose, not just the anticipated types (a full
+                # card, a closed handle, a read-only mount). Anything else
+                # escaping here kills this thread with `writer_failure`
+                # unset, which is indistinguishable from a healthy writer
+                # that has not been asked to stop yet. Recorded, and the
+                # loop ends deliberately, so `close()` sees a dead thread
+                # and says so rather than waiting on it. The record this
+                # call had already popped off the queue is counted here
+                # because `close()`'s `qsize()` can never see it.
                 self.writer_failure = f"{type(exc).__name__}: {exc}"
                 self.dropped_records += 1
                 return

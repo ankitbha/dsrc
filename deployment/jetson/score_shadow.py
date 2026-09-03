@@ -96,8 +96,8 @@ REFUSAL_INPUTS_SCHEMA = "decision_inputs_schema"
 #: `_log_refusal`'s other three checks all cover the INPUT side of a tick
 #: (`decision_inputs`). `_segments`, `_limits` and `_reference_witness`
 #: subscript `sensing["shadow"]` / `sensing["reference"]` directly, with no
-#: `.get`, so a log missing either crashed deep inside one of those instead
-#: of being refused by name here. Checked by an explicit key list rather
+#: `.get`, so without this refusal a log missing either crashes deep inside
+#: one of those instead of being named here. Checked by an explicit key list rather
 #: than derived from `Decision`'s own dataclass fields, because
 #: `to_record()`'s keys are not named 1:1 with them (`here_query` becomes
 #: `here_radius_m`), so there is no single schema this could read instead.
