@@ -1613,8 +1613,10 @@ def _sensing_lines(sensing: dict[str, Any] | None) -> list[str]:
             f"- HERE calls: {here['calls_total']} total across {len(here['by_session'])} session(s) "
             f"({here['uncounted_prefix']} placed before the first observed report in each session, "
             f"not counted), {here['errors_total']} errors, expected from commanded rate "
-            f"{here['expected_from_commanded']:.2f}, phone-reported responses received "
-            f"{here['responses_received']}"
+            f"{here['expected_from_commanded']:.2f} (credited over "
+            f"{here['expected_from_commanded_weighted_over_s']:.1f} of "
+            f"{here['expected_from_commanded_span_s']:.1f} s spanned by commanded-rate ticks), "
+            f"phone-reported responses received {here['responses_received']}"
             + (f" -- {here['zero_calls_because']}" if here.get("zero_calls_because") else "")
             + backwards
         )
@@ -2468,39 +2470,77 @@ def _time_weighted_weights(times: list[float]) -> list[float]:
     a drive's own tick spacing is usually close to constant and there is no
     later point to measure it from. A single point gets weight 1.0 (any
     positive constant works, since it cancels in a mean).
+
+    Each gap is capped at `TICK_COVERAGE_GAP_MULTIPLE` times the median gap
+    in this same series -- the criterion `_tick_coverage` uses to call a gap
+    an interruption rather than jitter. Uncapped, a gap spanning a stretch
+    where the system was not running at all (no ticks, so no point exists in
+    that stretch) is credited entirely to whatever value the point before it
+    held, which states that value was in effect for the whole outage. The
+    cap bounds that credit to what an ordinary gap in this series looks
+    like.
     """
     if len(times) == 1:
         return [1.0]
     gaps = [b - a for a, b in zip(times, times[1:])]
-    return gaps + [gaps[-1]]
+    sorted_gaps = sorted(gaps)
+    mid = len(sorted_gaps) // 2
+    median_gap = (
+        sorted_gaps[mid] if len(sorted_gaps) % 2 else (sorted_gaps[mid - 1] + sorted_gaps[mid]) / 2.0
+    )
+    cap = TICK_COVERAGE_GAP_MULTIPLE * median_gap if median_gap > 0 else None
+    capped = gaps if cap is None else [min(g, cap) for g in gaps]
+    return capped + [capped[-1]]
 
 
-def _time_weighted_mean(points: list[tuple[float, float]]) -> float | None:
+@dataclass(frozen=True)
+class TimeWeightedStat:
+    """A time-weighted statistic (`_time_weighted_mean`'s mean, or
+    `_time_weighted_integral`'s integral) together with the window it was
+    computed over. `span_s` is the raw elapsed time between the first and
+    last point, uncapped. `weighted_over_s` is the total of the
+    (possibly capped) per-point weights `value` was actually computed from.
+    The two agree, up to one trailing extrapolated gap, on a series with no
+    capped gap; they diverge when a gap got capped, and the difference
+    between them is real elapsed time `value` says nothing about.
+    """
+
+    value: float | None
+    span_s: float
+    weighted_over_s: float
+
+
+def _time_weighted_mean(points: list[tuple[float, float]]) -> TimeWeightedStat:
     """Mean of `value`, weighted by how long (wall/monotonic seconds) it held
     -- not a mean over samples, which would overweight whatever period
-    happened to produce more ticks. On an evenly spaced series this reduces
-    to the ordinary sample mean.
+    happened to produce more ticks. On an evenly spaced series with no
+    capped gap this reduces to the ordinary sample mean.
     """
     if not points:
-        return None
+        return TimeWeightedStat(None, 0.0, 0.0)
     ordered = sorted(points, key=lambda p: p[0])
-    weights = _time_weighted_weights([t for t, _ in ordered])
-    total_weight = sum(weights)
-    if total_weight <= 0:
-        return float(ordered[-1][1])
-    return sum(v * w for (_, v), w in zip(ordered, weights)) / total_weight
+    times = [t for t, _ in ordered]
+    weights = _time_weighted_weights(times)
+    span_s = times[-1] - times[0]
+    weighted_over_s = sum(weights)
+    if weighted_over_s <= 0:
+        return TimeWeightedStat(float(ordered[-1][1]), span_s, weighted_over_s)
+    mean = sum(v * w for (_, v), w in zip(ordered, weights)) / weighted_over_s
+    return TimeWeightedStat(mean, span_s, weighted_over_s)
 
 
-def _time_weighted_integral(points: list[tuple[float, float]]) -> float:
+def _time_weighted_integral(points: list[tuple[float, float]]) -> TimeWeightedStat:
     """`sum(value * weight)` over the same weighting as `_time_weighted_mean`
     -- the expected count of events a rate would produce over the span
     covered.
     """
     if len(points) < 2:
-        return 0.0
+        return TimeWeightedStat(0.0, 0.0, 0.0)
     ordered = sorted(points, key=lambda p: p[0])
-    weights = _time_weighted_weights([t for t, _ in ordered])
-    return sum(v * w for (_, v), w in zip(ordered, weights))
+    times = [t for t, _ in ordered]
+    weights = _time_weighted_weights(times)
+    integral = sum(v * w for (_, v), w in zip(ordered, weights))
+    return TimeWeightedStat(integral, times[-1] - times[0], sum(weights))
 
 
 def _comparable(ever_live: bool, distinct_reports: list[dict[str, Any]], ticks: int) -> tuple[bool, str | None]:
@@ -2677,7 +2717,8 @@ def sensing_result(
         # whole report, including the axes that would have survived it.
         points = [(t_mono, v) for t_mono, v in points if t_mono is not None and v is not None]
         census = Counter(str(v) for _, v in points)
-        commanded_time_mean = _time_weighted_mean(points)
+        commanded_stat = _time_weighted_mean(points)
+        commanded_time_mean = commanded_stat.value
         clamped_ticks = sum(
             1 for t in sensing_ticks
             if ((t["sensing"].get("attribution") or {}).get("per_sensor") or {}).get(key, {}).get("clamped")
@@ -2691,9 +2732,13 @@ def sensing_result(
             "commanded_by_value": dict(census),
             "commanded_distinct": len(census),
             "commanded_time_mean": commanded_time_mean,
+            "commanded_span_s": commanded_stat.span_s,
+            "commanded_weighted_over_s": commanded_stat.weighted_over_s,
             "clamped_ticks": clamped_ticks,
             "thermal_scaled_ticks": thermal_scaled_ticks,
             "achieved_time_mean": None,
+            "achieved_span_s": None,
+            "achieved_weighted_over_s": None,
             "lambda_per_window": None,
             "percentiles": {"p50": None, "p95": None},
             "percentiles_suppressed": None,
@@ -2705,7 +2750,10 @@ def sensing_result(
                 (r.get("at_mono"), (r.get("achieved") or {}).get(key)) for r in distinct_reports
             ]
             achieved_points = [(t_mono, v) for t_mono, v in achieved_points if t_mono is not None and v is not None]
-            entry["achieved_time_mean"] = _time_weighted_mean(achieved_points)
+            achieved_stat = _time_weighted_mean(achieved_points)
+            entry["achieved_time_mean"] = achieved_stat.value
+            entry["achieved_span_s"] = achieved_stat.span_s
+            entry["achieved_weighted_over_s"] = achieved_stat.weighted_over_s
             lambda_per_window = (
                 None if window["observed_median_s"] is None or commanded_time_mean is None
                 else commanded_time_mean * window["observed_median_s"]
@@ -2742,7 +2790,10 @@ def sensing_result(
         for t in sensing_ticks
     ]
     here_points = [(t_mono, v) for t_mono, v in here_points if t_mono is not None and v is not None]
-    here["expected_from_commanded"] = _time_weighted_integral(here_points)
+    here_stat = _time_weighted_integral(here_points)
+    here["expected_from_commanded"] = here_stat.value
+    here["expected_from_commanded_span_s"] = here_stat.span_s
+    here["expected_from_commanded_weighted_over_s"] = here_stat.weighted_over_s
     here["responses_received"] = (
         ((summary or {}).get("phone") or {}).get("here") or {}
     ).get("responses_received")

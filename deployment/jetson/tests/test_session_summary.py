@@ -571,8 +571,8 @@ class TestHereCallsNotMeasuredAndBackwards:
 class TestExpectedFromCommanded:
     def test_doubling_the_commanded_rate_doubles_the_integral(self):
         points = [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0)]
-        base = _time_weighted_integral(points)
-        doubled = _time_weighted_integral([(t, v * 2) for t, v in points])
+        base = _time_weighted_integral(points).value
+        doubled = _time_weighted_integral([(t, v * 2) for t, v in points]).value
         assert doubled == pytest.approx(base * 2)
         assert base > 0
 
@@ -584,8 +584,43 @@ class TestExpectedFromCommanded:
         gap-weighted value on an unevenly spaced series instead.
         """
         points = [(0.0, 2.0), (1.0, 2.0), (5.0, 2.0)]
-        # weights = gaps + [last gap] = [1, 4, 4]; sum(v * w) = 2*1 + 2*4 + 2*4
-        assert _time_weighted_integral(points) == pytest.approx(18.0)
+        # gaps = [1, 4]; median of [1, 4] is 2.5, so the cap (3x median =
+        # 7.5) never binds here -- weights = gaps + [last gap] = [1, 4, 4];
+        # sum(v * w) = 2*1 + 2*4 + 2*4
+        stat = _time_weighted_integral(points)
+        assert stat.value == pytest.approx(18.0)
+        assert stat.span_s == pytest.approx(5.0)
+        assert stat.weighted_over_s == pytest.approx(9.0)
+
+
+class TestOutageWeightCapping:
+    """A1: a gap spanning a stretch with no ticks at all (the system was not
+    running) must not be credited, in full, to whatever value the point
+    before it held.
+    """
+
+    def test_a_gap_far_beyond_the_median_is_capped_not_credited_whole(self):
+        # Ordinary gap is 1.0 s; the last gap (20 s) stands in for a stretch
+        # with no ticks. gaps = [1, 1, 1, 20]; sorted [1, 1, 1, 20], median
+        # (even count) = (1 + 1) / 2 = 1.0; cap = 3.0 * 1.0 = 3.0 -- the 20 s
+        # gap is capped down to 3.0, not credited at its full width.
+        points = [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (23.0, 1.0)]
+        stat = _time_weighted_integral(points)
+        assert stat.span_s == pytest.approx(23.0)
+        # weights = [1, 1, 1, 3, 3] (last gap repeated once more, also capped)
+        assert stat.weighted_over_s == pytest.approx(9.0)
+        assert stat.value == pytest.approx(9.0)  # value is 1.0 throughout
+        assert stat.weighted_over_s < stat.span_s
+
+    def test_uncapped_would_have_credited_the_outage_at_its_full_width(self):
+        """Same series as above, read a different way: without the cap the
+        integral would equal the full span (value 1.0 held throughout), so
+        the capped result below the span is the fix, not noise."""
+        points = [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (23.0, 1.0)]
+        stat = _time_weighted_integral(points)
+        uncapped_would_be = 1 + 1 + 1 + 20 + 20  # = 43.0
+        assert stat.value < uncapped_would_be
+        assert stat.value == pytest.approx(9.0)
 
 
 class TestTelemetryWindow:
@@ -731,22 +766,28 @@ class TestCommandedByValue:
         mean -- an evenly-spaced fixture here cannot distinguish a time mean
         from a plain sample mean, which happen to agree whenever every gap is
         the same size, and this test's name claims that distinction.
+
+        gaps = [1, 1, 8]; sorted [1, 1, 8], median (odd count) = 1; cap =
+        3.0 * 1 = 3.0 -- the 8 s gap is capped down to 3.0.
         """
         points = [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (10.0, 5.0)]
-        mean = _time_weighted_mean(points)
+        mean = _time_weighted_mean(points).value
         sample_mean = sum(v for _, v in points) / len(points)
         assert mean != pytest.approx(sample_mean)
-        # weights = [1, 1, 8, 8]; sum(v*w) = 1+1+8+40 = 50, total weight = 18
-        assert mean == pytest.approx(50 / 18)
+        # weights = [1, 1, 3, 3]; sum(v*w) = 1+1+3+15 = 20, total weight = 8
+        assert mean == pytest.approx(20 / 8)
 
     def test_time_weighted_mean_is_not_a_plain_sample_mean(self):
+        """gaps = [1, 1, 98]; sorted [1, 1, 98], median (odd count) = 1; cap
+        = 3.0 * 1 = 3.0 -- the 98 s gap is capped down to 3.0.
+        """
         points = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (100.0, 12.0)]
         sample_mean = sum(v for _, v in points) / len(points)
-        # weights = gaps + [last gap] = [1, 1, 98, 98]; sum(v*w) = 12*98 = 1176,
-        # total weight = 198 -- the last point's long hold dominates a plain
-        # sample mean would never reflect.
-        assert _time_weighted_mean(points) != pytest.approx(sample_mean)
-        assert _time_weighted_mean(points) == pytest.approx(1176 / 198)
+        # weights = gaps + [last gap] = [1, 1, 3, 3]; sum(v*w) = 12*3 = 36,
+        # total weight = 8 -- the last point's held value still dominates,
+        # but its long, mostly-unobserved hold is no longer credited whole.
+        assert _time_weighted_mean(points).value != pytest.approx(sample_mean)
+        assert _time_weighted_mean(points).value == pytest.approx(36 / 8)
 
 
 class TestTriggersRulesMissing:
