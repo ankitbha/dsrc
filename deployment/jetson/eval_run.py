@@ -1172,7 +1172,7 @@ def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
             ev = events.get(device) or {}
             status, count = ev.get("status"), ev.get("count", 0)
             if status == RULE_NOT_EVALUABLE:
-                missing = ", ".join(ev.get("missing") or [])
+                missing = ", ".join(ev.get("missing") or []) or "a reason this record does not carry"
                 passes = (
                     f" ({ev.get('passes_readable')} of {ev.get('passes_attempted')} passes fully readable)"
                     if ev.get("passes_attempted") else ""
@@ -1380,7 +1380,7 @@ def _failure_lines(failures: dict[str, Any] | None, thermal_section_present: boo
                 f"{row.get('total', 0)} {quantity}{longest_note}"
             )
         elif status == RULE_NOT_EVALUABLE:
-            missing = ", ".join(row.get("missing") or [])
+            missing = ", ".join(row.get("missing") or []) or "a reason this record does not carry"
             passes_attempted = row.get("passes_attempted", 0)
             passes_unreadable = passes_attempted - row.get("passes_readable", 0)
             lines.append(

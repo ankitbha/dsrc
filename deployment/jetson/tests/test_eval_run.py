@@ -923,6 +923,34 @@ class TestNotEvaluableLineNamesTheUnreadableCount:
         assert "NOT EVALUABLE on 221 of 301 passes" not in text
 
 
+class TestNotEvaluableWithNoReasonNamesItsOwnAbsence:
+    """B2: a `not_evaluable` row with an empty (or absent) `missing` list
+    rendered `-- missing ;`, on a record that names no reason at all --
+    reachable on a log from a build that predates `missing` being written.
+    Every other row on every other drive carries a real reason; this one
+    must at least say it carries none, not print an empty list as though it
+    were one.
+    """
+
+    def test_an_empty_missing_list_renders_a_named_absence_not_a_bare_semicolon(self):
+        failures = {
+            "summary": {
+                "scan": {"passes": 301, "seq_last": 301, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {
+                    "phone.here_errors": {
+                        "status": "not_evaluable", "passes_attempted": 301, "passes_readable": 2,
+                        "episodes": 0, "total": 0, "by_reason": {}, "missing": [],
+                    },
+                },
+                "outcomes": {}, "counter_went_backwards": {},
+                "blind_ticks": 0, "pipeline_exception": None,
+            },
+        }
+        text = "\n".join(_failure_lines(failures))
+        assert "missing ;" not in text
+        assert "missing a reason this record does not carry" in text
+
+
 class TestEpisodesLineNamesTwoQuantitiesWhenTheyDisagree:
     """D6: `episodes` (the open/close record pairs a reader can join from
     the log -- only a source with `event_records=True` writes one) and the

@@ -1458,6 +1458,29 @@ def test_the_not_evaluable_line_names_the_pass_counts(tmp_path):
     assert "(1 of 3 passes fully readable)" in md
 
 
+def test_the_throttle_not_evaluable_line_names_its_own_absent_reason():
+    """B2: the same unguarded `", ".join(ev.get("missing") or [])` pattern
+    as the failure-source rows -- an empty `missing` list renders `--
+    missing ;`, reachable on a log from a build that predates this field.
+    """
+    from eval_run import _thermal_lines
+
+    thermal = {
+        "summary": {
+            "jetson": {"samples": 3, "temp_c": None},
+            "phone": {"samples": 0},
+            "events": {
+                "jetson": {"status": RULE_NOT_EVALUABLE, "count": 0, "missing": []},
+                "phone": {"status": RULE_QUIET, "count": 0},
+            },
+        },
+        "ticks_by_basis": {},
+    }
+    text = "\n".join(_thermal_lines(thermal))
+    assert "missing ;" not in text
+    assert "missing a reason this record does not carry" in text
+
+
 def test_the_fired_line_names_the_pass_counts_when_incomplete(tmp_path):
     """C2's tick/summary fix reaches `eval_run`'s rendering too: a real count
     observed under incomplete observation must say so on the "fired" line,
