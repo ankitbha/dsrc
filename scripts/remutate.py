@@ -613,14 +613,19 @@ MUTATIONS = [
      "python"),
     # Joint round 6: what the phone does with a command, and what reads the logs.
     # Moved by the A5 three-state change: `log_complete` is now a small
-    # if/elif/else block, not one expression, and the unmeasurable branch
-    # (nothing to compare against, `shortfall is None`) is the one the
-    # original finding is about -- forcing it to `True` is exactly "a
-    # truncated log is analysed as a complete run" restated for the new
-    # shape, since an unmeasurable log used to read as a complete one too.
-    ("eval: a truncated log is analysed as a complete run",
+    # if/elif/else block, not one expression. Renamed to the fact this
+    # specific mutation tests -- it forces the UNMEASURABLE branch
+    # (`shortfall is None`, nothing to compare against) to read complete,
+    # which is a different fact from a genuinely truncated log; that fact
+    # has its own pin immediately below, on the untouched `False` branch.
+    ("eval: an unmeasurable log is analysed as a complete run",
      "deployment/jetson/eval_run.py",
      "        log_complete = None",
+     "        log_complete = True",
+     "python"),
+    ("eval: a truncated log is analysed as a complete run",
+     "deployment/jetson/eval_run.py",
+     "        log_complete = False",
      "        log_complete = True",
      "python"),
     ("eval: unparseable lines are skipped without being counted",
@@ -643,6 +648,35 @@ MUTATIONS = [
      "deployment/jetson/eval_run.py",
      '        "overall_pass": bool(overall and integrity["log_complete"] and not coverage_untrustworthy),',
      '        "overall_pass": bool(overall and integrity["log_complete"]),',
+     "python"),
+    # Unreachable from the initial deployment commit until the tick-coverage
+    # decline for a missing tick_id was added: `analyze()` crashed on the
+    # direct subscript three hundred lines earlier, before that decline was
+    # ever reached, on every drive and every fixture for the project's whole
+    # history. Nothing pinned this because nothing could exercise it.
+    ("eval_run: a tick with no tick_id crashes analyze() instead of degrading",
+     "deployment/jetson/eval_run.py",
+     '        tick_id = t.get("tick_id")',
+     '        tick_id = t["tick_id"]',
+     "python"),
+    # Round 5's audit: correctness held in all three `_tick_id_trust_reason`
+    # shapes, but two of the three checks had no mutation pinning them.
+    # Removing the third (`if b <= a: ... "a restart"`) is an equivalent
+    # mutant -- the duplicate branch already returns on `b == a`, so no
+    # input distinguishes the two -- and is deliberately left unpinned.
+    ("eval_run: a null tick_id reaches the ordering check instead of declining",
+     "deployment/jetson/eval_run.py",
+     "    if any(i is None for i in ids):\n"
+     '        return "some ticks carry no tick_id"',
+     "    if False:\n"
+     '        return "some ticks carry no tick_id"',
+     "python"),
+    ("eval_run: a repeated tick_id declines with the restart's reason instead of its own",
+     "deployment/jetson/eval_run.py",
+     "    if len(set(ids)) != len(ids):\n"
+     '        return "tick_id repeats at least once"',
+     "    if False:\n"
+     '        return "tick_id repeats at least once"',
      "python"),
     ("eval: the log is not compared against the count the run reported",
      "deployment/jetson/eval_run.py",

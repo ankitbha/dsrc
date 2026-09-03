@@ -1651,13 +1651,39 @@ class TestTickCoverageReportsTwoQuestionsNotOne:
         assert cov["ticks_never_produced_reason"] is not None
 
     def test_fully_duplicated_ids_decline_both_axes_with_a_named_reason(self):
+        # Every id equal to every other: `b <= a` would also decline this
+        # (0 <= 0 on the first pair), with the wrong word -- "a restart"
+        # rather than "repeats" -- so the reason text, not just non-None,
+        # is what pins the duplicate check specifically.
         ticks = [
             {"type": "tick", "tick_id": 0, "t_wall": 1000.0 + i * 0.1, "e2e_ms": 10.0}
             for i in range(20)
         ]
         cov = _tick_coverage(ticks)
         assert cov["ticks_absent_from_log"] is None
+        assert cov["ticks_absent_from_log_reason"] == "tick_id repeats at least once"
         assert cov["ticks_never_produced"] is None
+        assert cov["ticks_never_produced_reason"] == "tick_id repeats at least once"
+
+    def test_a_single_missing_tick_id_among_otherwise_unique_ids_declines_by_name(self):
+        # Distinguishes the null check from the duplicate check: with only
+        # ONE tick_id missing and every other id unique, `len(set(ids))`
+        # still equals `len(ids)` (there is only one `None` to begin with),
+        # so only the null check catches this. Removing it would let this
+        # exact list reach `b <= a`, comparing `None` against an int, and
+        # raise TypeError instead of declining.
+        ticks = [
+            {
+                "type": "tick", "tick_id": (None if i == 5 else i),
+                "t_wall": 1000.0 + i * 0.1, "e2e_ms": 10.0,
+            }
+            for i in range(20)
+        ]
+        cov = _tick_coverage(ticks)
+        assert cov["ticks_absent_from_log"] is None
+        assert cov["ticks_absent_from_log_reason"] == "some ticks carry no tick_id"
+        assert cov["ticks_never_produced"] is None
+        assert cov["ticks_never_produced_reason"] == "some ticks carry no tick_id"
 
     def test_a_mid_drive_restart_declines_both_axes_with_a_named_reason(self):
         ids = list(range(15)) + list(range(15))  # the counter restarts at 0
