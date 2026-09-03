@@ -1602,6 +1602,42 @@ Written as part of the implementation, not added afterwards.
     average, and a §13 statement that the exit code does not change where its own D13 specifies
     a new one.
 
+### What section G's validation loop could not establish
+
+Seven audit rounds against an independent validator found nineteen defects that change a reported
+number or produce a plausible-but-wrong result, each reproduced before being acted on. Twelve were
+in the original instrumentation; the rest were introduced by fixes and caught by auditing the fixes
+as new code. Every one of the twelve original findings has the same shape: **a record that cannot
+distinguish a failure from a success.** A completeness check measured against a quantity the outage
+destroys on both sides. A dead writer reported as healthy. A recovery inferred from silence. An
+84-second camera blackout recorded as 21 recoveries.
+
+The items below are not open defects. They are claims the loop could not test, and each bounds
+something the instrumentation now asserts. Further audit rounds do not shrink them.
+
+- **Every drive in evidence is a shadow drive** (`ever_live: False` on all five), so the tick cadence
+  is constant for the whole run. The coverage and time-weighting fixes are specifically about a
+  cadence that changes — `IDLE_RATES` 1.0 Hz against `ACTIVE_RATES` 5.0, and 0.15 Hz under worst-case
+  thermal backoff, a 33.3× spread nothing has produced. Those fixes were found and verified against
+  hand-built live-mode fixtures and have never met a real adaptive cadence. **Task 44 is the input
+  that closes this, and it is worth more than another audit round.**
+- **The perception path has never processed a vehicle**: zero vehicle sightings and exactly one
+  detection across all 4,151 ticks of the five drives. Every perception-derived field is the fallback
+  path on every tick, which is why the `target_lane_front_gap` misclassification was uniform across
+  the corpus rather than intermittent. `perception/distance.py` and `sim_contract`'s encoder sit
+  downstream of a path that has never produced an input; audit them **before** the first drive with
+  traffic, not after.
+- **`_score_candidate` and `vs_incumbent` are entirely unexercised** — `candidates: {}` on every
+  drive, and the code runs only when `--candidate` is passed, which nothing does. It cannot report a
+  wrong number because it reports none. Audit it before the first candidate policy is scored.
+- **Per-notification timestamps are not in the artifact.** A source recording N episodes gives no
+  direct way to see the stream behind them. On `run_20260902_143427` the true structure was
+  recoverable only because it was perfectly regular; both the validator and I misread that drive from
+  the summary alone before the event records settled it.
+- **A2's zone census cannot be confirmed against any existing drive**, and neither can the
+  `missingness` reclassification: `eval_run` reads `obs_diagnostics.missingness` from the tick
+  records, so both take effect on the next capture rather than on re-analysis of an old log.
+
 ## H. Colocation and integration — **[COLOCATED]**
 
 Everything above is done before the devices meet.
