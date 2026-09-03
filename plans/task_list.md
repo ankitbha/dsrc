@@ -1638,7 +1638,7 @@ something the instrumentation now asserts. Further audit rounds do not shrink th
   `missingness` reclassification: `eval_run` reads `obs_diagnostics.missingness` from the tick
   records, so both take effect on the next capture rather than on re-analysis of an old log.
 
-### PAUSED 2026-09-03 — section G validation loop, mid-batch
+### Section G validation loop — resumed and closed out 2026-09-03
 
 **The blocking unknown: no mutation verdict produced in this loop is trustworthy yet.**
 
@@ -1662,9 +1662,8 @@ and count it in `survived` so the exit code still fails); treat a missing or unp
 inconclusive rather than zero failures; cross-check the collected testcase count against the
 expected baseline, which catches the partial-tree case independently.
 
-**STATUS: the fix is built and validated, but is UNCOMMITTED** — it is the `scripts/remutate.py` in
-the modified-files table below. Re-running the loop's fifteen affected pins against it gives
-**all fifteen CAUGHT, `survived: 0`**, so no verdict this loop relied on was a false clean.
+**STATUS: settled and landed** in `e6fed93`. Re-running the loop's fifteen affected pins against it
+gives **all fifteen CAUGHT, `survived: 0`**, so no verdict this loop relied on was a false clean.
 
 **It proved itself on first use, which is the part worth keeping.** The first re-run returned
 **13 of 15 `INCONCLUSIVE`** rather than CAUGHT. That was not a harness bug: the collected-count check
@@ -1682,41 +1681,27 @@ baseline from a clean run rather than a literal.
 and nothing pushed**; baseline for the loop was `c8ef736`. Suite **2059 passed**; registry **372
 anchors, all resolving exactly once**.
 
-**READ THIS BEFORE ANY GIT COMMAND. There is uncommitted work in the tree and a mutation run was
-live when this was written.** An implementation subagent stopped mid-batch, having committed
-nothing. `git status` showed four modified files, and they are not the same kind of thing:
+**A20 and the `feed_derived` reversal landed in `f307c72`.** `segment_target_speed`,
+`nearby_av_mean_speed` and `nearby_av_density` are all `SOURCE_DERIVED` and agree with each other;
+`nearby_av_count`, a direct count of receptions, stays `measured` and carries what evidence a peers
+tick has. A test asserts no field in `field_sources` ever carries a `feed`-family class. `SOURCE_FEED`
+stays reserved for the traffic feed, which `feed_fusion.py:26` and `observation_builder.py:350` both
+document as owning no observation field.
 
-| file | what it is |
-|---|---|
-| `deployment/jetson/perception/observation_builder.py` | **real work**, ~32 lines — the A20 / `SOURCE_DERIVED` fix |
-| `deployment/jetson/tests/test_observation_builder.py` | **real work**, ~40 lines — its tests |
-| `scripts/remutate.py` | **real work** — the harness fix above |
-| `deployment/jetson/eval_run.py` | **a live mutant**, 1 line, dropping `integrity["log_complete"]` from `overall_pass` — transient, owned by the running `remutate.py` |
+**Two operational hazards this loop hit repeatedly, worth knowing before touching this code again.**
+`remutate.py` edits files in place, so a `git status` showing one modified file during a run is a
+live mutant, not lost work — check for the `.remutate-restore` sidecar, whose first line names the
+file, before reaching for anything. Never `git checkout --`, `git stash` or `git add -A` while it
+runs: the first two destroy uncommitted work, which has happened in this project three times in one
+session, and the third commits the mutant. And any stray `.py` under the repo root becomes a test
+case via `test_no_undefined_names.py`'s `REPO.rglob("*.py")`, changing the suite count and failing
+the run if it has an undefined name.
 
-**Do not run `git checkout --`, `git stash`, or `git add -A`.** The first two destroy roughly 72
-lines of unbacked work; the third commits the mutant. This project has lost work to `git checkout --`
-three times in one session, which is why it is written here rather than assumed.
-
-**The safe sequence:** confirm `pgrep -f scripts/remutate.py` is empty and `.remutate-restore` is
-gone, then confirm `git diff deployment/jetson/eval_run.py` is empty — `remutate` restores that file
-from its sidecar in a `finally`. If it is *not* empty, the run died mid-mutation and the original
-text is in `.remutate-restore`, whose first line names the file. Only then commit the other three
-paths **by name**, never with `-A`. The subagent's last word was that it was waiting on a background
-re-verification, so its own results were never reported and the state of those three files is
-unreviewed — read the diffs before committing them.
-
-**Outstanding, in resume order:**
-
-1. **The harness fix above.** Everything else waits on it.
-2. **A20** — `observation_builder.py`: `cooperation["segment_target_speed"]` and
-   `obs["nearby_av_mean_speed"]` hold the **same float** and are classed `feed_derived` and
-   `measured`. That is the A19 defect recreated by the fix for its sibling.
-3. **Reverse `feed_derived`.** `segment_target_speed`, `nearby_av_mean_speed` and `nearby_av_density`
-   should all be `SOURCE_DERIVED`, which also closes A20. `SOURCE_FEED` is documented at
-   `feed_fusion.py:26` as the **reserved** name for whatever eventually owns a field, and
-   `observation_builder.py:350` states the traffic feed owns no observation field; writing a
-   `feed`-family class contradicts both. `nearby_av_density` divides a count by a config constant and
-   is not a reading. `nearby_av_count` stays `measured` and keeps peers in `PRIMARY_EVIDENCE`.
+**Still outstanding:** one comment-trimming pass over the comments this loop added. Seven rounds of
+fixes left narration that argues with a reviewer who was never there — finding identifiers like
+`A20:`, sentences beginning "this test then briefly asserted", and the history of classes a field
+used to carry. The code is correct; the comments describe how it got that way rather than what it
+does.
 
 **Traps already mapped, do not re-derive.** `remutate.py` edits files in place: a `git status` showing
 one modified file during a run is a live mutant, not lost work — check for the `.remutate-restore`
