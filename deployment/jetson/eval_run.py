@@ -754,10 +754,20 @@ def analyze(
     ]
     method_counts: Counter[str] = Counter()
     track_spans: dict[int, list[int]] = defaultdict(list)
+    # A span needs the tick's own position in the sequence, which a missing
+    # `tick_id` cannot give it -- skipped here rather than raising, the way
+    # `_tick_coverage` already declines on the same absence instead of
+    # guessing. `method_counts` does not need `tick_id` at all, so it still
+    # counts every vehicle regardless.
+    vehicles_missing_tick_id = 0
     for t in ticks:
+        tick_id = t.get("tick_id")
         for v in t.get("vehicles", []):
             method_counts[v["method"]] += 1
-            track_spans[v["id"]].append(t["tick_id"])
+            if tick_id is None:
+                vehicles_missing_tick_id += 1
+                continue
+            track_spans[v["id"]].append(tick_id)
     lifetimes_s = [
         (max(span) - min(span) + 1) / max(rate_hz, 1e-9) for span in track_spans.values()
     ]
@@ -776,6 +786,11 @@ def analyze(
         "distance_method_counts": dict(method_counts),
         "unique_tracks": len(track_spans),
         "track_lifetime_s": pctl(lifetimes_s) if lifetimes_s else None,
+        # Named rather than silently absorbed into `unique_tracks` /
+        # `track_lifetime_s` reading low: every vehicle sighting on a tick
+        # with no `tick_id` is excluded from both, since a span cannot be
+        # measured without the tick's own position in the sequence.
+        "vehicles_missing_tick_id": vehicles_missing_tick_id,
     }
 
     # --- observation quality ----------------------------------------------

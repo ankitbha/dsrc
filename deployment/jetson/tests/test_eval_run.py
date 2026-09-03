@@ -9,6 +9,7 @@ from eval_run import (
     _failure_lines,
     _join_failure_episodes,
     _log_health_lines,
+    _tick_coverage,
     analyze,
     join_phone_log,
     load_phone_log,
@@ -416,6 +417,42 @@ class TestUntrustworthyIdsDoNotSilentlyPassOverall:
         assert result["gates"]["tick_coverage_absent_from_log"]["pass"] is None
         assert result["gates"]["tick_coverage_never_produced"]["pass"] is None
         assert result["overall_pass"] is False
+
+
+class TestAnalyzeSurvivesTicksWithNoTickId:
+    """A drive whose ticks carry no tick_id at all used to crash `analyze()`
+    itself -- in the unrelated track-span accumulation, which hard-indexed
+    `t["tick_id"]` -- before ever reaching tick_coverage's own decline for
+    exactly this shape. That made the decline dead code no drive could
+    actually exercise end to end: the report was never produced, so nothing
+    downstream of it (the gates, `overall_pass`) ever ran either.
+    """
+
+    def test_a_log_with_no_tick_id_produces_a_report_not_a_crash(self, tmp_path):
+        ticks = [make_tick(i) for i in range(10)]
+        for t in ticks:
+            del t["tick_id"]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+
+        result = analyze(run_dir)  # used to raise KeyError('tick_id')
+
+        # Every tick in this fixture carries exactly one vehicle (the
+        # default leader), so all ten sightings are excluded from the
+        # spans, named rather than silently read as zero tracks.
+        assert result["perception"]["vehicles_missing_tick_id"] == 10
+        assert result["perception"]["unique_tracks"] == 0
+
+        assert result["gates"]["tick_coverage_absent_from_log"]["pass"] is None
+        assert result["gates"]["tick_coverage_never_produced"]["pass"] is None
+        assert result["overall_pass"] is False
+
+        # The reason each axis declined, which `analyze()`'s own gates do
+        # not carry text for -- read directly off the same ticks.
+        coverage = _tick_coverage(ticks)
+        assert coverage["ticks_absent_from_log"] is None
+        assert coverage["ticks_absent_from_log_reason"] == "some ticks carry no tick_id"
+        assert coverage["ticks_never_produced"] is None
+        assert coverage["ticks_never_produced_reason"] == "some ticks carry no tick_id"
 
 
 # -- joining the phone's own log against the Jetson's ticks -----------------
