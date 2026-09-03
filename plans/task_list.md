@@ -1510,8 +1510,84 @@ Written as part of the implementation, not added afterwards.
     reconciliation test it specifies was never written; and its record specification still lists two
     scan-block aggregates that were deliberately removed for being constant by construction, one of
     them a literal nothing could ever increment.
-39. Session summary generator: latency percentiles, achieved versus commanded
-    rates, API calls made, trigger counts, failure counts.
+39. ~~Session summary generator: latency percentiles, achieved versus commanded
+    rates, API calls made, trigger counts, failure counts.~~
+    rates, trigger counts, API calls made, failure counts.~~
+    **The plan's first job was to find the honest gap, and two of the five items were already
+    rendered.** Latency percentiles and failure counts had surfaces. The other three did not, in
+    the pattern this section kept finding: trigger counts were written into `summary.json` and had
+    **zero non-test readers**; achieved and commanded rates both existed on every tick and were
+    never put side by side; and the phone's own count of API calls placed crossed the wire on every
+    telemetry frame and **reached no reader at all**. So the task is one section in the report a
+    human reads, not a seventh artefact beside the six that already existed.
+    **The design question was how to aggregate five three-state vocabularies without collapsing the
+    third state.** The answer: each of seven axes reports `answered of attempted` as two
+    independently counted integers, plus the census of that axis's own reason words. No percentage
+    anywhere, no scalar health field in the JSON -- because a scalar is what a dashboard plots on
+    its own, and once plotted the enumeration is gone. `0 of 0` is never "answered". A word outside
+    a declared vocabulary is counted verbatim and flagged rather than absorbed. Ten reconciliations
+    compare numbers that are supposed to agree.
+    **Three validation rounds, and the critical finding was the section's own defect class inside
+    the mechanism built to detect it.** Seven of the nine reconciliations reported `held` having
+    compared nothing: the predicates read with defaulting accessors, so an absent field equalled an
+    absent field, and an empty population produced an empty failure list, which read as success. On
+    a real drive the summary printed `9 reconciliations, 9 held, 0 failed` while one of them
+    compared a field present on **0 of 1073 ticks** against a zero. The second critical was the same
+    shape one level up: `## Sensing` rendered `0 HERE calls` with a causal explanation attached, on
+    a log that never carried the field. And two axes describing the same 1,073 records disagreed by
+    a factor of 1,073 -- one read the field that says whether telemetry arrived, the other counted a
+    missing field and called it the same thing.
+    **The finding worth carrying forward is about pinning, not about summaries.** The rule that a
+    count must be measured rather than derived was pinned on the one axis that already obeyed it,
+    and unpinned on the three that violated it. The pin was placed where it would pass. It resolved,
+    it caught its mutation, and it read as coverage -- while the behaviour it named went unguarded
+    three feet away. The consequence was concrete: a count derived by subtraction cannot disagree
+    with its own census, so the census being wrong was invisible from inside the axis.
+    **Experiment: three drives, one of them deliberately degraded, because a clean drive proves
+    nothing for a task whose only claim is that a bad drive says so at the top.** A live 300-second
+    run with an induced link outage, a run with no phone and the thermal sampler disabled, and the
+    previous task's log evaluated on the backward-compatible path. **A reader of the degraded
+    drive's summary alone would not know it went badly, and the reason is structural rather than a
+    defect.** Ticks are produced by phone frames, so the 54.58-second outage destroyed `attempted`
+    and `answered` together: at the drive's own 5.01 ticks per second it cost about 273 of the
+    roughly 1,502 ticks that would have existed, and the summary reports `attempted = 1229` and
+    calls every axis fully answered. **18.2 per cent of every denominator was missing and no axis
+    could say so, because each axis is a ratio whose denominator the same event removed.** Its whole
+    account of a dead 54-second stretch and a real redial is `no_telemetry 1` on two axes, above
+    `10 reconciliations, 10 held`; searching the section for the words that would name the event
+    matches only its heading. An axis of the form `answered of attempted` is blind by construction
+    to an event that stops the attempting -- the vocabulary this section built protects the
+    numerator, and nothing was watching the denominator. The drive also found eight places where
+    the summary and the detail it summarises disagree, the sharpest being a `failures` axis reading
+    `749 of 749 ticks answered` on a run where 20 of 30 sources were unreadable on every pass and
+    the section below it said so 20 times; four `See ##` references to sections the same document
+    did not render; and a zero attributed to shadow mode when the real cause, recorded two sections
+    away, was a missing API key. **And it settled a disagreement in both directions.** A claim of
+    mine that the provenance axis was wrong on the earlier log was itself wrong -- that log carries
+    three non-substituted classes -- but the concern behind it was right: `ego_headway_s`,
+    `target_lane_front_gap` and `uncongested_low_speed_flag` carry a non-excluded class on 100 per
+    cent of ticks of all three drives, so the axis can never report zero in the field, because
+    `derived` is assigned even when every input to the derivation is substituted. On the no-phone
+    drive every input to those three was a fallback and the axis still read fully answered. The
+    guard passes its unit test and cannot fire on this hardware.
+    **Two corrections went the other way, and both were mine.** I reported the provenance axis as
+    wrong to call a drive fully measured; the implementer asked for the evidence, and the drive in
+    fact carried three non-substituted classes -- I had generalised from one field of thirty-nine.
+    And in building a control I called the reconciliation entry point with its arguments reversed,
+    producing nine uniform verdicts that looked exactly like a finding; the control I had built to
+    fail, and which did not, is what caught it. That is the same hazard the plan's own decision to
+    replace a six-tuple with a dataclass exists to prevent, met from the caller side where no type
+    checker was watching.
+    **Also worth keeping: an agent declined to add two pins it had been asked for**, on the ground
+    that for an exact two-way partition the derived and counted forms are algebraically
+    indistinguishable, so no input could tell them apart. Refusing to write a pin that would pass
+    regardless is the exact opposite of the defect above, and the right call.
+    **Open:** four §5.3 record fields remain specified and absent, one of which an open item's
+    stated bound rests on. The plan was wrong in nine places, all recorded -- among them an identity
+    that counts only episode opens where the code counts opens and closes, a cited symbol that does
+    not exist, a worked example that cannot distinguish the mean it demonstrates from a plain
+    average, and a §13 statement that the exit code does not change where its own D13 specifies
+    a new one.
 
 ## H. Colocation and integration — **[COLOCATED]**
 
