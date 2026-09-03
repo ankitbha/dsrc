@@ -948,6 +948,58 @@ class TestFiredRowQuantityMatchesItsDeclaredCumulativeFlag:
         assert "passes with the condition active" not in text
 
 
+class TestFiredLineNamesAnUnobservableOutcome:
+    """B12: a source that went unwatchable while its condition was still
+    active closes its episode with outcome `unobservable`, not `recovered`
+    -- but the FIRED line rendered only the duration ("longest 3.0 s"),
+    which a reader reads as a resolution. The aggregate `outcomes` line
+    does carry `1 unobservable`; the per-source line did not.
+    """
+
+    def test_an_unobservable_outcome_and_the_unreadable_pass_count_are_named(self):
+        failures = {
+            "episodes": [
+                {"source": "phone.here_errors", "duration_s": 3.0, "outcome": "unobservable"},
+            ],
+            "summary": {
+                "scan": {"passes": 301, "seq_last": 301, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {
+                    "phone.here_errors": {
+                        "status": "fired", "passes_attempted": 301, "passes_readable": 297,
+                        "episodes": 1, "total": 4, "by_reason": {}, "cumulative": False,
+                    },
+                },
+                "outcomes": {"unobservable": 1}, "counter_went_backwards": {},
+                "blind_ticks": 0, "pipeline_exception": None,
+            },
+        }
+        text = "\n".join(_failure_lines(failures))
+        assert "longest 3.0 s (unobservable)" in text
+        assert "unreadable on 4 of 301 passes" in text
+
+    def test_a_recovered_outcome_names_neither(self):
+        failures = {
+            "episodes": [
+                {"source": "phone.here_errors", "duration_s": 3.0, "outcome": "recovered"},
+            ],
+            "summary": {
+                "scan": {"passes": 301, "seq_last": 301, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {
+                    "phone.here_errors": {
+                        "status": "fired", "passes_attempted": 301, "passes_readable": 301,
+                        "episodes": 1, "total": 4, "by_reason": {}, "cumulative": False,
+                    },
+                },
+                "outcomes": {"recovered": 1}, "counter_went_backwards": {},
+                "blind_ticks": 0, "pipeline_exception": None,
+            },
+        }
+        text = "\n".join(_failure_lines(failures))
+        assert "longest 3.0 s" in text
+        assert "(recovered)" not in text
+        assert "unreadable on" not in text
+
+
 class TestNotEvaluableLineNamesTheUnreadableCount:
     """D3: the NOT EVALUABLE line rendered `passes_readable` in the slot
     that names how many passes the source was NOT readable -- the correct

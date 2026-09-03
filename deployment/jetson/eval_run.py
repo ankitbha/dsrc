@@ -1355,17 +1355,29 @@ def _failure_lines(failures: dict[str, Any] | None, thermal_section_present: boo
                 + f" -- {closed_total - len(episodes)} closed on a source with no event record"
             )
 
-    durations_by_source: dict[str, list[float]] = {}
+    timed_episodes_by_source: dict[str, list[dict[str, Any]]] = {}
     for episode in episodes:
         if episode.get("duration_s") is not None:
-            durations_by_source.setdefault(episode["source"], []).append(episode["duration_s"])
+            timed_episodes_by_source.setdefault(episode["source"], []).append(episode)
 
     sources = s.get("sources") or {}
     for name, row in sorted(sources.items()):
         status = row.get("status")
         if status == RULE_FIRED:
-            longest = max(durations_by_source[name]) if durations_by_source.get(name) else None
-            longest_note = f", longest {longest:.1f} s" if longest is not None else ""
+            timed = timed_episodes_by_source.get(name)
+            longest_episode = max(timed, key=lambda e: e["duration_s"]) if timed else None
+            longest_note = ""
+            if longest_episode is not None:
+                longest_note = f", longest {longest_episode['duration_s']:.1f} s"
+                # `recovered` is the only outcome that means the condition
+                # actually cleared. `unobservable` (the source itself went
+                # unwatchable) and `open_at_end` (the drive ended first)
+                # both closed the episode on a duration alone, and a reader
+                # seeing only "longest 3.0 s" reads that as a resolution --
+                # named here so it is not assumed from the number alone.
+                outcome = longest_episode.get("outcome")
+                if outcome and outcome != "recovered":
+                    longest_note += f" ({outcome})"
             # A cumulative source's `total` is real occurrences: a counter
             # moved that many times. A predicate source's `total` is passes
             # the condition held -- a sticky error active for a whole 180 s
@@ -1375,9 +1387,15 @@ def _failure_lines(failures: dict[str, Any] | None, thermal_section_present: boo
             # recorded before it existed, so the default keeps that
             # reading (`True`) rather than silently reclassifying it.
             quantity = "occurrences" if row.get("cumulative", True) else "passes with the condition active"
+            passes_attempted = row.get("passes_attempted", 0)
+            passes_unreadable = passes_attempted - row.get("passes_readable", 0)
+            unreadable_note = (
+                f"; unreadable on {passes_unreadable} of {passes_attempted} passes"
+                if passes_unreadable else ""
+            )
             lines.append(
                 f"- {name}: FIRED -- {row.get('episodes', 0)} episode(s), "
-                f"{row.get('total', 0)} {quantity}{longest_note}"
+                f"{row.get('total', 0)} {quantity}{longest_note}{unreadable_note}"
             )
         elif status == RULE_NOT_EVALUABLE:
             missing = ", ".join(row.get("missing") or []) or "a reason this record does not carry"
