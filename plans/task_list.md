@@ -1664,11 +1664,32 @@ expected baseline, which catches the partial-tree case independently. **Then re-
 verdict this loop produced.** That is minutes, not a round. Until it is done, every clean mutation
 result recorded above — including the ones used as evidence for accepting fixes — is unverified.
 
-**Where the work stopped.** Branch `main`, HEAD `f1a7f73`, clean tree, **26 commits ahead of origin
+**Where the work stopped.** Branch `main`, HEAD `902ee08` (this commit), **27 commits ahead of origin
 and nothing pushed**; baseline for the loop was `c8ef736`. Suite **2059 passed**; registry **372
-anchors, all resolving exactly once**. An implementation subagent was mid-batch on the two items
-below when the pause landed — its work may or may not have been committed, so **check `git log` and
-`git status` before assuming either**.
+anchors, all resolving exactly once**.
+
+**READ THIS BEFORE ANY GIT COMMAND. There is uncommitted work in the tree and a mutation run was
+live when this was written.** An implementation subagent stopped mid-batch, having committed
+nothing. `git status` showed four modified files, and they are not the same kind of thing:
+
+| file | what it is |
+|---|---|
+| `deployment/jetson/perception/observation_builder.py` | **real work**, ~32 lines — the A20 / `SOURCE_DERIVED` fix |
+| `deployment/jetson/tests/test_observation_builder.py` | **real work**, ~40 lines — its tests |
+| `scripts/remutate.py` | **real work** — the harness fix above |
+| `deployment/jetson/eval_run.py` | **a live mutant**, 1 line, dropping `integrity["log_complete"]` from `overall_pass` — transient, owned by the running `remutate.py` |
+
+**Do not run `git checkout --`, `git stash`, or `git add -A`.** The first two destroy roughly 72
+lines of unbacked work; the third commits the mutant. This project has lost work to `git checkout --`
+three times in one session, which is why it is written here rather than assumed.
+
+**The safe sequence:** confirm `pgrep -f scripts/remutate.py` is empty and `.remutate-restore` is
+gone, then confirm `git diff deployment/jetson/eval_run.py` is empty — `remutate` restores that file
+from its sidecar in a `finally`. If it is *not* empty, the run died mid-mutation and the original
+text is in `.remutate-restore`, whose first line names the file. Only then commit the other three
+paths **by name**, never with `-A`. The subagent's last word was that it was waiting on a background
+re-verification, so its own results were never reported and the state of those three files is
+unreviewed — read the diffs before committing them.
 
 **Outstanding, in resume order:**
 
