@@ -1034,6 +1034,76 @@ class TestNotEvaluableLineNamesTheUnreadableCount:
         assert "NOT EVALUABLE on 221 of 301 passes" not in text
 
 
+class TestFiredWithNoEpisodeNamesItsOwnSpan:
+    """A7: a `camera.blind_ticks` (or any source) that fired but never
+    formed a single episode -- one continuous 82 s blackout and 21 isolated
+    drops scattered over 294 s -- render identically (`episodes 0, total
+    21, below_threshold 21`) on every count `_failure_lines` prints,
+    differing only in `first_t_mono`/`last_t_mono`, which appeared nowhere
+    in the report before this.
+    """
+
+    def test_a_continuous_condition_and_scattered_drops_are_told_apart(self):
+        continuous = {
+            "summary": {
+                "scan": {"passes": 82, "seq_last": 82, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {
+                    "camera.blind_ticks": {
+                        "status": "fired", "passes_attempted": 0, "passes_readable": 0,
+                        "episodes": 0, "total": 21, "by_reason": {"no_frame": 21},
+                        "cumulative": True, "first_t_mono": 100.0, "last_t_mono": 182.0,
+                    },
+                },
+                "outcomes": {}, "counter_went_backwards": {},
+                "blind_ticks": 21, "pipeline_exception": None,
+            },
+        }
+        scattered = {
+            "summary": {
+                "scan": {"passes": 294, "seq_last": 294, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {
+                    "camera.blind_ticks": {
+                        "status": "fired", "passes_attempted": 0, "passes_readable": 0,
+                        "episodes": 0, "total": 21, "by_reason": {"no_frame": 21},
+                        "cumulative": True, "first_t_mono": 100.0, "last_t_mono": 394.0,
+                    },
+                },
+                "outcomes": {}, "counter_went_backwards": {},
+                "blind_ticks": 21, "pipeline_exception": None,
+            },
+        }
+        continuous_line = next(
+            line for line in _failure_lines(continuous) if line.startswith("- camera.blind_ticks")
+        )
+        scattered_line = next(
+            line for line in _failure_lines(scattered) if line.startswith("- camera.blind_ticks")
+        )
+
+        assert "first_t_mono 100.0 -> last_t_mono 182.0 (82.0 s apart)" in continuous_line
+        assert "first_t_mono 100.0 -> last_t_mono 394.0 (294.0 s apart)" in scattered_line
+        # Every other count on the line is identical between the two drives;
+        # the span is the only thing that tells them apart.
+        assert continuous_line.split("; first_t_mono")[0] == scattered_line.split("; first_t_mono")[0]
+
+    def test_the_span_is_silent_once_a_real_episode_forms(self):
+        failures = {
+            "summary": {
+                "scan": {"passes": 3, "seq_last": 3, "interval_s": {"p50": 1.0, "max": 1.0}, "sources_n": 30},
+                "sources": {
+                    "camera.blind_ticks": {
+                        "status": "fired", "passes_attempted": 0, "passes_readable": 0,
+                        "episodes": 1, "total": 4, "by_reason": {"no_frame": 4},
+                        "cumulative": True, "first_t_mono": 100.0, "last_t_mono": 103.0,
+                    },
+                },
+                "outcomes": {"recovered": 1}, "counter_went_backwards": {},
+                "blind_ticks": 4, "pipeline_exception": None,
+            },
+        }
+        text = "\n".join(_failure_lines(failures))
+        assert "first_t_mono" not in text
+
+
 class TestNotEvaluableWithNoReasonNamesItsOwnAbsence:
     """B2: a `not_evaluable` row with an empty (or absent) `missing` list
     rendered `-- missing ;`, on a record that names no reason at all --

@@ -1407,9 +1407,22 @@ def _failure_lines(failures: dict[str, Any] | None, thermal_section_present: boo
                 f"; unreadable on {passes_unreadable} of {passes_attempted} passes"
                 if passes_unreadable else ""
             )
+            span_note = ""
+            first_t_mono, last_t_mono = row.get("first_t_mono"), row.get("last_t_mono")
+            if not row.get("episodes", 0) and first_t_mono is not None and last_t_mono is not None:
+                # A source firing with no episode at all is exactly the shape
+                # a continuous condition and a string of isolated ones share:
+                # one 82 s blackout and 21 drops scattered over 294 s produce
+                # identical episode/total/below-threshold counts, differing
+                # only in how far apart their occurrences actually are. Named
+                # here because neither field is rendered anywhere else.
+                span_note = (
+                    f"; first_t_mono {first_t_mono:.1f} -> last_t_mono {last_t_mono:.1f} "
+                    f"({last_t_mono - first_t_mono:.1f} s apart)"
+                )
             lines.append(
                 f"- {name}: FIRED -- {row.get('episodes', 0)} episode(s), "
-                f"{row.get('total', 0)} {quantity}{longest_note}{unreadable_note}"
+                f"{row.get('total', 0)} {quantity}{longest_note}{unreadable_note}{span_note}"
             )
         elif status == RULE_NOT_EVALUABLE:
             missing = ", ".join(row.get("missing") or []) or "a reason this record does not carry"
