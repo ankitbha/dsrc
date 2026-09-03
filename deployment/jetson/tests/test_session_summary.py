@@ -1417,3 +1417,54 @@ class TestTickCoverageSeesWhatTheAxesCannot:
 
     def test_fewer_than_three_ticks_is_absent_not_a_manufactured_zero(self):
         assert _tick_coverage(_ticks_at([0.2])) is None
+
+
+class TestProvenanceNeedsPrimaryEvidence:
+    """D7. `derived` and `approximated` are assigned to three encoder slots
+    on every tick of every drive, whatever their own inputs were, because
+    `field_sources` records the class given to a field and not the
+    provenance of what that field was computed from. A shape check plus a
+    "not substituted" test therefore answers on a drive built entirely from
+    fallbacks -- which is what a real no-phone drive did, at 749 of 749.
+    """
+
+    @staticmethod
+    def _map(**overrides: str) -> dict[str, str]:
+        from perception import provenance
+        from policy import sim_contract
+
+        names = sim_contract.encoded_slot_names()
+        out = {n: provenance.SOURCE_FALLBACK_NEUTRAL for n in names}
+        # The three that carry a computed class no matter what fed them.
+        out["ego_headway_s"] = provenance.SOURCE_DERIVED
+        out["target_lane_front_gap"] = provenance.SOURCE_DERIVED
+        out["uncongested_low_speed_flag"] = provenance.SOURCE_APPROXIMATED
+        out.update(overrides)
+        return out
+
+    def _axis(self, fs: dict[str, str]):
+        return _axis_provenance([{"type": "tick", "field_sources": fs}])
+
+    def test_a_map_of_only_computed_and_substituted_classes_does_not_answer(self):
+        from perception import provenance
+
+        axis = self._axis(self._map())
+        assert axis.answered == 0
+        assert axis.attempted == 1
+        assert axis.unanswered_by_reason == {provenance.SOURCE_FALLBACK_NEUTRAL: 1}
+
+    def test_one_primary_reading_anywhere_in_the_map_is_enough(self):
+        from perception import provenance
+
+        axis = self._axis(self._map(ego_speed=provenance.SOURCE_MEASURED_CONVERTED))
+        assert axis.answered == 1
+        assert axis.unanswered_by_reason == {}
+
+    def test_the_three_always_computed_slots_are_not_evidence_on_their_own(self):
+        from perception import provenance
+
+        # Removing every other non-excluded class must drop the answer, even
+        # though these three still read `derived`/`approximated`.
+        fs = self._map()
+        assert fs["ego_headway_s"] == provenance.SOURCE_DERIVED
+        assert self._axis(fs).answered == 0
