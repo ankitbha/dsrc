@@ -1523,3 +1523,55 @@ class TestFailuresAxisCarriesSourceReadability:
         }}}
         axis = _axis_failures([{"type": "tick", "failures": {"basis": "measured"}}], summary)
         assert axis.not_evaluable_by_rule == {}
+
+
+class TestBothCausesOfZeroHereCalls:
+    """D5. A shadow drive with no API key has two independent reasons for
+    placing no HERE calls, and the drive reported only one -- inviting the
+    false counterfactual that a live run would have placed the calls the
+    commanded rate predicts. It would have placed zero.
+    """
+
+    def _sensing(self, kinds: frozenset[str]):
+        ticks = sensing_ticks(4, here_calls_at={i: 0 for i in range(4)})
+        return sensing_result(ticks, {}, phone_offline_kinds=kinds)
+
+    def test_shadow_mode_alone_names_one_cause(self):
+        here = (self._sensing(frozenset()) or {})["here"]
+        because = here["zero_calls_because"] or ""
+        assert "shadow" in because
+        assert "API key" not in because
+
+    def test_a_missing_api_key_is_named_beside_the_mode_not_instead_of_it(self):
+        here = (self._sensing(frozenset({"here.unconfigured"})) or {})["here"]
+        because = here["zero_calls_because"] or ""
+        assert "shadow" in because
+        assert "no HERE API key" in because
+        assert "would also place zero calls" in because
+
+
+class TestOneWordForALogThatPredatesTheField:
+    """D6. Three surfaces used to classify the same shape three ways: the
+    axis reported it as did-not-answer, the HERE line as a measured zero,
+    and the reconciliation as a shape violation. They now share one string.
+    """
+
+    def test_the_axis_the_here_line_and_the_reconciliation_agree(self):
+        from eval_run import HERE_CALLS_PREDATES_TASK_39 as SHARED
+
+        # A log recorded before the field existed carries no `here_calls`
+        # key at all -- not a null, an absent key.
+        ticks = sensing_ticks(3)
+        for t in ticks:
+            t["sensing"]["reference"].pop("here_calls", None)
+            t["sensing"]["reference"].pop("here_errors", None)
+        axis = _axis_api_calls(ticks)
+        here = (sensing_result(ticks, {}) or {})["here"]
+        assert axis.unbuildable == SHARED
+        assert here["not_measured"] == SHARED
+
+    def test_it_is_not_confused_with_a_run_that_had_no_phone_at_all(self):
+        from eval_run import HERE_CALLS_PREDATES_TASK_39, NOT_A_PHONE_RUN
+
+        assert HERE_CALLS_PREDATES_TASK_39 != NOT_A_PHONE_RUN
+        assert _axis_api_calls([{"type": "tick"}]).unbuildable == NOT_A_PHONE_RUN
