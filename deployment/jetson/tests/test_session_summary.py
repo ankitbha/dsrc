@@ -1575,3 +1575,62 @@ class TestOneWordForALogThatPredatesTheField:
 
         assert HERE_CALLS_PREDATES_TASK_39 != NOT_A_PHONE_RUN
         assert _axis_api_calls([{"type": "tick"}]).unbuildable == NOT_A_PHONE_RUN
+
+
+class TestAnAxisNeverPointsAtASectionThatIsNotThere:
+    """D3. A drive with no phone and no thermal records rendered four
+    `See ##` references to sections the same document did not contain.
+    `AxisResult.section` is a fixed string set at construction; nothing
+    checked it against what was actually written.
+    """
+
+    @staticmethod
+    def _axis(section: str) -> dict[str, Any]:
+        return {
+            "axis": "rates", "attempted": 10, "answered": 10, "unanswered_by_reason": {},
+            "vocabulary_violations": {}, "unbuildable": None, "section": section,
+            "not_evaluable_by_rule": {}, "attempted_is": "t", "answered_is": "a",
+            "zero_attempted_context": None,
+        }
+
+    def test_a_rendered_section_is_pointed_at(self):
+        line = _axis_headline_line(self._axis("## Sensing"), {"rendered_sections": {"## Sensing"}})
+        assert "See ## Sensing." in line
+
+    def test_an_unrendered_section_is_named_as_absent_instead(self):
+        line = _axis_headline_line(self._axis("## Sensing"), {"rendered_sections": {"## Gates"}})
+        assert "does not appear in this report" in line
+        assert "See ## Sensing." not in line
+
+    def test_an_unknown_render_set_keeps_the_pre_existing_pointer(self):
+        line = _axis_headline_line(self._axis("## Sensing"), None)
+        assert "See ## Sensing." in line
+
+
+class TestTheThermalAxisSaysWhichHalfItCounted:
+    """D8. The axis counts the jetson basis only. A real drive read
+    `1229 of 1229 answered` while the section it points at reported the
+    phone half answering none of its 300 reports.
+    """
+
+    @staticmethod
+    def _axis() -> dict[str, Any]:
+        return {
+            "axis": "thermal", "attempted": 300, "answered": 300, "unanswered_by_reason": {},
+            "vocabulary_violations": {}, "unbuildable": None, "section": "## Thermal",
+            "not_evaluable_by_rule": {}, "attempted_is": "t", "answered_is": "a",
+            "zero_attempted_context": None,
+        }
+
+    def test_a_phone_half_that_answered_nothing_is_named_on_the_axis_line(self):
+        context = {"thermal": {"summary": {"phone": {"samples": 300,
+                    "headroom_absent_counts": {"not_a_number": 300}}}}}
+        line = _axis_headline_line(self._axis(), context)
+        assert "jetson zone only" in line
+        assert "answered none of its 300 reports" in line
+
+    def test_a_phone_half_that_answered_is_not_flagged(self):
+        context = {"thermal": {"summary": {"phone": {"samples": 300,
+                    "headroom_absent_counts": {"not_a_number": 12}}}}}
+        line = _axis_headline_line(self._axis(), context)
+        assert "jetson zone only" not in line
