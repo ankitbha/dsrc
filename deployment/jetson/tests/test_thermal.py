@@ -122,9 +122,10 @@ def test_a_zone_that_will_not_read_is_absent_with_a_reason(tmp_path):
     root = tmp_path / "root"
     _zone(root, 0, "cpu-thermal", temp=None)  # type readable, temp file absent
 
-    census, reason = JetsonThermal(root=root).read_zones()
+    census, missing, reason = JetsonThermal(root=root).read_zones()
     assert census == {}
     assert reason == ABSENT_NO_ZONE_READABLE
+    assert missing == (("cpu-thermal", thermal.ZONE_UNREADABLE),)
 
     sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
     sampler.sample_once()
@@ -142,15 +143,16 @@ def test_the_six_absence_reasons_are_each_reachable_and_distinct(tmp_path):
 
     # arm 1: the root would not list at all.
     missing_root = JetsonThermal(root=tmp_path / "does-not-exist")
-    _, reason = missing_root.read_zones()
+    _, _, reason = missing_root.read_zones()
     assert reason == ABSENT_NO_THERMAL_ROOT
     seen.add(reason)
 
     # arm 2: the root lists, but nothing in it is a plausible temperature.
     no_zone_root = tmp_path / "no-zone"
     _zone(no_zone_root, 0, "soc", "100000000")  # excluded: 100000 C, implausible
-    _, reason = JetsonThermal(root=no_zone_root).read_zones()
+    _, missing, reason = JetsonThermal(root=no_zone_root).read_zones()
     assert reason == ABSENT_NO_ZONE_READABLE
+    assert missing == (("soc", thermal.ZONE_IMPLAUSIBLE),)
     seen.add(reason)
 
     # arm 3: the sampler is running but has not completed a first pass.
@@ -226,10 +228,83 @@ def test_a_value_that_is_not_a_temperature_is_refused(tmp_path):
     _zone(root, 1, "quiet_therm", "-2000000")  # -> -2000.0 C, refused
     _zone(root, 2, "xo_therm", "28926")   # -> 28.926 C, the only plausible one
 
-    census, reason = JetsonThermal(root=root).read_zones()
+    census, missing, reason = JetsonThermal(root=root).read_zones()
     assert reason is None
     assert set(census) == {"xo_therm"}
     assert census["xo_therm"] == pytest.approx(28.926)
+    assert dict(missing) == {"skin": thermal.ZONE_IMPLAUSIBLE, "quiet_therm": thermal.ZONE_IMPLAUSIBLE}
+
+
+# -- A2: a dropped zone is named, not silently absorbed into a shorter census -
+
+
+class TestReadZonesNamesEveryDroppedZone:
+    """The old `read_zones` dropped a zone whose `type`/`temp` would not
+    read and a zone whose value fell outside the plausible band into the
+    same `continue`, with `reason` staying `None` as long as at least one
+    zone answered -- a 2-of-4 read looked identical to a complete one with
+    only two zones to report, and the two failure causes were
+    indistinguishable from each other.
+    """
+
+    def test_an_unreadable_zone_and_an_implausible_reading_are_both_named(self, tmp_path):
+        root = tmp_path / "root"
+        _zone(root, 0, "cpu-thermal", "40000")     # 40.0 C, plausible
+        _zone(root, 1, "gpu-thermal", temp=None)   # temp file absent
+        _zone(root, 2, "soc0-thermal", "130000")   # 130.0 C, above MAX_PLAUSIBLE_C (125)
+        _zone(root, 3, "tj-thermal", "35000")      # 35.0 C, plausible
+
+        census, missing, reason = JetsonThermal(root=root).read_zones()
+
+        assert reason is None
+        assert set(census) == {"cpu-thermal", "tj-thermal"}
+        assert dict(missing) == {
+            "gpu-thermal": thermal.ZONE_UNREADABLE,
+            "soc0-thermal": thermal.ZONE_IMPLAUSIBLE,
+        }
+
+    def test_the_sampler_counts_the_dropped_zones_kept_apart_by_cause(self, tmp_path):
+        root = tmp_path / "root"
+        _zone(root, 0, "cpu-thermal", "40000")
+        _zone(root, 1, "gpu-thermal", temp=None)
+        _zone(root, 2, "soc0-thermal", "130000")
+        _zone(root, 3, "tj-thermal", "35000")
+
+        sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
+        sampler.sample_once()
+        sampler.sample_once()
+
+        jetson_record = sampler.to_record()["jetson"]
+        assert jetson_record["zones_missing"]["unreadable"] == {"gpu-thermal": 2}
+        assert jetson_record["zones_missing"]["implausible"] == {"soc0-thermal": 2}
+        assert jetson_record["zone_passes_attempted"] == 2
+        assert jetson_record["zone_passes_readable"] == 0  # something missing every pass
+        assert sorted(jetson_record["zones_seen"]) == ["cpu-thermal", "tj-thermal"]
+
+    def test_a_more_preferred_name_refused_is_recorded_beside_the_selection(self, tmp_path):
+        root = tmp_path / "root"
+        _zone(root, 0, "tj-thermal", temp=None)   # most preferred, but unreadable this pass
+        _zone(root, 1, "cpu-thermal", "40000")    # next preference, plausible
+
+        sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
+        sampler.sample_once()
+
+        jetson_record = sampler.to_record()["jetson"]
+        assert jetson_record["selected_zone"] == "cpu-thermal"
+        assert jetson_record["selected_by"] == "preferred_name"
+        assert jetson_record["selected_preferred_names_refused"] == ["tj-thermal"]
+
+    def test_a_fully_readable_pass_reports_no_refused_preferred_names(self, tmp_path):
+        root = tmp_path / "root"
+        _zone(root, 0, "tj-thermal", "35000")
+
+        sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=_Clock(100.0))
+        sampler.sample_once()
+
+        jetson_record = sampler.to_record()["jetson"]
+        assert jetson_record["selected_preferred_names_refused"] == []
+        assert jetson_record["zone_passes_attempted"] == 1
+        assert jetson_record["zone_passes_readable"] == 1
 
 
 # -- 4. millidegrees and degrees are separated by magnitude ------------------
@@ -1440,6 +1515,32 @@ def test_the_quiet_line_names_the_pass_counts(tmp_path):
         "throttle events, jetson: quiet -- cooling devices readable throughout, "
         "0 transitions (3 of 3 passes fully readable)"
     ) in md
+
+
+def test_the_zones_read_line_names_a_zone_that_never_once_answered(tmp_path):
+    """A2: `zones_seen` only ever held zones that gave a plausible reading
+    at least once -- a zone that was listed and attempted on every pass but
+    never answered left no trace in this line at all. The report must count
+    it in the denominator and name it, not just report the numerator alone.
+    """
+    from eval_run import analyze, render_markdown
+    from tests.test_eval_run import make_tick, write_run
+
+    root = tmp_path / "sysroot"
+    _zone(root, 0, "cpu-thermal", "40000")
+    _zone(root, 1, "gpu-thermal", temp=None)  # listed, never once readable
+    clock = _Clock(100.0)
+    sampler = ThermalSampler(sink=None, jetson=JetsonThermal(root=root), clock=clock)
+    for _ in range(3):
+        sampler.sample_once()
+        clock.advance(1.0)
+
+    run_dir = write_run(tmp_path, [make_tick(0)], summary={
+        "ticks": 1, "camera_dropped_frames": 0, "policy_trained": False,
+        "thermal": sampler.to_record(jtop_available=None),
+    })
+    md = render_markdown(analyze(run_dir), [])
+    assert "1 of 2 zones read (gpu-thermal never read)" in md
 
 
 # MINOR: the two percentile conventions in the same report section must agree.

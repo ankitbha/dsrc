@@ -1117,8 +1117,18 @@ def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
         if temp is not None:
             per_zone_max = jetson.get("per_zone_max_c") or {}
             hottest = max(per_zone_max, key=per_zone_max.get) if per_zone_max else None
+            zones_seen = jetson.get("zones_seen") or []
+            zones_missing = jetson.get("zones_missing") or {}
+            # Every zone that ever listed, whether or not it ever gave a
+            # plausible reading -- a zone that always refused would
+            # otherwise leave no trace in this count at all.
+            never_read = sorted(
+                set(zones_missing.get("unreadable") or {}) | set(zones_missing.get("implausible") or {})
+            )
+            total_zones = len(zones_seen) + len(never_read)
+            never_read_note = f" ({', '.join(never_read)} never read)" if never_read else ""
             peak = (
-                f"; {len(jetson.get('zones_seen') or [])} zones read, hottest at peak "
+                f"; {len(zones_seen)} of {total_zones} zones read{never_read_note}, hottest at peak "
                 f"{hottest} {per_zone_max[hottest]:.1f} C" if hottest else ""
             )
             lines.append(

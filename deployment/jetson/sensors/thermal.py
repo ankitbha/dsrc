@@ -90,6 +90,15 @@ MISSING_STATUS_CHANGES = "thermal_status_changes"
 MIN_PLAUSIBLE_C = -40.0
 MAX_PLAUSIBLE_C = 125.0
 
+#: Why a zone that listed under root gave `read_zones` no usable reading.
+#: The two are kept apart rather than merged into one "could not read"
+#: word: a value that parsed but landed outside the plausible band is a
+#: real excursion the census is refusing, and folding it into "the file
+#: would not read" would make an overheat indistinguishable from a sysfs
+#: zone that always answers EAGAIN.
+ZONE_UNREADABLE = "unreadable"
+ZONE_IMPLAUSIBLE = "implausible"
+
 #: Zone `type` names to prefer, best first -- a guess at the Orin's own names
 #: (open item 1), with `JetsonThermal`'s fallback to the hottest readable zone
 #: existing precisely so a wrong guess degrades to something rather than to
@@ -175,32 +184,60 @@ class JetsonThermal:
     def __init__(self, root: Path | str = "/sys/class/thermal") -> None:
         self.root = Path(root)
 
-    def read_zones(self) -> tuple[dict[str, float], str | None]:
+    def read_zones(self) -> tuple[dict[str, float], tuple[tuple[str, str], ...], str | None]:
         """Every zone under root with a `type` and a currently plausible
-        `temp`, keyed by type name. `(census, reason)`: the census is empty if
-        and only if `reason` is not None, so a partial read is never mistaken
-        for a complete one with nothing to report.
+        `temp`, keyed by type name, plus every zone that listed but gave no
+        usable reading. `(census, missing, reason)`: `missing` pairs each
+        such zone's name (or, when even `type` would not read, its directory
+        name) with why -- `ZONE_UNREADABLE` or `ZONE_IMPLAUSIBLE`. `reason`
+        is set only when the census itself is empty, so a partial read is
+        never mistaken for a complete one with nothing to report; `missing`
+        can be non-empty either way, the same as `read_cooling`'s own
+        `missing`.
         """
         try:
             if not self.root.is_dir():
-                return {}, ABSENT_NO_THERMAL_ROOT
+                return {}, (), ABSENT_NO_THERMAL_ROOT
             entries = sorted(self.root.glob("thermal_zone*"))
         except OSError:
-            return {}, ABSENT_NO_THERMAL_ROOT
+            return {}, (), ABSENT_NO_THERMAL_ROOT
 
         census: dict[str, float] = {}
+        missing: list[tuple[str, str]] = []
         for entry in entries:
             name = _read_trimmed(entry / "type")
-            if name is None or name in census:
+            if name is None:
+                missing.append((entry.name, ZONE_UNREADABLE))
+                continue
+            if name in census:
                 continue
             raw = _read_trimmed(entry / "temp")
-            celsius = None if raw is None else self.celsius_of(raw)
+            if raw is None:
+                missing.append((name, ZONE_UNREADABLE))
+                continue
+            celsius = self.celsius_of(raw)
             if celsius is None:
+                missing.append((name, self._zone_missing_reason(raw)))
                 continue
             census[name] = celsius
         if not census:
-            return {}, ABSENT_NO_ZONE_READABLE
-        return census, None
+            return {}, tuple(missing), ABSENT_NO_ZONE_READABLE
+        return census, tuple(missing), None
+
+    @staticmethod
+    def _zone_missing_reason(raw: str) -> str:
+        """Which of `celsius_of`'s two refusals produced a `None` for `raw`:
+        content that will not parse as a number at all, or one that parses
+        but falls outside the plausible band. Kept separate from
+        `celsius_of` itself so that function's own contract -- parse, band,
+        return a plain `float | None` -- stays the single thing it is used
+        and tested for elsewhere.
+        """
+        try:
+            int(raw)
+        except ValueError:
+            return ZONE_UNREADABLE
+        return ZONE_IMPLAUSIBLE
 
     def read_cooling(self) -> tuple[dict[str, int], tuple[str, ...]]:
         """Every `cooling_device*`'s current state, keyed by its `type`, and
@@ -362,10 +399,29 @@ class ThermalSampler:
         # -- the held zone (D11) and the last successful reading -------------
         self._selected_zone: str | None = None
         self._selected_by: str | None = None
+        #: Preferred names (`PREFERRED_ZONE_TYPES`, in order) that were
+        #: attempted and refused on the one pass that made the selection --
+        #: set once, alongside `_selected_zone`, never again. Empty when the
+        #: selected name was the first preference tried, or when the
+        #: fallback to the hottest zone found no preferred name attempted at
+        #: all.
+        self._selected_preferred_names_refused: tuple[str, ...] = ()
         self._last_census: dict[str, float] = {}
         self._last_sample_mono: float | None = None
         self._last_selected_celsius: float | None = None
         self._last_zones_reason: str | None = None
+        #: As `_cooling_passes_attempted` / `_cooling_passes_readable` below,
+        #: for the zone census: a pass with no `thermal_zone*` entry at all
+        #: (or no root) attempts nothing; a pass where every zone entry
+        #: found gave a plausible reading is `readable`.
+        self._zone_passes_attempted = 0
+        self._zone_passes_readable = 0
+        #: Per-zone-name counts of `read_zones`'s `missing`, kept apart by
+        #: cause (`ZONE_UNREADABLE` vs `ZONE_IMPLAUSIBLE`) so a real
+        #: excursion above the plausible ceiling is never reported the same
+        #: as a zone whose files simply will not read.
+        self._zone_unreadable_counts: dict[str, int] = {}
+        self._zone_implausible_counts: dict[str, int] = {}
 
         # -- jetson cooling / throttle events ---------------------------------
         self._prev_cooling: dict[str, int] | None = None
@@ -460,13 +516,15 @@ class ThermalSampler:
         # sysfs quirk raising here must not stop the phone-side processing
         # below in the same pass, and the failed read is recorded as this
         # pass's own absence rather than propagated.
-        census, zones_reason = _safe_call(self._jetson.read_zones, ({}, ABSENT_READ_ERROR))
+        census, zones_missing, zones_reason = _safe_call(
+            self._jetson.read_zones, ({}, (), ABSENT_READ_ERROR)
+        )
         cooling, cooling_missing = _safe_call(self._jetson.read_cooling, ({}, ()))
         telemetry = getattr(self._phone, "telemetry", None) if self._phone is not None else None
         telemetry_at = getattr(self._phone, "telemetry_at_mono", None) if self._phone is not None else None
 
         with self._lock:
-            jetson_basis, jetson_reason = self._advance_zone_reading(census, zones_reason, now)
+            jetson_basis, jetson_reason = self._advance_zone_reading(census, zones_missing, zones_reason, now)
             self._process_cooling(cooling, cooling_missing, census, now)
             self._process_phone_events(telemetry, now)
             self._accumulate_phone_summary(telemetry, telemetry_at, now)
@@ -475,11 +533,25 @@ class ThermalSampler:
         self._write_sample(now, census, cooling, jetson_basis, jetson_reason, telemetry, telemetry_at)
 
     def _advance_zone_reading(
-        self, census: dict[str, float], zones_reason: str | None, now: float,
+        self, census: dict[str, float], missing: tuple[tuple[str, str], ...],
+        zones_reason: str | None, now: float,
     ) -> tuple[str, str | None]:
         self._zones_seen.update(census)
         for name, value in census.items():
             self._per_zone_max[name] = max(self._per_zone_max.get(name, value), value)
+
+        # As `_process_cooling`: a pass with nothing to attempt (no root, no
+        # `thermal_zone*` entry at all) counts toward neither total, and a
+        # pass counts `readable` only when every zone entry found this pass
+        # gave a plausible reading -- one zone reading fine does not make the
+        # census complete while another next to it never answers.
+        if census or missing:
+            self._zone_passes_attempted += 1
+            for name, cause in missing:
+                counts = self._zone_implausible_counts if cause == ZONE_IMPLAUSIBLE else self._zone_unreadable_counts
+                counts[name] = counts.get(name, 0) + 1
+            if not missing:
+                self._zone_passes_readable += 1
 
         if zones_reason is not None:
             self._last_zones_reason = zones_reason
@@ -488,7 +560,7 @@ class ThermalSampler:
             return THERMAL_BASIS_ABSENT, zones_reason
 
         if self._selected_zone is None:
-            self._select_zone(census)
+            self._select_zone(census, missing)
         value = census.get(self._selected_zone) if self._selected_zone else None
         if value is None:
             # Zones were readable this pass -- census is non-empty, or `reason`
@@ -510,15 +582,30 @@ class ThermalSampler:
         self._basis_counts[THERMAL_BASIS_MEASURED] += 1
         return THERMAL_BASIS_MEASURED, None
 
-    def _select_zone(self, census: dict[str, float]) -> None:
+    def _select_zone(self, census: dict[str, float], missing: tuple[tuple[str, str], ...]) -> None:
+        """Runs once, on the pass that first has a plausible census (D11).
+        `missing` is that same pass's own -- a preferred name refused here,
+        with a less-preferred name selected instead, is recorded so
+        `selected_by: "preferred_name"` does not read as an unqualified
+        first choice when a more-preferred name was actually attempted and
+        refused.
+        """
+        missing_names = {name for name, _ in missing}
+        refused_before_selection: list[str] = []
         for name in PREFERRED_ZONE_TYPES:
             if name in census:
                 self._selected_zone = name
                 self._selected_by = "preferred_name"
+                self._selected_preferred_names_refused = tuple(refused_before_selection)
                 return
+            if name in missing_names:
+                refused_before_selection.append(name)
         if census:
             self._selected_zone = max(census, key=census.get)
             self._selected_by = "hottest_at_first_sample"
+            self._selected_preferred_names_refused = tuple(
+                name for name in PREFERRED_ZONE_TYPES if name in missing_names
+            )
 
     def _process_cooling(
         self, states: dict[str, int], missing: tuple[str, ...], census: dict[str, float], now: float,
@@ -803,7 +890,20 @@ class ThermalSampler:
                 "samples": self._samples,
                 "selected_zone": self._selected_zone,
                 "selected_by": self._selected_by,
+                "selected_preferred_names_refused": list(self._selected_preferred_names_refused),
                 "zones_seen": sorted(self._zones_seen),
+                # A zone that never once gave a plausible reading is absent
+                # from `zones_seen` and would otherwise leave no trace at
+                # all -- these two censuses are how many passes attempted it
+                # anyway, kept apart by cause so a real excursion above the
+                # plausible ceiling is never reported the same as a zone
+                # whose files simply will not read.
+                "zones_missing": {
+                    "unreadable": dict(self._zone_unreadable_counts),
+                    "implausible": dict(self._zone_implausible_counts),
+                },
+                "zone_passes_attempted": self._zone_passes_attempted,
+                "zone_passes_readable": self._zone_passes_readable,
                 "temp_c": temp_stats,
                 "per_zone_max_c": dict(self._per_zone_max),
                 "cooling_devices": sorted(self._cooling_devices),
