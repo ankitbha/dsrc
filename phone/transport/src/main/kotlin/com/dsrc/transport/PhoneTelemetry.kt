@@ -55,6 +55,28 @@ data class PhoneTelemetry(
     val thermalChangeFrom: String? = null,
     val thermalChangeTo: String? = null,
     val thermalChangeAtMonoNs: Long? = null,
+    /**
+     * Which network the phone's own traffic was on when this report was built: one of
+     * `cellular`, `wifi`, `ethernet`, `bluetooth`, `vpn`, `wifi_aware` or `lowpan`, or
+     * several of them joined with `+` when one network carries more than one -- a VPN
+     * network reports `vpn` and, where the platform populates it, the transport beneath.
+     *
+     * The only phone traffic that leaves the handset by IP is the HERE query, so this says
+     * what carried HERE. It is a property of the rig, and it is recorded because it stopped
+     * being constant: a tethered handset can change network inside a single drive, and a
+     * HERE call with no route reports `status = 0`, which is indistinguishable from a DNS
+     * failure or from HERE itself being down.
+     *
+     * Null exactly when [networkTransportAbsent] gives the reason.
+     */
+    val networkTransport: String? = null,
+    /**
+     * Why [networkTransport] is null: `no_active_network` (the platform says the handset has
+     * no route at all -- a measured negative, not a failed reading), `no_capabilities` (the
+     * network went away between the two calls), `no_known_transport`, `no_manager`,
+     * `permission_denied`, or `accessor_raised`. Null exactly when the value has one.
+     */
+    val networkTransportAbsent: String? = null,
 ) {
     fun toExtensions(): Map<String, JsonValue> = buildMap {
         putAll(base())
@@ -66,6 +88,8 @@ data class PhoneTelemetry(
         thermalChangeFrom?.let { put("thermal_change_from", JsonValue.Text(it)) }
         thermalChangeTo?.let { put("thermal_change_to", JsonValue.Text(it)) }
         thermalChangeAtMonoNs?.let { put("thermal_change_at_mono_ns", JsonValue.Num(it)) }
+        networkTransport?.let { put("network_transport", JsonValue.Text(it)) }
+        networkTransportAbsent?.let { put("network_transport_absent", JsonValue.Text(it)) }
     }
 
     private fun base(): Map<String, JsonValue> = mapOf(
@@ -103,6 +127,8 @@ data class PhoneTelemetry(
                 thermalChangeFrom = Fields.absentableString(extensions, "thermal_change_from"),
                 thermalChangeTo = Fields.absentableString(extensions, "thermal_change_to"),
                 thermalChangeAtMonoNs = Fields.absentableInt(extensions, "thermal_change_at_mono_ns"),
+                networkTransport = Fields.absentableString(extensions, "network_transport"),
+                networkTransportAbsent = Fields.absentableString(extensions, "network_transport_absent"),
                 achieved = Fields.requireNestedNumbers(extensions, "achieved", RateCommand.RATE_KEYS),
                 dropped = Fields.requireNestedCounts(extensions, "dropped", DROP_KEYS),
                 hereCalls = Fields.requireCount(extensions, "here_calls"),

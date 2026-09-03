@@ -417,6 +417,42 @@ class TypedMessagesTest {
     }
 
     @Test
+    fun `the network a report was built on survives the wire`() {
+        val decoded = PhoneTelemetry.fromWire(
+            telemetry().copy(networkTransport = "wifi+vpn").toExtensions(),
+            ByteArray(0),
+        )
+        assertEquals("wifi+vpn", decoded.networkTransport)
+        assertNull(decoded.networkTransportAbsent)
+    }
+
+    @Test
+    fun `a phone that could not read its network sends the reason instead`() {
+        val extensions = telemetry().copy(
+            networkTransportAbsent = "no_active_network",
+        ).toExtensions()
+        assertFalse("network_transport" in extensions)
+
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+        assertEquals("no_active_network", decoded.networkTransportAbsent)
+        assertNull(decoded.networkTransport)
+    }
+
+    @Test
+    fun `telemetry from a build that predates the network fields is still accepted`() {
+        // A third state, and not the same as either of the two above: the handset said
+        // nothing about its network at all. Requiring the key would refuse every frame
+        // from an older build, which is how an additive field takes a drive down.
+        val extensions = telemetry().toExtensions()
+        assertFalse("network_transport" in extensions)
+        assertFalse("network_transport_absent" in extensions)
+
+        val decoded = PhoneTelemetry.fromWire(extensions, ByteArray(0))
+        assertNull(decoded.networkTransport)
+        assertNull(decoded.networkTransportAbsent)
+    }
+
+    @Test
     fun `an absence reason survives the wire in its own field`() {
         val extensions = telemetry().copy(
             thermalHeadroom = null, thermalHeadroomAbsent = "not_a_number",

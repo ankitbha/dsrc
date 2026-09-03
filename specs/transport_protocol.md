@@ -340,7 +340,7 @@ by the sender's transport rather than by the message.
 | `here` | `request_url`, `status`, `content_type`, `query_lat`, `query_lon`, `query_radius_m`, `t_request_mono_ns`, `t_response_mono_ns` | response body bytes |
 | `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `headway_target_s`, `lane_text`, `merge_text`, `traffic_text`, `confidence`, `confidence_label`, `action` | empty |
 | `rate_cmd` | `rates`, `trigger`, `shadow` | empty |
-| `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors`, `skin_temp_c`*, `skin_temp_zone`*, `thermal_headroom_absent`*, `skin_temp_absent`*, `thermal_status_changes`*, `thermal_change_from`*, `thermal_change_to`*, `thermal_change_at_mono_ns`* | empty |
+| `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors`, `skin_temp_c`*, `skin_temp_zone`*, `thermal_headroom_absent`*, `skin_temp_absent`*, `thermal_status_changes`*, `thermal_change_from`*, `thermal_change_to`*, `thermal_change_at_mono_ns`*, `network_transport`*, `network_transport_absent`* | empty |
 | `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns`, `t_peer_wire_mono_ns`, `prev_exchange_id`*, `t_prev_pong_wire_mono_ns`*, `t_prev_pong_recv_mono_ns`* | empty |
 
 The fields above marked `*`, like `skin_temp_c` and `skin_temp_zone` below,
@@ -420,6 +420,23 @@ call, or unsupported"), or `out_of_band`. `skin_temp_absent` is one of
 `no_zones_listed`, `no_preferred_zone`, `unreadable`, or `implausible`. A
 `null` headroom or skin reading on its own answers only "no number"; the
 paired reason answers "which of several different causes produced it".
+
+`network_transport` and `network_transport_absent` are marked `*` for the same
+absent-tolerance reason, and stand in the same value-or-named-reason relation to
+each other as the thermal pair above: exactly one of the two is present in any
+report. `network_transport` names which network the phone's own traffic was on
+when the report was built, as one or more of `cellular`, `wifi`, `ethernet`,
+`bluetooth`, `vpn`, `wifi_aware` and `lowpan`, joined with `+` in that order when
+one network carries more than one -- a VPN network reports `vpn` and, on the
+platform versions that populate it, the transport beneath it. This describes the
+phone's route to the internet and NOT the sensor link, which is a USB tunnel in the
+car and loopback on the handset; the only phone traffic it governs is the HERE
+query. `network_transport_absent` is one of `no_active_network` (the platform
+reports no route at all, which is a measured fact about the handset rather than a
+failed reading), `no_capabilities` (the network went away between the two calls),
+`no_known_transport`, `no_manager`, `permission_denied`, or `accessor_raised`. A
+receiver MUST accept telemetry carrying neither key: a phone build predating the
+field sends neither, which is a third state and not the same as either.
 
 `thermal_status_changes` and the `thermal_change_*` trio are marked `*` for
 the same absent-tolerance reason, but differ in *which* absence they mean.

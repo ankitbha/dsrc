@@ -109,6 +109,14 @@ def _end_reason_of(session: Any) -> str | None:
     return getattr(reason, "value", None) if reason is not None else None
 
 
+#: A telemetry report that named neither a network nor a reason there was none.
+#: A phone build that predates the field writes neither key, so this is what an
+#: older handset counts as -- kept apart from the wire's own closed reasons, and
+#: counted rather than skipped, because dropping it would make "every report named
+#: its network" and "no report ever mentioned one" the same empty dict.
+NETWORK_TRANSPORT_UNSPECIFIED = "unspecified"
+
+
 class PhoneLink:
     """One phone session, and the camera and GPS backends it feeds.
 
@@ -170,6 +178,22 @@ class PhoneLink:
         #: `telemetry` and `telemetry_at_mono` properties.
         self._telemetry: tuple[Any, float] | None = None
         self.telemetry_received = 0
+        #: Which network the phone said its own traffic was on, counted over every
+        #: report of the run, and the reasons it could not say. Two dicts rather
+        #: than one, so a value can never be confused with an excuse for not having
+        #: one.
+        #:
+        #: A distribution, not the latest value, because the latest answers the
+        #: wrong question. On a handset with its own SIM there is one answer for the
+        #: whole drive and the last report states it; on a tethered handset the
+        #: answer changes when the hotspot drops, and the last report then describes
+        #: only however the drive happened to end.
+        #:
+        #: Run-scoped, deliberately, where `telemetry_received` beside it is reset
+        #: per session: a rebind does not change which network the handset is on,
+        #: and the question here is what the drive ran over.
+        self.network_transport_counts: dict[str, int] = {}
+        self.network_transport_absent_counts: dict[str, int] = {}
         #: The fourth modality. The phone streams `imu` at 50 Hz for the whole drive
         #: and nothing on this side read the channel, so the inbound deque sat
         #: permanently at its 256 depth and every later sample was discarded -- ~50 a
@@ -623,6 +647,29 @@ class PhoneLink:
             # Published as a single tuple, so a reader sees both or neither.
             self._telemetry = (message, receipt.t_recv_mono_ns / 1e9)
             self.telemetry_received += 1
+            self._count_network_transport(message)
+
+    def _count_network_transport(self, message: Any) -> None:
+        """Add one report to the run's network tally.
+
+        Exactly one of the two dicts moves per report. `getattr` with a default
+        rather than attribute access, for the same reason the thermal fields use it:
+        a phone built before the field exists sends a message that decodes without
+        it, and this side must count that handset rather than raise on it.
+        """
+        value = getattr(message, "network_transport", None)
+        if value is not None:
+            self.network_transport_counts[value] = (
+                self.network_transport_counts.get(value, 0) + 1
+            )
+            return
+        reason = (
+            getattr(message, "network_transport_absent", None)
+            or NETWORK_TRANSPORT_UNSPECIFIED
+        )
+        self.network_transport_absent_counts[reason] = (
+            self.network_transport_absent_counts.get(reason, 0) + 1
+        )
 
     def send_advisory(self, advisory: Any, *, t_capture_mono_ns: int) -> bool:
         """Send the advisory back to the phone. False when there is nothing to send on.
@@ -936,6 +983,19 @@ class PhoneLink:
                 "achieved": getattr(self.telemetry, "achieved", None),
                 "dropped": getattr(self.telemetry, "dropped", None),
                 "at_mono": self.telemetry_at_mono,
+                # Which network carried the phone's own traffic, meaning the HERE
+                # query -- the only thing that leaves the handset by IP. The latest
+                # value and the whole run's tally, because a tethered handset can
+                # change network mid-drive and the latest alone would describe only
+                # how the drive ended.
+                "network_transport": getattr(self.telemetry, "network_transport", None),
+                "network_transport_absent": getattr(
+                    self.telemetry, "network_transport_absent", None
+                ),
+                "network_transport_counts": dict(self.network_transport_counts),
+                "network_transport_absent_counts": dict(
+                    self.network_transport_absent_counts
+                ),
                 "reader_alive": bool(self._telemetry_reader and self._telemetry_reader.is_alive()),
             },
             # What the transport did, as opposed to what the readers made of it.

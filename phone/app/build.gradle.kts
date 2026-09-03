@@ -120,6 +120,7 @@ val verifyMergedManifest by tasks.registering {
             "android.permission.ACCESS_FINE_LOCATION",
             "android.permission.ACCESS_COARSE_LOCATION",
             "android.permission.INTERNET",
+            "android.permission.ACCESS_NETWORK_STATE",
             "android.permission.FOREGROUND_SERVICE",
             "android.permission.FOREGROUND_SERVICE_CAMERA",
             "android.permission.FOREGROUND_SERVICE_LOCATION",

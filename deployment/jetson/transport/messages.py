@@ -624,6 +624,24 @@ class PhoneTelemetry:
     thermal_change_from: str | None = None
     thermal_change_to: str | None = None
     thermal_change_at_mono_ns: int | None = None
+    #: Which network the phone's own traffic was on when the report was built:
+    #: one of `cellular`, `wifi`, `ethernet`, `bluetooth`, `vpn`, `wifi_aware`,
+    #: `lowpan`, or several joined with `+` when one network carries more than
+    #: one -- a VPN network reports `vpn` and, where the platform populates it,
+    #: the transport beneath it.
+    #:
+    #: The only phone traffic that leaves the handset by IP is the HERE query,
+    #: so this says what carried HERE. Recorded because it stopped being
+    #: constant: a tethered handset can change network inside one drive, and a
+    #: HERE call with no route reports `status = 0`, which is the same value a
+    #: DNS failure and an unreachable HERE both produce.
+    network_transport: str | None = None
+    #: Why `network_transport` is null: `no_active_network` (the platform says
+    #: there is no route at all -- a measured negative, not a failed reading),
+    #: `no_capabilities` (the network went away between the two calls),
+    #: `no_known_transport`, `no_manager`, `permission_denied`, or
+    #: `accessor_raised`. Absent exactly when the value is present.
+    network_transport_absent: str | None = None
 
     CHANNEL: ClassVar[Channel] = Channel.TELEMETRY
 
@@ -683,6 +701,16 @@ class PhoneTelemetry:
                     if self.thermal_change_at_mono_ns is not None
                     else {}
                 ),
+                **(
+                    {"network_transport": self.network_transport}
+                    if self.network_transport is not None
+                    else {}
+                ),
+                **(
+                    {"network_transport_absent": self.network_transport_absent}
+                    if self.network_transport_absent is not None
+                    else {}
+                ),
             },
             b"",
         )
@@ -704,6 +732,10 @@ class PhoneTelemetry:
             thermal_change_from=absentable_str(extensions, "thermal_change_from"),
             thermal_change_to=absentable_str(extensions, "thermal_change_to"),
             thermal_change_at_mono_ns=absentable_int(extensions, "thermal_change_at_mono_ns"),
+            network_transport=absentable_str(extensions, "network_transport"),
+            network_transport_absent=absentable_str(
+                extensions, "network_transport_absent"
+            ),
             achieved=require_mapping_of_numbers(extensions, "achieved", RATE_KEYS),
             dropped=require_mapping_of_ints(extensions, "dropped", DROP_KEYS),
             here_calls=check_count(require(extensions, "here_calls"), "here_calls"),

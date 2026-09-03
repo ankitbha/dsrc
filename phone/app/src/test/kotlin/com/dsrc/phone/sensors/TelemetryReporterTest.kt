@@ -27,11 +27,14 @@ class TelemetryReporterTest {
         lastTransitionFrom: String? = null,
         lastTransitionTo: String? = null,
         lastTransitionAtMonoNs: Long? = null,
+        networkTransport: String? = null,
+        networkTransportAbsent: String? = null,
     ) = TelemetryReporter.Sample(
         thermalStatus = status, thermalHeadroom = headroom, delivered = delivered, dropped = dropped,
         hereCalls = hereCalls, hereErrors = hereErrors,
         statusChanges = statusChanges, lastTransitionFrom = lastTransitionFrom,
         lastTransitionTo = lastTransitionTo, lastTransitionAtMonoNs = lastTransitionAtMonoNs,
+        networkTransport = networkTransport, networkTransportAbsent = networkTransportAbsent,
     )
 
     private class Recorder {
@@ -317,4 +320,36 @@ class TelemetryReporterTest {
         assertFalse("a bare NaN token must never reach the wire", encoded.contains("NaN"))
     }
 
+    @Test
+    fun `the network reading reaches the wire on every report`() {
+        // Read per sample, not once at start: the value is a fact about the moment, and a
+        // tethered handset that loses its hotspot changes it mid-drive. Carrying only the
+        // first would report the whole drive as whatever it began on.
+        val (reporter, recorder) = reporter(
+            listOf(
+                sample(networkTransport = "wifi"),
+                sample(networkTransport = "wifi"),
+                sample(networkTransport = null, networkTransportAbsent = "no_active_network"),
+            ),
+        )
+        repeat(3) { reporter.report() }
+
+        // The first sample only establishes the baseline for `achieved` and sends nothing.
+        assertEquals(listOf("wifi", null), recorder.sent.map { it.networkTransport })
+        assertEquals(
+            listOf(null, "no_active_network"),
+            recorder.sent.map { it.networkTransportAbsent },
+        )
+    }
+
+    @Test
+    fun `a sample that names neither is sent with neither`() {
+        // A handset whose reader is not wired up at all. It must not acquire a value here.
+        val (reporter, recorder) = reporter(listOf(sample(), sample()))
+        repeat(2) { reporter.report() }
+
+        assertEquals(1, recorder.sent.size)
+        assertNull(recorder.sent.single().networkTransport)
+        assertNull(recorder.sent.single().networkTransportAbsent)
+    }
 }

@@ -683,7 +683,12 @@ POPULATED_OPTIONALS = {
                 thermal_headroom_absent="not_a_number", skin_temp_absent="unreadable",
                 thermal_status_changes=3, thermal_change_from="nominal",
                 thermal_change_to="severe", thermal_change_at_mono_ns=123,
+                network_transport="wifi",
             ).to_wire()[0]
+        }
+        | {
+            field
+            for field in a_telemetry(network_transport_absent="no_active_network").to_wire()[0]
         }
         if channel is Channel.TELEMETRY
         else set(a_camera_frame_with_encode_stamps().to_wire()[0])
@@ -2020,3 +2025,31 @@ class TestWantsWireStamp:
         finally:
             writer.close()
             reader.close()
+
+
+def test_the_network_a_report_was_built_on_survives_the_wire():
+    decoded = PhoneTelemetry.from_wire(
+        a_telemetry(network_transport="wifi+vpn").to_wire()[0], b""
+    )
+    assert decoded.network_transport == "wifi+vpn"
+    assert decoded.network_transport_absent is None
+
+
+def test_a_phone_that_could_not_read_its_network_sends_the_reason_instead():
+    extensions, _ = a_telemetry(network_transport_absent="no_active_network").to_wire()
+    assert "network_transport" not in extensions
+    decoded = PhoneTelemetry.from_wire(extensions, b"")
+    assert decoded.network_transport_absent == "no_active_network"
+    assert decoded.network_transport is None
+
+
+def test_telemetry_predating_the_network_fields_is_still_accepted():
+    # A third state, not the same as either above: the handset said nothing about its
+    # network at all. Requiring the key would refuse every frame an older build sends,
+    # which is how an additive field takes a whole drive down.
+    extensions, _ = a_telemetry().to_wire()
+    assert "network_transport" not in extensions
+    assert "network_transport_absent" not in extensions
+    decoded = PhoneTelemetry.from_wire(extensions, b"")
+    assert decoded.network_transport is None
+    assert decoded.network_transport_absent is None

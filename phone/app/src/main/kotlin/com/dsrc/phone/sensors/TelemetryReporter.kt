@@ -55,6 +55,11 @@ class TelemetryReporter(
         val lastTransitionFrom: String? = null,
         val lastTransitionTo: String? = null,
         val lastTransitionAtMonoNs: Long? = null,
+        /** [NetworkReader.Reading.value] as of this sample: which network the phone's own
+         * traffic is on, which on this handset means which network carried HERE. */
+        val networkTransport: String? = null,
+        /** [NetworkReader.Reading.absentReason], set exactly when [networkTransport] is not. */
+        val networkTransportAbsent: String? = null,
     )
 
     /**
@@ -164,6 +169,8 @@ class TelemetryReporter(
                 dropped = PhoneTelemetry.DROP_KEYS.associateWith { reading.dropped[it] ?: 0L },
                 hereCalls = reading.hereCalls,
                 hereErrors = reading.hereErrors,
+                networkTransport = reading.networkTransport,
+                networkTransportAbsent = reading.networkTransportAbsent,
             )
         )
         // Counted apart. `reports++` alone said a report was made whether or not the

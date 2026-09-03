@@ -28,6 +28,7 @@ import com.dsrc.phone.ui.AdvisoryHolder
 import com.dsrc.phone.sensors.GpsLocationSource
 import com.dsrc.phone.sensors.HerePipeline
 import com.dsrc.phone.sensors.HttpHereClient
+import com.dsrc.phone.sensors.NetworkReader
 import com.dsrc.phone.sensors.TelemetryReporter
 import com.dsrc.phone.sensors.ThermalReader
 import com.dsrc.phone.sensors.ThermalStatusWatcher
@@ -494,6 +495,12 @@ class SensingService : LifecycleService() {
         here.start()
 
         val power = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        // `as?`, not `as`. The thermal cast above is load-bearing -- without a PowerManager
+        // there is no telemetry worth sending -- but the network reading is a note about the
+        // rig, so a handset that will not hand over the service reports `no_manager` for the
+        // drive instead of failing come-up.
+        val connectivity =
+            getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
         // Built per come-up, so the zone search runs once a session rather than once a
         // report -- and a handset that gained or lost readable zones since the last drive
         // is re-examined rather than trusted from a previous process.
@@ -525,6 +532,10 @@ class SensingService : LifecycleService() {
                 // (a binder call) between them, so the listener firing in that window could
                 // move the count and the transition out of step with each other.
                 val thermalSnapshot = watcher.snapshot()
+                // Read per report, like the skin temperature and for the same reason: the
+                // answer changes during a drive. A tethered handset that loses its hotspot
+                // moves from `wifi` to whatever it falls back to, or to `no_active_network`.
+                val network = NetworkReader.from(connectivity)
                 TelemetryReporter.Sample(
                     thermalStatus = ThermalReader.statusName(power.currentThermalStatus),
                     thermalHeadroom = headroom.value,
@@ -536,6 +547,8 @@ class SensingService : LifecycleService() {
                     lastTransitionFrom = thermalSnapshot.lastTransition?.fromStatus,
                     lastTransitionTo = thermalSnapshot.lastTransition?.toStatus,
                     lastTransitionAtMonoNs = thermalSnapshot.lastTransition?.atMonoNs,
+                    networkTransport = network.value,
+                    networkTransportAbsent = network.absentReason,
                     // What each modality actually put on the wire.
                     delivered = mapOf(
                         "camera_hz" to cameraSent.sent,

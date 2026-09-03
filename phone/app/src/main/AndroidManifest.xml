@@ -5,6 +5,12 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Read-only, install-time, no runtime prompt. Held so the telemetry report can name
+         which network the handset's own traffic is on: the HERE query is the only thing
+         that leaves this phone by IP, and on a tethered handset that answer changes during
+         a drive. Without it every sample reports `permission_denied`. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
     <!-- Typed foreground services, required from API 34. The service holds the

@@ -29,6 +29,19 @@ The phone stays dumb: it captures or queries at the commanded rate and forwards
 raw data. All interpretation, association, and control live on the Jetson.
 The cloud supplies observability through HERE; it is not in the control loop.
 
+**The phone is tethered, not on its own SIM.** It reaches the internet through a
+personal phone's WiFi hotspot, because the alternative was buying a SIM and a plan
+for one experiment. The system does not depend on which it is: the sensor link to
+the Jetson is USB in the car and loopback over `adb reverse` on the bench, and the
+only phone traffic that leaves the handset by IP is the HERE query. Two measured
+quantities do depend on it, and both are reported as properties of this rig rather
+than of the system: HERE feed lag includes the tether hop and the tethering phone's
+radio, and the phone's own radio load during the thermal soak is WiFi rather than
+cellular. Every telemetry report names the network it was built on
+(`network_transport`, with `network_transport_absent` when there is none), so which
+network a drive ran on is recorded rather than assumed — a tether can drop and be
+replaced mid-drive by a fallback or by nothing.
+
 ## Non-goals
 
 Both devices are powered from the car, so **energy and battery life are not
@@ -1607,7 +1620,16 @@ Everything above is done before the devices meet.
 45. **[COLOCATED]** Thermal soak: sustained maximum-rate run to steady state;
     confirm the phone stays within limits and the controller backs off.
 46. **[COLOCATED]** Failure injection: revoke GPS, kill HERE, unplug the link,
-    and confirm each degraded mode behaves as specified.
+    drop the tether, and confirm each degraded mode behaves as specified.
+
+    The tether is the likeliest network failure in the car and the newest, because
+    it depends on a second handset's battery, thermal state, hotspot idle timeout
+    and incoming calls. It is worth injecting separately from "kill HERE" because
+    the phone cannot tell them apart: a HERE call with no route reports
+    `status = 0`, the same value a DNS failure and an unreachable HERE produce.
+    What distinguishes them in the record is `network_transport` moving to
+    `no_active_network` or to a fallback, so the injection is also the check that
+    that field reports what it is supposed to.
 47. **[COLOCATED]** Sim-contract parity: the observation vector produced live
     matches the simulator's sensing model field for field.
 48. **[COLOCATED]** In-car install: 12 V power for both devices, mounts, cable
@@ -1623,6 +1645,11 @@ Everything above is done before the devices meet.
     shadow-mode predictions held.
 52. Repeat across congested and free-flow conditions on at least three separate
     days, on a corridor known to congest.
+
+Connectivity on every drive is the tethered configuration described under
+Architecture. `network_transport` in each telemetry report, and the run tally in
+`summary.json`, record which network each drive actually ran on, a mid-drive change
+included; a drive whose reports name no network is not assumed to have had one.
 
 Measured on the drives: end-to-end and per-stage latency; achieved versus
 commanded rates and trigger attribution; HERE-reported speed against experienced

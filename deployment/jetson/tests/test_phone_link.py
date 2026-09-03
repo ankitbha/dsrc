@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from policy.advisory import Advisory
+from sensors import phone_link
 from sensors.phone_link import PhoneLink
 from transport.channels import Channel
 from transport.frames import Frame, encode
@@ -695,6 +697,104 @@ class TestTelemetryIngestion:
         finally:
             link.stop()
             phone.close()
+
+    def test_the_network_the_phone_was_on_reaches_the_record(self):
+        from transport.messages import PhoneTelemetry
+
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        try:
+            attach(link, jetson, down)
+            assert up.send(PhoneTelemetry(
+                t_capture_mono_ns=now_mono_ns() + TRUE_OFFSET_NS,
+                thermal_status="nominal", thermal_headroom=0.4,
+                achieved={"camera_hz": 4.9, "gps_hz": 1.0, "imu_hz": 49.8, "here_hz": 0.2},
+                dropped={"camera": 0, "gps": 0, "imu": 0, "here": 0},
+                here_calls=3, here_errors=0, network_transport="wifi",
+            ))
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline and link.telemetry_received == 0:
+                time.sleep(0.02)
+
+            record = link.to_record()["telemetry"]
+            assert record["network_transport"] == "wifi"
+            assert record["network_transport_absent"] is None
+            assert record["network_transport_counts"] == {"wifi": 1}
+            assert record["network_transport_absent_counts"] == {}
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_a_network_that_changes_mid_drive_is_visible_in_the_tally(self):
+        # The reason the record carries a tally and not only the latest value. A
+        # tethered handset that loses its hotspot ends the drive on something other
+        # than it began on, and the last report would describe only the ending.
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        for value in ("wifi", "wifi", "cellular"):
+            link._count_network_transport(SimpleNamespace(network_transport=value))
+        assert link.network_transport_counts == {"wifi": 2, "cellular": 1}
+        assert link.network_transport_absent_counts == {}
+
+    def test_a_reason_is_tallied_apart_from_a_value(self):
+        # Two dicts, so a reason can never be counted as a network the phone was on.
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        link._count_network_transport(SimpleNamespace(network_transport="wifi"))
+        link._count_network_transport(
+            SimpleNamespace(network_transport=None,
+                            network_transport_absent="no_active_network")
+        )
+        assert link.network_transport_counts == {"wifi": 1}
+        assert link.network_transport_absent_counts == {"no_active_network": 1}
+
+    def test_a_phone_naming_neither_is_counted_rather_than_skipped(self):
+        # A build predating the field sends neither key. Skipping it would make "every
+        # report named its network" and "no report ever mentioned one" the same empty
+        # pair of dicts, which is the distinction the tally exists to keep.
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        link._count_network_transport(SimpleNamespace())
+        assert link.network_transport_counts == {}
+        assert link.network_transport_absent_counts == {
+            phone_link.NETWORK_TRANSPORT_UNSPECIFIED: 1
+        }
+
+    def test_exactly_one_tally_moves_per_report(self):
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        reports = [
+            SimpleNamespace(network_transport="wifi"),
+            SimpleNamespace(network_transport="wifi+vpn"),
+            SimpleNamespace(network_transport=None, network_transport_absent="no_manager"),
+            SimpleNamespace(network_transport=None, network_transport_absent="accessor_raised"),
+            SimpleNamespace(),
+        ]
+        for report in reports:
+            link._count_network_transport(report)
+        counted = sum(link.network_transport_counts.values()) + sum(
+            link.network_transport_absent_counts.values()
+        )
+        assert counted == len(reports)
+
+    def test_the_network_tally_survives_a_rebind(self):
+        # Run-scoped where `telemetry_received` beside it is per session: a rebind does
+        # not change which network the handset is on, and the question the tally answers
+        # is what the drive ran over. Reset here, a drive with three redials would report
+        # only whatever the last session saw.
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            link._count_network_transport(SimpleNamespace(network_transport="wifi"))
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two")
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert link.telemetry_received == 0, "the per-session counter should reset"
+            assert link.network_transport_counts == {"wifi": 1}
+            second.hang_up()
+        finally:
+            link.stop()
 
     def test_a_closed_session_stops_the_telemetry_reader(self):
         phone, jetson, up, down = phone_and_jetson()
