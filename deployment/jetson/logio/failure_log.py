@@ -1316,7 +1316,10 @@ class FailureSampler:
             and self._blind_last_mono is not None
             and now - self._blind_last_mono >= BLIND_EPISODE_MIN_S
         ):
-            self._close_episode(st, self._by_name["camera.blind_ticks"], now, t_wall, OUTCOME_UNOBSERVABLE)
+            self._close_episode(
+                st, self._by_name["camera.blind_ticks"], now, t_wall, OUTCOME_UNOBSERVABLE,
+                observed_until=self._blind_last_mono,
+            )
 
     def _open_episode(
         self, st: _SourceState, source: Source, now: float, t_wall: float,
@@ -1364,14 +1367,25 @@ class FailureSampler:
 
     def _close_episode(
         self, st: _SourceState, source: Source, now: float, t_wall: float, outcome: str,
+        *, observed_until: float | None = None,
     ) -> None:
         episode = st.open_episode
         assert episode is not None
         if outcome == OUTCOME_UNOBSERVABLE:
             # The last instant this drive actually watched the source, not
-            # the last occurrence and not the moment the gap was noticed --
-            # see `_SourceState.last_readable_t_mono`'s own docstring.
-            episode.closed_t_mono = st.last_readable_t_mono
+            # the last occurrence and not the moment the gap was noticed.
+            # For a regularly scanned source that instant is
+            # `last_readable_t_mono` -- see its own docstring. It is wrong
+            # for `camera.blind_ticks`: that pseudo-source's accessor
+            # reports `readable=True` unconditionally (PSEUDO_SOURCES), so
+            # `last_readable_t_mono` there tracks the most recent ordinary
+            # SCAN PASS, which carries no information about the camera at
+            # all, rather than the most recent evidence of blindness. A
+            # caller that has that evidence (`_check_pseudo_source_quiet`,
+            # via `_blind_last_mono`) passes it as `observed_until`, which
+            # takes priority; a caller with none falls through to the
+            # scanned-source behaviour unchanged.
+            episode.closed_t_mono = observed_until if observed_until is not None else st.last_readable_t_mono
         else:
             episode.closed_t_mono = now
         episode.closed_t_wall = t_wall

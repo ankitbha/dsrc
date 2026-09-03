@@ -1211,6 +1211,39 @@ class TestBlindTicks:
         assert row["episodes"] == 1
         assert closes[0]["outcome"] == OUTCOME_UNOBSERVABLE
 
+    def test_an_unobservable_close_reports_when_blindness_was_last_confirmed_not_the_last_scan(self):
+        # A16: `last_readable_t_mono` advances on every ordinary scan pass
+        # regardless of this pseudo-source's real state -- its accessor
+        # always reports readable=True (PSEUDO_SOURCES) -- so it carries no
+        # information about the camera at all. Using it as the unobservable
+        # close's own instant credited every scan pass that ran after the
+        # tick loop had already died with no more evidence, overstating the
+        # observed blindness by however long the sampler kept scanning past
+        # the last real notification.
+        now = [0.0]
+        s = sampler(now=now)
+        # Notifications every 1.0 s from t=2 to t=16 (15 of them); the
+        # episode promotes once the streak reaches BLIND_EPISODE_MIN_S at
+        # t=12, back-dated to t=2.
+        for t in range(2, 17):
+            now[0] = float(t)
+            s.note_no_frame()
+        # The tick loop then dies -- no more note_no_frame, no
+        # end_of_stream -- but the sampler's own 1 Hz scan thread keeps
+        # running regardless, independent of the tick loop.
+        for t in range(17, 27):
+            now[0] = float(t)
+            s.sample_once()
+        row = s.to_record()["sources"]["camera.blind_ticks"]
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert row["episodes"] == 1
+        assert closes[0]["outcome"] == OUTCOME_UNOBSERVABLE
+        assert closes[0]["n"] == 15
+        # The blindness was confirmed from t=2 (first notification) to
+        # t=16 (last notification): 14.0 s, not 24.0 s (to t=26, the last
+        # scan pass before the quiet bound tripped).
+        assert closes[0]["duration_s"] == pytest.approx(14.0)
+
     def test_the_tick_loop_exception_is_recorded(self):
         s = sampler()
         try:
