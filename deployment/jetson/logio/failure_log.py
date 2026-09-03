@@ -1386,6 +1386,18 @@ class FailureSampler:
             # takes priority; a caller with none falls through to the
             # scanned-source behaviour unchanged.
             episode.closed_t_mono = observed_until if observed_until is not None else st.last_readable_t_mono
+        elif outcome == OUTCOME_OPEN_AT_END and source.name == "pipeline.exception":
+            # `pipeline.exception` has no quiet-streak or scan-based close
+            # of its own (PSEUDO_SOURCES): every close is teardown, at
+            # whatever instant the run happened to end, which can be
+            # arbitrarily long after the last exception if everything in
+            # between ran healthy. `episode.last_t_mono` -- kept current by
+            # every `note_pipeline_exception` call, including the one that
+            # opened it -- is the last instant this episode has any
+            # evidence for. The outcome word already says a recovery was
+            # never observed; the duration should not also claim the
+            # source was unwell for the healthy time in between.
+            episode.closed_t_mono = episode.last_t_mono
         else:
             episode.closed_t_mono = now
         episode.closed_t_wall = t_wall

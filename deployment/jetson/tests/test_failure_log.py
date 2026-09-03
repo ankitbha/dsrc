@@ -1274,6 +1274,67 @@ class TestBlindTicks:
         closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
         assert closes[0]["n"] == 3
 
+    def test_an_instantaneous_exception_followed_by_healthy_running_reports_zero_duration(self):
+        # A17: pipeline.exception has no scan-based or quiet-streak close of
+        # its own (PSEUDO_SOURCES), so a single exception's episode stayed
+        # open until teardown regardless of how long the run then ran
+        # healthy -- reporting a multi-thousand-second failure for an
+        # instant. The outcome word (open_at_end) already says no recovery
+        # was ever observed; the duration must not also claim the healthy
+        # time in between.
+        now = [0.0]
+        s = sampler(now=now)
+        now[0] = 10.0
+        try:
+            raise ValueError("boom")
+        except ValueError as exc:
+            s.note_pipeline_exception(exc)
+        now[0] = 3000.0  # 2990 s of healthy running follows
+        s.stop()
+        row = s.to_record()["sources"]["pipeline.exception"]
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert row["episodes"] == 1
+        assert closes[0]["outcome"] == OUTCOME_OPEN_AT_END
+        assert closes[0]["n"] == 1
+        assert closes[0]["duration_s"] == pytest.approx(0.0)
+
+    def test_repeated_exceptions_across_a_long_window_still_span_them(self):
+        now = [0.0]
+        s = sampler(now=now)
+        for t, msg in ((10.0, "a"), (500.0, "b"), (990.0, "c")):
+            now[0] = t
+            try:
+                raise ValueError(msg)
+            except ValueError as exc:
+                s.note_pipeline_exception(exc)
+        now[0] = 3000.0
+        s.stop()
+        row = s.to_record()["sources"]["pipeline.exception"]
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert row["episodes"] == 1
+        assert closes[0]["n"] == 3
+        assert closes[0]["outcome"] == OUTCOME_OPEN_AT_END
+        # Spans the first exception (t=10) to the last (t=990), not to
+        # teardown (t=3000).
+        assert closes[0]["duration_s"] == pytest.approx(980.0)
+
+    def test_an_exception_at_the_very_end_of_a_run_still_reads_open_at_end(self):
+        # The one shape that genuinely was unresolved when the run stopped:
+        # no healthy time follows the exception at all.
+        now = [0.0]
+        s = sampler(now=now)
+        now[0] = 100.0
+        try:
+            raise ValueError("boom")
+        except ValueError as exc:
+            s.note_pipeline_exception(exc)
+        s.stop()
+        row = s.to_record()["sources"]["pipeline.exception"]
+        closes = [l for l in s._sink.lines if l.get("type") == "failure_event" and l["phase"] == "close"]
+        assert row["episodes"] == 1
+        assert closes[0]["outcome"] == OUTCOME_OPEN_AT_END
+        assert closes[0]["duration_s"] == pytest.approx(0.0)
+
 
 # ---------------------------------------------------------------------------
 # M1: the accounting invariant, walked across every registry row rather than
