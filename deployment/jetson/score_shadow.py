@@ -684,11 +684,16 @@ def render_table(result: dict[str, Any]) -> str:
                      f"scored={lt['ticks_scored']} missing={lt['ticks_missing']}")
     tc = result["tick_coverage"]
     if tc is not None:
-        missing = tc["missing_ticks"]
-        expected = tc["expected_ticks"]
-        fraction = missing / expected if expected else 0.0
-        lines.append(f"  tick_coverage: actual={tc['actual_ticks']} missing={missing} "
-                     f"({fraction:.1%} of {expected} expected)")
+        # Reported separately, never summed: `ticks_absent_from_log` (exact,
+        # from tick_id holes) and `ticks_never_produced` (an estimate from
+        # gap widths) answer different questions and can each independently
+        # be `None` with its own reason when its own trust conditions fail.
+        absent, absent_reason = tc["ticks_absent_from_log"], tc["ticks_absent_from_log_reason"]
+        never, never_reason = tc["ticks_never_produced"], tc["ticks_never_produced_reason"]
+        absent_text = f"unmeasurable ({absent_reason})" if absent_reason else str(absent)
+        never_text = f"unmeasurable ({never_reason})" if never_reason else str(never)
+        lines.append(f"  tick_coverage: actual={tc['actual_ticks']} "
+                     f"absent_from_log={absent_text} never_produced={never_text}")
     ri = result["replay_identity"]
     lines.append(f"  replay_identity: {ri['status']} ({ri['mismatched']}/{ri['ticks']} mismatched, "
                  f"{ri['compared']} keys compared, {len(ri['log_only'])} log-only: {ri['log_only']})")

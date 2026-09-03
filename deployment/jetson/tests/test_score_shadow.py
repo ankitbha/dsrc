@@ -540,7 +540,8 @@ class TestTickCoverage:
         run_dir = write_run(tmp_path, n=10)
         _inject_t_wall(run_dir)
         result = score_shadow.score(run_dir)
-        assert result["tick_coverage"]["missing_ticks"] == 0
+        assert result["tick_coverage"]["ticks_absent_from_log"] == 0
+        assert result["tick_coverage"]["ticks_never_produced"] == 0
 
     def test_fewer_than_three_ticks_is_not_applicable(self, tmp_path):
         run_dir = write_run(tmp_path, n=2)
@@ -566,10 +567,11 @@ class TestTickCoverage:
 
         result = score_shadow.score(run_dir)
         assert result["log_truncation"]["ticks_missing"] == 0
-        assert result["tick_coverage"]["missing_ticks"] > 0
+        assert result["tick_coverage"]["ticks_absent_from_log"] == 0
+        assert result["tick_coverage"]["ticks_never_produced"] > 0
 
         table = score_shadow.render_table(result)
-        assert "tick_coverage: actual=10 missing=" in table
+        assert "tick_coverage: actual=10 absent_from_log=0 never_produced=" in table
 
 
 class TestSegments:

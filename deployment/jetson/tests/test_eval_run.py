@@ -300,24 +300,26 @@ class TestATruncatedLogIsNotACompleteRun:
 class TestTickCoverageGate:
     """A5: `log_integrity` compares the log against what the run itself
     reported producing, so a real outage that reduces both sides together is
-    invisible to it -- `missing_ticks` reads zero by construction. This gate
-    reads the gap distribution instead, so a real interruption fails it even
-    when the run's own reported tick count and every ratio-based gate agree
-    nothing is missing.
+    invisible to it -- its own shortfall reads zero by construction. The
+    `tick_coverage_never_produced` gate reads the gap distribution instead,
+    so a real interruption fails it even when the run's own reported tick
+    count and every ratio-based gate agree nothing is missing.
     """
 
     def test_a_real_outage_fails_the_gate_and_the_overall_verdict(self, tmp_path):
         ticks = [make_tick(i) for i in range(90)]
         # A 10 s gap after tick 40 (300 ticks' worth at 30 Hz) -- every tick
-        # keeps its own relative spacing, just shifted forward in time.
+        # keeps its own relative spacing and its own tick_id, just shifted
+        # forward in time, so only the never-produced axis sees this.
         for t in ticks[40:]:
             t["t_wall"] += 10.0
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
 
-        gate = result["gates"]["tick_coverage"]
+        gate = result["gates"]["tick_coverage_never_produced"]
         assert gate["pass"] is False
         assert gate["value"] > GATE_TICK_COVERAGE_MISSING_FRACTION
+        assert result["gates"]["tick_coverage_absent_from_log"]["value"] == 0.0
         # The ratio-based gates this outage does not touch still read healthy --
         # the point of the finding: nothing else in the report says a span of
         # the drive is missing.
@@ -328,9 +330,10 @@ class TestTickCoverageGate:
         ticks = [make_tick(i) for i in range(90)]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
-        gate = result["gates"]["tick_coverage"]
-        assert gate["pass"] is True
-        assert gate["value"] == 0.0
+        assert result["gates"]["tick_coverage_absent_from_log"]["pass"] is True
+        assert result["gates"]["tick_coverage_absent_from_log"]["value"] == 0.0
+        assert result["gates"]["tick_coverage_never_produced"]["pass"] is True
+        assert result["gates"]["tick_coverage_never_produced"]["value"] == 0.0
 
 
 class TestTickCoverageDistinguishesRateChangeFromLoss:
@@ -352,25 +355,27 @@ class TestTickCoverageDistinguishesRateChangeFromLoss:
             t["t_wall"] = base_t_wall + offset * (1.0 / 6.0)
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
-        gate = result["gates"]["tick_coverage"]
+        gate = result["gates"]["tick_coverage_never_produced"]
         assert gate["value"] == 0.0
         assert gate["pass"] is True
 
     def test_an_evenly_distributed_loss_is_caught_through_tick_id_holes(self, tmp_path):
         all_ticks = [make_tick(i) for i in range(90)]
         # Every third tick deleted -- no single gap stands out (each
-        # surviving gap is a uniform multiple of the base period), so a
-        # heuristic reading only gap SIZE cannot see this at all. tick_id
-        # itself holes exactly where a tick used to be.
+        # surviving gap is a uniform multiple of the base period, well under
+        # the gap_multiple threshold), so the never-produced axis cannot see
+        # this at all. tick_id itself holes exactly where a tick used to be,
+        # which is exactly what the absent-from-log axis reads.
         kept = [t for i, t in enumerate(all_ticks) if i % 3 != 2]
         run_dir = write_run(
             tmp_path, kept, scenario=scenario_record(),
             summary={"ticks": len(kept), "camera_dropped_frames": 0, "policy_trained": False},
         )
         result = analyze(run_dir)
-        gate = result["gates"]["tick_coverage"]
+        gate = result["gates"]["tick_coverage_absent_from_log"]
         assert gate["pass"] is False
         assert gate["value"] == pytest.approx(30 / 90, abs=0.01)
+        assert result["gates"]["tick_coverage_never_produced"]["value"] == 0.0
         assert result["overall_pass"] is False
 
 
@@ -386,9 +391,31 @@ class TestTickCoverageGateIsNoneWhenUnmeasurable:
         ticks = [make_tick(0), make_tick(1)]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
-        gate = result["gates"]["tick_coverage"]
-        assert gate["pass"] is None
-        assert gate["value"] is None
+        assert result["gates"]["tick_coverage_absent_from_log"]["pass"] is None
+        assert result["gates"]["tick_coverage_absent_from_log"]["value"] is None
+        assert result["gates"]["tick_coverage_never_produced"]["pass"] is None
+        assert result["gates"]["tick_coverage_never_produced"]["value"] is None
+
+
+class TestUntrustworthyIdsDoNotSilentlyPassOverall:
+    """A drive with too few ticks to measure coverage at all is ordinary
+    not-applicable -- the same as a GPS gate on a drive with no GPS -- and
+    does not touch the verdict, per the test above. A drive whose ids
+    cannot be trusted (a restart, half-null ids, ids all identical) is a
+    different fact: this drive's own tick coverage is unknown, not absent,
+    and both gates reading `None` must not let an otherwise-healthy run
+    read as an overall pass.
+    """
+
+    def test_duplicated_tick_ids_leave_both_gates_none_and_fail_the_run(self, tmp_path):
+        ticks = [make_tick(i) for i in range(20)]
+        for t in ticks:
+            t["tick_id"] = 0  # every tick claims the same id
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        assert result["gates"]["tick_coverage_absent_from_log"]["pass"] is None
+        assert result["gates"]["tick_coverage_never_produced"]["pass"] is None
+        assert result["overall_pass"] is False
 
 
 # -- joining the phone's own log against the Jetson's ticks -----------------

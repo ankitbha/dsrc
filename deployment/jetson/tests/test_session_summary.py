@@ -369,7 +369,9 @@ class TestSessionSummaryShape:
         if session["tick_coverage"] is not None:
             assert set(session["tick_coverage"].keys()) == {
                 "actual_ticks", "span_s", "median_gap_s", "largest_gap_s",
-                "next_largest_gap_s", "gap_multiple", "missing_ticks", "expected_ticks",
+                "next_largest_gap_s", "gap_multiple",
+                "ticks_absent_from_log", "ticks_absent_from_log_reason",
+                "ticks_never_produced", "ticks_never_produced_reason",
             }
         for axis in session["axes"]:
             assert set(axis.keys()) == {
@@ -584,12 +586,14 @@ class TestExpectedFromCommanded:
         gap-weighted value on an unevenly spaced series instead.
         """
         points = [(0.0, 2.0), (1.0, 2.0), (5.0, 2.0)]
-        # A9: every point's value is 2.0 Hz, so each gap is capped against
-        # its OWN implied period (1 / 2.0 = 0.5 s), not a population median
-        # -- cap = 3 * 0.5 = 1.5 s. gaps = [1, 4]; capped = [1, 1.5]
-        # (the second gap exceeds 1.5 s); trailing weight is also capped at
-        # 1.5. weights = [1, 1.5, 1.5]; sum(v * w) = 2*1 + 2*1.5 + 2*1.5 = 8
-        stat = _time_weighted_integral(points)
+        # A12: the caller supplies the series' own sampling period per point
+        # (here, 1 / 2.0 = 0.5 s -- as if each point's own value were also
+        # its sampling rate, the case A9 originally covered), not a
+        # population median -- cap = 3 * 0.5 = 1.5 s. gaps = [1, 4]; capped =
+        # [1, 1.5] (the second gap exceeds 1.5 s); trailing weight is also
+        # capped at 1.5. weights = [1, 1.5, 1.5]; sum(v*w) = 2*1+2*1.5+2*1.5 = 8
+        periods = [1.0 / v for _, v in points]
+        stat = _time_weighted_integral(points, periods)
         assert stat.value == pytest.approx(8.0)
         assert stat.span_s == pytest.approx(5.0)
         assert stat.weighted_over_s == pytest.approx(4.0)
@@ -626,12 +630,17 @@ class TestOutageWeightCapping:
 
 
 class TestPerPointRateCapping:
-    """A9: `_time_weighted_weights`'s cap used a population median, which
-    assumes one characteristic period -- wrong for a controller built to
-    run at more than one rate (idle vs active, or thermally scaled as low
-    as 0.15x). Capping a slow regime's gaps at a multiple of a fast
-    regime's median period truncates every one of them, biasing the mean
-    toward whichever regime holds the majority of points.
+    """A9/A12: `_time_weighted_weights`'s cap must not come from a single
+    population median, which assumes one characteristic period -- wrong for
+    a controller built to run at more than one rate (idle vs active, or
+    thermally scaled as low as 0.15x). Capping a slow regime's gaps at a
+    multiple of a fast regime's median period truncates every one of them,
+    biasing the mean toward whichever regime holds the majority of points.
+    The cap comes from a `sample_period_s` the caller supplies per point --
+    for a per-tick series that is the tick period implied by `camera_hz` at
+    that point (A12), which these tests stand in for directly as `1 / v`,
+    since the series here legitimately runs at two different rates and `v`
+    is one of them.
     """
 
     def test_a_minority_slow_regime_is_not_truncated_by_the_fast_majority(self):
@@ -645,17 +654,18 @@ class TestPerPointRateCapping:
         slow = [(slow_start + i * 1.0, 1.0) for i in range(5)]
         points = fast + slow
 
-        stat = _time_weighted_integral(points)
-        # Each point's own value is the rate that gap-caps against ITS OWN
-        # implied period, so the four intra-slow-regime gaps (1.0 s, period
-        # 1.0 s) are not capped at all. Verified against the function
-        # itself: 27.0, against 25.0 a population-median cap would give.
+        periods = [1.0 / v for _, v in points]
+        stat = _time_weighted_integral(points, periods)
+        # Each point's own period gap-caps against ITS OWN implied period,
+        # so the four intra-slow-regime gaps (1.0 s, period 1.0 s) are not
+        # capped at all. Verified against the function itself: 27.0,
+        # against 25.0 a population-median cap would give.
         assert stat.value == pytest.approx(27.0)
 
     def test_the_same_series_would_read_lower_under_a_population_median_cap(self):
         """Names the OLD defect directly: recomputes what a single global
         median-based cap would have given for the same series, and shows
-        the per-point-rate result is higher -- the slow regime's gaps
+        the per-point-period result is higher -- the slow regime's gaps
         credited at their own width rather than truncated to the fast
         regime's cadence.
         """
@@ -677,7 +687,8 @@ class TestPerPointRateCapping:
         old_weights.append(min(gaps[-1], cap))
         old_value = sum(v * w for (_, v), w in zip(points, old_weights))
 
-        new_value = _time_weighted_integral(points).value
+        periods = [1.0 / v for _, v in points]
+        new_value = _time_weighted_integral(points, periods).value
         assert new_value > old_value
         assert old_value == pytest.approx(25.0)
         assert new_value == pytest.approx(27.0)
@@ -827,15 +838,19 @@ class TestCommandedByValue:
         from a plain sample mean, which happen to agree whenever every gap is
         the same size, and this test's name claims that distinction.
 
-        A9: each gap is capped against the period implied by the point
-        that precedes it (1 / value), not a population median. gaps =
-        [1, 1, 8]; the first two points are 1.0 Hz (period 1 s, cap 3 s --
-        neither 1 s gap is affected); the third point is still 1.0 Hz, so
-        the 8 s gap is also capped at 3 s. The series' own last point
-        (5.0 Hz, period 0.2 s) caps its own trailing weight at 0.6 s.
+        A12: `camera_hz` is the one rate whose own value IS its own sampling
+        period, since a per-tick series is sampled once per tick and
+        `camera_hz` commands the tick rate itself -- so `1 / value` is passed
+        explicitly as `sample_period_s` here rather than a population
+        median. gaps = [1, 1, 8]; the first two points are 1.0 Hz (period
+        1 s, cap 3 s -- neither 1 s gap is affected); the third point is
+        still 1.0 Hz, so the 8 s gap is also capped at 3 s. The series' own
+        last point (5.0 Hz, period 0.2 s) caps its own trailing weight at
+        0.6 s.
         """
         points = [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (10.0, 5.0)]
-        mean = _time_weighted_mean(points).value
+        periods = [1.0 / v for _, v in points]
+        mean = _time_weighted_mean(points, periods).value
         sample_mean = sum(v for _, v in points) / len(points)
         assert mean != pytest.approx(sample_mean)
         # weights = [1, 1, 3, 0.6]; sum(v*w) = 1+1+3+3 = 8, total weight = 5.6
@@ -852,6 +867,18 @@ class TestCommandedByValue:
         # but its long, mostly-unobserved hold is no longer credited whole.
         assert _time_weighted_mean(points).value != pytest.approx(sample_mean)
         assert _time_weighted_mean(points).value == pytest.approx(36 / 8)
+
+    def test_a_sample_period_list_the_wrong_length_falls_back_to_the_median_cap(self):
+        # A `sample_period_s` list has to stay aligned with `points` one
+        # entry per point, or `zip` would pair a period with the wrong
+        # point once the two disagree in length -- falls back to the
+        # median cap instead, the same as passing no periods at all.
+        points = [(0.0, 2.0), (1.0, 2.0), (5.0, 2.0)]
+        too_short = [1.0 / v for _, v in points][:-1]
+        with_periods = _time_weighted_mean(points, too_short)
+        with_none = _time_weighted_mean(points, None)
+        assert with_periods.value == pytest.approx(with_none.value)
+        assert with_periods.weighted_over_s == pytest.approx(with_none.weighted_over_s)
 
 
 class TestTriggersRulesMissing:
@@ -1500,17 +1527,20 @@ class TestTickCoverageSeesWhatTheAxesCannot:
 
     def test_an_uninterrupted_run_reports_no_missing_ticks(self):
         cov = _tick_coverage(_ticks_at([0.2] * 50))
-        assert cov["missing_ticks"] == 0
-        assert cov["actual_ticks"] == cov["expected_ticks"]
+        assert cov["ticks_absent_from_log"] == 0
+        assert cov["ticks_never_produced"] == 0
+        assert cov["actual_ticks"] == 51
 
     def test_one_long_gap_is_counted_and_the_next_largest_is_named_beside_it(self):
         # 20 ticks at 0.2 s, one 54.58 s hole, 20 more -- the shape the real
         # degraded drive produced, where the next-largest gap was 0.31 s.
+        # The ids are intact throughout -- nothing was deleted -- so only the
+        # never-produced axis, estimated from the gap's width, sees this.
         cov = _tick_coverage(_ticks_at([0.2] * 20 + [54.58] + [0.2] * 20))
         assert cov["largest_gap_s"] == pytest.approx(54.58)
         assert cov["next_largest_gap_s"] == pytest.approx(0.2)
-        assert cov["missing_ticks"] > 250
-        assert cov["expected_ticks"] > cov["actual_ticks"]
+        assert cov["ticks_absent_from_log"] == 0
+        assert cov["ticks_never_produced"] > 250
 
     def test_the_estimate_is_not_span_times_rate_which_could_never_fail(self):
         # `expected = span x achieved rate` is algebraically forced: the rate
@@ -1520,10 +1550,124 @@ class TestTickCoverageSeesWhatTheAxesCannot:
         cov = _tick_coverage(_ticks_at([0.2] * 20 + [54.58] + [0.2] * 20))
         span, actual = cov["span_s"], cov["actual_ticks"]
         forced = span * ((actual - 1) / span)
-        assert cov["expected_ticks"] > forced + 1
+        expected_ticks = actual + cov["ticks_never_produced"]
+        assert expected_ticks > forced + 1
 
     def test_fewer_than_three_ticks_is_absent_not_a_manufactured_zero(self):
         assert _tick_coverage(_ticks_at([0.2])) is None
+
+
+class TestTickCoverageReportsTwoQuestionsNotOne:
+    """The revised design (superseding the exact-count-only redesign that
+    preceded it): `ticks_absent_from_log` (ids, exact) and
+    `ticks_never_produced` (gap widths, an estimate) answer different
+    questions and are never summed into one number. An outage that removes
+    no records leaves no id hole at all -- an exact id count is
+    structurally blind to it, which is the reason the estimate exists
+    rather than evidence the estimate should be deleted.
+    """
+
+    def test_a_deletion_only_drive_reports_the_exact_count_and_no_phantom_never_produced(self):
+        # 1000 ticks produced at a steady 0.1 s cadence; 300 of them (three
+        # consecutive ids per block of ten, spread across the whole drive)
+        # deleted from the log afterward. The surviving ticks' own t_wall
+        # values are exactly what the steady cadence would have given them,
+        # so the gap a deletion leaves is not ALSO evidence of a pause --
+        # ticks_never_produced must not re-count the same loss the id hole
+        # already counts exactly (A13: a deleted record inside a real
+        # outage used to erase almost the whole outage from the estimate;
+        # this is the same mechanism with no outage at all, so the estimate
+        # must land on exactly zero, not just "less than before").
+        # A trailing block (ids 1000..1009) is left fully intact so the
+        # highest surviving id is proof the deleted tail ids existed too --
+        # the exact count is blind to a hole it cannot see evidence for,
+        # which is a truncated tail, not a hole in the middle.
+        period = 0.1
+        deleted_ids = {10 * block + offset for block in range(100) for offset in (7, 8, 9)}
+        ticks = [
+            {"type": "tick", "tick_id": i, "t_wall": 1000.0 + i * period, "e2e_ms": 10.0}
+            for i in range(1010) if i not in deleted_ids
+        ]
+        cov = _tick_coverage(ticks)
+        assert cov["ticks_absent_from_log"] == 300
+        assert cov["ticks_never_produced"] == 0
+
+    def test_the_local_reference_uses_the_leading_cadence_not_a_pooled_average(self):
+        # A15/B15: a rate transition sits right where the drive was also
+        # interrupted. Pooling gaps from both sides of the interruption
+        # into one median describes a cadence the drive never ran at --
+        # only the leading side (what the drive was actually doing up to
+        # the gap) is read.
+        fast_period, slow_period, gap_s = 0.2, 1.0, 5.0
+        fast = [(i, 1000.0 + i * fast_period) for i in range(30)]
+        slow_start_t = fast[-1][1] + gap_s
+        slow = [(30 + i, slow_start_t + i * slow_period) for i in range(30)]
+        ticks = [
+            {"type": "tick", "tick_id": tid, "t_wall": t, "e2e_ms": 10.0}
+            for tid, t in fast + slow
+        ]
+        cov = _tick_coverage(ticks)
+        assert cov["ticks_absent_from_log"] == 0
+        # Leading (fast, 0.2 s) cadence: 5 s / 0.2 s - 1 = 24 missing ticks.
+        # A pooled median across both cadences (about 0.6 s) would give
+        # about 7 instead -- badly under-counting a real 5 s outage.
+        assert cov["ticks_never_produced"] == 24
+
+    def test_a_backward_clock_step_with_nothing_lost_declines_rather_than_reporting_loss(self):
+        # A14: production order (tick_id, and the order ticks were written)
+        # is intact and nothing was lost, but partway through, t_wall reads
+        # a value behind its own neighbours (an NTP correction, a re-synced
+        # clock). Sorting these same ticks by t_wall would then put them in
+        # a different order than they are already in, so the estimate must
+        # decline rather than manufacture a loss from a width that never
+        # happened this way. A 2 s step like this used to read as 0.2308
+        # missing and fail a drive that lost nothing.
+        n = 300
+        t_walls = [1000.0 + i * 0.1 for i in range(n)]
+        t_walls[150] -= 2.0
+        ticks = [
+            {"type": "tick", "tick_id": i, "t_wall": t_walls[i], "e2e_ms": 10.0}
+            for i in range(n)
+        ]
+        cov = _tick_coverage(ticks)
+        assert cov["ticks_absent_from_log"] == 0
+        assert cov["ticks_never_produced"] is None
+        assert cov["ticks_never_produced_reason"] is not None
+
+    def test_half_null_ids_decline_both_axes_with_a_named_reason(self):
+        # The validator confirmed the old code silently reported 0 for
+        # this shape rather than refusing to guess.
+        ticks = [
+            {
+                "type": "tick", "tick_id": (i if i % 2 == 0 else None),
+                "t_wall": 1000.0 + i * 0.1, "e2e_ms": 10.0,
+            }
+            for i in range(20)
+        ]
+        cov = _tick_coverage(ticks)
+        assert cov["ticks_absent_from_log"] is None
+        assert cov["ticks_absent_from_log_reason"] is not None
+        assert cov["ticks_never_produced"] is None
+        assert cov["ticks_never_produced_reason"] is not None
+
+    def test_fully_duplicated_ids_decline_both_axes_with_a_named_reason(self):
+        ticks = [
+            {"type": "tick", "tick_id": 0, "t_wall": 1000.0 + i * 0.1, "e2e_ms": 10.0}
+            for i in range(20)
+        ]
+        cov = _tick_coverage(ticks)
+        assert cov["ticks_absent_from_log"] is None
+        assert cov["ticks_never_produced"] is None
+
+    def test_a_mid_drive_restart_declines_both_axes_with_a_named_reason(self):
+        ids = list(range(15)) + list(range(15))  # the counter restarts at 0
+        ticks = [
+            {"type": "tick", "tick_id": tid, "t_wall": 1000.0 + i * 0.1, "e2e_ms": 10.0}
+            for i, tid in enumerate(ids)
+        ]
+        cov = _tick_coverage(ticks)
+        assert cov["ticks_absent_from_log"] is None
+        assert cov["ticks_never_produced"] is None
 
 
 class TestProvenanceNeedsPrimaryEvidence:

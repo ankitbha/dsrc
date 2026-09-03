@@ -76,9 +76,10 @@ GATE_GPS_FRESH_FRACTION = 0.95
 GATE_GPS_SPEED_RMSE_MPS = 1.0
 GATE_VEHICLE_TICK_FRACTION = 0.50
 #: A ratio, not a raw tick count, so the threshold reads the same regardless
-#: of a drive's length: `_tick_coverage`'s missing_ticks over its own
-#: expected_ticks (actual plus missing) -- the fraction of the drive's
-#: expected span that a gap this large or bigger would have to have cost.
+#: of a drive's length: shared by `_tick_coverage`'s two independent axes,
+#: each over its own actual-plus-its-own-missing denominator -- the fraction
+#: of the drive's expected span that a gap this large or bigger would have
+#: to have cost, on that axis alone.
 GATE_TICK_COVERAGE_MISSING_FRACTION = 0.05
 DROPOUT_RECOVERY_MARGIN_S = 2.5  # stale_after_s + one fix interval
 
@@ -946,16 +947,43 @@ def analyze(
     # that destroys the numerator and denominator together. `None` (fewer
     # than three ticks, or the run's clock never advanced) is not applicable
     # rather than a manufactured pass or fail.
+    #
+    # Two separate gates, not one: `_tick_coverage` answers two different
+    # questions (ticks lost from the log vs ticks never produced) and a
+    # single combined number cannot fail for one reason and tell a reader
+    # which. Each is its own fraction over its own "actual plus this axis's
+    # own missing" denominator, so neither ever borrows the other's count.
     coverage = _tick_coverage(ticks)
-    coverage_fraction = (
-        coverage["missing_ticks"] / coverage["expected_ticks"] if coverage else None
+    ticks_absent = coverage["ticks_absent_from_log"] if coverage else None
+    ticks_never = coverage["ticks_never_produced"] if coverage else None
+    absent_fraction = (
+        ticks_absent / (coverage["actual_ticks"] + ticks_absent)
+        if coverage and ticks_absent is not None else None
+    )
+    never_fraction = (
+        ticks_never / (coverage["actual_ticks"] + ticks_never)
+        if coverage and ticks_never is not None else None
     )
     gate(
-        "tick_coverage",
-        round(coverage_fraction, 4) if coverage_fraction is not None else None,
+        "tick_coverage_absent_from_log",
+        round(absent_fraction, 4) if absent_fraction is not None else None,
         f"<= {GATE_TICK_COVERAGE_MISSING_FRACTION} missing/expected",
-        coverage_fraction <= GATE_TICK_COVERAGE_MISSING_FRACTION if coverage_fraction is not None else None,
+        absent_fraction <= GATE_TICK_COVERAGE_MISSING_FRACTION if absent_fraction is not None else None,
     )
+    gate(
+        "tick_coverage_never_produced",
+        round(never_fraction, 4) if never_fraction is not None else None,
+        f"<= {GATE_TICK_COVERAGE_MISSING_FRACTION} missing/expected",
+        never_fraction <= GATE_TICK_COVERAGE_MISSING_FRACTION if never_fraction is not None else None,
+    )
+    # Coverage the drive HAS (fewer than three wall-timed ticks) is ordinary
+    # not-applicable, the same as a GPS gate on a drive with no GPS, and does
+    # not touch the verdict below. Coverage that exists but cannot vouch for
+    # itself -- ids that fail `_tick_id_trust_reason`, or a clock caught
+    # moving out of sequence -- is a different fact: this drive's coverage is
+    # unknown, not absent, and must not read as a silent pass just because
+    # both gates above are individually excluded from `applicable`.
+    coverage_untrustworthy = coverage is not None and (ticks_absent is None or ticks_never is None)
     applicable = [g["pass"] for g in gates.values() if g["pass"] is not None]
     overall = all(applicable) if applicable else False
 
@@ -998,7 +1026,12 @@ def analyze(
         # is the failure this whole check exists to close. `log_complete` can also be
         # `None` (nothing to compare against) -- coerced to a plain bool here so an
         # unmeasured drive reads as a fail, not as `null` sitting where a verdict goes.
-        "overall_pass": bool(overall and integrity["log_complete"]),
+        # `coverage_untrustworthy` is folded in the same way and for the same reason:
+        # a drive whose ids cannot be trusted, or whose clock was caught out of
+        # sequence, has not had its tick coverage measured, which must not read as a
+        # pass just because the two `tick_coverage_*` gates are individually excluded
+        # from `applicable` above.
+        "overall_pass": bool(overall and integrity["log_complete"] and not coverage_untrustworthy),
         "phone_join": phone_join,
         # Sourced from the joined rows when a phone log was supplied, because those
         # carry `return` and `render` as well -- the two stages only the phone
@@ -1581,6 +1614,13 @@ def _reconciliation_line(rec: dict[str, Any]) -> str:
     return f"{prefix} -- {detail}" if detail else prefix
 
 
+def _tick_coverage_axis_clause(count: int | None, reason: str | None, actual_ticks: int, label: str) -> str:
+    if reason is not None:
+        return f"{label} unmeasurable ({reason})"
+    fraction = f" ({count / (actual_ticks + count):.1%} of {actual_ticks + count} expected)" if count else ""
+    return f"{label} {count} tick(s){fraction}"
+
+
 def _tick_coverage_line(coverage: dict[str, Any] | None) -> list[str]:
     """The one line the hardware-drive round's D1 exists for: a check on
     tick PRODUCTION, placed in the first few lines of `## Session summary`
@@ -1588,29 +1628,29 @@ def _tick_coverage_line(coverage: dict[str, Any] | None) -> list[str]:
     that are all, individually, ratios of ticks that DO exist. Absent
     (rather than a manufactured zero) on fewer than three ticks -- there is
     no gap distribution to read a median from.
+
+    Reports `ticks_absent_from_log` and `ticks_never_produced` on their own
+    -- never summed, and never standing in for each other when one of them
+    is unmeasurable -- because they answer different questions with
+    different fixes: a log short of what it produced, and a loop that
+    paused, look nothing alike to whoever has to act on this line.
     """
     if coverage is None:
         return []
     largest = coverage["largest_gap_s"]
     next_largest = coverage["next_largest_gap_s"]
-    missing = coverage["missing_ticks"]
-    expected = coverage["expected_ticks"]
-    deleted = coverage["missing_from_deleted_records"]
-    from_gaps = coverage["missing_from_gap_widths"]
-    fraction = f" ({missing / expected:.1%} of {expected} expected)" if missing and expected else ""
-    if deleted and from_gaps:
-        source = f" ({deleted} an exact count from a hole in the tick ids, {from_gaps} estimated from gap widths)"
-    elif deleted:
-        source = " (an exact count from a hole in the tick ids)"
-    elif from_gaps:
-        source = " (estimated from gap widths)"
-    else:
-        source = ""
+    absent_clause = _tick_coverage_axis_clause(
+        coverage["ticks_absent_from_log"], coverage["ticks_absent_from_log_reason"],
+        coverage["actual_ticks"], "absent from the log:",
+    )
+    never_clause = _tick_coverage_axis_clause(
+        coverage["ticks_never_produced"], coverage["ticks_never_produced_reason"],
+        coverage["actual_ticks"], "never produced:",
+    )
     return [
         f"Tick coverage: {coverage['actual_ticks']} ticks read over {coverage['span_s']:.2f} s "
         f"(median inter-tick gap {coverage['median_gap_s'] * 1000:.1f} ms); largest gap "
-        f"{largest:.2f} s (next-largest {next_largest:.2f} s), costing {missing} tick(s)"
-        f"{source}{fraction}.",
+        f"{largest:.2f} s (next-largest {next_largest:.2f} s); {absent_clause}; {never_clause}.",
         "",
     ]
 
@@ -2632,7 +2672,9 @@ def _telemetry_window(sensing_ticks: list[dict[str, Any]]) -> dict[str, Any]:
     return {"observed_median_s": median, "reports": reports, "unbuildable": None}
 
 
-def _time_weighted_weights(times: list[float], rates: list[float] | None = None) -> list[float]:
+def _time_weighted_weights(
+    times: list[float], sample_period_s: list[float | None] | float | None = None,
+) -> list[float]:
     """One weight per point in `times` (already sorted): the gap to the next
     point, and, for the last point, the gap immediately before it again --
     the best available estimate of how long its value would have held, since
@@ -2640,19 +2682,35 @@ def _time_weighted_weights(times: list[float], rates: list[float] | None = None)
     later point to measure it from. A single point gets weight 1.0 (any
     positive constant works, since it cancels in a mean).
 
-    `rates`, when given, is one value per point: for a commanded- or
-    achieved-rate series the point's own value already IS that rate, so the
-    gap following it is capped at `TICK_COVERAGE_GAP_MULTIPLE` times ITS OWN
-    implied period (`1 / rate`) rather than a population median. A
-    controller built to run at more than one rate (idle vs active, or
-    thermally scaled down to 0.15x) has no single period a median can stand
-    in for: capping the fast regime's gaps at a multiple of the slow
-    regime's period -- or the reverse, whichever the median happens to fall
-    on -- either manufactures an interruption that was never one or hides
-    one that was, depending only on which regime holds the majority of
-    points. Falls back to `TICK_COVERAGE_GAP_MULTIPLE * median(gaps)` when
-    `rates` is not given, or any entry in it is not a usable rate (`None` or
-    `<= 0`) -- a series with nothing to read a commanded rate from.
+    `sample_period_s`, when given, is the interval at which THIS series
+    itself is sampled -- how often a new point of it arrives -- not the rate
+    its value describes. A single float applies the same period to every
+    gap (an achieved series' own telemetry report interval, measured once
+    for the whole series); a list gives one period per point (a per-tick
+    series' own tick period, read off `camera_hz` at that point, which can
+    itself vary between an idle and an active regime). Either way the gap
+    following a point is capped at `TICK_COVERAGE_GAP_MULTIPLE` times that
+    point's own period rather than a population median: a controller built
+    to run at more than one rate (idle vs active, or thermally scaled down
+    to 0.15x) has no single period a median can stand in for, and capping
+    the fast regime's gaps at a multiple of the slow regime's period -- or
+    the reverse, whichever the median happens to fall on -- either
+    manufactures an interruption that was never one or hides one that was,
+    depending only on which regime holds the majority of points.
+
+    A per-point value used to stand in for its own sampling period directly
+    (`1 / value`), which is wrong whenever the two differ: a commanded rate
+    of 0.2 Hz describes how often something else should run, not how often
+    THIS point itself was sampled, which is once per tick regardless of what
+    it commands. `1 / value` for `here_hz` = 0.2 implied a 5 s period and a
+    15 s cap, crediting up to three HERE calls' worth of no distinction to a
+    stretch where the phone was actually unreachable the whole time.
+
+    Falls back to `TICK_COVERAGE_GAP_MULTIPLE * median(gaps)` when
+    `sample_period_s` is not given, is a non-positive scalar, or (as a list)
+    has any entry that is not usable (`None`, non-positive, or the wrong
+    length for `times`) -- a series with nothing to read its own sampling
+    period from.
 
     Uncapped either way, a gap spanning a stretch where the system was not
     running at all (no ticks, so no point exists in that stretch) is
@@ -2664,8 +2722,15 @@ def _time_weighted_weights(times: list[float], rates: list[float] | None = None)
     if len(times) == 1:
         return [1.0]
     gaps = [b - a for a, b in zip(times, times[1:])]
-    if rates is not None and all(r is not None and r > 0 for r in rates):
-        periods = [1.0 / r for r in rates]
+    periods: list[float] | None = None
+    if isinstance(sample_period_s, (int, float)):
+        if sample_period_s > 0:
+            periods = [float(sample_period_s)] * len(times)
+    elif sample_period_s is not None and len(sample_period_s) == len(times) and all(
+        p is not None and p > 0 for p in sample_period_s
+    ):
+        periods = [float(p) for p in sample_period_s]
+    if periods is not None:
         capped = [min(g, TICK_COVERAGE_GAP_MULTIPLE * periods[i]) for i, g in enumerate(gaps)]
         trailing = min(gaps[-1], TICK_COVERAGE_GAP_MULTIPLE * periods[-1])
         return capped + [trailing]
@@ -2696,23 +2761,49 @@ class TimeWeightedStat:
     weighted_over_s: float
 
 
-def _time_weighted_mean(points: list[tuple[float, float]]) -> TimeWeightedStat:
+def _order_with_periods(
+    points: list[tuple[float, float]], sample_period_s: list[float | None] | float | None,
+) -> tuple[list[tuple[float, float]], list[float | None] | float | None]:
+    """Sorts `points` by time, carrying a per-point `sample_period_s` list
+    along with them so it stays aligned with the point it describes -- a
+    caller builds both lists in the same, usually unsorted, order (one entry
+    per tick as read off the log), and sorting only `points` would silently
+    mismatch the two. A scalar `sample_period_s` needs no such care, since
+    the same value applies to every point regardless of order.
+
+    A list shorter or longer than `points` is treated as absent rather than
+    zipped and silently truncated to the shorter length -- `zip` would
+    otherwise pair each surviving point with the WRONG period once the two
+    lists disagree in length, rather than falling back to the median cap
+    the way a missing `sample_period_s` already does.
+    """
+    if isinstance(sample_period_s, list):
+        if len(sample_period_s) != len(points):
+            return sorted(points, key=lambda p: p[0]), None
+        combined = sorted(zip(points, sample_period_s), key=lambda pair: pair[0][0])
+        return [p for p, _ in combined], [s for _, s in combined]
+    return sorted(points, key=lambda p: p[0]), sample_period_s
+
+
+def _time_weighted_mean(
+    points: list[tuple[float, float]],
+    sample_period_s: list[float | None] | float | None = None,
+) -> TimeWeightedStat:
     """Mean of `value`, weighted by how long (wall/monotonic seconds) it held
     -- not a mean over samples, which would overweight whatever period
     happened to produce more ticks. On an evenly spaced series with no
     capped gap this reduces to the ordinary sample mean.
 
-    Every caller of this function passes a commanded- or achieved-rate
-    series, so `value` at each point already IS the rate that gap-capping
-    needs (see `_time_weighted_weights`) -- passed straight through rather
-    than re-derived.
+    `sample_period_s` is passed straight through to `_time_weighted_weights`
+    -- see its own docstring. It is the series' own sampling period, not
+    `value`; a caller with nothing better falls back to the median-gap cap
+    by leaving it unset.
     """
     if not points:
         return TimeWeightedStat(None, 0.0, 0.0)
-    ordered = sorted(points, key=lambda p: p[0])
+    ordered, periods = _order_with_periods(points, sample_period_s)
     times = [t for t, _ in ordered]
-    rates = [v for _, v in ordered]
-    weights = _time_weighted_weights(times, rates)
+    weights = _time_weighted_weights(times, periods)
     span_s = times[-1] - times[0]
     weighted_over_s = sum(weights)
     if weighted_over_s <= 0:
@@ -2721,18 +2812,20 @@ def _time_weighted_mean(points: list[tuple[float, float]]) -> TimeWeightedStat:
     return TimeWeightedStat(mean, span_s, weighted_over_s)
 
 
-def _time_weighted_integral(points: list[tuple[float, float]]) -> TimeWeightedStat:
+def _time_weighted_integral(
+    points: list[tuple[float, float]],
+    sample_period_s: list[float | None] | float | None = None,
+) -> TimeWeightedStat:
     """`sum(value * weight)` over the same weighting as `_time_weighted_mean`
     -- the expected count of events a rate would produce over the span
-    covered. As there, `value` is itself the rate `_time_weighted_weights`
-    caps gaps against.
+    covered. `sample_period_s` is the same argument, with the same meaning,
+    passed straight through -- see `_time_weighted_weights`.
     """
     if len(points) < 2:
         return TimeWeightedStat(0.0, 0.0, 0.0)
-    ordered = sorted(points, key=lambda p: p[0])
+    ordered, periods = _order_with_periods(points, sample_period_s)
     times = [t for t, _ in ordered]
-    rates = [v for _, v in ordered]
-    weights = _time_weighted_weights(times, rates)
+    weights = _time_weighted_weights(times, periods)
     integral = sum(v * w for (_, v), w in zip(ordered, weights))
     return TimeWeightedStat(integral, times[-1] - times[0], sum(weights))
 
@@ -2902,16 +2995,26 @@ def sensing_result(
 
     rates: dict[str, Any] = {}
     for key in RATE_KEYS:
-        points = [
-            (t["sensing"].get("decided_at_mono"), (t["sensing"].get("rates") or {}).get(key))
+        raw = [
+            (
+                t["sensing"].get("decided_at_mono"),
+                (t["sensing"].get("rates") or {}).get(key),
+                (t["sensing"].get("rates") or {}).get("camera_hz"),
+            )
             for t in sensing_ticks
         ]
         # A malformed tick (missing decided_at_mono or this rate key) is
         # dropped rather than raising -- one bad record should not abort the
         # whole report, including the axes that would have survived it.
-        points = [(t_mono, v) for t_mono, v in points if t_mono is not None and v is not None]
+        raw = [(t_mono, v, cam_hz) for t_mono, v, cam_hz in raw if t_mono is not None and v is not None]
+        points = [(t_mono, v) for t_mono, v, _ in raw]
+        # Every rate is commanded once per sensing tick, so the series' own
+        # sampling period is the tick period implied by THAT tick's
+        # `camera_hz` -- not `1 / v`, which is the rate `key` itself
+        # commands, not how often a new reading of it arrives (A12).
+        sample_periods = [(1.0 / cam_hz) if cam_hz else None for _, _, cam_hz in raw]
         census = Counter(str(v) for _, v in points)
-        commanded_stat = _time_weighted_mean(points)
+        commanded_stat = _time_weighted_mean(points, sample_periods)
         commanded_time_mean = commanded_stat.value
         clamped_ticks = sum(
             1 for t in sensing_ticks
@@ -2944,7 +3047,11 @@ def sensing_result(
                 (r.get("at_mono"), (r.get("achieved") or {}).get(key)) for r in distinct_reports
             ]
             achieved_points = [(t_mono, v) for t_mono, v in achieved_points if t_mono is not None and v is not None]
-            achieved_stat = _time_weighted_mean(achieved_points)
+            # An achieved reading arrives once per telemetry report, not once
+            # per tick -- its own sampling period is the report interval
+            # already measured in `window`, a single constant for the whole
+            # series rather than a per-point one (A12).
+            achieved_stat = _time_weighted_mean(achieved_points, window["observed_median_s"])
             entry["achieved_time_mean"] = achieved_stat.value
             entry["achieved_span_s"] = achieved_stat.span_s
             entry["achieved_weighted_over_s"] = achieved_stat.weighted_over_s
@@ -2979,12 +3086,20 @@ def sensing_result(
         rates[key] = entry
 
     here = _here_calls_by_session(ticks)
-    here_points = [
-        (t["sensing"].get("decided_at_mono"), (t["sensing"].get("rates") or {}).get("here_hz"))
+    here_raw = [
+        (
+            t["sensing"].get("decided_at_mono"),
+            (t["sensing"].get("rates") or {}).get("here_hz"),
+            (t["sensing"].get("rates") or {}).get("camera_hz"),
+        )
         for t in sensing_ticks
     ]
-    here_points = [(t_mono, v) for t_mono, v in here_points if t_mono is not None and v is not None]
-    here_stat = _time_weighted_integral(here_points)
+    here_raw = [(t_mono, v, cam_hz) for t_mono, v, cam_hz in here_raw if t_mono is not None and v is not None]
+    here_points = [(t_mono, v) for t_mono, v, _ in here_raw]
+    # Commanded `here_hz` is also a per-tick reading -- see the identical
+    # comment in the `RATE_KEYS` loop above (A12).
+    here_sample_periods = [(1.0 / cam_hz) if cam_hz else None for _, _, cam_hz in here_raw]
+    here_stat = _time_weighted_integral(here_points, here_sample_periods)
     here["expected_from_commanded"] = here_stat.value
     here["expected_from_commanded_span_s"] = here_stat.span_s
     here["expected_from_commanded_weighted_over_s"] = here_stat.weighted_over_s
@@ -3374,85 +3489,98 @@ def _cluster_gap_widths(
     return clusters
 
 
-def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_COVERAGE_GAP_MULTIPLE) -> dict[str, Any] | None:
-    """A check on tick PRODUCTION itself, not on any one instrument (D1).
-
-    Every axis in this module reports `answered of attempted` over the ticks
-    that exist -- a ratio of that form is blind by construction to an event
-    that stops ticks from being produced at all, because it destroys
-    `attempted` and `answered` together. A 54.58 s link outage on a real
-    drive cost about 270 ticks, and the only trace of it anywhere in
-    `## Session summary` was `no_telemetry` on two axes plus ten held
-    reconciliations -- nothing that says a stretch of the drive is simply
-    missing.
-
-    **The first shape tried for this was wrong, and measuring it is what
-    caught it.** `expected = span_s * (actual_ticks / span_s)` is
-    `actual_ticks` by algebra, on every drive, healthy or not. A second
-    shape -- every gap more than `gap_multiple` times the single population
-    median -- was also wrong, in two directions at once: a controller that
-    legitimately runs at more than one rate (idle vs active, or thermally
-    scaled as low as 0.15x) has no one period a median can stand in for, so
-    it flagged a real rate change as missing; and a loss spread evenly
-    across the drive (every third tick gone) never widens any individual
-    gap past a multiple of the median at all, so it missed a genuine 33% of
-    the drive.
-
-    **This reads two independent signals instead, and adds them.**
-
-    `tick_id` is assigned once per tick actually produced, in order, so a
-    tick deleted from the log after being written -- the log is short of
-    what was produced, not of what the loop attempted -- leaves an exact,
-    unambiguous hole in the sequence read off the ids still present: no
-    estimate needed. That is `missing_from_deleted_records`.
-
-    A tick the loop never produced at all leaves no hole in `tick_id`
-    -- consecutive ids either side of the pause, however long -- so it is
-    read from the gap's WIDTH instead, compared against the width of gaps
-    NEAR it in the sequence (`_cluster_gap_widths`, over gaps between
-    consecutive ids only) rather than one global median: a gap whose width
-    recurs at least `TICK_COVERAGE_MIN_REGIME_TICKS` times anywhere in the
-    drive is a cadence the drive was genuinely holding and costs nothing; a
-    gap that does not is compared against the cadence held by the
-    `TICK_COVERAGE_LOCAL_WINDOW` cadence-bearing gaps nearest to it -- what
-    the drive was actually doing immediately around the interruption, not
-    its fastest or its most common rate elsewhere. That is
-    `missing_from_gap_widths`. Verified against real drives: a drive with an
-    induced 54.58 s outage scores 269 of 1229 this way (0.1796); a
-    historical drive with its own 85.22 s gap scores 420 of 1073 (0.2813,
-    the same order as the original heuristic on this drive); a drive built
-    with a 5 Hz-to-1 Hz rate change over its last 20% of ticks, nothing
-    missing, scores 0; a drive with every third tick deleted (33.3%) scores
-    that exactly through `missing_from_deleted_records` alone.
+def _tick_id_trust_reason(ids: list[int | None]) -> str | None:
+    """`None` when `ids` -- in the order the log itself was written, which is
+    production order regardless of what any clock reads -- support an exact
+    count: every one present, none repeated, each strictly greater than the
+    one before. Otherwise the specific reason they do not, so a caller
+    reports `None` rather than a count that reads 0 for a restart, a
+    half-null id column, or ids that are all identical -- three shapes that
+    otherwise compute a hole count of exactly nothing to hide behind.
     """
-    ordered = sorted(
-        ((t["t_wall"], t.get("tick_id")) for t in ticks if t.get("t_wall") is not None),
-        key=lambda pair: pair[0],
-    )
-    if len(ordered) < 3:
-        return None
-    t_wall = [p[0] for p in ordered]
-    tick_ids = [p[1] for p in ordered]
-    gaps = [b - a for a, b in zip(t_wall, t_wall[1:])]
-    span_s = t_wall[-1] - t_wall[0]
-    sorted_gaps = sorted(gaps)
-    mid = len(sorted_gaps) // 2
-    median_gap_s = (
-        sorted_gaps[mid] if len(sorted_gaps) % 2 else (sorted_gaps[mid - 1] + sorted_gaps[mid]) / 2.0
-    )
-    largest_gap_s = sorted_gaps[-1]
-    next_largest_gap_s = sorted_gaps[-2]
-    actual_ticks = len(t_wall)
+    if any(i is None for i in ids):
+        return "some ticks carry no tick_id"
+    if len(set(ids)) != len(ids):
+        return "tick_id repeats at least once"
+    for a, b in zip(ids, ids[1:]):
+        if b <= a:
+            return "tick_id decreases somewhere in the log (a restart)"
+    return None
 
-    # A gap has a known id delta only when both ends carry a tick_id; an
-    # unknown delta is treated as consecutive (1) so a log with no tick_id
-    # at all falls back entirely to the gap-width signal below, exactly as
-    # before this ids-aware split existed.
-    id_deltas = [
-        (tick_ids[i + 1] - tick_ids[i]) if tick_ids[i] is not None and tick_ids[i + 1] is not None else 1
-        for i in range(len(gaps))
-    ]
-    missing_from_deleted_records = sum(max(0, d - 1) for d in id_deltas)
+
+def _ticks_absent_from_log(ticks: list[dict[str, Any]]) -> tuple[int | None, str | None]:
+    """Ticks the loop produced that are no longer in the log: an exact count
+    of the hole in `tick_id`, which is assigned once per tick actually
+    produced and nothing else, so a tick deleted after being written leaves
+    an unambiguous gap in the ids still present. Needs no estimate and no
+    time axis at all -- unlike `_ticks_never_produced`, this reads `ticks` in
+    the order they were written, not sorted by `t_wall`, because it is
+    concerned only with whether the ids themselves are intact.
+
+    `(None, reason)` when the ids cannot support an exact count (see
+    `_tick_id_trust_reason`) -- reporting 0 here would read as "nothing is
+    missing" on a log this check cannot actually vouch for.
+    """
+    ids = [t.get("tick_id") for t in ticks]
+    reason = _tick_id_trust_reason(ids)
+    if reason is not None:
+        return None, reason
+    return (ids[-1] - ids[0] + 1) - len(ids), None
+
+
+def _ticks_never_produced(
+    with_wall: list[dict[str, Any]], *, gap_multiple: float,
+) -> tuple[int | None, str | None]:
+    """Ticks the loop never produced at all: a pause that consumes no
+    `tick_id`, so it leaves no hole in the id sequence the way a deletion
+    does -- only an anomalously wide gap in wall time, compared against the
+    width of gaps NEAR it in the sequence (`_cluster_gap_widths`, over gaps
+    between consecutive ids only) rather than one global median: a gap whose
+    width recurs at least `TICK_COVERAGE_MIN_REGIME_TICKS` times anywhere in
+    the drive is a cadence the drive was genuinely holding and costs
+    nothing; a gap that does not is compared against the cadence held by the
+    `TICK_COVERAGE_LOCAL_WINDOW` cadence-bearing gaps immediately BEFORE it
+    -- the rate the drive was actually holding right up to the interruption,
+    not an average with whatever it changed to afterward, which would
+    describe a cadence the drive never ran at when the two sides differ
+    (falls back to the gaps immediately after only when there are none
+    before, e.g. the interruption is the first gap in the log).
+
+    `with_wall` must already be filtered to ticks carrying a usable
+    `t_wall`, and is read in the order given -- which must be the order the
+    log was written in, not sorted by `t_wall` -- for the same reason
+    `_ticks_absent_from_log` reads `ticks` unsorted: `tick_id` is production
+    order and `t_wall` is not, whenever the clock has stepped. `(None,
+    reason)` when the ids cannot support this (see `_tick_id_trust_reason`)
+    or when sorting these same ticks by `t_wall` would put them in a
+    different order than they are already in -- the clock moved backward,
+    or otherwise out of sequence, somewhere in the log, and every width
+    computed from it below would describe a gap that did not happen this
+    way. A 2 s backward step with nothing actually lost used to read as
+    0.2308 missing and fail a drive that lost nothing.
+
+    A gap can hold both a real interruption and a separately deleted record
+    at once: the id delta already counts the deleted one exactly, in
+    `_ticks_absent_from_log`, so only the width beyond what that deletion
+    alone would produce is credited here -- crediting the whole width
+    regardless of `id_delta` used to report a single deleted record inside
+    an 85 s outage as 1 tick missing instead of the outage's own size.
+
+    Verified against real drives: a drive with an induced 54.58 s outage and
+    intact ids scores 269 of 1229 this way; a historical drive with its own
+    85.22 s gap scores 420 of 1073; a drive built with a 5 Hz-to-1 Hz rate
+    change over its last 20% of ticks, nothing missing, scores 0.
+    """
+    ids = [t.get("tick_id") for t in with_wall]
+    reason = _tick_id_trust_reason(ids)
+    if reason is not None:
+        return None, reason
+    t_wall = [t["t_wall"] for t in with_wall]
+    if t_wall != sorted(t_wall):
+        return None, "t_wall order disagrees with tick_id order (the clock moved out of sequence)"
+
+    gaps = [b - a for a, b in zip(t_wall, t_wall[1:])]
+    id_deltas = [ids[i + 1] - ids[i] for i in range(len(gaps))]
 
     consecutive_idx = [i for i, d in enumerate(id_deltas) if d <= 1]
     consecutive_gaps = [gaps[i] for i in consecutive_idx]
@@ -3465,25 +3593,79 @@ def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_CO
             for local_i in members:
                 has_cadence[consecutive_idx[local_i]] = True
 
-    def local_reference_period(i: int) -> float | None:
-        before = [gaps[j] for j in range(i - 1, -1, -1) if has_cadence[j]][:TICK_COVERAGE_LOCAL_WINDOW]
-        after = [gaps[j] for j in range(i + 1, len(gaps)) if has_cadence[j]][:TICK_COVERAGE_LOCAL_WINDOW]
-        pool = before + after
-        if not pool:
-            return None
-        pool.sort()
+    def median(pool: list[float]) -> float:
+        pool = sorted(pool)
         pm = len(pool) // 2
         return pool[pm] if len(pool) % 2 else (pool[pm - 1] + pool[pm]) / 2.0
 
-    missing_from_gap_widths = 0
+    def local_reference_period(i: int) -> float | None:
+        before = [gaps[j] for j in range(i - 1, -1, -1) if has_cadence[j]][:TICK_COVERAGE_LOCAL_WINDOW]
+        if before:
+            return median(before)
+        after = [gaps[j] for j in range(i + 1, len(gaps)) if has_cadence[j]][:TICK_COVERAGE_LOCAL_WINDOW]
+        return median(after) if after else None
+
+    missing = 0
     for i, (g, d) in enumerate(zip(gaps, id_deltas)):
-        if d > 1 or has_cadence[i]:
+        if has_cadence[i]:
             continue
         reference = local_reference_period(i)
-        if reference and g > gap_multiple * reference:
-            missing_from_gap_widths += round(g / reference) - 1
+        if not reference or g <= gap_multiple * reference:
+            continue
+        raw_estimate = round(g / reference) - 1
+        missing += max(0, raw_estimate - max(0, d - 1))
+    return missing, None
 
-    missing_ticks = missing_from_deleted_records + missing_from_gap_widths
+
+def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_COVERAGE_GAP_MULTIPLE) -> dict[str, Any] | None:
+    """A check on tick PRODUCTION itself, not on any one instrument (D1).
+
+    Every axis in this module reports `answered of attempted` over the ticks
+    that exist -- a ratio of that form is blind by construction to an event
+    that stops ticks from being produced at all, because it destroys
+    `attempted` and `answered` together. A 54.58 s link outage on a real
+    drive cost about 270 ticks, and the only trace of it anywhere in
+    `## Session summary` was `no_telemetry` on two axes plus ten held
+    reconciliations -- nothing that says a stretch of the drive is simply
+    missing.
+
+    **This answers two different questions, and never combines them.**
+    "How many ticks did the log lose after they were produced" is answered
+    exactly, from `tick_id` holes (`_ticks_absent_from_log`): during an
+    outage no ticks are produced, so no ids are consumed, so an outage
+    leaves no id hole at all -- an exact id count cannot see one, which is
+    why it is not asked to. "How many ticks did the loop never produce"
+    can only be estimated, from the width of gaps between the ids that do
+    exist (`_ticks_never_produced`), because the loop pausing and the loop
+    idling at a slower, legitimate rate look identical to a hole count: both
+    are consecutive ids with a wide gap between them, and only the width
+    -- read against what the drive was doing immediately around it, not one
+    global figure -- tells them apart. Summing the two into one number was
+    tried and was wrong: it double-counted a deletion that happened to sit
+    inside a real outage, and it made a drive's own coverage indistinguishable
+    from `log_integrity`, which already answers the first question from the
+    run's self-reported count. Each is reported on its own, including
+    `None` with its own named reason when its own trust conditions fail, and
+    a caller should not add them together or let one stand in for the other.
+    """
+    with_wall = [t for t in ticks if t.get("t_wall") is not None]
+    if len(with_wall) < 3:
+        return None
+    t_wall = sorted(t["t_wall"] for t in with_wall)
+    gaps = [b - a for a, b in zip(t_wall, t_wall[1:])]
+    span_s = t_wall[-1] - t_wall[0]
+    sorted_gaps = sorted(gaps)
+    mid = len(sorted_gaps) // 2
+    median_gap_s = (
+        sorted_gaps[mid] if len(sorted_gaps) % 2 else (sorted_gaps[mid - 1] + sorted_gaps[mid]) / 2.0
+    )
+    largest_gap_s = sorted_gaps[-1]
+    next_largest_gap_s = sorted_gaps[-2]
+    actual_ticks = len(t_wall)
+
+    ticks_absent_from_log, absent_reason = _ticks_absent_from_log(ticks)
+    ticks_never_produced, never_reason = _ticks_never_produced(with_wall, gap_multiple=gap_multiple)
+
     return {
         "actual_ticks": actual_ticks,
         "span_s": span_s,
@@ -3491,10 +3673,10 @@ def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_CO
         "largest_gap_s": largest_gap_s,
         "next_largest_gap_s": next_largest_gap_s,
         "gap_multiple": gap_multiple,
-        "missing_from_deleted_records": missing_from_deleted_records,
-        "missing_from_gap_widths": missing_from_gap_widths,
-        "missing_ticks": missing_ticks,
-        "expected_ticks": actual_ticks + missing_ticks,
+        "ticks_absent_from_log": ticks_absent_from_log,
+        "ticks_absent_from_log_reason": absent_reason,
+        "ticks_never_produced": ticks_never_produced,
+        "ticks_never_produced_reason": never_reason,
     }
 
 
