@@ -3131,28 +3131,71 @@ RESULTS = {
 
 
 def failing_tests(kind):
-    """Names of the tests that failed, from the JUnit XML the run just wrote."""
-    # Parsed as XML, not by regex over the attributes. Gradle writes `name` first and
-    # pytest writes `classname` first, so a pattern that fixes the order silently matches
-    # nothing on one of the two -- which is how the first version of this reported both
-    # Python pins as SURVIVED while they were being caught perfectly well. A harness that
-    # reports a false SURVIVED is the same failure as one that reports a false CAUGHT.
+    """Names of the tests that failed, the total testcases seen, and whether
+    every JUnit XML file found parsed cleanly.
+
+    Parsed as XML, not by regex over the attributes. Gradle writes `name` first and
+    pytest writes `classname` first, so a pattern that fixes the order silently matches
+    nothing on one of the two -- which is how the first version of this reported both
+    Python pins as SURVIVED while they were being caught perfectly well. A harness that
+    reports a false SURVIVED is the same failure as one that reports a false CAUGHT.
+
+    That asymmetry was only half closed. No XML at all, an XML file truncated
+    mid-write (a killed run, a full disk), and a genuine zero-failures result
+    all used to produce the identical empty list this returned outright --
+    and `run()` read all three as SURVIVED, the same verdict a real pass gets.
+    The third element here is False for either of the first two, so the
+    caller can tell "nothing failed" from "nothing was observed" apart.
+    """
     names = []
+    total = 0
+    found_xml = False
+    parse_failed = False
     for base in RESULTS[kind]:
         for report in base.rglob("*.xml"):
+            found_xml = True
             try:
                 root = ElementTree.parse(report).getroot()
             except ElementTree.ParseError:
+                parse_failed = True
                 continue
             for case in root.iter("testcase"):
+                total += 1
                 if case.find("failure") is None and case.find("error") is None:
                     continue
                 cls = (case.get("classname") or "").rsplit(".", 1)[-1]
                 names.append(f"{cls}.{case.get('name')}" if cls else str(case.get("name")))
-    return names
+    return names, total, found_xml and not parse_failed
 
 
 BUILD_ERROR = ["<the mutation did not compile>"]
+
+#: A run that did not settle anything about a test outcome: the pytest
+#: process exited with a code other than 0 or 1 (2 interrupted, 3 internal
+#: error, 4 usage error, 5 no tests collected), or wrote no usable JUnit XML
+#: at all, or collected a testcase count that disagrees with what a clean
+#: tree collects. An empty failing_tests() result under any of those is
+#: evidence nothing was OBSERVED, not evidence nothing failed -- reporting
+#: it as SURVIVED is the false-negative half of the asymmetry
+#: `failing_tests`'s own docstring names, closed here rather than there
+#: because it takes a returncode and a testcase count neither `run()`'s
+#: Gradle arm nor `failing_tests` alone has both of.
+INCONCLUSIVE = ["<inconclusive: the run did not produce a trustworthy result>"]
+
+#: pytest's own exit codes that say anything about a TEST outcome. Every
+#: other code (2, 3, 4, 5) means the run itself did not complete as a test
+#: run.
+PYTEST_VERDICT_RETURNCODES = frozenset({0, 1})
+
+#: Testcases a clean, unmutated Python suite collects today. A mutated run
+#: collecting a different count did not exercise the same suite it is being
+#: scored against -- a partial file copy or a conftest import that silently
+#: drops a whole module both trivially report zero failures, because most
+#: of the suite never ran at all. Update this when the suite's own test
+#: count changes; a run reporting a different count is not proof of drift,
+#: only that it needs checking against `pytest --collect-only` before being
+#: trusted either way.
+EXPECTED_PYTHON_TESTCASES = 2060
 
 
 def is_collection_error(names):
@@ -3180,23 +3223,37 @@ def run(kind):
 
     Naming the failing test settles it. A mutation that is caught says which assertion
     caught it, and one that is "caught" by an unrelated failure is now visible as such
-    instead of counting as a pass.
+    instead of counting as a pass. That settles a false CAUGHT; it does nothing for a
+    false SURVIVED, which needs its own check: the Python arm used to discard its own
+    subprocess result outright (only the Gradle arm ever looked at one), so a pytest
+    process that never started a test run at all -- a bad flag, a crash, an OOM kill, a
+    conftest import failure, an XML truncated by a killed run, a partial-tree-copy that
+    collects 18 testcases instead of the whole suite -- produced the identical `[]`
+    failing_tests() returns for a real pass, and every one of those was reported
+    SURVIVED alongside the mutations the suite genuinely caught nothing for.
     """
     for base in RESULTS[kind]:
         if base.exists():
             shutil.rmtree(base)          # or a previous run's failures count as this one's
     if kind == "python":
-        subprocess.run(
+        result = subprocess.run(
             [".venv/bin/python3", "-m", "pytest", "-q", "deployment/jetson/tests/",
              "-p", "no:cacheprovider", f"--junit-xml={RESULTS['python'][0]}/results.xml"],
             capture_output=True, text=True,
         )
+        if result.returncode not in PYTEST_VERDICT_RETURNCODES:
+            return INCONCLUSIVE
     else:
         target = ":transport:test" if kind == "transport" else ":app:test"
         result = subprocess.run(GRADLE + [target, "--rerun-tasks"], capture_output=True, text=True)
         if "e: file://" in result.stdout or "e: file://" in result.stderr:
             return BUILD_ERROR
-    return failing_tests(kind)
+    names, total, usable = failing_tests(kind)
+    if not usable:
+        return INCONCLUSIVE
+    if kind == "python" and total != EXPECTED_PYTHON_TESTCASES:
+        return INCONCLUSIVE
+    return names
 
 # A killed run used to leave its mutation in the tree. The `finally` below restores on an
 # exception and on Ctrl-C, and not on a SIGKILL -- and one of those left
@@ -3258,7 +3315,7 @@ for name, rel, old, new, kind in MUTATIONS:
     finally:
         path.write_text(keep)
         SIDECAR.unlink(missing_ok=True)
-    if failed and failed is not BUILD_ERROR and is_collection_error(failed):
+    if failed and failed is not BUILD_ERROR and failed is not INCONCLUSIVE and is_collection_error(failed):
         failed = BUILD_ERROR
     if failed == BUILD_ERROR:
         # Distinct from both verdicts. A mutation that does not compile -- or, in
@@ -3266,6 +3323,13 @@ for name, rel, old, new, kind in MUTATIONS:
         # as CAUGHT is how one of these entries came to measure the compiler for weeks.
         survived.append(name + " [did not build/import]")
         print(f"  DID NOT BUILD      {name}")
+    elif failed == INCONCLUSIVE:
+        # A third state, distinct from both verdicts for the same reason BUILD_ERROR
+        # is: the run did not produce a trustworthy answer either way, so it counts
+        # against the exit code (a clean run is not one with an inconclusive result
+        # sitting in it) without being reported as a caught OR a survived mutation.
+        survived.append(name + " [inconclusive -- the run did not produce a trustworthy result]")
+        print(f"  INCONCLUSIVE       {name}")
     elif failed:
         print(f"  CAUGHT ({len(failed)})         {name}")
         print(f"                     by {failed[0]}")
