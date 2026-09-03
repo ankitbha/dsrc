@@ -1550,12 +1550,22 @@ def _tick_coverage_line(coverage: dict[str, Any] | None) -> list[str]:
     next_largest = coverage["next_largest_gap_s"]
     missing = coverage["missing_ticks"]
     expected = coverage["expected_ticks"]
+    deleted = coverage["missing_from_deleted_records"]
+    from_gaps = coverage["missing_from_gap_widths"]
     fraction = f" ({missing / expected:.1%} of {expected} expected)" if missing and expected else ""
+    if deleted and from_gaps:
+        source = f" ({deleted} an exact count from a hole in the tick ids, {from_gaps} estimated from gap widths)"
+    elif deleted:
+        source = " (an exact count from a hole in the tick ids)"
+    elif from_gaps:
+        source = " (estimated from gap widths)"
+    else:
+        source = ""
     return [
         f"Tick coverage: {coverage['actual_ticks']} ticks read over {coverage['span_s']:.2f} s "
         f"(median inter-tick gap {coverage['median_gap_s'] * 1000:.1f} ms); largest gap "
-        f"{largest:.2f} s (next-largest {next_largest:.2f} s), costing an estimated "
-        f"{missing} tick(s) at {coverage['gap_multiple']:g}x the median or bigger{fraction}.",
+        f"{largest:.2f} s (next-largest {next_largest:.2f} s), costing {missing} tick(s)"
+        f"{source}{fraction}.",
         "",
     ]
 
@@ -2577,7 +2587,7 @@ def _telemetry_window(sensing_ticks: list[dict[str, Any]]) -> dict[str, Any]:
     return {"observed_median_s": median, "reports": reports, "unbuildable": None}
 
 
-def _time_weighted_weights(times: list[float]) -> list[float]:
+def _time_weighted_weights(times: list[float], rates: list[float] | None = None) -> list[float]:
     """One weight per point in `times` (already sorted): the gap to the next
     point, and, for the last point, the gap immediately before it again --
     the best available estimate of how long its value would have held, since
@@ -2585,18 +2595,35 @@ def _time_weighted_weights(times: list[float]) -> list[float]:
     later point to measure it from. A single point gets weight 1.0 (any
     positive constant works, since it cancels in a mean).
 
-    Each gap is capped at `TICK_COVERAGE_GAP_MULTIPLE` times the median gap
-    in this same series -- the criterion `_tick_coverage` uses to call a gap
-    an interruption rather than jitter. Uncapped, a gap spanning a stretch
-    where the system was not running at all (no ticks, so no point exists in
-    that stretch) is credited entirely to whatever value the point before it
-    held, which states that value was in effect for the whole outage. The
-    cap bounds that credit to what an ordinary gap in this series looks
+    `rates`, when given, is one value per point: for a commanded- or
+    achieved-rate series the point's own value already IS that rate, so the
+    gap following it is capped at `TICK_COVERAGE_GAP_MULTIPLE` times ITS OWN
+    implied period (`1 / rate`) rather than a population median. A
+    controller built to run at more than one rate (idle vs active, or
+    thermally scaled down to 0.15x) has no single period a median can stand
+    in for: capping the fast regime's gaps at a multiple of the slow
+    regime's period -- or the reverse, whichever the median happens to fall
+    on -- either manufactures an interruption that was never one or hides
+    one that was, depending only on which regime holds the majority of
+    points. Falls back to `TICK_COVERAGE_GAP_MULTIPLE * median(gaps)` when
+    `rates` is not given, or any entry in it is not a usable rate (`None` or
+    `<= 0`) -- a series with nothing to read a commanded rate from.
+
+    Uncapped either way, a gap spanning a stretch where the system was not
+    running at all (no ticks, so no point exists in that stretch) is
+    credited entirely to whatever value the point before it held, which
+    states that value was in effect for the whole outage. The cap bounds
+    that credit to what an ordinary gap at the rate actually in force looks
     like.
     """
     if len(times) == 1:
         return [1.0]
     gaps = [b - a for a, b in zip(times, times[1:])]
+    if rates is not None and all(r is not None and r > 0 for r in rates):
+        periods = [1.0 / r for r in rates]
+        capped = [min(g, TICK_COVERAGE_GAP_MULTIPLE * periods[i]) for i, g in enumerate(gaps)]
+        trailing = min(gaps[-1], TICK_COVERAGE_GAP_MULTIPLE * periods[-1])
+        return capped + [trailing]
     sorted_gaps = sorted(gaps)
     mid = len(sorted_gaps) // 2
     median_gap = (
@@ -2629,12 +2656,18 @@ def _time_weighted_mean(points: list[tuple[float, float]]) -> TimeWeightedStat:
     -- not a mean over samples, which would overweight whatever period
     happened to produce more ticks. On an evenly spaced series with no
     capped gap this reduces to the ordinary sample mean.
+
+    Every caller of this function passes a commanded- or achieved-rate
+    series, so `value` at each point already IS the rate that gap-capping
+    needs (see `_time_weighted_weights`) -- passed straight through rather
+    than re-derived.
     """
     if not points:
         return TimeWeightedStat(None, 0.0, 0.0)
     ordered = sorted(points, key=lambda p: p[0])
     times = [t for t, _ in ordered]
-    weights = _time_weighted_weights(times)
+    rates = [v for _, v in ordered]
+    weights = _time_weighted_weights(times, rates)
     span_s = times[-1] - times[0]
     weighted_over_s = sum(weights)
     if weighted_over_s <= 0:
@@ -2646,13 +2679,15 @@ def _time_weighted_mean(points: list[tuple[float, float]]) -> TimeWeightedStat:
 def _time_weighted_integral(points: list[tuple[float, float]]) -> TimeWeightedStat:
     """`sum(value * weight)` over the same weighting as `_time_weighted_mean`
     -- the expected count of events a rate would produce over the span
-    covered.
+    covered. As there, `value` is itself the rate `_time_weighted_weights`
+    caps gaps against.
     """
     if len(points) < 2:
         return TimeWeightedStat(0.0, 0.0, 0.0)
     ordered = sorted(points, key=lambda p: p[0])
     times = [t for t, _ in ordered]
-    weights = _time_weighted_weights(times)
+    rates = [v for _, v in ordered]
+    weights = _time_weighted_weights(times, rates)
     integral = sum(v * w for (_, v), w in zip(ordered, weights))
     return TimeWeightedStat(integral, times[-1] - times[0], sum(weights))
 
@@ -3247,11 +3282,51 @@ def reconciliations(loaded: "LoadedRecords", summary: dict[str, Any]) -> list[Re
     return out
 
 
-#: D1's default: how many times the median inter-tick gap a gap has to be
+#: D1's default: how many times a gap's own reference period it has to be
 #: before `_tick_coverage` treats it as an interruption rather than
-#: ordinary jitter. Verified against three real drives -- see
-#: `_tick_coverage`'s own docstring for the numbers.
+#: ordinary jitter. Verified against real drives -- see `_tick_coverage`'s
+#: own docstring for the numbers.
 TICK_COVERAGE_GAP_MULTIPLE = 3.0
+
+#: How many gaps a cluster of similar widths needs before `_tick_coverage`
+#: accepts it as a cadence the drive was genuinely holding, rather than a
+#: coincidence too small to trust. A controller idling at 1 Hz for the tail
+#: of a drive produces a cluster in the hundreds; a fluke has one or two
+#: members.
+TICK_COVERAGE_MIN_REGIME_TICKS = 5
+
+#: How far apart (relative) two gaps can be and still count as the same
+#: cadence, absorbing ordinary jitter without merging two genuinely
+#: different rates into one cluster.
+TICK_COVERAGE_CLUSTER_TOLERANCE = 0.15
+
+#: How many nearby same-cadence gaps `_tick_coverage` averages to estimate
+#: the rate an interruption cut across, on each side of it.
+TICK_COVERAGE_LOCAL_WINDOW = 5
+
+
+def _cluster_gap_widths(
+    gaps: list[float], *, tolerance: float = TICK_COVERAGE_CLUSTER_TOLERANCE,
+) -> list[list[int]]:
+    """Groups `gaps`' indices by width: sorted by value, a gap joins the
+    current cluster when it is within `tolerance` of the largest member so
+    far, and starts a new one otherwise. A drive that legitimately holds
+    more than one cadence (idle vs active) produces one cluster per cadence;
+    an interruption -- a gap unlike anything nearby in the drive -- forms a
+    cluster of its own.
+    """
+    if not gaps:
+        return []
+    order = sorted(range(len(gaps)), key=lambda i: gaps[i])
+    clusters: list[list[int]] = [[order[0]]]
+    ceiling = gaps[order[0]]
+    for i in order[1:]:
+        if gaps[i] <= ceiling * (1 + tolerance):
+            clusters[-1].append(i)
+        else:
+            clusters.append([i])
+        ceiling = gaps[i]
+    return clusters
 
 
 def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_COVERAGE_GAP_MULTIPLE) -> dict[str, Any] | None:
@@ -3268,31 +3343,51 @@ def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_CO
 
     **The first shape tried for this was wrong, and measuring it is what
     caught it.** `expected = span_s * (actual_ticks / span_s)` is
-    `actual_ticks` by algebra, on every drive, healthy or not -- verified
-    against the real outage log: 1229 actual against 1229.0 "expected", a
-    zero-width miss. That is the same defect this section has already
-    removed twice (a `stale` count nothing could increment; a `basis_counts`
-    literal): an aggregate that is constant by construction is not a
-    measurement, and a mean tick rate computed from the same span it is then
-    multiplied back into can only ever reproduce the tick count it started
-    from.
+    `actual_ticks` by algebra, on every drive, healthy or not. A second
+    shape -- every gap more than `gap_multiple` times the single population
+    median -- was also wrong, in two directions at once: a controller that
+    legitimately runs at more than one rate (idle vs active, or thermally
+    scaled as low as 0.15x) has no one period a median can stand in for, so
+    it flagged a real rate change as missing; and a loss spread evenly
+    across the drive (every third tick gone) never widens any individual
+    gap past a multiple of the median at all, so it missed a genuine 33% of
+    the drive.
 
-    **What this reads instead is the GAP distribution.** `median_gap_s` is
-    the median of every inter-tick wall-clock gap -- robust to one outlier,
-    so it stands in for the drive's ordinary cadence even across a long
-    stall. `missing_ticks` sums, over every gap more than `gap_multiple`
-    times that median, how many ticks the ordinary cadence would have
-    produced in that gap beyond the one tick bounding it; a uniformly paced
-    drive scores zero regardless of its tick count or span, because nothing
-    but an actual pause in production can move it. Verified against three
-    real drives' tick records: a drive with an induced 54.58 s outage scores
-    269 missing of 1229 read (largest gap 270x the median); a historical
-    drive with its own, unrelated 85.22 s gap scores 421 of 1073; a drive
-    with no induced fault scores 0 of 749 (largest gap 1.5x the median).
+    **This reads two independent signals instead, and adds them.**
+
+    `tick_id` is assigned once per tick actually produced, in order, so a
+    tick deleted from the log after being written -- the log is short of
+    what was produced, not of what the loop attempted -- leaves an exact,
+    unambiguous hole in the sequence read off the ids still present: no
+    estimate needed. That is `missing_from_deleted_records`.
+
+    A tick the loop never produced at all leaves no hole in `tick_id`
+    -- consecutive ids either side of the pause, however long -- so it is
+    read from the gap's WIDTH instead, compared against the width of gaps
+    NEAR it in the sequence (`_cluster_gap_widths`, over gaps between
+    consecutive ids only) rather than one global median: a gap whose width
+    recurs at least `TICK_COVERAGE_MIN_REGIME_TICKS` times anywhere in the
+    drive is a cadence the drive was genuinely holding and costs nothing; a
+    gap that does not is compared against the cadence held by the
+    `TICK_COVERAGE_LOCAL_WINDOW` cadence-bearing gaps nearest to it -- what
+    the drive was actually doing immediately around the interruption, not
+    its fastest or its most common rate elsewhere. That is
+    `missing_from_gap_widths`. Verified against real drives: a drive with an
+    induced 54.58 s outage scores 269 of 1229 this way (0.1796); a
+    historical drive with its own 85.22 s gap scores 420 of 1073 (0.2813,
+    the same order as the original heuristic on this drive); a drive built
+    with a 5 Hz-to-1 Hz rate change over its last 20% of ticks, nothing
+    missing, scores 0; a drive with every third tick deleted (33.3%) scores
+    that exactly through `missing_from_deleted_records` alone.
     """
-    t_wall = sorted(t["t_wall"] for t in ticks if t.get("t_wall") is not None)
-    if len(t_wall) < 3:
+    ordered = sorted(
+        ((t["t_wall"], t.get("tick_id")) for t in ticks if t.get("t_wall") is not None),
+        key=lambda pair: pair[0],
+    )
+    if len(ordered) < 3:
         return None
+    t_wall = [p[0] for p in ordered]
+    tick_ids = [p[1] for p in ordered]
     gaps = [b - a for a, b in zip(t_wall, t_wall[1:])]
     span_s = t_wall[-1] - t_wall[0]
     sorted_gaps = sorted(gaps)
@@ -3302,13 +3397,48 @@ def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_CO
     )
     largest_gap_s = sorted_gaps[-1]
     next_largest_gap_s = sorted_gaps[-2]
-    missing_ticks = 0
-    if median_gap_s > 0:
-        threshold = gap_multiple * median_gap_s
-        for g in gaps:
-            if g > threshold:
-                missing_ticks += round(g / median_gap_s) - 1
     actual_ticks = len(t_wall)
+
+    # A gap has a known id delta only when both ends carry a tick_id; an
+    # unknown delta is treated as consecutive (1) so a log with no tick_id
+    # at all falls back entirely to the gap-width signal below, exactly as
+    # before this ids-aware split existed.
+    id_deltas = [
+        (tick_ids[i + 1] - tick_ids[i]) if tick_ids[i] is not None and tick_ids[i + 1] is not None else 1
+        for i in range(len(gaps))
+    ]
+    missing_from_deleted_records = sum(max(0, d - 1) for d in id_deltas)
+
+    consecutive_idx = [i for i, d in enumerate(id_deltas) if d <= 1]
+    consecutive_gaps = [gaps[i] for i in consecutive_idx]
+    clusters = _cluster_gap_widths(consecutive_gaps)
+    # `has_cadence[i]` (indexed like `gaps`) is True when gap i belongs to a
+    # cluster large enough to trust as a cadence the drive actually held.
+    has_cadence = [False] * len(gaps)
+    for members in clusters:
+        if len(members) >= TICK_COVERAGE_MIN_REGIME_TICKS:
+            for local_i in members:
+                has_cadence[consecutive_idx[local_i]] = True
+
+    def local_reference_period(i: int) -> float | None:
+        before = [gaps[j] for j in range(i - 1, -1, -1) if has_cadence[j]][:TICK_COVERAGE_LOCAL_WINDOW]
+        after = [gaps[j] for j in range(i + 1, len(gaps)) if has_cadence[j]][:TICK_COVERAGE_LOCAL_WINDOW]
+        pool = before + after
+        if not pool:
+            return None
+        pool.sort()
+        pm = len(pool) // 2
+        return pool[pm] if len(pool) % 2 else (pool[pm - 1] + pool[pm]) / 2.0
+
+    missing_from_gap_widths = 0
+    for i, (g, d) in enumerate(zip(gaps, id_deltas)):
+        if d > 1 or has_cadence[i]:
+            continue
+        reference = local_reference_period(i)
+        if reference and g > gap_multiple * reference:
+            missing_from_gap_widths += round(g / reference) - 1
+
+    missing_ticks = missing_from_deleted_records + missing_from_gap_widths
     return {
         "actual_ticks": actual_ticks,
         "span_s": span_s,
@@ -3316,6 +3446,8 @@ def _tick_coverage(ticks: list[dict[str, Any]], *, gap_multiple: float = TICK_CO
         "largest_gap_s": largest_gap_s,
         "next_largest_gap_s": next_largest_gap_s,
         "gap_multiple": gap_multiple,
+        "missing_from_deleted_records": missing_from_deleted_records,
+        "missing_from_gap_widths": missing_from_gap_widths,
         "missing_ticks": missing_ticks,
         "expected_ticks": actual_ticks + missing_ticks,
     }

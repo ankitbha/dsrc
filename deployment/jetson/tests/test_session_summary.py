@@ -584,13 +584,15 @@ class TestExpectedFromCommanded:
         gap-weighted value on an unevenly spaced series instead.
         """
         points = [(0.0, 2.0), (1.0, 2.0), (5.0, 2.0)]
-        # gaps = [1, 4]; median of [1, 4] is 2.5, so the cap (3x median =
-        # 7.5) never binds here -- weights = gaps + [last gap] = [1, 4, 4];
-        # sum(v * w) = 2*1 + 2*4 + 2*4
+        # A9: every point's value is 2.0 Hz, so each gap is capped against
+        # its OWN implied period (1 / 2.0 = 0.5 s), not a population median
+        # -- cap = 3 * 0.5 = 1.5 s. gaps = [1, 4]; capped = [1, 1.5]
+        # (the second gap exceeds 1.5 s); trailing weight is also capped at
+        # 1.5. weights = [1, 1.5, 1.5]; sum(v * w) = 2*1 + 2*1.5 + 2*1.5 = 8
         stat = _time_weighted_integral(points)
-        assert stat.value == pytest.approx(18.0)
+        assert stat.value == pytest.approx(8.0)
         assert stat.span_s == pytest.approx(5.0)
-        assert stat.weighted_over_s == pytest.approx(9.0)
+        assert stat.weighted_over_s == pytest.approx(4.0)
 
 
 class TestOutageWeightCapping:
@@ -621,6 +623,64 @@ class TestOutageWeightCapping:
         uncapped_would_be = 1 + 1 + 1 + 20 + 20  # = 43.0
         assert stat.value < uncapped_would_be
         assert stat.value == pytest.approx(9.0)
+
+
+class TestPerPointRateCapping:
+    """A9: `_time_weighted_weights`'s cap used a population median, which
+    assumes one characteristic period -- wrong for a controller built to
+    run at more than one rate (idle vs active, or thermally scaled as low
+    as 0.15x). Capping a slow regime's gaps at a multiple of a fast
+    regime's median period truncates every one of them, biasing the mean
+    toward whichever regime holds the majority of points.
+    """
+
+    def test_a_minority_slow_regime_is_not_truncated_by_the_fast_majority(self):
+        # 20 points at 5.0 Hz (period 0.2 s), then 5 points at 1.0 Hz
+        # (period 1.0 s), both legitimately held for their own gaps --
+        # nothing here is actually missing. The population median gap is
+        # 0.2 s (19 fast gaps against 4 slow ones), so a median-based cap
+        # at 3 * 0.2 = 0.6 s would truncate every 1.0 s slow gap.
+        fast = [(i * 0.2, 5.0) for i in range(20)]
+        slow_start = fast[-1][0] + 1.0
+        slow = [(slow_start + i * 1.0, 1.0) for i in range(5)]
+        points = fast + slow
+
+        stat = _time_weighted_integral(points)
+        # Each point's own value is the rate that gap-caps against ITS OWN
+        # implied period, so the four intra-slow-regime gaps (1.0 s, period
+        # 1.0 s) are not capped at all. Verified against the function
+        # itself: 27.0, against 25.0 a population-median cap would give.
+        assert stat.value == pytest.approx(27.0)
+
+    def test_the_same_series_would_read_lower_under_a_population_median_cap(self):
+        """Names the OLD defect directly: recomputes what a single global
+        median-based cap would have given for the same series, and shows
+        the per-point-rate result is higher -- the slow regime's gaps
+        credited at their own width rather than truncated to the fast
+        regime's cadence.
+        """
+        fast = [(i * 0.2, 5.0) for i in range(20)]
+        slow_start = fast[-1][0] + 1.0
+        slow = [(slow_start + i * 1.0, 1.0) for i in range(5)]
+        points = fast + slow
+
+        times = [t for t, _ in points]
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        sorted_gaps = sorted(gaps)
+        mid = len(sorted_gaps) // 2
+        median_gap = (
+            sorted_gaps[mid] if len(sorted_gaps) % 2
+            else (sorted_gaps[mid - 1] + sorted_gaps[mid]) / 2.0
+        )
+        cap = 3.0 * median_gap
+        old_weights = [min(g, cap) for g in gaps]
+        old_weights.append(min(gaps[-1], cap))
+        old_value = sum(v * w for (_, v), w in zip(points, old_weights))
+
+        new_value = _time_weighted_integral(points).value
+        assert new_value > old_value
+        assert old_value == pytest.approx(25.0)
+        assert new_value == pytest.approx(27.0)
 
 
 class TestTelemetryWindow:
@@ -767,15 +827,19 @@ class TestCommandedByValue:
         from a plain sample mean, which happen to agree whenever every gap is
         the same size, and this test's name claims that distinction.
 
-        gaps = [1, 1, 8]; sorted [1, 1, 8], median (odd count) = 1; cap =
-        3.0 * 1 = 3.0 -- the 8 s gap is capped down to 3.0.
+        A9: each gap is capped against the period implied by the point
+        that precedes it (1 / value), not a population median. gaps =
+        [1, 1, 8]; the first two points are 1.0 Hz (period 1 s, cap 3 s --
+        neither 1 s gap is affected); the third point is still 1.0 Hz, so
+        the 8 s gap is also capped at 3 s. The series' own last point
+        (5.0 Hz, period 0.2 s) caps its own trailing weight at 0.6 s.
         """
         points = [(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (10.0, 5.0)]
         mean = _time_weighted_mean(points).value
         sample_mean = sum(v for _, v in points) / len(points)
         assert mean != pytest.approx(sample_mean)
-        # weights = [1, 1, 3, 3]; sum(v*w) = 1+1+3+15 = 20, total weight = 8
-        assert mean == pytest.approx(20 / 8)
+        # weights = [1, 1, 3, 0.6]; sum(v*w) = 1+1+3+3 = 8, total weight = 5.6
+        assert mean == pytest.approx(8 / 5.6)
 
     def test_time_weighted_mean_is_not_a_plain_sample_mean(self):
         """gaps = [1, 1, 98]; sorted [1, 1, 98], median (odd count) = 1; cap

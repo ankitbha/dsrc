@@ -332,6 +332,64 @@ class TestTickCoverageGate:
         assert gate["value"] == 0.0
 
 
+class TestTickCoverageDistinguishesRateChangeFromLoss:
+    """A9/A10/A11: a single population median assumes one characteristic
+    period. A controller legitimately running at more than one rate has no
+    such period (A9/A10); a loss spread evenly across a drive never widens
+    any one gap past a multiple of the median at all (A11). Both are size
+    questions a gap-shape heuristic answers wrong in opposite directions.
+    """
+
+    def test_a_legitimate_rate_change_reports_zero_missing(self, tmp_path):
+        ticks = [make_tick(i) for i in range(90)]
+        # The last 20 ticks held a real, slower cadence (6 Hz instead of the
+        # base 30 Hz) for long enough to be its own regime -- every tick
+        # that was produced is still here, tick_id 0..89 with no hole, just
+        # spaced out differently in wall time.
+        base_t_wall = ticks[69]["t_wall"]
+        for offset, t in enumerate(ticks[70:], start=1):
+            t["t_wall"] = base_t_wall + offset * (1.0 / 6.0)
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        gate = result["gates"]["tick_coverage"]
+        assert gate["value"] == 0.0
+        assert gate["pass"] is True
+
+    def test_an_evenly_distributed_loss_is_caught_through_tick_id_holes(self, tmp_path):
+        all_ticks = [make_tick(i) for i in range(90)]
+        # Every third tick deleted -- no single gap stands out (each
+        # surviving gap is a uniform multiple of the base period), so a
+        # heuristic reading only gap SIZE cannot see this at all. tick_id
+        # itself holes exactly where a tick used to be.
+        kept = [t for i, t in enumerate(all_ticks) if i % 3 != 2]
+        run_dir = write_run(
+            tmp_path, kept, scenario=scenario_record(),
+            summary={"ticks": len(kept), "camera_dropped_frames": 0, "policy_trained": False},
+        )
+        result = analyze(run_dir)
+        gate = result["gates"]["tick_coverage"]
+        assert gate["pass"] is False
+        assert gate["value"] == pytest.approx(30 / 90, abs=0.01)
+        assert result["overall_pass"] is False
+
+
+class TestTickCoverageGateIsNoneWhenUnmeasurable:
+    """B13: `coverage_fraction is not None else None` mutated to `else True`
+    left every existing test passing -- a drive whose coverage cannot be
+    computed at all (fewer than three ticks) would then render the gate as
+    a pass rather than not applicable, the same silent-pass shape
+    `log_complete`'s three-state fix (A5) exists to rule out.
+    """
+
+    def test_a_two_tick_drive_leaves_the_gate_not_applicable(self, tmp_path):
+        ticks = [make_tick(0), make_tick(1)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        gate = result["gates"]["tick_coverage"]
+        assert gate["pass"] is None
+        assert gate["value"] is None
+
+
 # -- joining the phone's own log against the Jetson's ticks -----------------
 
 
