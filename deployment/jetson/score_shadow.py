@@ -93,6 +93,15 @@ REFUSAL_PRE_TASK_35 = "decision_inputs_absent"
 #: so the next `Inputs` change gets a refusal instead of the `ValueError`
 #: `Inputs.from_record` would otherwise raise deep inside `_replay_incumbent`.
 REFUSAL_INPUTS_SCHEMA = "decision_inputs_schema"
+#: `_log_refusal`'s other three checks all cover the INPUT side of a tick
+#: (`decision_inputs`). `_segments`, `_limits` and `_reference_witness`
+#: subscript `sensing["shadow"]` / `sensing["reference"]` directly, with no
+#: `.get`, so a log missing either crashed deep inside one of those instead
+#: of being refused by name here. Checked by an explicit key list rather
+#: than derived from `Decision`'s own dataclass fields, because
+#: `to_record()`'s keys are not named 1:1 with them (`here_query` becomes
+#: `here_radius_m`), so there is no single schema this could read instead.
+REFUSAL_OUTPUTS_ABSENT = "decision_outputs_absent"
 
 #: Why a candidate's own score is refused rather than emitted on rates alone.
 #: A candidate that cannot report the same three-state attribution the
@@ -125,6 +134,13 @@ def _sensing_ticks(ticks: list[dict]) -> list[dict]:
     return [t for t in ticks if "sensing" in t]
 
 
+#: `sensing` keys read by a bare subscript, with no `.get`, downstream of
+#: `_log_refusal` -- `_segments`/`_limits` read `shadow`, `_reference_witness`
+#: reads `reference`. A log missing either crashes deep inside one of those
+#: instead of being refused by name here.
+REQUIRED_SENSING_OUTPUT_KEYS = ("shadow", "reference")
+
+
 def _log_refusal(
     ticks: list[dict], sensing_ticks: list[dict],
 ) -> tuple[str | None, dict[str, Any] | None]:
@@ -143,6 +159,8 @@ def _log_refusal(
         sensing = t["sensing"]
         if "decision_inputs" not in sensing or "decided_at_mono" not in sensing:
             return REFUSAL_PRE_TASK_35, None
+        if any(key not in sensing for key in REQUIRED_SENSING_OUTPUT_KEYS):
+            return REFUSAL_OUTPUTS_ABSENT, None
     expected = {f.name for f in fields(Inputs)}
     for t in sensing_ticks:
         present = set(t["sensing"]["decision_inputs"])

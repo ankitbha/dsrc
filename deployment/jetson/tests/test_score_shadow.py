@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import sys
 import types
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -322,6 +322,44 @@ class TestRefusals:
         monkeypatch.setattr(sys, "argv", ["score_shadow.py", str(run_dir)])
         assert score_shadow.main() == 2
         assert not (run_dir / "shadow_score.json").exists()
+
+    def test_a_log_missing_shadow_refuses_by_name_instead_of_crashing(self, tmp_path):
+        """B4: `_segments` subscripts `sensing["shadow"]` directly, with no
+        `.get` -- a log carrying `decision_inputs`/`decided_at_mono` but not
+        `shadow` used to raise `KeyError` deep inside `_segments`, bypassing
+        `_log_refusal` entirely, which validated the input side of a tick
+        but nothing on the output side.
+        """
+        run_dir = tmp_path / "no_shadow"
+        run_dir.mkdir()
+        expected_inputs = {f.name: None for f in fields(score_shadow.Inputs)}
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            f.write(json.dumps({
+                "type": "tick", "tick_id": 0,
+                "sensing": {
+                    "decision_inputs": expected_inputs, "decided_at_mono": 1.0,
+                    "reference": {"absent": "no_telemetry"},
+                    # "shadow" deliberately absent.
+                },
+            }) + "\n")
+        result = score_shadow.score(run_dir)
+        assert result["refused"] == score_shadow.REFUSAL_OUTPUTS_ABSENT
+
+    def test_a_log_missing_reference_also_refuses_by_name(self, tmp_path):
+        run_dir = tmp_path / "no_reference"
+        run_dir.mkdir()
+        expected_inputs = {f.name: None for f in fields(score_shadow.Inputs)}
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            f.write(json.dumps({
+                "type": "tick", "tick_id": 0,
+                "sensing": {
+                    "decision_inputs": expected_inputs, "decided_at_mono": 1.0,
+                    "shadow": True,
+                    # "reference" deliberately absent.
+                },
+            }) + "\n")
+        result = score_shadow.score(run_dir)
+        assert result["refused"] == score_shadow.REFUSAL_OUTPUTS_ABSENT
 
 
 class TestReplayIdentityGate:
