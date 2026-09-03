@@ -54,7 +54,7 @@ from typing import Any, Callable, Mapping
 JETSON_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(JETSON_DIR))
 
-from eval_run import load_records  # noqa: E402
+from eval_run import _tick_coverage, load_records  # noqa: E402
 from policy.sensing_controller import (  # noqa: E402
     MAX_TELEMETRY_AGE_S,
     RULE_FIRED,
@@ -244,9 +244,16 @@ def _limits(sensing_ticks: list[dict], summary: dict[str, Any] | None) -> dict[s
     }
 
 
-def _log_completeness(sensing_ticks: list[dict], summary: dict[str, Any] | None) -> dict[str, Any] | None:
+def _log_truncation(sensing_ticks: list[dict], summary: dict[str, Any] | None) -> dict[str, Any] | None:
     """Whether the tick records this scorer read match the count the run
     itself recorded, or `None` when there is nothing to compare against.
+
+    Named for what it can see, not for completeness in general: an outage
+    that stops tick production reduces `summary["sensing"]["ticks"]` and
+    `len(sensing_ticks)` together, so `ticks_missing` reads zero by
+    construction on exactly the drive this check is blind to. `tick_coverage`
+    (`score()`'s own separate field, built from `eval_run._tick_coverage`)
+    is what catches that; this one catches a different, narrower loss.
 
     `summary["sensing"]["ticks"]` is `SensingLoop.ticks`: incremented once
     per call to `on_tick`, independent of whatever later made it into
@@ -568,7 +575,12 @@ def score(run_dir: Path, candidates: Mapping[str, Callable[[Any], Any]] | None =
         "run": str(run_dir),
         "ticks": len(sensing_ticks),
         "unparseable_lines": unparseable,
-        "log_completeness": _log_completeness(sensing_ticks, summary),
+        "log_truncation": _log_truncation(sensing_ticks, summary),
+        # Independent of `log_truncation`, and reads a different signal
+        # (the sensing ticks' own gap distribution and tick_id sequence,
+        # not a count the run reported about itself) so it can see an
+        # outage log_truncation is structurally blind to.
+        "tick_coverage": _tick_coverage(sensing_ticks),
         "replay_identity": replay_identity,
         "segments": segments,
         "limits": _limits(sensing_ticks, summary),
@@ -626,10 +638,17 @@ def render_table(result: dict[str, Any]) -> str:
 
     lines = [f"[score_shadow] {result['run']}", f"  ticks: {result['ticks']}"
              f" (unparseable lines: {result['unparseable_lines']})"]
-    lc = result["log_completeness"]
-    if lc is not None:
-        lines.append(f"  log_completeness: recorded={lc['ticks_recorded']} "
-                     f"scored={lc['ticks_scored']} missing={lc['ticks_missing']}")
+    lt = result["log_truncation"]
+    if lt is not None:
+        lines.append(f"  log_truncation: recorded={lt['ticks_recorded']} "
+                     f"scored={lt['ticks_scored']} missing={lt['ticks_missing']}")
+    tc = result["tick_coverage"]
+    if tc is not None:
+        missing = tc["missing_ticks"]
+        expected = tc["expected_ticks"]
+        fraction = missing / expected if expected else 0.0
+        lines.append(f"  tick_coverage: actual={tc['actual_ticks']} missing={missing} "
+                     f"({fraction:.1%} of {expected} expected)")
     ri = result["replay_identity"]
     lines.append(f"  replay_identity: {ri['status']} ({ri['mismatched']}/{ri['ticks']} mismatched)")
     if ri["status"] != "ok":

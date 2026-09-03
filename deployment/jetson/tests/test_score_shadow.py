@@ -379,7 +379,7 @@ class TestReplayIdentityGate:
         assert score_shadow.main() == 2
 
 
-class TestLogCompleteness:
+class TestLogTruncation:
     """`summary["sensing"]["ticks"]` is the tick count `SensingLoop` itself
     recorded; `len(sensing_ticks)` is what this scorer read back off the
     log. A truncated log can carry fewer records than the run it came from
@@ -390,13 +390,13 @@ class TestLogCompleteness:
     def test_none_without_a_recorded_tick_count(self, tmp_path):
         run_dir = write_run(tmp_path, n=10)  # no summary.json written at all
         result = score_shadow.score(run_dir)
-        assert result["log_completeness"] is None
+        assert result["log_truncation"] is None
 
     def test_a_complete_log_reports_zero_missing(self, tmp_path):
         run_dir = write_run(tmp_path, n=10)
         (run_dir / "summary.json").write_text(json.dumps({"sensing": {"ticks": 10}}))
         result = score_shadow.score(run_dir)
-        assert result["log_completeness"] == {
+        assert result["log_truncation"] == {
             "ticks_recorded": 10, "ticks_scored": 10, "ticks_missing": 0,
         }
 
@@ -407,13 +407,73 @@ class TestLogCompleteness:
         run_dir = write_run(tmp_path, n=10)
         (run_dir / "summary.json").write_text(json.dumps({"sensing": {"ticks": 13}}))
         result = score_shadow.score(run_dir)
-        assert result["log_completeness"] == {
+        assert result["log_truncation"] == {
             "ticks_recorded": 13, "ticks_scored": 10, "ticks_missing": 3,
         }
         table = score_shadow.render_table(result)
         assert "recorded=13" in table
         assert "scored=10" in table
         assert "missing=3" in table
+
+
+def _inject_t_wall(run_dir: Path, *, base: float = 1000.0, period: float = 0.1) -> None:
+    """`write_run`'s ticks carry no top-level `t_wall` at all -- this test
+    module only cares about the `sensing` sub-block, unlike a real Jetson
+    tick record. `_tick_coverage` reads `t_wall`, so a test that wants it
+    stamps one on afterward, evenly spaced at `period` starting at `base`.
+    """
+    lines = (run_dir / "metadata.jsonl").read_text().splitlines()
+    records = [json.loads(line) for line in lines]
+    tick_records = [r for r in records if r.get("type") == "tick"]
+    for i, r in enumerate(tick_records):
+        r["t_wall"] = base + i * period
+    with open(run_dir / "metadata.jsonl", "w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+
+
+class TestTickCoverage:
+    """A8: `log_truncation` compares the log against a count the run itself
+    reported, so an outage that stops tick production reduces both sides
+    together and reads zero missing by construction. `tick_coverage`
+    (ported from `eval_run._tick_coverage`) reads the sensing ticks' own gap
+    distribution and tick_id sequence instead, so it can see that outage.
+    """
+
+    def test_an_uninterrupted_log_reports_zero_missing(self, tmp_path):
+        run_dir = write_run(tmp_path, n=10)
+        _inject_t_wall(run_dir)
+        result = score_shadow.score(run_dir)
+        assert result["tick_coverage"]["missing_ticks"] == 0
+
+    def test_fewer_than_three_ticks_is_not_applicable(self, tmp_path):
+        run_dir = write_run(tmp_path, n=2)
+        _inject_t_wall(run_dir)
+        result = score_shadow.score(run_dir)
+        assert result["tick_coverage"] is None
+
+    def test_an_outage_log_truncation_cannot_see_is_caught_here(self, tmp_path):
+        # The run's own reported tick count and the log's record count agree
+        # -- log_truncation reads zero missing -- but a real gap sits in the
+        # ticks this scorer actually read.
+        run_dir = write_run(tmp_path, n=10)
+        _inject_t_wall(run_dir)
+        lines = (run_dir / "metadata.jsonl").read_text().splitlines()
+        records = [json.loads(line) for line in lines]
+        tick_records = [r for r in records if r.get("type") == "tick"]
+        for r in tick_records[5:]:
+            r["t_wall"] += 60.0
+        with open(run_dir / "metadata.jsonl", "w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+        (run_dir / "summary.json").write_text(json.dumps({"sensing": {"ticks": 10}}))
+
+        result = score_shadow.score(run_dir)
+        assert result["log_truncation"]["ticks_missing"] == 0
+        assert result["tick_coverage"]["missing_ticks"] > 0
+
+        table = score_shadow.render_table(result)
+        assert "tick_coverage: actual=10 missing=" in table
 
 
 class TestSegments:
