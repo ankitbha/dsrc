@@ -1736,12 +1736,13 @@ Everything above is done before the devices meet.
     no diagnostic. **The phone must go in a USB-A port**, or a hub hanging off
     one — the u-blox GPS and the Bluetooth radio are on the same USB 2.0 hub.
 
-    **Not verified: whether "always allow" was ticked.** The device has no root
-    (`su: inaccessible`), so `/data/misc/adb/adb_keys` cannot be read to confirm
-    the key was persisted. If it was not, the grant is session-scoped and dies on
-    the next reboot or replug — which would return this task in the car, where
-    nobody wants it. The cheap confirmation is to unplug and replug: coming back
-    as `device` with no new prompt proves the box was ticked.
+    **"Always allow from this computer" was ticked** (Ankit, at the phone). It is
+    not independently checkable from this side: the device has no root
+    (`su: inaccessible`), so `/data/misc/adb/adb_keys` cannot be read. The
+    empirical confirmation, if it is ever wanted, is a replug — the USB device
+    number increments and the grant should hold with no new prompt. Worth knowing
+    because a session-scoped grant would only reveal itself at the next reboot,
+    and the next reboot is likely to be in the car.
 42. **[COLOCATED]** Bench loopback over USB with both devices on a desk;
     end-to-end latency measured against the 200 ms target.
 43. **[COLOCATED]** Shadow-mode correctness: logged shadow decisions match what
