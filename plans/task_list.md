@@ -1718,8 +1718,30 @@ Everything above is done before the devices meet.
 
 40. **[COLOCATED]** USB transport backend behind the same interface, swapped in
     for the network backend.
-41. **[COLOCATED]** `adb` first connection: accept the RSA authorization on the
-    phone screen, tick "always allow".
+41. ~~**[COLOCATED]** `adb` first connection: accept the RSA authorization on the
+    phone screen, tick "always allow".~~ **DONE 2026-09-04** — `ZY227VV4XC` on
+    `usb:1-2.2`, reporting `device`; `adb shell getprop` returns `moto g power`
+    running Android 11, so the link carries commands rather than merely
+    enumerating. Survives an `adb kill-server` / `start-server` cycle. The
+    Jetson's identity key is `/home/edge/.android/adbkey`; no `.pub` file exists,
+    which is normal — adb derives it on demand.
+
+    **The port was the whole difficulty, and it is worth recording because the
+    symptom is silent.** The phone spent some time plugged into the Orin's USB-C
+    port, where it never appeared on the bus at all: no error, no partial
+    enumeration, nothing in `lsusb`. That port is registered as a USB *device*
+    controller (`/sys/class/udc/3550000.usb`, the `tegra-xudc` driver backing the
+    `l4tbr0` gadget interface), so the Jetson presents itself as a device on it
+    and can never act as host. Two devices both waiting to be enumerated produce
+    no diagnostic. **The phone must go in a USB-A port**, or a hub hanging off
+    one — the u-blox GPS and the Bluetooth radio are on the same USB 2.0 hub.
+
+    **Not verified: whether "always allow" was ticked.** The device has no root
+    (`su: inaccessible`), so `/data/misc/adb/adb_keys` cannot be read to confirm
+    the key was persisted. If it was not, the grant is session-scoped and dies on
+    the next reboot or replug — which would return this task in the car, where
+    nobody wants it. The cheap confirmation is to unplug and replug: coming back
+    as `device` with no new prompt proves the box was ticked.
 42. **[COLOCATED]** Bench loopback over USB with both devices on a desk;
     end-to-end latency measured against the 200 ms target.
 43. **[COLOCATED]** Shadow-mode correctness: logged shadow decisions match what
