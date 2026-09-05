@@ -956,3 +956,236 @@ class TestUsbAcceptorCloseIsRegisteredWithAtexit:
 
         assert rc == 2
         assert registered == []
+
+
+class TestUsbSigtermHandler:
+    """C5 (validation round 2, upgraded to required): a bare `kill`
+    (SIGTERM) bypasses `atexit` entirely -- Python's default disposition
+    for it terminates the process immediately, a different path from an
+    uncaught exception reaching the top of the interpreter (which DOES
+    still run atexit). Left unhandled, the leaked `adb reverse
+    tcp:47811 tcp:47811` holds a device-side listener on that exact port,
+    which `ImuWireTest.kt` binds a `ServerSocket` on
+    (`LinkConfig.DEFAULT_PORT`), so an instrumented run after a SIGTERM'd
+    drive fails with `EADDRINUSE` for an unrelated reason.
+    """
+
+    def _install_fakes(self, monkeypatch):
+        installed_handlers: dict[int, object] = {}
+        monkeypatch.setattr(
+            run_demo.signal, "signal",
+            lambda sig, handler: installed_handlers.__setitem__(sig, handler),
+        )
+
+        closed = []
+
+        class FakeUsbAcceptor:
+            port = 47811
+
+            def __init__(self, serial, port=47811):
+                self.serial = serial
+
+            def close(self):
+                closed.append(self.serial)
+
+        monkeypatch.setattr("transport.usb.UsbAcceptor", FakeUsbAcceptor)
+
+        class FakePhoneLink:
+            def __init__(self, **kwargs):
+                self.host = "127.0.0.1"
+                self.port = 47811
+                self.refusals = []
+                self.session = None
+
+            def wait_for_phone(self, timeout_s):
+                return False
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr("sensors.phone_link.PhoneLink", FakePhoneLink)
+        return installed_handlers, closed
+
+    def test_installs_a_sigterm_handler_when_usb_is_used(self, monkeypatch, tmp_path):
+        installed_handlers, _closed = self._install_fakes(monkeypatch)
+        args = _real_drive_args(
+            phone=True, usb=True, usb_serial="ZY227VV4XC", phone_wait_s=0.01, no_gps=False,
+        )
+        config = _real_drive_config(tmp_path)
+        rc = run_demo.run_live(config, args)
+
+        assert rc == 2
+        assert run_demo.signal.SIGTERM in installed_handlers
+
+    def test_the_handler_raises_systemexit_which_still_runs_the_atexit_close(
+        self, monkeypatch, tmp_path,
+    ):
+        """Not just that a handler is installed: that invoking it actually
+        unwinds through SystemExit (verified separately: that still runs a
+        registered atexit callback, unlike the SIGTERM default) rather than
+        calling `close()` directly and swallowing the signal -- which would
+        leave the process running with a signal handler that silently ate
+        a termination request.
+        """
+        registered = []
+        monkeypatch.setattr(run_demo.atexit, "register", lambda fn: registered.append(fn))
+        installed_handlers, closed = self._install_fakes(monkeypatch)
+
+        args = _real_drive_args(
+            phone=True, usb=True, usb_serial="ZY227VV4XC", phone_wait_s=0.01, no_gps=False,
+        )
+        config = _real_drive_config(tmp_path)
+        run_demo.run_live(config, args)
+
+        handler = installed_handlers[run_demo.signal.SIGTERM]
+        with pytest.raises(SystemExit) as exc_info:
+            handler(run_demo.signal.SIGTERM, None)
+        assert exc_info.value.code == 128 + run_demo.signal.SIGTERM
+        # The handler itself does not call close() -- atexit (registered
+        # separately, above) is what runs it once SystemExit is unhandled.
+        assert closed == []
+        registered[0]()
+        assert closed == ["ZY227VV4XC"]
+
+    def test_does_not_install_a_sigterm_handler_when_usb_is_not_used(self, monkeypatch, tmp_path):
+        installed_handlers = {}
+        monkeypatch.setattr(
+            run_demo.signal, "signal",
+            lambda sig, handler: installed_handlers.__setitem__(sig, handler),
+        )
+
+        class FakePhoneLink:
+            def __init__(self, **kwargs):
+                self.host = "0.0.0.0"
+                self.port = 47811
+                self.refusals = []
+                self.session = None
+
+            def wait_for_phone(self, timeout_s):
+                return False
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr("sensors.phone_link.PhoneLink", FakePhoneLink)
+        args = _real_drive_args(phone=True, usb=False, phone_wait_s=0.01, no_gps=False)
+        config = _real_drive_config(tmp_path)
+        rc = run_demo.run_live(config, args)
+
+        assert rc == 2
+        assert installed_handlers == {}
+
+
+class TestBuildProvenance:
+    """A4 (validation round 2): given a run directory alone, none of the
+    policy bundle, the detector engine, or the code revision was
+    recoverable -- `summary.json`'s only model field was `policy_trained:
+    false`. `_build_provenance` fills `summary["build"]`.
+    """
+
+    def _config(self, tmp_path, **overrides):
+        config = {
+            "policy": {"bundle": str(tmp_path / "actor_policy")},
+            "detector": {"engine": str(tmp_path / "yolov8n.engine")},
+        }
+        config.update(overrides)
+        return config
+
+    def test_reads_the_real_git_commit(self, tmp_path):
+        # This is the real `git rev-parse HEAD` against run_demo.JETSON_DIR
+        # -- not a fake -- so this deliberately reads correctly in BOTH of
+        # this task's own two environments: a real git checkout (the Mac)
+        # and an ad-hoc rsync copy with no `.git` at all (this task's own
+        # `~/dsrc-task40` on jetson-orin, exit 128) -- the exact case A4
+        # names and the one an earlier version of this test did not handle,
+        # asserting `None == ""` there instead of `None == None`.
+        import subprocess
+
+        probe = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(run_demo.JETSON_DIR),
+            capture_output=True, text=True,
+        )
+        expected = probe.stdout.strip() if probe.returncode == 0 else None
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] == expected
+        if expected is not None:
+            assert len(expected) == 40
+
+    def test_commit_is_none_when_git_rev_parse_fails(self, tmp_path, monkeypatch):
+        """The exact shape `~/dsrc-task40` (this task's own rsync copy, not
+        a git checkout) produces -- named rather than silently omitted."""
+        def failing_run(args, *, cwd, capture_output, text, timeout):
+            class Result:
+                returncode = 128
+                stdout = ""
+
+            return Result()
+
+        monkeypatch.setattr(run_demo.subprocess, "run", failing_run)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] is None
+
+    def test_commit_is_none_when_git_is_not_on_path(self, tmp_path, monkeypatch):
+        def raising_run(args, *, cwd, capture_output, text, timeout):
+            raise FileNotFoundError("no git")
+
+        monkeypatch.setattr(run_demo.subprocess, "run", raising_run)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] is None
+
+    def test_reads_the_policy_bundle_sidecar_as_a_copy(self, tmp_path):
+        bundle_json = {
+            "trained": False, "sim_commit": "d477dba",
+            "contract_fingerprint": "918ec57cf2f2e1db",
+        }
+        (tmp_path / "actor_policy.json").write_text(json.dumps(bundle_json))
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["policy_bundle"] == bundle_json
+
+    def test_policy_bundle_is_none_when_the_sidecar_is_absent(self, tmp_path):
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["policy_bundle"] is None
+
+    def test_hashes_the_detector_engine(self, tmp_path):
+        engine_bytes = b"a fake tensorrt engine, just bytes to hash"
+        (tmp_path / "yolov8n.engine").write_bytes(engine_bytes)
+        import hashlib
+
+        expected = hashlib.sha256(engine_bytes).hexdigest()
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["detector_engine_sha256"] == expected
+
+    def test_detector_engine_sha256_is_none_when_the_engine_is_absent(self, tmp_path):
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["detector_engine_sha256"] is None
+
+    def test_reads_apk_sha256_from_the_installed_apk_record(self, tmp_path, monkeypatch):
+        record_path = tmp_path / "installed_apk.json"
+        record_path.write_text(json.dumps({"sha256": "abc123", "version_code": 1}))
+        monkeypatch.setattr(run_demo, "INSTALLED_APK_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["apk_sha256"] == "abc123"
+
+    def test_apk_sha256_is_none_when_no_install_record_exists(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(run_demo, "INSTALLED_APK_RECORD", tmp_path / "nope.json")
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["apk_sha256"] is None
+
+    def test_a_real_drive_writes_the_build_block(self, tmp_path, monkeypatch):
+        """End to end through run_live's own teardown, not a transcription:
+        the same real pipeline TestRunLiveFailureSamplerIntegration drives."""
+        pipeline, actor = _build_real_pipeline(tmp_path)
+        camera = _FiniteCamera(n_frames=3)
+        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
+
+        config = _real_drive_config(tmp_path)
+        args = _real_drive_args()
+        rc = run_demo.run_live(config, args)
+        assert rc == 0
+
+        run_dirs = list((tmp_path / "logs").iterdir())
+        summary = json.loads((run_dirs[0] / "summary.json").read_text())
+        assert "build" in summary
+        assert set(summary["build"]) == {
+            "commit", "policy_bundle", "detector_engine_sha256", "apk_sha256",
+        }

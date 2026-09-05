@@ -25,9 +25,12 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import hashlib
 import json
 import math
 import os
+import signal
+import subprocess
 import sys
 import threading
 import time
@@ -151,14 +154,12 @@ def _build_rest(config: dict):
         ),
     )
 
-    obs_cfg = dict(config["observation"])
-    obs_cfg["gps_stale_after_s"] = config["gps"]["stale_after_s"]
-    # The same number the beacon admits peers at. `nearby_av_density` divides by it,
-    # and it used to divide by a literal 150 while the transceiver honoured the
-    # config -- so raising `v2v.range_m` left the density reporting twice the
-    # vehicles per km the admission range implied.
-    obs_cfg["peer_range_m"] = config["v2v"]["range_m"]
-    builder = ObservationBuilder(BuilderConfig.from_dict(obs_cfg))
+    # B11 (validation round 2): the observation-section-plus-two-overrides
+    # merge lives once, in BuilderConfig.from_full_config, so this and
+    # src.analysis.observation_parity's harness build the identical
+    # BuilderConfig from the identical config rather than each carrying its
+    # own copy of the same three lines.
+    builder = ObservationBuilder(BuilderConfig.from_full_config(config))
 
     p = config["policy"]
     actor = ActorRuntime(
@@ -240,6 +241,67 @@ def _log_timebase_estimates(
             "why_not_usable": estimator.why_not_usable(),
             **estimate.to_record(),
         })
+
+
+#: Where the install step records what it put on the phone -- read here so
+#: a run record can name the APK that produced it (A4, validation round 2).
+#: Untracked, same as every other model artifact (models/.gitignore is "*").
+INSTALLED_APK_RECORD = JETSON_DIR / "models" / "installed_apk.json"
+
+
+def _build_provenance(config: dict) -> dict[str, Any]:
+    """The three inputs a run's `advisory`/`sensing`/`perception` numbers
+    depend on that nothing else in the record names (A4, validation round
+    2): the code revision, the policy bundle, the detector engine, and the
+    phone's APK.
+
+    Given a run directory alone, none of these was previously recoverable:
+    `summary.json`'s only model field was `policy_trained`, `models/
+    .gitignore` is `*`, `metadata.jsonl` has no run-header record, and this
+    function's own `git rev-parse` can itself return `commit: null` on a
+    tree that is not a git checkout -- an ad-hoc rsync copy, same as this
+    task's own `~/dsrc-task40` -- which is named rather than silently
+    omitted, so a reader knows the absence is the tree's, not a bug here.
+    """
+    commit = None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(JETSON_DIR),
+            capture_output=True, text=True, timeout=5.0,
+        )
+        if result.returncode == 0:
+            commit = result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    # A copy, not a computation: the bundle sidecar is already JSON and
+    # already carries sim_commit and contract_fingerprint.
+    policy_bundle = None
+    bundle_json_path = Path(resolve_model_path(config, "policy.bundle") + ".json")
+    if bundle_json_path.exists():
+        try:
+            policy_bundle = json.loads(bundle_json_path.read_text())
+        except ValueError:
+            pass
+
+    detector_engine_sha256 = None
+    engine_path = Path(resolve_model_path(config, "detector.engine"))
+    if engine_path.exists():
+        detector_engine_sha256 = hashlib.sha256(engine_path.read_bytes()).hexdigest()
+
+    apk_sha256 = None
+    if INSTALLED_APK_RECORD.exists():
+        try:
+            apk_sha256 = json.loads(INSTALLED_APK_RECORD.read_text()).get("sha256")
+        except ValueError:
+            pass
+
+    return {
+        "commit": commit,
+        "policy_bundle": policy_bundle,
+        "detector_engine_sha256": detector_engine_sha256,
+        "apk_sha256": apk_sha256,
+    }
 
 
 def _thermal_summary(thermal_sampler, stats_sampler) -> dict[str, Any] | None:
@@ -406,6 +468,27 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # a normal run that already closed it through `phone.stop()`
             # calls it again harmlessly.
             atexit.register(usb_acceptor.close)
+            # C5 (validation round 2, upgraded to required): a bare `kill`
+            # (SIGTERM) does not go through atexit at all -- Python's default
+            # disposition for it terminates the process immediately, which
+            # is a different path from an uncaught exception reaching the
+            # top of the interpreter (that one does still run atexit,
+            # confirmed above). Left unhandled, the leaked reverse mapping
+            # holds a device-side listener on 127.0.0.1:47811 -- exactly
+            # what `ImuWireTest.kt` binds a `ServerSocket` on
+            # (`LinkConfig.DEFAULT_PORT`) -- so an instrumented run after a
+            # SIGTERM'd drive fails with `EADDRINUSE` for a reason that has
+            # nothing to do with it, and R2's own operational check
+            # ("adb reverse --list before every run, assert non-empty")
+            # passes on stale state. Raising SystemExit from the handler is
+            # enough: it still reaches the top of the interpreter and still
+            # runs the atexit callback just registered above (verified
+            # empirically), so the handler does not call usb_acceptor.close()
+            # itself.
+            def _usb_sigterm_handler(signum: int, frame: Any) -> None:
+                raise SystemExit(128 + signum)
+
+            signal.signal(signal.SIGTERM, _usb_sigterm_handler)
             print(f"[run] usb: adb reverse tcp:{usb_acceptor.port} tcp:{usb_acceptor.port} "
                   f"on {serial}", flush=True)
 
@@ -701,6 +784,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             "camera_dropped_frames": camera.dropped_frames,
             "camera_file_recoveries": camera.file_recoveries,
             "policy_trained": actor.is_trained,
+            # A4 (validation round 2): the code revision, policy bundle,
+            # detector engine and phone APK that produced everything in
+            # `advisory`/`sensing`/`perception` below -- none of which was
+            # recoverable from a run directory alone before this.
+            "build": _build_provenance(config),
         }
         if phone is not None:
             # Both ends of the run, because a path can change mid-drive: Tailscale
