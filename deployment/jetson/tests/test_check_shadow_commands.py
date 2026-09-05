@@ -554,6 +554,38 @@ def test_run_window_uses_the_current_session_when_offsets_agree_within_margin(tm
     assert window == (1000.95, 1010.95 + csc.RUN_WINDOW_MARGIN_S)
 
 
+def test_run_window_refuses_when_an_intermediate_session_disagrees(tmp_path):
+    """B19 (validation round 4): the validator's own repro -- comparing
+    only the FIRST and CURRENT session missed a session in the MIDDLE of
+    a two-rebind run entirely. 3 sessions: 0.9, 60.0, 0.9 -- first and
+    current (last) agree (0.9 each), but the middle one is 59.1s from
+    both, more than `RUN_WINDOW_MARGIN_S` (30s). Before B19 this was
+    silently ACCEPTED; must now refuse."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=0.9,
+        sessions=[{"wall_clock_offset_s": 0.9}, {"wall_clock_offset_s": 60.0}],
+    )
+    assert csc._run_window(run_dir) is None
+
+
+def test_run_window_refuses_when_any_of_four_sessions_disagrees(tmp_path):
+    """B19's second repro: 4 sessions, 0.9/0.9/60.0/0.9 -- the third of
+    four again agrees with neither neighbour by more than the margin, and
+    first/current (both 0.9) still agree with each other. Before B19 this
+    was also silently ACCEPTED."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=0.9,
+        sessions=[
+            {"wall_clock_offset_s": 0.9},
+            {"wall_clock_offset_s": 0.9},
+            {"wall_clock_offset_s": 60.0},
+        ],
+    )
+    assert csc._run_window(run_dir) is None
+
+
 def test_run_window_with_an_empty_sessions_list_behaves_like_no_rebind(tmp_path):
     """A run with `sessions: []` (no rebind, `PhoneLink.to_record`'s own
     docstring: `sessions` holds every session BEFORE the current one) has
@@ -598,36 +630,62 @@ def test_run_window_is_none_without_metadata_jsonl(tmp_path):
     assert csc._run_window(run_dir) is None
 
 
-# -- _phone_session_offsets (B15, validation round 3) ------------------------
+# -- _phone_session_offsets (B15, round 3; widened to every session, B19, round 4) ---
 
 
-def test_phone_session_offsets_with_no_rebind_reports_the_same_value_twice():
-    first, current = csc._phone_session_offsets({"wall_clock_offset_s": 0.935})
-    assert first == 0.935
+def test_phone_session_offsets_with_no_rebind_reports_one_value():
+    offsets, current = csc._phone_session_offsets({"wall_clock_offset_s": 0.935})
+    assert offsets == [0.935]
     assert current == 0.935
 
 
-def test_phone_session_offsets_with_a_rebind_reports_the_first_sessions_own_value():
-    first, current = csc._phone_session_offsets({
+def test_phone_session_offsets_with_a_rebind_reports_both_sessions():
+    offsets, current = csc._phone_session_offsets({
         "wall_clock_offset_s": 46.0,
         "sessions": [{"wall_clock_offset_s": 0.9}],
     })
-    assert first == 0.9
+    assert offsets == [0.9, 46.0]
     assert current == 46.0
 
 
-def test_phone_session_offsets_with_multiple_rebinds_uses_the_earliest_session():
-    first, current = csc._phone_session_offsets({
+def test_phone_session_offsets_with_multiple_rebinds_reports_every_session():
+    offsets, current = csc._phone_session_offsets({
         "wall_clock_offset_s": 3.0,
         "sessions": [{"wall_clock_offset_s": 1.0}, {"wall_clock_offset_s": 2.0}],
     })
-    assert first == 1.0
+    assert offsets == [1.0, 2.0, 3.0]
     assert current == 3.0
 
 
-def test_phone_session_offsets_is_none_none_with_no_phone_summary_at_all():
-    assert csc._phone_session_offsets(None) == (None, None)
-    assert csc._phone_session_offsets({}) == (None, None)
+def test_phone_session_offsets_reports_an_intermediate_session_too():
+    """B19 (validation round 4): the exact gap the widened check closes --
+    a session in the middle of the list (60.0, between two sessions at
+    0.9) must appear in `offsets`, not just the first and the last."""
+    offsets, current = csc._phone_session_offsets({
+        "wall_clock_offset_s": 0.9,
+        "sessions": [{"wall_clock_offset_s": 0.9}, {"wall_clock_offset_s": 60.0}],
+    })
+    assert offsets == [0.9, 60.0, 0.9]
+    assert current == 0.9
+    assert max(offsets) - min(offsets) == pytest.approx(59.1)
+
+
+def test_phone_session_offsets_drops_sessions_with_no_recorded_offset():
+    """A session recorded before B10 introduced the field at all -- its
+    own entry has no `wall_clock_offset_s` key, and must not become a
+    `None` sitting in `offsets` (which `max`/`min` cannot compare
+    against)."""
+    offsets, current = csc._phone_session_offsets({
+        "wall_clock_offset_s": 46.0,
+        "sessions": [{"session_id": "no-offset-recorded"}],
+    })
+    assert offsets == [46.0]
+    assert current == 46.0
+
+
+def test_phone_session_offsets_is_empty_with_no_phone_summary_at_all():
+    assert csc._phone_session_offsets(None) == ([], None)
+    assert csc._phone_session_offsets({}) == ([], None)
 
 
 # -- pull_config_applier_stats: uses -v epoch and the given window ----------
@@ -931,3 +989,23 @@ def test_apply_phone_applier_check_refuses_and_names_both_sessions_offsets(tmp_p
     assert out["phone_applier"]["wall_clock_offset_s"] is None
     detail = out["phone_applier"]["detail"]
     assert "0.900000" in detail and "46.000000" in detail and "rebound" in detail
+
+
+def test_apply_phone_applier_check_refuses_when_an_intermediate_session_disagrees(tmp_path):
+    """B19 (validation round 4): the validator's own 3-session repro,
+    through the full `apply_phone_applier_check` path -- first (0.9) and
+    current (0.9) agree with each other, so the pre-B19 check would have
+    accepted this; the middle session (60.0) is what must trigger the
+    refusal."""
+    run_dir = write_shadow_drive(
+        tmp_path, n=5, t_wall_start=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=0.9,
+        sessions=[{"wall_clock_offset_s": 0.9}, {"wall_clock_offset_s": 60.0}],
+    )
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["ok"] is False
+    assert out["overall_ok"] is False
+    assert out["phone_applier"]["wall_clock_offset_s"] is None
+    detail = out["phone_applier"]["detail"]
+    assert "0.900000" in detail and "60.000000" in detail and "rebound" in detail

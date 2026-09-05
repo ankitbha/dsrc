@@ -307,27 +307,39 @@ def parse_config_applier_stats(
 RUN_WINDOW_MARGIN_S = 30.0
 
 
-def _phone_session_offsets(phone_summary: dict[str, Any] | None) -> tuple[float | None, float | None]:
-    """The FIRST session's and the CURRENTLY-ACTIVE (last) session's
-    handshake-time wall-clock offsets, from one `summary["phone"]` block
-    (B15, validation round 3).
+def _phone_session_offsets(phone_summary: dict[str, Any] | None) -> tuple[list[float], float | None]:
+    """EVERY session's own handshake-time wall-clock offset, from one
+    `summary["phone"]` block -- not just the first and the current (B19,
+    validation round 4): comparing only those two missed an intermediate
+    session's disagreement entirely. Confirmed by the validator:
 
-    A run with no rebind has exactly one session: live in the top-level
-    `wall_clock_offset_s`, and absent from `sessions` (`PhoneLink.to_record`'s
-    own docstring: `sessions` holds every session BEFORE the current one) --
-    so "first" and "current" name the same field. A run with at least one
-    rebind has the first session's own offset in `sessions[0]`
-    (`_session_record` has carried it since this fix; before it, only the
-    LAST session's offset survived a rebind at all, so a run window
-    spanning the rebind had no way to detect two sessions measuring two
-    different phones). Either half may be `None` -- no session ever
-    started, or a run recorded before B10 introduced the field at all.
+        2 sessions, 59.1s apart          -> refused (correct)
+        3 sessions: 0.9, 60.0, 0.9       -> ACCEPTED (first and last agree)
+        4 sessions: 0.9, 0.9, 60.0, 0.9  -> ACCEPTED (first and last agree)
+
+    In both accepted cases a session 59.1s from its neighbours sits in the
+    MIDDLE of the run, so "first vs current" (B15, validation round 3)
+    never saw it -- and two rebinds in one drive is not exotic;
+    `PhoneLink` has a supervisor built for repeated redials.
+
+    `offsets` is every FINISHED session's own reading (from `sessions`)
+    plus `current` (the CURRENTLY-ACTIVE, still-active-at-teardown
+    session's), `None`s dropped -- a run with no rebind has exactly one
+    session, live only in `current` and absent from `sessions`
+    (`PhoneLink.to_record`'s own docstring: `sessions` holds every session
+    BEFORE the current one), so `offsets` there is a one-element list.
+    `current` is returned separately because it, specifically, is what
+    `_run_window` shifts the whole window by -- the session covering
+    `end`. A caller comparing for disagreement uses `max(offsets) -
+    min(offsets)`, which spans every session that ran, not just the two
+    it used to compare.
     """
     phone_summary = phone_summary or {}
     current = phone_summary.get("wall_clock_offset_s")
     sessions = phone_summary.get("sessions") or []
-    first = sessions[0].get("wall_clock_offset_s") if sessions else current
-    return first, current
+    offsets = [s.get("wall_clock_offset_s") for s in sessions] + [current]
+    offsets = [o for o in offsets if o is not None]
+    return offsets, current
 
 
 def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tuple[float, float] | None:
@@ -360,13 +372,14 @@ def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tupl
     to the unshifted, Jetson-clock window rather than refusing outright.
 
     A rebind is a different failure mode from a missing offset (B15,
-    validation round 3): the CURRENT session's shift is right for `end`,
-    which it covers, but `start` fell inside the FIRST session, measured
-    against a phone that may since have been replaced. One shift cannot be
-    correct for both halves of the window when the two sessions disagree
-    by more than `margin_s` -- more than this window already tolerates as
-    ordinary clock drift -- so this refuses outright rather than silently
-    applying the wrong session's shift to part of the window.
+    validation round 3, widened to every session by B19, validation round
+    4): the CURRENT session's shift is right for `end`, which it covers,
+    but `start`, and any session in between, may have measured a different
+    phone. One shift cannot be correct for every session's own portion of
+    the window when they disagree by more than `margin_s` -- more than
+    this window already tolerates as ordinary clock drift -- so this
+    refuses outright rather than silently applying one session's shift to
+    a portion of the window some other session actually covered.
     """
     metadata_path = run_dir / "metadata.jsonl"
     if not metadata_path.exists():
@@ -396,8 +409,8 @@ def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tupl
     end = log_health.get("t_wall")
     if end is None:
         return None
-    first_offset, offset_s = _phone_session_offsets(_read_summary(run_dir).get("phone"))
-    if first_offset is not None and offset_s is not None and abs(offset_s - first_offset) > margin_s:
+    offsets, offset_s = _phone_session_offsets(_read_summary(run_dir).get("phone"))
+    if len(offsets) >= 2 and (max(offsets) - min(offsets)) > margin_s:
         return None
     # B14 (validation round 3): `is None`, not `or 0.0` -- a genuine 0.0
     # offset and an absent one must not compute the same fallback for the
@@ -519,15 +532,15 @@ def apply_phone_applier_check(
         result["phone_applier"] = {"ok": None, "detail": "not requested"}
         return result
     window = _run_window(run_dir)
-    first_offset, offset_s = _phone_session_offsets(_read_summary(run_dir).get("phone"))
+    offsets, offset_s = _phone_session_offsets(_read_summary(run_dir).get("phone"))
     if window is None:
-        if first_offset is not None and offset_s is not None and abs(offset_s - first_offset) > RUN_WINDOW_MARGIN_S:
+        if len(offsets) >= 2 and (max(offsets) - min(offsets)) > RUN_WINDOW_MARGIN_S:
             detail = (
                 f"the run rebound and its sessions' wall-clock offsets disagree by "
-                f"{abs(offset_s - first_offset):.3f}s, more than this window's own "
-                f"{RUN_WINDOW_MARGIN_S:.0f}s margin -- one shift cannot cover both "
-                f"halves of the window (first session {first_offset:.6f}s, current "
-                f"session {offset_s:.6f}s)"
+                f"{max(offsets) - min(offsets):.3f}s (range [{min(offsets):.6f}, "
+                f"{max(offsets):.6f}]), more than this window's own "
+                f"{RUN_WINDOW_MARGIN_S:.0f}s margin -- one shift cannot cover every "
+                f"session's own portion of the window"
             )
         else:
             detail = (
