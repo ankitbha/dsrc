@@ -29,7 +29,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -45,6 +44,7 @@ from transport.tcp import DEFAULT_PORT as PHONE_DEFAULT_PORT  # noqa: E402
 
 import yaml  # noqa: E402
 
+from dumpsys_util import parse_last_update_time  # noqa: E402
 from perception.detector import TrtYoloDetector  # noqa: E402
 from perception.distance import DistanceEstimator  # noqa: E402
 from perception.observation_builder import BuilderConfig, ObservationBuilder  # noqa: E402
@@ -259,15 +259,80 @@ INSTALLED_APK_RECORD = JETSON_DIR / "models" / "installed_apk.json"
 #: same as every other model artifact.
 DEPLOYED_COMMIT_RECORD = JETSON_DIR / "models" / "deployed_commit.json"
 
+#: Must match `scripts/record_deployed_commit.py`'s own `SOURCE_HASH_
+#: EXCLUDE_DIRS`/`SOURCE_HASH_EXCLUDE_SUFFIXES` exactly (B21, validation
+#: round 4): a difference here makes an unchanged tree hash differently on
+#: each side, and every run would report a false mismatch.
+SOURCE_HASH_EXCLUDE_DIRS = frozenset({"models", "__pycache__", ".pytest_cache", ".git"})
+SOURCE_HASH_EXCLUDE_SUFFIXES = frozenset({".pyc", ".pyo"})
+
+#: `apk_last_update_time_check`'s closed vocabulary (B20, validation round
+#: 4): `null` used to mean two different things -- "not applicable, no
+#: serial was given" and "applicable, but the device would not answer" --
+#: read alike by anything downstream. A word from this set says which.
+APK_TIMESTAMP_MATCHED = "matched"
+APK_TIMESTAMP_MISMATCHED = "mismatched"
+APK_TIMESTAMP_NO_SERIAL = "no_serial"
+APK_TIMESTAMP_SIDECAR_HAS_NO_TIMESTAMP = "sidecar_has_no_timestamp"
+APK_TIMESTAMP_DEVICE_DID_NOT_ANSWER = "device_did_not_answer"
+APK_TIMESTAMP_VOCABULARY = frozenset({
+    APK_TIMESTAMP_MATCHED, APK_TIMESTAMP_MISMATCHED, APK_TIMESTAMP_NO_SERIAL,
+    APK_TIMESTAMP_SIDECAR_HAS_NO_TIMESTAMP, APK_TIMESTAMP_DEVICE_DID_NOT_ANSWER,
+})
+
+#: `source_tree_check`'s own closed vocabulary, same reasoning, for B21's
+#: staleness signal on `commit` (validation round 4).
+SOURCE_TREE_MATCHED = "matched"
+SOURCE_TREE_MISMATCHED = "mismatched"
+SOURCE_TREE_NOT_APPLICABLE_GIT_CHECKOUT = "not_applicable_git_checkout"
+SOURCE_TREE_NO_SIDECAR_HASH = "no_sidecar_hash"
+SOURCE_TREE_NO_COMMIT_RECORDED = "no_commit_recorded"
+SOURCE_TREE_VOCABULARY = frozenset({
+    SOURCE_TREE_MATCHED, SOURCE_TREE_MISMATCHED, SOURCE_TREE_NOT_APPLICABLE_GIT_CHECKOUT,
+    SOURCE_TREE_NO_SIDECAR_HASH, SOURCE_TREE_NO_COMMIT_RECORDED,
+})
+
+
+def _live_source_tree_sha256(deploy_root: Path) -> str | None:
+    """Recomputes `scripts/record_deployed_commit.py`'s own
+    `source_tree_sha256`, against THIS tree, NOW (B21, validation round
+    4) -- duplicated rather than imported, same as
+    `_live_apk_last_update_time` duplicates `record_installed_apk.py`'s
+    `_dumpsys_last_update_time` (CLI in /scripts, /nash for modules).
+    `SOURCE_HASH_EXCLUDE_DIRS`/`_SUFFIXES` above must match that script's
+    own constants exactly, or this disagrees with an unchanged tree.
+    """
+    if not deploy_root.is_dir():
+        return None
+    paths = [p for p in deploy_root.rglob("*") if p.is_file()]
+    paths.sort(key=lambda p: p.relative_to(deploy_root).parts)
+    hasher = hashlib.sha256()
+    for path in paths:
+        rel_parts = path.relative_to(deploy_root).parts
+        if any(part in SOURCE_HASH_EXCLUDE_DIRS for part in rel_parts):
+            continue
+        if path.suffix in SOURCE_HASH_EXCLUDE_SUFFIXES:
+            continue
+        hasher.update("/".join(rel_parts).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
 
 def _live_apk_last_update_time(serial: str) -> str | None:
     """`lastUpdateTime` off `dumpsys package com.dsrc.phone`, queried NOW
     (A5, validation round 3) -- not the sidecar's recorded value, which
     `_build_provenance` reads separately and compares this against. `None`
-    when adb cannot answer or the field is absent, same contract as
-    `scripts/record_installed_apk.py`'s own `_dumpsys_last_update_time`
-    (duplicated rather than imported: `scripts/` holds CLIs, not modules
-    this package imports from -- CLI in /scripts, /nash for modules).
+    when adb cannot answer or the field is absent.
+
+    The extraction itself is `dumpsys_util.parse_last_update_time`, shared
+    with `scripts/record_installed_apk.py`'s own `_dumpsys_last_update_
+    time` rather than duplicated (B23, validation round 4): these two
+    values are COMPARED for equality, so a regex hardened in one copy and
+    not the other would make that comparison assert a reinstall that
+    never happened. Only the subprocess call itself (different timeout,
+    same error handling) stays separate in each file.
     """
     try:
         result = subprocess.run(
@@ -276,8 +341,7 @@ def _live_apk_last_update_time(serial: str) -> str | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    match = re.search(r"lastUpdateTime=(.+)", result.stdout)
-    return match.group(1).strip() if match else None
+    return parse_last_update_time(result.stdout)
 
 
 def _build_provenance(config: dict, *, serial: str | None = None) -> dict[str, Any]:
@@ -298,18 +362,41 @@ def _build_provenance(config: dict, *, serial: str | None = None) -> dict[str, A
     before the rsync that strips `.git`, so it is the one place the real
     tree's commit survives onto the ONLY machine a run happens on.
 
-    `serial`, given, re-reads the phone's CURRENT `lastUpdateTime` and
-    compares it to the value `apk_sha256`'s own sidecar was written
+    `installed_apk_record`/`deployed_commit_record` carry those two
+    sidecars WHOLE (B22, validation round 4), the same way `policy_bundle`
+    already did: cherry-picking them down to `apk_sha256`/`commit` alone
+    dropped `dirty`, `apk_name`, `version_code`, `version_name` and
+    `local_apk_sha256` -- a bare 64-character hash that cannot be resolved
+    to a build once the APK archive itself is gone. `apk_sha256`/`commit`
+    stay as top-level fields too, since the two checks below need them as
+    plain values to compare against a live re-read.
+
+    `apk_last_update_time_check` (B20, validation round 4): a closed
+    vocabulary (`APK_TIMESTAMP_VOCABULARY`) rather than a bare `bool |
+    None`, because `None` used to mean two different things read alike --
+    "not applicable, no serial was given" (the tailnet path) and
+    "applicable, but the device would not answer" (a fault on a USB
+    drive). `serial`, given, re-reads the phone's CURRENT `lastUpdateTime`
+    and compares it to the value `apk_sha256`'s own sidecar was written
     against (A5, validation round 3): `apk_sha256` names an install that
-    may since have been replaced by a later `adb install -r` that nobody
-    re-ran this script for, and a record that asserts a hash without
-    checking whether it is still current is the false-looking-true
-    failure A5 was filed for -- `None` when there is no serial to check
-    with (the tailnet path, or a run before this fix), or the sidecar
-    itself has no `last_update_time` to compare against (a record written
-    before A5, or with no device reachable at write time either).
+    may since have been replaced by a later `adb install -r` nobody
+    re-ran `record_installed_apk.py` for.
+
+    `source_tree_check` (B21, validation round 4): `commit`'s own
+    staleness signal. `DEPLOYED_COMMIT_RECORD` has no `--delete` behind
+    it (`models/` is gitignored, and the deploy rsync does not pass it),
+    so a re-deploy that forgets to run `record_deployed_commit.py` leaves
+    deploy A's sidecar beside deploy B's code -- and this function always
+    takes that sidecar path on the jetson, since `git rev-parse` always
+    fails there, so it would report commit A with full confidence about a
+    tree that is actually B's. This recomputes `record_deployed_commit.
+    py`'s own `source_tree_sha256` against THIS tree and compares it to
+    the sidecar's recorded value; `recorded_at` alone would not have
+    caught this, since `rsync -a` preserves source mtimes and a freshly
+    deployed file can be OLDER than a stale sidecar.
     """
     commit = None
+    commit_from_git = False
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(JETSON_DIR),
@@ -317,13 +404,32 @@ def _build_provenance(config: dict, *, serial: str | None = None) -> dict[str, A
         )
         if result.returncode == 0:
             commit = result.stdout.strip()
+            commit_from_git = True
     except (OSError, subprocess.SubprocessError):
         pass
+
+    deployed_commit_record = None
     if commit is None and DEPLOYED_COMMIT_RECORD.exists():
         try:
-            commit = json.loads(DEPLOYED_COMMIT_RECORD.read_text()).get("commit")
+            deployed_commit_record = json.loads(DEPLOYED_COMMIT_RECORD.read_text())
+            commit = deployed_commit_record.get("commit")
         except ValueError:
             pass
+
+    if commit is None:
+        source_tree_check = SOURCE_TREE_NO_COMMIT_RECORDED
+    elif commit_from_git:
+        source_tree_check = SOURCE_TREE_NOT_APPLICABLE_GIT_CHECKOUT
+    else:
+        recorded_tree_sha256 = (deployed_commit_record or {}).get("source_tree_sha256")
+        if recorded_tree_sha256 is None:
+            source_tree_check = SOURCE_TREE_NO_SIDECAR_HASH
+        else:
+            live_tree_sha256 = _live_source_tree_sha256(JETSON_DIR)
+            source_tree_check = (
+                SOURCE_TREE_MATCHED if live_tree_sha256 == recorded_tree_sha256
+                else SOURCE_TREE_MISMATCHED
+            )
 
     # A copy, not a computation: the bundle sidecar is already JSON and
     # already carries sim_commit and contract_fingerprint.
@@ -340,29 +446,40 @@ def _build_provenance(config: dict, *, serial: str | None = None) -> dict[str, A
     if engine_path.exists():
         detector_engine_sha256 = hashlib.sha256(engine_path.read_bytes()).hexdigest()
 
+    installed_apk_record = None
     apk_sha256 = None
     apk_last_update_time = None
     if INSTALLED_APK_RECORD.exists():
         try:
-            installed = json.loads(INSTALLED_APK_RECORD.read_text())
-            apk_sha256 = installed.get("sha256")
-            apk_last_update_time = installed.get("last_update_time")
+            installed_apk_record = json.loads(INSTALLED_APK_RECORD.read_text())
+            apk_sha256 = installed_apk_record.get("sha256")
+            apk_last_update_time = installed_apk_record.get("last_update_time")
         except ValueError:
             pass
 
-    apk_last_update_time_matches = None
-    if serial is not None and apk_last_update_time is not None:
+    if serial is None:
+        apk_last_update_time_check = APK_TIMESTAMP_NO_SERIAL
+    elif apk_last_update_time is None:
+        apk_last_update_time_check = APK_TIMESTAMP_SIDECAR_HAS_NO_TIMESTAMP
+    else:
         live_last_update_time = _live_apk_last_update_time(serial)
-        if live_last_update_time is not None:
-            apk_last_update_time_matches = live_last_update_time == apk_last_update_time
+        if live_last_update_time is None:
+            apk_last_update_time_check = APK_TIMESTAMP_DEVICE_DID_NOT_ANSWER
+        elif live_last_update_time == apk_last_update_time:
+            apk_last_update_time_check = APK_TIMESTAMP_MATCHED
+        else:
+            apk_last_update_time_check = APK_TIMESTAMP_MISMATCHED
 
     return {
         "commit": commit,
+        "source_tree_check": source_tree_check,
+        "deployed_commit_record": deployed_commit_record,
         "policy_bundle": policy_bundle,
         "detector_engine_sha256": detector_engine_sha256,
         "apk_sha256": apk_sha256,
         "apk_last_update_time": apk_last_update_time,
-        "apk_last_update_time_matches": apk_last_update_time_matches,
+        "apk_last_update_time_check": apk_last_update_time_check,
+        "installed_apk_record": installed_apk_record,
     }
 
 
@@ -856,8 +973,9 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # `advisory`/`sensing`/`perception` below -- none of which was
             # recoverable from a run directory alone before this. `serial`
             # is `None` off the tailnet path; `_build_provenance` reports
-            # `apk_last_update_time_matches: None` rather than checking
-            # anything in that case (A5, validation round 3).
+            # `apk_last_update_time_check: "no_serial"` rather than
+            # checking anything in that case (A5/B20, validation rounds
+            # 3/4).
             "build": _build_provenance(config, serial=serial),
         }
         if phone is not None:

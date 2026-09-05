@@ -58,6 +58,59 @@ def test_git_is_dirty_is_none_when_the_tree_is_not_a_checkout(tmp_path):
     assert rdc._git_is_dirty(tmp_path) is None
 
 
+# -- B21 (validation round 4): source_tree_sha256, the deployed commit's own
+# -- staleness signal ---------------------------------------------------------
+
+
+def test_source_tree_sha256_is_none_when_the_tree_does_not_exist(tmp_path):
+    assert rdc.source_tree_sha256(tmp_path / "nope") is None
+
+
+def test_source_tree_sha256_is_stable_across_two_calls(tmp_path):
+    (tmp_path / "a.py").write_text("print(1)\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.py").write_text("print(2)\n")
+    first = rdc.source_tree_sha256(tmp_path)
+    second = rdc.source_tree_sha256(tmp_path)
+    assert first == second
+    assert first is not None
+
+
+def test_source_tree_sha256_changes_when_a_files_content_changes(tmp_path):
+    (tmp_path / "a.py").write_text("print(1)\n")
+    before = rdc.source_tree_sha256(tmp_path)
+    (tmp_path / "a.py").write_text("print(2)\n")
+    after = rdc.source_tree_sha256(tmp_path)
+    assert before != after
+
+
+def test_source_tree_sha256_changes_on_a_rename_with_identical_content(tmp_path):
+    """B21's own repro shape: a re-deploy that changed WHICH file a byte
+    sequence lives in (not just its bytes) must not hash identically to
+    the tree it replaced -- hashing content alone would miss it."""
+    (tmp_path / "a.py").write_text("print(1)\n")
+    before = rdc.source_tree_sha256(tmp_path)
+    (tmp_path / "a.py").rename(tmp_path / "b.py")
+    after = rdc.source_tree_sha256(tmp_path)
+    assert before != after
+
+
+def test_source_tree_sha256_ignores_excluded_directories(tmp_path):
+    """`models/` (this script's own sidecar lives there -- hashing it
+    would be self-referential) and Python's bytecode/test caches must not
+    perturb the hash."""
+    (tmp_path / "a.py").write_text("print(1)\n")
+    before = rdc.source_tree_sha256(tmp_path)
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "deployed_commit.json").write_text('{"commit": "x"}')
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"bytecode")
+    (tmp_path / ".pytest_cache").mkdir()
+    (tmp_path / ".pytest_cache" / "v").write_text("cache")
+    after = rdc.source_tree_sha256(tmp_path)
+    assert before == after
+
+
 def test_main_writes_the_real_checkouts_commit(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     expected = subprocess.run(
@@ -73,6 +126,41 @@ def test_main_writes_the_real_checkouts_commit(tmp_path, monkeypatch):
     record = json.loads(out.read_text())
     assert record["commit"] == expected
     assert record["dirty"] is False
+
+
+def test_main_writes_a_real_source_tree_sha256_for_the_given_deploy_root(tmp_path, monkeypatch):
+    _init_git_repo(tmp_path)
+    deploy_root = tmp_path / "deployment" / "jetson"
+    deploy_root.mkdir(parents=True)
+    (deploy_root / "run_demo.py").write_text("# a real file\n")
+    out = tmp_path / "deployed_commit.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["record_deployed_commit.py", "--repo-root", str(tmp_path),
+         "--deploy-root", str(deploy_root), "--out", str(out)],
+    )
+    rc = rdc.main()
+    assert rc == 0
+    record = json.loads(out.read_text())
+    assert record["source_tree_sha256"] == rdc.source_tree_sha256(deploy_root)
+    assert record["source_tree_sha256"] is not None
+
+
+def test_main_warns_and_writes_a_null_source_tree_sha256_when_the_deploy_root_is_absent(
+    tmp_path, monkeypatch, capsys,
+):
+    _init_git_repo(tmp_path)
+    out = tmp_path / "deployed_commit.json"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["record_deployed_commit.py", "--repo-root", str(tmp_path),
+         "--deploy-root", str(tmp_path / "nope"), "--out", str(out)],
+    )
+    rc = rdc.main()
+    assert rc == 0  # commit is still real; only the tree hash is absent
+    record = json.loads(out.read_text())
+    assert record["source_tree_sha256"] is None
+    assert "does not exist" in capsys.readouterr().err
 
 
 def test_main_refuses_a_tree_that_is_not_a_git_checkout(tmp_path, monkeypatch, capsys):

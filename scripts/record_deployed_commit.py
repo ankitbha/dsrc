@@ -9,9 +9,23 @@ jetson tree) is an rsync copy, not a git checkout, so `git rev-parse` exits
 `detector_engine_sha256`, `apk_sha256`) populate fine; only the commit,
 arguably the most basic one, was always absent where it mattered most.
 
+B21 (validation round 4): the commit alone has no staleness signal, on the
+ONLY machine that reads it. `models/` is gitignored and the deploy rsync
+has no `--delete`, so a re-deploy that forgets to run this script leaves
+deploy A's sidecar sitting beside deploy B's code -- and `_build_
+provenance` always takes the sidecar path on the jetson, since `git rev-
+parse` always fails there. It would then report commit A with full
+confidence about a tree that is actually B's. `recorded_at` alone would
+not catch this: `rsync -a` preserves source mtimes, so a freshly deployed
+file can be OLDER than a stale sidecar. This script instead hashes the
+deployed source tree itself (`deployment/jetson/`, minus generated
+artifacts) immediately before the rsync, and `_build_provenance`
+recomputes the identical hash at run time -- a mismatch means "this tree
+is not the one this commit names", whatever the actual cause.
+
 Run this on the SOURCE machine -- the one with the real git checkout --
-right before the deploy step's rsync, so the commit it names is the one
-about to be copied:
+right before the deploy step's rsync, so the commit and hash it names are
+the ones about to be copied:
 
     python3 scripts/record_deployed_commit.py
     rsync -a --exclude .git ./ jetson:~/dsrc-task40/
@@ -25,13 +39,27 @@ every other model artifact (`models/.gitignore` is `*`).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUT = REPO_ROOT / "deployment" / "jetson" / "models" / "deployed_commit.json"
+DEFAULT_DEPLOY_ROOT = REPO_ROOT / "deployment" / "jetson"
+DEFAULT_OUT = DEFAULT_DEPLOY_ROOT / "models" / "deployed_commit.json"
+
+#: Directories that exist under `deployment/jetson/` on BOTH machines but
+#: describe something other than the deployed source: `models/` is this
+#: task's own generated artifacts, including the sidecar THIS script
+#: writes -- hashing it would be self-referential -- and the other two are
+#: Python's own bytecode/test caches, which differ between the two
+#: machines' Python versions and run histories for reasons that have
+#: nothing to do with a real code change. `run_demo.py`'s own copy of this
+#: constant must name exactly the same set, or an unchanged tree hashes
+#: differently on each side and every run reports a false mismatch.
+SOURCE_HASH_EXCLUDE_DIRS = frozenset({"models", "__pycache__", ".pytest_cache", ".git"})
+SOURCE_HASH_EXCLUDE_SUFFIXES = frozenset({".pyc", ".pyo"})
 
 
 def _git_commit(repo_root: Path) -> str | None:
@@ -64,11 +92,54 @@ def _git_is_dirty(repo_root: Path) -> bool | None:
     return bool(result.stdout.strip()) if result.returncode == 0 else None
 
 
+def source_tree_sha256(deploy_root: Path) -> str | None:
+    """One sha256 over every source file under `deploy_root`, keyed by its
+    path relative to `deploy_root` as well as its bytes (B21, validation
+    round 4) -- `run_demo.py`'s `_live_source_tree_sha256` recomputes this
+    identically on the jetson side.
+
+    Files are visited in a fixed order (sorted by their relative path's
+    own parts, not by however the filesystem happens to enumerate them) and
+    each one's relative path goes into the hash alongside its content, so a
+    file that MOVED without changing (a rename) also changes the result --
+    hashing content alone would miss that, and an unordered walk would make
+    two genuinely-identical trees hash differently by accident.
+
+    `None` when `deploy_root` does not exist at all -- distinct from an
+    empty tree (which hashes to a real, reproducible digest of nothing) and
+    from any other failure this function does not otherwise mask (a
+    permission error reading a real file is left to raise, the same as
+    `record_installed_apk.py` and `_build_provenance` leave a hash's own
+    read errors unguarded elsewhere in this task).
+    """
+    if not deploy_root.is_dir():
+        return None
+    paths = [p for p in deploy_root.rglob("*") if p.is_file()]
+    paths.sort(key=lambda p: p.relative_to(deploy_root).parts)
+    hasher = hashlib.sha256()
+    for path in paths:
+        rel_parts = path.relative_to(deploy_root).parts
+        if any(part in SOURCE_HASH_EXCLUDE_DIRS for part in rel_parts):
+            continue
+        if path.suffix in SOURCE_HASH_EXCLUDE_SUFFIXES:
+            continue
+        hasher.update("/".join(rel_parts).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--repo-root", type=Path, default=REPO_ROOT,
         help="the git checkout to read HEAD from (default: this script's own repo)",
+    )
+    parser.add_argument(
+        "--deploy-root", type=Path, default=DEFAULT_DEPLOY_ROOT,
+        help="the tree to hash for the staleness check (default: deployment/jetson/, "
+             "the code that actually runs on the jetson)",
     )
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
@@ -79,11 +150,18 @@ def main() -> int:
               f"nothing to record", file=sys.stderr)
         return 1
     dirty = _git_is_dirty(args.repo_root)
+    tree_sha256 = source_tree_sha256(args.deploy_root)
+    if tree_sha256 is None:
+        print(f"warning: {args.deploy_root} does not exist -- source_tree_sha256 will "
+              f"be null, and _build_provenance will have nothing to check the deployed "
+              f"tree against", file=sys.stderr)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps({"commit": commit, "dirty": dirty}, indent=2))
+    args.out.write_text(json.dumps({
+        "commit": commit, "dirty": dirty, "source_tree_sha256": tree_sha256,
+    }, indent=2))
     print(f"wrote {args.out}")
-    print(f"commit={commit} dirty={dirty}")
+    print(f"commit={commit} dirty={dirty} source_tree_sha256={tree_sha256}")
     return 0
 
 

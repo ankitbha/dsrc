@@ -1121,6 +1121,66 @@ class TestLiveApkLastUpdateTime:
         assert run_demo._live_apk_last_update_time("ZY227VV4XC") is None
 
 
+class TestLiveSourceTreeSha256:
+    """B21 (validation round 4): the same hash `scripts/
+    record_deployed_commit.py`'s `source_tree_sha256` computes, recomputed
+    against a real tree at run time."""
+
+    def test_is_none_when_the_tree_does_not_exist(self, tmp_path):
+        assert run_demo._live_source_tree_sha256(tmp_path / "nope") is None
+
+    def test_is_stable_across_two_calls_on_an_unchanged_tree(self, tmp_path):
+        (tmp_path / "a.py").write_text("print(1)\n")
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "b.py").write_text("print(2)\n")
+        first = run_demo._live_source_tree_sha256(tmp_path)
+        second = run_demo._live_source_tree_sha256(tmp_path)
+        assert first == second
+        assert first is not None
+
+    def test_changes_when_a_files_content_changes(self, tmp_path):
+        (tmp_path / "a.py").write_text("print(1)\n")
+        before = run_demo._live_source_tree_sha256(tmp_path)
+        (tmp_path / "a.py").write_text("print(2)\n")
+        after = run_demo._live_source_tree_sha256(tmp_path)
+        assert before != after
+
+    def test_changes_when_a_file_is_renamed_with_identical_content(self, tmp_path):
+        """Content alone is not enough -- a rename is a real change to
+        what was deployed, and must not hash identically to the file it
+        replaced."""
+        (tmp_path / "a.py").write_text("print(1)\n")
+        before = run_demo._live_source_tree_sha256(tmp_path)
+        (tmp_path / "a.py").rename(tmp_path / "b.py")
+        after = run_demo._live_source_tree_sha256(tmp_path)
+        assert before != after
+
+    def test_ignores_files_under_excluded_directories(self, tmp_path):
+        (tmp_path / "a.py").write_text("print(1)\n")
+        before = run_demo._live_source_tree_sha256(tmp_path)
+        (tmp_path / "models").mkdir()
+        (tmp_path / "models" / "deployed_commit.json").write_text('{"commit": "x"}')
+        (tmp_path / "__pycache__").mkdir()
+        (tmp_path / "__pycache__" / "a.cpython-312.pyc").write_bytes(b"bytecode")
+        after = run_demo._live_source_tree_sha256(tmp_path)
+        assert before == after
+
+    def test_matches_record_deployed_commits_own_function_on_the_real_tree(self):
+        """The two must agree byte-for-byte on the real `deployment/
+        jetson/` tree -- a divergence here is exactly how B21's own check
+        would report a false mismatch on an unchanged deploy."""
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        _sys.path.insert(0, str(_Path(__file__).resolve().parents[3] / "scripts"))
+        import record_deployed_commit as rdc  # noqa: E402
+
+        assert (
+            run_demo._live_source_tree_sha256(run_demo.JETSON_DIR)
+            == rdc.source_tree_sha256(run_demo.JETSON_DIR)
+        )
+
+
 class TestBuildProvenance:
     """A4 (validation round 2): given a run directory alone, none of the
     policy bundle, the detector engine, or the code revision was
@@ -1305,7 +1365,31 @@ class TestBuildProvenance:
         result = run_demo._build_provenance(self._config(tmp_path))
         assert result["apk_sha256"] is None
 
+    # -- B22 (validation round 4): the sidecar copied whole, not cherry-picked --
+
+    def test_installed_apk_record_is_the_whole_sidecar(self, tmp_path, monkeypatch):
+        """`dirty`, `apk_name`, `version_code`, `version_name` and
+        `local_apk_sha256` must all survive, not just `sha256` -- a bare
+        64-character hash cannot be resolved to a build once the APK
+        archive itself is gone."""
+        record_path = tmp_path / "installed_apk.json"
+        whole = {
+            "sha256": "abc123", "local_apk_sha256": "def456",
+            "last_update_time": "2026-09-05 00:58:05", "apk_name": "app-debug.apk",
+            "version_code": 1, "version_name": "0.1", "serial": "ZY227VV4XC",
+        }
+        record_path.write_text(json.dumps(whole))
+        monkeypatch.setattr(run_demo, "INSTALLED_APK_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["installed_apk_record"] == whole
+
+    def test_installed_apk_record_is_none_when_no_install_record_exists(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(run_demo, "INSTALLED_APK_RECORD", tmp_path / "nope.json")
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["installed_apk_record"] is None
+
     # -- A5 (validation round 3): live lastUpdateTime re-check ---------------
+    # -- B20 (validation round 4): a closed vocabulary, not a bare bool | None --
 
     def _install_record(self, tmp_path, monkeypatch, **overrides):
         record_path = tmp_path / "installed_apk.json"
@@ -1324,20 +1408,21 @@ class TestBuildProvenance:
         result = run_demo._build_provenance(self._config(tmp_path))
         assert result["apk_last_update_time"] is None
 
-    def test_apk_last_update_time_matches_is_none_without_a_serial(self, tmp_path, monkeypatch):
-        """The tailnet path, or a call before this fix: nothing to check
-        the sidecar's recorded value against."""
+    def test_apk_last_update_time_check_is_no_serial_without_a_serial(self, tmp_path, monkeypatch):
+        """The tailnet path -- 'not applicable', not 'applicable but the
+        device would not answer' (B20's own two-nulls-that-differ)."""
         self._install_record(tmp_path, monkeypatch)
         result = run_demo._build_provenance(self._config(tmp_path))
-        assert result["apk_last_update_time_matches"] is None
+        assert result["apk_last_update_time_check"] == run_demo.APK_TIMESTAMP_NO_SERIAL
+        assert result["apk_last_update_time_check"] in run_demo.APK_TIMESTAMP_VOCABULARY
 
-    def test_apk_last_update_time_matches_true_when_the_live_device_agrees(self, tmp_path, monkeypatch):
+    def test_apk_last_update_time_check_is_matched_when_the_live_device_agrees(self, tmp_path, monkeypatch):
         self._install_record(tmp_path, monkeypatch)
         monkeypatch.setattr(run_demo, "_live_apk_last_update_time", lambda serial: "2026-09-05 00:58:05")
         result = run_demo._build_provenance(self._config(tmp_path), serial="ZY227VV4XC")
-        assert result["apk_last_update_time_matches"] is True
+        assert result["apk_last_update_time_check"] == run_demo.APK_TIMESTAMP_MATCHED
 
-    def test_apk_last_update_time_matches_false_when_the_phone_was_reinstalled(self, tmp_path, monkeypatch):
+    def test_apk_last_update_time_check_is_mismatched_when_the_phone_was_reinstalled(self, tmp_path, monkeypatch):
         """The core of A5: `adb install -r other.apk` without re-running
         `record_installed_apk.py` leaves the sidecar's `sha256` describing
         an install that is no longer on the phone -- this is the live
@@ -1346,15 +1431,20 @@ class TestBuildProvenance:
         self._install_record(tmp_path, monkeypatch)
         monkeypatch.setattr(run_demo, "_live_apk_last_update_time", lambda serial: "2026-09-05 09:00:00")
         result = run_demo._build_provenance(self._config(tmp_path), serial="ZY227VV4XC")
-        assert result["apk_last_update_time_matches"] is False
+        assert result["apk_last_update_time_check"] == run_demo.APK_TIMESTAMP_MISMATCHED
 
-    def test_apk_last_update_time_matches_is_none_when_the_live_device_is_unreachable(self, tmp_path, monkeypatch):
+    def test_apk_last_update_time_check_is_device_did_not_answer_when_the_live_device_is_unreachable(
+        self, tmp_path, monkeypatch,
+    ):
+        """B20's other null: a serial WAS given (a USB drive), but adb
+        could not answer -- a fault, distinct from 'not applicable'
+        above, and must not read the same as it."""
         self._install_record(tmp_path, monkeypatch)
         monkeypatch.setattr(run_demo, "_live_apk_last_update_time", lambda serial: None)
         result = run_demo._build_provenance(self._config(tmp_path), serial="NOSUCHSERIAL")
-        assert result["apk_last_update_time_matches"] is None
+        assert result["apk_last_update_time_check"] == run_demo.APK_TIMESTAMP_DEVICE_DID_NOT_ANSWER
 
-    def test_apk_last_update_time_matches_is_none_when_the_sidecar_has_no_recorded_value(
+    def test_apk_last_update_time_check_is_sidecar_has_no_timestamp(
         self, tmp_path, monkeypatch,
     ):
         """A record written before A5, or with no device reachable at
@@ -1370,7 +1460,98 @@ class TestBuildProvenance:
         monkeypatch.setattr(run_demo, "_live_apk_last_update_time", unexpected)
         result = run_demo._build_provenance(self._config(tmp_path), serial="ZY227VV4XC")
         assert result["apk_last_update_time"] is None
-        assert result["apk_last_update_time_matches"] is None
+        assert result["apk_last_update_time_check"] == run_demo.APK_TIMESTAMP_SIDECAR_HAS_NO_TIMESTAMP
+
+    # -- B21 (validation round 4): the deployed commit's own staleness signal --
+
+    def _real_git_rev_parse_succeeds(self) -> bool:
+        """Probes `JETSON_DIR` directly, real `git`, no mock -- this repo
+        runs in two real environments (a Mac checkout with `.git`; the
+        jetson's own rsync copy without one), and `result["commit"] is
+        not None` cannot distinguish "git succeeded" from "the fallback
+        sidecar supplied it" now that B16/B21 gave `commit` a second
+        source -- exactly the trap `test_reads_the_real_git_commit`
+        already names once for this same ambiguity."""
+        import subprocess
+
+        probe = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(run_demo.JETSON_DIR),
+            capture_output=True, text=True,
+        )
+        return probe.returncode == 0
+
+    def test_source_tree_check_is_not_applicable_when_git_rev_parse_succeeds(self, tmp_path):
+        """On a real git checkout (this repo, on the Mac), the sidecar
+        staleness question does not even arise -- git itself is the live
+        source of truth."""
+        if not self._real_git_rev_parse_succeeds():
+            pytest.skip("this tree is not a git checkout; the fallback tests above cover it")
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["source_tree_check"] == run_demo.SOURCE_TREE_NOT_APPLICABLE_GIT_CHECKOUT
+
+    def test_source_tree_check_is_no_commit_recorded(self, tmp_path, monkeypatch):
+        self._failing_git_rev_parse(monkeypatch)
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", tmp_path / "nope.json")
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] is None
+        assert result["source_tree_check"] == run_demo.SOURCE_TREE_NO_COMMIT_RECORDED
+
+    def test_source_tree_check_is_no_sidecar_hash_on_a_pre_b21_record(self, tmp_path, monkeypatch):
+        """A `deployed_commit.json` written before B21 has no
+        `source_tree_sha256` key at all -- nothing to compare against,
+        distinct from a real mismatch."""
+        self._failing_git_rev_parse(monkeypatch)
+        record_path = tmp_path / "deployed_commit.json"
+        record_path.write_text(json.dumps({"commit": "a" * 40, "dirty": False}))
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["source_tree_check"] == run_demo.SOURCE_TREE_NO_SIDECAR_HASH
+
+    def test_source_tree_check_is_matched_when_the_live_tree_agrees(self, tmp_path, monkeypatch):
+        self._failing_git_rev_parse(monkeypatch)
+        real_hash = run_demo._live_source_tree_sha256(run_demo.JETSON_DIR)
+        record_path = tmp_path / "deployed_commit.json"
+        record_path.write_text(json.dumps({
+            "commit": "a" * 40, "dirty": False, "source_tree_sha256": real_hash,
+        }))
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["source_tree_check"] == run_demo.SOURCE_TREE_MATCHED
+
+    def test_source_tree_check_is_mismatched_when_a_redeploy_forgot_the_script(self, tmp_path, monkeypatch):
+        """B21's own core case: deploy A's sidecar (`deployed_commit.json`,
+        no `--delete` behind the rsync) sitting beside deploy B's code --
+        the exact scenario a stale, un-refreshed `source_tree_sha256`
+        must be caught by, since `git rev-parse` always fails on this
+        tree and `commit` alone would report deploy A with full
+        confidence."""
+        self._failing_git_rev_parse(monkeypatch)
+        record_path = tmp_path / "deployed_commit.json"
+        record_path.write_text(json.dumps({
+            "commit": "a" * 40, "dirty": False,
+            "source_tree_sha256": "0" * 64,  # deliberately wrong
+        }))
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] == "a" * 40, "the stale commit is still reported, just flagged"
+        assert result["source_tree_check"] == run_demo.SOURCE_TREE_MISMATCHED
+
+    def test_deployed_commit_record_is_the_whole_sidecar(self, tmp_path, monkeypatch):
+        """B22: `dirty` and `source_tree_sha256` must survive, not just
+        `commit` alone."""
+        self._failing_git_rev_parse(monkeypatch)
+        record_path = tmp_path / "deployed_commit.json"
+        whole = {"commit": "a" * 40, "dirty": True, "source_tree_sha256": "b" * 64}
+        record_path.write_text(json.dumps(whole))
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["deployed_commit_record"] == whole
+
+    def test_deployed_commit_record_is_none_when_git_rev_parse_succeeds(self, tmp_path):
+        if not self._real_git_rev_parse_succeeds():
+            pytest.skip("this tree is not a git checkout; the fallback tests above cover it")
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["deployed_commit_record"] is None
 
     def test_a_real_drive_writes_the_build_block(self, tmp_path, monkeypatch):
         """End to end through run_live's own teardown, not a transcription:
@@ -1388,6 +1569,8 @@ class TestBuildProvenance:
         summary = json.loads((run_dirs[0] / "summary.json").read_text())
         assert "build" in summary
         assert set(summary["build"]) == {
-            "commit", "policy_bundle", "detector_engine_sha256", "apk_sha256",
-            "apk_last_update_time", "apk_last_update_time_matches",
+            "commit", "source_tree_check", "deployed_commit_record",
+            "policy_bundle", "detector_engine_sha256",
+            "apk_sha256", "apk_last_update_time", "apk_last_update_time_check",
+            "installed_apk_record",
         }
