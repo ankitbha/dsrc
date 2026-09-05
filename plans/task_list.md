@@ -1805,6 +1805,41 @@ Everything above is done before the devices meet.
 44. **[COLOCATED]** Live-mode verification: flip the flag and confirm gating
     genuinely changes sampling rates, the loop still closes, and the advisory
     remains sane. Shadow mode is not evidence that live mode works.
+
+    **PARTIAL 2026-09-05, bench.** `run_20260905_142351`, 900 s with the phone on
+    USB and `--live-rates`: `sensing.shadow` is `False` on all 3,486 ticks, the
+    first live-mode run in the project.
+
+    **The actuation link is closed.** Every rate command the controller issued was
+    applied. Eleven segments and ten transitions, delivered frame rate measured on
+    the Jetson against the rate commanded on the same tick:
+
+    | commanded | segments | delivered |
+    |---|---|---|
+    | 5.0 Hz | 385.4 s, 3.6 s, 5.8 s, 0.6 s, 0.8 s | 4.989, 4.990, 5.003, 4.950, 5.031 Hz |
+    | 3.0 Hz | 89.0 s, 4.7 s, 12.0 s, 0.6 s, 393.0 s | 3.001, 2.989, 2.993, 3.086, 3.000 Hz |
+
+    `sends_by_reason` records `changed` exactly 10 times against 171 heartbeats;
+    the phone's own log encoded 3,487 frames and the Jetson received 3,486; zero
+    frames dropped on the Jetson and four on the phone's send queue. Before this
+    run every drive reported `applied == 0`.
+
+    The stimulus was the phone's own temperature, not an injected value. Skin
+    (`xo_therm`) rose from 28.857 C to a maximum of 42.513 C with p50 40.201, and
+    the platform `thermal_status` stayed `nominal` on all 900 reports, so the
+    `SKIN_WARM_C` path is what carried it. Jetson latency mean 31.6 ms, p95
+    33.0 ms; USB counters all zero and no leaked reverse mapping.
+
+    **What this run could not do, by construction.** The level was `active` on
+    3,485 of 3,486 ticks, because `advisory_margin_narrow` fires on every tick when
+    the scene is empty. The dwell, hold and bridge transitions are therefore still
+    unexercised, and so is the whole of the advisory-sanity half: a stationary
+    camera indoors gives the policy nothing to be sane about. Those need traffic
+    and belong with tasks 50 and 51. `SKIN_HOT_C` at 45.0 C was not reached
+    (max 42.513), and GPS and HERE both ran at 0.0 Hz, HERE because the installed
+    APK reports `here.unconfigured` -- no key in `local.properties`.
+
+    See task 57 for the defect this run found.
 45. **[COLOCATED]** Thermal soak: sustained maximum-rate run to steady state;
     confirm the phone stays within limits and the controller backs off.
 46. **[COLOCATED]** Failure injection: revoke GPS, kill HERE, unplug the link,
@@ -1931,3 +1966,34 @@ see what was cleared and on what evidence.
   `android/` directory at any level of this repository. The phone app is `phone/`, a
   Gradle project whose sources are rooted at
   `phone/app/src/main/kotlin/com/dsrc/phone`. The Jetson half is correct.
+
+## K. Found in passing
+
+57. **Thermal backoff has no hysteresis, and a phone on the threshold rebinds its
+    camera repeatedly.** A section F runtime defect, numbered here so nothing above
+    is renumbered.
+
+    `_thermal_scale` compares `skin_temp_c >= SKIN_WARM_C` directly, with no dead
+    band, no dwell and no hold. Measured on `run_20260905_142351`: between t=476.7 s
+    and t=506.7 s the skin reading sat on 40.0 C and the commanded camera rate
+    changed **eight times in 30 seconds** -- 5.0, 3.0, 5.0, 3.0, 5.0, 3.0, 5.0, 3.0 --
+    on readings of 39.991, 40.001, 39.994, 40.027, 39.998, 40.005 and 39.991 C. Two
+    of those segments lasted 0.6 s. Each change is a real camera rebind on the
+    handset, because in live mode the phone applies what it is told.
+
+    **The evidence path already solves this and the thermal path was never given the
+    same guard.** `RAISE_DWELL_S` and `HOLD_S` exist for exactly this, and
+    `decide`'s own comment states the failure they prevent: "With a signal straddling
+    the threshold it produced a camera rebind per tick, which is the exact thrash the
+    dwell and the hold exist to prevent." The thermal multiplier bypasses both.
+
+    **It was invisible in shadow mode by construction.** The command changed, nothing
+    applied it, and the cost of a rebind falls on the phone. Every earlier drive
+    recorded the same chatter as a sequence of decisions and could not have shown it
+    as a cost. This is the defect that justified running task 44 on a bench rather
+    than first discovering it on a drive.
+
+    Not yet fixed. A dead band on the skin thresholds is the obvious remedy, but the
+    choice between a dead band, a dwell, and reusing `HOLD_S` is a design decision
+    that should be taken deliberately: backing off late and recovering late are not
+    symmetric costs when the reason for backing off is heat.
