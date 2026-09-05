@@ -1949,6 +1949,66 @@ Everything above is done before the devices meet.
     `gps.not_fresh` with reason `absent` already opens at tick 0 of every indoor run,
     so the revoked state and the baseline no-fix state may produce the same record.
 
+    **PARTIAL 2026-09-05.** Three of four injected in one 660 s live run,
+    `run_20260905_181058`, each stamped against the same unix clock the tick stream
+    carries. Two of the three expectations above were wrong, which is the argument
+    for having written them down.
+
+    **Link drop: the expectation was wrong and the flagged alternative was right.**
+    Removing the mapping at t=120.0 s and restoring it at t=150.1 s produced **no
+    `link.down`, no `link.session_end`, no `link.sends_lost`, and zero tick gaps
+    over 2 s** across the whole run. `adb reverse` governs new connections; an
+    established TCP session is untouched by removing it. So this injection does not
+    simulate unplugging the cable, and the real unplug -- which also takes away adb
+    and charging -- remains untested and needs a hand.
+
+    **It did, however, fire task 40's recovery path for the first time.**
+    `reverses_reestablished` read **1** against `reverse_reestablish_failures` 0,
+    where every previous run in the project read 0 and 0. The manual restore used a
+    raw `adb reverse` add, which does not touch that counter, so the increment is
+    the runtime's own `verify` loop noticing the mapping gone and putting it back
+    inside the 30 s window. It cannot be timed more precisely than that.
+
+    **Network drop: the field reported the change, at a different value than
+    expected.** `network_transport` moved off `wifi+vpn` for **56 of 384 telemetry
+    reports**, to `vpn` rather than to the predicted `no_active_network` -- the VPN
+    interface stayed up as an active network with wifi down, so the absent path was
+    never reached and `network_transport_absent_counts` is empty. That still meets
+    the clause above, which asks for `no_active_network` **or a fallback**. The USB
+    link survived, as required, which was the discriminator.
+
+    **One thing that weakens the attribution, recorded rather than smoothed over.**
+    `wire.seq_gaps` opened at t=245.6 s, twenty-five seconds *before* the wifi
+    injection, so seq gaps occur unprompted on this bench. The gap at t=271.6 s is
+    consistent with the injection and is not exclusively attributable to it. A
+    second pair at t=328.6 s, twenty-eight seconds after wifi was restored, matches
+    the transport counts, which show `vpn` persisting past the restore.
+
+    **GPS revoke: the platform kills the app, and the predicted defect is
+    unreachable this way.** Ticks stopped 0.7 s after the revoke, `link.down` opened
+    at t=421.6 s with reason `no_session`, `camera.blind_ticks` followed at
+    t=431.5 s, `pidof com.dsrc.phone` returned nothing and Camera2 logged the client
+    closed. The Jetson behaved correctly: `end_reason` `peer_closed`, then
+    "waiting up to 120s for a redial" that could not come.
+
+    **No `SecurityException` appears anywhere in the captured logcat.** Android
+    terminates the process on runtime permission revocation before any rate command
+    can reach `requestLocationUpdates`, so the missing try/catch predicted above is
+    neither confirmed nor cleared -- this injection cannot reach it, and a different
+    trigger would be needed. The prediction stands unproven and is not filed as a
+    defect.
+
+    Whether a revoked GPS is distinguishable from an indoor no-fix also remains
+    unanswered, for the same reason: the app died instead of running without the
+    permission.
+
+    **A defect in the injection harness itself, worth more than the injection.**
+    `run_device_session.py` never exited after the app was killed, so the wrapper sat
+    in `wait` and its restore trap did not fire. **The location permission stayed
+    revoked for about five and a half minutes** until it was granted back by hand.
+    Device restoration must not depend on the wrapper reaching its last line; it
+    belongs on a timer inside the injection step, or in a separate process.
+
 47. ~~**[COLOCATED]** Sim-contract parity: the observation vector produced live
     matches the simulator's sensing model field for field.~~ **DONE 2026-09-05**, and
     **the task as worded is false** — which is the result. "Matches field for field"
