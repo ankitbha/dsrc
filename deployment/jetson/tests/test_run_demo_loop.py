@@ -866,3 +866,93 @@ class TestTickSessionId:
 
     def test_no_phone_at_all_is_none(self):
         assert run_demo.tick_session_id(None) is None
+
+
+class TestUsbAcceptorCloseIsRegisteredWithAtexit:
+    """B2 (validation round 1): `adb reverse` is external state on the
+    device, not a socket that dies with the process. `UsbAcceptor.close()`
+    was only reachable from the `finally` at the end of `run_live` that
+    tears down `camera`/`gps`/etc., and that `finally` cannot exist until
+    those objects are built -- so anything raising between constructing the
+    acceptor and reaching it (build_components, camera warmup, the worker
+    thread) left the mapping on the device. The fix registers `close()`
+    with `atexit` at construction, which runs on any exception that reaches
+    the top of the process (verified separately: an uncaught exception and
+    a KeyboardInterrupt both still ran a registered atexit callback).
+
+    Exercised by making `wait_for_phone` fail immediately after the
+    registration should have happened, so nothing past it (build_components,
+    the camera, the detector engine) needs to run at all.
+    """
+
+    def test_registers_close_before_waiting_for_the_phone(self, monkeypatch, tmp_path):
+        registered = []
+        monkeypatch.setattr(run_demo.atexit, "register", lambda fn: registered.append(fn))
+
+        closed = []
+
+        class FakeUsbAcceptor:
+            port = 47811
+
+            def __init__(self, serial, port=47811):
+                self.serial = serial
+
+            def close(self):
+                closed.append(self.serial)
+
+        monkeypatch.setattr("transport.usb.UsbAcceptor", FakeUsbAcceptor)
+
+        class FakePhoneLink:
+            def __init__(self, **kwargs):
+                self.host = "127.0.0.1"
+                self.port = 47811
+                self.refusals = []
+                self.session = None
+
+            def wait_for_phone(self, timeout_s):
+                return False
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr("sensors.phone_link.PhoneLink", FakePhoneLink)
+
+        args = _real_drive_args(
+            phone=True, usb=True, usb_serial="ZY227VV4XC", phone_wait_s=0.01, no_gps=False,
+        )
+        config = _real_drive_config(tmp_path)
+        rc = run_demo.run_live(config, args)
+
+        assert rc == 2, "no phone dialled in (FakePhoneLink.wait_for_phone returns False)"
+        assert len(registered) == 1
+        # The registered callable is the fake acceptor's own bound close --
+        # calling it proves it is the SAME object atexit would call, not a
+        # copy or a no-op standing in for it.
+        registered[0]()
+        assert closed == ["ZY227VV4XC"]
+
+    def test_does_not_register_when_usb_is_not_used(self, monkeypatch, tmp_path):
+        registered = []
+        monkeypatch.setattr(run_demo.atexit, "register", lambda fn: registered.append(fn))
+
+        class FakePhoneLink:
+            def __init__(self, **kwargs):
+                self.host = "0.0.0.0"
+                self.port = 47811
+                self.refusals = []
+                self.session = None
+
+            def wait_for_phone(self, timeout_s):
+                return False
+
+            def stop(self):
+                pass
+
+        monkeypatch.setattr("sensors.phone_link.PhoneLink", FakePhoneLink)
+
+        args = _real_drive_args(phone=True, usb=False, phone_wait_s=0.01, no_gps=False)
+        config = _real_drive_config(tmp_path)
+        rc = run_demo.run_live(config, args)
+
+        assert rc == 2
+        assert registered == []

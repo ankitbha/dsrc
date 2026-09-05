@@ -24,6 +24,7 @@ plan_deployment.md, "Safety and demo constraints").
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import math
 import os
@@ -390,6 +391,21 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 print(f"[run] --usb: could not establish the reverse mapping: {exc}",
                       file=sys.stderr)
                 return 2
+            # B2: the reverse mapping is external state on the device, not a
+            # socket that dies with this process. Everything from here to the
+            # teardown at the end of this function (build_components, camera
+            # warmup, the worker thread, the display loop) can raise, and
+            # none of it is behind the `finally` that eventually calls
+            # `phone.stop()` -- which is what closes this acceptor -- because
+            # that `finally` cannot exist until the objects it tears down
+            # (camera, gps, ...) have themselves been built. Registered here,
+            # at construction, rather than wrapping the downstream code in a
+            # new try/finally: `atexit` runs on any exception that reaches
+            # the top of the process, verified for both an uncaught
+            # exception and a KeyboardInterrupt. `close()` is idempotent, so
+            # a normal run that already closed it through `phone.stop()`
+            # calls it again harmlessly.
+            atexit.register(usb_acceptor.close)
             print(f"[run] usb: adb reverse tcp:{usb_acceptor.port} tcp:{usb_acceptor.port} "
                   f"on {serial}", flush=True)
 
