@@ -183,14 +183,30 @@ def test_remove_is_tolerant_of_adb_not_on_path():
 # -- AdbReverse: list / verify / transport_id / version -------------------
 
 
-def test_list_filters_by_serial():
+def test_list_returns_every_mapping_the_scoped_call_reports():
+    """`-s <serial>` routes the request to that device's adbd server-side --
+    it is not a client-side filter -- so every line the scoped call prints
+    belongs to this serial and none is re-filtered out."""
     fake = FakeRun()
     fake.set(
         "reverse --list",
-        FakeCompleted(0, "ZY227VV4XC tcp:47811 tcp:47811\nOTHERDEVICE tcp:9999 tcp:9999\n", ""),
+        FakeCompleted(0, "ZY227VV4XC tcp:47811 tcp:47811\ntcp:9999 tcp:9999\n", ""),
     )
     reverse = AdbReverse("ZY227VV4XC", run=fake)
+    assert reverse.list() == ["tcp:47811", "tcp:9999"]
+
+
+def test_list_does_not_require_the_first_column_to_be_the_serial():
+    """Measured on real hardware (ZY227VV4XC): `adb -s ZY227VV4XC reverse
+    --list` printed `UsbFfs tcp:47811 tcp:47811` -- the transport name, not
+    the serial. A `list()` that required `parts[0] == serial` never found
+    its own mapping and reported every timeout as one it had to
+    re-establish."""
+    fake = FakeRun()
+    fake.set("reverse --list", FakeCompleted(0, "UsbFfs tcp:47811 tcp:47811\n", ""))
+    reverse = AdbReverse("ZY227VV4XC", run=fake)
     assert reverse.list() == ["tcp:47811"]
+    assert reverse.verify(ReverseSpec(47811, 47811)) is True
 
 
 def test_list_is_empty_not_an_error_when_adb_is_unreachable():

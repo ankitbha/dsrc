@@ -161,6 +161,17 @@ class AdbReverse:
     def list(self) -> list[str]:
         """This serial's registered device-port mappings, as `tcp:N` strings.
 
+        Every line of `adb -s <serial> reverse --list` already belongs to
+        this serial -- `-s` routes the request to that device's adbd
+        server-side, it is not a client-side filter -- so every line is
+        taken rather than re-filtered on its first column. That column is
+        NOT reliably the serial: measured on `ZY227VV4XC`, both
+        `adb -s ZY227VV4XC reverse --list` and the unscoped `adb reverse
+        --list` printed `UsbFfs tcp:47811 tcp:47811`, the transport name
+        rather than the serial. An earlier version of this method matched
+        `parts[0] == self._serial` and consequently never found its own
+        mapping, so `accept()` re-established it on every single timeout.
+
         Empty when `adb` itself could not be reached, not just when there are
         no mappings -- a caller checking `spec.device_arg() in reverse.list()`
         then reads "not present" either way, which is the conservative answer:
@@ -176,8 +187,8 @@ class AdbReverse:
         mappings = []
         for line in result.stdout.splitlines():
             parts = line.split()
-            # "<serial> <device-port> <local-port>"
-            if len(parts) >= 2 and parts[0] == self._serial:
+            # "<label> <device-port> <local-port>" -- label is not the serial.
+            if len(parts) >= 2:
                 mappings.append(parts[1])
         return mappings
 
