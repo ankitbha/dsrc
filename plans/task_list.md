@@ -1856,6 +1856,51 @@ Everything above is done before the devices meet.
     See task 57 for the defect this run found.
 45. **[COLOCATED]** Thermal soak: sustained maximum-rate run to steady state;
     confirm the phone stays within limits and the controller backs off.
+
+    **PARTIAL 2026-09-05. Open, and the soak is deliberately not scheduled** --
+    recorded here so the next reader does not repeat the analysis to find out which
+    of the four clauses already have answers.
+
+    **"The controller backs off" is settled, on hardware.** Two 900 s live runs:
+    the thermal rule fired on 1,504 of 3,486 ticks and 1,561 of 3,451, cause
+    `skin_warm`, and in live mode the phone applied the result -- delivered frame
+    rate 3.000 and 2.998 Hz against a commanded 3.0. The decision function reads
+    only device temperature, never ambient, so this clause does not depend on the
+    environment and a car run would add nothing to it.
+
+    **"To steady state" is answered in the negative, and measured.** Both runs ended
+    because their clock expired, not because the handset equilibrated. The skin
+    slope over the last two minutes was **+0.368 and +0.367 C/min**, and it stops
+    falling after about minute five: +0.330 then +0.363 C/min over minutes 5-10 and
+    10-15 in the first run, +0.452 then +0.398 in the second. It is climbing close to
+    linearly. Extrapolated, `SKIN_HOT_C` at 45 C is about six minutes past where both
+    runs stopped.
+
+    **"Sustained maximum rate" was not run, in two ways.** The camera held 5.0 Hz for
+    roughly the first 380 s and the loop then cut it to 3.0 Hz, so maximum rate and
+    an engaged backoff cannot both hold -- the task's own wording is in tension here.
+    And `gps_hz` and `here_hz` were 0.0 throughout both runs, so two of the four
+    modalities carried no load at all, which are exactly the two `THERMAL_SCALED_KEYS`
+    scales.
+
+    **"Stays within limits" holds only as a statement about a desk.** The platform
+    `thermal_status` was `nominal` on every one of roughly 2,700 telemetry reports
+    across every run to date, at a maximum skin of 43.087 C, and no thermal shutdown
+    occurred. The `skin_hot`/`severe` tier and every non-`nominal` status tier are
+    unit-tested and have never executed on hardware.
+
+    **One thing the desk actively hides, noted and accepted.** No policy module reads
+    the Jetson's own temperature: `sensors/thermal.py` and the metadata logger record
+    it, nothing consumes it, and there is no Jetson-side backoff. On both runs it sat
+    at 53.7-55.6 C, a 1.4 C spread over fifteen minutes, which is equilibrium -- it
+    has a heatsink and airflow. A closed car has neither, and no code path would
+    respond. Raised and set aside deliberately.
+
+    **What would close it**, if it is ever wanted: one two-hour run from ambient with
+    the handset at a window so GPS and HERE carry their load, the pass condition
+    written down first, and steady state judged in analysis as a trailing five-minute
+    slope under 0.05 C/min rather than by terminating the run, so that "did not
+    settle" stays a reportable outcome.
 46. **[COLOCATED]** Failure injection: revoke GPS, kill HERE, unplug the link,
     drop the tether, and confirm each degraded mode behaves as specified.
 
