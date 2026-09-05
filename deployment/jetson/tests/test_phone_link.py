@@ -1158,6 +1158,54 @@ class TestRedial:
         finally:
             link.stop()
 
+    def test_wall_clock_offset_bound_is_recorded_from_the_handshake(self):
+        """B13 (validation round 3): `remote_minus_local_wall_s` compares
+        two hello-sends up to one round trip apart, not two simultaneous
+        stamps, so a reader needs the bound alongside the offset to know
+        how much to trust it -- `None` before any session, a real number
+        once one starts, same as the offset itself."""
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            assert link.wall_clock_offset_bound_s is None
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            phone = dialling.result(timeout=5.0)
+            assert link.wall_clock_offset_bound_s is not None
+            assert link.wall_clock_offset_bound_s >= 0.0
+            assert link.to_record()["wall_clock_offset_bound_s"] == link.wall_clock_offset_bound_s
+            phone.hang_up()
+        finally:
+            link.stop()
+
+    def test_a_finished_sessions_own_offset_survives_a_rebind(self):
+        """B15 (validation round 3): before `_session_record` carried this
+        field, only the LAST session's `wall_clock_offset_s` survived a
+        rebind -- the top-level scalar this class exposes live is
+        overwritten in place, and the finished session's own reading was
+        gone the instant the new one replaced it. `link.sessions[0]` is
+        the first (now finished) session's snapshot; its own offset must
+        still read the FIRST phone's measurement, not the second's."""
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one", wall_clock=lambda: 100_935_000_000)
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            first_offset = link.wall_clock_offset_s
+            assert first_offset is not None
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two", wall_clock=lambda: 200_500_000_000)
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert len(link.sessions) == 1
+            assert link.sessions[0]["wall_clock_offset_s"] == first_offset
+            assert link.sessions[0]["wall_clock_offset_s"] != link.wall_clock_offset_s
+            second.hang_up()
+        finally:
+            link.stop()
+
     def test_the_rebind_names_how_the_previous_session_ended(self):
         # "The phone lost the link" and "the phone was displaced by another device"
         # are different drives, and `session_id` alone cannot tell them apart later.

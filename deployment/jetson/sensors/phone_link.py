@@ -224,6 +224,16 @@ class PhoneLink:
         #: session -- and `transport/handshake.py`'s `t_remote_wall_ns` had
         #: no consumer anywhere outside that module before this.
         self.wall_clock_offset_s: float | None = None
+        #: The upper bound on the error in `wall_clock_offset_s` (B13,
+        #: validation round 3): `remote_minus_local_wall_s` compares two
+        #: instants up to one round trip apart, not two simultaneous
+        #: stamps, so it systematically overstates how far ahead the phone
+        #: is. Carried beside the offset in this run's own record, rather
+        #: than left as a property only reachable from
+        #: `transport/handshake.py`'s `ClockSample`, because it is a
+        #: reader of the run record who needs to know how much to trust
+        #: the number next to it.
+        self.wall_clock_offset_bound_s: float | None = None
         self.pings_answered = 0
         #: What went DOWN the link. Until now nothing did: `run_demo.py --phone` took
         #: camera and GPS off the handset and sent nothing back, so the driver's panel
@@ -350,6 +360,7 @@ class PhoneLink:
                 self.session = event.session
                 self.peer_device_id = event.handshake.remote.device_id
                 self.wall_clock_offset_s = event.handshake.clock.remote_minus_local_wall_s
+                self.wall_clock_offset_bound_s = event.handshake.clock.wall_clock_offset_bound_s
                 self._begin()
                 return True
         return False
@@ -541,6 +552,7 @@ class PhoneLink:
             # replacement handset's own offset, not the one the previous
             # phone measured.
             self.wall_clock_offset_s = event.handshake.clock.remote_minus_local_wall_s
+            self.wall_clock_offset_bound_s = event.handshake.clock.wall_clock_offset_bound_s
             # Through `_begin`, not `_start_session_workers`. The single-supervisor
             # guard lives in `_begin`, and calling past it left the guard unreachable
             # on the only path that could ever need it -- so the test asserting one
@@ -916,6 +928,15 @@ class PhoneLink:
         return {
             "session_id": None if session is None else session.session_id,
             "peer_device_id": self.peer_device_id,
+            # This session's OWN handshake-time offset, snapshotted before a
+            # rebind overwrites the live scalar with the next session's
+            # (B15, validation round 3): before this field existed, a run's
+            # `sessions` list recorded every session but this one number,
+            # so a run window spanning a rebind had only the LAST session's
+            # offset to shift by, silently wrong for the portion of the
+            # window that fell inside an earlier session.
+            "wall_clock_offset_s": self.wall_clock_offset_s,
+            "wall_clock_offset_bound_s": self.wall_clock_offset_bound_s,
             "end_reason": _end_reason_of(session),
             "pings_answered": self.pings_answered,
             "timebase": self._timebase_record(),
@@ -949,6 +970,13 @@ class PhoneLink:
             # window, among others) has a measured correction rather than
             # an assumed one. `None` when no session ever started.
             "wall_clock_offset_s": self.wall_clock_offset_s,
+            # The upper bound on the error above (B13, validation round 3):
+            # `remote_minus_local_wall_s` compares two hello-sends up to
+            # one round trip apart, not two simultaneous stamps, so it is
+            # not exact. Carried alongside the offset itself, the same way
+            # `TimebaseStamp.bound_s` and `StageTiming.converted(bound_ms=
+            # ...)` carry theirs elsewhere in this codebase.
+            "wall_clock_offset_bound_s": self.wall_clock_offset_bound_s,
             # Accepted/displaced separate a run the phone left from one a second
             # device took over: with `--phone-host 0.0.0.0` any tailnet peer that
             # speaks the hello can displace a session, and `session_id` alone

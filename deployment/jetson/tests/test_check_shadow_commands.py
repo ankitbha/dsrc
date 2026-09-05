@@ -106,7 +106,7 @@ def write_shadow_drive(
     tmp_path: Path, n: int = 12, *, mode: str = SHADOW, accel_ticks: frozenset = frozenset(),
     rate_cmd_sent: int | None = None, name: str = "drive",
     t_wall_start: float | None = None, log_health_t_wall: float | None = None,
-    wall_clock_offset_s: float | None = None,
+    wall_clock_offset_s: float | None = None, sessions: list | None = None,
 ) -> Path:
     """A run directory with both `metadata.jsonl` and a `summary.json`
     naming the drive's mode -- `check()` needs the latter to know what
@@ -122,6 +122,11 @@ def write_shadow_drive(
     offset_s"]` -- what `_run_window` shifts the window by (B10, validation
     round 2). `None` omits the key, matching a run from before that fix or
     one with no phone session.
+
+    `sessions`, given, writes `summary["phone"]["sessions"]` -- the
+    FINISHED sessions before the current one, each with its own
+    `wall_clock_offset_s` (B15, validation round 3), simulating a run that
+    rebound.
     """
     clock = Clock()
     modes = ModeHolder(mode, clock=clock)
@@ -152,6 +157,8 @@ def write_shadow_drive(
     phone_record: dict[str, Any] = {"wire": {"channels": {"rate_cmd": {"sent": sent}}}}
     if wall_clock_offset_s is not None:
         phone_record["wall_clock_offset_s"] = wall_clock_offset_s
+    if sessions is not None:
+        phone_record["sessions"] = sessions
     (run_dir / "summary.json").write_text(json.dumps({
         "sensing": loop.to_record(),
         "phone": phone_record,
@@ -424,18 +431,28 @@ def test_parse_config_applier_stats_with_window_takes_the_last_match_inside_it()
 
 def _write_minimal_run(
     tmp_path, *, first_tick_t_wall, log_health_t_wall, name="run",
-    wall_clock_offset_s=None,
+    wall_clock_offset_s=None, sessions=None,
 ):
+    """`sessions`, given, writes `summary["phone"]["sessions"]` -- one
+    entry per FINISHED session, each carrying its own `wall_clock_offset_s`
+    (B15, validation round 3), simulating a run that rebound at least once.
+    `wall_clock_offset_s` is always the CURRENT (last, still-active) session's
+    own reading; `sessions[0]` names the FIRST one, which `_run_window`
+    compares it against.
+    """
     run_dir = tmp_path / name
     run_dir.mkdir()
     with open(run_dir / "metadata.jsonl", "w") as f:
         f.write(json.dumps({"type": "tick", "tick_id": 0, "t_wall": first_tick_t_wall}) + "\n")
     if log_health_t_wall is not None:
         (run_dir / "log_health.json").write_text(json.dumps({"t_wall": log_health_t_wall}))
-    if wall_clock_offset_s is not None:
-        (run_dir / "summary.json").write_text(
-            json.dumps({"phone": {"wall_clock_offset_s": wall_clock_offset_s}})
-        )
+    if wall_clock_offset_s is not None or sessions is not None:
+        phone_record: dict[str, Any] = {}
+        if wall_clock_offset_s is not None:
+            phone_record["wall_clock_offset_s"] = wall_clock_offset_s
+        if sessions is not None:
+            phone_record["sessions"] = sessions
+        (run_dir / "summary.json").write_text(json.dumps({"phone": phone_record}))
     return run_dir
 
 
@@ -508,6 +525,47 @@ def test_run_window_shift_closes_the_beyond_margin_contamination_case(tmp_path):
     assert start <= phone_clock_teardown_line <= end
 
 
+def test_run_window_refuses_when_sessions_disagree_beyond_the_margin(tmp_path):
+    """B15 (validation round 3): a rebind's two sessions can each have
+    measured a different phone. `start` fell inside the FIRST session
+    (offset 0.9); the CURRENT session's offset (46.0) is what
+    `wall_clock_offset_s` reports post-rebind -- 45.1s apart, more than
+    `RUN_WINDOW_MARGIN_S` (30s), so one shift cannot be trusted for both
+    halves of the window and this refuses rather than silently using the
+    current session's offset for the whole thing."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=46.0, sessions=[{"wall_clock_offset_s": 0.9}],
+    )
+    assert csc._run_window(run_dir) is None
+
+
+def test_run_window_uses_the_current_session_when_offsets_agree_within_margin(tmp_path):
+    """The ordinary case: a rebind happened, but both sessions measured
+    close to the same phone-Jetson offset (0.9 vs 0.95, 0.05s apart) --
+    well within the margin, so the CURRENT (last, covering `end`) session's
+    offset is used for the whole window, same as a run with no rebind at
+    all."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=0.95, sessions=[{"wall_clock_offset_s": 0.9}],
+    )
+    window = csc._run_window(run_dir)
+    assert window == (1000.95, 1010.95 + csc.RUN_WINDOW_MARGIN_S)
+
+
+def test_run_window_with_an_empty_sessions_list_behaves_like_no_rebind(tmp_path):
+    """A run with `sessions: []` (no rebind, `PhoneLink.to_record`'s own
+    docstring: `sessions` holds every session BEFORE the current one) has
+    nothing to compare the current offset against, and must not refuse."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=0.935, sessions=[],
+    )
+    window = csc._run_window(run_dir)
+    assert window == (1000.935, 1010.935 + csc.RUN_WINDOW_MARGIN_S)
+
+
 def test_run_window_skips_a_leading_non_tick_record(tmp_path):
     """A run that opened with a `failure_event` has one ahead of tick 0;
     the window's start is the first TICK's t_wall, not the first line's."""
@@ -538,6 +596,38 @@ def test_run_window_is_none_without_metadata_jsonl(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     assert csc._run_window(run_dir) is None
+
+
+# -- _phone_session_offsets (B15, validation round 3) ------------------------
+
+
+def test_phone_session_offsets_with_no_rebind_reports_the_same_value_twice():
+    first, current = csc._phone_session_offsets({"wall_clock_offset_s": 0.935})
+    assert first == 0.935
+    assert current == 0.935
+
+
+def test_phone_session_offsets_with_a_rebind_reports_the_first_sessions_own_value():
+    first, current = csc._phone_session_offsets({
+        "wall_clock_offset_s": 46.0,
+        "sessions": [{"wall_clock_offset_s": 0.9}],
+    })
+    assert first == 0.9
+    assert current == 46.0
+
+
+def test_phone_session_offsets_with_multiple_rebinds_uses_the_earliest_session():
+    first, current = csc._phone_session_offsets({
+        "wall_clock_offset_s": 3.0,
+        "sessions": [{"wall_clock_offset_s": 1.0}, {"wall_clock_offset_s": 2.0}],
+    })
+    assert first == 1.0
+    assert current == 3.0
+
+
+def test_phone_session_offsets_is_none_none_with_no_phone_summary_at_all():
+    assert csc._phone_session_offsets(None) == (None, None)
+    assert csc._phone_session_offsets({}) == (None, None)
 
 
 # -- pull_config_applier_stats: uses -v epoch and the given window ----------
@@ -767,3 +857,77 @@ def test_apply_phone_applier_check_live_drive_does_not_change_overall_ok(tmp_pat
     out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
     assert out["phone_applier"]["ok"] is None
     assert out["overall_ok"] is True
+
+
+# -- B14 (validation round 3): the offset used is named in the artifact -----
+
+
+def test_apply_phone_applier_check_names_the_offset_it_used(tmp_path, monkeypatch):
+    run_dir = write_shadow_drive(
+        tmp_path, n=5, rate_cmd_sent=7, t_wall_start=1000.0, log_health_t_wall=1005.0,
+        wall_clock_offset_s=0.935,
+    )
+    monkeypatch.setattr(
+        csc, "pull_config_applier_stats", lambda serial, window: {"applied": 0, "shadowed": 7},
+    )
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["wall_clock_offset_s"] == 0.935
+
+
+def test_apply_phone_applier_check_names_none_when_no_offset_was_recorded(tmp_path, monkeypatch):
+    """A genuine 0.0 offset and an absent one must not read alike: this run
+    has no phone session at all (no `wall_clock_offset_s` key), so the
+    window fell back to unshifted -- `None`, not `0.0`, records that
+    nothing was measured (B14)."""
+    run_dir = write_shadow_drive(
+        tmp_path, n=5, rate_cmd_sent=7, t_wall_start=1000.0, log_health_t_wall=1005.0,
+    )
+    monkeypatch.setattr(
+        csc, "pull_config_applier_stats", lambda serial, window: {"applied": 0, "shadowed": 7},
+    )
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["wall_clock_offset_s"] is None
+
+
+def test_apply_phone_applier_check_names_a_genuine_zero_offset(tmp_path, monkeypatch):
+    """The other half of the same distinction: a MEASURED zero offset
+    (the two devices' clocks agreed exactly) must read as `0.0`, not
+    `None` -- `is None` in `_run_window`, not `or 0.0`, is what keeps the
+    two apart."""
+    run_dir = write_shadow_drive(
+        tmp_path, n=5, rate_cmd_sent=7, t_wall_start=1000.0, log_health_t_wall=1005.0,
+        wall_clock_offset_s=0.0,
+    )
+    monkeypatch.setattr(
+        csc, "pull_config_applier_stats", lambda serial, window: {"applied": 0, "shadowed": 7},
+    )
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["wall_clock_offset_s"] == 0.0
+
+
+def test_apply_phone_applier_check_window_unavailable_names_no_offset(tmp_path):
+    run_dir = tmp_path / "no_window"
+    run_dir.mkdir()  # no metadata.jsonl, no log_health.json at all
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["wall_clock_offset_s"] is None
+
+
+# -- B15 (validation round 3): a rebind whose sessions disagree -------------
+
+
+def test_apply_phone_applier_check_refuses_and_names_both_sessions_offsets(tmp_path):
+    run_dir = write_shadow_drive(
+        tmp_path, n=5, t_wall_start=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=46.0, sessions=[{"wall_clock_offset_s": 0.9}],
+    )
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["ok"] is False
+    assert out["overall_ok"] is False
+    assert out["phone_applier"]["wall_clock_offset_s"] is None
+    detail = out["phone_applier"]["detail"]
+    assert "0.900000" in detail and "46.000000" in detail and "rebound" in detail

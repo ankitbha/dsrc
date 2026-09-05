@@ -307,9 +307,33 @@ def parse_config_applier_stats(
 RUN_WINDOW_MARGIN_S = 30.0
 
 
+def _phone_session_offsets(phone_summary: dict[str, Any] | None) -> tuple[float | None, float | None]:
+    """The FIRST session's and the CURRENTLY-ACTIVE (last) session's
+    handshake-time wall-clock offsets, from one `summary["phone"]` block
+    (B15, validation round 3).
+
+    A run with no rebind has exactly one session: live in the top-level
+    `wall_clock_offset_s`, and absent from `sessions` (`PhoneLink.to_record`'s
+    own docstring: `sessions` holds every session BEFORE the current one) --
+    so "first" and "current" name the same field. A run with at least one
+    rebind has the first session's own offset in `sessions[0]`
+    (`_session_record` has carried it since this fix; before it, only the
+    LAST session's offset survived a rebind at all, so a run window
+    spanning the rebind had no way to detect two sessions measuring two
+    different phones). Either half may be `None` -- no session ever
+    started, or a run recorded before B10 introduced the field at all.
+    """
+    phone_summary = phone_summary or {}
+    current = phone_summary.get("wall_clock_offset_s")
+    sessions = phone_summary.get("sessions") or []
+    first = sessions[0].get("wall_clock_offset_s") if sessions else current
+    return first, current
+
+
 def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tuple[float, float] | None:
     """`[start, end]` wall-clock epoch seconds for this run, expressed on
-    the PHONE's clock, or `None` when either bound is unavailable.
+    the PHONE's clock, or `None` when either bound is unavailable or the
+    run's own sessions disagree about what the shift should be.
 
     `start` is the first TICK record's own `t_wall` (`Tick.to_record()`);
     the first LINE of `metadata.jsonl` is not necessarily a tick (a run
@@ -323,9 +347,10 @@ def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tupl
     validation round 2) -- two different, unsynchronised clocks: measured
     on real hardware at +0.935 to +0.952 s across three samples minutes
     apart, and near zero for the same two devices earlier in the same
-    session, so it is not even constant. Shifted here by
-    `summary["phone"]["wall_clock_offset_s"]` (recorded from the handshake,
-    `sensors/phone_link.py`) when available, which also fixes the margin
+    session, so it is not even constant. Shifted here by the CURRENT
+    (last, still-active-at-teardown) session's `wall_clock_offset_s`
+    (recorded from the handshake, `sensors/phone_link.py`) when available,
+    which is the session covering `end` -- which also fixes the margin
     being one-sided: an unshifted `[start, end + margin_s]` tolerates a
     phone running behind for the whole run's duration while tolerating one
     running more than `margin_s` ahead nowhere at all, and past that this
@@ -333,6 +358,15 @@ def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tupl
     outside window N while run N-1's falls inside it. `None` offset (a run
     from before this fix, or one with no phone session at all) falls back
     to the unshifted, Jetson-clock window rather than refusing outright.
+
+    A rebind is a different failure mode from a missing offset (B15,
+    validation round 3): the CURRENT session's shift is right for `end`,
+    which it covers, but `start` fell inside the FIRST session, measured
+    against a phone that may since have been replaced. One shift cannot be
+    correct for both halves of the window when the two sessions disagree
+    by more than `margin_s` -- more than this window already tolerates as
+    ordinary clock drift -- so this refuses outright rather than silently
+    applying the wrong session's shift to part of the window.
     """
     metadata_path = run_dir / "metadata.jsonl"
     if not metadata_path.exists():
@@ -362,8 +396,18 @@ def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tupl
     end = log_health.get("t_wall")
     if end is None:
         return None
-    offset_s = ((_read_summary(run_dir).get("phone") or {}).get("wall_clock_offset_s")) or 0.0
-    return start + offset_s, end + offset_s + margin_s
+    first_offset, offset_s = _phone_session_offsets(_read_summary(run_dir).get("phone"))
+    if first_offset is not None and offset_s is not None and abs(offset_s - first_offset) > margin_s:
+        return None
+    # B14 (validation round 3): `is None`, not `or 0.0` -- a genuine 0.0
+    # offset and an absent one must not compute the same fallback for the
+    # wrong reason, even though the arithmetic result is identical either
+    # way; `apply_phone_applier_check` is the one that needs to tell a
+    # measured zero from an absent measurement apart, by calling
+    # `_phone_session_offsets` itself rather than trusting this return
+    # value to carry that distinction through.
+    used = 0.0 if offset_s is None else offset_s
+    return start + used, end + used + margin_s
 
 
 RunAdb = Callable[..., "subprocess.CompletedProcess"]
@@ -462,17 +506,35 @@ def apply_phone_applier_check(
     tell "not asked" from "asked and passed" without also knowing whether
     `--serial` was on the command line, and `overall_ok` is left exactly as
     `check()` computed it.
+
+    Every outcome once a check was actually requested also carries
+    `wall_clock_offset_s` -- the shift `_run_window` actually used, or
+    `None` when it used none (B14, validation round 3): the window's own
+    bounds were printed shifted with no indication a shift happened at
+    all, so a reader comparing them against `log_health.json`'s unshifted
+    `t_wall` saw an unexplained ~0.93s discrepancy and no way to tell
+    whether that was the fix working or a bug.
     """
     if not serial:
         result["phone_applier"] = {"ok": None, "detail": "not requested"}
         return result
     window = _run_window(run_dir)
+    first_offset, offset_s = _phone_session_offsets(_read_summary(run_dir).get("phone"))
     if window is None:
-        result["phone_applier"] = {
-            "ok": False,
-            "detail": "the run's own window could not be established (missing "
-                      "metadata.jsonl's first tick t_wall or log_health.json)",
-        }
+        if first_offset is not None and offset_s is not None and abs(offset_s - first_offset) > RUN_WINDOW_MARGIN_S:
+            detail = (
+                f"the run rebound and its sessions' wall-clock offsets disagree by "
+                f"{abs(offset_s - first_offset):.3f}s, more than this window's own "
+                f"{RUN_WINDOW_MARGIN_S:.0f}s margin -- one shift cannot cover both "
+                f"halves of the window (first session {first_offset:.6f}s, current "
+                f"session {offset_s:.6f}s)"
+            )
+        else:
+            detail = (
+                "the run's own window could not be established (missing "
+                "metadata.jsonl's first tick t_wall or log_health.json)"
+            )
+        result["phone_applier"] = {"ok": False, "detail": detail}
     else:
         applier_stats = pull_config_applier_stats(serial, window)
         if applier_stats is None:
@@ -495,8 +557,15 @@ def apply_phone_applier_check(
                 )
             )
     # Outside the if/else above so it runs for EVERY outcome once a check
-    # was actually requested -- the bug this fixes was this line living
-    # inside just one branch. `ok` may be None (B3's live-drive case, or a
+    # was actually requested, the same reason `phone_ok`'s fold-in below is
+    # out here too (A1, validation round 1): `None` when no window was
+    # established at all (nothing was shifted by anything), the CURRENT
+    # session's offset when one was (`_run_window`'s own fallback to
+    # unshifted, which reads as `offset_s is None`, is named `None` here
+    # too rather than the `0.0` it computes internally -- B14, validation
+    # round 3).
+    result["phone_applier"]["wall_clock_offset_s"] = offset_s if window is not None else None
+    # `ok` may be None (B3's live-drive case, or a
     # window/adb failure that could not even be judged) -- `and` with None
     # would corrupt a True `overall_ok` into `None`, so only a definite
     # False is folded in.

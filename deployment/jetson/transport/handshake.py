@@ -94,10 +94,37 @@ class ClockSample:
 
     @property
     def remote_minus_local_wall_s(self) -> float:
-        """Remote wall clock minus local wall clock, in seconds, at
-        handshake time -- positive means the remote (the phone, on the
-        Jetson's own listener side of every session) is ahead."""
+        """Remote wall clock minus local wall clock, in seconds -- positive
+        means the remote (the phone, on the Jetson's own listener side of
+        every session) is ahead.
+
+        NOT two simultaneous stamps (B13, validation round 3):
+        `t_local_wall_ns` is taken at this device's own hello-send,
+        `t_remote_wall_ns` is the peer's wall clock at ITS hello-send, and
+        both sides send before either reads (this module's own docstring),
+        so the two instants are up to one round trip apart, with the
+        remote's always the later one. That makes this value systematically
+        overstate how far ahead the remote is, by up to
+        `wall_clock_offset_bound_s`. A caller that needs the bound alongside
+        the estimate reads that property too, rather than treating this one
+        as exact.
+        """
         return (self.t_remote_wall_ns - self.t_local_wall_ns) / 1e9
+
+    @property
+    def wall_clock_offset_bound_s(self) -> float:
+        """Upper bound on the error in `remote_minus_local_wall_s`, in
+        seconds (B13, validation round 3).
+
+        `t_remote_wall_ns` is the peer's wall clock at its OWN hello-send,
+        not at the instant `t_local_wall_ns` was taken, and the two stamps
+        are up to one round trip (`round_trip_ns`) apart. This codebase's
+        rule for a cross-device number is to carry its bound alongside it
+        (`TimebaseStamp.bound_s`, `StageTiming.converted(bound_ms=...)`);
+        `remote_minus_local_wall_s` was the exception until this property
+        existed.
+        """
+        return self.round_trip_ns / 1e9
 
 
 @dataclass(frozen=True)

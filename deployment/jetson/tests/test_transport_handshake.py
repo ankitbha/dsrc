@@ -210,6 +210,47 @@ def test_remote_minus_local_wall_s_is_negative_when_the_remote_is_behind():
     assert result.clock.remote_minus_local_wall_s == pytest.approx(-0.5, abs=1e-9)
 
 
+def test_wall_clock_offset_bound_s_is_the_round_trip_in_seconds():
+    """B13 (validation round 3): `remote_minus_local_wall_s` compares two
+    hello-sends up to one round trip apart, not two simultaneous stamps --
+    the bound on that error is exactly this side's own round trip,
+    converted to seconds."""
+    phone_conn, jetson_conn = loopback_pair()
+    thread = threading.Thread(
+        target=lambda: perform_handshake(
+            phone_conn, PHONE, mono_clock=lambda: 500, wall_clock=lambda: 900
+        ),
+        daemon=True,
+    )
+    thread.start()
+    ticks = iter([10_000_000, 45_000_000])
+    result = perform_handshake(
+        jetson_conn, JETSON, mono_clock=lambda: next(ticks), wall_clock=lambda: 77
+    )
+    thread.join(timeout=2.0)
+    assert result.clock.round_trip_ns == 35_000_000
+    assert result.clock.wall_clock_offset_bound_s == pytest.approx(0.035, abs=1e-9)
+
+
+def test_wall_clock_offset_bound_s_is_zero_for_an_instant_round_trip():
+    """Not a claim this ever happens on real hardware -- a same-tick
+    round trip is the smallest possible bound, and the property should not
+    invent a floor under it."""
+    phone_conn, jetson_conn = loopback_pair()
+    thread = threading.Thread(
+        target=lambda: perform_handshake(
+            phone_conn, PHONE, mono_clock=lambda: 500, wall_clock=lambda: 900
+        ),
+        daemon=True,
+    )
+    thread.start()
+    result = perform_handshake(
+        jetson_conn, JETSON, mono_clock=lambda: 10, wall_clock=lambda: 77,
+    )
+    thread.join(timeout=2.0)
+    assert result.clock.wall_clock_offset_bound_s == 0.0
+
+
 def test_a_non_hello_first_frame_is_refused():
     phone_conn, jetson_conn = loopback_pair()
     phone_conn.send_all(
