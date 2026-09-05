@@ -1716,8 +1716,26 @@ which is disposable; they are re-fetchable from `jetson:/home/edge/dsrc_logs/`.
 
 Everything above is done before the devices meet.
 
-40. **[COLOCATED]** USB transport backend behind the same interface, swapped in
-    for the network backend.
+40. ~~**[COLOCATED]** USB transport backend behind the same interface, swapped in
+    for the network backend.~~ **DONE 2026-09-05** — `transport/usb.py`. `UsbAcceptor`
+    composes a loopback `TcpAcceptor` with an `adb reverse` lifecycle, so no new
+    `ByteConnection` was needed: `adb reverse` leaves ordinary TCP at both ends.
+    Registered as the `usb` backend and acceptor in both conformance suites, gated on
+    an attached serial.
+
+    **Note the spec is wrong and was not edited.** `specs/transport_protocol.md:21`
+    and section D's preamble both say the USB path is `adb forward`. It is `adb
+    reverse` — `forward` inverts the direction the same paragraph mandates, and the
+    only production socket construction in `phone/` is a dial. The spec is frozen, so
+    the discrepancy is recorded rather than fixed.
+
+    Two defects only real hardware produced: `adb reverse --list`'s first column is
+    not the serial, so the original filter never matched and every timeout falsely
+    re-established the mapping; and `verify()` compared only the device port,
+    discarding the local one, so a mapping pointing at the wrong local port read as
+    healthy. Across three 180 s drives: `reverses_reestablished` 0,
+    `reverse_reestablish_failures` 0, `reverses_swept` 0, and `adb reverse --list`
+    empty before and after every run.
 41. ~~**[COLOCATED]** `adb` first connection: accept the RSA authorization on the
     phone screen, tick "always allow".~~ **DONE 2026-09-04** — `ZY227VV4XC` on
     `usb:1-2.2`, reporting `device`; `adb shell getprop` returns `moto g power`
@@ -1743,10 +1761,47 @@ Everything above is done before the devices meet.
     number increments and the grant should hold with no new prompt. Worth knowing
     because a session-scoped grant would only reveal itself at the next reboot,
     and the next reboot is likely to be in the car.
-42. **[COLOCATED]** Bench loopback over USB with both devices on a desk;
-    end-to-end latency measured against the 200 ms target.
-43. **[COLOCATED]** Shadow-mode correctness: logged shadow decisions match what
-    live gating produces on the same input.
+42. ~~**[COLOCATED]** Bench loopback over USB with both devices on a desk;
+    end-to-end latency measured against the 200 ms target.~~ **DONE 2026-09-05** —
+    **target met in all three runs.** `e2e_ms` p95 **90.72 / 139.52 / 111.52 ms**
+    against 200 ms, pooled 116.19 over 2,684 ticks; converted-only differs by at most
+    0.12 ms within a run. The tailnet baseline **missed** the target at 215.63 ms, so
+    USB removed roughly 99 ms of p95. Recomputed from the raw logs independently of
+    the campaign's own report.
+
+    **Two bounds on that claim.** `link_ms` p50 36.83 ms against a conversion bound of
+    1.97 ms is resolved by ~18×, but `transport` p50 sits *at* its bound — exceeding
+    it by 0.02 and 0.30 ms in two runs and falling 0.03 ms below it in the third. The
+    USB wire hop is of order 2 ms and the instrument cannot place it more precisely;
+    on the tailnet the same stage cleared its bound by 17.64 ms. So the reduction is
+    established and the wire hop's magnitude is not.
+
+    The three runs disagree by 48.80 ms at p95, and 46.40 ms of that (95.1%) is
+    `enqueue_to_wire`, the phone-side send-queue interval measured on the phone's
+    clock at both ends; no other stage moves more than 1.97 ms between any pair, and
+    `phone.dropped` tracks it 0/3/17. **The spread is phone-side queueing, not the
+    link.** `link_ms` is now partitioned by `timebase.source` and never pooled, which
+    corrected the baseline's own figure from 185.38 to 185.78 ms.
+43. ~~**[COLOCATED]** Shadow-mode correctness: logged shadow decisions match what
+    live gating produces on the same input.~~ **DONE 2026-09-05** —
+    `check_shadow_commands.py` replays the incumbent and compares shadow against live
+    commands **decoded through the real `rate_cmd` wire codec**, not through the
+    in-process objects. Three drives, 899/900/885 ticks: command-replay mismatches 0,
+    logged `sensing.shadow` correct, and the phone's own applier counters
+    `applied == 0` with `shadowed == commands_sent` (37/38/38).
+
+    The check itself carried this section's signature defect and it was caught in
+    validation: when the phone-side half *could not run*, it printed
+    `phone_applier ok=False` and exited **0**. Three real causes reach that branch.
+    Fixed, and the fix is verified in both directions — a check that cannot run now
+    exits 2, one that ran and passed exits 0, one never requested exits 0.
+
+    Its logcat scoping was also wrong twice over: unscoped, so after three runs the
+    last match won and run 3's counters were compared against run 1's `rate_cmd.sent`;
+    then scoped to a window built on the *Jetson's* clock and matched against the
+    *phone's*, which runs ~0.93 s ahead. The offset is now measured at handshake,
+    recorded per session, and the window refuses when sessions disagree by more than
+    the margin.
 44. **[COLOCATED]** Live-mode verification: flip the flag and confirm gating
     genuinely changes sampling rates, the loop still closes, and the advisory
     remains sane. Shadow mode is not evidence that live mode works.
@@ -1763,8 +1818,22 @@ Everything above is done before the devices meet.
     What distinguishes them in the record is `network_transport` moving to
     `no_active_network` or to a fallback, so the injection is also the check that
     that field reports what it is supposed to.
-47. **[COLOCATED]** Sim-contract parity: the observation vector produced live
-    matches the simulator's sensing model field for field.
+47. ~~**[COLOCATED]** Sim-contract parity: the observation vector produced live
+    matches the simulator's sensing model field for field.~~ **DONE 2026-09-05**, and
+    **the task as worded is false** — which is the result. "Matches field for field"
+    does not hold for 31 of the 39 slots, and cannot: six have no rear sensor on the
+    device at all. `src/analysis/observation_parity.py` is the first module importing
+    both sensing models; before it, `test_sim_contract.py` fed one hand-written dict
+    to two *encoders* and compared their output.
+
+    The ledger over 7 real scenes: **8 identical, 18 approximated, 7 substituted, 6
+    structurally absent.** Every substituted or absent slot carries a provenance class
+    inside the `SUBSTITUTED` partition on every scene. Checked against all three
+    campaign drives: 0 re-encode mismatches, 0 constant mismatches over 2,684 ticks.
+
+    So the deliverable is a **parity ledger with a per-slot claim**, not a
+    field-for-field equality: it says which slots agree, which are approximations and
+    by what, and which the device cannot produce.
 48. **[COLOCATED]** In-car install: 12 V power for both devices, mounts, cable
     routing.
 
