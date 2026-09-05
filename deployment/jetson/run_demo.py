@@ -680,6 +680,10 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             host=args.phone_host, port=args.phone_port,
             acceptor=usb_acceptor,
         )
+        # 0 means no limit, the same reading `--duration-s` already gives it. The
+        # default is unchanged, so only a command line that asks for it gets the
+        # new behaviour.
+        phone.rebind_timeout_s = args.rebind_timeout_s or None
         print(f"[run] waiting up to {args.phone_wait_s:.0f}s for a phone on "
               f"{phone.host}:{phone.port} (the phone dials; the Jetson cannot)", flush=True)
         if not phone.wait_for_phone(timeout_s=args.phone_wait_s):
@@ -1180,7 +1184,15 @@ def summary_line(summary: dict, dropped_frames: int) -> str:
     )
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, as its own function so a test can read it.
+
+    Extracted after `--rebind-timeout-s` broke five tests at once: they build an
+    `argparse.Namespace` by hand to stand in for parsed arguments, and a new option
+    leaves that fixture short a field, which surfaces as an `AttributeError` deep in
+    `run_live` rather than as anything about the fixture. With the parser reachable,
+    the drift is checkable directly.
+    """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default=str(JETSON_DIR / "config.yaml"))
     parser.add_argument("--source", help="override camera.source (e.g. file:clip.mp4)")
@@ -1234,10 +1246,20 @@ def main() -> int:
              "reconnected mid-drive is not left on whatever it had",
     )
     parser.add_argument("--require-gps", action="store_true", help="fail instead of degrading without GPS")
+    parser.add_argument(
+        "--rebind-timeout-s", type=float, default=120.0,
+        help="how long to wait for the phone to dial back after the link drops, "
+             "before ending the run; 0 waits indefinitely, which is what an "
+             "unattended in-car drive wants",
+    )
     parser.add_argument("--duration-s", type=float, default=0.0)
     parser.add_argument("--max-ticks", type=int, default=0)
     parser.add_argument("--print-every", type=float, default=1.0, help="headless status period (s)")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     config = load_config(args.config)
     scenario = apply_scenario(config, args)

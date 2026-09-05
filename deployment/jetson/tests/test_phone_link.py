@@ -414,6 +414,54 @@ class TestSessionEndPropagates:
             link.stop()
             phone.close()
 
+    def test_an_unlimited_rebind_window_never_gives_up_on_the_drive(self):
+        # The in-car case. A phone away longer than the timeout ends the run, and in
+        # a car nothing is there to start it again -- an incoming call, an app
+        # restart or a thermal shutdown would silently cost the drive. With no
+        # limit the supervisor keeps looking, and the camera stream stays open so
+        # the consumer keeps waiting rather than being told the drive is over.
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        link.rebind_timeout_s = None
+        try:
+            attach(link, jetson, down)
+            phone.close()
+            # Comfortably past the 120 s default's shortest useful setting and past
+            # the 0.3 s the timed test above gives up in, so a regression to any
+            # finite bound this small fails here.
+            time.sleep(1.0)
+            # The supervisor must be ALIVE and looking, not merely silent. Written
+            # this way after the first version passed against a deliberately broken
+            # build: reverting the unlimited branch made the supervisor raise
+            # TypeError on `f"{None:g}"` and die, which left `end_of_stream` False
+            # and `supervisor_ended` None -- both assertions satisfied by a crash.
+            assert link._supervisor is not None and link._supervisor.is_alive(), \
+                "the supervisor is not running, so nothing is waiting for a redial"
+            assert link.camera.end_of_stream is False, \
+                "an unlimited window ended the stream anyway"
+            assert link.supervisor_ended is None, \
+                f"the supervisor gave up: {link.supervisor_ended}"
+        finally:
+            link.stop()
+            phone.close()
+
+    def test_an_unlimited_window_still_stops_on_teardown(self):
+        # The risk the unlimited branch introduces, tested directly: a wait with no
+        # deadline must still exit, or `stop()` hangs and the process needs killing.
+        phone, jetson, up, down = phone_and_jetson()
+        link = PhoneLink(acceptor=LoopbackAcceptor())
+        link.rebind_timeout_s = None
+        try:
+            attach(link, jetson, down)
+            phone.close()
+            time.sleep(0.2)
+            started = time.monotonic()
+            link.stop()
+            assert time.monotonic() - started < 5.0, "stop() did not return promptly"
+            assert link.supervisor_ended == "stopped", link.supervisor_ended
+        finally:
+            phone.close()
+
     def test_a_closed_session_stops_the_reader_thread_rather_than_spinning(self):
         phone, jetson, up, down = phone_and_jetson()
         link = PhoneLink(acceptor=LoopbackAcceptor())

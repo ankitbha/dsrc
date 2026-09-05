@@ -2125,6 +2125,53 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
+58. ~~**Nothing starts the Jetson runtime in the car.**~~ **DONE 2026-09-05.**
+    Until this, `run_demo.py` could only be started from a shell, which meant `ssh`
+    over Tailscale, which meant the Jetson needed internet and the car needed a
+    laptop. Checked all three autostart routes on the box first: no systemd unit,
+    no cron entry, no `rc.local`. The phone half was never the problem --
+    `MainActivity` has a Start button, and `SessionHolder` retries a refused dial
+    indefinitely, so tap order does not matter.
+
+    `deployment/jetson/systemd/` now carries a **user** unit, its environment file
+    and a README. A user unit because installing to `/etc` needs a password an
+    unattended deploy does not have, and `loginctl enable-linger` does not. The
+    procedure in the car is: 12 V on, plug the phone in, tap **Start sensing**.
+
+    Two settings carry the weight. `--rebind-timeout-s 0` is new and means never
+    give up on a handset that went away; the old fixed 120 s **ended the run**, so a
+    call, an app restart or a thermal shutdown longer than two minutes would have
+    cost a drive silently with nothing there to restart it. `--duration-s 0` was
+    already unlimited.
+
+    **Verified end to end on the bench**, not just installed: service enabled and
+    started, the phone tapped, ticks flowing, then the runtime killed by its
+    systemd `MainPID` -- a **new** run directory appeared with the phone
+    reconnected and no human action, `NRestarts` 1, and a clean stop left
+    `inactive/success`.
+
+    **Three defects in this work, found by running it rather than by writing it.**
+    The environment file did not parse as shell (`--usb: command not found`) even
+    though systemd would have read it, so it is quoted now and valid under both.
+    `journalctl --user -u dsrc-drive` reported **"No journal files were found"** on
+    this box, so the README's own instruction showed nothing -- output goes to
+    `~/dsrc_logs/dsrc-drive.log` with `PYTHONUNBUFFERED=1`, because Python
+    block-buffers to a file and an empty log reads the same as a dead service. And a
+    normal stop left the unit `failed` until `SuccessExitStatus=143` was added; a
+    unit that reports failure after being told to stop teaches the reader to ignore
+    its state.
+
+    `--rebind-timeout-s` also broke five tests at once, because they build an
+    `argparse.Namespace` by hand and a new option leaves it short a field. The
+    parser is now `build_parser()` and a test compares the fixture against it, so
+    the next option fails once, naming the missing field, instead of raising an
+    `AttributeError` deep inside `run_live`.
+
+    **What it does not solve:** the service restarts the runtime, not the phone. If
+    the app dies -- which task 46 showed `pm revoke` makes it do -- somebody must
+    tap Start again. There is no channel from the Jetson to the app: the USB link is
+    adb with the Jetson as host.
+
 57. ~~**Thermal backoff has no hysteresis, and a phone on the threshold rebinds its
     camera repeatedly.**~~ **DONE 2026-09-05.** A section F runtime defect, numbered
     here so nothing above is renumbered.

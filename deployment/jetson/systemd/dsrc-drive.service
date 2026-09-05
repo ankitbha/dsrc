@@ -1,0 +1,61 @@
+[Unit]
+Description=dsrc in-car drive: Jetson runtime waiting for the phone to dial in
+Documentation=file:%h/dsrc-task40/deployment/jetson/systemd/README.md
+# Deliberately NOT After=network-online.target. The run needs no internet: the
+# camera and GPS come from the handset over USB, the detector engine and policy
+# bundle are on local disk, and the only outbound calls are HERE requests the
+# PHONE makes. Waiting for a network the car may not have would stop the drive
+# from ever starting.
+After=local-fs.target
+
+# A USER unit, run by the per-user systemd manager with lingering enabled, so it
+# starts at boot with no login and needs no root to install. Installing to /etc
+# requires a password that an unattended deploy does not have.
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dsrc-task40/deployment/jetson
+EnvironmentFile=%h/.config/dsrc-drive.env
+
+# The phone is the whole input. Blocking here rather than failing means the
+# service can start before the handset is plugged in or awake, which is the
+# ordinary case when the Jetson boots on 12 V as the car starts.
+ExecStartPre=/bin/mkdir -p %h/dsrc_logs
+ExecStartPre=/usr/bin/adb start-server
+ExecStartPre=/usr/bin/adb wait-for-device
+
+# To a file rather than the journal. `journalctl --user -u dsrc-drive` reported
+# "No journal files were found" on this box, so the documented way to check a
+# service with no screen attached showed nothing at all -- measured, not assumed.
+# A file needs no journald configuration and no root.
+StandardOutput=append:%h/dsrc_logs/dsrc-drive.log
+StandardError=append:%h/dsrc_logs/dsrc-drive.log
+# Without this Python block-buffers stdout when it is not a terminal, and the log
+# stays empty for minutes at a time -- which is the same failure as no log at all
+# for someone checking whether the drive came up.
+Environment=PYTHONUNBUFFERED=1
+
+# 143 is 128+SIGTERM, which is how the runtime exits when the service is stopped.
+# Without this a normal `systemctl --user stop` leaves the unit in `failed`, and a
+# unit that reports failure after being asked to stop teaches the reader to ignore
+# its state.
+SuccessExitStatus=143
+
+# Unquoted on purpose: systemd splits $VAR on whitespace, where ${VAR} would pass
+# the whole line as one argument and argparse would reject it.
+ExecStart=/usr/bin/python3 run_demo.py $DSRC_RUN_ARGS
+
+# A drive is worth more than a clean exit. If the runtime dies for any reason the
+# service comes straight back and the phone, which redials indefinitely, reconnects
+# without anyone touching either device.
+Restart=always
+RestartSec=5
+
+# adb wait-for-device blocks until a handset appears, which may be the whole time
+# between powering the Jetson and plugging the phone in. A start timeout would
+# turn that ordinary wait into a failure.
+TimeoutStartSec=infinity
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

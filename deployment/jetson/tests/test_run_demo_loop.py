@@ -690,9 +690,27 @@ def _real_drive_args(**overrides):
         no_gps=True, no_log=False, phone=False, phone_host="0.0.0.0",
         phone_port=0, phone_wait_s=0.0, print_every=1.0, rate_heartbeat_s=1.0,
         require_gps=False, sim_gps=None, source=None, usb=False, usb_serial=None,
+        rebind_timeout_s=120.0,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
+
+
+def test_the_hand_built_args_cover_every_option_run_live_can_read():
+    """The fixture above stands in for parsed arguments, and drifts silently.
+
+    Adding `--rebind-timeout-s` broke five tests at once, and the symptom was an
+    `AttributeError` raised deep inside `run_live` rather than anything naming the
+    fixture. This compares the fixture against the real parser, so the next option
+    fails here, once, with a message that says which field is missing.
+
+    Only options `run_live` can reach are required: `--config`, `--selfcheck` and
+    `--scenario` are consumed by `main` before `run_live` is called.
+    """
+    consumed_by_main = {"config", "selfcheck", "scenario"}
+    parsed = vars(run_demo.build_parser().parse_args([]))
+    missing = set(parsed) - consumed_by_main - set(vars(_real_drive_args()))
+    assert not missing, f"_real_drive_args is missing: {sorted(missing)}"
 
 
 class TestRunLiveFailureSamplerIntegration:

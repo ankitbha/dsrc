@@ -286,7 +286,12 @@ class PhoneLink:
         self._imu_reader: threading.Thread | None = None
         self._supervisor: threading.Thread | None = None
         #: How long the supervisor waits for a redial before giving up on the run.
-        self.rebind_timeout_s = 120.0
+        #: `None` means it never gives up, which is what an unattended drive needs:
+        #: an incoming call, an app restart or a thermal shutdown lasting longer
+        #: than this ends the run, and in a car nothing is there to start it again.
+        #: `None` rather than 0, because 0 already reads as "give up at once" and
+        #: two tests rely on a small positive value meaning exactly that.
+        self.rebind_timeout_s: float | None = 120.0
 
     @property
     def telemetry(self) -> Any:
@@ -485,8 +490,10 @@ class PhoneLink:
             # camera that reports no frame and no end, which is the right behaviour
             # and an alarming silence to sit through without a word.
             logging.getLogger(__name__).warning(
-                "phone link down (%s); waiting up to %.0fs for a redial",
-                ended, self.rebind_timeout_s,
+                "phone link down (%s); %s",
+                ended,
+                "waiting for a redial, no time limit" if self.rebind_timeout_s is None
+                else f"waiting up to {self.rebind_timeout_s:.0f}s for a redial",
             )
             if not self._rebind(down_from=down_from, previous_end_reason=ended):
                 # Falls through to the give-up branch below.
@@ -509,8 +516,11 @@ class PhoneLink:
 
     def _rebind(self, *, down_from: float, previous_end_reason: str | None) -> bool:
         """Wait for the next dial-in and bind it. False when none came."""
-        deadline = down_from + self.rebind_timeout_s
-        while not self._stop.is_set() and time.monotonic() < deadline:
+        # `None` waits until `_stop`, which teardown always sets, so this cannot
+        # become an unkillable loop -- it is the same exit the timed branch uses
+        # first on a clean stop.
+        deadline = None if self.rebind_timeout_s is None else down_from + self.rebind_timeout_s
+        while not self._stop.is_set() and (deadline is None or time.monotonic() < deadline):
             event = self._listener.next_event(timeout=0.1)
             if isinstance(event, SessionRefused):
                 self._note_refusal(event)
