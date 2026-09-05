@@ -95,6 +95,12 @@ class RecordingReverse:
         #: replug: the mapping went missing (`verify` said so) and putting
         #: it back also fails for a beat while the device re-enumerates.
         self.raise_on_reestablish: BaseException | None = None
+        #: `UsbAcceptor.__init__` calls `sweep()` unconditionally, before
+        #: `establish()` -- recorded so a test can assert it was asked to,
+        #: and configurable so a test can simulate finding (and reporting)
+        #: a stray.
+        self.sweep_calls: list[int] = []
+        self.sweep_return = 0
 
     @property
     def serial(self) -> str:
@@ -105,6 +111,10 @@ class RecordingReverse:
             self.establish_calls.append(spec)
             raise self.raise_on_reestablish
         self.establish_calls.append(spec)
+
+    def sweep(self, device_port: int) -> int:
+        self.sweep_calls.append(device_port)
+        return self.sweep_return
 
     def verify(self, spec: ReverseSpec) -> bool:
         self.verify_calls += 1
@@ -198,10 +208,10 @@ def test_list_returns_every_mapping_the_scoped_call_reports():
     fake = FakeRun()
     fake.set(
         "reverse --list",
-        FakeCompleted(0, "ZY227VV4XC tcp:47811 tcp:47811\ntcp:9999 tcp:9999\n", ""),
+        FakeCompleted(0, "ZY227VV4XC tcp:47811 tcp:47811\nUsbFfs tcp:9999 tcp:8888\n", ""),
     )
     reverse = AdbReverse("ZY227VV4XC", run=fake)
-    assert reverse.list() == ["tcp:47811", "tcp:9999"]
+    assert reverse.list() == [("tcp:47811", "tcp:47811"), ("tcp:9999", "tcp:8888")]
 
 
 def test_list_does_not_require_the_first_column_to_be_the_serial():
@@ -213,8 +223,57 @@ def test_list_does_not_require_the_first_column_to_be_the_serial():
     fake = FakeRun()
     fake.set("reverse --list", FakeCompleted(0, "UsbFfs tcp:47811 tcp:47811\n", ""))
     reverse = AdbReverse("ZY227VV4XC", run=fake)
-    assert reverse.list() == ["tcp:47811"]
+    assert reverse.list() == [("tcp:47811", "tcp:47811")]
     assert reverse.verify(ReverseSpec(47811, 47811)) is True
+
+
+# -- B9 (validation round 2): verify() must check BOTH halves of the pair --
+
+
+def test_verify_is_false_when_the_device_port_matches_but_the_local_port_does_not():
+    """The exact defect: a mapping whose device port matches but whose
+    local port points somewhere else is not this mapping, and the old
+    device-port-only check read it as healthy -- R2's failure, invisible
+    to the mechanism built to detect it."""
+    fake = FakeRun()
+    fake.set("reverse --list", FakeCompleted(0, "UsbFfs tcp:47811 tcp:9999\n", ""))
+    reverse = AdbReverse("ZY227VV4XC", run=fake)
+    assert reverse.verify(ReverseSpec(device_port=47811, local_port=47811)) is False
+
+
+def test_verify_is_true_only_when_both_halves_match():
+    fake = FakeRun()
+    fake.set("reverse --list", FakeCompleted(0, "UsbFfs tcp:47811 tcp:9999\n", ""))
+    reverse = AdbReverse("ZY227VV4XC", run=fake)
+    assert reverse.verify(ReverseSpec(device_port=47811, local_port=9999)) is True
+
+
+# -- AdbReverse.sweep() (C5/B9/B12, validation round 2) --------------------
+
+
+def test_sweep_removes_every_mapping_for_the_device_port_and_counts_them():
+    fake = FakeRun()
+    fake.set("reverse --list", FakeCompleted(0, "UsbFfs tcp:47811 tcp:9999\n", ""))
+    reverse = AdbReverse("ZY227VV4XC", run=fake)
+    removed = reverse.sweep(47811)
+    assert removed == 1
+    remove_calls = [c for c in fake.calls if c[3:5] == ["reverse", "--remove"]]
+    assert remove_calls == [["adb", "-s", "ZY227VV4XC", "reverse", "--remove", "tcp:47811"]]
+
+
+def test_sweep_ignores_mappings_for_a_different_device_port():
+    fake = FakeRun()
+    fake.set("reverse --list", FakeCompleted(0, "UsbFfs tcp:9999 tcp:9999\n", ""))
+    reverse = AdbReverse("ZY227VV4XC", run=fake)
+    assert reverse.sweep(47811) == 0
+    assert not any(c[3:5] == ["reverse", "--remove"] for c in fake.calls)
+
+
+def test_sweep_is_zero_when_nothing_is_registered():
+    fake = FakeRun()
+    fake.set("reverse --list", FakeCompleted(0, "", ""))
+    reverse = AdbReverse("ZY227VV4XC", run=fake)
+    assert reverse.sweep(47811) == 0
 
 
 def test_list_is_empty_not_an_error_when_adb_is_unreachable():
@@ -341,6 +400,56 @@ def test_construction_raises_and_does_not_leak_the_socket_when_reverse_fails():
     # would fail with "address already in use".
     second = TcpAcceptor("127.0.0.1", port)
     second.close()
+
+
+def test_construction_sweeps_before_establishing():
+    """C5/B9/B12: a stray mapping for this device port -- left by an
+    earlier drive that was killed, crashed, or raised before its own
+    teardown -- must be gone before the fresh mapping goes up, not after."""
+    reverse = RecordingReverse()
+    acceptor = UsbAcceptor("ZY227VV4XC", port=0, reverse=reverse)
+    try:
+        assert reverse.sweep_calls == [acceptor.port]
+        assert acceptor.reverses_swept == 0
+    finally:
+        acceptor.close()
+
+
+def test_construction_reports_a_swept_stray():
+    reverse = RecordingReverse()
+    reverse.sweep_return = 1
+    acceptor = UsbAcceptor("ZY227VV4XC", port=0, reverse=reverse)
+    try:
+        assert acceptor.reverses_swept == 1
+    finally:
+        acceptor.close()
+
+
+def test_construction_really_removes_a_stray_left_by_a_leaked_run():
+    """End to end against a real AdbReverse (fake subprocess): a mapping
+    for the exact port we are about to bind, already registered -- as a
+    leaked run would leave it -- is gone by the time construction returns,
+    and the fresh one is the only one left."""
+    port = free_port()
+    fake = FakeRun()
+    fake.set(
+        "reverse --list",
+        FakeCompleted(0, f"UsbFfs tcp:{port} tcp:{port}\n", ""),
+    )
+    acceptor = UsbAcceptor("ZY227VV4XC", port=port, run=fake)
+    try:
+        assert acceptor.reverses_swept == 1
+        remove_calls = [c for c in fake.calls if c[3:5] == ["reverse", "--remove"]]
+        assert remove_calls == [["adb", "-s", "ZY227VV4XC", "reverse", "--remove", f"tcp:{port}"]]
+        establish_calls = [c for c in fake.calls if c[3] == "reverse" and c[4] != "--remove" and c[4] != "--list"]
+        assert len(establish_calls) == 1
+        # Swept before established: the remove call comes first in the
+        # recorded order.
+        remove_index = fake.calls.index(remove_calls[0])
+        establish_index = fake.calls.index(establish_calls[0])
+        assert remove_index < establish_index
+    finally:
+        acceptor.close()
 
 
 # -- UsbAcceptor: re-verification and re-establishment on timeout ---------
@@ -544,6 +653,7 @@ def test_usb_record_shape():
         assert record["adb_version"] == "Android Debug Bridge version 1.0.41"
         assert record["reverses_reestablished"] == 0
         assert record["reverse_reestablish_failures"] == 0
+        assert record["reverses_swept"] == 0
         assert record["address"] == ["127.0.0.1", acceptor.port]
     finally:
         acceptor.close()

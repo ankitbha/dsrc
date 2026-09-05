@@ -159,8 +159,8 @@ class AdbReverse:
         except AdbError:
             pass
 
-    def list(self) -> list[str]:
-        """This serial's registered device-port mappings, as `tcp:N` strings.
+    def list(self) -> list[tuple[str, str]]:
+        """This serial's registered `(device-port, local-port)` mappings.
 
         Every line of `adb -s <serial> reverse --list` already belongs to
         this serial -- `-s` routes the request to that device's adbd
@@ -173,9 +173,18 @@ class AdbReverse:
         `parts[0] == self._serial` and consequently never found its own
         mapping, so `accept()` re-established it on every single timeout.
 
-        Empty when `adb` itself could not be reached, not just when there are
-        no mappings -- a caller checking `spec.device_arg() in reverse.list()`
-        then reads "not present" either way, which is the conservative answer:
+        Both halves of each mapping, not just the device port (B9,
+        validation round 2): an earlier version kept only `parts[1]` and
+        dropped `parts[2]`, the local port, so `verify()` -- which checked
+        membership in this list -- read `tcp:47811 tcp:9999` as a healthy
+        mapping for a spec asking for `tcp:47811 tcp:47811`. Not reachable
+        while every caller leaves `device_port=None` (both ports then move
+        together), but a caller passing one explicitly would reach it, and
+        the fix costs nothing for the common case.
+
+        Empty when `adb` itself could not be reached, not just when there
+        are no mappings -- a caller checking `pair in reverse.list()` then
+        reads "not present" either way, which is the conservative answer:
         an unreachable `adb` should look like a missing mapping, not a
         confirmed one.
         """
@@ -189,12 +198,41 @@ class AdbReverse:
         for line in result.stdout.splitlines():
             parts = line.split()
             # "<label> <device-port> <local-port>" -- label is not the serial.
-            if len(parts) >= 2:
-                mappings.append(parts[1])
+            if len(parts) >= 3:
+                mappings.append((parts[1], parts[2]))
         return mappings
 
     def verify(self, spec: ReverseSpec) -> bool:
-        return spec.device_arg() in self.list()
+        """Whether BOTH halves of `spec` are registered together, not just
+        the device port (B9): `tcp:47811 tcp:9999` is not this mapping even
+        though its device port matches, and treating it as healthy is
+        exactly R2's failure -- a listener that reports perfect health
+        while the drive produces no ticks -- invisible to the mechanism
+        built to detect it.
+        """
+        return (spec.device_arg(), spec.local_arg()) in self.list()
+
+    def sweep(self, device_port: int) -> int:
+        """Remove every CURRENTLY-registered mapping for `device_port`,
+        whatever local port it happens to point to, and return how many
+        were found.
+
+        Closes a stray left by an earlier drive that never tore down its
+        own reverse -- a SIGKILL, a crash, a test fixture that raised
+        before its own teardown (B12), or (before this fix) a bare `kill`
+        (C5): nothing else enumerates or removes one, so it sits on the
+        device indefinitely, reads as healthy against `verify()`'s
+        pre-B9 device-port-only check, and collides with anything else
+        that binds the same device-side port -- `ImuWireTest.kt` binds a
+        `ServerSocket` on this exact port (`LinkConfig.DEFAULT_PORT`,
+        47811), so an instrumented run after a leaked drive fails with
+        `EADDRINUSE` for a reason that has nothing to do with it.
+        """
+        device_arg = f"tcp:{device_port}"
+        matches = [device for device, _local in self.list() if device == device_arg]
+        for _ in matches:
+            self.remove(ReverseSpec(device_port=device_port, local_port=device_port))
+        return len(matches)
 
     _TRANSPORT_ID_RE = re.compile(r"transport_id:(\d+)")
 
@@ -244,6 +282,14 @@ class UsbAcceptor:
                 device_port=device_port if device_port is not None else self._tcp.port,
                 local_port=self._tcp.port,
             )
+            # Swept before establishing (C5/B9/B12, validation round 2): a
+            # stray mapping for this exact device port left by an earlier
+            # leaked drive would otherwise sit alongside the fresh one
+            # (`adb reverse` does not refuse a duplicate device port
+            # outright the way a real bind would), and it is the leaked
+            # mapping, not necessarily the fresh one, that a naive `verify()`
+            # might have matched pre-B9.
+            self.reverses_swept = self._reverse.sweep(self._spec.device_port)
             self._reverse.establish(self._spec)
         except BaseException:
             # The acceptor bound a socket above; if the reverse cannot be
@@ -356,6 +402,7 @@ class UsbAcceptor:
             "adb_version": adb_version(run=self._run),
             "reverses_reestablished": self.reverses_reestablished,
             "reverse_reestablish_failures": self.reverse_reestablish_failures,
+            "reverses_swept": self.reverses_swept,
             "address": list(self.address),
         }
 
