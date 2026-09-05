@@ -331,6 +331,10 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
     gps_sim_spec = args.sim_gps or (scenario or {}).get("gps")
 
     phone = None
+    usb_acceptor = None
+    if args.usb and not args.phone:
+        print("[run] --usb has no effect without --phone", file=sys.stderr)
+        return 2
     if args.phone:
         if gps_sim_spec is not None:
             # `--phone` takes BOTH sensors from the handset, so a simulated GPS
@@ -364,7 +368,35 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             return 2
         from sensors.phone_link import PhoneLink
 
-        phone = PhoneLink(host=args.phone_host, port=args.phone_port)
+        if args.usb:
+            if args.phone_host != "0.0.0.0":
+                print("[run] --usb and --phone-host are mutually exclusive: a command "
+                      "line cannot claim USB and name a tailnet address", file=sys.stderr)
+                return 2
+            from transport.usb import AdbError, UsbAcceptor, attached_serial
+
+            serial = args.usb_serial
+            if serial is None:
+                serial, reason = attached_serial()
+                if serial is None:
+                    # Refuses rather than falling back to TCP: a fallback here
+                    # would produce a run that looks like a USB run and is not.
+                    print(f"[run] --usb: no device to establish a reverse against "
+                          f"({reason})", file=sys.stderr)
+                    return 2
+            try:
+                usb_acceptor = UsbAcceptor(serial, port=args.phone_port)
+            except AdbError as exc:
+                print(f"[run] --usb: could not establish the reverse mapping: {exc}",
+                      file=sys.stderr)
+                return 2
+            print(f"[run] usb: adb reverse tcp:{usb_acceptor.port} tcp:{usb_acceptor.port} "
+                  f"on {serial}", flush=True)
+
+        phone = PhoneLink(
+            host=args.phone_host, port=args.phone_port,
+            acceptor=usb_acceptor,
+        )
         print(f"[run] waiting up to {args.phone_wait_s:.0f}s for a phone on "
               f"{phone.host}:{phone.port} (the phone dials; the Jetson cannot)", flush=True)
         if not phone.wait_for_phone(timeout_s=args.phone_wait_s):
@@ -677,6 +709,15 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 "reachability_at_start": network_at_start,
                 "reachability_at_end": end,
             }
+        if usb_acceptor is not None:
+            # Beside `network`, not folded into it: `network` answers "what
+            # would this machine's tailnet reachability say", `usb` answers
+            # "which cable, and did the reverse mapping survive the drive" --
+            # task 32's lesson was that a record which cannot name its own
+            # path is not evidence, and `path_for_address` already reports
+            # `127.0.0.1` as USB, which says which path, not which cable or
+            # how often it dropped.
+            summary["usb"] = usb_acceptor.usb_record()
         if sensing is not None:
             # What was decided and how much of it reached the phone. A drive whose
             # commands were all refused and one where nothing needed sending write
@@ -872,6 +913,21 @@ def main() -> int:
     parser.add_argument(
         "--phone-wait-s", type=float, default=60.0,
         help="how long to wait for the phone to dial in before giving up",
+    )
+    # The USB path: an `adb reverse` mapping in place of the tailnet listener.
+    # Mutually exclusive with --phone-host: a command line cannot claim USB
+    # and name a tailnet address, because a `--phone-host 127.0.0.1` typed by
+    # hand is indistinguishable from a genuine loopback test and establishes
+    # no reverse at all.
+    parser.add_argument(
+        "--usb", action="store_true",
+        help="accept the phone over adb reverse instead of the tailnet; "
+             "mutually exclusive with --phone-host",
+    )
+    parser.add_argument(
+        "--usb-serial",
+        help="the adb serial to establish the reverse against; auto-detected "
+             "when exactly one device is attached",
     )
     # Shadow is the default and live is chosen. A drive that gates for real because
     # nobody passed a flag is the wrong failure to have.

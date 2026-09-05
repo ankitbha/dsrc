@@ -9,6 +9,15 @@ thread abandoned per connection attempt.
 Parametrizing over backends means the USB backend inherits the whole suite, and
 it also cross-checks the loopback backend that shipped earlier: if loopback
 fails a check here, the contract text and the shipped code disagree.
+
+The `usb` backend is gated on a real device being attached (`attached_serial`),
+skipping with a stated reason when not, because it is the one entry here whose
+setup shells a real `adb reverse`. The bytes themselves are exchanged over a
+local dial to the acceptor's bound port -- exactly what a phone's dial through
+the reverse mapping lands as on this side -- so what the gate proves is that
+`UsbAcceptor` really can establish and tear down a mapping against hardware;
+the `ByteConnection` it hands back is a `TcpConnection`, proved generically by
+this same suite under the `tcp` backend above.
 """
 
 from __future__ import annotations
@@ -23,6 +32,7 @@ import pytest
 from transport.connection import ByteConnection, ConnectionClosed
 from transport.loopback import loopback_pair
 from transport.tcp import TcpAcceptor, dial
+from transport.usb import UsbAcceptor, attached_serial
 
 
 @dataclass
@@ -52,7 +62,24 @@ def tcp_backend(**kwargs) -> Pair:
     return Pair("tcp", client, server, dispose)
 
 
-BACKENDS = {"loopback": loopback_backend, "tcp": tcp_backend}
+def usb_backend(**kwargs) -> Pair:
+    serial, reason = attached_serial()
+    if serial is None:
+        pytest.skip(f"no USB device attached: {reason}")
+    acceptor = UsbAcceptor(serial, port=0, **kwargs)
+    client = dial("127.0.0.1", acceptor.port)
+    server = acceptor.accept(timeout=5.0)
+    assert server is not None
+
+    def dispose():
+        client.close()
+        server.close()
+        acceptor.close()
+
+    return Pair("usb", client, server, dispose)
+
+
+BACKENDS = {"loopback": loopback_backend, "tcp": tcp_backend, "usb": usb_backend}
 
 
 @pytest.fixture(params=sorted(BACKENDS), ids=sorted(BACKENDS))
@@ -277,6 +304,9 @@ PROTOCOL_MEMBERS = {"peer", "send_all", "recv_exact", "close"}
 ALLOWED_EXTRAS = {
     "loopback": {"unread_bytes"},
     "tcp": {"applied_options"},
+    # The usb backend hands back a plain TcpConnection -- no new ByteConnection
+    # class, per decision D1 -- so it carries exactly tcp's extras.
+    "usb": {"applied_options"},
 }
 
 

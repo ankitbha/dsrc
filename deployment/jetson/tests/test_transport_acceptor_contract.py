@@ -8,7 +8,9 @@ LoopbackAcceptor returned the connection. `timeout=0.0` is this codebase's idiom
 for "poll now" (`next_event`, `Session.recv`), so the two answers were both
 plausible and only one can be right.
 
-Task 40's USB acceptor is the next one written; it inherits this.
+Task 40's USB acceptor is the next one written; it inherits this. It is gated
+on a real device being attached (`attached_serial`), skipping with a stated
+reason when not, because establishing it shells a real `adb reverse`.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import pytest
 from transport.connection import ConnectionClosed
 from transport.loopback import LoopbackAcceptor
 from transport.tcp import TcpAcceptor, dial
+from transport.usb import UsbAcceptor, attached_serial
 
 
 @dataclass
@@ -57,7 +60,27 @@ def tcp_acceptor() -> AcceptorUnderTest:
     return AcceptorUnderTest("tcp", acceptor, connect, dispose)
 
 
-ACCEPTORS = {"loopback": loopback_acceptor, "tcp": tcp_acceptor}
+def usb_acceptor() -> AcceptorUnderTest:
+    serial, reason = attached_serial()
+    if serial is None:
+        pytest.skip(f"no USB device attached: {reason}")
+    acceptor = UsbAcceptor(serial, port=0)
+    opened: list[object] = []
+
+    def connect():
+        connection = dial("127.0.0.1", acceptor.port)
+        opened.append(connection)
+        return connection
+
+    def dispose():
+        for connection in opened:
+            connection.close()
+        acceptor.close()
+
+    return AcceptorUnderTest("usb", acceptor, connect, dispose)
+
+
+ACCEPTORS = {"loopback": loopback_acceptor, "tcp": tcp_acceptor, "usb": usb_acceptor}
 
 
 @pytest.fixture(params=sorted(ACCEPTORS), ids=sorted(ACCEPTORS))

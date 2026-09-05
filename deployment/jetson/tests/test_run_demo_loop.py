@@ -689,7 +689,7 @@ def _real_drive_args(**overrides):
         duration_s=0.0, headless=True, live_rates=False, max_ticks=0,
         no_gps=True, no_log=False, phone=False, phone_host="0.0.0.0",
         phone_port=0, phone_wait_s=0.0, print_every=1.0, rate_heartbeat_s=1.0,
-        require_gps=False, sim_gps=None, source=None,
+        require_gps=False, sim_gps=None, source=None, usb=False, usb_serial=None,
     )
     base.update(overrides)
     return argparse.Namespace(**base)
