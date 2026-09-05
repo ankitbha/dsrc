@@ -20,12 +20,36 @@ from eval_run import (
 T0 = 1_750_000_000.0
 RATE_HZ = 30.0
 
+#: Distinguishes "the caller did not pass timebase_source" from "the caller
+#: explicitly wants no timebase dict at all" -- the latter models a run
+#: recorded before per-tick timebase.source existed, which is its own test.
+_TIMEBASE_AUTO = object()
+
 
 def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
               gps_fresh=True, leader_rel_measured=True, jetson_ms=None,
-              link_ms=None, field_sources=None, missingness=0.3) -> dict:
+              link_ms=None, timebase_source=_TIMEBASE_AUTO, proxy_reason=None,
+              field_sources=None, missingness=0.3) -> dict:
     has_leader = leader_gap is not None
     gap = leader_gap if has_leader else float("inf")
+    if timebase_source is _TIMEBASE_AUTO:
+        # A real Tick always carries a timebase dict whenever link_ms is not
+        # None (link_ms comes FROM frame.timebase.link_s), and round_trip is
+        # the dominant source in practice -- 1,198 of 1,204 on the tailnet
+        # baseline -- so that is the realistic default for a test that does
+        # not care which source produced the sample.
+        timebase_source = "round_trip" if link_ms is not None else None
+    timebase = None
+    if timebase_source is not None:
+        timebase = {
+            "converted": timebase_source in ("round_trip", "one_way"),
+            "proxy": timebase_source == "proxy",
+            "source": timebase_source,
+            "proxy_reason": proxy_reason,
+            "bound_ms": None,
+            "estimate_id": None,
+            "link_ms": link_ms,
+        }
     return {
         "type": "tick",
         "tick_id": i,
@@ -36,6 +60,7 @@ def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
         # looks like -- the fallback path. A value exercises the gate proper.
         **({} if jetson_ms is None else {"jetson_ms": jetson_ms}),
         **({} if link_ms is None else {"link_ms": link_ms}),
+        **({} if timebase is None else {"timebase": timebase}),
         "stage_ms": {"detect": 17.0, "track_distance": 0.4, "observe": 0.5,
                      "policy_advisory": 0.7, "capture_to_start": 1.0},
         "fps": RATE_HZ,
@@ -232,10 +257,136 @@ def test_the_link_segment_reports_its_count_and_its_negatives(tmp_path):
     ticks = [make_tick(i, jetson_ms=20.0, link_ms=(-2.0 if i < 10 else 8.0))
              for i in range(120)]
     run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
-    link = analyze(run_dir)["latency_ms"]["link_ms"]
+    link = analyze(run_dir)["latency_ms"]["link_ms"]["round_trip"]
     assert link["n"] == 120
     assert link["negative"] == 10
     assert link["min"] == pytest.approx(-2.0, abs=0.01)
+
+
+# -- Task 42, D10: link_ms is partitioned by timebase.source, never pooled --
+
+
+def test_link_ms_partitions_round_trip_and_one_way_into_separate_series(tmp_path):
+    """`sensors/time_sync.py:64-68`: a round-trip-converted sample and a
+    one-way-converted one have different error semantics and must never be
+    pooled into one reported series. Built so pooling would visibly change
+    the p95 the old code reported: round-trip is a tight cluster around
+    10 ms, one-way is a wide spread up to 200 ms.
+    """
+    ticks = (
+        [make_tick(i, jetson_ms=20.0, link_ms=10.0, timebase_source="round_trip")
+         for i in range(100)]
+        + [make_tick(100 + i, jetson_ms=20.0, link_ms=float(i * 2), timebase_source="one_way")
+           for i in range(20)]
+    )
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    link = result["latency_ms"]["link_ms"]
+    assert link["round_trip"]["n"] == 100
+    assert link["round_trip"]["p95"] == pytest.approx(10.0, abs=0.01)
+    assert link["one_way"]["n"] == 20
+    # Pooling the two series would have pulled the reported p95 toward the
+    # wide one-way spread; kept apart, round_trip's own p95 is untouched by it.
+    assert link["one_way"]["max"] == pytest.approx(38.0, abs=0.01)
+    assert "unknown_source" not in link
+
+
+def test_link_ms_is_none_when_a_run_has_no_link_segment(tmp_path):
+    ticks = [make_tick(i, e2e_ms=42.0) for i in range(60)]
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    assert result["latency_ms"]["link_ms"] is None
+    assert result["latency_ms"]["link_ms_proxied"] == 0
+    assert result["latency_ms"]["link_ms_converted_fraction"] is None
+
+
+def test_a_link_ms_with_no_recognised_source_is_kept_apart_as_unknown(tmp_path):
+    """A run recorded before per-tick timebase.source existed carries link_ms
+    with no source to partition by. Guessing it into round_trip or one_way
+    would misrepresent a real run's error semantics as measured; it is kept
+    in its own bucket instead."""
+    ticks = [make_tick(i, jetson_ms=20.0, link_ms=8.0, timebase_source=None)
+             for i in range(30)]
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    link = result["latency_ms"]["link_ms"]
+    assert set(link) == {"unknown_source"}
+    assert link["unknown_source"]["n"] == 30
+
+
+def test_proxied_ticks_are_counted_and_named_by_reason_not_pooled_into_link_ms(tmp_path):
+    """Under the proxy, link_ms is None by construction (capture IS arrival),
+    so a proxied tick contributes to neither link series -- it is counted and
+    its reason kept, which is the only place a reader can see it happened."""
+    ticks = (
+        [make_tick(i, jetson_ms=31.0, e2e_ms=31.0, link_ms=None,
+                   timebase_source="proxy", proxy_reason="no samples")
+         for i in range(5)]
+        + [make_tick(5 + i, jetson_ms=31.0, e2e_ms=31.0, link_ms=None,
+                     timebase_source="proxy",
+                     proxy_reason="only 2 samples in the offset window")
+           for i in range(3)]
+        + [make_tick(8 + i, jetson_ms=20.0, link_ms=10.0, timebase_source="round_trip")
+           for i in range(92)]
+    )
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    latency = result["latency_ms"]
+    assert latency["link_ms_proxied"] == 8
+    assert latency["link_ms_proxy_reasons"] == {
+        "no samples": 5, "only 2 samples in the offset window": 3,
+    }
+    assert latency["link_ms_converted_fraction"] == pytest.approx(92 / 100, abs=1e-4)
+    assert "proxy" not in latency["link_ms"]
+
+
+# -- Task 42, D9: e2e_ms over all ticks and over converted-only ticks -------
+
+
+def test_e2e_ms_reports_both_populations_and_the_proxy_pulls_the_pooled_one_down(tmp_path):
+    """Under the proxy e2e_ms == jetson_ms, ~31 ms on the tailnet baseline
+    against ~118 ms measured elsewhere -- so a pooled e2e_ms including the
+    proxied ticks is LOWER than the converted-only figure, not higher."""
+    ticks = (
+        [make_tick(i, e2e_ms=31.0, jetson_ms=31.0, timebase_source="proxy",
+                   proxy_reason="no samples")
+         for i in range(25)]
+        + [make_tick(25 + i, e2e_ms=118.0, jetson_ms=20.0, link_ms=98.0,
+                     timebase_source="round_trip")
+           for i in range(200)]
+    )
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    latency = result["latency_ms"]
+    assert latency["e2e_ms"]["n"] == 225
+    assert latency["e2e_ms_converted_only"]["n"] == 200
+    assert latency["e2e_ms_converted_only"]["p50"] == pytest.approx(118.0, abs=0.01)
+    # The pooled figure sits below the converted-only one, not above it --
+    # the direction a reader would get backwards by assuming more samples
+    # means a worse (higher) tail.
+    assert latency["e2e_ms"]["mean"] < latency["e2e_ms_converted_only"]["mean"]
+
+
+def test_e2e_ms_converted_only_is_none_when_nothing_ever_converted(tmp_path):
+    ticks = [make_tick(i, e2e_ms=31.0, jetson_ms=31.0, timebase_source="proxy",
+                        proxy_reason="no samples") for i in range(10)]
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    assert result["latency_ms"]["e2e_ms_converted_only"] is None
+    assert result["latency_ms"]["e2e_ms"]["n"] == 10
+
+
+def test_render_markdown_shows_link_rows_per_source_and_the_conversion_note(tmp_path):
+    ticks = (
+        [make_tick(i, jetson_ms=20.0, link_ms=10.0, timebase_source="round_trip")
+         for i in range(90)]
+        + [make_tick(90 + i, jetson_ms=20.0, link_ms=50.0, timebase_source="one_way")
+           for i in range(5)]
+        + [make_tick(95 + i, e2e_ms=31.0, jetson_ms=31.0, timebase_source="proxy",
+                     proxy_reason="no samples")
+           for i in range(5)]
+    )
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    md = render_markdown(result, [])
+    assert "link (round_trip)" in md
+    assert "link (one_way)" in md
+    assert "e2e (converted only)" in md
+    assert "Converted fraction:" in md
+    assert "no samples x5" in md
 
 
 class TestATruncatedLogIsNotACompleteRun:

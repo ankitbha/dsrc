@@ -729,7 +729,23 @@ def analyze(
     rate_hz = 1.0 / float(np.median(periods)) if len(periods) else 0.0
 
     # --- latency ---------------------------------------------------------
-    latency = {"e2e_ms": pctl([t["e2e_ms"] for t in ticks])}
+    # Task 42, D9: under the proxy `t_capture_mono == t_arrival_mono`, so a
+    # proxied tick's e2e_ms equals its jetson_ms by construction -- about
+    # 31 ms on the tailnet baseline, against ~118 ms elsewhere. Pooling it
+    # into e2e_ms pulls the reported p95 DOWN, not up, so both populations
+    # are reported: every tick, and converted-only (a tick whose capture
+    # stamp actually crossed the link, rather than being proxied by
+    # arrival).
+    timebase_records = [t.get("timebase") for t in ticks]
+    converted_mask = [
+        (tb or {}).get("source") in ("round_trip", "one_way") for tb in timebase_records
+    ]
+    e2e_all = [t["e2e_ms"] for t in ticks]
+    e2e_converted = [e for e, c in zip(e2e_all, converted_mask) if c]
+    latency = {
+        "e2e_ms": pctl(e2e_all),
+        "e2e_ms_converted_only": pctl(e2e_converted) if e2e_converted else None,
+    }
     # jetson_ms is absent from runs recorded before the split; fall back to e2e,
     # which is what it meant on a local camera anyway, and say so in the record
     # rather than reporting a zero.
@@ -738,8 +754,41 @@ def analyze(
     latency["jetson_ms_source"] = (
         "measured" if jetson_samples else "absent from this run; e2e used"
     )
-    link_samples = [t["link_ms"] for t in ticks if t.get("link_ms") is not None]
-    latency["link_ms"] = pctl(link_samples) if link_samples else None
+    # D10: a round-trip-converted link sample and a one-way-converted one have
+    # different error semantics (sensors/time_sync.py:64-68) and must never be
+    # pooled into one series -- which this function did before this task, and
+    # which contaminated 6 of 1,204 samples on the tailnet baseline. Every
+    # tick with a link_ms carries a recognised source (link_ms is None under
+    # the proxy, by construction); `unknown_source` exists only for a run
+    # recorded before per-tick timebase.source existed at all, so it is kept
+    # apart rather than guessed into either real series.
+    link_by_source: dict[str, list[float]] = {
+        "round_trip": [], "one_way": [], "unknown_source": [],
+    }
+    proxy_reason_counts: Counter[str] = Counter()
+    proxied_count = 0
+    for t, tb in zip(ticks, timebase_records):
+        link_ms = t.get("link_ms")
+        source = (tb or {}).get("source")
+        if link_ms is not None:
+            bucket = source if source in ("round_trip", "one_way") else "unknown_source"
+            link_by_source[bucket].append(link_ms)
+        elif source == "proxy":
+            proxied_count += 1
+            reason = (tb or {}).get("proxy_reason") or "unknown"
+            proxy_reason_counts[reason] += 1
+    converted_total = sum(len(samples) for samples in link_by_source.values())
+    latency["link_ms"] = {
+        source: pctl(samples) for source, samples in link_by_source.items() if samples
+    } or None
+    latency["link_ms_proxied"] = proxied_count
+    latency["link_ms_proxy_reasons"] = dict(sorted(proxy_reason_counts.items()))
+    # None when there is nothing to take a fraction of at all -- a local
+    # camera run has neither a converted tick nor a proxied one.
+    latency["link_ms_converted_fraction"] = (
+        round(converted_total / (converted_total + proxied_count), 4)
+        if (converted_total + proxied_count) else None
+    )
     for stage in ticks[0]["stage_ms"]:
         latency[stage + "_ms"] = pctl([t["stage_ms"][stage] for t in ticks])
 
@@ -1953,14 +2002,44 @@ def render_markdown(
         "| stage | n | min | mean | p50 | p95 | max |",
         "|---|---|---|---|---|---|---|",
     ]
-    order = ["jetson_ms", "link_ms", "e2e_ms", "capture_to_start_ms", "detect_ms",
-             "track_distance_ms",
-             "observe_ms", "policy_advisory_ms"]
-    for key in order:
+    lat = r["latency_ms"]
+    if lat.get("jetson_ms") is not None:
+        lines.append(fmt_row("jetson", lat["jetson_ms"]))
+    # link_ms is a dict keyed by timebase source (D10), never one pooled
+    # series: a round-trip-converted sample and a one-way-converted one have
+    # different error semantics and a reader comparing their p95s as one
+    # number would be comparing two different kinds of confidence as if they
+    # were one.
+    link_ms = lat.get("link_ms")
+    if link_ms:
+        for source in ("round_trip", "one_way", "unknown_source"):
+            if link_ms.get(source) is not None:
+                lines.append(fmt_row(f"link ({source})", link_ms[source]))
+    if lat.get("e2e_ms") is not None:
+        lines.append(fmt_row("e2e", lat["e2e_ms"]))
+    if lat.get("e2e_ms_converted_only") is not None:
+        lines.append(fmt_row("e2e (converted only)", lat["e2e_ms_converted_only"]))
+    for key in ("capture_to_start_ms", "detect_ms", "track_distance_ms",
+                "observe_ms", "policy_advisory_ms"):
         # None means the series was absent -- a local run has no link segment --
         # and an absent series must not render as zeros.
-        if r["latency_ms"].get(key) is not None:
-            lines.append(fmt_row(key.removesuffix("_ms"), r["latency_ms"][key]))
+        if lat.get(key) is not None:
+            lines.append(fmt_row(key.removesuffix("_ms"), lat[key]))
+    if lat.get("link_ms_proxied") or (link_ms and "unknown_source" in link_ms):
+        converted_pct = (
+            f"{lat['link_ms_converted_fraction']:.1%}"
+            if lat.get("link_ms_converted_fraction") is not None else "n/a"
+        )
+        reasons = ", ".join(
+            f"{reason} x{count}"
+            for reason, count in (lat.get("link_ms_proxy_reasons") or {}).items()
+        )
+        lines += [
+            "",
+            f"Converted fraction: {converted_pct}. Proxied ticks: "
+            f"{lat.get('link_ms_proxied', 0)}"
+            + (f" ({reasons})" if reasons else "") + ".",
+        ]
     stages = r.get("stage_timings") or {}
     if stages:
         lines += [
