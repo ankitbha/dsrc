@@ -90,12 +90,20 @@ class RecordingReverse:
         self.verify_calls = 0
         self._verify_sequence = list(verify_sequence) if verify_sequence is not None else None
         self.raise_on_remove: BaseException | None = None
+        #: Raised by `establish()` on every call AFTER the one at
+        #: construction -- i.e. only re-establishment attempts, mirroring a
+        #: replug: the mapping went missing (`verify` said so) and putting
+        #: it back also fails for a beat while the device re-enumerates.
+        self.raise_on_reestablish: BaseException | None = None
 
     @property
     def serial(self) -> str:
         return self._serial
 
     def establish(self, spec: ReverseSpec) -> None:
+        if self.establish_calls and self.raise_on_reestablish is not None:
+            self.establish_calls.append(spec)
+            raise self.raise_on_reestablish
         self.establish_calls.append(spec)
 
     def verify(self, spec: ReverseSpec) -> bool:
@@ -372,7 +380,134 @@ def test_accept_does_not_reverify_after_close():
     assert reverse.verify_calls == 0
 
 
+# -- A3 (validation round 1): a re-establishment that itself fails --------
+
+
+def test_accept_catches_a_reestablish_failure_counts_it_and_returns_none():
+    """A `replug` is D5's expected in-car event: the mapping goes missing
+    (`verify` says so) and `establish()` raises `AdbError` ("device not
+    found") for the seconds the device takes to re-enumerate. Before the
+    fix this propagated out of `accept()`; the only caller
+    (`endpoint.py`'s accept loop) catches only `ConnectionClosed` and
+    `OSError` and returns on anything else, ending the listener thread for
+    the rest of the drive with the socket still bound."""
+    from transport.usb import AdbError
+
+    reverse = RecordingReverse(verify_sequence=[False])
+    reverse.raise_on_reestablish = AdbError("device 'ZY227VV4XC' not found")
+    acceptor = UsbAcceptor("ZY227VV4XC", port=0, reverse=reverse)
+    try:
+        result = acceptor.accept(timeout=0.05)
+        assert result is None, "a failed reestablish must still read as a timeout, not raise"
+        assert acceptor.reverse_reestablish_failures == 1
+        assert acceptor.reverses_reestablished == 0
+        # The attempt was made and counted as an attempt on the fake too.
+        assert len(reverse.establish_calls) == 2
+    finally:
+        acceptor.close()
+
+
+def test_accept_keeps_polling_across_repeated_reestablish_failures():
+    """Not a one-shot catch: a replug can take several poll cycles to clear,
+    and each failed attempt in that stretch must leave the acceptor able to
+    try again on the next poll rather than latching into a dead state."""
+    from transport.usb import AdbError
+
+    reverse = RecordingReverse(verify_sequence=[False, False, False])
+    reverse.raise_on_reestablish = AdbError("device not found")
+    acceptor = UsbAcceptor("ZY227VV4XC", port=0, reverse=reverse)
+    try:
+        for _ in range(3):
+            assert acceptor.accept(timeout=0.02) is None
+        assert acceptor.reverse_reestablish_failures == 3
+    finally:
+        acceptor.close()
+
+
 # -- UsbAcceptor: teardown order and idempotence --------------------------
+
+
+def test_close_and_accept_do_not_race_the_reverse_mapping():
+    """B1: `close()` used to race `accept()`'s re-verify-and-reestablish
+    step and re-establish the mapping `close()` had just removed, violating
+    task 40's own "shows none after the process exits". Reproduced
+    deterministically with a slow `remove()`: `close()` is made to block
+    inside it on a background thread; `accept()` is given a SHORT socket
+    timeout so it reaches its own re-verify step -- and, pre-fix, finishes
+    it -- well before `remove()` is allowed to return. The check that
+    actually discriminates the two implementations happens BEFORE
+    `remove()` is released: unlocked, `accept()` completes a second
+    `establish()` while `close()` is still mid-`remove()`; locked, it is
+    still blocked waiting for the same lock `close()` holds.
+
+    (An earlier version of this test gave `accept()` a socket timeout
+    close to how long `remove()` was held, so `self._tcp.close()` --
+    reached only after `remove()` returns -- usually raced ahead and
+    unblocked `accept()`'s own socket wait with `ConnectionClosed` before
+    the mapping race it meant to expose ever ran; it passed against the
+    unfixed code for the wrong reason. `establish_calls`, not
+    `accept_thread.is_alive()`, is what the fix actually changes.)
+    """
+    remove_started = threading.Event()
+    remove_may_proceed = threading.Event()
+
+    class SlowRemoveReverse(RecordingReverse):
+        def remove(self, spec):
+            remove_started.set()
+            assert remove_may_proceed.wait(timeout=5.0), "test setup: never released"
+            super().remove(spec)
+
+    reverse = SlowRemoveReverse(verify_sequence=[False] * 10)
+    acceptor = UsbAcceptor("ZY227VV4XC", port=0, reverse=reverse)
+    assert len(reverse.establish_calls) == 1  # construction only, so far
+
+    close_thread = threading.Thread(target=acceptor.close)
+    close_thread.start()
+    assert remove_started.wait(timeout=5.0), "close() never reached remove()"
+
+    accept_result = []
+
+    def call_accept():
+        try:
+            # Short: this must return (a genuine timeout, nothing is
+            # dialing in) and reach the re-verify step well inside the
+            # window `remove()` is held open below, or the race this test
+            # exists to force never happens.
+            accept_result.append(acceptor.accept(timeout=0.02))
+        except ConnectionClosed:
+            accept_result.append("closed")
+
+    accept_thread = threading.Thread(target=call_accept)
+    accept_thread.start()
+    # NOT a join: the fixed code is SUPPOSED to leave accept_thread blocked
+    # here (on the lock close_thread holds), so waiting for it to finish
+    # would wait for the very thing under test. A plain sleep, generous
+    # against the 0.02s socket timeout plus an immediate (delay-free)
+    # establish() call, is the unlocked code's whole window to finish in.
+    time.sleep(0.2)
+
+    # The discriminating check, taken while `close()` is STILL mid-`remove()`
+    # (it cannot have reached `remove_calls.append` yet -- `remove_may_proceed`
+    # has not been set, and `self._tcp` is therefore still open, so nothing
+    # here raced `self._tcp.close()` either). Unlocked, `accept()` already
+    # re-established the mapping by now; locked, it is parked behind the
+    # same lock `close()` holds and has not touched `establish()` again at
+    # all.
+    assert len(reverse.remove_calls) == 0, "test setup: close() finished too early to check"
+    assert len(reverse.establish_calls) == 1, (
+        "accept() re-established the mapping while close() was still removing it"
+    )
+    assert accept_thread.is_alive(), (
+        "accept() finished without ever blocking on close()'s lock -- either "
+        "the fix regressed, or this reproduction stopped forcing the race"
+    )
+
+    remove_may_proceed.set()
+    close_thread.join(timeout=5.0)
+    assert not close_thread.is_alive()
+
+    assert len(reverse.remove_calls) == 1
+    assert len(reverse.establish_calls) == 1
 
 
 def test_close_removes_the_reverse_then_closes_the_tcp_acceptor():
@@ -408,6 +543,7 @@ def test_usb_record_shape():
         assert record["reverse_spec"] == f"tcp:{acceptor.port} tcp:{acceptor.port}"
         assert record["adb_version"] == "Android Debug Bridge version 1.0.41"
         assert record["reverses_reestablished"] == 0
+        assert record["reverse_reestablish_failures"] == 0
         assert record["address"] == ["127.0.0.1", acceptor.port]
     finally:
         acceptor.close()

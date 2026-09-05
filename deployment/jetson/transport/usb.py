@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Callable
 
@@ -251,7 +252,19 @@ class UsbAcceptor:
             self._tcp.close()
             raise
         self.reverses_reestablished = 0
+        # A re-establishment attempt that itself fails -- `establish()`
+        # raises `device not found` for the seconds a replugged device
+        # takes to re-enumerate, which D5 names as the expected in-car
+        # event. Counted rather than left to `accept()` propagate it.
+        self.reverse_reestablish_failures = 0
         self._closed = False
+        # Shared by `accept()`'s re-verify-and-reestablish step and
+        # `close()`'s remove, so the two cannot interleave: without it,
+        # `close()` could remove the mapping, then `accept()` -- already
+        # past its own closed check -- finds it missing and reestablishes
+        # the very mapping `close()` just removed, violating "shows none
+        # after the process exits" (task 40's own acceptance item).
+        self._lock = threading.Lock()
 
     @property
     def serial(self) -> str:
@@ -278,14 +291,34 @@ class UsbAcceptor:
         for the phone to retry against forever with nothing on this side ever
         noticing.
 
-        A closed acceptor never reaches the check below: `TcpAcceptor.accept`
-        raises `ConnectionClosed` rather than returning `None` once closed, so
-        `connection is None` here only happens on a genuine timeout.
+        `TcpAcceptor.accept` raises `ConnectionClosed` rather than returning
+        `None` once ITS `close()` has run, so `connection is None` here means
+        either a genuine timeout or a `close()` that has set `self._closed`
+        but not yet reached `self._tcp.close()` -- the lock and the
+        `_closed` check below cover exactly that window, so this never
+        re-establishes a mapping `close()` is in the middle of removing.
+
+        A re-establishment attempt can itself fail -- `establish()` raises
+        `AdbError` ("device not found") for the seconds a replugged device
+        takes to re-enumerate, which D5 names as the expected in-car event.
+        Caught here rather than left to propagate: the only caller is
+        `endpoint.py`'s accept loop, which catches `ConnectionClosed` and
+        `OSError` and treats anything else as fatal to the whole listener --
+        and that module is deliberately not touched by this task. Returning
+        `None` keeps the loop polling exactly as a genuine timeout would, so
+        the NEXT poll retries the re-establishment rather than the drive
+        ending silently with the socket still bound and the phone's redial
+        completing at TCP level and then waiting forever for a hello.
         """
         connection = self._tcp.accept(timeout=timeout)
-        if connection is None and not self._reverse.verify(self._spec):
-            self._reverse.establish(self._spec)
-            self.reverses_reestablished += 1
+        if connection is None:
+            with self._lock:
+                if not self._closed and not self._reverse.verify(self._spec):
+                    try:
+                        self._reverse.establish(self._spec)
+                        self.reverses_reestablished += 1
+                    except AdbError:
+                        self.reverse_reestablish_failures += 1
         return connection
 
     def close(self) -> None:
@@ -294,11 +327,19 @@ class UsbAcceptor:
         In that order: removing the reverse first means a client cannot dial
         in during the window between the two, and tolerant of a device
         already unplugged -- `AdbReverse.remove` itself swallows that.
+
+        Holds the same lock `accept()`'s re-verify-and-reestablish step
+        does, and sets `_closed` before releasing it, so a re-establishment
+        already in flight when `close()` is called either finishes first (and
+        `close()`'s `remove()` then runs after it, so the mapping still ends
+        up gone) or never starts at all (because it sees `_closed` already
+        true) -- never in between.
         """
-        if self._closed:
-            return
-        self._closed = True
-        self._reverse.remove(self._spec)
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._reverse.remove(self._spec)
         self._tcp.close()
 
     def usb_record(self) -> dict[str, object]:
@@ -314,6 +355,7 @@ class UsbAcceptor:
             "reverse_spec": self._spec.as_string(),
             "adb_version": adb_version(run=self._run),
             "reverses_reestablished": self.reverses_reestablished,
+            "reverse_reestablish_failures": self.reverse_reestablish_failures,
             "address": list(self.address),
         }
 
