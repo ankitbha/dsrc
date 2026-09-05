@@ -1912,6 +1912,43 @@ Everything above is done before the devices meet.
     What distinguishes them in the record is `network_transport` moving to
     `no_active_network` or to a fallback, so the injection is also the check that
     that field reports what it is supposed to.
+
+    **Expectations, written and committed before the injections were run** -- the
+    commit order is the point. "Behaves as specified" has no spec for three of the
+    four: `specs/` carries no failure or degradation document, and the nearest thing
+    is the 30-source closed vocabulary in `logio/failure_log.py`. Without a written
+    expectation every injection passes, because something always appears in the log
+    and nobody can say it was the wrong thing.
+
+    | injection | how | expected | must NOT change |
+    |---|---|---|---|
+    | link drop | `adb reverse --remove tcp:47811`, restored 30 s later | `link.down` opens with reason `no_session`, plus `link.session_end` and `link.sends_lost`; the phone redials and fails; on restore a second session is accepted | the phone keeps capturing, so `phone.dropped` grows on `camera` |
+    | network drop | `adb shell svc wifi disable`, restored 30 s later | `network_transport` leaves `wifi+vpn`; with no data SIM in this handset, `network_transport_absent` should read `no_active_network`, one of the five values `specs/transport_protocol.md:434` allows | **the USB link**, because `adb reverse` runs over USB and must survive wifi going down -- this separation is the whole discriminator |
+    | GPS revoke | `pm revoke ACCESS_FINE_LOCATION`, granted back afterwards | one of three, and which one is the result: the platform kills the app, so the link dies; or `requestLocationUpdates` raises `SecurityException`; or it degrades with a record distinguishable from baseline | -- |
+    | kill HERE | not injectable | **skipped, and not for want of trying.** HERE is never called without a position, so `here.refused`, `here.reader_failures` and `phone.here_errors` cannot fire. Nothing to kill | -- |
+
+    **Two predictions worth stating before the fact.**
+
+    The link-drop expectation may be wrong in an interesting way: removing an `adb
+    reverse` mapping closes the device's listening socket, and an already-established
+    TCP session may simply continue. If it does, that is the finding -- the
+    `reverses_reestablished` recovery path guards against something other than "the
+    link went away", and it has read 0 on every run ever done, along with
+    `reverse_reestablish_failures` and `reverses_swept`.
+
+    The GPS revoke should raise. `GpsLocationSource.request()` calls
+    `requestLocationUpdates` under `@SuppressLint("MissingPermission")` with no
+    try/catch, and there is no catch on the path `ConfigApplier.apply()` ->
+    `setGpsRate` -> `locations.setRate` -> `request`, up to the bare
+    `applier.apply(command)` at `SensingService.kt:683`. **That path became reachable
+    only when live mode was turned on**: in shadow mode `apply()` returns before
+    touching any target. Predicted from reading, not reproduced, which is what this
+    injection is for.
+
+    Also expected to be indistinguishable, and recorded so the null is legible:
+    `gps.not_fresh` with reason `absent` already opens at tick 0 of every indoor run,
+    so the revoked state and the baseline no-fix state may produce the same record.
+
 47. ~~**[COLOCATED]** Sim-contract parity: the observation vector produced live
     matches the simulator's sensing model field for field.~~ **DONE 2026-09-05**, and
     **the task as worded is false** — which is the result. "Matches field for field"
