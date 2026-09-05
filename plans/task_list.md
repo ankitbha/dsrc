@@ -1983,9 +1983,36 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
-57. **Thermal backoff has no hysteresis, and a phone on the threshold rebinds its
-    camera repeatedly.** A section F runtime defect, numbered here so nothing above
-    is renumbered.
+57. ~~**Thermal backoff has no hysteresis, and a phone on the threshold rebinds its
+    camera repeatedly.**~~ **DONE 2026-09-05.** A section F runtime defect, numbered
+    here so nothing above is renumbered.
+
+    **Fixed and verified on the handset.** `run_20260905_153043`, 900 s in live mode
+    on commit `d7b224d`, with `source_tree_check` and `apk_last_update_time_check`
+    both `matched`:
+
+    | | before | after |
+    |---|---|---|
+    | commanded rate transitions | 10 | **2** |
+    | changes while sitting on 40 C | 8 in 30 s | **none** |
+    | delivered rate at commanded 5.0 / 3.0 Hz | 4.989 / 3.000 | 5.000 / 2.998 |
+
+    One crossing at t=377.6 s on a reading of 40.009 C, then held for the remaining
+    520.4 s to a maximum of 43.087 C. `sends_by_reason` records `changed` twice.
+
+    **The dead band was exercised, not merely unopposed.** After the crossing the
+    skin fell below 40.0 C on **237 of the 1,561 remaining ticks**, as deep as
+    39.48 C. Under the previous bare comparison every one of those would have
+    released the backoff and re-engaged it. The latch held on all 1,561.
+
+    That deepest dip is 0.520 C, which settles a judgement made before it could be
+    measured: the 1.0 C band was chosen over 0.25 C on the grounds that 0.25 C sat
+    below the largest single-sample step then observed. **0.25 C would have failed on
+    this run**, and 0.5 C would have been marginal.
+
+    The platform `thermal_status` was `nominal` on all 900 reports again, at a
+    maximum of 43.087 C, so the skin path remains the only one that moves on this
+    handset.
 
     `_thermal_scale` compares `skin_temp_c >= SKIN_WARM_C` directly, with no dead
     band, no dwell and no hold. Measured on `run_20260905_142351`: between t=476.7 s
@@ -2007,7 +2034,15 @@ see what was cleared and on what evidence.
     as a cost. This is the defect that justified running task 44 on a bench rather
     than first discovering it on a drive.
 
-    Not yet fixed. A dead band on the skin thresholds is the obvious remedy, but the
-    choice between a dead band, a dwell, and reusing `HOLD_S` is a design decision
-    that should be taken deliberately: backing off late and recovering late are not
-    symmetric costs when the reason for backing off is heat.
+    **A dead band and not a dwell**, because the two directions are not symmetric:
+    a dwell would delay backing off, which is the direction where lateness costs
+    heat, while a dead band delays only the recovery, at a temperature already below
+    the trip point. Entering still takes the bare threshold.
+
+    `SKIN_HYSTERESIS_C` is 1.0 C, sized from the sensor rather than chosen: over the
+    900 samples of the run that found the defect, the 1 Hz sample-to-sample change
+    had p50 0.023 C, p95 0.087 C and a maximum of 0.369 C.
+
+    The latch is deliberately **not** cleared when telemetry goes absent, stale or
+    unstamped. A gap in the reporting is not evidence the handset cooled, which is
+    the same reading of silence the `unknown` tier already takes.
