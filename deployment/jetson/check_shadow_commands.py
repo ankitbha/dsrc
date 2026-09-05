@@ -231,21 +231,55 @@ _CONFIG_APPLIER_STATS_RE = re.compile(
     r"hereConfigured=(?P<here_configured>true|false)\)"
 )
 
+#: `adb logcat -v epoch`'s own line format: leading whitespace (logcat pads
+#: columns it does not have a value for), then `<seconds>.<millis>`, pid,
+#: tid, level, tag, message. Measured verbatim off ZY227VV4XC:
+#:   "         1788585230.408 20794 20794 I SensingService: config applier ..."
+_EPOCH_LINE_RE = re.compile(r"^\s*(?P<t>\d+\.\d+)\s+\d+\s+\d+\s+\w\s+[^:]*:\s?(?P<message>.*)$")
 
-def parse_config_applier_stats(logcat_text: str) -> dict[str, Any] | None:
+
+def parse_config_applier_stats(
+    logcat_text: str, *, window: tuple[float, float] | None = None,
+) -> dict[str, Any] | None:
     """The phone's `ConfigApplier.Stats` teardown line, from a `logcat -d`
-    dump. `None` when the line never appeared -- the app never tore down
-    (the drive is still running), or the ring buffer already rotated it out
-    -- rather than a zeroed dict that would read as a real report of
-    nothing shadowed.
+    dump. `None` when nothing qualifies -- the app never tore down (the
+    drive is still running), the ring buffer already rotated the line out,
+    or (with a `window`) every match found is outside it -- rather than a
+    zeroed dict that would read as a real report of nothing shadowed.
 
-    The LAST match, not the first: `SensingService.onSensingDown` runs on
-    every stop, so a phone that rebound mid-drive tears down more than
-    once, and only the final one describes the whole session.
+    `window`, given as `(start, end)` wall-clock epoch seconds, restricts
+    matches to lines whose OWN `-v epoch` timestamp falls inside it (A2,
+    validation round 1): the device-global ring buffer holds a line for far
+    longer than one run lasts -- measured: a line was still the only match
+    57 minutes after it was written -- so an unwindowed pull silently reads
+    a PREVIOUS run's teardown line into the artifact of a LATER one whenever
+    the buffer still holds one and the counts happen to satisfy the check.
+    `None` (the default) keeps the old, unscoped behaviour for a caller
+    working from text with no epoch prefix at all -- a fixture, or text a
+    caller has already sliced to one run itself.
+
+    The LAST match inside the window (or in the whole text, unwindowed),
+    not the first: `SensingService.onSensingDown` runs on every stop, so a
+    phone that rebound mid-drive tears down more than once, and only the
+    final one -- provided it is still inside this run's own window --
+    describes the whole session.
     """
     match = None
-    for candidate in _CONFIG_APPLIER_STATS_RE.finditer(logcat_text):
-        match = candidate
+    if window is None:
+        for candidate in _CONFIG_APPLIER_STATS_RE.finditer(logcat_text):
+            match = candidate
+    else:
+        start, end = window
+        for line in logcat_text.splitlines():
+            line_match = _EPOCH_LINE_RE.match(line)
+            if line_match is None:
+                continue
+            t = float(line_match.group("t"))
+            if not (start <= t <= end):
+                continue
+            candidate = _CONFIG_APPLIER_STATS_RE.search(line_match.group("message"))
+            if candidate is not None:
+                match = candidate
     if match is None:
         return None
     rates: dict[str, float] = {}
@@ -264,28 +298,83 @@ def parse_config_applier_stats(logcat_text: str) -> dict[str, Any] | None:
     }
 
 
+#: How much slop to allow around [run start, run end] when scoping a logcat
+#: pull to one run's own window. The Jetson's `log_health.json.t_wall` and
+#: the phone's own `-v epoch` timestamp are two different devices' clocks;
+#: measured 0.75s apart on a real drive (the phone tears down last, after
+#: the Jetson's own `close()`), so this covers ordinary two-device clock
+#: drift without reaching anywhere near an adjacent run.
+RUN_WINDOW_MARGIN_S = 30.0
+
+
+def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tuple[float, float] | None:
+    """`[start, end]` wall-clock epoch seconds for this run, or `None` when
+    either bound is unavailable.
+
+    `start` is the first TICK record's own `t_wall` (`Tick.to_record()`);
+    the first LINE of `metadata.jsonl` is not necessarily a tick (a run
+    that opened with a `failure_event` has one ahead of tick 0). `end` is
+    `log_health.json`'s `t_wall` -- the metadata logger's own close()-time
+    timestamp, the closest thing to "this run definitely ended" that is on
+    disk -- plus `margin_s`.
+    """
+    metadata_path = run_dir / "metadata.jsonl"
+    if not metadata_path.exists():
+        return None
+    start = None
+    with open(metadata_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("type") == "tick" and "t_wall" in record:
+                start = record["t_wall"]
+                break
+    if start is None:
+        return None
+    log_health_path = run_dir / "log_health.json"
+    if not log_health_path.exists():
+        return None
+    try:
+        log_health = json.loads(log_health_path.read_text())
+    except ValueError:
+        return None
+    end = log_health.get("t_wall")
+    if end is None:
+        return None
+    return start, end + margin_s
+
+
 RunAdb = Callable[..., "subprocess.CompletedProcess"]
 
 
 def pull_config_applier_stats(
-    serial: str, *, run: RunAdb = subprocess.run, timeout_s: float = 30.0,
+    serial: str, window: tuple[float, float], *, run: RunAdb = subprocess.run, timeout_s: float = 30.0,
 ) -> dict[str, Any] | None:
-    """Shell `adb -s <serial> logcat -d -s SensingService:I` and parse the
-    teardown line. `None` when `adb` could not be reached at all, exactly
-    like `parse_config_applier_stats` treats a line that never appeared --
-    the caller cannot tell "no report" from "could not ask" any other way,
-    and both must not read as a healthy zero.
+    """Shell `adb -s <serial> logcat -d -v epoch -s SensingService:I` and
+    parse the teardown line whose OWN timestamp falls inside `window` (A2,
+    validation round 1): the ring buffer holds a line for far longer than
+    one run lasts, so an unscoped pull can silently read a PREVIOUS run's
+    counters into THIS run's artifact. `None` when `adb` could not be
+    reached at all, or when nothing in the window matched -- the caller
+    cannot tell these apart from this return value alone, which is why
+    `apply_phone_applier_check`'s own detail message names the window it
+    looked in rather than repeating "no line found".
     """
     try:
         result = run(
-            ["adb", "-s", serial, "logcat", "-d", "-s", "SensingService:I"],
+            ["adb", "-s", serial, "logcat", "-d", "-v", "epoch", "-s", "SensingService:I"],
             capture_output=True, text=True, timeout=timeout_s,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if result.returncode != 0:
         return None
-    return parse_config_applier_stats(result.stdout)
+    return parse_config_applier_stats(result.stdout, window=window)
 
 
 def check_phone_applier(
@@ -299,11 +388,21 @@ def check_phone_applier(
     Jetson's `rate_cmd` channel counter says it sent -- the phone is the
     only direct witness that a shadow command was not acted on
     (`ConfigApplier.kt` returns before `applied` is incremented).
+
+    On a LIVE drive this returns `ok: None` (B3, validation round 1):
+    whether the phone applied every commanded rate correctly is a live-mode
+    correctness question, and this task's scope is the decision function a
+    shadow log predicts, not whether live mode itself behaves -- that is
+    task 44's territory (`shadow_mode.py`'s own module docstring: "a shadow
+    log predicts the decision function... and does NOT predict the
+    trajectory"). Asserting `applied == commands_sent` here would be a
+    claim about live mode this task never gathered evidence for; `applied`
+    is still reported, just not asserted on.
     """
     if drive_mode == SHADOW:
         ok = applier_stats["applied"] == 0 and applier_stats["shadowed"] == commands_sent
     else:
-        ok = applier_stats["shadowed"] == 0
+        ok = None
     return {
         "drive_mode": drive_mode,
         "commands_sent": commands_sent,
@@ -328,6 +427,68 @@ def rate_cmd_commands_sent(summary: dict[str, Any]) -> int | None:
     return None if rate_cmd is None else rate_cmd.get("sent")
 
 
+def apply_phone_applier_check(
+    result: dict[str, Any], *, serial: str | None, run_dir: Path,
+) -> dict[str, Any]:
+    """Adds `phone_applier` to `result` and folds its `ok` into
+    `overall_ok` -- both in one place, so the fold cannot be skipped for
+    one outcome and not another the way it was before this fix (A1,
+    validation round 1): `overall_ok` used to stay untouched whenever
+    `pull_config_applier_stats` returned `None`, because that branch set
+    `phone_applier["ok"] = False` and returned without ever reaching the
+    line that folds it in -- so `--serial NOSUCHSERIAL` against a real run
+    reported `phone_applier ok=False` and still exited 0.
+
+    `serial` absent means the phone check was never asked for, which is
+    written as `{"ok": None, "detail": "not requested"}` rather than
+    leaving the key out entirely -- a reader of the JSON must be able to
+    tell "not asked" from "asked and passed" without also knowing whether
+    `--serial` was on the command line, and `overall_ok` is left exactly as
+    `check()` computed it.
+    """
+    if not serial:
+        result["phone_applier"] = {"ok": None, "detail": "not requested"}
+        return result
+    window = _run_window(run_dir)
+    if window is None:
+        result["phone_applier"] = {
+            "ok": False,
+            "detail": "the run's own window could not be established (missing "
+                      "metadata.jsonl's first tick t_wall or log_health.json)",
+        }
+    else:
+        applier_stats = pull_config_applier_stats(serial, window)
+        if applier_stats is None:
+            result["phone_applier"] = {
+                "ok": False,
+                "detail": (
+                    f"no ConfigApplier stats line inside the run window "
+                    f"[{window[0]:.3f}, {window[1]:.3f}] (adb unreachable, the "
+                    f"app has not torn down yet, or the ring buffer rotated the "
+                    f"line out)"
+                ),
+            }
+        else:
+            commands_sent = rate_cmd_commands_sent(_read_summary(run_dir))
+            result["phone_applier"] = (
+                {"ok": False, "detail": "rate_cmd channel counter absent from summary.json"}
+                if commands_sent is None
+                else check_phone_applier(
+                    applier_stats, drive_mode=result["drive_mode"], commands_sent=commands_sent,
+                )
+            )
+    # Outside the if/else above so it runs for EVERY outcome once a check
+    # was actually requested -- the bug this fixes was this line living
+    # inside just one branch. `ok` may be None (B3's live-drive case, or a
+    # window/adb failure that could not even be judged) -- `and` with None
+    # would corrupt a True `overall_ok` into `None`, so only a definite
+    # False is folded in.
+    phone_ok = result["phone_applier"]["ok"]
+    if phone_ok is False:
+        result["overall_ok"] = False
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir", type=Path)
@@ -342,26 +503,13 @@ def main() -> int:
             (args.run_dir / "shadow_command_check.json").write_text(json.dumps(result, indent=2))
         return 2
 
-    if args.serial:
-        applier_stats = pull_config_applier_stats(args.serial)
-        if applier_stats is None:
-            result["phone_applier"] = {"ok": False, "detail": "no ConfigApplier stats line found"}
-        else:
-            commands_sent = rate_cmd_commands_sent(_read_summary(args.run_dir))
-            result["phone_applier"] = (
-                {"ok": False, "detail": "rate_cmd channel counter absent from summary.json"}
-                if commands_sent is None
-                else check_phone_applier(
-                    applier_stats, drive_mode=result["drive_mode"], commands_sent=commands_sent,
-                )
-            )
-            result["overall_ok"] = result["overall_ok"] and result["phone_applier"]["ok"]
+    result = apply_phone_applier_check(result, serial=args.serial, run_dir=args.run_dir)
 
     print(
         f"drive_mode={result['drive_mode']} ticks={result['ticks']} "
         f"command_replay mismatched={result['command_replay']['mismatched']} "
-        f"logged_shadow_flag ok={result['logged_shadow_flag']['ok']}"
-        + (f" phone_applier ok={result['phone_applier']['ok']}" if "phone_applier" in result else "")
+        f"logged_shadow_flag ok={result['logged_shadow_flag']['ok']} "
+        f"phone_applier ok={result['phone_applier']['ok']}"
     )
     if not args.no_json:
         (args.run_dir / "shadow_command_check.json").write_text(json.dumps(result, indent=2))

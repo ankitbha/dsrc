@@ -105,10 +105,17 @@ class Phone:
 def write_shadow_drive(
     tmp_path: Path, n: int = 12, *, mode: str = SHADOW, accel_ticks: frozenset = frozenset(),
     rate_cmd_sent: int | None = None, name: str = "drive",
+    t_wall_start: float | None = None, log_health_t_wall: float | None = None,
 ) -> Path:
     """A run directory with both `metadata.jsonl` and a `summary.json`
     naming the drive's mode -- `check()` needs the latter to know what
     `sensing.shadow` is supposed to say.
+
+    `t_wall_start`/`log_health_t_wall`, given, also write a `t_wall` on
+    every tick (one second apart, starting there) and a `log_health.json`
+    -- what `_run_window` (A2, validation round 1) needs. `None` (the
+    default) omits both, matching every test written before that check
+    existed.
     """
     clock = Clock()
     modes = ModeHolder(mode, clock=clock)
@@ -120,12 +127,15 @@ def write_shadow_drive(
         accel = 3.0 if i in accel_ticks else 0.0
         tick = _tick(i, accel=accel)
         outcome = loop.on_tick(tick, phone)
-        lines.append({
+        record = {
             "type": "tick",
             "tick_id": i,
             "t_capture_mono_ns": capture_stamp_ns(tick.t_capture_mono),
             "sensing": outcome.to_record(),
-        })
+        }
+        if t_wall_start is not None:
+            record["t_wall"] = t_wall_start + i
+        lines.append(record)
 
     run_dir = tmp_path / name
     run_dir.mkdir()
@@ -137,6 +147,8 @@ def write_shadow_drive(
         "sensing": loop.to_record(),
         "phone": {"wire": {"channels": {"rate_cmd": {"sent": sent}}}},
     }))
+    if log_health_t_wall is not None:
+        (run_dir / "log_health.json").write_text(json.dumps({"t_wall": log_health_t_wall}))
     return run_dir
 
 
@@ -336,6 +348,176 @@ def test_parse_config_applier_stats_takes_the_last_line_after_a_rebind():
     assert stats["applied"] == 5 and stats["shadowed"] == 9
 
 
+# -- A2 (validation round 1): windowed logcat parsing -----------------------
+
+
+#: Verbatim off ZY227VV4XC, `-v epoch` format, the same line
+#: REAL_LOGCAT_LINE carries in the older (unwindowed) `-v time` format.
+REAL_EPOCH_LOGCAT_LINE = (
+    "         1788585230.408 20794 20794 I SensingService: config applier stats "
+    "Stats(applied=0, shadowed=7, lastTrigger=advisory_margin_narrow, "
+    "currentRates={}, hereConfigured=false)"
+)
+
+
+def test_parse_config_applier_stats_reads_a_real_epoch_line_inside_its_window():
+    stats = csc.parse_config_applier_stats(
+        REAL_EPOCH_LOGCAT_LINE, window=(1788585200.0, 1788585260.0),
+    )
+    assert stats is not None and stats["shadowed"] == 7
+
+
+def test_parse_config_applier_stats_with_window_ignores_a_line_outside_it():
+    """The exact defect (A2): the buffer holds a real line, and without a
+    window it would be the only match -- but it is from a run that is not
+    this one."""
+    stats = csc.parse_config_applier_stats(
+        REAL_EPOCH_LOGCAT_LINE, window=(1788589000.0, 1788589060.0),
+    )
+    assert stats is None
+
+
+def test_parse_config_applier_stats_with_window_picks_the_in_window_line_from_two():
+    """Run 1's teardown line an hour before run 3's, both still in the
+    buffer -- the shape A2 was reported against ("the 01:13 line was still
+    the only match at 02:10"). Windowed, run 1's own check must not pick up
+    run 3's line even though it is chronologically the last match."""
+    run1_line = (
+        "         1788585230.408 20794 20794 I SensingService: config applier "
+        "stats Stats(applied=0, shadowed=7, lastTrigger=a, currentRates={}, "
+        "hereConfigured=false)"
+    )
+    run3_line = (
+        "         1788588830.408 20794 20794 I SensingService: config applier "
+        "stats Stats(applied=0, shadowed=99, lastTrigger=b, currentRates={}, "
+        "hereConfigured=false)"
+    )
+    buffer = run1_line + "\n" + run3_line + "\n"
+    stats = csc.parse_config_applier_stats(buffer, window=(1788585190.0, 1788585260.0))
+    assert stats is not None and stats["shadowed"] == 7
+
+
+def test_parse_config_applier_stats_with_window_takes_the_last_match_inside_it():
+    two_in_window = (
+        "         1788585210.0 1 1 I SensingService: config applier stats "
+        "Stats(applied=1, shadowed=1, lastTrigger=first, currentRates={}, "
+        "hereConfigured=false)\n"
+        "         1788585220.0 1 1 I SensingService: config applier stats "
+        "Stats(applied=5, shadowed=9, lastTrigger=second, currentRates={}, "
+        "hereConfigured=false)\n"
+    )
+    stats = csc.parse_config_applier_stats(two_in_window, window=(1788585200.0, 1788585260.0))
+    assert stats["applied"] == 5 and stats["shadowed"] == 9
+
+
+# -- _run_window -------------------------------------------------------------
+
+
+def _write_minimal_run(tmp_path, *, first_tick_t_wall, log_health_t_wall, name="run"):
+    run_dir = tmp_path / name
+    run_dir.mkdir()
+    with open(run_dir / "metadata.jsonl", "w") as f:
+        f.write(json.dumps({"type": "tick", "tick_id": 0, "t_wall": first_tick_t_wall}) + "\n")
+    if log_health_t_wall is not None:
+        (run_dir / "log_health.json").write_text(json.dumps({"t_wall": log_health_t_wall}))
+    return run_dir
+
+
+def test_run_window_reads_first_tick_and_log_health_plus_margin(tmp_path):
+    """The real numbers from task 42's smoke run: first tick t_wall
+    1788585200.572, log_health.json t_wall 1788585229.66 -- the phone's own
+    teardown line landed at 1788585230.408, 0.75s after log_health's own
+    timestamp and comfortably inside `[start, end + margin]`."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1788585200.572, log_health_t_wall=1788585229.6617892,
+    )
+    window = csc._run_window(run_dir)
+    assert window == (1788585200.572, 1788585229.6617892 + csc.RUN_WINDOW_MARGIN_S)
+    start, end = window
+    assert start <= 1788585230.408 <= end
+
+
+def test_run_window_skips_a_leading_non_tick_record(tmp_path):
+    """A run that opened with a `failure_event` has one ahead of tick 0;
+    the window's start is the first TICK's t_wall, not the first line's."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    with open(run_dir / "metadata.jsonl", "w") as f:
+        f.write(json.dumps({"type": "failure_event", "t_wall": 1.0}) + "\n")
+        f.write(json.dumps({"type": "tick", "tick_id": 0, "t_wall": 100.0}) + "\n")
+    (run_dir / "log_health.json").write_text(json.dumps({"t_wall": 200.0}))
+    window = csc._run_window(run_dir)
+    assert window == (100.0, 200.0 + csc.RUN_WINDOW_MARGIN_S)
+
+
+def test_run_window_is_none_without_log_health(tmp_path):
+    run_dir = _write_minimal_run(tmp_path, first_tick_t_wall=1.0, log_health_t_wall=None)
+    assert csc._run_window(run_dir) is None
+
+
+def test_run_window_is_none_without_any_tick(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "metadata.jsonl").write_text("")
+    (run_dir / "log_health.json").write_text(json.dumps({"t_wall": 1.0}))
+    assert csc._run_window(run_dir) is None
+
+
+def test_run_window_is_none_without_metadata_jsonl(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    assert csc._run_window(run_dir) is None
+
+
+# -- pull_config_applier_stats: uses -v epoch and the given window ----------
+
+
+class RecordingRunAdb:
+    def __init__(self, stdout: str = "", returncode: int = 0):
+        self.calls: list[list[str]] = []
+        self.stdout = stdout
+        self.returncode = returncode
+
+    def __call__(self, args, *, capture_output, text, timeout):
+        self.calls.append(list(args))
+
+        class Result:
+            pass
+
+        result = Result()
+        result.stdout = self.stdout
+        result.returncode = self.returncode
+        return result
+
+
+def test_pull_config_applier_stats_uses_v_epoch():
+    run = RecordingRunAdb(stdout=REAL_EPOCH_LOGCAT_LINE + "\n")
+    stats = csc.pull_config_applier_stats(
+        "ZY227VV4XC", (1788585200.0, 1788585260.0), run=run,
+    )
+    assert stats is not None and stats["shadowed"] == 7
+    assert run.calls == [
+        ["adb", "-s", "ZY227VV4XC", "logcat", "-d", "-v", "epoch", "-s", "SensingService:I"]
+    ]
+
+
+def test_pull_config_applier_stats_respects_the_window():
+    run = RecordingRunAdb(stdout=REAL_EPOCH_LOGCAT_LINE + "\n")
+    stats = csc.pull_config_applier_stats(
+        "ZY227VV4XC", (1788589000.0, 1788589060.0), run=run,
+    )
+    assert stats is None
+
+
+def test_pull_config_applier_stats_is_none_when_adb_is_unreachable():
+    def raising_run(args, *, capture_output, text, timeout):
+        raise FileNotFoundError("no adb")
+
+    assert csc.pull_config_applier_stats(
+        "ZY227VV4XC", (0.0, 1.0), run=raising_run,
+    ) is None
+
+
 def test_check_phone_applier_passes_on_the_real_smoke_run_numbers():
     """applied=0, shadowed=7 against the Jetson's own rate_cmd.sent=7 --
     task 42's actual smoke-run numbers."""
@@ -362,11 +544,32 @@ def test_check_phone_applier_fails_if_shadowed_undercounts_what_was_sent():
     assert result["ok"] is False
 
 
-def test_check_phone_applier_on_a_live_drive_requires_nothing_shadowed():
-    result = csc.check_phone_applier(
+def test_check_phone_applier_on_a_live_drive_defers_to_task_44():
+    """B3, validation round 1: the live-mode branch was unpinned in the
+    failing direction (mutating `ok = shadowed == 0` to `ok = True` left
+    the suite green) and never read `applied` at all. Rather than assert
+    `applied == commands_sent` -- a live-mode correctness claim this task
+    gathered no evidence for -- it returns `ok: None` regardless, deferring
+    to task 44, which the module docstring for `check_phone_applier` now
+    states."""
+    passing_numbers = csc.check_phone_applier(
         {"applied": 7, "shadowed": 0}, drive_mode=LIVE, commands_sent=7,
     )
-    assert result["ok"] is True
+    assert passing_numbers["ok"] is None
+    assert passing_numbers["applied"] == 7
+    assert passing_numbers["shadowed"] == 0
+
+    # The failing direction the old test never exercised at all: something
+    # WAS shadowed, and applied fell short of commands_sent. Still `None`,
+    # not silently `True` -- a mutation collapsing this branch to a
+    # constant `True` is caught by the `is None` on both cases, not just
+    # one.
+    bad_numbers = csc.check_phone_applier(
+        {"applied": 3, "shadowed": 4}, drive_mode=LIVE, commands_sent=7,
+    )
+    assert bad_numbers["ok"] is None
+    assert bad_numbers["applied"] == 3
+    assert bad_numbers["shadowed"] == 4
 
 
 def test_rate_cmd_commands_sent_reads_the_transport_channel_counter():
@@ -408,3 +611,88 @@ def test_a_pure_shadow_drive_is_witnessed_three_independent_ways(tmp_path):
     comparable, reason = _comparable(ever_live=False, distinct_reports=[], ticks=len(ticks))
     assert comparable is False
     assert "mode shadow" in reason
+
+
+# -- A1 (validation round 1): overall_ok must fold in every outcome --------
+
+
+def test_apply_phone_applier_check_not_requested_leaves_overall_ok_untouched(tmp_path):
+    run_dir = write_shadow_drive(tmp_path, n=5, t_wall_start=1000.0, log_health_t_wall=1005.0)
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial=None, run_dir=run_dir)
+    assert out["phone_applier"] == {"ok": None, "detail": "not requested"}
+    assert out["overall_ok"] is True
+
+
+def test_apply_phone_applier_check_reproduces_the_reported_defect(tmp_path, monkeypatch):
+    """The validator's own repro: `--serial NOSUCHSERIAL` against a real
+    run reported `phone_applier ok=False` and still exited 0, because the
+    line folding the verdict into `overall_ok` lived inside the branch
+    that only runs when `pull_config_applier_stats` returns something --
+    not the branch where it returns `None`. Reproduced here by making
+    `pull_config_applier_stats` return `None`, exactly what an
+    unreachable/nonexistent serial does.
+    """
+    run_dir = write_shadow_drive(tmp_path, n=5, t_wall_start=1000.0, log_health_t_wall=1005.0)
+    monkeypatch.setattr(csc, "pull_config_applier_stats", lambda serial, window: None)
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="NOSUCHSERIAL", run_dir=run_dir)
+    assert out["phone_applier"]["ok"] is False
+    assert out["overall_ok"] is False, (
+        "the exact defect: phone_applier.ok=False must fail overall_ok, not "
+        "leave it at whatever check() computed"
+    )
+
+
+def test_apply_phone_applier_check_window_unavailable_fails_overall_ok(tmp_path):
+    run_dir = tmp_path / "no_window"
+    run_dir.mkdir()  # no metadata.jsonl, no log_health.json at all
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["ok"] is False
+    assert "window" in out["phone_applier"]["detail"]
+    assert out["overall_ok"] is False
+
+
+def test_apply_phone_applier_check_passes_and_names_the_window(tmp_path, monkeypatch):
+    run_dir = write_shadow_drive(
+        tmp_path, n=5, rate_cmd_sent=7, t_wall_start=1000.0, log_health_t_wall=1005.0,
+    )
+    seen_windows = []
+
+    def fake_pull(serial, window):
+        seen_windows.append(window)
+        return {"applied": 0, "shadowed": 7}
+
+    monkeypatch.setattr(csc, "pull_config_applier_stats", fake_pull)
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["ok"] is True
+    assert out["overall_ok"] is True
+    assert seen_windows == [(1000.0, 1005.0 + csc.RUN_WINDOW_MARGIN_S)]
+
+
+def test_apply_phone_applier_check_no_match_names_the_window_in_the_detail(tmp_path, monkeypatch):
+    run_dir = write_shadow_drive(tmp_path, n=5, t_wall_start=1000.0, log_health_t_wall=1005.0)
+    monkeypatch.setattr(csc, "pull_config_applier_stats", lambda serial, window: None)
+    result = {"overall_ok": True, "drive_mode": SHADOW}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    detail = out["phone_applier"]["detail"]
+    assert "1000.000" in detail and f"{1005.0 + csc.RUN_WINDOW_MARGIN_S:.3f}" in detail
+
+
+def test_apply_phone_applier_check_live_drive_does_not_change_overall_ok(tmp_path, monkeypatch):
+    """`ok: None` (B3) must not corrupt a real bool: `True and None` is
+    `None`, not `True`, so folding it in naively would turn a passing
+    live-mode command_replay/shadow_flag result into a falsy-but-not-False
+    `overall_ok`."""
+    run_dir = write_shadow_drive(
+        tmp_path, n=5, mode=LIVE, t_wall_start=1000.0, log_health_t_wall=1005.0,
+    )
+    monkeypatch.setattr(
+        csc, "pull_config_applier_stats", lambda serial, window: {"applied": 5, "shadowed": 0},
+    )
+    result = {"overall_ok": True, "drive_mode": LIVE}
+    out = csc.apply_phone_applier_check(result, serial="ZY227VV4XC", run_dir=run_dir)
+    assert out["phone_applier"]["ok"] is None
+    assert out["overall_ok"] is True
