@@ -106,6 +106,7 @@ def write_shadow_drive(
     tmp_path: Path, n: int = 12, *, mode: str = SHADOW, accel_ticks: frozenset = frozenset(),
     rate_cmd_sent: int | None = None, name: str = "drive",
     t_wall_start: float | None = None, log_health_t_wall: float | None = None,
+    wall_clock_offset_s: float | None = None,
 ) -> Path:
     """A run directory with both `metadata.jsonl` and a `summary.json`
     naming the drive's mode -- `check()` needs the latter to know what
@@ -116,6 +117,11 @@ def write_shadow_drive(
     -- what `_run_window` (A2, validation round 1) needs. `None` (the
     default) omits both, matching every test written before that check
     existed.
+
+    `wall_clock_offset_s`, given, writes `summary["phone"]["wall_clock_
+    offset_s"]` -- what `_run_window` shifts the window by (B10, validation
+    round 2). `None` omits the key, matching a run from before that fix or
+    one with no phone session.
     """
     clock = Clock()
     modes = ModeHolder(mode, clock=clock)
@@ -143,9 +149,12 @@ def write_shadow_drive(
         for r in lines:
             f.write(json.dumps(r) + "\n")
     sent = rate_cmd_sent if rate_cmd_sent is not None else loop.to_record()["rate_commands_sent"]
+    phone_record: dict[str, Any] = {"wire": {"channels": {"rate_cmd": {"sent": sent}}}}
+    if wall_clock_offset_s is not None:
+        phone_record["wall_clock_offset_s"] = wall_clock_offset_s
     (run_dir / "summary.json").write_text(json.dumps({
         "sensing": loop.to_record(),
-        "phone": {"wire": {"channels": {"rate_cmd": {"sent": sent}}}},
+        "phone": phone_record,
     }))
     if log_health_t_wall is not None:
         (run_dir / "log_health.json").write_text(json.dumps({"t_wall": log_health_t_wall}))
@@ -413,13 +422,20 @@ def test_parse_config_applier_stats_with_window_takes_the_last_match_inside_it()
 # -- _run_window -------------------------------------------------------------
 
 
-def _write_minimal_run(tmp_path, *, first_tick_t_wall, log_health_t_wall, name="run"):
+def _write_minimal_run(
+    tmp_path, *, first_tick_t_wall, log_health_t_wall, name="run",
+    wall_clock_offset_s=None,
+):
     run_dir = tmp_path / name
     run_dir.mkdir()
     with open(run_dir / "metadata.jsonl", "w") as f:
         f.write(json.dumps({"type": "tick", "tick_id": 0, "t_wall": first_tick_t_wall}) + "\n")
     if log_health_t_wall is not None:
         (run_dir / "log_health.json").write_text(json.dumps({"t_wall": log_health_t_wall}))
+    if wall_clock_offset_s is not None:
+        (run_dir / "summary.json").write_text(
+            json.dumps({"phone": {"wall_clock_offset_s": wall_clock_offset_s}})
+        )
     return run_dir
 
 
@@ -435,6 +451,61 @@ def test_run_window_reads_first_tick_and_log_health_plus_margin(tmp_path):
     assert window == (1788585200.572, 1788585229.6617892 + csc.RUN_WINDOW_MARGIN_S)
     start, end = window
     assert start <= 1788585230.408 <= end
+
+
+def test_run_window_shifts_by_the_recorded_wall_clock_offset(tmp_path):
+    """B10 (validation round 2): `start`/`end` are on the Jetson's clock as
+    recorded, but the logcat lines this window is matched against are
+    timestamped on the phone's -- shifted by the measured offset so both
+    sides of the comparison are expressed in the same clock's terms."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=0.935,
+    )
+    window = csc._run_window(run_dir)
+    assert window == (1000.935, 1010.935 + csc.RUN_WINDOW_MARGIN_S)
+
+
+def test_run_window_shifts_negative_when_the_phone_is_behind(tmp_path):
+    """The one-sided-margin defect this fixes: an unshifted window
+    tolerates a phone running behind for the whole run's duration and one
+    running ahead nowhere past margin_s. Shifting by a negative offset
+    moves BOTH bounds down, which a fixed one-sided margin cannot do."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=-45.0,
+    )
+    window = csc._run_window(run_dir)
+    assert window == (955.0, 965.0 + csc.RUN_WINDOW_MARGIN_S)
+
+
+def test_run_window_falls_back_to_unshifted_when_no_offset_was_recorded(tmp_path):
+    """A run from before B10 (no summary.json at all) or one with no phone
+    session (offset never set) gets the prior, unshifted behaviour rather
+    than refusing outright."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+    )
+    window = csc._run_window(run_dir)
+    assert window == (1000.0, 1010.0 + csc.RUN_WINDOW_MARGIN_S)
+
+
+def test_run_window_shift_closes_the_beyond_margin_contamination_case(tmp_path):
+    """A2's own failure returning "one layer down": with an offset large
+    enough that the unshifted window would have missed this run's own
+    line, the shift recovers it."""
+    run_dir = _write_minimal_run(
+        tmp_path, first_tick_t_wall=1000.0, log_health_t_wall=1010.0,
+        wall_clock_offset_s=45.0,  # bigger than RUN_WINDOW_MARGIN_S (30s)
+    )
+    window = csc._run_window(run_dir)
+    start, end = window
+    # The phone's own teardown line, ~0.75s after log_health's Jetson-clock
+    # t_wall PLUS the phone's offset -- outside the unshifted window
+    # ([1000, 1040]), inside the shifted one.
+    phone_clock_teardown_line = 1010.0 + 45.0 + 0.75
+    assert not (1000.0 <= phone_clock_teardown_line <= 1010.0 + csc.RUN_WINDOW_MARGIN_S)
+    assert start <= phone_clock_teardown_line <= end
 
 
 def test_run_window_skips_a_leading_non_tick_record(tmp_path):

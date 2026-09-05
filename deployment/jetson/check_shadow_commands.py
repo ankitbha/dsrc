@@ -308,8 +308,8 @@ RUN_WINDOW_MARGIN_S = 30.0
 
 
 def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tuple[float, float] | None:
-    """`[start, end]` wall-clock epoch seconds for this run, or `None` when
-    either bound is unavailable.
+    """`[start, end]` wall-clock epoch seconds for this run, expressed on
+    the PHONE's clock, or `None` when either bound is unavailable.
 
     `start` is the first TICK record's own `t_wall` (`Tick.to_record()`);
     the first LINE of `metadata.jsonl` is not necessarily a tick (a run
@@ -317,6 +317,22 @@ def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tupl
     `log_health.json`'s `t_wall` -- the metadata logger's own close()-time
     timestamp, the closest thing to "this run definitely ended" that is on
     disk -- plus `margin_s`.
+
+    Both are on the JETSON's clock as recorded, but the logcat lines this
+    window is matched against are timestamped on the PHONE's (B10,
+    validation round 2) -- two different, unsynchronised clocks: measured
+    on real hardware at +0.935 to +0.952 s across three samples minutes
+    apart, and near zero for the same two devices earlier in the same
+    session, so it is not even constant. Shifted here by
+    `summary["phone"]["wall_clock_offset_s"]` (recorded from the handshake,
+    `sensors/phone_link.py`) when available, which also fixes the margin
+    being one-sided: an unshifted `[start, end + margin_s]` tolerates a
+    phone running behind for the whole run's duration while tolerating one
+    running more than `margin_s` ahead nowhere at all, and past that this
+    is A2's own contamination one layer down -- run N's line falling
+    outside window N while run N-1's falls inside it. `None` offset (a run
+    from before this fix, or one with no phone session at all) falls back
+    to the unshifted, Jetson-clock window rather than refusing outright.
     """
     metadata_path = run_dir / "metadata.jsonl"
     if not metadata_path.exists():
@@ -346,7 +362,8 @@ def _run_window(run_dir: Path, *, margin_s: float = RUN_WINDOW_MARGIN_S) -> tupl
     end = log_health.get("t_wall")
     if end is None:
         return None
-    return start, end + margin_s
+    offset_s = ((_read_summary(run_dir).get("phone") or {}).get("wall_clock_offset_s")) or 0.0
+    return start + offset_s, end + offset_s + margin_s
 
 
 RunAdb = Callable[..., "subprocess.CompletedProcess"]

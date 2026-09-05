@@ -214,6 +214,16 @@ class PhoneLink:
         #: from six hundred.
         self.here_failures = 0
         self.peer_device_id: str | None = None
+        #: The current session's handshake-time wall-clock offset (remote
+        #: minus local, seconds; positive means the phone is ahead), or
+        #: `None` before any session has started. Recorded (B10, validation
+        #: round 2) because `check_shadow_commands.py`'s run-window check
+        #: was matching Jetson-clock timestamps against the phone's own
+        #: `logcat -v epoch` stamps with no correction at all -- measured on
+        #: real hardware at +0.935 to +0.952 s, not constant even across one
+        #: session -- and `transport/handshake.py`'s `t_remote_wall_ns` had
+        #: no consumer anywhere outside that module before this.
+        self.wall_clock_offset_s: float | None = None
         self.pings_answered = 0
         #: What went DOWN the link. Until now nothing did: `run_demo.py --phone` took
         #: camera and GPS off the handset and sent nothing back, so the driver's panel
@@ -339,6 +349,7 @@ class PhoneLink:
             if isinstance(event, SessionStarted):
                 self.session = event.session
                 self.peer_device_id = event.handshake.remote.device_id
+                self.wall_clock_offset_s = event.handshake.clock.remote_minus_local_wall_s
                 self._begin()
                 return True
         return False
@@ -526,6 +537,10 @@ class PhoneLink:
             self.here_failure = None
             self.session = event.session
             self.peer_device_id = event.handshake.remote.device_id
+            # A new session is a new peer clock in this sense too: the
+            # replacement handset's own offset, not the one the previous
+            # phone measured.
+            self.wall_clock_offset_s = event.handshake.clock.remote_minus_local_wall_s
             # Through `_begin`, not `_start_session_workers`. The single-supervisor
             # guard lives in `_begin`, and calling past it left the guard unreachable
             # on the only path that could ever need it -- so the test asserting one
@@ -927,6 +942,13 @@ class PhoneLink:
         return {
             "peer_device_id": self.peer_device_id,
             "session_id": None if session is None else session.session_id,
+            # Handshake-time wall-clock offset, remote (the phone) minus
+            # local (B10, validation round 2): recorded so a reader
+            # matching the phone's OWN logcat timestamps against this run's
+            # Jetson-clock records (`check_shadow_commands.py`'s run
+            # window, among others) has a measured correction rather than
+            # an assumed one. `None` when no session ever started.
+            "wall_clock_offset_s": self.wall_clock_offset_s,
             # Accepted/displaced separate a run the phone left from one a second
             # device took over: with `--phone-host 0.0.0.0` any tailnet peer that
             # speaks the hello can displace a session, and `session_id` alone

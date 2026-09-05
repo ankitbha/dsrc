@@ -888,12 +888,13 @@ class TestTelemetryPairIsAtomic:
 class LoopbackPhone:
     """A loopback client that speaks the protocol, standing in for the app."""
 
-    def __init__(self, acceptor, device_id="moto-g-power"):
+    def __init__(self, acceptor, device_id="moto-g-power", *, wall_clock=None):
         from transport.handshake import perform_handshake
 
         self.connection = acceptor.connect(device_id)
+        kwargs = {} if wall_clock is None else {"wall_clock": wall_clock}
         self.handshake = perform_handshake(
-            self.connection, Hello(device_id, Role.PHONE)
+            self.connection, Hello(device_id, Role.PHONE), **kwargs
         )
         self.session = Session(self.connection, session_id=99, heartbeat_s=None,
                                stall_timeout_s=None).start()
@@ -902,18 +903,24 @@ class LoopbackPhone:
         self.session.close()
 
 
-def dial(acceptor, device_id):
+def dial(acceptor, device_id, *, wall_clock=None):
     """Dial in from another thread, and hand back the phone once it is up.
 
     The handshake is synchronous on the client side, so calling `LoopbackPhone`
     inline before `wait_for_phone` deadlocks: nothing has started the listener that
     would answer it. Off-thread, the dial waits for the listener to come up the way
     a real handset does.
+
+    `wall_clock`, given, stands in for the phone's own wall clock during its
+    half of the handshake -- used to give a test a controlled, nonzero
+    `remote_minus_local_wall_s` (B10, validation round 2) rather than
+    whatever two real `now_wall_ns()` reads on the same process happen to
+    differ by.
     """
     import concurrent.futures
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    future = pool.submit(LoopbackPhone, acceptor, device_id)
+    future = pool.submit(LoopbackPhone, acceptor, device_id, wall_clock=wall_clock)
     pool.shutdown(wait=False)
     return future
 
@@ -1100,6 +1107,53 @@ class TestRedial:
             # follow the rebind, not just the one-way fallback.
             assert link.adapter._one_way is link.estimator
             assert link.adapter._round_trip is link.round_trip_estimator
+            second.hang_up()
+        finally:
+            link.stop()
+
+    def test_wall_clock_offset_is_recorded_from_the_handshake(self):
+        """B10 (validation round 2): `check_shadow_commands.py`'s run-window
+        check was matching Jetson-clock timestamps against the phone's own
+        `logcat` stamps with no correction -- `transport/handshake.py`'s
+        `t_remote_wall_ns` had no consumer anywhere outside that module.
+        `wall_clock_offset_s` is `None` before any session, and a real
+        number (not the exact value, which `test_transport_handshake.py`
+        already pins) once one starts.
+        """
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            assert link.wall_clock_offset_s is None
+            dialling = dial(acceptor, "phone-one")
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            phone = dialling.result(timeout=5.0)
+            assert link.wall_clock_offset_s is not None
+            assert isinstance(link.wall_clock_offset_s, float)
+            assert link.to_record()["wall_clock_offset_s"] == link.wall_clock_offset_s
+            phone.hang_up()
+        finally:
+            link.stop()
+
+    def test_wall_clock_offset_updates_to_the_new_phones_own_on_rebind(self):
+        """A new session is a new peer clock in this sense too -- the
+        replacement handset's own offset, not the one the previous phone
+        measured, the same property `test_the_timebase_does_not_carry_
+        across_a_rebind` pins for the timebase estimators."""
+        acceptor = LoopbackAcceptor()
+        link = PhoneLink(acceptor=acceptor)
+        try:
+            dialling = dial(acceptor, "phone-one", wall_clock=lambda: 100_935_000_000)
+            assert link.wait_for_phone(timeout_s=5.0) is True
+            first = dialling.result(timeout=5.0)
+            first_offset = link.wall_clock_offset_s
+            assert first_offset is not None
+
+            first.hang_up()
+            second = LoopbackPhone(acceptor, "phone-two", wall_clock=lambda: 200_500_000_000)
+            assert wait_until(lambda: len(link.rebinds) == 1), "never rebound"
+
+            assert link.wall_clock_offset_s is not None
+            assert link.wall_clock_offset_s != first_offset
             second.hang_up()
         finally:
             link.stop()

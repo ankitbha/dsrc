@@ -78,10 +78,26 @@ class ClockSample:
     t_local_recv_mono_ns: int
     t_remote_mono_ns: int
     t_remote_wall_ns: int
+    #: This device's own wall clock at the same instant `t_local_send_mono_ns`
+    #: was taken -- local only, never encoded onto the wire (`hello_frame`
+    #: puts a wall stamp in the outgoing header too, but that is a separate
+    #: call the OTHER side reads back as ITS `t_remote_wall_ns`). Captured so
+    #: a later reader can compare THIS device's wall clock against
+    #: `t_remote_wall_ns` without assuming the two were taken at the same
+    #: moment some other way (B10, validation round 2): before this field
+    #: existed, nothing outside this module read `t_remote_wall_ns` at all.
+    t_local_wall_ns: int
 
     @property
     def round_trip_ns(self) -> int:
         return self.t_local_recv_mono_ns - self.t_local_send_mono_ns
+
+    @property
+    def remote_minus_local_wall_s(self) -> float:
+        """Remote wall clock minus local wall clock, in seconds, at
+        handshake time -- positive means the remote (the phone, on the
+        Jetson's own listener side of every session) is ahead."""
+        return (self.t_remote_wall_ns - self.t_local_wall_ns) / 1e9
 
 
 @dataclass(frozen=True)
@@ -142,7 +158,8 @@ def perform_handshake(
     so a mismatched peer never gets a message interpreted.
     """
     t_send = mono_clock()
-    connection.send_all(encode(hello_frame(local, t_mono_ns=t_send, t_wall_ns=wall_clock())))
+    t_send_wall = wall_clock()
+    connection.send_all(encode(hello_frame(local, t_mono_ns=t_send, t_wall_ns=t_send_wall)))
 
     try:
         frame = read_frame(connection.recv_exact)
@@ -162,5 +179,6 @@ def perform_handshake(
             t_local_recv_mono_ns=t_recv,
             t_remote_mono_ns=frame.t_mono_ns,
             t_remote_wall_ns=frame.t_wall_ns,
+            t_local_wall_ns=t_send_wall,
         ),
     )

@@ -168,6 +168,46 @@ def test_clock_sample_uses_injected_clocks():
     assert result.clock.t_local_recv_mono_ns == 20
     assert result.clock.t_remote_mono_ns == 500
     assert result.clock.t_remote_wall_ns == 900
+    # B10 (validation round 2): the Jetson's OWN wall clock at hello-send
+    # time, captured so a caller outside this module can compare it
+    # against t_remote_wall_ns without assuming the two were taken at the
+    # same moment some other way.
+    assert result.clock.t_local_wall_ns == 77
+
+
+def test_remote_minus_local_wall_s_is_the_measured_clock_offset():
+    """Positive means the remote (the phone, on every session this device
+    accepts) is ahead -- matches the measured real-hardware direction
+    (+0.935 to +0.952 s, phone ahead of the Jetson)."""
+    phone_conn, jetson_conn = loopback_pair()
+    thread = threading.Thread(
+        target=lambda: perform_handshake(
+            phone_conn, PHONE, mono_clock=lambda: 500, wall_clock=lambda: 100_935_000_000
+        ),
+        daemon=True,
+    )
+    thread.start()
+    result = perform_handshake(
+        jetson_conn, JETSON, mono_clock=lambda: 10, wall_clock=lambda: 100_000_000_000,
+    )
+    thread.join(timeout=2.0)
+    assert result.clock.remote_minus_local_wall_s == pytest.approx(0.935, abs=1e-9)
+
+
+def test_remote_minus_local_wall_s_is_negative_when_the_remote_is_behind():
+    phone_conn, jetson_conn = loopback_pair()
+    thread = threading.Thread(
+        target=lambda: perform_handshake(
+            phone_conn, PHONE, mono_clock=lambda: 500, wall_clock=lambda: 99_500_000_000
+        ),
+        daemon=True,
+    )
+    thread.start()
+    result = perform_handshake(
+        jetson_conn, JETSON, mono_clock=lambda: 10, wall_clock=lambda: 100_000_000_000,
+    )
+    thread.join(timeout=2.0)
+    assert result.clock.remote_minus_local_wall_s == pytest.approx(-0.5, abs=1e-9)
 
 
 def test_a_non_hello_first_frame_is_refused():
