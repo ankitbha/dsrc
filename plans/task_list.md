@@ -1836,8 +1836,22 @@ Everything above is done before the devices meet.
     unexercised, and so is the whole of the advisory-sanity half: a stationary
     camera indoors gives the policy nothing to be sane about. Those need traffic
     and belong with tasks 50 and 51. `SKIN_HOT_C` at 45.0 C was not reached
-    (max 42.513), and GPS and HERE both ran at 0.0 Hz, HERE because the installed
-    APK reports `here.unconfigured` -- no key in `local.properties`.
+    (max 42.513), and GPS and HERE both ran at 0.0 Hz.
+
+    **The missing key was only one of two reasons HERE was inert, and correcting
+    this is the point of the paragraph.** The key is now configured, the rebuilt APK
+    is installed and `HttpHereClient` constructs without complaint -- and the Jetson
+    still sends `here=false` on every rate command, because `_here_query` returns
+    `None` without a usable position: "a query centred on a position we do not have
+    describes nowhere, and the phone would spend a cellular call on it." GPS itself
+    is not a defect. `ACCESS_FINE_LOCATION` is granted, `location_mode` is 3, and
+    `dumpsys location` shows `com.dsrc.phone` holding a GPS request at a maximum
+    interval of 1 s, last active during the run; the app asked correctly and the
+    receiver returned no fix, which is what a desk indoors produces.
+
+    So **HERE and GPS are one blocker and it is physical**: the handset needs sky.
+    No amount of configuration exercises the HERE path at this desk, and a reader who
+    adds a key and expects HERE frames will be misled by the sentence this replaced.
 
     See task 57 for the defect this run found.
 45. **[COLOCATED]** Thermal soak: sustained maximum-rate run to steady state;
