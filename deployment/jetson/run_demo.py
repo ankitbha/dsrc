@@ -29,6 +29,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -247,10 +248,40 @@ def _log_timebase_estimates(
 #: a run record can name the APK that produced it (A4, validation round 2).
 #: Untracked, same as every other model artifact (models/.gitignore is "*").
 INSTALLED_APK_RECORD = JETSON_DIR / "models" / "installed_apk.json"
+#: Where the DEPLOY step (on the SOURCE machine, before the rsync copy that
+#: strips `.git`) records the commit it deployed (B16, validation round 3):
+#: `git rev-parse HEAD` below returns `commit: null` on the only machine a
+#: run actually happens on -- `~/dsrc-task40` is an rsync copy, not a git
+#: checkout -- so the other three provenance fields populate and this one
+#: never does. `scripts/record_deployed_commit.py` writes this file on the
+#: source machine, alongside the rsync, the same pattern
+#: `record_installed_apk.py` established for the phone's APK. Untracked,
+#: same as every other model artifact.
+DEPLOYED_COMMIT_RECORD = JETSON_DIR / "models" / "deployed_commit.json"
 
 
-def _build_provenance(config: dict) -> dict[str, Any]:
-    """The three inputs a run's `advisory`/`sensing`/`perception` numbers
+def _live_apk_last_update_time(serial: str) -> str | None:
+    """`lastUpdateTime` off `dumpsys package com.dsrc.phone`, queried NOW
+    (A5, validation round 3) -- not the sidecar's recorded value, which
+    `_build_provenance` reads separately and compares this against. `None`
+    when adb cannot answer or the field is absent, same contract as
+    `scripts/record_installed_apk.py`'s own `_dumpsys_last_update_time`
+    (duplicated rather than imported: `scripts/` holds CLIs, not modules
+    this package imports from -- CLI in /scripts, /nash for modules).
+    """
+    try:
+        result = subprocess.run(
+            ["adb", "-s", serial, "shell", "dumpsys", "package", "com.dsrc.phone"],
+            capture_output=True, text=True, timeout=10.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"lastUpdateTime=(.+)", result.stdout)
+    return match.group(1).strip() if match else None
+
+
+def _build_provenance(config: dict, *, serial: str | None = None) -> dict[str, Any]:
+    """The four inputs a run's `advisory`/`sensing`/`perception` numbers
     depend on that nothing else in the record names (A4, validation round
     2): the code revision, the policy bundle, the detector engine, and the
     phone's APK.
@@ -260,8 +291,23 @@ def _build_provenance(config: dict) -> dict[str, Any]:
     .gitignore` is `*`, `metadata.jsonl` has no run-header record, and this
     function's own `git rev-parse` can itself return `commit: null` on a
     tree that is not a git checkout -- an ad-hoc rsync copy, same as this
-    task's own `~/dsrc-task40` -- which is named rather than silently
-    omitted, so a reader knows the absence is the tree's, not a bug here.
+    task's own `~/dsrc-task40` -- named rather than silently omitted, so a
+    reader knows the absence is the tree's, not a bug here. `commit` falls
+    back to `DEPLOYED_COMMIT_RECORD` when `git rev-parse` itself fails
+    (B16, validation round 3): that file is written on the SOURCE machine,
+    before the rsync that strips `.git`, so it is the one place the real
+    tree's commit survives onto the ONLY machine a run happens on.
+
+    `serial`, given, re-reads the phone's CURRENT `lastUpdateTime` and
+    compares it to the value `apk_sha256`'s own sidecar was written
+    against (A5, validation round 3): `apk_sha256` names an install that
+    may since have been replaced by a later `adb install -r` that nobody
+    re-ran this script for, and a record that asserts a hash without
+    checking whether it is still current is the false-looking-true
+    failure A5 was filed for -- `None` when there is no serial to check
+    with (the tailnet path, or a run before this fix), or the sidecar
+    itself has no `last_update_time` to compare against (a record written
+    before A5, or with no device reachable at write time either).
     """
     commit = None
     try:
@@ -273,6 +319,11 @@ def _build_provenance(config: dict) -> dict[str, Any]:
             commit = result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         pass
+    if commit is None and DEPLOYED_COMMIT_RECORD.exists():
+        try:
+            commit = json.loads(DEPLOYED_COMMIT_RECORD.read_text()).get("commit")
+        except ValueError:
+            pass
 
     # A copy, not a computation: the bundle sidecar is already JSON and
     # already carries sim_commit and contract_fingerprint.
@@ -290,17 +341,28 @@ def _build_provenance(config: dict) -> dict[str, Any]:
         detector_engine_sha256 = hashlib.sha256(engine_path.read_bytes()).hexdigest()
 
     apk_sha256 = None
+    apk_last_update_time = None
     if INSTALLED_APK_RECORD.exists():
         try:
-            apk_sha256 = json.loads(INSTALLED_APK_RECORD.read_text()).get("sha256")
+            installed = json.loads(INSTALLED_APK_RECORD.read_text())
+            apk_sha256 = installed.get("sha256")
+            apk_last_update_time = installed.get("last_update_time")
         except ValueError:
             pass
+
+    apk_last_update_time_matches = None
+    if serial is not None and apk_last_update_time is not None:
+        live_last_update_time = _live_apk_last_update_time(serial)
+        if live_last_update_time is not None:
+            apk_last_update_time_matches = live_last_update_time == apk_last_update_time
 
     return {
         "commit": commit,
         "policy_bundle": policy_bundle,
         "detector_engine_sha256": detector_engine_sha256,
         "apk_sha256": apk_sha256,
+        "apk_last_update_time": apk_last_update_time,
+        "apk_last_update_time_matches": apk_last_update_time_matches,
     }
 
 
@@ -395,6 +457,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
 
     phone = None
     usb_acceptor = None
+    # Bound here, not just inside `if args.usb:`, so `_build_provenance`'s
+    # A5 (validation round 3) live re-check has a name to read at teardown
+    # regardless of which branch ran -- `None` on the tailnet path (there
+    # is no adb serial to check with at all) rather than a `NameError`.
+    serial = None
     if args.usb and not args.phone:
         print("[run] --usb has no effect without --phone", file=sys.stderr)
         return 2
@@ -787,8 +854,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # A4 (validation round 2): the code revision, policy bundle,
             # detector engine and phone APK that produced everything in
             # `advisory`/`sensing`/`perception` below -- none of which was
-            # recoverable from a run directory alone before this.
-            "build": _build_provenance(config),
+            # recoverable from a run directory alone before this. `serial`
+            # is `None` off the tailnet path; `_build_provenance` reports
+            # `apk_last_update_time_matches: None` rather than checking
+            # anything in that case (A5, validation round 3).
+            "build": _build_provenance(config, serial=serial),
         }
         if phone is not None:
             # Both ends of the run, because a path can change mid-drive: Tailscale

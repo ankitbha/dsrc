@@ -1076,6 +1076,51 @@ class TestUsbSigtermHandler:
         assert installed_handlers == {}
 
 
+#: Verbatim `adb -s ZY227VV4XC shell dumpsys package com.dsrc.phone` (this
+#: session, 2026-09-05) -- the same real capture
+#: `tests/test_record_installed_apk.py`'s `REAL_DUMPSYS_OUTPUT` uses.
+_REAL_DUMPSYS_OUTPUT = (
+    "    versionCode=1 minSdk=29 targetSdk=35\n"
+    "    versionName=0.1\n"
+    "    splits=[base]\n"
+    "    firstInstallTime=2026-09-05 00:58:05\n"
+    "    lastUpdateTime=2026-09-05 00:58:05\n"
+)
+
+
+class TestLiveApkLastUpdateTime:
+    """A5 (validation round 3): `_build_provenance`'s own live re-check of
+    the phone's CURRENT `lastUpdateTime`, queried at run time rather than
+    trusted from the sidecar alone."""
+
+    def test_parses_the_real_device_output(self, monkeypatch):
+        def fake_run(args, *, capture_output, text, timeout):
+            class Result:
+                stdout = _REAL_DUMPSYS_OUTPUT
+
+            return Result()
+
+        monkeypatch.setattr(run_demo.subprocess, "run", fake_run)
+        assert run_demo._live_apk_last_update_time("ZY227VV4XC") == "2026-09-05 00:58:05"
+
+    def test_is_none_on_unrecognised_output(self, monkeypatch):
+        def fake_run(args, *, capture_output, text, timeout):
+            class Result:
+                stdout = "nothing relevant here"
+
+            return Result()
+
+        monkeypatch.setattr(run_demo.subprocess, "run", fake_run)
+        assert run_demo._live_apk_last_update_time("ZY227VV4XC") is None
+
+    def test_is_none_when_adb_is_unreachable(self, monkeypatch):
+        def raising_run(args, *, capture_output, text, timeout):
+            raise FileNotFoundError("no adb")
+
+        monkeypatch.setattr(run_demo.subprocess, "run", raising_run)
+        assert run_demo._live_apk_last_update_time("ZY227VV4XC") is None
+
+
 class TestBuildProvenance:
     """A4 (validation round 2): given a run directory alone, none of the
     policy bundle, the detector engine, or the code revision was
@@ -1099,6 +1144,17 @@ class TestBuildProvenance:
         # `~/dsrc-task40` on jetson-orin, exit 128) -- the exact case A4
         # names and the one an earlier version of this test did not handle,
         # asserting `None == ""` there instead of `None == None`.
+        #
+        # B16 (validation round 3) added a second real source on top of
+        # git: `run_demo.DEPLOYED_COMMIT_RECORD` (also read for real, not
+        # monkeypatched, for the same reason as `git rev-parse` above) --
+        # present for real on the jetson tree once a deploy step has
+        # written it, absent on a Mac checkout where git already answers.
+        # `expected` follows `_build_provenance`'s own precedence so this
+        # test reads correctly in all three states (git works; git fails,
+        # sidecar present; git fails, no sidecar) rather than assuming
+        # whichever one happened to be true when it was written -- the
+        # exact failure this docstring already names once.
         import subprocess
 
         probe = subprocess.run(
@@ -1106,6 +1162,11 @@ class TestBuildProvenance:
             capture_output=True, text=True,
         )
         expected = probe.stdout.strip() if probe.returncode == 0 else None
+        if expected is None and run_demo.DEPLOYED_COMMIT_RECORD.exists():
+            try:
+                expected = json.loads(run_demo.DEPLOYED_COMMIT_RECORD.read_text()).get("commit")
+            except ValueError:
+                expected = None
         result = run_demo._build_provenance(self._config(tmp_path))
         assert result["commit"] == expected
         if expected is not None:
@@ -1113,7 +1174,12 @@ class TestBuildProvenance:
 
     def test_commit_is_none_when_git_rev_parse_fails(self, tmp_path, monkeypatch):
         """The exact shape `~/dsrc-task40` (this task's own rsync copy, not
-        a git checkout) produces -- named rather than silently omitted."""
+        a git checkout) produces -- named rather than silently omitted.
+        `DEPLOYED_COMMIT_RECORD` is pointed at a path that does not exist
+        (B16, validation round 3): this test's own intent is "git fails
+        AND there is no other source", which a REAL sidecar left on
+        whichever machine runs this suite would otherwise silently supply
+        -- the jetson always carries one once a deploy has run."""
         def failing_run(args, *, cwd, capture_output, text, timeout):
             class Result:
                 returncode = 128
@@ -1122,6 +1188,7 @@ class TestBuildProvenance:
             return Result()
 
         monkeypatch.setattr(run_demo.subprocess, "run", failing_run)
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", tmp_path / "nope.json")
         result = run_demo._build_provenance(self._config(tmp_path))
         assert result["commit"] is None
 
@@ -1130,8 +1197,75 @@ class TestBuildProvenance:
             raise FileNotFoundError("no git")
 
         monkeypatch.setattr(run_demo.subprocess, "run", raising_run)
+        # Same isolation as the test above, same reason.
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", tmp_path / "nope.json")
         result = run_demo._build_provenance(self._config(tmp_path))
         assert result["commit"] is None
+
+    # -- B16 (validation round 3): deployed_commit.json fallback ------------
+
+    def _failing_git_rev_parse(self, monkeypatch):
+        def failing_run(args, *, cwd, capture_output, text, timeout):
+            class Result:
+                returncode = 128
+                stdout = ""
+
+            return Result()
+
+        monkeypatch.setattr(run_demo.subprocess, "run", failing_run)
+
+    def test_commit_falls_back_to_the_deployed_commit_record_when_git_fails(self, tmp_path, monkeypatch):
+        """The exact case this fix is for: `git rev-parse` fails (the
+        jetson's rsync copy), but the SOURCE machine wrote this sidecar
+        before the rsync that stripped `.git` -- the commit survives
+        where `git rev-parse` alone cannot reach it."""
+        self._failing_git_rev_parse(monkeypatch)
+        record_path = tmp_path / "deployed_commit.json"
+        record_path.write_text(json.dumps({"commit": "a" * 40, "dirty": False}))
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] == "a" * 40
+
+    def test_commit_is_none_when_git_fails_and_no_deployed_commit_record_exists(self, tmp_path, monkeypatch):
+        self._failing_git_rev_parse(monkeypatch)
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", tmp_path / "nope.json")
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] is None
+
+    def test_commit_is_none_when_the_deployed_commit_record_is_malformed(self, tmp_path, monkeypatch):
+        self._failing_git_rev_parse(monkeypatch)
+        record_path = tmp_path / "deployed_commit.json"
+        record_path.write_text("not json")
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] is None
+
+    def test_commit_prefers_a_real_git_rev_parse_over_the_deployed_commit_record(self, tmp_path, monkeypatch):
+        """On a machine where `git rev-parse` genuinely works (a real git
+        checkout -- the Mac, not the jetson's own rsync copy, which has no
+        `.git` at all and is exactly what the fallback tests above cover),
+        a stale sidecar left over from some earlier deploy must not
+        override the real, current HEAD -- the fallback is for when git
+        itself cannot answer, not a general override. Skips rather than
+        assuming which of the two this is: `test_reads_the_real_git_commit`
+        already established that this suite runs in both.
+        """
+        import subprocess
+
+        probe = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(run_demo.JETSON_DIR),
+            capture_output=True, text=True,
+        )
+        if probe.returncode != 0:
+            pytest.skip("this tree is not a git checkout; the fallback tests above cover it")
+        real_commit = probe.stdout.strip()
+
+        record_path = tmp_path / "deployed_commit.json"
+        record_path.write_text(json.dumps({"commit": "stale" * 8, "dirty": False}))
+        monkeypatch.setattr(run_demo, "DEPLOYED_COMMIT_RECORD", record_path)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["commit"] == real_commit
+        assert result["commit"] != "stale" * 8
 
     def test_reads_the_policy_bundle_sidecar_as_a_copy(self, tmp_path):
         bundle_json = {
@@ -1171,6 +1305,73 @@ class TestBuildProvenance:
         result = run_demo._build_provenance(self._config(tmp_path))
         assert result["apk_sha256"] is None
 
+    # -- A5 (validation round 3): live lastUpdateTime re-check ---------------
+
+    def _install_record(self, tmp_path, monkeypatch, **overrides):
+        record_path = tmp_path / "installed_apk.json"
+        record = {"sha256": "abc123", "last_update_time": "2026-09-05 00:58:05"}
+        record.update(overrides)
+        record_path.write_text(json.dumps(record))
+        monkeypatch.setattr(run_demo, "INSTALLED_APK_RECORD", record_path)
+
+    def test_reads_apk_last_update_time_from_the_installed_apk_record(self, tmp_path, monkeypatch):
+        self._install_record(tmp_path, monkeypatch)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["apk_last_update_time"] == "2026-09-05 00:58:05"
+
+    def test_apk_last_update_time_is_none_when_no_install_record_exists(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(run_demo, "INSTALLED_APK_RECORD", tmp_path / "nope.json")
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["apk_last_update_time"] is None
+
+    def test_apk_last_update_time_matches_is_none_without_a_serial(self, tmp_path, monkeypatch):
+        """The tailnet path, or a call before this fix: nothing to check
+        the sidecar's recorded value against."""
+        self._install_record(tmp_path, monkeypatch)
+        result = run_demo._build_provenance(self._config(tmp_path))
+        assert result["apk_last_update_time_matches"] is None
+
+    def test_apk_last_update_time_matches_true_when_the_live_device_agrees(self, tmp_path, monkeypatch):
+        self._install_record(tmp_path, monkeypatch)
+        monkeypatch.setattr(run_demo, "_live_apk_last_update_time", lambda serial: "2026-09-05 00:58:05")
+        result = run_demo._build_provenance(self._config(tmp_path), serial="ZY227VV4XC")
+        assert result["apk_last_update_time_matches"] is True
+
+    def test_apk_last_update_time_matches_false_when_the_phone_was_reinstalled(self, tmp_path, monkeypatch):
+        """The core of A5: `adb install -r other.apk` without re-running
+        `record_installed_apk.py` leaves the sidecar's `sha256` describing
+        an install that is no longer on the phone -- this is the live
+        re-check catching exactly that, at run time rather than at write
+        time."""
+        self._install_record(tmp_path, monkeypatch)
+        monkeypatch.setattr(run_demo, "_live_apk_last_update_time", lambda serial: "2026-09-05 09:00:00")
+        result = run_demo._build_provenance(self._config(tmp_path), serial="ZY227VV4XC")
+        assert result["apk_last_update_time_matches"] is False
+
+    def test_apk_last_update_time_matches_is_none_when_the_live_device_is_unreachable(self, tmp_path, monkeypatch):
+        self._install_record(tmp_path, monkeypatch)
+        monkeypatch.setattr(run_demo, "_live_apk_last_update_time", lambda serial: None)
+        result = run_demo._build_provenance(self._config(tmp_path), serial="NOSUCHSERIAL")
+        assert result["apk_last_update_time_matches"] is None
+
+    def test_apk_last_update_time_matches_is_none_when_the_sidecar_has_no_recorded_value(
+        self, tmp_path, monkeypatch,
+    ):
+        """A record written before A5, or with no device reachable at
+        write time either -- nothing to compare a live value against, so
+        this must not call `_live_apk_last_update_time` at all."""
+        record_path = tmp_path / "installed_apk.json"
+        record_path.write_text(json.dumps({"sha256": "abc123"}))  # no last_update_time key
+        monkeypatch.setattr(run_demo, "INSTALLED_APK_RECORD", record_path)
+
+        def unexpected(serial):
+            raise AssertionError("must not be called with nothing to compare against")
+
+        monkeypatch.setattr(run_demo, "_live_apk_last_update_time", unexpected)
+        result = run_demo._build_provenance(self._config(tmp_path), serial="ZY227VV4XC")
+        assert result["apk_last_update_time"] is None
+        assert result["apk_last_update_time_matches"] is None
+
     def test_a_real_drive_writes_the_build_block(self, tmp_path, monkeypatch):
         """End to end through run_live's own teardown, not a transcription:
         the same real pipeline TestRunLiveFailureSamplerIntegration drives."""
@@ -1188,4 +1389,5 @@ class TestBuildProvenance:
         assert "build" in summary
         assert set(summary["build"]) == {
             "commit", "policy_bundle", "detector_engine_sha256", "apk_sha256",
+            "apk_last_update_time", "apk_last_update_time_matches",
         }
