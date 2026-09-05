@@ -50,9 +50,18 @@ def loopback_backend(**kwargs) -> Pair:
 
 def tcp_backend(**kwargs) -> Pair:
     acceptor = TcpAcceptor("127.0.0.1", 0, **kwargs)
-    client = dial("127.0.0.1", acceptor.port)
-    server = acceptor.accept(timeout=5.0)
-    assert server is not None
+    try:
+        client = dial("127.0.0.1", acceptor.port)
+        server = acceptor.accept(timeout=5.0)
+        assert server is not None
+    except BaseException:
+        # `dispose` does not exist yet if `dial`/`accept`/the assert fails,
+        # so nothing else would close this acceptor -- harmless for a local
+        # socket, which dies with the process either way, but the pattern
+        # is shared with `usb_backend` below, where it is not harmless
+        # (B12, validation round 2).
+        acceptor.close()
+        raise
 
     def dispose():
         client.close()
@@ -67,9 +76,18 @@ def usb_backend(**kwargs) -> Pair:
     if serial is None:
         pytest.skip(f"no USB device attached: {reason}")
     acceptor = UsbAcceptor(serial, port=0, **kwargs)
-    client = dial("127.0.0.1", acceptor.port)
-    server = acceptor.accept(timeout=5.0)
-    assert server is not None
+    try:
+        client = dial("127.0.0.1", acceptor.port)
+        server = acceptor.accept(timeout=5.0)
+        assert server is not None
+    except BaseException:
+        # B12: `dispose` is not defined until both calls above succeed, so
+        # a failure here used to leave `adb reverse tcp:P tcp:P` on the
+        # device permanently for this ephemeral P -- nothing enumerates or
+        # sweeps a stray registered under a port nobody asks about again,
+        # and `UsbAcceptor.close()` only ever removes its OWN spec.
+        acceptor.close()
+        raise
 
     def dispose():
         client.close()
@@ -89,6 +107,96 @@ def pair(request):
         yield made
     finally:
         made.dispose()
+
+
+# -- B12 (validation round 2): the backend factories close on setup failure --
+
+
+def _this_module():
+    import sys
+
+    return sys.modules[__name__]
+
+
+def test_usb_backend_closes_the_acceptor_if_dial_fails(monkeypatch):
+    """A failure between constructing the acceptor and defining `dispose`
+    must not leak the reverse mapping -- unlike a leaked TCP listener,
+    which dies with the process, a leaked `adb reverse tcp:P tcp:P` sits on
+    the device permanently for this ephemeral P, and nothing enumerates or
+    sweeps a stray registered under a port nobody asks about again.
+    """
+    closed = []
+
+    class FakeAcceptor:
+        port = 47811
+
+        def close(self):
+            closed.append(True)
+
+    module = _this_module()
+    monkeypatch.setattr(module, "attached_serial", lambda: ("SERIALX", "ok"))
+    monkeypatch.setattr(module, "UsbAcceptor", lambda *a, **k: FakeAcceptor())
+
+    def raising_dial(host, port):
+        raise ConnectionRefusedError("nothing is listening")
+
+    monkeypatch.setattr(module, "dial", raising_dial)
+
+    with pytest.raises(ConnectionRefusedError):
+        usb_backend()
+    assert closed == [True]
+
+
+def test_usb_backend_closes_the_acceptor_if_accept_returns_none(monkeypatch):
+    """The other half of the same failure window: `dial` succeeds but
+    `accept` times out (`assert server is not None` fails) -- still before
+    `dispose` exists."""
+    closed = []
+
+    class FakeAcceptor:
+        port = 47811
+
+        def accept(self, timeout=None):
+            return None
+
+        def close(self):
+            closed.append(True)
+
+    module = _this_module()
+    monkeypatch.setattr(module, "attached_serial", lambda: ("SERIALX", "ok"))
+    monkeypatch.setattr(module, "UsbAcceptor", lambda *a, **k: FakeAcceptor())
+    monkeypatch.setattr(module, "dial", lambda host, port: object())
+
+    with pytest.raises(AssertionError):
+        usb_backend()
+    assert closed == [True]
+
+
+def test_tcp_backend_closes_the_acceptor_if_dial_fails(monkeypatch):
+    """Same pattern, `tcp_backend`: lower stakes (a leaked local socket
+    dies with the process) but the same shared code shape, fixed the same
+    way."""
+    real_acceptor = TcpAcceptor("127.0.0.1", 0)
+    closed = []
+    real_close = real_acceptor.close
+
+    def tracking_close():
+        closed.append(True)
+        real_close()
+
+    real_acceptor.close = tracking_close
+
+    module = _this_module()
+    monkeypatch.setattr(module, "TcpAcceptor", lambda *a, **k: real_acceptor)
+
+    def raising_dial(host, port):
+        raise ConnectionRefusedError("nothing is listening")
+
+    monkeypatch.setattr(module, "dial", raising_dial)
+
+    with pytest.raises(ConnectionRefusedError):
+        tcp_backend()
+    assert closed == [True]
 
 
 # -- the basics the session assumes -----------------------------------------
