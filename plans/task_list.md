@@ -1845,8 +1845,36 @@ Everything above is done before the devices meet.
     candidate policy's decisions against identical traffic.
 51. Drive set 2, live mode: the controller gating for real, verifying the
     shadow-mode predictions held.
-52. Repeat across congested and free-flow conditions on at least three separate
-    days, on a corridor known to congest.
+52. ~~Repeat across congested and free-flow conditions on at least three separate
+    days, on a corridor known to congest.~~ **DROPPED 2026-09-05** — the drives will
+    happen once. This is not a deferral: there is no later occasion on which the
+    repeat could be run. It is struck rather than deleted because it bounds what
+    section I's numbers can support.
+
+    **What a single drive cannot separate.** Condition, day and run are confounded
+    in one sample. Of the quantities listed below, end-to-end latency and thermal
+    behavior depend mainly on load and are the least affected. Advisory bin
+    distribution and churn, how often the camera changes the advisory, safety-layer
+    intervention counts, and HERE-reported speed against experienced speed all
+    depend on the traffic condition, and each gets exactly one observation. A
+    statement of the form "the advisory changed N times per hour" then describes
+    that drive; it is not an estimate for the corridor and it carries no interval.
+
+    **The run-to-run term is not small enough to ignore.** The only repeat-measure
+    evidence in the project is task 42's three bench runs of an identical 180 s
+    configuration: the largest and smallest of their three `e2e_ms` p95 values
+    differ by 48.80 ms, and 95.1% of that difference is the phone-side send-queue
+    stage. That is a stationary bench with no traffic and no thermal excursion, so
+    it is a lower bound on how far two drives would differ, and there will be no
+    second drive against which to measure it.
+
+    **The one contrast still available is inside the drive, not across days.**
+    Choose the corridor and the departure time so the route passes through a
+    congested segment and a free-flow segment, and record the segment boundaries so
+    the two can be separated afterwards. That holds day, device and thermal state
+    constant, which the three-day design did not, and it confounds condition with
+    location, which the three-day design did not either. It is weaker than the
+    dropped task and it is not nothing. Tasks 50 and 51 now carry it.
 
 Connectivity on every drive is the tethered configuration described under
 Architecture. `network_transport` in each telemetry report, and the run tally in
@@ -1886,7 +1914,20 @@ counts; thermal behavior; and failure and recovery events.
 
 ## Blockers
 
-- **HERE API key** — blocks task 21 only. Everything else in E proceeds.
-- **Physical colocation** — blocks section H onward. Nothing before it.
-- Repository layout: phone app in `dsrc/android/`, Jetson runtime extends
-  `deployment/jetson/`.
+None outstanding. All three items below are struck; they are kept so a reader can
+see what was cleared and on what evidence.
+
+- ~~**HERE API key** — blocks task 21 only. Everything else in E proceeds.~~
+  **CLEARED** — the key is shared with Nash production, and task 21 is done. It
+  never reaches `request_url`, so it is on no wire and in no artifact.
+- ~~**Physical colocation** — blocks section H onward. Nothing before it.~~
+  **CLEARED 2026-09-05** — the phone is USB-attached to the Jetson and tasks 40, 41,
+  42, 43 and 47 all ran on the attached pair. What tasks 44 to 48 still need is not
+  this blocker: 44 needs the live flag flipped, 45 a sustained maximum-rate run, 46 a
+  hand present for one injection, and 48 vehicle installation hardware, meaning a
+  12 V supply and mounts, which no item on this list has ever named.
+- ~~Repository layout: phone app in `dsrc/android/`, Jetson runtime extends
+  `deployment/jetson/`.~~ Never a blocker, and half of it is wrong: there is no
+  `android/` directory at any level of this repository. The phone app is `phone/`, a
+  Gradle project whose sources are rooted at
+  `phone/app/src/main/kotlin/com/dsrc/phone`. The Jetson half is correct.
