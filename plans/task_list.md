@@ -1797,6 +1797,23 @@ counts; thermal behavior; and failure and recovery events.
 54. Smoke validation small enough for routine regression testing.
 55. Artifact manifest: where checkpoints, session recordings, metrics, plots, and
     validation summaries live.
+56. The suite does not pass on the Jetson, and one assertion is why.
+    `test_score_shadow.py:660` compares a computed float mean for exact dict
+    equality: `rw["achieved_mean"] == {"camera_hz": 4.97, ..., "imu_hz": 49.8, ...}`.
+    `sum([49.8]*8)/8` is exactly `49.8` on the Mac (arm64, CPython 3.12) and
+    `49.800000000000004` on the Jetson (aarch64, CPython 3.10), so the assertion
+    fails there and nowhere else.
+
+    **The architecture is not the defect.** Comparing a float mean for exact
+    equality is wrong on every machine; the Mac passing is luck about summation
+    order, not evidence. `pytest.approx` is the fix.
+
+    It is filed here rather than as a test-quality nit because of what it costs:
+    the suite cannot go green on the box where the runs happen, so nothing routine
+    runs it there, and every future audit re-establishes "1 failure, pre-existing"
+    by hand — a cost already paid twice. Verified pre-existing: zero commits in the
+    tasks 40/42/43/47 loop touched `test_score_shadow.py` or `score_shadow.py`, and
+    the failure reproduces at that loop's baseline `a61458d` on the Jetson.
 
 ## Blockers
 
