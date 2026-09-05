@@ -69,6 +69,26 @@ THERMAL_SCALED_KEYS = ("camera_hz", "here_hz")
 SKIN_WARM_C = 40.0
 SKIN_HOT_C = 45.0
 
+#: How far the skin must fall BELOW a threshold before the backoff it triggered is
+#: released. Without it the comparison is bare, and a handset resting on a threshold
+#: rebinds its camera every time the reading crosses it by a hundredth of a degree.
+#: Measured on `run_20260905_142351`: eight commanded rate changes in 30 s, on
+#: readings of 39.991, 40.001, 39.994, 40.027, 39.998, 40.005 and 39.991 C, two of
+#: the resulting segments lasting 0.6 s. In live mode each change is a real camera
+#: rebind on the handset, which is why shadow mode could not show this.
+#:
+#: A dead band and NOT a dwell, because the two directions are not symmetric. A dwell
+#: would delay backing off, which is the direction where being late costs heat. A
+#: dead band delays only the recovery, where being late costs a little rate at a
+#: temperature already below the trip point.
+#:
+#: Sized from the sensor rather than chosen: over that run's 900 samples the 1 Hz
+#: sample-to-sample change had p50 0.023 C, p95 0.087 C and a maximum of 0.369 C.
+#: 1.0 C is 11x the p95 and 2.7x the largest single step seen. 0.25 C would also have
+#: removed all eight changes on that run, and is rejected for sitting below that
+#: largest step -- one excursion away from failing the same way.
+SKIN_HYSTERESIS_C = 1.0
+
 #: How old a thermal report may be and still describe the phone. Telemetry runs on
 #: its own 1 Hz thread on the handset, guarded so a failing tick is logged and
 #: skipped, so the stream can die while the session stays healthy -- it has done, on
@@ -480,6 +500,30 @@ def _disagreement_check(inputs: Inputs) -> RuleCheck:
     )
 
 
+def _skin_over(value: float, threshold: float, latched: bool) -> bool:
+    """Whether `value` counts as over `threshold`, with the dead band applied.
+
+    Entering takes the bare threshold, so a backoff is never late. Leaving takes
+    `threshold - SKIN_HYSTERESIS_C`, so a reading resting on the threshold holds the
+    state it is already in instead of alternating with the sensor's own noise.
+    """
+    return value >= (threshold - SKIN_HYSTERESIS_C if latched else threshold)
+
+
+def _skin_reason(value: float, threshold: float) -> str:
+    """Why the skin reading is backing the rates off, in the reader's terms.
+
+    Two decimals, not one: the readings this exists to stop chattering on differ in
+    the hundredths, and `39.99` rendered as `40.0` would read as a plain crossing.
+    Below the threshold the sentence says which test is actually holding, because
+    "skin 39.50C >= 40.0" would simply be false.
+    """
+    if value >= threshold:
+        return f"skin {value:.2f}C >= {threshold}"
+    return (f"skin {value:.2f}C below {threshold} but held: "
+            f"recovers under {threshold - SKIN_HYSTERESIS_C:.1f}")
+
+
 class SensingController:
     """Decides the four rates. Does not send them, and does not gate them.
 
@@ -487,6 +531,17 @@ class SensingController:
     belongs to task 31. Keeping the decision separate from both is what lets shadow
     mode log what would have happened without doing it.
     """
+
+    def _skin_latch_evidence(self) -> dict[str, bool]:
+        """The two latches, for every evidence dict this class emits.
+
+        On the same keys on every path, including the three that return before the
+        skin is read: a reader censusing this field must not have to tell "not
+        latched" from "this path does not say", and a latch held across a telemetry
+        gap is exactly what a reader of that gap needs to see.
+        """
+        return {"skin_warm_latched": self._skin_warm_latched,
+                "skin_hot_latched": self._skin_hot_latched}
 
     def __init__(self, *, clock: Any = None) -> None:
         import time as _time
@@ -497,6 +552,13 @@ class SensingController:
         self._last: Decision | None = None
         self._last_active = False
         self._last_at: float | None = None
+        # Latched per threshold, because leaving a skin backoff is a different test
+        # from entering it -- see `SKIN_HYSTERESIS_C`. Deliberately NOT cleared when
+        # telemetry goes absent, stale or unstamped: a gap in the reporting is not
+        # evidence the handset cooled, which is the same reading of silence the
+        # `unknown` tier already takes.
+        self._skin_warm_latched = False
+        self._skin_hot_latched = False
 
     def decide(self, inputs: Inputs) -> Decision:
         now = self._now()
@@ -755,6 +817,7 @@ class SensingController:
             reasons.append("thermal unknown: no telemetry received")
             evidence = {"thermal_status": None, "skin_temp_c": None,
                        "telemetry": "absent", "telemetry_age_s": None}
+            evidence.update(self._skin_latch_evidence())
             return THERMAL_SCALE["unknown"], THERMAL_CAUSE_NO_TELEMETRY, evidence
 
         age = inputs.telemetry_age_s
@@ -768,6 +831,7 @@ class SensingController:
             evidence = {"thermal_status": inputs.thermal_status,
                        "skin_temp_c": inputs.skin_temp_c,
                        "telemetry": "unstamped", "telemetry_age_s": None}
+            evidence.update(self._skin_latch_evidence())
             return THERMAL_SCALE["unknown"], THERMAL_CAUSE_UNSTAMPED_TELEMETRY, evidence
 
         # abs(), because `PhoneGpsReader.is_stale` states the rule outright and
@@ -783,6 +847,7 @@ class SensingController:
             evidence = {"thermal_status": inputs.thermal_status,
                        "skin_temp_c": inputs.skin_temp_c,
                        "telemetry": "stale", "telemetry_age_s": age}
+            evidence.update(self._skin_latch_evidence())
             return THERMAL_SCALE["unknown"], THERMAL_CAUSE_STALE_TELEMETRY, evidence
 
         scale = THERMAL_SCALE.get(inputs.thermal_status or "unknown", THERMAL_SCALE["unknown"])
@@ -807,17 +872,23 @@ class SensingController:
         # A `min` tie leaves the cause alone: skin claims it only when it strictly
         # lowers the scale the status had already reached, not when it merely ties.
         if inputs.skin_temp_c is not None:
-            if inputs.skin_temp_c >= SKIN_HOT_C:
-                reasons.append(f"skin {inputs.skin_temp_c:.1f}C >= {SKIN_HOT_C}")
+            skin = inputs.skin_temp_c
+            was_hot, was_warm = self._skin_hot_latched, self._skin_warm_latched
+            hot = _skin_over(skin, SKIN_HOT_C, was_hot)
+            warm = _skin_over(skin, SKIN_WARM_C, was_warm)
+            self._skin_hot_latched, self._skin_warm_latched = hot, warm
+            if hot:
+                reasons.append(_skin_reason(skin, SKIN_HOT_C))
                 if THERMAL_SCALE["severe"] < scale:
                     cause = THERMAL_CAUSE_SKIN_HOT
                 scale = min(scale, THERMAL_SCALE["severe"])
-            elif inputs.skin_temp_c >= SKIN_WARM_C:
-                reasons.append(f"skin {inputs.skin_temp_c:.1f}C >= {SKIN_WARM_C}")
+            elif warm:
+                reasons.append(_skin_reason(skin, SKIN_WARM_C))
                 if THERMAL_SCALE["moderate"] < scale:
                     cause = THERMAL_CAUSE_SKIN_WARM
                 scale = min(scale, THERMAL_SCALE["moderate"])
 
         evidence = {"thermal_status": inputs.thermal_status, "skin_temp_c": inputs.skin_temp_c,
-                   "telemetry": "fresh", "telemetry_age_s": age}
+                   "telemetry": "fresh", "telemetry_age_s": age,
+                   **self._skin_latch_evidence()}
         return scale, cause, evidence

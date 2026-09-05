@@ -30,6 +30,7 @@ from policy.sensing_controller import (
     RULE_NOT_EVALUABLE,
     RULE_QUIET,
     SKIN_HOT_C,
+    SKIN_HYSTERESIS_C,
     SKIN_WARM_C,
     THERMAL_CAUSE_NO_TELEMETRY,
     THERMAL_CAUSE_SKIN_HOT,
@@ -871,6 +872,10 @@ class TestTheConstantsAreValuesNotSelfReferences:
         assert NARROW_MARGIN == 0.15
         assert SKIN_WARM_C == 40.0
         assert SKIN_HOT_C == 45.0
+        # Pinned, not derived: the dead band is sized against the handset's own
+        # sensor noise (p95 0.087 C, max step 0.369 C over 900 samples), so a
+        # change to it is a claim about the sensor and should be argued, not typed.
+        assert SKIN_HYSTERESIS_C == 1.0
         assert MIN_RATE_HZ == 0.001
         assert MAX_RATE_HZ == 1000.0
         assert MIN_QUERY_RADIUS_M == 500.0
@@ -1574,3 +1579,108 @@ class TestReplayIdentity:
 
         assert shifted.attribution.gates["dwell"]["satisfied"] is False
         assert shifted.rates != original.rates
+
+
+class TestSkinHysteresis:
+    """The dead band on the skin thresholds -- task 57.
+
+    Every temperature here is a reading the handset actually produced. The sequence
+    in the first test is verbatim from `run_20260905_142351`, which is the run that
+    found the defect: without a dead band it commanded eight camera rate changes in
+    thirty seconds, and in live mode each one is a camera rebind on the phone.
+    """
+
+    #: The seven readings, in order, that the handset reported while it sat on
+    #: SKIN_WARM_C. Under the bare comparison they alternate over and under.
+    CHATTER = (39.991, 40.001, 39.994, 40.027, 39.998, 40.005, 39.991)
+
+    def _scales(self, readings):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        out = []
+        for celsius in readings:
+            out.append(controller.decide(calm(skin_temp_c=celsius)).thermal_scale)
+            clock.advance(1.0)
+        return out
+
+    def test_a_reading_resting_on_the_threshold_changes_the_scale_once(self):
+        scales = self._scales(self.CHATTER)
+        # First reading is under the threshold and has nothing latched, so full rate.
+        assert scales[0] == 1.0
+        # Every reading after the first crossing stays backed off, including the four
+        # that are under 40.0 by hundredths.
+        assert scales[1:] == [THERMAL_SCALE["moderate"]] * 6, scales
+        changes = sum(1 for a, b in zip(scales, scales[1:]) if a != b)
+        assert changes == 1, f"{changes} scale changes over {self.CHATTER}"
+
+    def test_the_bare_comparison_is_what_chattered(self):
+        # The control. Without this the test above cannot show the dead band did
+        # anything: a sequence that never chattered would pass it unchanged.
+        bare = [1.0 if c < SKIN_WARM_C else THERMAL_SCALE["moderate"] for c in self.CHATTER]
+        changes = sum(1 for a, b in zip(bare, bare[1:]) if a != b)
+        assert changes == 6, bare
+
+    def test_backing_off_is_not_delayed_by_the_dead_band(self):
+        # The asymmetry the dead band exists to preserve: entering takes the bare
+        # threshold, on the first decision that sees it, with no dwell.
+        controller = SensingController(clock=Clock())
+        decision = controller.decide(calm(skin_temp_c=SKIN_WARM_C))
+        assert decision.thermal_scale == THERMAL_SCALE["moderate"]
+
+    def test_recovery_waits_for_the_full_dead_band(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        controller.decide(calm(skin_temp_c=SKIN_WARM_C + 0.5))
+        held = controller.decide(calm(skin_temp_c=SKIN_WARM_C - 0.5))
+        assert held.thermal_scale == THERMAL_SCALE["moderate"]
+        released = controller.decide(calm(skin_temp_c=SKIN_WARM_C - 1.5))
+        assert released.thermal_scale == 1.0
+
+    def test_the_hot_threshold_has_its_own_dead_band(self):
+        # Releasing `severe` must land on `moderate`, not on 1.0: the reading is
+        # still far above SKIN_WARM_C, and one latch must not release the other.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        assert controller.decide(calm(skin_temp_c=SKIN_HOT_C)).thermal_scale \
+            == THERMAL_SCALE["severe"]
+        held = controller.decide(calm(skin_temp_c=SKIN_HOT_C - 0.5))
+        assert held.thermal_scale == THERMAL_SCALE["severe"]
+        released = controller.decide(calm(skin_temp_c=SKIN_HOT_C - 1.5))
+        assert released.thermal_scale == THERMAL_SCALE["moderate"]
+
+    def test_a_latch_survives_a_telemetry_gap(self):
+        # Silence is not cooling. A gap must not hand back full rates to a handset
+        # that was hot when it last spoke, which is the same reading of silence the
+        # `unknown` tier already takes.
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        controller.decide(calm(skin_temp_c=SKIN_WARM_C + 0.5))
+        gap = controller.decide(calm(thermal_status=None, skin_temp_c=None))
+        assert gap.thermal_scale == THERMAL_SCALE["unknown"]
+        back = controller.decide(calm(skin_temp_c=SKIN_WARM_C - 0.5))
+        assert back.thermal_scale == THERMAL_SCALE["moderate"]
+
+    def test_every_thermal_evidence_path_carries_both_latches(self):
+        # The key set must not vary by path: a census of `skin_warm_latched` should
+        # never have to tell "false" from "this path does not say".
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        controller.decide(calm(skin_temp_c=SKIN_WARM_C + 0.5))
+        paths = [
+            calm(skin_temp_c=SKIN_WARM_C + 0.5),          # fresh
+            calm(thermal_status=None, skin_temp_c=None),  # no_telemetry
+            calm(telemetry_age_s=None),                   # unstamped
+            calm(telemetry_age_s=MAX_TELEMETRY_AGE_S + 1),  # stale
+        ]
+        for inputs in paths:
+            evidence = controller.decide(inputs).attribution.rules[Trigger.THERMAL].evidence
+            assert "skin_warm_latched" in evidence, inputs
+            assert "skin_hot_latched" in evidence, inputs
+
+    def test_the_reason_does_not_claim_a_crossing_that_did_not_happen(self):
+        clock = Clock()
+        controller = SensingController(clock=clock)
+        controller.decide(calm(skin_temp_c=SKIN_WARM_C + 0.5))
+        held = controller.decide(calm(skin_temp_c=SKIN_WARM_C - 0.5))
+        reason = " ".join(held.reasons)
+        assert "held" in reason and ">=" not in reason, reason

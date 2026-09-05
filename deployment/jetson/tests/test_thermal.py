@@ -1721,4 +1721,14 @@ def test_the_controller_is_byte_identical_after_this_task():
     # independently of `thermal_status` and `skin_temp_c`. `_thermal_scale`
     # reads that combination as `unknown` rather than fresh, which moves
     # `Decision.to_record()` on every draw that hits it.
-    assert digest == "bb1cb86fa04187b0374d3820e96f7f08"
+    #
+    # Moved once, deliberately, by task 57's skin dead band. Diffed record by record
+    # against the previous controller over these same 15,000 draws rather than
+    # accepted on the digest alone: `attribution` moved on all 15,000, which is the
+    # two latch flags now present on every evidence dict; `reasons` on 644, which is
+    # the skin sentence carrying two decimals and saying when it is held; and
+    # `thermal_scale` and `rates` on 6, which is the behaviour change itself -- six
+    # draws that landed under a threshold while latched and are now held instead of
+    # released. Six is low because the fuzz draws skin uniformly over 20-50 C, so
+    # falling inside a 1 C band below a threshold while already latched is rare.
+    assert digest == "7cc2e8480eaaae1b1d14309316fb7a0e"
