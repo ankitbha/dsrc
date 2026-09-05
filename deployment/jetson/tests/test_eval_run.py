@@ -311,6 +311,32 @@ def test_a_link_ms_with_no_recognised_source_is_kept_apart_as_unknown(tmp_path):
     assert link["unknown_source"]["n"] == 30
 
 
+def test_unknown_source_ticks_count_as_converted_for_e2e_ms_too(tmp_path):
+    """B7, validation round 1: `e2e_ms_converted_only`'s own mask used to
+    check `timebase.source` against `("round_trip", "one_way")` directly,
+    while `link_by_source` (this same function, just above) counts a tick
+    "converted" whenever `link_ms is not None` -- unconditionally including
+    `unknown_source`. The two disagreed on exactly this tick shape: counted
+    in `link_ms_converted_fraction`'s numerator, excluded from
+    `e2e_ms_converted_only`'s population. Mixed with a genuinely proxied
+    tick so the two populations (all ticks vs. converted-only) actually
+    differ if `unknown_source` ticks are wrongly left out of "converted"."""
+    ticks = (
+        [make_tick(i, e2e_ms=31.0, jetson_ms=31.0, timebase_source="proxy",
+                   proxy_reason="no samples")
+         for i in range(5)]
+        + [make_tick(5 + i, e2e_ms=118.0, jetson_ms=20.0, link_ms=8.0,
+                     timebase_source=None)
+           for i in range(25)]
+    )
+    result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+    latency = result["latency_ms"]
+    # All 25 unknown_source ticks must count as converted, not just the 0
+    # that "source in (round_trip, one_way)" alone would recognise.
+    assert latency["e2e_ms_converted_only"]["n"] == 25
+    assert latency["e2e_ms"]["n"] == 30
+
+
 def test_proxied_ticks_are_counted_and_named_by_reason_not_pooled_into_link_ms(tmp_path):
     """Under the proxy, link_ms is None by construction (capture IS arrival),
     so a proxied tick contributes to neither link series -- it is counted and

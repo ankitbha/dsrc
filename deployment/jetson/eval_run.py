@@ -737,9 +737,20 @@ def analyze(
     # stamp actually crossed the link, rather than being proxied by
     # arrival).
     timebase_records = [t.get("timebase") for t in ticks]
-    converted_mask = [
-        (tb or {}).get("source") in ("round_trip", "one_way") for tb in timebase_records
-    ]
+    # B7 (validation round 1): defined the same way `link_by_source` below
+    # defines "converted" -- `link_ms is not None` -- rather than checking
+    # `timebase.source` against the two recognised strings. The two
+    # disagreed on a tick with `link_ms` present but an unrecognised or
+    # missing source (`unknown_source`'s own case): `link_by_source` counted
+    # it as converted (it contributes to `converted_total`, and so to
+    # `link_ms_converted_fraction`), while this mask did not, so the same
+    # tick was "converted" for one population and not the other. Unreachable
+    # at this commit -- a current-format tick's `link_ms` is never set
+    # without a recognised `timebase.source` alongside it -- but a run
+    # recorded before per-tick `timebase.source` existed could produce
+    # exactly that shape, and the two must agree about what "converted"
+    # means regardless of which run produced the tick.
+    converted_mask = [t.get("link_ms") is not None for t in ticks]
     e2e_all = [t["e2e_ms"] for t in ticks]
     e2e_converted = [e for e, c in zip(e2e_all, converted_mask) if c]
     latency = {
