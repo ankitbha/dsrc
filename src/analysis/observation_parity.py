@@ -280,23 +280,22 @@ def _production_builder_config() -> BuilderConfig:
     """`BuilderConfig` built exactly the way `run_demo.py` builds it (B5,
     validation round 1), not `BuilderConfig()`'s bare defaults.
 
-    `run_demo.py` does not call `BuilderConfig()` either: it reads
-    `config["observation"]`, then overrides `gps_stale_after_s` from
-    `config["gps"]["stale_after_s"]` and `peer_range_m` from
-    `config["v2v"]["range_m"]`, and only THEN calls `BuilderConfig.from_dict`.
-    The two constructions agree today only because nobody has edited
-    `config.yaml` and this file's bare defaults at the same time; reading
-    the real file means a config edit that missed this one cannot leave the
-    ledger silently describing a builder nobody runs.
+    Reads the real `config.yaml` and calls `BuilderConfig.from_full_config`
+    -- the SAME classmethod `run_demo.build_components` calls (B11,
+    validation round 2: this function used to carry its own copy of that
+    merge's three lines, so a test asserting the two agreed was pinning the
+    function against a transcription of itself, not against
+    `run_demo.py`'s actual construction -- a fourth override added to one
+    copy and not the other would have left both the harness and that test
+    green). One merge, called from both places, is what makes a future
+    divergence between them structurally impossible rather than merely
+    untested.
     """
     import yaml
 
     with open(JETSON_DIR / "config.yaml") as f:
         config = yaml.safe_load(f)
-    obs_cfg = dict(config["observation"])
-    obs_cfg["gps_stale_after_s"] = config["gps"]["stale_after_s"]
-    obs_cfg["peer_range_m"] = config["v2v"]["range_m"]
-    return BuilderConfig.from_dict(obs_cfg)
+    return BuilderConfig.from_full_config(config)
 
 
 def live_observation(scene: Scene) -> "ObservationResult":  # noqa: F821

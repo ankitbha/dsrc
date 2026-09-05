@@ -671,3 +671,44 @@ class TestLastDetectionAge:
             ages.append(result.diagnostics["last_detection_age_s"])
         assert ages == sorted(ages)
         assert ages == [1.0, 2.0, 5.0]
+
+
+class TestBuilderConfigFromFullConfig:
+    """B11 (validation round 2): the merge `run_demo.build_components` and
+    `src.analysis.observation_parity._production_builder_config` both need
+    -- config["observation"] plus two cross-section overrides -- lives once
+    here, not as a copy at each call site.
+    """
+
+    def _config(self, **overrides):
+        base = {
+            "observation": {"effective_range_m": 80.0, "assumed_lane": 1},
+            "gps": {"stale_after_s": 2.0},
+            "v2v": {"range_m": 150.0},
+        }
+        base.update(overrides)
+        return base
+
+    def test_reads_the_observation_section(self):
+        cfg = BuilderConfig.from_full_config(self._config())
+        assert cfg.effective_range_m == 80.0
+        assert cfg.assumed_lane == 1
+
+    def test_overrides_gps_stale_after_s_from_the_gps_section(self):
+        cfg = BuilderConfig.from_full_config(self._config(gps={"stale_after_s": 9.0}))
+        assert cfg.gps_stale_after_s == 9.0
+
+    def test_overrides_peer_range_m_from_the_v2v_section(self):
+        cfg = BuilderConfig.from_full_config(self._config(v2v={"range_m": 300.0}))
+        assert cfg.peer_range_m == 300.0
+
+    def test_a_value_named_in_both_the_observation_section_and_an_override_takes_the_override(self):
+        """The override sections win, matching build_components' own
+        assignment order (observation section first, then overwritten)."""
+        cfg = BuilderConfig.from_full_config(
+            self._config(
+                observation={"effective_range_m": 80.0, "gps_stale_after_s": 1.0},
+                gps={"stale_after_s": 9.0},
+            )
+        )
+        assert cfg.gps_stale_after_s == 9.0

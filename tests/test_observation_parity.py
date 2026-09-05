@@ -276,27 +276,25 @@ def test_check_run_against_ledger_refuses_an_empty_run(tmp_path, ledger):
 
 
 def test_production_builder_config_reads_the_real_config_yaml():
-    """`run_demo.py` does not call `BuilderConfig()` either -- it reads
-    `config["observation"]`, overrides `gps_stale_after_s` from
-    `config["gps"]["stale_after_s"]` and `peer_range_m` from
-    `config["v2v"]["range_m"]`, and only then calls `BuilderConfig.
-    from_dict`. Reproduced independently here (not by importing
-    `_production_builder_config`'s own merge steps) so a future edit that
-    made the harness diverge from `run_demo.py`'s actual construction would
-    fail this, not just happen to agree with bare defaults the way it did
-    before this fix.
+    """`_production_builder_config` is now a thin wrapper -- read the real
+    file, call `BuilderConfig.from_full_config` (B11, validation round 2:
+    the SAME classmethod `run_demo.build_components` calls, extracted so
+    the merge exists once rather than as a copy at each call site -- see
+    `TestBuilderConfigFromFullConfig` in `deployment/jetson/tests/
+    test_observation_builder.py` for that merge's own tests). What is
+    worth pinning here is narrower and does not re-derive the merge: that
+    this function reads THIS repository's real `config.yaml` rather than a
+    stale copy or the wrong path.
     """
     import yaml
     from perception.observation_builder import BuilderConfig
 
     with open(JETSON_DIR / "config.yaml") as f:
         config = yaml.safe_load(f)
-    obs_cfg = dict(config["observation"])
-    obs_cfg["gps_stale_after_s"] = config["gps"]["stale_after_s"]
-    obs_cfg["peer_range_m"] = config["v2v"]["range_m"]
-    expected = BuilderConfig.from_dict(obs_cfg)
+    expected = BuilderConfig.from_full_config(config)
 
     assert _production_builder_config() == expected
-    # And, today, the two constructions coincide -- which is exactly why
-    # this was worth pinning rather than leaving as a coincidence.
+    # And, today, the two constructions coincide with bare defaults too --
+    # which is exactly why that was worth pinning rather than leaving as a
+    # coincidence.
     assert _production_builder_config() == BuilderConfig()

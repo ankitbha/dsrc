@@ -32,7 +32,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -92,6 +92,32 @@ class BuilderConfig:
                 value = raw[f]
                 kwargs[f] = tuple(value) if isinstance(value, list) else value
         return cls(**kwargs)
+
+    @classmethod
+    def from_full_config(cls, config: Mapping[str, Any]) -> "BuilderConfig":
+        """The one construction from a whole `config.yaml`-shaped dict:
+        `config["observation"]` plus two cross-section overrides this
+        builder cannot get from its own section alone.
+
+        `gps_stale_after_s` comes from `config["gps"]["stale_after_s"]`,
+        and `peer_range_m` from `config["v2v"]["range_m"]` -- the range the
+        beacon transceiver actually admits peers at, which `nearby_av_
+        density` divides by; a config with `v2v.range_m` changed but this
+        builder still dividing by its own literal used to report double
+        the vehicles per km the admission range implied.
+
+        Extracted (B11, validation round 2) so `run_demo.build_components`
+        and `src.analysis.observation_parity._production_builder_config`
+        call the SAME merge rather than each carrying its own copy of these
+        three lines: two copies agree only until one of them gains a fourth
+        override the other does not, and a test built by re-typing the
+        same three lines independently would not catch that either -- it
+        would only ever agree with whichever copy it was transcribed from.
+        """
+        obs_cfg = dict(config["observation"])
+        obs_cfg["gps_stale_after_s"] = config["gps"]["stale_after_s"]
+        obs_cfg["peer_range_m"] = config["v2v"]["range_m"]
+        return cls.from_dict(obs_cfg)
 
 
 @dataclass
