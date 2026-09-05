@@ -46,6 +46,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUT = REPO_ROOT / "deployment" / "jetson" / "models" / "installed_apk.json"
 PACKAGE = "com.dsrc.phone"
 
+# B23 (validation round 4, acted on rather than skipped): `lastUpdateTime`
+# is read here at INSTALL time and again by `run_demo.py`'s
+# `_live_apk_last_update_time` at RUN time, and the two values are then
+# COMPARED for equality -- a regex hardened in one copy and not the other
+# would make that comparison assert a reinstall that never happened, so
+# the extraction itself lives in one shared module rather than two
+# separate regexes that happen to agree today.
+sys.path.insert(0, str(REPO_ROOT / "deployment" / "jetson"))
+from dumpsys_util import parse_last_update_time  # noqa: E402
+
 
 def _dumpsys_versions(serial: str) -> tuple[int | None, str | None]:
     """versionCode/versionName off `dumpsys package com.dsrc.phone`, or
@@ -70,7 +80,9 @@ def _dumpsys_last_update_time(serial: str) -> str | None:
     (e.g. `"2026-09-05 00:58:05"`) -- the field `run_demo.py`'s
     `_build_provenance` re-reads at run time to tell whether the device
     still matches what this sidecar was written against (A5, validation
-    round 3). `None` when adb cannot answer or the field is absent."""
+    round 3). `None` when adb cannot answer or the field is absent. The
+    extraction itself is `dumpsys_util.parse_last_update_time`, shared
+    with that re-check rather than duplicated (B23, validation round 4)."""
     try:
         result = subprocess.run(
             ["adb", "-s", serial, "shell", "dumpsys", "package", PACKAGE],
@@ -78,8 +90,7 @@ def _dumpsys_last_update_time(serial: str) -> str | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    match = re.search(r"lastUpdateTime=(.+)", result.stdout)
-    return match.group(1).strip() if match else None
+    return parse_last_update_time(result.stdout)
 
 
 def _device_apk_sha256(serial: str) -> str | None:
