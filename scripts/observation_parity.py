@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.analysis.observation_parity import build_ledger  # noqa: E402
+from src.analysis.observation_parity import build_ledger, check_run_against_ledger  # noqa: E402
 
 
 def json_safe(value: object) -> object:
@@ -65,6 +65,12 @@ def markdown_report(ledger: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-root", default="outputs/validation/observation_parity")
+    parser.add_argument(
+        "--run-dir", type=Path, default=None,
+        help="also check a real drive's own metadata.jsonl against the ledger (47.8/47.9) "
+             "and write observation_run_check.json into it -- B6, validation round 1: "
+             "47.8/47.9 had no committed command and left no artifact",
+    )
     args = parser.parse_args()
 
     ledger = build_ledger()
@@ -84,7 +90,24 @@ def main() -> int:
     print(f"provenance mismatches: {prov_mismatches or 'none'}")
     print(f"json: {json_path}")
     print(f"markdown: {md_path}")
-    return 0 if not mismatches and not prov_mismatches else 2
+    ledger_ok = not mismatches and not prov_mismatches
+
+    run_check_ok = True
+    if args.run_dir is not None:
+        run_check = check_run_against_ledger(args.run_dir, ledger)
+        run_check_path = args.run_dir / "observation_run_check.json"
+        run_check_path.write_text(
+            json.dumps(json_safe(run_check), indent=2, sort_keys=True, allow_nan=False)
+        )
+        print(
+            f"run check: {run_check['ticks_checked']} ticks, "
+            f"reencode mismatches {len(run_check['reencode_mismatches'])}, "
+            f"constant mismatches {list(run_check['constant_mismatches'])}"
+        )
+        print(f"run check json: {run_check_path}")
+        run_check_ok = run_check["ok"]
+
+    return 0 if ledger_ok and run_check_ok else 2
 
 
 if __name__ == "__main__":

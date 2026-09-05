@@ -20,6 +20,8 @@ from src.analysis.observation_parity import (
     CLASS_IDENTICAL,
     CLASS_STRUCTURALLY_ABSENT,
     CLASS_SUBSTITUTED,
+    JETSON_DIR,
+    _production_builder_config,
     build_ledger,
     check_run_against_ledger,
     encode,
@@ -29,6 +31,7 @@ from src.analysis.observation_parity import (
 # sys.path (mirroring scripts/generate_transport_golden_frames.py), so
 # `policy` -- a deployment/jetson package, not a `src.*` one -- is only
 # reachable bare, and only after that import has already run.
+from perception.provenance import SUBSTITUTED  # noqa: E402
 from policy import sim_contract  # noqa: E402
 
 
@@ -119,24 +122,55 @@ def test_exactly_six_slots_are_structurally_absent():
 def test_every_claimed_class_matches_the_scenes_actually_run(ledger):
     """D19: `identical` must hold bit-for-bit on every scene, and a
     non-identical claim must show a real disagreement on at least one --
-    a check written to pass regardless would prove nothing about the code."""
-    mismatches = [row["slot"] for row in ledger["slots"] if not row["matches_claimed_class"]]
+    a check written to pass regardless would prove nothing about the code.
+
+    Recomputed here from `row["per_scene"][*]["equal"]` (B4, validation
+    round 1) rather than trusting `row["matches_claimed_class"]`, which the
+    module under test also computed: a bug that hardcoded that field to
+    `True` would still pass a test reading it back, and did -- 12 tests
+    stayed green under exactly that mutation.
+    """
+    mismatches = []
+    for row in ledger["slots"]:
+        always_equal = all(v["equal"] for v in row["per_scene"].values())
+        should_hold = always_equal if row["class"] == CLASS_IDENTICAL else not always_equal
+        if not should_hold:
+            mismatches.append(row["slot"])
     assert mismatches == []
 
 
 def test_every_substituted_or_absent_slot_carries_substituted_provenance(ledger):
     """D19 acceptance item 4: a slot substituted in fact but marked measured
-    in provenance is a defect and fails the task."""
-    failing = [
-        row["slot"] for row in ledger["slots"] if not row["provenance_in_substituted_partition"]
-    ]
+    in provenance is a defect and fails the task.
+
+    Recomputed from `row["field_sources_by_scene"]` against
+    `perception.provenance.SUBSTITUTED` directly (B4), not from
+    `row["provenance_in_substituted_partition"]`, which the module under
+    test also computed.
+    """
+    failing = []
+    for row in ledger["slots"]:
+        if row["class"] not in (CLASS_SUBSTITUTED, CLASS_STRUCTURALLY_ABSENT):
+            continue
+        classes = [c for c in row["field_sources_by_scene"].values() if c is not None]
+        if not classes or not all(c in SUBSTITUTED for c in classes):
+            failing.append(row["slot"])
     assert failing == []
 
 
 def test_every_named_constant_holds_across_every_scene(ledger):
+    """Recomputed from `row["per_scene"][*]["live"]` against
+    `row["live_constant"]` directly (B4), not from
+    `row["constant_holds_across_scenes"]`."""
     rows_with_constants = [row for row in ledger["slots"] if row["live_constant"] is not None]
     assert len(rows_with_constants) > 0, "fixture must exercise at least one named constant"
-    failing = [row["slot"] for row in rows_with_constants if not row["constant_holds_across_scenes"]]
+    failing = []
+    for row in rows_with_constants:
+        constant = row["live_constant"]
+        if not all(
+            abs(v["live"] - constant) <= 1e-5 for v in row["per_scene"].values()
+        ):
+            failing.append(row["slot"])
     assert failing == []
 
 
@@ -236,3 +270,33 @@ def test_check_run_against_ledger_refuses_an_empty_run(tmp_path, ledger):
     result = check_run_against_ledger(run_dir, ledger)
     assert result["ticks_checked"] == 0
     assert result["ok"] is False
+
+
+# -- B5 (validation round 1): the harness builds from the real config.yaml -
+
+
+def test_production_builder_config_reads_the_real_config_yaml():
+    """`run_demo.py` does not call `BuilderConfig()` either -- it reads
+    `config["observation"]`, overrides `gps_stale_after_s` from
+    `config["gps"]["stale_after_s"]` and `peer_range_m` from
+    `config["v2v"]["range_m"]`, and only then calls `BuilderConfig.
+    from_dict`. Reproduced independently here (not by importing
+    `_production_builder_config`'s own merge steps) so a future edit that
+    made the harness diverge from `run_demo.py`'s actual construction would
+    fail this, not just happen to agree with bare defaults the way it did
+    before this fix.
+    """
+    import yaml
+    from perception.observation_builder import BuilderConfig
+
+    with open(JETSON_DIR / "config.yaml") as f:
+        config = yaml.safe_load(f)
+    obs_cfg = dict(config["observation"])
+    obs_cfg["gps_stale_after_s"] = config["gps"]["stale_after_s"]
+    obs_cfg["peer_range_m"] = config["v2v"]["range_m"]
+    expected = BuilderConfig.from_dict(obs_cfg)
+
+    assert _production_builder_config() == expected
+    # And, today, the two constructions coincide -- which is exactly why
+    # this was worth pinning rather than leaving as a coincidence.
+    assert _production_builder_config() == BuilderConfig()

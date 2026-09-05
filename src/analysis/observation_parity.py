@@ -276,6 +276,29 @@ def sim_observation(scene: Scene) -> dict[str, Any]:
     return result["ego"]
 
 
+def _production_builder_config() -> BuilderConfig:
+    """`BuilderConfig` built exactly the way `run_demo.py` builds it (B5,
+    validation round 1), not `BuilderConfig()`'s bare defaults.
+
+    `run_demo.py` does not call `BuilderConfig()` either: it reads
+    `config["observation"]`, then overrides `gps_stale_after_s` from
+    `config["gps"]["stale_after_s"]` and `peer_range_m` from
+    `config["v2v"]["range_m"]`, and only THEN calls `BuilderConfig.from_dict`.
+    The two constructions agree today only because nobody has edited
+    `config.yaml` and this file's bare defaults at the same time; reading
+    the real file means a config edit that missed this one cannot leave the
+    ledger silently describing a builder nobody runs.
+    """
+    import yaml
+
+    with open(JETSON_DIR / "config.yaml") as f:
+        config = yaml.safe_load(f)
+    obs_cfg = dict(config["observation"])
+    obs_cfg["gps_stale_after_s"] = config["gps"]["stale_after_s"]
+    obs_cfg["peer_range_m"] = config["v2v"]["range_m"]
+    return BuilderConfig.from_dict(obs_cfg)
+
+
 def live_observation(scene: Scene) -> "ObservationResult":  # noqa: F821
     """Instantiate `scene` on the live sensing model.
 
@@ -285,7 +308,7 @@ def live_observation(scene: Scene) -> "ObservationResult":  # noqa: F821
     approximation of one, an absence, which is `follower_gap` and its
     siblings' actual mechanism (`structurally_absent`, not merely unequal).
     """
-    cfg = BuilderConfig()
+    cfg = _production_builder_config()
     builder = ObservationBuilder(cfg)
     forward = [v for v in scene.vehicles if v.longitudinal_offset_m > 0]
     vehicles = [
