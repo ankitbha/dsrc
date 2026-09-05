@@ -68,6 +68,24 @@ Reference simulated runs (each has `report.md` + plots from `eval_run.py`):
 
 ## Session log
 
+- **2026-09-05** — Phone app installed on `ZY227VV4XC` (implement stage,
+  tasks 40/42/43/47). The app was absent from the handset going into this
+  session (`pm path com.dsrc.phone` empty); tasks 40, 42, 43 and 47 all
+  need a live phone session, so this is a precondition for all four.
+  Built `:app:assembleDebug` on this laptop (JDK 17, `phone/gradlew`) from
+  commit `a61458d`, applicationId `com.dsrc.phone`, versionCode 1,
+  versionName `0.1`. SHA-256 of `app-debug.apk`:
+  `e179e95282ced6a99a71b03547350079254ceda3caabbbd2778dc7c15f327602`
+  (identical across a clean rebuild, so the build is reproducible for this
+  tree). Copied to `jetson-orin` by `scp` (checksum verified after
+  transfer, unchanged) and installed from there —
+  `adb -s ZY227VV4XC install -r`, since the Mac's `adb` cannot see the
+  phone while it is cabled to the Jetson. `pm path com.dsrc.phone` on the
+  device now resolves; `dumpsys package com.dsrc.phone` reports
+  versionCode 1 / versionName 0.1, matching the build. No other package or
+  device setting was touched. Any run record from here should cite this
+  SHA-256 as the build that produced it.
+
 - **2026-07-02 (final)** — TRAINED POLICY DEPLOYED. v3 training (5 runs,
   3000 updates, ring/heterogeneous/2 AVs + 8 humans, crash_penalty 2.0,
   entropy 0.005 — config `shared_ppo_stage0`) produced genuinely different
