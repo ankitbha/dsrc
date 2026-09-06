@@ -190,6 +190,38 @@ reserved `hello` header extension:
 `role` is `phone` or `jetson`. `hello` is reserved: no message-level extension
 may use that key on any channel.
 
+### `requested_mode` (optional)
+
+A hello MAY carry `requested_mode`, whose value is `shadow` or `live`:
+
+```json
+"hello": {
+  "protocol_version": 1,
+  "device_id": "moto-g-power",
+  "role": "phone",
+  "requested_mode": "live"
+}
+```
+
+It exists so a person in a car can choose a drive's kind from the phone app, which
+otherwise needs a shell on the Jetson and therefore a laptop.
+
+- **It is a request, not a setting.** The Jetson decides, applies it before the
+  first tick, and records both the mode and who asked in `sensing.mode`. The rule
+  that the Jetson owns every sensing decision, and that every decision reaches its
+  log, is unchanged.
+- **Absent means "no opinion"**, not `shadow`. A peer that omits the key leaves the
+  receiver on whatever its own configuration chose, so a build older than this
+  field changes nothing about an existing run.
+- **A sender with no opinion MUST omit the key** rather than send `null`. A hello
+  without it is then byte-identical to one from before the field existed, which is
+  what keeps `specs/transport_golden_frames.json` valid.
+- **A value outside the two MUST be refused** and the connection closed. Ignoring
+  it and running the default produces a drive that reads as a good one while
+  answering a question nobody asked.
+- Only the Jetson acts on it today. A `requested_mode` in the Jetson's own hello is
+  well-formed and has no defined effect.
+
 Rules:
 
 - The first frame in each direction MUST be a hello. A non-hello first frame is

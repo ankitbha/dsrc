@@ -54,18 +54,47 @@ class VersionMismatch(HandshakeError):
         self.remote = remote
 
 
+#: The drive modes a hello may ask for.
+#:
+#: Spelled out here rather than imported from `policy.shadow_mode`, because this
+#: file's own spec says the transport is opaque and assigns no meaning to what it
+#: carries -- a transport that imports the policy layer to validate a word is no
+#: longer that. The cost of restating them is drift, so
+#: `test_handshake.py::test_the_requested_modes_match_the_policy_layer` asserts the
+#: two sets are equal and fails the moment a mode is added on one side only.
+REQUESTED_MODES = frozenset({"shadow", "live"})
+
+
 @dataclass(frozen=True)
 class Hello:
     device_id: str
     role: Role
     protocol_version: int = PROTOCOL_VERSION
+    #: Which drive mode the peer is asking for, or None for "no opinion".
+    #:
+    #: The phone carries this so a person in a car can choose shadow or live from
+    #: the app, which otherwise takes a shell on the Jetson and therefore a laptop.
+    #: It is a REQUEST: the Jetson decides, applies it before the first tick and
+    #: records both the mode and who asked for it, so the invariant that the Jetson
+    #: owns every sensing decision and every decision reaches the log still holds.
+    #:
+    #: Optional on the wire. A peer that omits it -- any build older than this one
+    #: -- leaves the Jetson on whatever its command line chose, so nothing about an
+    #: existing run changes.
+    requested_mode: str | None = None
 
     def to_header_value(self) -> dict[str, Any]:
-        return {
+        value: dict[str, Any] = {
             "protocol_version": int(self.protocol_version),
             "device_id": str(self.device_id),
             "role": self.role.value,
         }
+        # Omitted rather than sent as null, so the golden frames for a hello
+        # without an opinion are byte-identical to the ones frozen before this
+        # field existed.
+        if self.requested_mode is not None:
+            value["requested_mode"] = str(self.requested_mode)
+        return value
 
 
 @dataclass(frozen=True)
@@ -169,7 +198,24 @@ def parse_hello(frame: Frame) -> Hello:
     if not isinstance(device_id, str) or not device_id:
         raise HandshakeError("hello device_id must be a non-empty string")
 
-    return Hello(device_id=device_id, role=role, protocol_version=version)
+    # Absent is fine and means "no opinion". A malformed value is refused rather
+    # than ignored: silently running shadow because the driver's build sent a word
+    # this one does not know is a wasted drive that reads as a good one, which is
+    # strictly worse than a session that fails immediately and says why.
+    requested_mode = value.get("requested_mode")
+    if requested_mode is not None:
+        if not isinstance(requested_mode, str):
+            raise HandshakeError(
+                f"hello requested_mode is {type(requested_mode).__name__}, expected str"
+            )
+        if requested_mode not in REQUESTED_MODES:
+            raise HandshakeError(
+                f"hello requested_mode {requested_mode!r} is not one of "
+                f"{sorted(REQUESTED_MODES)}"
+            )
+
+    return Hello(device_id=device_id, role=role, protocol_version=version,
+                 requested_mode=requested_mode)
 
 
 def perform_handshake(

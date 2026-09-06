@@ -214,6 +214,12 @@ class PhoneLink:
         #: from six hundred.
         self.here_failures = 0
         self.peer_device_id: str | None = None
+        #: The drive mode the connected phone asked for in its hello, or None when
+        #: it expressed none. Read once at session start and never mid-drive: the
+        #: mode a drive is BORN in is what `ModeHolder._born_live` and the analysis
+        #: in `eval_run` both key on, and a flip part-way through is a drive neither
+        #: `structurally_absent` nor the rates axis scores correctly today.
+        self.peer_requested_mode: str | None = None
         #: The current session's handshake-time wall-clock offset (remote
         #: minus local, seconds; positive means the phone is ahead), or
         #: `None` before any session has started. Recorded (B10, validation
@@ -364,6 +370,7 @@ class PhoneLink:
             if isinstance(event, SessionStarted):
                 self.session = event.session
                 self.peer_device_id = event.handshake.remote.device_id
+                self.peer_requested_mode = event.handshake.remote.requested_mode
                 self.wall_clock_offset_s = event.handshake.clock.remote_minus_local_wall_s
                 self.wall_clock_offset_bound_s = event.handshake.clock.wall_clock_offset_bound_s
                 self._begin()
@@ -558,6 +565,7 @@ class PhoneLink:
             self.here_failure = None
             self.session = event.session
             self.peer_device_id = event.handshake.remote.device_id
+            self.peer_requested_mode = event.handshake.remote.requested_mode
             # A new session is a new peer clock in this sense too: the
             # replacement handset's own offset, not the one the previous
             # phone measured.

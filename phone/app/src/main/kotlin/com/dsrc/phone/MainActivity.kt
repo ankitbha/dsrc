@@ -48,8 +48,12 @@ class MainActivity : ComponentActivity() {
     private val advisoryHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private lateinit var asked: AskedPermissions
 
-    /** Set when the user pressed Start but permissions had to be requested first. */
-    private var startRequested = false
+    /** Which Start the user pressed, when permissions had to be requested first.
+     *
+     *  The mode and not just a flag: the two buttons start different kinds of drive,
+     *  and remembering only that Start was pressed would resume the permission
+     *  round-trip in whichever mode the code happened to default to. */
+    private var pendingStartMode: String? = null
 
     private val listener = SensingStatus.Listener {
         runOnUiThread { refresh() }
@@ -66,9 +70,10 @@ class MainActivity : ComponentActivity() {
             // Continue the Start the user actually asked for. Without this, granting
             // returns to an idle screen and the user has to press Start again with no
             // indication that anything happened.
-            if (startRequested && PermissionModel.next(currentStates()) is PermissionAction.Proceed) {
-                startRequested = false
-                SensingService.start(this)
+            val pending = pendingStartMode
+            if (pending != null && PermissionModel.next(currentStates()) is PermissionAction.Proceed) {
+                pendingStartMode = null
+                SensingService.start(this, pending)
             }
             refresh()
         }
@@ -79,7 +84,10 @@ class MainActivity : ComponentActivity() {
         // The pending-result dispatch happens on the *new* instance after a rotation or
         // a process death mid-dialog, so a plain field would be false exactly when it
         // was needed.
-        startRequested = savedInstanceState?.getBoolean(KEY_START_REQUESTED, false) ?: false
+        // A String now, not a Boolean: the surviving value has to say WHICH Start was
+        // pressed, or a rotation mid-dialog resumes in whichever mode the code falls
+        // back to rather than the one the finger chose.
+        pendingStartMode = savedInstanceState?.getString(KEY_PENDING_START_MODE)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -104,9 +112,20 @@ class MainActivity : ComponentActivity() {
         root.addView(speedLabel)
         root.addView(adviceLabel)
         root.addView(confidenceLabel)
+        // Two buttons, not a toggle plus one. The mode belongs to a session, and a
+        // toggle has a state that survives the session that set it -- so the next
+        // drive would inherit the last one's kind from a control nobody looked at.
+        // Pressing the button IS the choice, and there is no other place to read it
+        // from.
         root.addView(Button(this).apply {
-            text = "Start sensing"
-            setOnClickListener { onStartClicked() }
+            text = "Start (shadow)"
+            tag = TAG_START_SHADOW
+            setOnClickListener { onStartClicked(SensingService.MODE_SHADOW) }
+        })
+        root.addView(Button(this).apply {
+            text = "Start (live)"
+            tag = TAG_START_LIVE
+            setOnClickListener { onStartClicked(SensingService.MODE_LIVE) }
         })
         root.addView(Button(this).apply {
             text = "Stop sensing"
@@ -171,12 +190,12 @@ class MainActivity : ComponentActivity() {
         confidenceLabel.text = advisory.confidenceLabel
     }
 
-    private fun onStartClicked() {
-        startRequested = true
+    private fun onStartClicked(mode: String) {
+        pendingStartMode = mode
         when (val action = PermissionModel.next(currentStates())) {
             is PermissionAction.Proceed -> {
-                startRequested = false
-                SensingService.start(this)
+                pendingStartMode = null
+                SensingService.start(this, mode)
             }
             is PermissionAction.Request -> requestPermissions.launch(action.permissions.toTypedArray())
             // Rationale and a fresh request are the same gesture here; a real
@@ -188,13 +207,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        outState.putBoolean(KEY_START_REQUESTED, startRequested)
+        outState.putString(KEY_PENDING_START_MODE, pendingStartMode)
     }
 
     private fun onStopClicked() {
         // A stop cancels a start the user is midway through granting for, or the
         // permission dialog's result would start sensing they just asked to end.
-        startRequested = false
+        pendingStartMode = null
         SensingService.stop(this)
     }
 
@@ -246,6 +265,12 @@ class MainActivity : ComponentActivity() {
         const val TAG_ADVICE = "advisory-advice"
         const val TAG_CONFIDENCE = "advisory-confidence"
 
+        // Tagged so an instrumented test and `run_device_session.py` can find the
+        // right Start without matching on button text, which is the label a person
+        // reads and therefore the thing most likely to be reworded.
+        const val TAG_START_SHADOW = "start-shadow"
+        const val TAG_START_LIVE = "start-live"
+
         /**
          * How often the advisory panel is redrawn.
          *
@@ -255,7 +280,7 @@ class MainActivity : ComponentActivity() {
         const val ADVISORY_TICK_MS = 250L
 
         const val PREFS = "permissions"
-        const val KEY_START_REQUESTED = "startRequested"
+        const val KEY_PENDING_START_MODE = "pendingStartMode"
         const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
     }
 }

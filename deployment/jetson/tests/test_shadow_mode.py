@@ -443,3 +443,32 @@ class TestTheRecordNamesWhatShadowCannotSee:
         for earlier, later in zip(flips, flips[1:]):
             assert earlier["now"] == later["was"]
         assert flips[0]["was"] == SHADOW
+
+
+class TestModeOrigin:
+    """Who chose the mode, recorded beside what the mode is.
+
+    Two builds of the phone and one service configuration produce the same `mode`
+    for different reasons, and a drive whose mode cannot be attributed is a drive
+    whose mode is a guess later.
+    """
+
+    def test_the_origin_defaults_to_the_command_line(self):
+        assert ModeHolder().to_record()["mode_origin"] == ModeHolder.ORIGIN_COMMAND_LINE
+
+    def test_a_phone_request_is_recorded_as_one(self):
+        holder = ModeHolder(LIVE, origin=ModeHolder.ORIGIN_PHONE_REQUEST)
+        record = holder.to_record()
+        assert record["mode"] == LIVE
+        assert record["mode_origin"] == ModeHolder.ORIGIN_PHONE_REQUEST
+        # Born live, so nothing is structurally absent and no flip happened: this is
+        # the property the whole start-time design exists to preserve.
+        assert record["flips"] == []
+        assert record["structurally_absent"] == []
+
+    def test_an_unknown_origin_is_refused(self):
+        # Closed set, like every other vocabulary in this file. An origin nobody
+        # recognises is worse than none, because a census of the field would
+        # silently grow a bucket.
+        with pytest.raises(ValueError, match="origin"):
+            ModeHolder(SHADOW, origin="somebody")

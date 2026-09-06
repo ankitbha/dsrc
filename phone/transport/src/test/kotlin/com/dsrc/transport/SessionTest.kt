@@ -245,6 +245,55 @@ class SessionTest {
     }
 
     @Test
+    fun `a requested mode goes out on the hello, and is absent when none is asked for`() {
+        // The phone's half of choosing a drive's kind from the app. It is a REQUEST:
+        // the Jetson reads it, decides, and records who asked. This test is about the
+        // wire only -- that the word leaves the handset, and that a session with no
+        // opinion sends a hello byte-identical to one from before the field existed,
+        // which is what keeps the frozen golden frames valid.
+        for (asked in listOf("live", "shadow", null)) {
+            val server = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).also { servers.add(it) }
+            val client = Socket(InetAddress.getLoopbackAddress(), server.localPort).also { sockets.add(it) }
+            val accepted = server.accept().also { sockets.add(it) }
+
+            // A valid peer hello first, so `start()` can complete its read.
+            Framing.write(
+                Framing.header(
+                    Channels.CONTROL, 0, 1, 2,
+                    mapOf(Session.HELLO to JsonValue.Obj(mapOf(
+                        "protocol_version" to JsonValue.Num(Protocol.VERSION.toLong()),
+                        "device_id" to JsonValue.Text("jetson"),
+                        "role" to JsonValue.Text("jetson"),
+                    ))),
+                    allowReserved = setOf(Session.HELLO),
+                ),
+                ByteArray(0), accepted.getOutputStream(),
+            )
+
+            Session(
+                input = client.getInputStream(),
+                output = client.getOutputStream(),
+                deviceId = "phone",
+                role = "phone",
+                monoClock = { 1 },
+                wallClock = { 2 },
+                requestedMode = asked,
+                onFrame = { _, _, _ -> },
+            ).also { sessions.add(it) }.start()
+
+            val hello = Framing.read(accepted.getInputStream()).header.entries[Session.HELLO]
+            val entries = (hello as JsonValue.Obj).entries
+            if (asked == null) {
+                assertFalse(entries.containsKey("requested_mode"),
+                    "a hello with no opinion must not carry the key at all")
+                assertEquals(setOf("protocol_version", "device_id", "role"), entries.keys)
+            } else {
+                assertEquals(asked, (entries["requested_mode"] as JsonValue.Text).value)
+            }
+        }
+    }
+
+    @Test
     fun `the hello is not delivered to the application`() {
         // It is transport traffic, consumed rather than delivered.
         val (phone, _) = pair()

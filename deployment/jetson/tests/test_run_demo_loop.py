@@ -1592,3 +1592,35 @@ class TestBuildProvenance:
             "apk_sha256", "apk_last_update_time", "apk_last_update_time_check",
             "installed_apk_record",
         }
+
+
+class TestResolveDriveMode:
+    """The one `if` that decides what kind a whole drive is.
+
+    Extracted from `run_live` for exactly this reason: buried there it could only be
+    exercised by starting a run with a handset attached.
+    """
+
+    def test_the_phone_wins_when_it_asks(self):
+        # Both directions, because a rule that only overrides one way would look
+        # correct on the drive people run most and fail on the other.
+        assert run_demo.resolve_drive_mode("live", False) == ("live", "phone_request")
+        assert run_demo.resolve_drive_mode("shadow", True) == ("shadow", "phone_request")
+
+    def test_the_command_line_decides_when_the_phone_says_nothing(self):
+        # A handset older than the field expresses no opinion, and an existing
+        # service configuration must behave exactly as it did before this feature.
+        assert run_demo.resolve_drive_mode(None, False) == ("shadow", "command_line")
+        assert run_demo.resolve_drive_mode(None, True) == ("live", "command_line")
+
+    def test_the_origin_is_always_one_the_holder_will_accept(self):
+        # The second element goes straight into `ModeHolder(origin=...)`, which
+        # raises on anything outside its closed set. A drive that fails there fails
+        # after the phone has already connected.
+        from policy.shadow_mode import ModeHolder
+
+        for requested in (None, "shadow", "live"):
+            for live_rates in (False, True):
+                mode, origin = run_demo.resolve_drive_mode(requested, live_rates)
+                assert origin in ModeHolder.ORIGINS
+                assert ModeHolder(mode, origin=origin).to_record()["mode_origin"] == origin

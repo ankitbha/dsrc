@@ -821,13 +821,25 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         from policy.sensing_loop import SensingLoop
         from policy.shadow_mode import LIVE, SHADOW, ModeHolder
 
+        # The phone's hello wins when it carries a request, and the command line
+        # is the default when it does not. That ordering is what lets one service
+        # configuration serve both drive kinds: the person in the car presses
+        # Start (shadow) or Start (live), and a handset too old to ask leaves the
+        # service exactly where its own arguments put it.
+        #
+        # Applied HERE, before the first tick, and never again. The mode a drive is
+        # born in is what `ModeHolder._born_live` and `eval_run`'s rates axis both
+        # key on; a mid-drive flip is a drive neither scores correctly today.
+        mode, origin = resolve_drive_mode(phone.peer_requested_mode, args.live_rates)
         sensing = SensingLoop(
-            modes=ModeHolder(LIVE if args.live_rates else SHADOW),
+            modes=ModeHolder(mode, origin=origin),
             heartbeat_s=args.rate_heartbeat_s,
         )
         print("[run] sensing control: " + ("LIVE -- rates are applied on the phone"
-              if args.live_rates else
-              "shadow -- decisions recorded, nothing applied"), flush=True)
+              if mode == LIVE else
+              "shadow -- decisions recorded, nothing applied")
+              + f" (chosen by the {'phone' if origin == ModeHolder.ORIGIN_PHONE_REQUEST else 'command line'})",
+              flush=True)
 
     def worker() -> None:
         nonlocal last_print
@@ -1182,6 +1194,24 @@ def summary_line(summary: dict, dropped_frames: int) -> str:
         f"p50 {latency['p50']:.1f} ms, p95 {latency['p95']:.1f} ms | "
         f"dropped frames {dropped_frames}"
     )
+
+
+def resolve_drive_mode(requested: str | None, live_rates: bool) -> tuple[str, str]:
+    """Which mode this drive runs in, and who chose it.
+
+    The phone's request wins when it carries one; the command line is the default
+    when it does not. That ordering is what lets one service configuration serve
+    both drive kinds -- a person presses Start (shadow) or Start (live) in the car --
+    while a handset too old to ask leaves an existing run exactly as it was.
+
+    Returned rather than applied so the rule is checkable on its own: it is one
+    `if`, and it decides what a whole drive is.
+    """
+    from policy.shadow_mode import LIVE, SHADOW, ModeHolder
+
+    if requested is None:
+        return (LIVE if live_rates else SHADOW), ModeHolder.ORIGIN_COMMAND_LINE
+    return requested, ModeHolder.ORIGIN_PHONE_REQUEST
 
 
 def build_parser() -> argparse.ArgumentParser:

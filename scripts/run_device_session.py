@@ -79,6 +79,17 @@ def focus_index(serial: str) -> int | None:
     return None
 
 
+#: Button order in `MainActivity`, which `press` navigates to by index because the
+#: activity never goes idle and `uiautomator` therefore cannot dump it. Named rather
+#: than written as literals at the call sites: adding the second Start moved Stop
+#: from 1 to 2, and a bare `press(serial, 1, ...)` at the end of a drive would have
+#: quietly started a live session instead of stopping a shadow one.
+BUTTON_START_SHADOW = 0
+BUTTON_START_LIVE = 1
+BUTTON_STOP = 2
+MODE_BUTTON = {"shadow": BUTTON_START_SHADOW, "live": BUTTON_START_LIVE}
+
+
 def press(serial: str, index: int, deadline: float) -> bool:
     """Move focus onto button `index` and activate it."""
     sh(serial, "shell", "input", "keyevent", "KEYCODE_DPAD_DOWN")
@@ -132,6 +143,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--serial", required=True)
     ap.add_argument("--seconds", type=float, default=60.0)
+    ap.add_argument(
+        "--mode", choices=sorted(MODE_BUTTON), default="shadow",
+        help="which Start to press. The phone carries this to the Jetson in its "
+             "hello, so one service configuration serves both drive kinds.",
+    )
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -163,7 +179,8 @@ def main() -> int:
     while time.time() < up and not buttons(args.serial):
         time.sleep(1.0)
 
-    if not press(args.serial, 0, time.time() + 45):
+    start_button = MODE_BUTTON[args.mode]
+    if not press(args.serial, start_button, time.time() + 45):
         print("could not focus START", flush=True)
         (args.out / "logcat.txt").write_text(sh(args.serial, "logcat", "-d", "-v", "time", timeout=180))
         (args.out / "views.txt").write_text(views(args.serial))
@@ -178,7 +195,7 @@ def main() -> int:
     while time.time() < deadline and not any("-> RUNNING" in t for t in transitions(args.serial)):
         time.sleep(2.0)
     if not any("-> RUNNING" in t for t in transitions(args.serial)):
-        press(args.serial, 0, time.time() + 20)
+        press(args.serial, start_button, time.time() + 20)
         clear_dialogs(args.serial, time.time() + 30)
         deadline = time.time() + 40
         while time.time() < deadline and not any("-> RUNNING" in t for t in transitions(args.serial)):
@@ -191,7 +208,7 @@ def main() -> int:
         return 3
 
     time.sleep(args.seconds)
-    press(args.serial, 1, time.time() + 30)
+    press(args.serial, BUTTON_STOP, time.time() + 30)
     time.sleep(6.0)
 
     (args.out / "logcat.txt").write_text(sh(args.serial, "logcat", "-d", "-v", "time", timeout=240))

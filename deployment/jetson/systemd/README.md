@@ -41,9 +41,26 @@ must not be able to change how the next drive runs.
 
 ## Choosing shadow or live
 
-Edit `DSRC_RUN_ARGS` in `~/.config/dsrc-drive.env` and restart the service. Shadow is
-the default; adding `--live-rates` makes the phone apply the commanded rates, which
-is task 51 and not task 50. Nothing else in the line should need changing.
+**From the app.** The activity has two Start buttons, `Start (shadow)` and
+`Start (live)`, and the phone carries the choice to the Jetson in its handshake. One
+service configuration therefore serves both kinds of drive, and switching between
+them is stopping the session and starting another — no shell, no restart, no edit.
+
+It is a request, not a setting: the Jetson decides, applies it before the first tick,
+and records both the mode and who asked in `summary.json` under
+`sensing.mode.mode_origin`, which reads `phone_request` or `command_line`. The rule
+that the Jetson owns every sensing decision, and that every decision reaches its log,
+is unchanged.
+
+`DSRC_RUN_ARGS` in `~/.config/dsrc-drive.env` still sets the **default**, used when
+the handset expresses no preference — a build older than the two buttons, for
+instance. Adding `--live-rates` there changes only that default.
+
+**Mid-session switching is deliberately not possible.** A drive that changes mode
+part-way is scored wrongly today: `eval_run` treats `ever_live` as a property of a
+whole drive, so the shadow segment of a promoted drive loses its caveat and its
+unapplied commands read as a rate shortfall. Choosing at the start keeps
+`flip_count` at 0 and each drive one kind throughout.
 
 ## Checking it without a screen
 

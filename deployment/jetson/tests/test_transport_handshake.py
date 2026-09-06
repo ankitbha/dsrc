@@ -11,6 +11,7 @@ import pytest
 from transport.channels import Channel
 from transport.frames import HELLO_KEY, PROTOCOL_VERSION, Frame, encode
 from transport.handshake import (
+    REQUESTED_MODES,
     HandshakeError,
     Hello,
     Role,
@@ -349,3 +350,54 @@ def test_the_round_trip_spans_the_read_not_a_bare_clock_pair():
     )
     thread.join(timeout=2.0)
     assert result.clock.round_trip_ns == wrapped.reads * 7
+
+
+class TestRequestedMode:
+    """The hello field that lets a person choose a drive's kind from the app.
+
+    A request and not a setting: the Jetson decides, applies it before the first
+    tick and records who asked, so the rule that the Jetson owns every sensing
+    decision and that every decision reaches its log still holds.
+    """
+
+    def test_a_hello_with_no_opinion_serialises_as_it_did_before_the_field(self):
+        # The golden frames were frozen before `requested_mode` existed, so a hello
+        # that omits it must serialise exactly as it did then. Sending `null`
+        # instead of omitting the key would have broken every one of them.
+        value = Hello(device_id="phone-1", role=Role.PHONE).to_header_value()
+        assert value == {"protocol_version": PROTOCOL_VERSION,
+                         "device_id": "phone-1", "role": "phone"}
+
+    def test_a_request_travels_and_comes_back(self):
+        for mode in sorted(REQUESTED_MODES):
+            hello = Hello(device_id="phone-1", role=Role.PHONE, requested_mode=mode)
+            assert hello.to_header_value()["requested_mode"] == mode
+            assert parse_hello(hello_frame(hello, t_mono_ns=1, t_wall_ns=2)).requested_mode == mode
+
+    def test_a_hello_without_the_field_reads_as_no_opinion_not_as_shadow(self):
+        # "No opinion" leaves the Jetson on its own configuration. Reading it as
+        # shadow would let a handset too old to ask silently overrule a service
+        # that was deliberately started for a live drive.
+        frame = hello_frame(Hello(device_id="phone-1", role=Role.PHONE),
+                            t_mono_ns=1, t_wall_ns=2)
+        assert parse_hello(frame).requested_mode is None
+
+    @pytest.mark.parametrize("bad", ["gated", "", 3, True, ["live"]])
+    def test_a_mode_this_build_does_not_know_is_refused_rather_than_ignored(self, bad):
+        # Ignoring it and running the default produces a drive that reads as a good
+        # one while answering a question nobody asked, which is strictly worse than
+        # a session that fails at the door and says why.
+        frame = hello_frame(Hello(device_id="phone-1", role=Role.PHONE),
+                            t_mono_ns=1, t_wall_ns=2)
+        frame.extensions[HELLO_KEY]["requested_mode"] = bad
+        with pytest.raises(HandshakeError, match="requested_mode"):
+            parse_hello(frame)
+
+    def test_the_requested_modes_match_the_policy_layer(self):
+        # `handshake.py` restates the modes rather than importing them, because its
+        # own spec says the transport is opaque and a transport that imports the
+        # policy layer to validate a word is not that. Restating costs drift, and
+        # this is the guard: add a mode on one side only and this fails.
+        from policy.shadow_mode import MODES
+
+        assert REQUESTED_MODES == frozenset(MODES)

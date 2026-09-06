@@ -103,11 +103,25 @@ class ModeHolder:
     reading it for the flag, because there is only one read.
     """
 
-    def __init__(self, mode: str = SHADOW, *, clock: Any = None) -> None:
+    #: Who chose the mode this drive is running in. `command_line` is the service's
+    #: own configuration; `phone_request` means the handset asked for it in its
+    #: hello, which is how a person in a car picks shadow or live without a shell.
+    ORIGIN_COMMAND_LINE = "command_line"
+    ORIGIN_PHONE_REQUEST = "phone_request"
+    ORIGINS = frozenset({ORIGIN_COMMAND_LINE, ORIGIN_PHONE_REQUEST})
+
+    def __init__(self, mode: str = SHADOW, *, clock: Any = None,
+                 origin: str = ORIGIN_COMMAND_LINE) -> None:
         import time as _time
 
         if mode not in MODES:
             raise ValueError(f"mode {mode!r} is not one of {MODES}")
+        if origin not in ModeHolder.ORIGINS:
+            raise ValueError(f"origin {origin!r} is not one of {sorted(ModeHolder.ORIGINS)}")
+        # Recorded, because a drive whose mode cannot be attributed is a drive whose
+        # mode is a guess later. Two builds of the phone and one service
+        # configuration can produce the same `mode` for different reasons.
+        self._origin = origin
         self._now = clock or _time.monotonic
         self._lock = threading.Lock()
         self._mode = mode
@@ -152,6 +166,7 @@ class ModeHolder:
         with self._lock:
             return {
                 "mode": self._mode,
+                "mode_origin": self._origin,
                 # Every flip, not just where it ended. A log that reports only the
                 # final mode cannot say which decisions were gated.
                 "flips": [{"at_mono": f.at_mono, "was": f.was, "now": f.now} for f in self._flips],

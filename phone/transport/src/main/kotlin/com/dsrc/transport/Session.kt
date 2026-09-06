@@ -93,6 +93,16 @@ class Session(
     private val monoClock: () -> Long,
     private val wallClock: () -> Long,
     /**
+     * The drive mode this side asks the Jetson for, or null for "no opinion".
+     *
+     * A request and not a setting: the Jetson decides, applies it before the first
+     * tick and records who asked, so the rule that the Jetson owns every sensing
+     * decision -- and that every decision reaches its log -- still holds. It exists
+     * so a person in a car can choose shadow or live from the app, which otherwise
+     * needs a shell on the Jetson and therefore a laptop.
+     */
+    private val requestedMode: String? = null,
+    /**
      * Delivered messages, minus transport traffic, called on the delivery thread with the
      * reader's own receipt stamps.
      *
@@ -214,11 +224,16 @@ class Session(
     fun start() {
         val helloSequence = queues.reserveHelloSequence()
         val hello = JsonValue.Obj(
-            mapOf(
-                "protocol_version" to JsonValue.Num(Protocol.VERSION.toLong()),
-                "device_id" to JsonValue.Text(deviceId),
-                "role" to JsonValue.Text(role),
-            )
+            buildMap {
+                put("protocol_version", JsonValue.Num(Protocol.VERSION.toLong()))
+                put("device_id", JsonValue.Text(deviceId))
+                put("role", JsonValue.Text(role))
+                // Omitted, not sent as null, when this side has no opinion. A hello
+                // without an opinion is then byte-identical to one from a build
+                // predating this field, so the frozen golden frames still hold and a
+                // Jetson that has never heard of it reads the same bytes as before.
+                requestedMode?.let { put("requested_mode", JsonValue.Text(it)) }
+            }
         )
         val header = Framing.header(
             channel = Channels.CONTROL,

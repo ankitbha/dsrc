@@ -54,6 +54,11 @@ class SessionHolder(
     /** Delivered inbound frames, with the reader's own receipt stamps. Called on a
      *  session delivery thread. */
     private val onFrame: (Frame, Long, Long) -> Unit,
+    /** The drive mode to ask the Jetson for, or null for "no opinion". Passed
+     *  straight into every [Session] this holder builds, including the ones it
+     *  builds on a redial: a reconnect must ask for the same mode the session it
+     *  replaces did, or the drive changes character when the cable is jostled. */
+    private val requestedMode: String? = null,
     /** Handed each outgoing header, as canonical JSON, for a local recorder. */
     private val onSent: ((String) -> Unit)? = null,
     /** A dial failure or a session end, named for the local session log --
@@ -199,6 +204,7 @@ class SessionHolder(
                     role = ROLE,
                     monoClock = monoClock,
                     wallClock = wallClock,
+                    requestedMode = requestedMode,
                     onFrame = onFrame,
                     onSent = onSent,
                     onEnd = { end, error ->

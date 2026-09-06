@@ -2125,6 +2125,65 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
+59. ~~**Choosing a drive's kind needs a shell, so it needs a laptop in the car.**~~
+    **DONE 2026-09-06.** `MainActivity` now has **Start (shadow)** and
+    **Start (live)**. Stop the session and start another to change kind; there is no
+    mid-session switching and that is deliberate.
+
+    **A request, not a setting.** The phone carries `requested_mode` in its
+    handshake; the Jetson decides, applies it before the first tick, and records both
+    the mode and who asked. `plan_deployment.md`'s rule -- the Jetson owns every
+    sensing decision, and a setting chosen on the phone is a decision that never
+    reaches the log -- therefore still holds, because this decision does reach it:
+    `sensing.mode.mode_origin` reads `phone_request` or `command_line`.
+
+    **Precedence:** the phone wins when it asks, the command line decides when it
+    does not. A handset older than the field expresses no opinion, so an existing
+    service configuration behaves exactly as before. `resolve_drive_mode` is a
+    module-level function rather than an `if` inside `run_live`, because it decides
+    what a whole drive is and was otherwise only reachable by starting a run with a
+    handset attached.
+
+    **Verified on the device, against a service whose own arguments select shadow:**
+
+    | button pressed | recorded mode | origin | flips |
+    |---|---|---|---|
+    | Start (live) | `live` | `phone_request` | 0 |
+    | Start (shadow) | `shadow` | `phone_request` | 0 |
+
+    So one service configuration served both kinds, and the button decided.
+
+    **Three design points that are not obvious.** A hello with no opinion omits the
+    key rather than sending `null`, so it is byte-identical to one from before the
+    field and `transport_golden_frames.json` stays valid. A value outside the two is
+    refused at the door on both sides rather than defaulted, because running shadow
+    silently when the driver pressed live is a wasted drive that reads as a good one.
+    And `handshake.py` restates the two modes instead of importing
+    `policy.shadow_mode`, because its own spec says the transport is opaque -- with a
+    test asserting the two sets stay equal, since restating them costs drift.
+
+    Two buttons rather than a toggle plus one Start: a toggle has state that outlives
+    the session that set it, so the next drive would inherit the last one's kind from
+    a control nobody looked at.
+
+    **Mid-session switching is left undone on purpose.** `ModeHolder` already
+    supports it -- `flip_to` exists with 22 tests and no production caller -- but
+    `eval_run` treats `ever_live` as a property of a whole drive, so a promoted
+    drive's shadow segment loses its caveat at `eval_run.py:1639` and its unapplied
+    commands read as a rate shortfall. The record can express a flip; the scoring
+    cannot.
+
+    `specs/transport_protocol.md` gains the field, since a wire change absent from
+    the contract is worse than an edit to it. Suites: 2265 Python, 458 app, 286
+    transport, 372 pins.
+
+    **A defect in the bench, not the feature.** The acceptance script printed
+    `VERDICT: the phone's request decided the drive` while its own Python was raising
+    `FileNotFoundError` -- the summary is not written until the run ends, and
+    `check ... | tee` takes its exit status from `tee`. The verdict was reported by a
+    check that never ran, which is this section's recurring shape. The result above
+    was re-derived from the summaries afterwards.
+
 58. ~~**Nothing starts the Jetson runtime in the car.**~~ **DONE 2026-09-05.**
     Until this, `run_demo.py` could only be started from a shell, which meant `ssh`
     over Tailscale, which meant the Jetson needed internet and the car needed a

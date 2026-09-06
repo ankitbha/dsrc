@@ -86,6 +86,11 @@ class SensingService : LifecycleService() {
     @Volatile
     private var configApplier: ConfigApplier? = null
 
+    /** The mode this session asks for, taken from the start intent. Null means the
+     *  caller expressed none, which leaves the Jetson on its own configuration. */
+    @Volatile
+    private var requestedMode: String? = null
+
     /**
      * The link address, read once at start, and the only instance of it.
      *
@@ -152,7 +157,19 @@ class SensingService : LifecycleService() {
         super.onStartCommand(intent, flags, startId)
         lastStartId = startId
         when (intent?.action) {
-            ACTION_START -> handle(SensingEvent.Start)
+            ACTION_START -> {
+                // Refused rather than defaulted. A start whose mode this build does
+                // not recognise means the caller wanted something specific, and
+                // quietly running shadow because the word was unknown is a drive
+                // that reads as a good one and answers a question nobody asked.
+                val asked = intent.getStringExtra(EXTRA_REQUESTED_MODE)
+                if (asked != null && asked != MODE_SHADOW && asked != MODE_LIVE) {
+                    Log.e(TAG, "refusing start: unknown requested mode $asked")
+                } else {
+                    requestedMode = asked
+                    handle(SensingEvent.Start)
+                }
+            }
             ACTION_STOP -> handle(SensingEvent.Stop)
             else -> Log.w(TAG, "ignoring intent with action ${intent?.action}")
         }
@@ -369,6 +386,7 @@ class SensingService : LifecycleService() {
         val holder = SessionHolder(
             config = linkAddress.config,
             deviceId = deviceId(),
+            requestedMode = requestedMode,
             monoClock = SystemClock::elapsedRealtimeNanos,
             wallClock = ::wallClockNanos,
             onFrame = ::onInboundFrame,
@@ -1016,6 +1034,9 @@ class SensingService : LifecycleService() {
     companion object {
         private const val TAG = "SensingService"
         const val ACTION_START = "com.dsrc.phone.action.START"
+        const val EXTRA_REQUESTED_MODE = "com.dsrc.phone.extra.REQUESTED_MODE"
+        const val MODE_SHADOW = "shadow"
+        const val MODE_LIVE = "live"
         const val ACTION_STOP = "com.dsrc.phone.action.STOP"
         private const val CHANNEL_ID = "sensing"
 
@@ -1207,8 +1228,18 @@ class SensingService : LifecycleService() {
          * A future background trigger would have to make the promise, and would then
          * need a fallback that satisfies it before giving up.
          */
-        fun start(context: Context) = context.startService(
-            Intent(context, SensingService::class.java).setAction(ACTION_START)
+        /**
+         * Start a session, asking the Jetson for [mode].
+         *
+         * The mode rides on the start intent rather than being stored, because it
+         * belongs to one session: stopping and starting again is how a drive's
+         * kind is chosen, and a remembered value would silently carry the last
+         * drive's choice into the next one.
+         */
+        fun start(context: Context, mode: String) = context.startService(
+            Intent(context, SensingService::class.java)
+                .setAction(ACTION_START)
+                .putExtra(EXTRA_REQUESTED_MODE, mode)
         )
 
         fun stop(context: Context) = context.startService(
