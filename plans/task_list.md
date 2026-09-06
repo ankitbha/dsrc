@@ -2125,6 +2125,46 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
+62. **A dead USB tether holds the default route against working wifi, and nothing
+    notices.** Open: the remedy needs root and is staged at `/tmp/fix_metric.sh`.
+
+    Reproduced live on 2026-09-06 by switching the hotspot off, which left the Moto
+    with no upstream while the cable stayed plugged in:
+
+    | probe | result |
+    |---|---|
+    | `ping -I usb2` | **FAILS** |
+    | `ping -I wlP1p1s0` | WORKS |
+    | `ping` with no interface, the path everything uses | **FAILS** |
+
+    So the Jetson had a working network and would not use it.
+
+    **NetworkManager is not at fault and that is the point.** From its side nothing
+    is wrong: the cable is in, the link is up, the DHCP lease from the phone is
+    valid. The phone is still a router, just one with nowhere to route. `usb2` at
+    metric 100 beats wifi at 600, and no connectivity check ever runs, so a black
+    hole outranks a working path indefinitely.
+
+    **This is section G's shape in the network stack:** `connected` and `working` are
+    different claims and nothing in the state distinguishes them. `usb2` reported
+    `connected` for the entire outage.
+
+    **It therefore constrains the phone-side health readout** more than it
+    constrains the routing. A status panel that reports "the Jetson has a network"
+    from an interface state would have shown green throughout. That field has to
+    mean a packet went out and came back, or it is worse than absent.
+
+    The fix sets ethernet below wifi in two places: the profile that exists, and a
+    `conf.d` default covering ethernet connections that do not exist yet. The second
+    matters because `Wired connection 2` was auto-created by NetworkManager for this
+    USB device, so fixing only the profile would let the next replug generate a fresh
+    one at metric 100 and bring the bug back silently.
+
+    **In the car this changes nothing**, because there is no wifi to win: if the
+    hotspot drops, Jetson access is gone until it returns. What it fixes is the desk,
+    where the Jetson otherwise spends the personal phone's mobile data while campus
+    wifi sits idle beside it.
+
 61. ~~**No way to reach the Jetson in the car.**~~ **DONE 2026-09-06.** The wifi
     route is a dead end and the phone is the answer: with USB tethering the handset
     is the Jetson's network adapter over the cable already in place.
