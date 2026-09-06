@@ -2125,8 +2125,8 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
-62. **A dead USB tether holds the default route against working wifi, and nothing
-    notices.** Open: the remedy needs root and is staged at `/tmp/fix_metric.sh`.
+62. ~~**A dead USB tether holds the default route against working wifi, and nothing
+    notices.**~~ **DONE 2026-09-06**, verified by a packet rather than by a state.
 
     Reproduced live on 2026-09-06 by switching the hotspot off, which left the Moto
     with no upstream while the cable stayed plugged in:
@@ -2164,6 +2164,19 @@ see what was cleared and on what evidence.
     hotspot drops, Jetson access is gone until it returns. What it fixes is the desk,
     where the Jetson otherwise spends the personal phone's mobile data while campus
     wifi sits idle beside it.
+
+    **After the fix**, with the hotspot still off so `usb2` is still a black hole:
+    wifi carries the default route at 600, `ping` over the default path WORKS, and
+    `ip route get` names `wlP1p1s0`. The same three probes that failed before now
+    separate correctly -- wifi WORKS, `usb2` FAILS, default WORKS -- which is the
+    behaviour that was missing.
+
+    One number came out other than as written: `ipv4.route-metric 700` produced a
+    kernel route at **20700**, so NetworkManager adds an offset somewhere rather than
+    using the value verbatim. It is recorded because it looks like a mistake and is
+    not: the ordering is what matters, 20700 loses to wifi's 600 by a wider margin
+    than intended, and in the car `usb2` is the only default route, where a metric
+    decides nothing at all.
 
 61. ~~**No way to reach the Jetson in the car.**~~ **DONE 2026-09-06.** The wifi
     route is a dead end and the phone is the answer: with USB tethering the handset
