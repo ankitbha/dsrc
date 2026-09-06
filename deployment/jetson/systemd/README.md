@@ -101,3 +101,55 @@ the USB link is adb with the Jetson as host, and there is no channel the other w
 
 Logging is roughly 150 MB per hour into `~/dsrc_logs`. At 647 GB free that is not a
 constraint for any single drive, but nothing prunes it.
+
+## Reaching the Jetson in the car
+
+The Jetson has no wifi it can use in the car, and its own radio cannot even hear the
+personal hotspot: measured on 2026-09-06, the hotspot's BSSID `5e:9c:01:50:f0:ed` was
+absent from a full scan while the Moto -- cabled to the Jetson, so inches away -- sat
+on it at RSSI -36. A saved wifi profile therefore does not solve this, and a bare
+profile would have failed silently in the car, because autoconnect also waits to hear
+a beacon.
+
+**The phone is the network instead.** With USB tethering on, the handset presents
+itself as an ethernet adapter over the cable that is already there:
+
+```
+phone (hotspot or cellular) --USB--> Jetson usb2 --DHCP--> Tailscale --> reachable
+```
+
+Measured: `usb2` at `192.168.16.x/24`, gateway and DNS the phone at `.29`, ping out
+54-143 ms, and Tailscale up over it. `adb survives`: setting rndis yields
+`rndis,none,adb`.
+
+`dsrc-usb-net.service` keeps it on. `svc usb setFunctions rndis` does NOT persist
+across a replug or a phone reboot, so the unit re-applies it, checking the current
+config rather than setting blindly -- a blind re-set every 20 s would bounce the USB
+bus continuously and take the drive's own link down with it. Verified by clearing the
+setting, knocking rndis out until `usb2` was gone, and watching the unit restore both
+inside 10 s.
+
+A second, independent backstop lives on the phone: `svc usb setScreenUnlockedFunctions
+rndis`, which the framework re-applies whenever the handset is unlocked. Note
+`persist.sys.usb.config` still reads `adb` even when this is set, so that property is
+not the way to check it.
+
+### The phone can also reach the Jetson directly
+
+With tethering up they share a subnet, so from the phone `ssh edge@192.168.16.70`
+works -- confirmed by reading an `SSH-2.0-OpenSSH_8.9p1` banner from the handset, with
+a `Connection refused` control on a dead port. Without tethering there is still a
+path, `adb reverse tcp:2222 tcp:22`, which puts the Jetson's sshd on the phone's own
+`127.0.0.1:2222`; that mapping is lost on every USB bounce and nothing re-creates it.
+
+### One cost, and it needs root to fix
+
+`usb2` takes the default route at metric 100, beating wifi at 600, so **at the desk
+every byte the Jetson sends goes over the phone's mobile data** -- including `rsync`
+and `scp` of this repository. In the car that is what you want; at the desk it is not.
+To prefer wifi whenever it is present:
+
+```sh
+sudo nmcli connection modify "Wired connection 2" ipv4.route-metric 700
+sudo nmcli connection up "Wired connection 2"
+```

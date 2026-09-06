@@ -2125,6 +2125,51 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
+61. ~~**No way to reach the Jetson in the car.**~~ **DONE 2026-09-06.** The wifi
+    route is a dead end and the phone is the answer: with USB tethering the handset
+    is the Jetson's network adapter over the cable already in place.
+
+    **Why wifi could not work, measured rather than assumed.** The saved hotspot
+    profile was correct -- ssid, `hidden yes`, autoconnect, priority 5 under `nyu`'s
+    10, `psk-flags 0` with the keyfile present -- and activation still failed:
+    `secrets exist. No new secrets needed` then `Activation: failed`. The password
+    was never in question. The Jetson simply cannot hear the AP: BSSID
+    `5e:9c:01:50:f0:ed` appears nowhere in a full scan, while the Moto, cabled to the
+    Jetson and so inches away, sits on it at RSSI -36. A single radio associated on
+    5 GHz `nyu` picks up mains-powered campus APs on 2.4 GHz but not a phone beacon on
+    channel 6. **A profile saved the ordinary way would have failed silently in the
+    car**, since autoconnect also waits to hear a beacon.
+
+    **What works.** `svc usb setFunctions rndis` gives `rndis,none,adb`, so adb
+    survives. The Jetson enumerates `usb2`, NetworkManager DHCPs it with no root
+    (`Wired connection 2`, autoconnect yes), gateway and DNS are the phone, ping out
+    is 54-143 ms, and Tailscale comes up over it.
+
+    **Two independent mechanisms hold it up**, because the setting does not persist
+    across a replug or a phone reboot. `dsrc-usb-net.service` on the Jetson re-applies
+    it, checking the current config rather than setting blindly -- a blind re-set
+    every 20 s would bounce the USB bus continuously and take the drive's own link
+    down with it. And `svc usb setScreenUnlockedFunctions rndis` on the phone. Note
+    `persist.sys.usb.config` still reads `adb` when the latter is set, so that
+    property is not how to check it.
+
+    **The unit was verified against a genuinely broken state, not merely installed.**
+    The first attempt proved nothing: the knock-out failed because the phone-side
+    backstop silently restored rndis, and the unit's log was empty. Clearing that
+    first produced a real failure -- config `adb`, `usb2` gone -- and the unit
+    restored both within 10 s, with `config is 'adb'; enabling rndis` in its log.
+
+    **The phone can also reach the Jetson directly**, `ssh edge@192.168.16.70`,
+    confirmed by reading an `SSH-2.0-OpenSSH_8.9p1` banner from the handset against a
+    `Connection refused` control. Two of my probes before that returned nothing and
+    were instrument errors, not results: `nc` with stdin at `/dev/null` hangs up
+    before the banner arrives, and `nc -z` is not supported by toybox.
+
+    **One cost, needing root to fix:** `usb2` takes the default route at metric 100
+    against wifi's 600, so at the desk every byte the Jetson sends -- `rsync` and
+    `scp` of this repository included -- goes over mobile data. The remedy is in
+    `systemd/README.md`.
+
 60. ~~**The app had no icon, so the drawer showed a system placeholder.**~~
     **DONE 2026-09-06.** The manifest declared no `android:icon` and `res/` held only
     `values`, which the handset confirmed as `icon=0x0`. It was findable by name and

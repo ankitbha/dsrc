@@ -1,0 +1,24 @@
+[Unit]
+Description=dsrc: keep the phone tethering the Jetson over USB, so the car needs no wifi
+Documentation=file:%h/dsrc-task40/deployment/jetson/systemd/README.md
+# No network dependency on purpose. This unit is what CREATES the Jetson's only
+# usable network in the car; waiting for one would deadlock.
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=%h/dsrc-task40/deployment/jetson/systemd/dsrc-usb-net.sh
+
+# To a file, not the journal: `journalctl --user` reports "No journal files were
+# found" on this box, measured, so the journal is not a place a reader can look.
+StandardOutput=append:%h/dsrc_logs/dsrc-usb-net.log
+StandardError=append:%h/dsrc_logs/dsrc-usb-net.log
+
+Restart=always
+RestartSec=10
+# 143 is 128+SIGTERM, how the script exits when stopped. Without this a normal stop
+# leaves the unit `failed`, which teaches the reader to ignore its state.
+SuccessExitStatus=143
+
+[Install]
+WantedBy=default.target
