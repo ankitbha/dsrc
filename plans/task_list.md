@@ -2125,6 +2125,33 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
+60. ~~**The app had no icon, so the drawer showed a system placeholder.**~~
+    **DONE 2026-09-06.** The manifest declared no `android:icon` and `res/` held only
+    `values`, which the handset confirmed as `icon=0x0`. It was findable by name and
+    by nothing else -- a poor arrangement for someone looking for it one-handed in a
+    parked car.
+
+    An adaptive icon: a stop-and-go wave damping into smooth flow, which is the
+    project's own claim drawn as one white stroke on a dark blue ground. Adaptive
+    only, since `minSdk` is 29 and every launcher that reaches this app understands
+    `mipmap-anydpi-v26`; no legacy PNG densities are needed. The device now reports
+    `icon=0x7f080001` on the resolved launcher entry.
+
+    **Drawn against screenshots from the handset, not guessed at, and it took three
+    passes.** At 6dp stroke with half the amplitude it read as a squiggle. At 8dp
+    with four oscillations the lobes sat closer together than the stroke was wide and
+    merged into a single blob. Two oscillations spaced about twice the stroke width
+    apart is what survives being 48dp across.
+
+    `verifyMergedManifest` gains the icon, matching how this project checks every
+    other manifest fact: read it back out of the merged artifact rather than restate
+    the intent. Confirmed the gate fails without the attribute before relying on it.
+
+    **Two stale-artifact traps hit on the way.** An XML comment cannot contain `--`,
+    so one build failed while the `adb install` chained after it reported `Success` --
+    installing the previous APK. Comparing the device-side `sha256sum` against the
+    local one is what caught it, and is the only check that can.
+
 59. ~~**Choosing a drive's kind needs a shell, so it needs a laptop in the car.**~~
     **DONE 2026-09-06.** `MainActivity` now has **Start (shadow)** and
     **Start (live)**. Stop the session and start another to change kind; there is no

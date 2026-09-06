@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A stop-and-go wave damping into smooth flow: the project's own claim, drawn.
+
+  Adaptive-icon geometry, so the canvas is 108x108dp and a launcher may mask
+  anything outside the central 72x72dp. The path stays inside x 24..86 and
+  y 29..79, checked against the mask circle (centre 54,54 and radius 36) at
+  each peak's own x, not against the bounding box, which would have
+  rejected peaks that are comfortably inside a circle.
+
+  A single stroke with a round cap, because detail finer than about 4dp is gone
+  at drawer size. Twice redrawn against screenshots from the handset rather than
+  guessed at: at 6dp with half this amplitude it read as a squiggle, and at 8dp
+  with four oscillations the lobes were closer together than the stroke was wide,
+  so they merged into one blob. Two oscillations, spaced about twice the stroke
+  width apart, is what survives being 48dp across.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M22,54 C26,32 34,32 38,54 C42,74 50,74 54,54 C57,43 63,43 66,54 C68,60 72,60 74,54 L86,54"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

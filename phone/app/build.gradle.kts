@@ -133,6 +133,11 @@ val verifyMergedManifest by tasks.registering {
             put("android:foregroundServiceType=\"camera|location\"", "foreground-service type")
             put("android:name=\"com.dsrc.phone.SensingService\"", "sensing service")
             put("android:name=\"com.dsrc.phone.MainActivity\"", "launcher activity")
+            // Without an icon the drawer shows the system placeholder, which is what
+            // sent someone hunting for the app by name in a parked car. Pinned here
+            // rather than in a unit test for the same reason as everything else in
+            // this map: only the merged artifact can say whether it survived.
+            put("android:icon=\"@mipmap/ic_launcher\"", "launcher icon")
 
             permissions.forEach { put("android:name=\"$it\"", it.substringAfterLast('.')) }
         }

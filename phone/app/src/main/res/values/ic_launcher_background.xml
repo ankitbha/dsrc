@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark enough that the white foreground stroke reads at 48dp, which is the
+         size that actually matters: the drawer, not the settings screen. -->
+    <color name="ic_launcher_background">#12314F</color>
+</resources>
