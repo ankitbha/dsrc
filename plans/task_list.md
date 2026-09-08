@@ -1889,6 +1889,24 @@ Everything above is done before the devices meet.
     occurred. The `skin_hot`/`severe` tier and every non-`nominal` status tier are
     unit-tested and have never executed on hardware.
 
+    **Superseded in the field on 2026-09-08, and the answer is worse than a lower
+    rate.** On the first drive the handset reached `Thermal Status: 3` (`severe`)
+    with `xo-therm` at **51.6 C**, `modem-skin` 50.0 C and the GPU 50.8 C, mounted
+    on a windscreen in sunlight. The backoff behaved correctly -- scale 0.3, camera
+    commanded 1.5 Hz -- but that is not what ended the drive. **Android's own
+    throttling of the app stalled the pipeline and closed the session**: the final
+    tick recorded `link_ms` 135,359 against a p50 of 52 ms, and the app hung up.
+
+    So the thermal work protects the commanded rates, and the thing that actually
+    ends a daylight drive is the platform throttling the process, which nothing in
+    this system detects or reports. No gate looks at `link_ms`. That bears directly
+    on whether tasks 50 and 51 are runnable in daylight without shading or active
+    cooling.
+
+    One measurement worth keeping: it was a single tick, not a decline. Every tick to
+    1311 had a normal link time, so the session died sharply rather than degrading --
+    the drive's 279 s and 6.24 km are usable, and only the last tick is not.
+
     **One thing the desk actively hides, noted and accepted.** No policy module reads
     the Jetson's own temperature: `sensors/thermal.py` and the metadata logger record
     it, nothing consumes it, and there is no Jetson-side backoff. On both runs it sat
@@ -2030,8 +2048,33 @@ Everything above is done before the devices meet.
 
 ## I. Measurement drives — **[COLOCATED]**
 
-49. Shakedown drive: short and local, purely to confirm the system records
-    readable, aligned data.
+49. ~~Shakedown drive: short and local, purely to confirm the system records
+    readable, aligned data.~~ **DONE 2026-09-08.** Two drives in Westfield, NJ, on
+    the OnePlus Nord N10 (`a1411577`) rather than the Moto -- the Moto's cable
+    failed and the app was installed on the Nord in the car, with the swap recorded
+    automatically in `installed_apk.json`.
+
+    **`run_20260908_142253`: 1,632 ticks, 279.5 s, 6.24 km**, mean 22.9 m/s and max
+    28.0 m/s. GPS valid on 1,299 of 1,313 ticks at the point measured; 4.69 Hz mean
+    tick rate, 203 ms median spacing, two gaps over 2 s totalling 5 s. Distance
+    agrees to 0.01 km between integrating reported speed and the great-circle path
+    through the fixes, which is two independent routes to one number.
+
+    **First working GPS and first working HERE in the project.** Every bench run had
+    `gps_hz 0.0` and `here=false`; this drive had a real fix at highway speed and
+    `here=true`, so the HERE path has now been asked to run for the first time since
+    task 21 built it.
+
+    **It did what a shakedown is for: it broke.** Three defects, each filed
+    separately -- the 90-degree frame rotation that explains every zero-detection
+    drive in the project (task 63), frames being discarded so the drive could not
+    explain itself (task 64), and the `severe` thermal tier ending a session rather
+    than merely lowering rates (recorded under task 45).
+
+    **What it did not establish is the "aligned" half of its own wording.** Video
+    position could not be tied to ticks at the time -- that is what task 64 added
+    afterwards, and the second drive `run_20260908_155910` is the first with
+    `video_index.jsonl` beside `video.avi`.
 50. Drive set 1, shadow mode at maximum rate: the full-rate reference plus every
     candidate policy's decisions against identical traffic.
 51. Drive set 2, live mode: the controller gating for real, verifying the
@@ -2125,6 +2168,27 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
+65. **A drive started before NTP syncs will have `t_wall` step mid-run.** Open.
+
+    Seen on 2026-09-08: `dsrc-drive` reported `ActiveEnterTimestamp` of 14:30:44 on a
+    box that had booted at 15:55:09. The service was three minutes old. The Jetson
+    boots with an unsynced clock, systemd stamps against it, NTP then corrects the
+    clock forward -- 88 minutes, in that boot -- and the old stamp stays behind.
+
+    The hazard is not the stamp, it is `t_wall` in the tick records. A run that starts
+    inside the pre-sync window carries wall-clock times that jump when the correction
+    lands, and the last drive's duration and distance were both computed from
+    `t_wall`. `t_mono` is immune, which is most of the analysis, and the completed
+    drive is clean -- 279.5 s against 1,313 ticks is mutually consistent at 4.69 Hz,
+    so no step happened during it.
+
+    **The window is exactly the first minute or two of a cold boot in a car**, since
+    the Jetson only syncs once the phone tether gives it internet. The pre-flight
+    check is one line -- `timedatectl show -p NTPSynchronized --value` must read
+    `yes` -- and the proper fix is for `run_demo` to record the sync state at start
+    and flag or refuse an unsynced clock, which is the same shape as every other
+    "record the environment at run time" item here.
+
 63. **The camera frames arrive rotated 90 degrees, and that is why no drive has ever
     seen a vehicle.** Open: the fix is not yet written.
 
@@ -2196,6 +2260,20 @@ see what was cleared and on what evidence.
     drainer is what turns dropped frames into a lost summary.
 
     First test file this class has ever had. Suite 2270 passed, 24 skipped, 372 pins.
+
+    **One claim in that work is wrong and the code comment says it.** I wrote that a
+    dropped frame "shows as a gap in `frame_id`". It does not. Measured on
+    `run_20260908_155910`: 30 non-consecutive steps across 242 positions, a ratio of
+    1.57 frame_ids per written frame, and no drops -- because the camera delivers
+    faster than the pipeline consumes and `wait_for_fresh` is latest-wins, so skipped
+    ids were never offered to the logger at all. Gaps are normal operation. The only
+    sound discriminator is `dropped_frames`/`dropped_frame_ids`. The comment needs
+    correcting, because a note that teaches the next reader to misread the artifact
+    is worse than no note.
+
+    Also still missing: the drop count reaches a reader only in the summary at run
+    end, so mid-drive nobody can tell whether alignment is intact. A smaller version
+    of the gap this task closed, and it belongs in any health readout.
 
 62. ~~**A dead USB tether holds the default route against working wifi, and nothing
     notices.**~~ **DONE 2026-09-06**, verified by a packet rather than by a state.
