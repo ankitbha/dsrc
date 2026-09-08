@@ -738,6 +738,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
     camera.start()
 
     logger = video_logger = stats_sampler = thermal_sampler = failures = None
+    here_logger = None
     telemetry = None
     run_dir = None
     if config["telemetry"]["enabled"]:
@@ -747,6 +748,13 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         logger = MetadataLogger(run_dir, config_path=config["_config_path"])
         if config["logio"]["video"]:
             video_logger = VideoLogger(run_dir, fps=config["camera"]["fps"])
+        if config["logio"].get("here") and phone is not None:
+            from logio.here_logger import HereLogger
+
+            here_logger = HereLogger(run_dir)
+            # Assigned rather than passed at construction: the link is built before
+            # the run directory exists, so there is nowhere to write when it is made.
+            phone.here_body_sink = here_logger.write
         if config["logio"]["system_stats"]:
             stats_sampler = SystemStatsSampler(logger, config["logio"]["system_stats_interval_s"]).start()
         if config["logio"]["thermal"]:
@@ -988,6 +996,9 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # The VIDEO logger's counters, which are a different thing from the
             # camera's and were previously read by nothing at all.
             "video_log": None if video_logger is None else video_logger.to_record(),
+            # The HERE bodies, which cannot be re-fetched, so whether they were
+            # stored is a fact about the drive rather than a detail of logging.
+            "here_log": None if here_logger is None else here_logger.to_record(),
             "camera_file_recoveries": camera.file_recoveries,
             "policy_trained": actor.is_trained,
             # A4 (validation round 2): the code revision, policy bundle,
@@ -1059,6 +1070,8 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             v2v.stop()
         if video_logger is not None:
             video_logger.close()
+        if here_logger is not None:
+            here_logger.close()
         if stats_sampler is not None:
             stats_sampler.stop()
         if logger is not None:

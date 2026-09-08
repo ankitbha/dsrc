@@ -220,6 +220,12 @@ class PhoneLink:
         #: in `eval_run` both key on, and a flip part-way through is a drive neither
         #: `structurally_absent` nor the rates axis scores correctly today.
         self.peer_requested_mode: str | None = None
+        #: Optional `HereLogger.write`-shaped callable, set by the run once its
+        #: directory exists. A HERE response cannot be fetched again, so the body is
+        #: stored rather than reduced to the two floats the feed extracts -- see
+        #: `logio/here_logger.py`. Assigned after construction because this link is
+        #: built before the run directory is.
+        self.here_body_sink: Any = None
         #: The current session's handshake-time wall-clock offset (remote
         #: minus local, seconds; positive means the phone is ahead), or
         #: `None` before any session has started. Recorded (B10, validation
@@ -675,6 +681,26 @@ class PhoneLink:
                 # is visible rather than inferred.
                 self.here_failure = f"{type(exc).__name__}: {exc}"
                 self.here_failures += 1
+            # After the feed, not before: the feed is what the drive needs to run,
+            # and storage is what a later reader needs. A body that fails to store
+            # must not cost the tick the feed would have served. The sink never
+            # raises by contract, and is guarded anyway because this thread dying
+            # stops the feed for the rest of the drive.
+            sink = self.here_body_sink
+            if sink is not None:
+                try:
+                    sink(
+                        status=message.status,
+                        body=message.body,
+                        query_lat=message.query_lat,
+                        query_lon=message.query_lon,
+                        query_radius_m=message.query_radius_m,
+                        received_t_mono=stamp.t_capture_mono,
+                        request_url=message.request_url,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.here_failure = f"body sink: {type(exc).__name__}: {exc}"
+                    self.here_failures += 1
 
 
     def _read_telemetry(self) -> None:

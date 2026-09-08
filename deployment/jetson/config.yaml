@@ -108,6 +108,13 @@ logio:
                                      # detections with cars confirmed in view and
                                      # there was nothing left to examine.
   nmea: true                         # raw NMEA log for replay
+  here: true                         # store each HERE response BODY, not just the
+                                     # two floats the feed extracts. A HERE response
+                                     # is unrepeatable -- nobody can ask what the
+                                     # congestion was on that road at that minute
+                                     # again -- so a parse bug found later otherwise
+                                     # costs the whole drive. 2026-09-08: 143 calls
+                                     # of ~55 KB each, all discarded. ~11 MB/hour.
   system_stats: true                 # jtop power/util samples (if jetson-stats)
   system_stats_interval_s: 5.0
   thermal: true                      # /sys/class/thermal sampling + throttle events

@@ -2168,6 +2168,46 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
+66. ~~**HERE response bodies were discarded, and a HERE response cannot be fetched
+    again.**~~ **DONE 2026-09-08.** `_read_here` received every body, handed it to
+    the feed, which kept `downstream_congestion` and `free_flow_mps`, and dropped the
+    rest. The 2026-09-08 live drive made **143 successful calls of about 55 KB each**
+    and retained two floats per call. Nobody can ask what the congestion on that road
+    was at that minute again, so a parse bug found later would cost the drive rather
+    than an afternoon of reprocessing -- and this project has had parse bugs of
+    exactly that shape.
+
+    `logio/here_logger.py` stores each body as `here/NNNNNN.json` with a line in
+    `here_index.jsonl` carrying status, size, query position and radius, the request
+    URL and the arrival stamp. Same shape as the video index deliberately: payloads
+    on disk, a sidecar naming them, usable without any code from this repository.
+
+    Three properties the tests hold. The index line is written **after** the body and
+    by the same call, so a line exists only for a body really on disk. Bodies are
+    written whole and renamed, so a truncated file is never mistaken for a malformed
+    response. And a **non-200 body is stored too** -- a refusal from HERE is evidence,
+    and dropping error bodies would leave a run unable to say why it had no feed.
+
+    The sink is called **after** the feed, not before: the feed is what the drive
+    needs to run and storage is what a later reader needs, so a body that fails to
+    store must not cost the tick the feed would have served. `write` never raises by
+    contract, because its caller is the reader thread whose death stops the feed for
+    the rest of the drive -- the same lesson `_read_here` already learned from an
+    `OverflowError` out of `float()`.
+
+    `here_log` is in the run summary beside `video_log`, reporting written, bytes,
+    failures and `complete`. Written that way because `VideoLogger.dropped_frames`
+    was incremented and read by nothing, leaving "none lost" and "loss not reported"
+    indistinguishable.
+
+    About 11 MB/hour at the observed call rate. Suite 2305 passed, 372 pins.
+
+    **What this does not recover.** Today's 143 bodies are gone. What was rescued
+    from the phone is the *record* of each call -- query position, radius, request
+    URL, content type and payload size -- in `~/dsrc_logs/phone_sessions_20260908/`,
+    which is enough to know what was asked and how big the answer was, and not enough
+    to re-derive anything from it.
+
 65. **A drive started before NTP syncs will have `t_wall` step mid-run.** Open.
 
     Seen on 2026-09-08: `dsrc-drive` reported `ActiveEnterTimestamp` of 14:30:44 on a
