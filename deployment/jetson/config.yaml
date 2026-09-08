@@ -98,7 +98,15 @@ telemetry:
 
 logio:
   metadata: true                     # JSONL per-tick records
-  video: false                       # annotated MJPG video (costs ~5-8 ms/frame)
+  video: true                        # RAW frames as the pipeline consumed them,
+                                     # pre-annotation (costs ~5-8 ms/frame).
+                                     # On for drives: without it a drive's frames are
+                                     # decoded, detected on and discarded, so a
+                                     # perception failure cannot be diagnosed
+                                     # afterwards and the drive is spent. Learned on
+                                     # 2026-09-08, when 1,313 ticks recorded zero
+                                     # detections with cars confirmed in view and
+                                     # there was nothing left to examine.
   nmea: true                         # raw NMEA log for replay
   system_stats: true                 # jtop power/util samples (if jetson-stats)
   system_stats_interval_s: 5.0

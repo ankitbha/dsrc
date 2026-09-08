@@ -931,7 +931,10 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                 if phone is not None:
                     _log_timebase_estimates(logger, phone, last_estimate_ids, session_id)
             if video_logger is not None:
-                video_logger.write(frame.image)
+                # The id travels with the frame so `video_index.jsonl` can name what
+                # each video position holds. Without it, alignment is an assumption
+                # that one dropped frame invalidates for the rest of the run.
+                video_logger.write(frame.image, frame_id=frame.frame_id)
             if telemetry is not None:
                 telemetry.send(telemetry_record(tick))
             slot.publish(tick, frame.image)
@@ -982,6 +985,9 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             "ticks": pipeline._tick_counter,
             "stats": pipeline.stats.snapshot(),
             "camera_dropped_frames": camera.dropped_frames,
+            # The VIDEO logger's counters, which are a different thing from the
+            # camera's and were previously read by nothing at all.
+            "video_log": None if video_logger is None else video_logger.to_record(),
             "camera_file_recoveries": camera.file_recoveries,
             "policy_trained": actor.is_trained,
             # A4 (validation round 2): the code revision, policy bundle,

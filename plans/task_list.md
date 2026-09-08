@@ -2125,6 +2125,78 @@ see what was cleared and on what evidence.
 
 ## K. Found in passing
 
+63. **The camera frames arrive rotated 90 degrees, and that is why no drive has ever
+    seen a vehicle.** Open: the fix is not yet written.
+
+    Found on the first real drive, 2026-09-08. Same frame, same detector, one
+    rotation:
+
+    | frame | as delivered | rotated 90 clockwise |
+    |---|---|---|
+    | mid-drive | **0** | **2 vehicles, conf 0.90** (car, truck) |
+    | later | **0** | **5 vehicles, conf 0.87** |
+
+    Only clockwise; anticlockwise and 180 both give zero. The frame shows a GMC
+    Savana van filling much of the picture with a legible plate, so this is not a
+    marginal detection.
+
+    **This is one bug, not the several structural limits it was recorded as.** Zero
+    vehicle sightings across 4,151 ticks on the Moto and 1,632 on the Nord -- two
+    handsets, two cities, same zero. `leader_gap` `inf`/`fallback_neutral` on every
+    tick ever recorded, `unique_tracks` and `track_lifetime_s` empty everywhere,
+    `local_density_bin` always `0`/`derived_empty`: all downstream of this.
+
+    The detector was never at fault. Given an upright road image it returns cars at
+    conf 0.80, 0.67, 0.62.
+
+    **Where the fix belongs is a real decision, not a patch.** The intrinsics
+    (`fx_px 800`, `cx_px 640`, `horizon_y_px 360`) assume a landscape frame, and
+    rotating swaps which axis is which -- so correcting on the phone and correcting
+    on the Jetson are not equivalent for `DistanceEstimator`. To be settled at the
+    desk, not in a car.
+
+    **Two retractions of my own, recorded because both were confidently wrong.** I
+    first said rotation was the fault, then said a test had disproved it: that test
+    sampled frames 0/30/60/90, which is the first three seconds of a run on an empty
+    residential street, because `CAP_PROP_FRAME_COUNT` returns 0 on a file still
+    being written and seeking by fraction silently sampled the start. A null from
+    frames containing no cars says nothing about detecting cars. I also said the
+    frames "did not contain recognisable cars"; they contained perfectly
+    recognisable cars in an orientation the model cannot read.
+
+64. ~~**A drive's frames were discarded, and video position could not be trusted as a
+    tick index.**~~ **DONE 2026-09-08.**
+
+    `logio.video` was `false`, so 1,632 ticks of frames were decoded, detected on and
+    thrown away. The drive's central question -- why no detections -- was
+    unanswerable from its own record. Now `true`, with the reason in the config.
+
+    **Position is no longer assumed to be the tick index.** The docstring claimed
+    "video frame index == tick index == metadata record index" while the drop path
+    five lines below could break it: a bounded queue, `put_nowait`, discard on
+    `Full`. After one drop every later frame is off by one, silently, and every
+    offline re-analysis keyed on position is wrong from there. Each written frame now
+    appends `{pos, frame_id}` to `video_index.jsonl`, written by the thread that
+    wrote the frame and after the write, so a line exists only for a frame really in
+    the file and a drop shows as a gap in `frame_id` to a reader who never sees the
+    code.
+
+    `VideoLogger.dropped_frames` was incremented and **read by nothing** -- "no
+    drops" and "drops not reported" were indistinguishable. `to_record()` now
+    surfaces written, dropped, *which* ids were dropped, and
+    `position_is_tick_index`, and `run_demo` puts it in the summary beside the
+    camera's own separate counter.
+
+    **The test found a worse defect than the one it was written for.** `close()` did
+    a blocking `put` on a bounded queue, so with the drainer dead it never returned:
+    a run would hang at teardown and never write `summary.json`, losing the whole
+    drive's record over a video problem. `close` is now bounded by
+    `CLOSE_TIMEOUT_S`, reports `close_blocked`, and the drainer no longer dies on a
+    write error -- it records `writer_error` and keeps draining, because a dead
+    drainer is what turns dropped frames into a lost summary.
+
+    First test file this class has ever had. Suite 2270 passed, 24 skipped, 372 pins.
+
 62. ~~**A dead USB tether holds the default route against working wifi, and nothing
     notices.**~~ **DONE 2026-09-06**, verified by a packet rather than by a state.
 
