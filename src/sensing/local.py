@@ -25,6 +25,19 @@ class SensingConfig:
     density_bin_edges_veh_per_km: tuple[float, ...] = (12.0, 30.0)
     mean_speed_bin_edges_mps: tuple[float, ...] = (8.0, 18.0)
     queue_speed_mps: float = 5.0
+    #: Present only what the deployed rig can sense. The parity ledger classifies
+    #: six of the 39 observation slots as `structurally_absent` -- every rear-facing
+    #: field, because the live vehicle list is forward-camera derived and there is
+    #: no rear sensor -- and seven more as `substituted`, where the rig fills in a
+    #: constant. With this off, an actor learns from 13 of 39 inputs the vehicle
+    #: cannot produce, which is the largest single reason a policy would not
+    #: transfer.
+    #:
+    #: Defaults off deliberately. Turning it on everywhere would change every
+    #: existing measurement, and section C's sufficiency work needs the full vector
+    #: to ablate against -- this flag IS that ablation. `mappo_deploysense.yaml`
+    #: sets it, being the config that describes the deployed profile.
+    deployed_fidelity: bool = False
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any] | None) -> SensingConfig:
@@ -39,6 +52,7 @@ class SensingConfig:
             density_bin_edges_veh_per_km=_float_tuple(cfg.get("density_bin_edges_veh_per_km", (12.0, 30.0))),
             mean_speed_bin_edges_mps=_float_tuple(cfg.get("mean_speed_bin_edges_mps", (8.0, 18.0))),
             queue_speed_mps=max(0.0, float(cfg.get("queue_speed_mps", 5.0))),
+            deployed_fidelity=bool(cfg.get("deployed_fidelity", False)),
         )
 
 
@@ -242,7 +256,7 @@ class LocalObservationBuilder:
             "merge_pressure": float(merge_pressure),
             "downstream_congestion_estimate": float(downstream_congestion),
         }
-        return {
+        observation = {
             "is_active": True,
             "ego_speed": float(ego.speed_mps),
             "ego_acceleration": float(ego.acceleration_mps2),
@@ -293,6 +307,11 @@ class LocalObservationBuilder:
             },
             "cooperation": cooperation,
         }
+        # The rig cannot sense some of the above, and this is where the
+        # simulator stops pretending otherwise. Off by default; see the flag.
+        if self.config.deployed_fidelity:
+            return self._apply_deployed_fidelity(observation)
+        return observation
 
     def lane_gap_context(
         self,
@@ -447,6 +466,36 @@ class LocalObservationBuilder:
             return network.next_lane(lane_index, route=None, position=lane.position(lane.length, 0))
         except Exception:  # noqa: BLE001 - a lane with no successor is normal at an exit
             return None
+
+    #: What the rig puts in each field it cannot sense, from
+    #: `deployment/jetson/perception/observation_builder.py`. Kept as data rather
+    #: than scattered conditionals so a change on the rig is a change to one table.
+    RIG_UNSENSED = {
+        "ego_lane": 1,                              # cfg.assumed_lane
+        "time_since_last_lane_change": float("inf"),
+        "lane_changes_last_km": 0,
+        "distance_to_downstream_bottleneck": float("inf"),
+        "follower_gap": float("inf"),                # no rear sensing
+        "follower_relative_speed": 0.0,
+        "left_lane_rear_gap": float("inf"),
+        "right_lane_rear_gap": float("inf"),
+        "target_lane_rear_gap": float("inf"),
+        "target_lane_rear_required_decel": 0.0,
+    }
+
+    def _apply_deployed_fidelity(self, observation: dict[str, Any]) -> dict[str, Any]:
+        """Replace what the rig cannot sense with what the rig reports instead.
+
+        Only fields the parity ledger classifies as `structurally_absent` or
+        `substituted` are touched. Everything the forward camera genuinely measures
+        -- the leader gap, the ego's own speed and acceleration, the headway -- is
+        left exactly as the simulator computed it, because the rig measures those
+        too.
+        """
+        for field, value in self.RIG_UNSENSED.items():
+            if field in observation:
+                observation[field] = value
+        return observation
 
     def _forward_lane_offsets(
         self,

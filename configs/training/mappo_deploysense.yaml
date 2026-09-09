@@ -45,6 +45,13 @@ sensing:
   position_noise_std: 1.5
   speed_noise_std: 0.15
 
+  # Present only what the rig can sense. The parity ledger classifies six of the
+  # 39 observation slots as structurally absent -- every rear-facing field, since
+  # the live vehicle list is forward-camera derived and there is no rear sensor --
+  # and seven more as substituted with a constant. Without this the actor learns
+  # from 13 of 39 inputs the deployed vehicle cannot produce.
+  deployed_fidelity: true
+
   # The library default, and the drive supports it rather than contradicting it:
   # ego speed over 17,913 moving ticks is bimodal, with a stop-and-go mass below
   # about 6 m/s and a cruise mode at 22-26 m/s.
