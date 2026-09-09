@@ -2435,6 +2435,80 @@ and on what evidence.
 
 ## K. Found in passing
 
+72. **Collisions must be impossible by construction, as in PTV Vissim.**
+    **DECIDED BY THE USER 2026-09-09.** Blocks 73 and 74.
+
+    **The instruction:** collisions are not something you generally see on a road,
+    and a traffic simulator should make them structurally impossible rather than
+    penalise them. PTV Vissim and SUMO both guarantee this in their car-following
+    models; this simulator does not.
+
+    **It is a prerequisite, not a preference, and the arithmetic says so.** At the
+    current 120-step episode the AV arms complete 30 of 54, so per-step survival is
+    0.995114 and the expected time to the first AV crash is **205 steps, about 3.4
+    minutes**. Extrapolated:
+
+    | episode | P(no AV crash) |
+    |---|---|
+    | 120 steps (current) | 0.556 |
+    | 600 steps (10 min) | 0.053 |
+    | 1200 steps (20 min) | 0.0028 |
+    | **3600 steps (one hour)** | **2.2e-8** |
+
+    An hour of simulated driving is unmeasurable until this lands. Every
+    hour-long number would come from the vanishing fraction of runs that happened
+    not to crash, which is the selection effect task 69 already had to work around
+    at 7 of 18.
+
+    **What it dissolves.** Task 67's entire premise — vehicles colliding because
+    they cannot see each other — stops being a thing to mitigate. The `-5.0`
+    `collision_count` reward weight becomes inert. `terminated` stops firing, so
+    truncation ceases to be a criterion at all, and task 8's `episodes_complete`
+    becomes trivially satisfied rather than structurally broken.
+
+    **Three mechanisms are needed, in this order:**
+    1. A safe-velocity cap for the in-lane leader — the rear-end case. A Krauss or
+       Gipps bound, `v_safe = -b*tau + sqrt((b*tau)^2 + v_lead^2 + 2*b*gap)`, is
+       collision-free by construction given both parties decelerate at `b`.
+    2. The same cap against the merge-projected leader, reusing task 67's
+       projection, which covered 27 of 51 measured collisions.
+    3. Gap acceptance on lane changes — the lateral case, 6 of 51.
+
+    **Design question, open:** enforce it once in the environment's substep loop,
+    where `sub_dt` is known and it can cover humans and AVs together, or inside
+    each vehicle model. The former gives one invariant and one place to test; the
+    latter keeps each model self-contained. Recommendation: the substep loop,
+    because a guarantee that lives in two models is a guarantee that can disagree
+    with itself.
+
+73. **Reweight the team reward so throughput is not 1.3% of the signal.**
+    **DECIDED BY THE USER 2026-09-09.** Waits on 72.
+
+    Measured over the 100-update run: `mean_speed` contributes 69.3% of the
+    positive reward (weight 0.05 against a mean of 20.86) and `throughput_recent`
+    contributes **1.3%** (weight 0.02 against a mean of 0.95) — a ratio of 55 to 1,
+    because the weights do not normalise for scale. `throughput_recent` is a count
+    of completions in a 60 s rolling window, so its magnitude also depends on the
+    traffic state: about 0.95 during training, 5 to 15 at an evaluation's final
+    step.
+
+    Waits on 72 because the `-5.0` collision weight is currently a live term and
+    becomes inert once collisions are impossible, which changes what the remaining
+    weights have to balance against.
+
+74. **Widen the evaluation to an hour of simulated driving.**
+    **DECIDED BY THE USER 2026-09-09.** Waits on 72.
+
+    The present evaluation is 18 conditions per arm at 120 steps, of which only 7
+    had both arms complete. `throughput_recent` is an **integer** count, and it read
+    5 to 15, so the resolution is one vehicle — 7% to 20% of the value. The paired
+    result was +0.57 vehicles with four of seven conditions exactly equal, which is
+    what that resolution produces rather than a measurement of the controller.
+
+    An hour per run at `dt = 1.0` is 3600 steps, about 75 s of wall time per run at
+    the measured 0.02 s per step. Seeds are the cheap axis now that topology and
+    demand are fixed.
+
 71. **Route-aware leader gap on the Jetson, from the HERE link shape.**
     **DECIDED BY THE USER 2026-09-09. Not started — recorded only.**
 
