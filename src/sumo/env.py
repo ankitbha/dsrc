@@ -285,6 +285,18 @@ class SumoTopologyEnv:
             }
         return out
 
+    def crashed_agent_ids(self) -> list[str]:
+        """Always empty: SUMO's car-following cannot produce a collision.
+
+        So `crash_penalty` is inert on this simulator. That is the intended
+        consequence of the migration rather than an oversight -- the penalty existed
+        because the previous simulator's dense speed reward otherwise drowned a
+        one-step collision term, and there are no collisions to drown it now. The
+        per-step collision counter is what verifies the claim; this does not assert
+        it.
+        """
+        return []
+
     def get_global_state(self) -> dict[str, Any]:
         return dict(self._last_metrics)
 

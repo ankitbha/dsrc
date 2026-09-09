@@ -316,6 +316,15 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             "step_metrics": dict(self._last_step_metrics),
         }
 
+    def crashed_agent_ids(self) -> list[str]:
+        """AVs that have crashed this episode.
+
+        A method rather than a private attribute the trainer reads, so a second
+        simulator can answer the same question without exposing the same internals.
+        """
+        return [agent_id for agent_id, vehicle in self._av_vehicles.items()
+                if getattr(vehicle, "crashed", False)]
+
     def get_segment_metrics(self) -> SegmentMetrics:
         if self._cached_segment_metrics is None:
             self._cached_segment_metrics = compute_segment_metrics(

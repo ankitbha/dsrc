@@ -50,6 +50,15 @@ class TrainingConfig:
     #: objective says so here rather than editing the library and changing
     #: every other experiment at the same time.
     reward_weights: Mapping[str, float] | None = None
+    #: Which simulator the policy is learned on. Defaults to `highway_env` so every
+    #: existing config and its recorded results are unchanged; the SUMO configs opt
+    #: in. Worth being explicit about rather than inferring, because the two roads
+    #: produce different observation distributions -- SUMO's is collision-free and
+    #: junction-limited, the other was neither -- and a checkpoint otherwise carries
+    #: no record of which one it saw.
+    simulator: str = "highway_env"
+    #: Where a SUMO run writes its generated network and demand files.
+    work_dir: str | None = None
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> TrainingConfig:
@@ -79,6 +88,8 @@ class TrainingConfig:
                 if isinstance(weights_cfg := training.get("reward_weights"), Mapping) and weights_cfg
                 else None
             ),
+            simulator=str(training.get("simulator", "highway_env")),
+            work_dir=(str(training["work_dir"]) if training.get("work_dir") else None),
         )
 
 
@@ -165,7 +176,7 @@ class BasePPOTrainer:
         return {"output_dir": str(output_dir), "updates": self.config.total_updates, "best_score": best_score}
 
     def collect_rollout(self, *, seed: int) -> tuple[RolloutBuffer, dict[str, Any]]:
-        env = HighwayTopologyEnv(self.config.topology, self.env_config())
+        env = self.build_env()
         observations, _ = env.reset(seed=seed)
         buffer = RolloutBuffer()
         episode_metrics: dict[str, Any] = {}
@@ -197,9 +208,12 @@ class BasePPOTrainer:
             episode_metrics = dict(info.get("metrics", {}))
             metric_history.append(episode_metrics)
             team_reward = build_team_reward(episode_metrics, self.config.reward_weights) * self.ppo_config.reward_scale
-            crashed_agents = {
-                agent_id for agent_id, vehicle in env._av_vehicles.items() if vehicle.crashed
-            } if self.ppo_config.crash_penalty else set()
+            # Asked of the environment rather than read out of its internals. The
+            # previous form reached into `_av_vehicles`, which only exists on one
+            # of the two simulators, so it failed the moment a second one appeared.
+            crashed_agents = (
+                set(env.crashed_agent_ids()) if self.ppo_config.crash_penalty else set()
+            )
             for index, agent_id in enumerate(agent_ids):
                 reward = team_reward - safety_penalty_for_agent(info, agent_id)
                 if agent_id in crashed_agents:
@@ -251,6 +265,28 @@ class BasePPOTrainer:
         if not self.advantage_group_by_agent:
             bootstrap_values = {"__shared__": float(values.detach().mean().cpu().item())}
         buffer.set_bootstrap_values(bootstrap_values)
+
+    def build_env(self) -> Any:
+        """The environment this config asks for.
+
+        An unknown name is refused by name rather than falling back to a default:
+        a silent fallback would train on a road the config did not ask for and the
+        checkpoint would not say so.
+        """
+        name = str(self.config.simulator).lower()
+        if name == "highway_env":
+            return HighwayTopologyEnv(self.config.topology, self.env_config())
+        if name == "sumo":
+            from src.sumo.env import SumoTopologyEnv
+
+            config = self.env_config()
+            if self.config.work_dir:
+                config["work_dir"] = self.config.work_dir
+            return SumoTopologyEnv(self.config.topology, config)
+        raise ValueError(
+            f"unsupported simulator {self.config.simulator!r}; expected "
+            "'highway_env' or 'sumo'"
+        )
 
     def env_config(self) -> dict[str, Any]:
         topology_cfg = load_named_config("topology", self.config.topology)
