@@ -25,6 +25,7 @@ un-incremented counter from a genuine zero.
 """
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -252,8 +253,16 @@ class SumoTopologyEnv:
         terminated = False
         observations = self.get_local_observations(snapshots)
         self._last_metrics = self._build_metrics(snapshots, now)
+        # `penalties` is empty because the safety layer does not run on this
+        # simulator: SUMO's car-following is the safety guarantee, and
+        # `apply_safety_layer` was never invoked here. `safety_penalty_for_agent`
+        # therefore returns 0 for every agent and the per-agent reward equals the
+        # team reward. Recorded rather than hidden -- an empty dict that looks like
+        # "no penalties were incurred" is the shape of a metric that cannot charge
+        # you, and this one means "nothing was measured".
         info = {"collisions": self.collision_count, "step": self.step_count,
-                "metrics": self._last_metrics, "safety": {"penalties": {}}}
+                "metrics": self._last_metrics,
+                "safety": {"penalties": {}, "layer_ran": False}}
         return observations, {}, terminated, truncated, info
 
     # ---------------------------------------------------------------- actuation
@@ -554,9 +563,19 @@ class SumoTopologyEnv:
             target_headways={a: self._target_headways[a] for a in agent_ids},
             target_lanes={a: None for a in agent_ids},
             segment_metrics=self.get_segment_metrics(snapshots),
-            constraints=SafetyConstraints(),
+            # From the topology's own `safety:` block, not library defaults. The
+            # previous form passed a bare SafetyConstraints(), so lane-change dwell,
+            # the per-km change limit and the follower-braking limit were whatever
+            # the library shipped rather than what inverted_tree declares.
+            constraints=self._safety_constraints(),
             rng=self._rng,
         )
+
+    def _safety_constraints(self) -> SafetyConstraints:
+        """The topology's declared safety limits, falling back to the defaults."""
+        declared = (self.config.get("topology") or {}).get("safety", {}) or {}
+        fields = {f.name for f in dataclasses.fields(SafetyConstraints)}
+        return SafetyConstraints(**{k: v for k, v in declared.items() if k in fields})
 
     # ------------------------------------------------------------------ demand
 

@@ -2435,6 +2435,64 @@ and on what evidence.
 
 ## K. Found in passing
 
+87. **Three of the four action heads are inert on SUMO, and the safety layer never
+    runs.** Found by the independent audit of the SUMO migration, 2026-09-09.
+    Belongs with the task 86 decision, since both concern the action contract.
+
+    `_apply_actions` reads `desired_speed_bin` and stores `desired_headway_bin`;
+    `lane_preference` and `merge_mode` are discarded. `mappo_sumo.yaml` sets
+    `action_profile: full`, which activates all four heads. `desired_headway_bin`
+    only feeds back into the agent's own observation — SUMO's `tau` is never set —
+    so it changes what the agent sees and not what the traffic does.
+
+    **So of the four heads, one acts on the world, one acts on the observation and
+    two act on nothing.** With 5x4x3x3 action combinations and only the 5 speed bins
+    changing the simulation, most of the gradient signal is on inert dimensions.
+    That is a second cause of the task 86 null, independent of the speed bins being
+    outside the effective range.
+
+    **The safety layer is not invoked at all.** `apply_safety_layer` is never called
+    on this path, so `info["safety"]["penalties"]` was a literal empty dict and
+    `safety_penalty_for_agent` returned 0 for every agent — the per-agent reward
+    equalled the team reward exactly. That is defensible in principle, because
+    SUMO's car-following is the safety guarantee the layer existed to provide, but
+    it was not a decision that was taken; it was an omission. The etiquette filters
+    are likewise unreached.
+
+    **Two parts fixed now**, because they are omissions rather than design choices:
+    `SafetyConstraints` now comes from the topology's own `safety:` block rather
+    than library defaults, and the empty penalties dict carries `layer_ran: False`
+    so it cannot be read as "no penalties were incurred".
+
+    **What remains is a decision.** `lane_preference` maps onto
+    `traci.vehicle.changeLane` and `desired_headway_bin` onto `setTau`, so both are
+    implementable. Whether to wire them, and whether the safety and etiquette layers
+    should run on a simulator that cannot crash, is the same question as the speed
+    bin rescale: it changes what the deployed actor's heads mean.
+
+88. **Lower-severity items from the same audit.** Recorded, not fixed.
+
+    - **The demand config's speed distribution and spawn gap are ignored on SUMO.**
+      `_write_routes` reads only `speed_distribution.max_mps`. `mean_mps`, `std_mps`,
+      `min_mps`, `spawn_min_gap_m`, `branch_split` and `burst` reach SUMO nowhere,
+      though all are consumed on `highway_env`. Measured: a config declaring a
+      24.0 m/s desired-speed mean produced a sampled `getAllowedSpeed` of 28.35 m/s,
+      about 24% above it, and the minimum gap falls from the configured 12 m to
+      SUMO's vType default of 2.5 m, which raises jam density roughly fourfold. Both
+      set capacity, which is the quantity the sweeps measure.
+    - **`mean_speed` and `active_vehicle_count` exclude vehicles inside junctions.**
+      Measured: 700 of 48,590 vehicle-steps (1.44%) were on internal lanes, and the
+      reported `mean_speed` was 6.157 m/s against SUMO's own 6.358 over all
+      vehicles — 3.2% low, because junction-crossing vehicles are moving.
+    - **`mappo_sumo.yaml` does not set `duration_steps`**, so it defaults to 120
+      while `rollout_steps` is 512: one rollout spans 4.3 episodes and runs 1500
+      discarded warm-up steps. The reward weights and the operating point were
+      calibrated on 600- and 1800-step runs.
+    - **Threshold sources differ between the simulators.** The SUMO env reads
+      `queue_speed_mps` from `config["sensing"]` and `throughput_window_s` from the
+      top level; `highway_env` reads both from `config["metrics"]["thresholds"]`, so
+      a config setting them there is silently ignored on SUMO.
+
 86. **A 52% throughput gain exists, and the action space cannot reach it.**
     Measured 2026-09-09 on SUMO. This is the control effect the project has been
     trying to measure, and the reason no policy has found it.
