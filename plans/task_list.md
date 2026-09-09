@@ -2661,11 +2661,47 @@ and on what evidence.
     `backpressure` **0 and 6/6**. So an AV arm is now fully collision-free and the
     human-only arm is not, which is the reverse of where this task started.
 
-    Not yet diagnosed. The candidates are the 3-into-2 entry merges, where three
-    arcs still converge onto two lanes and only the later arriver yields, and
-    lateral motion during a lane change, which `RESIDUAL_ALLOWANCE = 2` in
-    `tests/test_collision_free.py` currently tolerates. That constant is a
-    measurement and must not be raised to accommodate a regression.
+    **DIAGNOSED 2026-09-09, and it is density, not duration.** Per seed, at the
+    `saturating` demand over 600 steps:
+
+    | controller | seed | steps | completed | collisions | jam | throughput |
+    |---|---|---|---|---|---|---|
+    | `no_av` | 7 | 600 | yes | 0 | 0.217 | **0.0** |
+    | `no_av` | 17 | 600 | yes | 0 | 0.000 | 23.0 |
+    | `no_av` | 27 | 600 | yes | 0 | 0.000 | 34.0 |
+    | `no_av` | 37 | 600 | yes | 0 | 0.064 | 29.0 |
+    | `no_av` | 47 | 600 | yes | **9** | 0.790 | **0.0** |
+    | `backpressure` | 7 | **225** | no | 2 | 0.000 | 29.0 |
+    | `backpressure` | 17 | 600 | yes | 0 | 0.000 | 21.0 |
+    | `backpressure` | 27 | **290** | no | 3 | 0.111 | 25.0 |
+    | `backpressure` | 37 | **319** | no | 7 | 0.228 | 37.0 |
+    | `backpressure` | 47 | **171** | no | 2 | 0.000 | 30.0 |
+
+    **Three findings.**
+
+    - **`no_av` is bimodal, not noisy.** Seeds 7 and 47 gridlock to throughput 0.0;
+      seeds 17, 27 and 37 flow at 23 to 34. The 17.2 ± 16.2 reported under task 80
+      was averaging two distinct regimes. Any reference at this operating point must
+      report the modes or the count in each, never a mean.
+    - **The bound fails for humans too**, not just AVs: seed 47 has 9 human-human
+      collisions with no AVs present at all. So this is not an AV-control problem.
+    - **AV runs die early, at steps 171 to 319**, and carry *higher* throughput
+      (25 to 37) than the reference right up to the crash. They were working.
+
+    **Why the bound fails.** It caps speed on the nearest vehicle ahead within a
+    2.6 m lateral window. Density rises with run length until steady state -- 2000
+    veh/h over 600 s spawns 333 vehicles against 67 over 120 s -- and at higher
+    density the collisions measured earlier were side-by-side, at 1.9 to 3.7 m
+    lateral, outside or at the edge of that window. A forward-looking window cannot
+    see a conflict that is currently beside the vehicle and converging.
+
+    **The fix is predictive rather than a wider window.** Widening to 4 m would make
+    every adjacent-lane vehicle a longitudinal constraint and over-brake multi-lane
+    sections. What is needed is closest-point-of-approach: for each pair, project
+    both velocities, and if the predicted miss distance is under a vehicle width
+    within the braking horizon, treat it as a conflict. That covers converging paths
+    the current test misses and does not constrain parallel traffic that never
+    meets.
 
 ## Ordering correction 2026-09-09: task 71 precedes training
 
