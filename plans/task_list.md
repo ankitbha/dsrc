@@ -2435,6 +2435,42 @@ and on what evidence.
 
 ## K. Found in passing
 
+80. **Controllers DO have a large measurable effect, once the simulator is fixed
+    and measured at the right operating point.** PRELIMINARY — two seeds.
+
+    At the `saturating` demand of 2000 veh/h, 600-step runs, after the
+    collision-free bound, the node-geometry fix and the capacity measurement:
+
+    | controller | AV penetration | jam | speed | throughput |
+    |---|---|---|---|---|
+    | `no_av` | 0.00 | 0.1083 | 10.70 | 11.5 |
+    | `backpressure` | 0.10 | **0.0000** | 19.96 | **25.0** |
+    | `backpressure` | 0.20 | 0.1000 | 17.69 | **31.5** |
+
+    **A hand-written baseline at 10% penetration removes the congestion entirely
+    and more than doubles throughput.** That is the effect task 8 concluded did not
+    exist — it measured "+0.12 to +0.14 m/s against a 1.0 m/s threshold" and failed
+    68 of 72 cells on `baselines_separate`.
+
+    **Why task 8 could not see it.** Three reasons, each now measured:
+    - Its demand levels bracket capacity without hitting it. `medium` (1800 veh/h)
+      free-flows so there is nothing to relieve; `high` (2700) gridlocks so there is
+      no throughput left to compare. The effect lives at 2000, which no config had.
+    - Collisions dominated the dynamics. Crash queueing was most of the measured
+      congestion — `merge` entirely, `inverted_tree` 61% — so a controller's effect
+      was buried under crash-induced jams it could do nothing about.
+    - Its reference controller was `no_av`, which cannot terminate early and so
+      passed `episodes_complete` by construction, making the criterion uninformative.
+
+    **What this changes.** Section C's premise, that the simulator cannot show a
+    control effect, is refuted. The replication has something to replicate. It also
+    means the MAPPO result must be compared against these baselines rather than
+    only against `no_av`, because the bar is now high: a learned policy has to beat
+    a hand-written one that already doubles throughput.
+
+    **Do not quote these numbers yet.** Two seeds, one duration, and the throughput
+    metric is a 60 s rolling count. A five-seed check is running.
+
 79. **The 120-step episode was hiding that `inverted_tree`/high is over-saturated.**
     Open, and it decides what task 74 can measure.
 
