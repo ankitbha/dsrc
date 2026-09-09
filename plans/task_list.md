@@ -77,9 +77,23 @@ it. The drives support the deployment claims and calibrate the sensing model.
 off the path.** Nothing here needs hardware, another drive, or a decision from
 outside the project.
 
-1. **Task 67** — fix the 40% episode-truncation rate. Gates task 68.
-2. **Task 63** — fix the 90-degree frame rotation. Gates task 9.
-3. **Task 9** — fill the five sensing-model parameters. Gates task 68.
+1. ~~**Task 67** — fix the 40% episode-truncation rate.~~ **DONE 2026-09-09.**
+   The cause was not the controllers: `highway_env`'s `IDMVehicle` follows only
+   within its own lane, and every node here funnels lanes, so human traffic drove
+   through itself. Measured on 81 **distinct** runs against a same-run plain-IDM
+   control: completion 43/81 to 57/81, +17pp; collisions 155 to 126, −19%.
+   `no_av` could never have shown the problem, because `terminated` checks AV
+   crashes and a `no_av` run has none.
+2. ~~**Task 63** — fix the 90-degree frame rotation.~~ **DONE 2026-09-09.**
+   Rotation applied at the decode boundary; intrinsics moved with it
+   (`cx_px` 640→360, `cy_px` 360→640); `horizon_y_px` measured at 717, not the
+   old landscape centre of 360; `hood_line_y_px` set to 1022. The offline replay
+   derives its own rotation from each run's recorded config.
+3. **Task 9** — fill the five sensing-model parameters. **PARTIAL 2026-09-09.**
+   `configs/training/mappo_deploysense.yaml`. `latency_s` and `queue_speed_mps`
+   settled from the drives, `range_m` from optics. Two remain open and are marked
+   in the file: the noise terms need a citation, and `range_m` still wants the
+   replay measurement, which needs the Jetson.
 4. **Task 68** — train MAPPO on `inverted_tree`. The single missing artifact.
 5. **Task 69** — evaluate trained MAPPO against `no_av` for throughput.
 6. Write the paper: the deployed system and the safety and etiquette filters, with

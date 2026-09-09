@@ -1,26 +1,27 @@
 {
   "schema": 1,
-  "updated_at": "2026-09-09T02:47:26Z",
-  "stale_after_minutes": 90,
+  "updated_at": "2026-09-09T05:25:31Z",
+  "stale_after_minutes": 45,
   "blocking": null,
   "awaiting_user": null,
-  "next_action": "PAUSED. Blocking unknown: whether a merge-yield rule in the safety layer reduces collisions is unmeasured, and task 67 now rests on it. The sensing half is committed (6efc3bf) and bought nothing -- 48/108 completed before and after, identical -- because SafetyContext has no merge fields so the layer never receives them. Resume at plans/plan_task_67_merge_blind_collisions.md, section 'PAUSED 2026-09-09', steps 1-4.",
+  "next_action": "Two jobs in flight. The validator is on round 2 of 3, auditing the round-1 fixes. MAPPO training is running: 100 updates at 512 rollout steps, ~15 s per update, output under the session scratchpad train/ directory. When training finishes, task 69 evaluates the checkpoint against no_av on inverted_tree, and MUST use the sensing block recorded in the checkpoint's config_resolved.yaml under the `training` key.",
   "last_verdict": null,
   "section": "C. Simulation replication",
   "task": {
-    "number": 67,
-    "what": "fix the 40% episode-truncation rate",
-    "stage": "paused",
-    "stage_started_at": "2026-09-09T02:47:26Z",
-    "background_job": null,
+    "number": 68,
+    "what": "train MAPPO on inverted_tree",
+    "stage": "experiment",
+    "stage_started_at": "2026-09-09T05:25:31Z",
+    "background_job": {
+      "what": "MAPPO training, 100 updates x 512 rollout steps, seed 7, demand medium",
+      "started_at": "2026-09-09T05:25:31Z",
+      "expect_by": "2026-09-09T06:05:31Z"
+    },
     "needs_hardware": false,
     "remaining": [
-      63,
-      9,
-      68,
       69
     ],
-    "stopped_by_user": true
+    "stopped_by_user": false
   },
   "carried_forward": [
     "Jetson suite baseline is 2308 passed / 24 skipped. Reproduce it before quoting any delta.",
@@ -30,7 +31,11 @@
     "9 gates 68: topology_env.py:109 builds every agent observation through SensingConfig, so the sensing block is the actor's input distribution.",
     "69 must evaluate under the same sensing block 68 trained under.",
     "--controlled-vehicles is inert outside ring; set AV population via demand.av_penetration.",
-    "Grid completion baseline is 48/108 on inverted_tree; simulator suite 263 passed.",
-    "0 of 51 collisions were successor-arc, so the committed route-aware leader fix is nearly inert here; the merge class is 27 of 51."
-  ]
+    "Task 67 measured on 81 DISTINCT runs against a same-run plain-IDM control: completion 43/81 -> 57/81 (+17pp), collisions 155 -> 126 (-19%).",
+    "burst is byte-identical to medium at 120 steps (its window opens at t=300 s), so any grid including it counts medium twice.",
+    "One MAPPO update at 512 rollout steps takes ~15 s; a 100-update run is ~25 min.",
+    "A checkpoint records its sensing block in config_resolved.yaml under the `training` key. Task 69 must evaluate under it.",
+    "Nothing validates that mean_speed is physical; a value of -2.6e11 propagated into the training score and the health criteria unnoticed."
+  ],
+  "stopped_by_user": false
 }
