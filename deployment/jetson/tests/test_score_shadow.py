@@ -657,8 +657,14 @@ class TestReferenceWitness:
         assert rw["ticks_with_achieved"] == 8
         assert rw["ticks_no_telemetry"] == 0
         assert rw["reports"] == 8
-        assert rw["achieved_mean"] == {"camera_hz": 4.97, "gps_hz": 1.0,
-                                       "imu_hz": 49.8, "here_hz": 0.0}
+        # approx, not equality: these are computed means. `sum([49.8]*8)/8` is
+        # exactly 49.8 on arm64 CPython 3.12 and 49.800000000000004 on the
+        # Jetson's aarch64 CPython 3.10, so exact comparison made the suite unable
+        # to go green on the machine the runs happen on. The Mac passing was luck
+        # about summation order, not evidence.
+        assert rw["achieved_mean"] == pytest.approx(
+            {"camera_hz": 4.97, "gps_hz": 1.0, "imu_hz": 49.8, "here_hz": 0.0}
+        )
         assert rw["dropped_final"] == {"camera": 7, "gps": 0, "imu": 0, "here": 0}
 
     def test_a_drive_that_never_reported_counts_zero(self, tmp_path):

@@ -2385,7 +2385,7 @@ flushes, and never by killing it — the final teardown of `run_20260908_190548`
 54. Smoke validation small enough for routine regression testing.
 55. Artifact manifest: where checkpoints, session recordings, metrics, plots, and
     validation summaries live.
-56. The suite does not pass on the Jetson, and one assertion is why.
+56. ~~The suite does not pass on the Jetson, and one assertion is why.~~ **DONE 2026-09-09** — `pytest.approx`. Verified against the Jetson's actual value: exact equality rejects 49.800000000000004, `approx` accepts it, and a genuinely wrong 51.0 is still rejected, so the assertion can still fail.
     `test_score_shadow.py:660` compares a computed float mean for exact dict
     equality: `rw["achieved_mean"] == {"camera_hz": 4.97, ..., "imu_hz": 49.8, ...}`.
     `sum([49.8]*8)/8` is exactly `49.8` on the Mac (arm64, CPython 3.12) and
