@@ -103,7 +103,14 @@ class MergeAwareIDMVehicle(IDMVehicle):
         phantom = self._phantom_leader(nearest, nearest_gap)
         if phantom is None:
             return None
-        return float(self.acceleration(ego_vehicle=self, front_vehicle=phantom))
+        acceleration = float(self.acceleration(ego_vehicle=self, front_vehicle=phantom))
+        # IDM's gap term is `(desired_gap / d)^2`, which diverges as d approaches
+        # zero. Real vehicles never get that close because a collision is detected
+        # first, but a PROJECTED leader can sit a centimetre ahead, and without this
+        # clamp a no_av run reached a mean_speed of -2.6e11 m/s -- a number that
+        # feeds the trainer's score directly. Braking is allowed to be hard; it is
+        # not allowed to be unbounded.
+        return max(acceleration, -abs(self.ACC_MAX))
 
     def _phantom_leader(self, other: Vehicle, gap: float) -> Vehicle | None:
         """The converging vehicle, restated as a leader on the ego's own lane.

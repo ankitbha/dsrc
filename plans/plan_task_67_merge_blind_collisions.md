@@ -331,3 +331,58 @@ vehicle, which is why a correct yield rule fired on 59% of samples and changed
 nothing.
 
 Both the human model and the safety layer use the same projection.
+
+---
+
+# CORRECTION 2026-09-09: the first merge-aware result was an artifact
+
+**What was reported and is wrong:** merge-aware humans cut collisions 212 to 120
+(-43%) and lifted grid completion from 48/108 to 69/108.
+
+**Why it was wrong.** `IDMVehicle.acceleration` uses a gap term of
+`(desired_gap / d)^2`, which diverges as `d` approaches zero. Real vehicles never
+reach a sub-metre gap because a collision is detected first, but a **projected**
+leader can be placed a centimetre ahead, and the filter only excluded `gap <= 0`.
+The result was unbounded braking: a `no_av` run reached a **mean_speed of
+-2.6e11 m/s** at step 28, against 28.1 for plain IDM on the same seed. The
+apparent collision reduction was vehicles being flung backwards, not merging.
+
+That number feeds the trainer directly -- `score = mean_speed - jam_fraction` --
+and `mean_speed` is also what task 8's `baselines_separate` criterion compares.
+
+**The fix** clamps the merge acceleration to the vehicle's own `ACC_MAX`. Braking
+is allowed to be hard; it is not allowed to be unbounded.
+
+**The corrected measurement:**
+
+| | baseline | with the blow-up | clamped, true |
+|---|---|---|---|
+| `cooperative_smoothing` | 7/36 | 16/36 | **11/36** |
+| `backpressure` | 5/36 | 17/36 | **11/36** |
+| overall completion | 48/108 (44%) | 69/108 (64%) | **58/108 (54%)** |
+| `no_av` collisions, 12 conditions | 212 | 120 | **301** |
+
+**The result is mixed and both halves are real.** AV episodes complete 10
+percentage points more often, which is the criterion that gates training. Human
+collisions in plain traffic rise 42%, because a vehicle yielding to a projected
+conflict slows and the traffic behind it in its own lane does not always react in
+time. That is the same rear-end mechanism raised as unrealistic at the start of
+this task, now caused by the fix rather than merely present.
+
+`mean_speed` across the grid is now 4.60 to 23.39 m/s, all physical.
+
+## The decision this needs
+
+1. **Keep it.** +10pp completion is real and training is what needs unblocking.
+   The human collision rate is a known cost, recorded, and the paper does not
+   claim collision-free traffic.
+2. **Refine the yield test** so a vehicle only gives way when a collision is
+   actually predicted, rather than whenever another vehicle reaches the node
+   first. Should reduce the unnecessary slowdowns causing the extra rear-ends.
+   **Recommended if asked** -- it addresses the regression rather than accepting it.
+3. **Revert to plain IDM** and take option 3 from the previous decision instead:
+   accept collisions, drop `episodes_complete` as a gate, let MAPPO learn.
+
+**A separate defect worth its own task:** nothing anywhere validates that
+`mean_speed` is physical. A value of -2.6e11 propagated into the training score,
+the health-check criteria and the run records without a single guard noticing.
