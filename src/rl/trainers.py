@@ -181,64 +181,71 @@ class BasePPOTrainer:
 
     def collect_rollout(self, *, seed: int) -> tuple[RolloutBuffer, dict[str, Any]]:
         env = self.build_env()
-        observations, _ = env.reset(seed=seed)
-        buffer = RolloutBuffer()
-        episode_metrics: dict[str, Any] = {}
-        metric_history: list[dict[str, Any]] = []
-        terminated = False
-        truncated = False
-        episode_index = 0
-        steps = 0
-        while steps < self.config.rollout_steps:
-            if terminated or truncated:
-                episode_index += 1
-                observations, _ = env.reset(seed=seed + episode_index)
-                terminated = False
-                truncated = False
-            agent_ids, obs_tensor = encode_local_batch(observations)
-            if not agent_ids:
-                observations, _, terminated, truncated, info = env.step({})
+        try:
+            observations, _ = env.reset(seed=seed)
+            buffer = RolloutBuffer()
+            episode_metrics: dict[str, Any] = {}
+            metric_history: list[dict[str, Any]] = []
+            terminated = False
+            truncated = False
+            episode_index = 0
+            steps = 0
+            while steps < self.config.rollout_steps:
+                if terminated or truncated:
+                    episode_index += 1
+                    observations, _ = env.reset(seed=seed + episode_index)
+                    terminated = False
+                    truncated = False
+                agent_ids, obs_tensor = encode_local_batch(observations)
+                if not agent_ids:
+                    observations, _, terminated, truncated, info = env.step({})
+                    episode_metrics = dict(info.get("metrics", {}))
+                    metric_history.append(episode_metrics)
+                    steps += 1
+                    continue
+                obs_tensor = obs_tensor.to(self.device)
+                with torch.no_grad():
+                    actions, action_indices, log_probs, _ = self.actor.sample(obs_tensor)
+                    value_obs = self.value_observation_tensor(env.get_global_state(), obs_tensor, len(agent_ids))
+                    values = self.critic(value_obs)
+                action_map = {agent_id: action for agent_id, action in zip(agent_ids, actions, strict=True)}
+                next_observations, _, terminated, truncated, info = env.step(action_map)
                 episode_metrics = dict(info.get("metrics", {}))
                 metric_history.append(episode_metrics)
-                steps += 1
-                continue
-            obs_tensor = obs_tensor.to(self.device)
-            with torch.no_grad():
-                actions, action_indices, log_probs, _ = self.actor.sample(obs_tensor)
-                value_obs = self.value_observation_tensor(env.get_global_state(), obs_tensor, len(agent_ids))
-                values = self.critic(value_obs)
-            action_map = {agent_id: action for agent_id, action in zip(agent_ids, actions, strict=True)}
-            next_observations, _, terminated, truncated, info = env.step(action_map)
-            episode_metrics = dict(info.get("metrics", {}))
-            metric_history.append(episode_metrics)
-            team_reward = build_team_reward(episode_metrics, self.config.reward_weights) * self.ppo_config.reward_scale
-            # Asked of the environment rather than read out of its internals. The
-            # previous form reached into `_av_vehicles`, which only exists on one
-            # of the two simulators, so it failed the moment a second one appeared.
-            crashed_agents = (
-                set(env.crashed_agent_ids()) if self.ppo_config.crash_penalty else set()
-            )
-            for index, agent_id in enumerate(agent_ids):
-                reward = team_reward - safety_penalty_for_agent(info, agent_id)
-                if agent_id in crashed_agents:
-                    # the dense speed reward otherwise dominates the one-step
-                    # collision term and argmax collapses to constant "fast"
-                    reward -= self.ppo_config.crash_penalty
-                reward = max(-self.ppo_config.reward_clip, min(self.ppo_config.reward_clip, reward))
-                buffer.add(
-                    observation=obs_tensor[index],
-                    action=action_indices[index],
-                    log_prob=log_probs[index],
-                    reward=reward,
-                    value=values[index],
-                    done=bool(terminated or agent_id not in next_observations),
-                    value_observation=value_obs[index],
-                    agent_id=agent_id,
+                team_reward = build_team_reward(episode_metrics, self.config.reward_weights) * self.ppo_config.reward_scale
+                # Asked of the environment rather than read out of its internals. The
+                # previous form reached into `_av_vehicles`, which only exists on one
+                # of the two simulators, so it failed the moment a second one appeared.
+                crashed_agents = (
+                    set(env.crashed_agent_ids()) if self.ppo_config.crash_penalty else set()
                 )
-            observations = next_observations
-            steps += 1
-        self._set_bootstrap_values(buffer, env, observations, terminated)
-        return buffer, aggregate_rollout_metrics(metric_history)
+                for index, agent_id in enumerate(agent_ids):
+                    reward = team_reward - safety_penalty_for_agent(info, agent_id)
+                    if agent_id in crashed_agents:
+                        # the dense speed reward otherwise dominates the one-step
+                        # collision term and argmax collapses to constant "fast"
+                        reward -= self.ppo_config.crash_penalty
+                    reward = max(-self.ppo_config.reward_clip, min(self.ppo_config.reward_clip, reward))
+                    buffer.add(
+                        observation=obs_tensor[index],
+                        action=action_indices[index],
+                        log_prob=log_probs[index],
+                        reward=reward,
+                        value=values[index],
+                        done=bool(terminated or agent_id not in next_observations),
+                        value_observation=value_obs[index],
+                        agent_id=agent_id,
+                    )
+                observations = next_observations
+                steps += 1
+            self._set_bootstrap_values(buffer, env, observations, terminated)
+            return buffer, aggregate_rollout_metrics(metric_history)
+        finally:
+            # libsumo is process-global and one connection is held at a time,
+            # so a rollout that does not release it leaves a live simulation
+            # behind and the next environment cannot start.
+            if hasattr(env, "close"):
+                env.close()
 
     def critic_input_dim(self) -> int:
         return physical_global_state_dim() if self.critic_scope == "global" else local_obs_dim()

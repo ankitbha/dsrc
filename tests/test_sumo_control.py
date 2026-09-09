@@ -167,9 +167,14 @@ class TestTheTwoVehicleTypesDifferOnlyInIdentity:
         try:
             env.reset(seed=7)
             routes = (env.work_dir / "demand.rou.xml").read_text()
+            # The DISTRIBUTION members, which is what the flows draw from. An
+            # earlier version of this test excluded every line containing
+            # `probability` -- that is, exactly those two -- and checked the two
+            # top-level vTypes that no flow references. The test written to stop
+            # the speedFactor confound returning could not fail.
             types = [line for line in routes.splitlines()
-                     if "<vType " in line and "probability" not in line]
-            assert len(types) == 2, types
+                     if "<vType " in line and "probability" in line]
+            assert len(types) == 2, f"expected two distribution members, got {types}"
             factors = [line.split('speedFactor="')[1].split('"')[0] for line in types]
             assert factors[0] == factors[1], (
                 f"the two vTypes have different speed factors: {factors}"

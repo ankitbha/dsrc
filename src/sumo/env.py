@@ -52,6 +52,16 @@ except ImportError:  # pragma: no cover
     _BINDING = "traci"
 
 
+#: The environment currently holding the process-global SUMO connection, or None.
+#: libsumo runs in-process and there is exactly one simulation per process, so two
+#: live environments would drive the same one. Before this existed, a second
+#: `reset` silently rewound the clock to 0.0 while the first environment stayed
+#: `_running`, and its next `step` advanced the SECOND simulation and returned the
+#: second's vehicles, with its own step count, arrivals and collision total
+#: continuing across both. Nothing raised.
+_LIVE: "SumoTopologyEnv | None" = None
+
+
 class SumoTopologyEnv:
     """Runs one SUMO simulation and reports it as `VehicleSnapshot`s."""
 
@@ -62,6 +72,10 @@ class SumoTopologyEnv:
     #: The distribution the flows draw from, so penetration changes who is
     #: controllable without changing the arrival process.
     MIX_TYPE = "mix"
+    #: How SUMO handles a collision. `warn` reports and leaves the vehicles in
+    #: place; anything that removes them would make the collision count read zero
+    #: whatever happened.
+    collision_action = "warn"
 
     def __init__(self, topology_id: str, config: Mapping[str, Any]) -> None:
         self.topology_id = topology_id
@@ -103,6 +117,12 @@ class SumoTopologyEnv:
     # ---------------------------------------------------------------- lifecycle
 
     def reset(self, seed: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+        global _LIVE
+        if _LIVE is not None and _LIVE is not self:
+            raise RuntimeError(
+                "another SumoTopologyEnv already holds the SUMO connection; "
+                "libsumo is process-global, so close it before resetting this one"
+            )
         self.close()
         topology_cfg = self.config.get("topology", {})
         self.network = SumoNetwork.build(self.topology_id, topology_cfg, self.work_dir)
@@ -129,13 +149,16 @@ class SumoTopologyEnv:
             "--no-step-log", "true",
             "--no-warnings", "true",
             # Report a collision rather than removing the vehicles, so the count is
-            # readable. Nothing is expected to arrive here.
-            "--collision.action", "warn",
+            # readable. `remove` would delete them and the count would read 0,
+            # which would make every "zero collisions" claim in this migration
+            # vacuous -- so the value is an attribute a test can pin.
+            "--collision.action", self.collision_action,
         ]
         if seed is not None:
             args += ["--seed", str(int(seed))]
         _sumo.start([self._binary()] + args)
         self._running = True
+        _LIVE = self
         self._warm_up()
         return self.get_local_observations(), {"binding": _BINDING}
 
@@ -173,6 +196,7 @@ class SumoTopologyEnv:
             self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
 
     def close(self) -> None:
+        global _LIVE
         if not self._running:
             return
         try:
@@ -180,6 +204,8 @@ class SumoTopologyEnv:
         except Exception:  # noqa: BLE001 - closing an already-dead connection
             pass
         self._running = False
+        if _LIVE is self:
+            _LIVE = None
 
     def __enter__(self) -> "SumoTopologyEnv":
         return self

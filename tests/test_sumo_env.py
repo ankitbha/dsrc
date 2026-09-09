@@ -61,20 +61,42 @@ class TestItRunsAndCloses:
         finally:
             env.close()
 
-    def test_two_envs_do_not_share_a_connection(self, tmp_path):
-        # libsumo is process-global, so two live envs would silently drive one
-        # simulation. Whatever the implementation does about that, it must not
-        # produce a network with vehicles from both.
+    def test_a_second_live_env_is_refused(self, tmp_path):
+        # The previous version of this test closed the first env before building
+        # the second, so it never exercised the path its name described and could
+        # not fail. Measured before the fix: A stepped 30 steps, B.reset() rewound
+        # the shared clock to 0.0 while A stayed `_running`, and A.step() then
+        # advanced B's simulation and returned B's vehicles, with A's own step
+        # count, arrivals and collision total continuing across both. Nothing
+        # raised.
+        first = _env(tmp_path / "a")
+        first.reset(seed=7)
+        try:
+            for _ in range(5):
+                first.step({})
+            second = _env(tmp_path / "b")
+            with pytest.raises(RuntimeError, match="process-global"):
+                second.reset(seed=7)
+            # And the first env is untouched by the refusal.
+            before = first.step_count
+            first.step({})
+            assert first.step_count == before + 1
+        finally:
+            first.close()
+
+    def test_the_connection_is_released_on_close(self, tmp_path):
+        # The control: after closing, a second env must be able to start. Without
+        # it the refusal above could be satisfied by never releasing at all.
         first = _env(tmp_path / "a")
         first.reset(seed=7)
         for _ in range(5):
             first.step({})
-        first_count = len(first.vehicle_snapshots())
         first.close()
         second = _env(tmp_path / "b")
         second.reset(seed=7)
         try:
-            assert len(second.vehicle_snapshots()) <= first_count + 5
+            second.step({})
+            assert second.step_count == 1
         finally:
             second.close()
 
@@ -138,16 +160,45 @@ class TestNoCollisionsEver:
         finally:
             env.close()
 
-    def test_the_collision_counter_is_actually_read(self, tmp_path):
-        # The control. A counter that is never incremented reads zero whatever
-        # happens, so assert the env queried SUMO rather than defaulting.
-        env = _env(tmp_path, duration_steps=20)
+    def test_the_collision_count_reflects_what_sumo_reports(self, tmp_path, monkeypatch):
+        # The previous version asserted `collision_checks == 20`, but that counter
+        # is incremented by a separate statement, so replacing the collision read
+        # with `+= 0` left it passing. The guard on this migration's central
+        # premise was defeated by a one-token change.
+        #
+        # This drives the count from SUMO's side instead: if the env stops reading
+        # the reported number, the assertion fails.
+        import src.sumo.env as env_module
+
+        env = _env(tmp_path, duration_steps=10)
+        env.reset(seed=7)
         try:
-            env.reset(seed=7)
-            for _ in range(20):
+            reported = [0, 3, 0, 2, 0, 0, 1, 0, 0, 0]
+            calls = iter(reported)
+            monkeypatch.setattr(
+                env_module._sumo.simulation, "getCollidingVehiclesNumber",
+                lambda: next(calls, 0),
+            )
+            for _ in range(10):
                 env.step({})
-            assert env.collision_checks == 20, (
-                f"the collision count was read {env.collision_checks} times in 20 steps"
+            assert env.collision_count == sum(reported), (
+                f"SUMO reported {sum(reported)} collisions and the env counted "
+                f"{env.collision_count}"
+            )
+            assert env.collision_checks == 10
+        finally:
+            env.close()
+
+    def test_collisions_are_reported_not_removed(self, tmp_path):
+        # `--collision.action remove` would delete colliding vehicles and the count
+        # would read 0, making every "zero collisions" claim in this migration
+        # vacuous. Pin the option.
+        env = _env(tmp_path, duration_steps=5)
+        env.reset(seed=7)
+        try:
+            assert env.collision_action == "warn", (
+                f"collisions are handled with {env.collision_action!r}; anything that "
+                "removes the vehicles makes the collision count meaningless"
             )
         finally:
             env.close()
