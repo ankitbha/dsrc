@@ -62,10 +62,18 @@ class ConfigApplierTest {
     }
 
     @Test
-    fun `a shadow command changes nothing at all`() {
-        // The spec defines shadow as whether the command "was gated for real or only
-        // recorded". A shadow command that moved a rate would make the comparison it exists
-        // for meaningless -- the Jetson would be measuring a phone that had already acted.
+    fun `a shadow command moves no rate that affects the trajectory`() {
+        // Renamed from "changes nothing at all", which was the contract until
+        // 2026-09-08. HERE is now the single exception, at a fixed one-a-minute: a
+        // query is an action, so the COMMANDED rate is still not honoured, but a
+        // shadow drive that fetches nothing cannot answer the two HERE questions
+        // section I asks of every drive, and every shadow run before that recorded
+        // here_calls 0.
+        //
+        // The reason the original gave is untouched and is what this still asserts:
+        // the Jetson must not be measuring a phone that has already acted. Fetching
+        // traffic data does not move the vehicle; changing the camera, GPS or IMU
+        // rate does.
         val recorder = Recorder()
         val applier = ConfigApplier(recorder)
         applier.apply(command(camera = 9.0, shadow = true, query = query))
@@ -73,8 +81,9 @@ class ConfigApplierTest {
         assertTrue("no rate may be applied: ${recorder.camera}", recorder.camera.isEmpty())
         assertTrue(recorder.gps.isEmpty())
         assertTrue(recorder.imu.isEmpty())
-        assertTrue(recorder.here.isEmpty())
-        assertTrue("not even the query", recorder.queries.isEmpty())
+        // HERE, and only HERE, is configured -- at the fixed rate, not the commanded one.
+        assertEquals(1.0 / 60.0, recorder.here.single(), 1e-9)
+        assertEquals(listOf(query), recorder.queries)
 
         val stats = applier.stats
         assertEquals(1, stats.shadowed)
@@ -165,5 +174,48 @@ class ConfigApplierTest {
 
         assertEquals(listOf(2.0, 8.0), recorder.camera)
         assertEquals(2, applier.stats.applied)
+    }
+
+    @Test
+    fun `shadow applies the HERE query and rate, and nothing else`() {
+        // Decided 2026-09-08. Issuing a query is an action, so the commanded rate is not
+        // honoured -- but a shadow drive that fetches nothing cannot answer the two HERE
+        // questions section I asks of every drive, and before this every shadow run in
+        // the project recorded here_calls 0.
+        val recorder = Recorder()
+        val applier = ConfigApplier(recorder)
+        applier.apply(command(shadow = true, query = query))
+
+        assertEquals(listOf(query), recorder.queries)
+        assertEquals(1, recorder.here.size)
+        // The trajectory must be untouched: that is what makes it a shadow drive.
+        assertTrue(recorder.camera.isEmpty())
+        assertTrue(recorder.gps.isEmpty())
+        assertTrue(recorder.imu.isEmpty())
+        // And it is still counted as shadowed, so the Jetson's record is unchanged.
+        assertEquals(1L, applier.stats.shadowed)
+        assertEquals(0L, applier.stats.applied)
+    }
+
+    @Test
+    fun `the shadow HERE rate is fixed at one a minute, not the commanded one`() {
+        // A recorded decision is not an instruction: honouring the commanded rate would
+        // make the fetch cadence depend on a policy that is not in force. Asserted
+        // against a commanded rate twelve times higher, so an implementation that
+        // passed the command through would fail here rather than coincide.
+        val recorder = Recorder()
+        ConfigApplier(recorder).apply(command(shadow = true, here = 0.2, query = query))
+        assertEquals(1.0 / 60.0, recorder.here.single(), 1e-9)
+    }
+
+    @Test
+    fun `live still applies every rate as before`() {
+        // The change must not have made shadow the only path that works.
+        val recorder = Recorder()
+        ConfigApplier(recorder).apply(command(camera = 2.0, gps = 3.0, imu = 4.0, here = 5.0))
+        assertEquals(listOf(2.0), recorder.camera)
+        assertEquals(listOf(3.0), recorder.gps)
+        assertEquals(listOf(4.0), recorder.imu)
+        assertEquals(listOf(5.0), recorder.here)
     }
 }

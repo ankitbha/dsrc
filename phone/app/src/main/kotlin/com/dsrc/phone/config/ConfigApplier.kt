@@ -26,6 +26,14 @@ class ConfigApplier(
         fun setHereQuery(query: com.dsrc.transport.HereQuery?)
     }
 
+    /** One HERE query a minute while shadowing, whatever the command asked for.
+     *
+     *  Constant on purpose: in shadow the controller's rate is a recorded decision
+     *  rather than an instruction, so honouring it would make the fetch cadence
+     *  depend on a policy that is not in force. A fixed rate gives every shadow
+     *  drive the same, comparable feed sampling. */
+    private val SHADOW_HERE_HZ = 1.0 / 60.0
+
     private val lock = Any()
 
     private var applied = 0L
@@ -56,15 +64,40 @@ class ConfigApplier(
      * running.
      */
     fun apply(command: RateCommand) {
+        val shadow: Boolean
         synchronized(lock) {
             lastTrigger = command.trigger
-            if (command.shadow) {
+            shadow = command.shadow
+            if (shadow) {
                 shadowed++
-                return
+            } else {
+                applied++
+                current = command
+                command.here?.let { currentQuery = it }
             }
-            applied++
-            current = command
-            command.here?.let { currentQuery = it }
+        }
+
+        if (shadow) {
+            // HERE is the one exception to "shadow applies nothing", decided on
+            // 2026-09-08. Issuing a query IS an action -- it spends cellular data and
+            // paid quota -- so the COMMANDED rate is not honoured. But a shadow drive
+            // that fetches nothing cannot answer the two questions section I asks of
+            // every drive, HERE-reported speed against experienced speed and feed lag,
+            // and before this every shadow run in the project recorded here_calls 0.
+            //
+            // So a fixed, slow rate is applied and nothing else is. The camera, GPS and
+            // IMU rates stay unapplied, which is what makes the drive a shadow drive:
+            // the trajectory is unchanged and the controller's decisions are still only
+            // recorded. The Jetson's own record is untouched -- these commands are still
+            // marked shadow, and `shadowed` still counts them.
+            //
+            // Outside the lock for the same reason the live path is: holding one across
+            // a pipeline's own synchronisation is how lock cycles get built.
+            with(targets) {
+                setHereRate(SHADOW_HERE_HZ)
+                setHereQuery(command.here)
+            }
+            return
         }
 
         // Outside the lock: these reach into the pipelines, and holding a lock across a
