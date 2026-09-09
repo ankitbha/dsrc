@@ -42,6 +42,13 @@ class SafetyContext:
     in_passing_lane: bool = False
     local_mean_speed_mps: float = 30.0
     near_merge: bool = False
+    #: Distance along the route to the next node where arcs join. A road fact, so
+    #: it is not limited by sensing range.
+    distance_to_next_merge_m: float = float("inf")
+    #: Distance to that same node of the nearest vehicle converging on it from a
+    #: different arc. Infinite when nobody is converging.
+    merge_conflict_gap_m: float = float("inf")
+    merge_conflict_relative_speed_mps: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -151,15 +158,16 @@ def physical_control_command(
 ) -> tuple[float, bool]:
     constraints = constraints or SafetyConstraints()
     forward_ttc = _forward_ttc(context)
-    critical_gap = context.leader_gap_m < constraints.min_front_gap_m
+    hazard_gap, hazard_relative_speed = _forward_hazard(context)
+    critical_gap = hazard_gap < constraints.min_front_gap_m
     if forward_ttc < constraints.min_forward_ttc_s or critical_gap:
         return -constraints.emergency_decel_mps2, True
 
     desired_speed = min(target_speed_mps, context.free_flow_speed_mps)
     desired_gap = max(constraints.min_front_gap_m, target_headway_s * max(context.ego_speed_mps, 0.0))
-    if context.leader_gap_m < desired_gap:
-        leader_speed = max(0.0, context.ego_speed_mps + context.leader_relative_speed_mps)
-        gap_ratio = max(0.0, context.leader_gap_m / max(desired_gap, 1e-6))
+    if hazard_gap < desired_gap:
+        leader_speed = max(0.0, context.ego_speed_mps + hazard_relative_speed)
+        gap_ratio = max(0.0, hazard_gap / max(desired_gap, 1e-6))
         desired_speed = min(desired_speed, leader_speed * gap_ratio)
 
     acceleration = constraints.speed_control_kp * (desired_speed - context.ego_speed_mps)
@@ -216,8 +224,32 @@ def _lane_change_count_exceeded(state: SafetyState, constraints: SafetyConstrain
     return recent_changes >= constraints.max_lane_changes_per_km
 
 
+def _forward_hazard(context: SafetyContext) -> tuple[float, float]:
+    """The nearest thing ahead the ego must not hit, and its closing speed.
+
+    Usually the leader. At a joining node it can instead be the node itself: a
+    vehicle converging from a sibling arc is on nobody's route, so no headway rule
+    sees it, and on `inverted_tree` 27 of 51 terminating collisions were exactly
+    that pair.
+
+    Priority is by arrival. When the other vehicle is closer to the joining point
+    than the ego is, it has the point, and the ego must be able to stop short of
+    it -- so the point is treated as a stationary obstacle. When the ego arrives
+    first it has priority and nothing is imposed, because braking for a vehicle
+    that will arrive behind you invents an obstacle that is not there.
+    """
+    gap = context.leader_gap_m
+    relative_speed = context.leader_relative_speed_mps
+    other_arrives_first = context.merge_conflict_gap_m < context.distance_to_next_merge_m
+    if other_arrives_first and context.distance_to_next_merge_m < gap:
+        gap = context.distance_to_next_merge_m
+        relative_speed = -context.ego_speed_mps
+    return gap, relative_speed
+
+
 def _forward_ttc(context: SafetyContext) -> float:
-    return _ttc_from_relative_speed(context.leader_gap_m, -context.leader_relative_speed_mps)
+    gap, relative_speed = _forward_hazard(context)
+    return _ttc_from_relative_speed(gap, -relative_speed)
 
 
 def _ttc_from_relative_speed(gap_m: float, closing_speed_mps: float) -> float:

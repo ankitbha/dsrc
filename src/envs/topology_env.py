@@ -692,6 +692,19 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             av_mean_speed_mps=gap_context.nearby_av_mean_speed_mps if gap_context is not None else float(metrics.get("mean_speed", free_flow_speed)),
             local_mean_speed_mps=gap_context.local_mean_speed_mps if gap_context is not None else float(metrics.get("mean_speed", free_flow_speed)),
             near_merge=bool(segment_id and ("merge" in segment_id or segment_id in self.topology.bottleneck_segments)),
+            # `near_merge` above is derived from the segment NAME, so it is False on
+            # every inverted_tree segment (`tree_leaf_a1` and friends) even though
+            # three arcs join at each of its inner nodes. These three carry the
+            # geometry instead of the naming convention.
+            distance_to_next_merge_m=(
+                gap_context.distance_to_next_merge_m if gap_context is not None else float("inf")
+            ),
+            merge_conflict_gap_m=(
+                gap_context.merge_conflict_gap_m if gap_context is not None else float("inf")
+            ),
+            merge_conflict_relative_speed_mps=(
+                gap_context.merge_conflict_relative_speed_mps if gap_context is not None else 0.0
+            ),
         )
 
     def _free_flow_speed_for_vehicle(self, vehicle: ControlledVehicle) -> float:

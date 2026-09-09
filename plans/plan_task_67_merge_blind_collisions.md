@@ -232,3 +232,79 @@ controllers (`no_av`, `cooperative_smoothing`, `backpressure`) × seeds (7, 17, 
 - Whether the 8 same-lane collisions that "had room to stop" indicate the braking law
   is too weak. That would be outside this task's scope boundary and needs its own
   task.
+
+---
+
+# FINDING 2026-09-09: the road produces collisions for plain human traffic
+
+**Three fixes were implemented and measured. None moved the completion rate.**
+
+| change | grid completion |
+|---|---|
+| baseline | 48/108 (44%) |
+| route-aware leader/follower across arc boundaries | 48/108 (44%) |
+| + merge yield in the safety layer, priority by arrival | 48/108 (44%) |
+| + entry lanes separated to a full lane width | 49/108 (45%) |
+
+**Why none of them could have worked.** `no_av` completes 36 of 36, which the plan
+read as evidence that the road is safe and the AVs are at fault. It is not evidence
+of anything: `terminated = any(vehicle.crashed for vehicle in self._av_vehicles)`,
+and a `no_av` run has no AVs, so it **cannot terminate early whatever happens on the
+road**.
+
+Counting collisions instead of terminations:
+
+| controller | collisions per 120-step run | runs with at least one |
+|---|---|---|
+| `no_av` | median **17**, max 57 | 30 of 36 |
+| `cooperative_smoothing` | median 6, max 52 | |
+| `backpressure` | median 5, max 52 | |
+
+**Plain IDM human traffic crashes more than the AV runs do.** The AVs are not driving
+badly; they are driving in traffic where collisions are endemic, and only their own
+collisions end an episode.
+
+**The mechanism is that every node in this topology reduces lane count and nothing
+sequences vehicles through it:**
+
+| node | lanes in | lanes out |
+|---|---|---|
+| `b1` | 3 | 2 |
+| `b2` | 3 | 2 |
+| `c` | 4 | 2 |
+
+`highway_env`'s `IDMVehicle` follows the vehicle ahead **in its own lane**. Two
+vehicles arriving at `b2` on different incoming lanes have no mutual awareness in the
+human model at all, so they interpenetrate. The same blindness I fixed for the AV's
+sensing exists in the human car-following model, and that is where the collisions
+come from.
+
+**This also means task 8's `episodes_complete` criterion compared every AV controller
+against a reference that passes by construction.** 44 of 72 cells failing that
+criterion is not 44 cells of controller failure.
+
+**What is now known to be NOT the cause:** the safety layer's braking law (it brakes
+correctly when given a correct gap), the AV's leader perception across arcs (0 of 51
+collisions were successor-arc), and the entry-lane geometry alone (separating them to
+a full lane width bought 1 percentage point).
+
+## The decision this needs, and it is the user's
+
+Three routes, and they produce materially different work:
+
+1. **Give the human model merge awareness at funnel nodes.** The faithful option: the
+   replication target (Flow, Vinitsky et al.) runs on SUMO, whose car-following is
+   collision-free by construction, so a faithful replication should not have humans
+   driving through each other. Largest change, and it touches a third-party vehicle
+   class. **Recommended if asked.**
+2. **Change the topology so no node reduces lane count.** Cheapest, but the funnels
+   are what create the congestion this topology exists to produce — task 8 measured
+   `inverted_tree` congesting in 12 of 12 cells — so this likely removes the
+   phenomenon under study.
+3. **Accept the collisions and change the success criterion.** Stop treating
+   `episodes_complete` as a gate, replace the `no_av` reference with one that can
+   actually fail, and let MAPPO learn to sequence. Cheapest path to a trained policy,
+   but the paper would be reporting throughput on a road where traffic collides.
+
+Option 1 and option 3 are compatible: 3 unblocks training now, 1 makes the result
+defensible later.

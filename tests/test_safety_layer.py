@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.envs.wrappers import decode_headway_bin
 from src.safety import SafetyConstraints, SafetyContext, SafetyState, apply_safety_layer
 
