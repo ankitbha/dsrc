@@ -2468,8 +2468,38 @@ and on what evidence.
     only against `no_av`, because the bar is now high: a learned policy has to beat
     a hand-written one that already doubles throughput.
 
-    **Do not quote these numbers yet.** Two seeds, one duration, and the throughput
-    metric is a 60 s rolling count. A five-seed check is running.
+    **RETRACTED at five seeds. Do not quote the table above.** The five-seed check:
+
+    | controller | pen | jam | speed | throughput | completed |
+    |---|---|---|---|---|---|
+    | `no_av` | 0.00 | 0.214 ± **0.334** | 11.41 ± **8.72** | 17.2 ± **16.2** | 5/5 |
+    | `backpressure` | 0.10 | 0.000 | 19.24 | 21.0 | **1/5** |
+    | `cooperative_smoothing` | 0.10 | — | — | — | **0/5** |
+    | `backpressure` | 0.20 | 0.000 | 19.39 | 39.0 | **1/5** |
+    | `cooperative_smoothing` | 0.20 | 0.000 | 20.08 | 23.0 | **1/5** |
+
+    Two independent reasons the effect cannot be measured here:
+
+    - **The reference is bistable at capacity.** `no_av` throughput is 17.2 with a
+      standard deviation of 16.2, and jam 0.214 ± 0.334. Some seeds free-flow and
+      some gridlock, which is what near-capacity traffic does. Two seeds happened
+      to draw two congested ones, which is why the preliminary table looked clean.
+    - **The treatment arms mostly crash.** 1 of 5 completed for `backpressure`,
+      0 of 5 for `cooperative_smoothing` at 0.10. So each percentage above rests on
+      one surviving run, and survivors are selected for not having crashed. This is
+      the selection effect that already invalidated task 69's comparison.
+
+    **And it contradicts something reported earlier in task 72.** `backpressure` at
+    `high`/0.20 over 120 steps was 0 collisions and 6/6 completed. At the saturating
+    demand over 600 steps it crashes 4 of 5. **The collision-free bound does not
+    hold at longer durations**, which is consistent with the truncation arithmetic
+    in task 72 and means task 77's residual is larger than two events.
+
+    **So the claim that survives is narrow:** at this operating point a controller
+    can drive jam to zero on the runs where it survives, and `no_av` cannot. Whether
+    that is a throughput improvement is unmeasured, and cannot be measured until the
+    runs complete reliably.
+
 
 79. **The 120-step episode was hiding that `inverted_tree`/high is over-saturated.**
     Open, and it decides what task 74 can measure.
