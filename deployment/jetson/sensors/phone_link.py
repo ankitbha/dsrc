@@ -142,6 +142,10 @@ class PhoneLink:
         # back up on a different session -- happens below the socket, and a test that
         # cannot supply a second connection cannot reach any of it.
         self._acceptor = acceptor if acceptor is not None else TcpAcceptor(host, port)
+        #: Quarter turns applied to every frame before anything measures it.
+        #: Set from `camera.rotate_cw_deg`; the intrinsics describe the frame
+        #: AFTER this rotation, so the two move together.
+        self.camera_rotate_cw_deg = 0
         self._listener = TransportListener(
             self._acceptor,
             Hello(device_id=device_id, role=Role.JETSON),
@@ -408,7 +412,10 @@ class PhoneLink:
         """
         self.router = MessageRouter(self.session)
         if self.camera is None or self.gps is None:
-            self.camera = PhoneCameraStream(self.router, self.adapter).start()
+            self.camera = PhoneCameraStream(
+                self.router, self.adapter,
+                rotate_cw_deg=self.camera_rotate_cw_deg,
+            ).start()
             self.gps = PhoneGpsReader(self.router, self.adapter).start()
         else:
             # Both, and both checked. A source that refused to rebind is not a source

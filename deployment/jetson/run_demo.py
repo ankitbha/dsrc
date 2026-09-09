@@ -684,6 +684,11 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         # default is unchanged, so only a command line that asks for it gets the
         # new behaviour.
         phone.rebind_timeout_s = args.rebind_timeout_s or None
+        # The intrinsics in config.yaml describe the frame AFTER this rotation,
+        # so a change to one without the other silently mis-measures distance.
+        phone.camera_rotate_cw_deg = int(
+            (config.get("camera") or {}).get("rotate_cw_deg", 0) or 0
+        )
         print(f"[run] waiting up to {args.phone_wait_s:.0f}s for a phone on "
               f"{phone.host}:{phone.port} (the phone dials; the Jetson cannot)", flush=True)
         if not phone.wait_for_phone(timeout_s=args.phone_wait_s):

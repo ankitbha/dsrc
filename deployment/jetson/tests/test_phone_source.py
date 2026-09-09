@@ -1221,3 +1221,74 @@ def test_transport_is_absent_when_the_wire_stamp_cannot_be_converted():
     transport = camera.latest().phone_stages["transport"]
     assert transport.basis == "absent"
     assert transport.reason == "no samples"
+
+
+# ---------------------------------------------------------------------------
+# Frame rotation.
+#
+# The camera is mounted rotated, so the scene arrives sideways inside a 1280x720
+# landscape raster: sky down the left edge, road down the right. Every drive of the
+# project detected essentially nothing -- 16 vehicles across 22,929 ticks -- because
+# the detector was shown a sideways road. Rotating clockwise gives a normal forward
+# view, 720 wide by 1280 tall.
+#
+# The rotation is at the decode boundary rather than in the detector because
+# distance estimation, the hood line and the tracker all read the same pixel
+# coordinates, and having two conventions in one pipeline is how the intrinsics
+# came to disagree with the frames in the first place.
+# ---------------------------------------------------------------------------
+
+class TestFrameRotation:
+
+    def _image(self):
+        import numpy as np
+
+        # Distinguishable corners, so a wrong rotation direction cannot pass.
+        image = np.zeros((720, 1280, 3), dtype=np.uint8)
+        image[0, 0] = (255, 0, 0)        # top-left
+        image[0, 1279] = (0, 255, 0)     # top-right
+        return image
+
+    def test_no_rotation_leaves_the_frame_alone(self):
+        from sensors.phone_source import rotate_frame
+
+        image = self._image()
+        out = rotate_frame(image, 0)
+        assert out.shape == (720, 1280, 3)
+        assert tuple(out[0, 0]) == (255, 0, 0)
+
+    def test_ninety_degrees_clockwise_puts_the_left_edge_on_top(self):
+        from sensors.phone_source import rotate_frame
+
+        image = self._image()
+        out = rotate_frame(image, 90)
+        assert out.shape == (1280, 720, 3), "a clockwise quarter turn must transpose the axes"
+        # The old top-left corner ends up at the new top-right.
+        assert tuple(out[0, 719]) == (255, 0, 0)
+        # The old top-right ends up at the new bottom-right.
+        assert tuple(out[1279, 719]) == (0, 255, 0)
+
+    def test_an_unsupported_angle_is_refused_rather_than_ignored(self):
+        from sensors.phone_source import rotate_frame
+
+        # Silently returning the frame unrotated is how a mis-set config becomes a
+        # drive that detects nothing and says why nowhere.
+        with pytest.raises(ValueError):
+            rotate_frame(self._image(), 45)
+
+    def test_the_source_applies_the_configured_rotation(self):
+        import numpy as np
+
+        from sensors.phone_source import PhoneCameraStream
+
+        captured = {}
+
+        def fake_decode(payload):
+            return np.zeros((720, 1280, 3), dtype=np.uint8)
+
+        source = PhoneCameraStream.__new__(PhoneCameraStream)
+        source._decode = fake_decode
+        source._rotate_cw_deg = 90
+        out = source._decode_and_orient(b"ignored")
+        captured["shape"] = out.shape
+        assert captured["shape"] == (1280, 720, 3)

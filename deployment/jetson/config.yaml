@@ -18,15 +18,21 @@ camera:
   # Intrinsics for distance estimation. Defaults assume a ~78 deg HFOV webcam
   # at 1280 px. Calibrate with calibration/camera_calibration.py before
   # trusting distances (see README "Calibration").
-  fx_px: 800.0
-  cx_px: 640.0
-  cy_px: 360.0
-  horizon_y_px: 360.0                # image row of the horizon on flat road
+  # The camera is mounted rotated: the scene arrives sideways inside a 1280x720
+  # landscape raster, which is why every drive detected almost nothing (16 vehicles
+  # across 22,929 ticks). A clockwise quarter turn gives a normal forward view,
+  # 720 wide by 1280 tall. EVERY value below describes the frame AFTER this
+  # rotation; changing one without the other mis-measures distance silently.
+  rotate_cw_deg: 90
+  fx_px: 800.0                       # unchanged: a quarter turn does not alter focal length
+  cx_px: 360.0                       # 720 / 2
+  cy_px: 640.0                       # 1280 / 2
+  horizon_y_px: 717                  # measured over 40 mid-drive frames of run_20260908_190548
   camera_height_m: 1.25              # lens height above the road surface
   # If the ego hood is visible, the row where it starts: detections whose
   # bbox center is below this are dropped (the detector boxes the hood and
   # its reflections as "car" -> phantom leader at minimum range).
-  hood_line_y_px: null
+  hood_line_y_px: 1022               # measured: the hood fills the bottom 20% of the rotated frame
 
 gps:
   port: /dev/ttyACM0                 # gpyes 2.0 (u-blox 8) enumerates here

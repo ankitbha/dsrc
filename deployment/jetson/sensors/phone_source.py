@@ -325,9 +325,18 @@ class PhoneCameraStream(_PhoneSource):
     """`CameraStream`'s consumer surface, fed from the camera channel."""
 
     def __init__(self, router: Any, adapter: PhoneClockAdapter, *,
-                 decode: Any = None, poll_s: float = 0.005) -> None:
+                 decode: Any = None, poll_s: float = 0.005,
+                 rotate_cw_deg: int = 0) -> None:
         super().__init__(router, adapter, Channel.CAMERA, "phone-camera", poll_s)
         self._decode = decode or _decode_jpeg
+        #: Quarter turns applied to every frame before anything else sees it. The
+        #: intrinsics in config.yaml describe the frame AFTER this rotation, so the
+        #: two have to be changed together.
+        self._rotate_cw_deg = int(rotate_cw_deg)
+        if self._rotate_cw_deg and self._rotate_cw_deg not in _ROTATIONS:
+            raise ValueError(
+                f"camera.rotate_cw_deg must be 0, 90, 180 or 270, got {rotate_cw_deg}"
+            )
         self._cond = threading.Condition()
         self._latest: Frame | None = None
         self._last_consumed_id = -1
@@ -355,6 +364,15 @@ class PhoneCameraStream(_PhoneSource):
         # drive the existing entry points unchanged simply false.
         self.source = "phone:camera"
         self.file_recoveries = 0
+
+    def _decode_and_orient(self, payload: bytes) -> np.ndarray:
+        """Decode one JPEG and put it the right way up.
+
+        Kept as one step so no caller can obtain a decoded frame that has not
+        been oriented: the pixel coordinates every later stage uses are the
+        rotated ones.
+        """
+        return rotate_frame(self._decode(payload), self._rotate_cw_deg)
 
     def _on_reader_ended(self) -> None:
         with self._cond:
@@ -425,7 +443,7 @@ class PhoneCameraStream(_PhoneSource):
     def _accept(self, message, receipt, stamp: TimebaseStamp) -> None:
         decode_started = now_mono()
         try:
-            image = self._decode(message.jpeg)
+            image = self._decode_and_orient(message.jpeg)
         except Exception:
             # A frame we cannot decode is one frame lost, not a dead stream --
             # the same recoverability split the transport draws between a
@@ -635,3 +653,36 @@ def _decode_jpeg(payload: bytes) -> np.ndarray:
     if image is None:
         raise ValueError("jpeg payload did not decode")
     return image
+
+
+#: Quarter turns only. The mount is fixed for a drive, so an arbitrary angle would
+#: mean resampling every frame for no gain, and a quarter turn is exact.
+_ROTATIONS = {90: "ROTATE_90_CLOCKWISE", 180: "ROTATE_180", 270: "ROTATE_90_COUNTERCLOCKWISE"}
+
+
+def rotate_frame(image: np.ndarray, degrees_clockwise: int) -> np.ndarray:
+    """Put the scene upright before anything measures it.
+
+    The camera is mounted rotated, so the road arrives sideways inside a landscape
+    raster and the detector was shown a sideways road for every drive of the
+    project: 16 vehicle detections across 22,929 ticks.
+
+    Rotating here rather than inside the detector is deliberate. Distance
+    estimation, the hood line and the tracker all read the same pixel coordinates,
+    so a pipeline with two orientation conventions is how the intrinsics came to
+    disagree with the frames. One boundary, applied once.
+
+    An unsupported angle raises rather than passing the frame through. A silently
+    ignored rotation is a drive that detects nothing and explains it nowhere, which
+    is the failure this function exists to end.
+    """
+    if not degrees_clockwise:
+        return image
+    name = _ROTATIONS.get(int(degrees_clockwise))
+    if name is None:
+        raise ValueError(
+            f"camera rotation must be one of 0, 90, 180, 270 degrees, got {degrees_clockwise}"
+        )
+    import cv2
+
+    return cv2.rotate(image, getattr(cv2, name))
