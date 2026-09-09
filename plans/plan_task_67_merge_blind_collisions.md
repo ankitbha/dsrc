@@ -386,3 +386,47 @@ this task, now caused by the fix rather than merely present.
 **A separate defect worth its own task:** nothing anywhere validates that
 `mean_speed` is physical. A value of -2.6e11 propagated into the training score,
 the health-check criteria and the run records without a single guard noticing.
+
+---
+
+# TASK 68 OBSERVATION 2026-09-09: the reward is ego speed, not throughput
+
+Noted while the first MAPPO run was in flight, before its result is known.
+
+`src/envs/topology_env.py:578`:
+
+```python
+def _reward_for_vehicle(vehicle: ControlledVehicle) -> float:
+    return 0.0 if vehicle.crashed else float(vehicle.speed)
+```
+
+That is the whole reward, less a `crash_penalty` of 2.0 subtracted in
+`src/rl/trainers.py:198`. **There is no throughput term.** The agent maximises its
+own speed; the paper's claim is a network-level throughput improvement.
+
+**The two objectives conflict exactly where this topology is interesting.** At a
+merge, yielding raises throughput and lowers the yielder's speed, so a
+speed-maximising agent learns not to yield. The training diagnostics at update 35
+of 100 are consistent with that reading, though 35 updates is too early to
+conclude from:
+
+| metric | first half | second half | change |
+|---|---|---|---|
+| `entropy` | 4.047 | 3.295 | −0.752, so the policy IS converging |
+| `throughput_recent` | 0.836 | 0.852 | +0.016, noise |
+| `mean_speed` | 20.891 | 20.666 | −0.225 |
+| `collision_count` | 0.629 | 0.853 | **+0.225** |
+
+**Why this is worth recording now.** If the finished run shows no throughput gain,
+there are two very different explanations — the method does not transfer to this
+simulator, or the agent was never asked for throughput — and they lead to
+completely different work. Reward design is a modelling decision, so it is put
+here rather than changed.
+
+Vinitsky et al. and the Flow benchmarks generally use a system-level reward
+(average speed over all vehicles, or a throughput term), not ego speed. A
+replication whose reward is per-agent speed is not replicating the same
+experiment.
+
+**Do not read this as the result.** The run is unfinished; the measured outcome
+goes in when it lands.
