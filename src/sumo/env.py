@@ -116,7 +116,30 @@ class SumoTopologyEnv:
             args += ["--seed", str(int(seed))]
         _sumo.start([self._binary()] + args)
         self._running = True
+        self._warm_up()
         return self.get_local_observations(), {"binding": _BINDING}
+
+    def _warm_up(self) -> None:
+        """Fill the network before the episode is observed.
+
+        A run starts empty and takes time to reach a steady state: a vehicle must
+        traverse 500 + 600 + 900 m before it can arrive, so at 20 m/s nothing
+        completes for the first hundred seconds and the early network is not the
+        traffic under study. Worse for training, a rollout beginning at t = 0 can
+        see no AV at all and collect zero transitions, which is how this was found.
+
+        Warm-up steps advance the simulation but are not counted, observed or
+        rewarded, so `duration_steps` still means what it says.
+        """
+        warmup = int(self.config.get("warmup_steps", 0))
+        for _ in range(max(0, warmup)):
+            _sumo.simulationStep()
+            # Collisions during warm-up would still be collisions.
+            self.collision_count += int(_sumo.simulation.getCollidingVehiclesNumber())
+            self.collision_checks += 1
+        if warmup > 0:
+            snapshots = self.vehicle_snapshots()
+            self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
 
     def close(self) -> None:
         if not self._running:

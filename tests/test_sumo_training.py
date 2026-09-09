@@ -24,6 +24,10 @@ def _config(**overrides):
         "topology": "inverted_tree",
         "demand": "sumo_saturating",
         "duration_steps": 120,
+        # Without a warm-up a 64-step rollout starting at t = 0 sees an empty
+        # network and collects zero transitions, which is how the warm-up was
+        # found.
+        "warmup_steps": 300,
     }
     base.update(overrides)
     return base

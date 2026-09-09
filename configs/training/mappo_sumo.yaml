@@ -12,6 +12,11 @@ description: >-
 # et al. and the Flow benchmarks run on.
 simulator: sumo
 
+# Let the network fill before the episode is observed. A vehicle must cover
+# 500 + 600 + 900 m before it can arrive, so nothing completes for the first
+# hundred seconds and a rollout beginning at t = 0 can see no AV at all.
+warmup_steps: 300
+
 # The one topology section C is scoped to.
 topology: inverted_tree
 

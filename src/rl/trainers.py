@@ -59,6 +59,9 @@ class TrainingConfig:
     simulator: str = "highway_env"
     #: Where a SUMO run writes its generated network and demand files.
     work_dir: str | None = None
+    #: Steps run before the episode is observed, so a rollout does not begin on an
+    #: empty network. Only meaningful for SUMO.
+    warmup_steps: int = 0
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> TrainingConfig:
@@ -90,6 +93,7 @@ class TrainingConfig:
             ),
             simulator=str(training.get("simulator", "highway_env")),
             work_dir=(str(training["work_dir"]) if training.get("work_dir") else None),
+            warmup_steps=int(training.get("warmup_steps", 0)),
         )
 
 
@@ -282,6 +286,7 @@ class BasePPOTrainer:
             config = self.env_config()
             if self.config.work_dir:
                 config["work_dir"] = self.config.work_dir
+            config.setdefault("warmup_steps", self.config.warmup_steps)
             return SumoTopologyEnv(self.config.topology, config)
         raise ValueError(
             f"unsupported simulator {self.config.simulator!r}; expected "
