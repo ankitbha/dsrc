@@ -498,3 +498,80 @@ class TestTheAggregatesCoverEveryVehicle:
             )
         finally:
             env.close()
+
+
+class TestTheAntiDegenerateTermsAreMeasured:
+    """`rolling_roadblock_score` and `all_lane_av_low_speed_occupancy` were once
+    hardcoded to 0.0. They were given real values, but mutants restoring the
+    constants survived: the tests written at the time read the per-segment values
+    rather than the aggregate the reward consumes, and compared two zeros in a run
+    where no AV was ever holding a lane below free flow.
+
+    `rolling_roadblock_score` carries -2.0, the largest negative weight after the
+    collision term, and it is what stops a policy learning to sit across every lane
+    of a segment. A constant 0.0 removes the only term that penalises exactly that.
+    """
+
+    def _run(self, tmp_path, commanded, penetration=0.2, steps=200):
+        demand = dict(load_named_config("demand", "sumo_saturating"))
+        demand["av_penetration"] = penetration
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": demand, "duration_steps": steps, "dt": 1.0,
+            "warmup_steps": 300, "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            roadblock, occupancy = [], []
+            for _ in range(steps):
+                if commanded is not None:
+                    for agent_id in list(env.agent_ids):
+                        env.command_speed(agent_id, commanded)
+                _, _, _, _, info = env.step({})
+                roadblock.append(info["metrics"]["rolling_roadblock_score"])
+                occupancy.append(info["metrics"]["all_lane_av_low_speed_occupancy"])
+            return roadblock, occupancy
+        finally:
+            env.close()
+
+    def test_holding_the_lanes_below_free_flow_raises_the_roadblock_score(self, tmp_path):
+        idle, _ = self._run(tmp_path, commanded=None)
+        blocking, _ = self._run(tmp_path, commanded=5.0)
+        idle_mean = sum(idle) / len(idle)
+        blocking_mean = sum(blocking) / len(blocking)
+        assert blocking_mean > 0.15, (
+            f"AVs held at 5 m/s scored {blocking_mean:.4f} on the term that exists "
+            "to penalise exactly that"
+        )
+        # The control: without it a constant 0.15 would satisfy the assertion above.
+        assert idle_mean < 0.05, f"uncommanded traffic already scores {idle_mean:.4f}"
+
+    def test_holding_the_lanes_raises_the_occupancy_term(self, tmp_path):
+        _, idle = self._run(tmp_path, commanded=None)
+        _, blocking = self._run(tmp_path, commanded=5.0)
+        assert sum(blocking) / len(blocking) > 0.4
+        assert sum(idle) / len(idle) < 0.3
+
+    def test_the_aggregate_is_the_mean_over_segments(self, tmp_path):
+        # Pins the aggregation as well as the magnitude: the reward reads one number
+        # per step and the per-segment values are what it is built from.
+        demand = dict(load_named_config("demand", "sumo_saturating"))
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": demand, "duration_steps": 60, "dt": 1.0,
+            "warmup_steps": 300, "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            nonzero = 0
+            for _ in range(60):
+                for agent_id in list(env.agent_ids):
+                    env.command_speed(agent_id, 5.0)
+                _, _, _, _, info = env.step({})
+                segments = env.get_segment_metrics()
+                for field in ("rolling_roadblock_score", "all_lane_av_low_speed_occupancy"):
+                    expected = sum(float(m[field]) for m in segments.values()) / len(segments)
+                    assert info["metrics"][field] == pytest.approx(expected)
+                    if expected > 0:
+                        nonzero += 1
+            assert nonzero > 20, f"only {nonzero} non-zero values, so the check is vacuous"
+        finally:
+            env.close()

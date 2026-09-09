@@ -220,83 +220,126 @@ of the capacity sweep at 3600 steps.
 ## The operating point depends on the run length
 
 `sumo_saturating` at 1050 veh/h was chosen against 600- and 1800-step runs. Over an
-hour it **gridlocks**: mean speed 2.64 m/s with no AVs over three seeds, which is
-why the hour-long evaluation reported 1.01 m/s in both arms.
+hour it is heavily congested: mean speed 4.04 m/s with no AVs over three seeds, and
+a 23.9% throughput deficit. It remains the right level for 600-step runs, where a
+controller recovers a measurable part of that deficit; the hour-long level is a
+separate config for that reason.
 
-Hour-long capacity, measured at 3600 steps after a 300-step warm-up, no AVs, over
-three seeds (7, 17, 27):
+Hour-long capacity, 3600 steps after a 300-step warm-up, no AVs, three seeds
+(7, 17, 27), with the fleet the demand config declares:
 
-| veh/h | mean speed | arrived | deficit against one hour of demand |
-|---|---|---|---|
-| 750 | 22.89 | 749.7 +/- 1.2 | 0.3 — free flow |
-| 780 | 21.59 | 775.3 +/- 1.5 | 4.7 |
-| 810 | 17.33 | **802.0 +/- 7.0** | 8.0 — arrivals peak here |
-| **840** | **10.90** | **782.7 +/- 7.5** | **57.3** — congested and moving |
-| 870 | 7.20 | 754.3 +/- 19.6 | 115.7 |
-| 900 | 5.33 | 732.3 +/- 10.7 | 167.7 |
-| 1050 | 2.64 | 677.0 +/- 7.0 | 373.0 — gridlocked |
+| veh/h | mean speed | arrived | deficit | deficit % |
+|---|---|---|---|---|
+| 750 | 20.10 | 748.3 +/- 2.1 | 1.7 | 0.2% |
+| 780 | 19.76 | 777.7 +/- 1.2 | 2.3 | 0.3% |
+| 810 | 19.07 | 807.7 +/- 3.2 | 2.3 | 0.3% |
+| 840 | 17.64 | 830.0 +/- 10.6 | 10.0 | 1.2% |
+| 870 | 15.45 | 856.0 +/- 12.5 | 14.0 | 1.6% |
+| 900 | 12.37 | **858.0 +/- 24.3** | 42.0 | 4.7% — arrivals peak here |
+| 930 | 8.44 | 840.3 +/- 15.5 | 89.7 | 9.6% |
+| 960 | 6.86 | 833.0 +/- 18.3 | 127.0 | 13.2% |
+| 990 | 5.35 | 813.7 +/- 21.1 | 176.3 | 17.8% |
+| 1020 | 4.35 | 797.7 +/- 10.3 | 222.3 | 21.8% |
+| 1050 | 4.04 | 799.0 +/- 15.7 | 251.0 | 23.9% |
+| 1100 | 3.43 | 789.3 +/- 13.6 | 310.7 | 28.2% |
+| 1200 | 2.90 | 810.3 +/- 12.7 | 389.7 | 32.5% |
 
-`configs/demand/sumo_hour.yaml` is 840 veh/h. Both levels are kept: shorter runs
-still want the shorter-run rate, and the fact that they differ is itself the
-finding — a demand chosen on 600-step runs does not describe an hour.
+**This table replaces two earlier ones, and the reason is a defect rather than
+noise.** `_write_routes` read only `max_mps` from the demand config's speed
+distribution and hardcoded the desired-speed spread as a factor on the lane limit,
+so every earlier measurement was taken on a fleet desiring about 30 m/s where the
+config declares 24. Hour-long capacity was measured at 858 veh/h rather than the
+802 recorded before, and the arrival peak moved from 810 to 900 veh/h.
 
-**Corrected 2026-09-09, from an independent audit, then re-measured.** The first
-version of this table was a single seed. It reported 16.62 m/s at 810 veh/h against
-13.10 at 780, which cannot be a demand effect, and it labelled 750 as the arrival
-peak. Over three seeds the mean speed falls monotonically with demand and the
-arrival peak is at 810. The arrival column reproduces the three-seed figures already
-recorded in `configs/demand/sumo_hour.yaml` to the tenth, so those were measured
-before `arrived_total` began double-counting warm-up arrivals and are unaffected by
-that defect; the mean-speed column is new.
+Attributed, at 1050 veh/h over an hour with three seeds:
+
+| route writer | arrived | mean speed |
+|---|---|---|
+| lane-limit fleet, inserted at rest (the previous behaviour) | 677.0 +/- 7.0 | 2.74 |
+| declared fleet, inserted at rest | 798.0 +/- 18.2 | 3.98 |
+| declared fleet, inserted at its desired speed (now) | 799.0 +/- 15.7 | 4.04 |
+
+The whole difference is the desired-speed distribution. Adding
+`departSpeed="desired"` changes arrivals by 1.0 against a standard deviation of 16,
+which is nothing; it is in for fidelity with the other simulator's spawner, not for
+an effect.
+
+The direction is worth stating plainly: **a fleet that wants to drive more slowly
+gets more vehicles through this junction** — 798 against 677 per hour at the same
+demand. That is the same speed-harmonisation effect the controller is meant to
+exploit, appearing here in the fleet's own desired speed rather than in a control
+action.
 
 840 veh/h remains the choice: it sits past the arrival peak, which is what gives a
 controller a deficit to recover, and it is congested while still moving.
 
 
+## One demand level serves both horizons, now that the fleet is the declared one
+
+Over an hour, with AVs at 20% penetration held at 10 m/s against an uncommanded
+fleet, three seeds:
+
+| veh/h | uncommanded | AVs at 10 m/s | gain | deficit recovered |
+|---|---|---|---|---|
+| 930 | 840.3 +/- 15.5 | 901.3 +/- 29.8 | +7.3% | 61.0 of 89.7 |
+| 960 | 833.0 +/- 18.3 | 931.0 +/- 30.1 | +11.8% | 98.0 of 127.0 |
+| 1050 | 799.0 +/- 15.7 | **966.3 +/- 31.8** | **+20.9%** | 167.3 of 251.0 |
+
+The effect grows with demand and is larger over an hour than over 600 steps: 20.9%
+against 17.6% at the same 1050 veh/h. At that level a controller recovers 67% of the
+throughput deficit.
+
+**`configs/demand/sumo_hour.yaml` is therefore removed.** It existed because
+`sumo_saturating` at 1050 veh/h appeared to gridlock over an hour — 0.89 m/s in the
+first measurement — leaving no deficit a controller could recover. That gridlock was
+a property of the undeclared 30 m/s fleet: with the fleet the config actually
+declares, 1050 veh/h is congested and moving at both horizons (4.04 m/s uncommanded,
+6.11 m/s under control) and carries the largest recoverable deficit of any level
+measured. The second level was an artifact of the defect, not a property of the
+road. Nothing referenced the file.
+
 ## The measured effect depends on the episode length, and 120 steps hides it
 
-Recorded 2026-09-09, after the second audit round. This supersedes every reward
-figure and every arrival figure quoted for a commanded-speed arm before commit
-`34d2587`, because the fairness term carries weight +0.5 and its denominator was
-wrong: Jain's index was computed over the branches that had completed a vehicle
-rather than over all six, so it read 1.0 while five branches were starved.
+Measured 2026-09-09 and re-measured after the demand fix below; these numbers
+supersede every earlier figure for a commanded-speed arm. Two defects sat under the
+earlier ones: the fairness term's denominator excluded branches that had completed
+nothing, and the fleet's desired speed was the lane limit rather than the 24 m/s the
+demand config declares.
 
-Arrivals, and the mean team reward per step under `mappo_sumo`'s weights
-(`throughput_recent` 0.10, `jam_fraction` −2.0), with every AV commanded to hold
-one speed for the whole episode:
+Every AV commanded to hold one speed for the whole episode, at `sumo_saturating`
+(1050 veh/h, 20% penetration), five seeds:
 
-| episode | arm | arrivals | mean reward |
-|---|---|---|---|
-| 120 steps, 3 seeds | uncommanded | 22.0 | +0.6027 |
-| | 10 m/s | 19.7 | −0.0002 |
-| | 20 m/s | 23.7 | +0.4313 |
-| | 30 m/s | 22.0 | +0.6430 |
-| 300 steps, 3 seeds | uncommanded | 56.0 | +0.3667 |
-| | 10 m/s | **76.3** | **+0.4929** |
-| | 20 m/s | 61.7 | +0.3225 |
-| | 30 m/s | 59.0 | +0.4780 |
-| 600 steps, 5 seeds | uncommanded | 111.8 +/- 1.5 | −0.0097 |
-| | 10 m/s | **143.0 +/- 18.4** | **+0.3200** |
-| | 20 m/s | 122.8 +/- 9.3 | −0.0054 |
-| | 30 m/s | 116.4 +/- 5.9 | +0.1153 |
+| arm | 120 steps: arrivals | reward | 600 steps: arrivals | reward |
+|---|---|---|---|---|
+| uncommanded | 27.8 +/- 3.1 | +1.339 | 132.0 +/- 6.4 | +0.823 |
+| 5 m/s | 23.2 +/- 3.0 | +0.670 | 123.4 +/- 19.9 | +0.520 |
+| 8 m/s | 24.4 +/- 1.9 | +0.773 | 148.8 +/- 9.0 | +0.915 |
+| 10 m/s | 26.2 +/- 4.3 | +0.848 | **155.2 +/- 10.5** | +0.930 |
+| 12 m/s | 26.8 +/- 3.5 | +0.920 | 150.6 +/- 17.9 | +0.823 |
+| 15 m/s | 27.4 +/- 4.0 | +1.132 | 148.0 +/- 17.1 | **+1.034** |
+| 20 m/s | 28.4 +/- 4.2 | +1.359 | 138.8 +/- 10.6 | +0.987 |
+| 24 m/s | 28.8 +/- 2.9 | +1.359 | 137.0 +/- 4.7 | +0.956 |
 
 Three things follow.
 
-**The effect does not exist at 120 steps.** Holding 10 m/s produces 19.7 arrivals
-against 22.0 uncommanded, and the reward ranks 30 m/s highest and 10 m/s last —
-the reverse of the ranking at 300 and 600 steps. `configs/training/mappo_sumo.yaml`
-declared no `duration_steps` and therefore took the trainer's default of 120, so
-training would have optimised against the effect the configuration exists to study.
-It now declares 600.
+**The effect does not exist at 120 steps.** No commanded arm beats an uncommanded
+fleet there: the best is 28.8 +/- 2.9 against 27.8 +/- 3.1, which is noise. At 600
+steps holding 10 m/s produces 155.2 +/- 10.5 against 132.0 +/- 6.4, an increase of
+17.6% with a standard error of about 5 arrivals.
+`configs/training/mappo_sumo.yaml` declared no `duration_steps` and therefore took
+the trainer's default of 120, so training would have been run at the one horizon
+where the effect it is meant to learn is absent. It now declares 600.
 
-**The 52% figure is superseded.** 167 arrivals against 110 was one seed. Over five
-seeds the same comparison is 143.0 +/- 18.4 against 111.8 +/- 1.5, a 28% increase
-with a standard error of about 8 arrivals. The direction holds; the magnitude was
-overstated by a factor of about two by taking a single draw from a wide
-distribution.
+**The 52% figure is superseded twice over.** 167 arrivals against 110 was a single
+seed, on the undeclared 30 m/s fleet, with the fairness defect present. The same
+comparison is now 155.2 against 132.0. The direction has held through every
+correction; the magnitude has fallen from 52% to 17.6%.
 
-**The reward magnitude is a property of the episode length, not of the operating
-point.** Uncommanded traffic scores +0.6027 per step at 120 steps and −0.0097 at
-600, because `jam_fraction` at weight −2.0 grows as the network fills and the
-120-step episode ends before it does. Any statement of the form "the team reward is
-about X" needs the episode length attached to it.
+**The reward does not rank the arms the way arrivals do.** At 600 steps arrivals are
+maximised at 10 m/s and the reward at 15 m/s, and at 120 steps the reward ranks the
+fastest arms first — the reverse of the 600-step arrival order. The reward's
+`throughput_recent` term is a 60-second window rather than the episode's total, and
+`jam_fraction` at weight -2.0 grows as the network fills, so the reward is not a
+monotone function of the quantity the experiment is about. Recorded, not fixed: it
+bears on task 85 and on any claim that a trained policy maximising this reward
+maximises throughput.

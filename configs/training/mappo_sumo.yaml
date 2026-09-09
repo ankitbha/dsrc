@@ -13,9 +13,12 @@ description: >-
 simulator: sumo
 
 # reward_scale 1.0, not the 0.05 the other configs use. At the SUMO operating point
-# the team reward is about 1.28; scaled by 0.05 it becomes 0.064, while the entropy
+# the team reward is about 0.82 per step for uncommanded traffic over a 600-step
+# episode -- the "about 1.28" this comment previously quoted was measured with the
+# fairness denominator defect and on the undeclared fleet, and the quantity also
+# moves with the episode length. Scaled by 0.05 it becomes 0.041, while the entropy
 # bonus at entropy_coef 0.01 and the entropy the policy actually held (4.24) is
-# 0.042 -- 66% of the objective. The policy therefore had almost no incentive to
+# 0.042 -- more than half of the objective, and on the earlier figures 66%. The policy therefore had almost no incentive to
 # become deterministic and held 91% of maximum entropy after 400 updates. PPO's
 # default coefficients assume a reward of order 1, and reward_clip at 10 already
 # bounds the magnitude, so scaling down was not protecting anything.
@@ -27,22 +30,26 @@ warmup_steps: 300
 
 # 600, not the 120 the trainer defaults to. The effect this configuration exists to
 # learn -- AVs holding a speed below free flow to raise throughput through the
-# junction -- does not exist at 120 steps. Arrivals against an uncommanded fleet at
-# the same demand, means over seeds:
+# junction -- does not exist at 120 steps. Arrivals with every AV commanded to hold
+# one speed, five seeds, at this demand and penetration:
 #
-#   episode length   uncommanded   AVs held at 10 m/s   seeds
-#         120 steps          22.0                 19.7       3   no gain
-#         300 steps          56.0                 76.3       3   +36%
-#         600 steps    111.8 +/- 1.5     143.0 +/- 18.4       5   +28%
+#   arm            120 steps        600 steps
+#   uncommanded    27.8 +/- 3.1     132.0 +/- 6.4
+#   8 m/s          24.4 +/- 1.9     148.8 +/- 9.0
+#   10 m/s         26.2 +/- 4.3     155.2 +/- 10.5   <- best over the longer episode
+#   15 m/s         27.4 +/- 4.0     148.0 +/- 17.1
+#   20 m/s         28.4 +/- 4.2     138.8 +/- 10.6
+#   24 m/s         28.8 +/- 2.9     137.0 +/- 4.7
 #
-# The 600-step spread is what the earlier single-seed figures hid: 167 against 110
-# arrivals was one seed at the top of an 18.4-wide distribution, not a 52% effect.
+# At 120 steps no commanded arm beats an uncommanded fleet: the best is 28.8 +/- 2.9
+# against 27.8 +/- 3.1, which is noise, and the reward ranks the fastest arms first.
+# At 600 steps holding 10 m/s gives 17.6% more arrivals. Training at the default
+# length would have run at the one horizon where the effect is absent.
 #
-# The mean team reward moves with the horizon for the same reason: +0.60 per step
-# uncommanded at 120 steps against -0.01 at 600, because `jam_fraction` at weight
-# -2.0 rises as the network fills. At 120 steps the reward RANKS 30 m/s above
-# 10 m/s, the reverse of the arrival ranking over the longer horizon, so training
-# at the default length would have optimised against the effect under study.
+# The mean team reward is also a function of the horizon: +1.34 per step uncommanded
+# at 120 steps against +0.82 at 600, because `jam_fraction` at weight -2.0 grows as
+# the network fills. Any statement of the form "the team reward is about X" needs
+# the episode length attached to it.
 duration_steps: 600
 
 # The one topology section C is scoped to.

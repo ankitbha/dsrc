@@ -2520,40 +2520,71 @@ and on what evidence.
       config sets it under `metrics.thresholds`, so the window silently stayed at
       the 60 s default on SUMO whatever a config declared.
 
-86. **A 52% throughput gain exists, and the action space cannot reach it.**
-    Measured 2026-09-09 on SUMO. This is the control effect the project has been
-    trying to measure, and the reason no policy has found it.
+86. **A 17.6% throughput gain exists, and the action space cannot reach it.**
+    Measured 2026-09-09 on SUMO, then re-measured twice after defects found in the
+    measurement itself. This is the control effect the project has been trying to
+    measure, and the reason no policy has found it.
 
     Every AV given the same commanded speed, 600 steps after a 300-step warm-up, at
-    `sumo_saturating` (1050 veh/h, 20% penetration):
+    `sumo_saturating` (1050 veh/h, 20% penetration), five seeds:
 
-    | command | mean AV speed | network mean speed | arrivals |
-    |---|---|---|---|
-    | none | 6.06 | 4.06 | 110 |
-    | 2 m/s | 1.86 | 2.86 | 53 |
-    | 5 m/s | 4.25 | 5.23 | 129 |
-    | **10 m/s** | **8.71** | **12.03** | **167** |
-    | 20 m/s | 7.91 | 4.70 | 138 |
-    | 30 m/s | 6.13 | 3.99 | 110 |
+    | command | arrivals | mean team reward |
+    |---|---|---|
+    | none | 132.0 +/- 6.4 | +0.823 |
+    | 5 m/s | 123.4 +/- 19.9 | +0.520 |
+    | 8 m/s | 148.8 +/- 9.0 | +0.915 |
+    | **10 m/s** | **155.2 +/- 10.5** | +0.930 |
+    | 12 m/s | 150.6 +/- 17.9 | +0.823 |
+    | 15 m/s | 148.0 +/- 17.1 | **+1.034** |
+    | 20 m/s | 138.8 +/- 10.6 | +0.987 |
+    | 24 m/s | 137.0 +/- 4.7 | +0.956 |
 
-    **Holding AVs at 10 m/s raises arrivals 110 to 167, a 52% gain, and network mean
-    speed 4.06 to 12.03 m/s.** Zero collisions throughout. The relationship is
-    non-monotonic: 2 m/s is much worse than doing nothing, so this is a genuine
-    operating point rather than "slower is better".
+    **Holding AVs at 10 m/s raises arrivals from 132.0 to 155.2, a 17.6% gain with a
+    standard error of about 5.** Zero collisions throughout. The relationship is
+    non-monotonic: 5 m/s is worse than doing nothing, so this is a genuine operating
+    point rather than "slower is better".
 
-    That is the speed-harmonisation result the replication targets, and it is now
+    **The 52% figure this item first recorded is superseded twice over.** 167
+    arrivals against 110 was one seed, taken with the fairness denominator defect
+    present and on a fleet desiring 30 m/s where the demand config declares 24. The
+    direction has survived every correction; the magnitude has fallen from 52% to
+    17.6%.
+
+    **The effect also does not exist at 120 steps**, which is what
+    `mappo_sumo.yaml` was implicitly training at. No commanded arm beats an
+    uncommanded fleet over 120 steps: the best is 28.8 +/- 2.9 against 27.8 +/- 3.1.
+    The config now declares 600.
+
+    That is the speed-harmonisation result the replication targets, and it is
     reproducible in one 600-step run.
 
-    **The action space cannot express it.** `decode_speed_bin` returns the free-flow
-    speed plus an offset: `slow` −10, `nominal` −3, `fast` 0. At the 30 m/s edge
-    limit those are 20, 27 and 30 m/s — all inside the flat region above 20 where
-    the effect is gone. The effect lives near 10 m/s and no bin reaches it.
+    **The action space reaches about half of it — CORRECTED 2026-09-09.** This item
+    first recorded that the action space could not express the effect at all, and
+    that was true of the fleet then being simulated. `decode_speed_bin` returns the
+    free-flow speed plus an offset (`slow` −10, `nominal` −3, `fast` 0), and
+    free-flow is the vehicle's own desired speed. While the route writer ignored the
+    demand config and gave every vehicle the 30 m/s lane limit, the bins decoded to
+    20, 27 and 30 m/s, all inside the flat region where the effect is gone. With the
+    fleet the config declares, they decode near 14, 20.5 and 23.5.
 
-    **So every policy this project has trained was choosing among equivalent
-    actions.** Measured directly before the flow fix: arrivals were identical at
-    137 for `slow`, `nominal`, `fast` and no action at all. The flat training
-    curves, the unmoving entropy and task 69's null all follow from this, and none
-    of them needed a subtler explanation.
+    Measured through the real action path, 600 steps, five seeds:
+
+    | bin | decodes to | arrivals |
+    |---|---|---|
+    | uncommanded | — | 132.0 +/- 6.4 |
+    | `slow` | 13.94 m/s | **143.0 +/- 11.7** |
+    | `nominal` | 20.48 m/s | 133.6 +/- 4.3 |
+    | `fast` | 23.53 m/s | 137.4 +/- 9.0 |
+
+    `slow` recovers 11.0 of the 23.2 arrivals available between doing nothing
+    (132.0) and the best commanded speed (155.2 at 10 m/s): about half the effect,
+    at roughly two standard errors. The earlier measurement of arrivals identical at
+    137 across all three bins and no action was taken on the undeclared fleet, where
+    every bin landed above 20 m/s.
+
+    So the actions were nearly equivalent rather than exactly equivalent, and the
+    flat training curves and task 69's null still follow — but the remedy is smaller
+    than this item first implied.
 
     **This supersedes task 85.** The entropy bonus really was 66% of the reward and
     `reward_scale: 1.0` really does fix that ratio, but changing it moved nothing --
@@ -2561,12 +2592,17 @@ and on what evidence.
     constraint is that the actions are equivalent. Task 85's arithmetic stands; its
     implied conclusion does not.
 
-    **The decision this needs, and it is the user's.** The bins are part of the
-    action contract shared with the deployed system through `sim_contract`, so
-    rescaling them changes what the Jetson's actor emits as well. Three routes:
+    **The decision this needs, and it is the user's. The case for it is now weaker
+    than when it was first put.** The bins are part of the action contract shared
+    with the deployed system through `sim_contract`, so rescaling them changes what
+    the Jetson's actor emits as well. On the corrected measurements the question is
+    whether to capture the remaining half of a 17.6% effect, not to make an
+    unreachable effect reachable. Three routes:
     make the bins fractions of the free-flow speed rather than offsets from it
-    (`slow` 0.33x gives 10 m/s at a 30 limit); decode them against the local traffic
-    speed rather than the edge limit, so `slow` means slow *for these conditions*;
+    (`slow` 0.33x gives 7.9 m/s on the declared fleet, which measured 148.8; a 0.42x
+    fraction would give the 10 m/s that measured 155.2); decode them against the
+    local traffic speed rather than the edge limit, so `slow` means slow *for these
+    conditions*;
     or leave the contract and add absolute low-speed bins. The first is the smallest
     change and the third is the most explicit.
 
