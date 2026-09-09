@@ -2435,6 +2435,66 @@ and on what evidence.
 
 ## K. Found in passing
 
+75. **The arcs do not join. Vehicles are teleported sideways at every node.**
+    Open, and it is the root cause of what task 72 could not reach.
+
+    Measured distance between the end of each lane and the start of the lane
+    `next_lane` sends a vehicle to:
+
+    | transition | lateral jump |
+    |---|---|
+    | `a1/a2/a3_entry` → `('b1','c',0)` | **4.00 m** |
+    | `('b1','c',0)` → `('c','exit',0)` | 2.00 m |
+    | `('b1','c',1)` → `('c','exit',1)` | 2.00 m |
+    | `('b2','c',1)` → `('c','exit',1)` | **10.00 m** |
+    | `a4/a5/a6_entry` → `('b2','c',1)` | 0.04–0.09 m (these do join) |
+
+    A vehicle crossing node `c` from `('b2','c',1)` is moved **ten metres**
+    sideways, which is two lanes. No car-following bound can prevent a collision
+    caused by a vehicle being placed into occupied space, which is why task 72's
+    residual is exactly six side-by-side events at 1.9–3.7 m lateral separation,
+    and why tightening MOBIL's `LANE_CHANGE_MAX_BRAKING_IMPOSED` from 2.0 to 0.05
+    changed the count not at all.
+
+    **It also explains two findings deferred from the task 67 audit.** The static
+    successor map disagreed with the `lane_index` vehicles acquire on 9 of 9
+    `('b2','c',1)` → `('c','exit',0)` transitions — because after a 10 m jump the
+    geometrically nearest lane is not the steering target. And the one colliding
+    pair the successor filter wrongly excluded collided 5–7 m past node `c`.
+
+    So this is one defect with four symptoms, and fixing it is what makes
+    collision-freedom achievable. The fix is that each lane's end must coincide
+    with the start of its successor.
+
+    Also noticed: `next_lane` on `('c','exit',k)` returns that same lane, giving a
+    900 m self-jump. Harmless today because nothing walks past the exit, but it
+    means the terminal arc has no proper successor.
+
+76. **Most of this simulator's congestion was crash-induced queueing.** Open.
+
+    Measured at high demand, penetration 0.10, `no_av`, with and without task 72's
+    collision-free bound:
+
+    | topology | collisions allowed | collision-free |
+    |---|---|---|
+    | `inverted_tree` | jam 0.2523 | **0.0990** |
+    | `merge` | jam 0.0580 | **0.0000** |
+
+    A crashed vehicle stops permanently and everything behind it backs up, so what
+    the health check read as congestion was substantially a crash queue. On `merge`
+    it was **all** of it, and its mean speed rose 14.13 → 20.11 m/s.
+
+    **What this costs.** Task 8's `congestion_reachable` criterion was largely
+    measuring crashes, so its topology ranking needs re-deriving. More importantly,
+    a replication needs congestion for a controller to have anything to improve,
+    and `inverted_tree` retains only 0.0990 — which is why it was the right
+    topology to pick, but not obviously enough on its own.
+
+    **Consequence for task 74:** reaching genuine congestion now has to come from
+    demand and duration rather than from crashes. That is exactly task 8's own
+    recommended diagnostic — raise demand, episode length and penetration together
+    — arrived at from the opposite direction.
+
 72. **Collisions must be impossible by construction, as in PTV Vissim.**
     **DECIDED BY THE USER 2026-09-09.** Blocks 73 and 74.
 

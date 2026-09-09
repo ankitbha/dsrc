@@ -34,8 +34,10 @@ ensure_highway_env_importable()
 from highway_env.vehicle.behavior import IDMVehicle  # noqa: E402
 from highway_env.vehicle.kinematics import Vehicle  # noqa: E402
 
+from src.vehicles.safe_following import CollisionFreeMixin  # noqa: E402
 
-class MergeAwareIDMVehicle(IDMVehicle):
+
+class MergeAwareIDMVehicle(CollisionFreeMixin, IDMVehicle):
     """An `IDMVehicle` that also yields to traffic converging on the same node."""
 
     #: Ignore a conflict further ahead than this. Beyond it the projected leader is

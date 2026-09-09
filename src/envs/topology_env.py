@@ -34,6 +34,7 @@ ensure_highway_env_importable()
 from highway_env.road.road import LaneIndex, Road
 from highway_env.vehicle.behavior import IDMVehicle
 from src.vehicles.merge_aware import MergeAwareIDMVehicle
+from src.vehicles.safe_controlled import SafeControlledVehicle
 from highway_env.vehicle.controller import ControlledVehicle
 
 
@@ -425,7 +426,7 @@ class HighwayTopologyEnv(BaseCTDEEnv):
                 lane = self.road.network.get_lane(lane_index)
                 longitudinal = min(20.0 + 35.0 * index, max(5.0, lane.length - 10.0))
                 speed = float(self.config.get("initial_speed_mps", min(lane.speed_limit or 24.0, 24.0)))
-            vehicle = ControlledVehicle.make_on_lane(
+            vehicle = SafeControlledVehicle.make_on_lane(
                 self.road,
                 lane_index,
                 longitudinal=longitudinal,

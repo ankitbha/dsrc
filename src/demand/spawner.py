@@ -16,6 +16,7 @@ ensure_highway_env_importable()
 from highway_env.road.road import LaneIndex, Road
 from highway_env.vehicle.behavior import IDMVehicle
 from src.vehicles.merge_aware import MergeAwareIDMVehicle
+from src.vehicles.safe_controlled import SafeControlledVehicle
 from highway_env.vehicle.controller import ControlledVehicle
 
 
@@ -125,7 +126,7 @@ class DemandSpawner:
         # in the tree topologies reduces lane count, so converging humans had no
         # mutual awareness at all. `isinstance(vehicle, IDMVehicle)` below still
         # holds, since this is a subclass.
-        vehicle_cls = ControlledVehicle if role == "av" else MergeAwareIDMVehicle
+        vehicle_cls = SafeControlledVehicle if role == "av" else MergeAwareIDMVehicle
         vehicle = vehicle_cls.make_on_lane(road, lane_index, longitudinal=0.0, speed=speed)
         vehicle.route = road_route_to_destination(lane_index, branch.destination, self.topology)
         if isinstance(vehicle, IDMVehicle):

@@ -194,22 +194,43 @@ def test_free_flow_topology_fails_congestion():
     assert "congestion_reachable" in verdict.failed_criteria
 
 
-def test_congestion_needs_time_to_develop():
-    """Duration is itself a health parameter. On merge/high, jam_fraction is
-    0.000 at 60 steps and 0.208 at 120: a short sweep reports no congestion
-    anywhere, which is a false negative rather than a finding."""
+def test_merge_congestion_was_crash_induced_and_is_now_absent():
+    """Records a finding, and it is not a tolerance.
+
+    This pair of tests previously asserted that merge/high congests -- 0.000 jam at
+    60 steps rising to 0.208 at 120 -- and that was the reason the sweep was
+    considered worth running. Under the collision-free bound the same cell reads
+    jam 0.000, and mean speed rises 14.13 to 20.11 m/s.
+
+    So that congestion was crash-induced queueing: a crashed vehicle stops
+    permanently and everything behind it backs up. Measured across topologies at
+    high demand, penetration 0.10: inverted_tree 0.2523 to 0.0990, merge 0.0580 to
+    0.0000. Most of this simulator's congestion was collisions, and on merge all of
+    it was.
+
+    The consequence is recorded in task 76: `congestion_reachable` in task 8's
+    health check was largely measuring crashes, and a replication that needs
+    congestion to control must reach it by demand and duration instead.
+    """
     cell = CellSpec(topology="merge", demand="high", av_penetration=0.10)
     short = run_condition(cell, "no_av", 7, duration_steps=60)
     full = run_condition(cell, "no_av", 7, duration_steps=120)
-    assert short.jam_fraction == pytest.approx(0.0)
-    assert full.jam_fraction > short.jam_fraction
+    assert short.jam_fraction == pytest.approx(0.0, abs=1e-3)
+    assert full.jam_fraction == pytest.approx(0.0, abs=1e-3), (
+        "merge/high congests again, so either the collision-free bound regressed or "
+        "genuine congestion has been reached; check which before relaxing this"
+    )
 
 
-def test_merge_at_high_demand_congests():
-    """The one cell known to congest; it is the reason the sweep is worth running."""
-    cell, runs = cell_runs("merge", "high", controllers=("no_av",), steps=120)
+def test_inverted_tree_still_congests_without_crashes():
+    """The control for the test above. If NO topology congested once collisions
+    were removed, the bound would have flattened the simulator rather than fixed
+    it, and there would be nothing left for a controller to improve."""
+    cell, runs = cell_runs("inverted_tree", "high", controllers=("no_av",), steps=120)
     verdict = assess_cell(cell, runs, min_completed_seeds=1)
-    assert verdict.reference_jam_fraction > 0.0
+    assert verdict.reference_jam_fraction > 0.0, (
+        "no congestion survives anywhere; the bound has flattened the simulator"
+    )
 
 
 def test_crashed_runs_are_excluded_from_metric_means():
@@ -284,15 +305,16 @@ def test_real_run_metrics_come_from_the_expected_env_fields():
     instead would change every ratio in the report without any test objecting."""
     cell = CellSpec(topology="merge", demand="high", av_penetration=0.10)
     run = run_condition(cell, "no_av", 7, duration_steps=120)
-    # Re-pinned 2026-09-09 for MergeAwareIDMVehicle. With plain IDMVehicle this
-    # same run reproduces the previous pin exactly -- 12.400, 20.0, 0.208 -- so the
-    # move is entirely the human model and not the extraction layer this test
-    # exists to guard. Throughput is identical either way; speed rose and jam fell,
-    # which is the merge topology's version of the same improvement measured on
-    # inverted_tree.
-    assert run.mean_speed == pytest.approx(14.13, abs=0.5)
+    # Re-pinned twice on 2026-09-09, both times for a vehicle-model change and not
+    # for the extraction layer this test exists to guard -- throughput has read 20.0
+    # throughout. First for MergeAwareIDMVehicle (12.400 -> 14.13 speed, 0.208 ->
+    # 0.174 jam), then for the collision-free bound, which removes this topology's
+    # congestion entirely: jam 0.174 -> 0.000 and speed 14.13 -> 20.11. That is the
+    # measured finding, not a tolerance -- on `merge` the jam was ENTIRELY
+    # crash-induced queueing.
+    assert run.mean_speed == pytest.approx(20.11, abs=0.5)
     assert run.throughput == pytest.approx(20.0, abs=2.0)
-    assert run.jam_fraction == pytest.approx(0.174, abs=0.02)
+    assert run.jam_fraction == pytest.approx(0.0, abs=0.02)
 
 
 # --------------------------------------------------------------------------
