@@ -32,6 +32,8 @@ from typing import Any
 import numpy as np
 
 from src.envs.wrappers import decode_headway_bin, decode_speed_bin
+from src.metrics.global_metrics import metric_thresholds_from_config
+from src.metrics.segment_metrics import compute_segment_metrics
 from src.safety import SafetyConstraints, SafetyState
 from src.sensing import LocalObservationBuilder, SensingConfig, VehicleSnapshot
 from src.sumo.network import SumoNetwork
@@ -84,6 +86,19 @@ class SumoTopologyEnv:
         self._last_metrics: dict[str, Any] = {}
         #: Completion times, for the 60 s rolling throughput window the reward reads.
         self._arrivals: list[float] = []
+        #: Which entry edge each live vehicle came from, so an arrival can be
+        #: attributed to a branch. Needed because a vehicle is gone by the time it
+        #: arrives, so its route cannot be read then.
+        self._origin_of: dict[str, str] = {}
+        #: Completions per entry branch, which is what fairness is measured over.
+        self._branch_completed: dict[str, int] = {}
+        self._branch_spawned: dict[str, int] = {}
+        #: The segment each vehicle occupied last step, for per-segment in and out
+        #: flow.
+        self._segment_of: dict[str, str] = {}
+        #: New collisions this step, exposed so a test can tell a measured zero from
+        #: a hardcoded one.
+        self.new_collisions_last_step = 0
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -98,6 +113,11 @@ class SumoTopologyEnv:
         self._safety_states = {}
         self._target_headways = {}
         self._arrivals = []
+        self._origin_of = {}
+        self._branch_completed = {}
+        self._branch_spawned = {}
+        self._segment_of = {}
+        self.new_collisions_last_step = 0
         self._rng = np.random.RandomState(0 if seed is None else int(seed))
         self.step_count = 0
         self.collision_count = 0
@@ -132,11 +152,22 @@ class SumoTopologyEnv:
         rewarded, so `duration_steps` still means what it says.
         """
         warmup = int(self.config.get("warmup_steps", 0))
-        for _ in range(max(0, warmup)):
+        dt = float(self.config.get("dt", 1.0))
+        for index in range(max(0, warmup)):
             _sumo.simulationStep()
             # Collisions during warm-up would still be collisions.
             self.collision_count += int(_sumo.simulation.getCollidingVehiclesNumber())
             self.collision_checks += 1
+            # Warm-up arrivals count toward the rolling throughput window, at a
+            # NEGATIVE time so the window sees them as already elapsed. Without
+            # this the window refilled from empty after a warm-up that had already
+            # reached steady state, and throughput_recent read 5.4 over the first 60
+            # steps against 11.0 afterwards -- on the term the config gives the
+            # largest positive weight.
+            arrived = int(_sumo.simulation.getArrivedNumber())
+            self.arrived_total += arrived
+            self._arrivals.extend([(index - warmup + 1) * dt] * arrived)
+            self._track_branches()
         if warmup > 0:
             snapshots = self.vehicle_snapshots()
             self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
@@ -171,13 +202,15 @@ class SumoTopologyEnv:
         _sumo.simulationStep()
         self.step_count += 1
 
+        before = self.collision_count
         self.collision_count += int(_sumo.simulation.getCollidingVehiclesNumber())
         self.collision_checks += 1
-
+        self.new_collisions_last_step = self.collision_count - before
         arrived = int(_sumo.simulation.getArrivedNumber())
         self.arrived_total += arrived
         now = self.step_count * float(self.config.get("dt", 1.0))
         self._arrivals.extend([now] * arrived)
+        self._track_branches()
 
         snapshots = self.vehicle_snapshots()
         self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
@@ -254,6 +287,7 @@ class SumoTopologyEnv:
         read every step, not from a per-vehicle flag, because SUMO removes nothing
         and a flag would always read clean.
         """
+        thresholds = metric_thresholds_from_config(self.config)
         window = float(self.config.get("throughput_window_s", 60.0))
         self._arrivals = [t for t in self._arrivals if now - t <= window]
         speeds = [s.speed_mps for s in snapshots]
@@ -267,64 +301,149 @@ class SumoTopologyEnv:
             "jam_fraction": float(sum(jam) / len(jam)) if jam else 0.0,
             "queue_length_total": queue,
             "collision_count": self.collision_count,
-            "new_collision_count": 0,
+            # The per-step change, not a constant. build_team_reward PREFERS
+            # new_collision_count over collision_count whenever the key is present,
+            # so a hardcoded 0 made the -5.0 collision weight read nothing.
+            "new_collision_count": self.new_collisions_last_step,
             "hard_braking_count": sum(
-                1 for s in snapshots if s.acceleration_mps2 < -3.0
+                1 for s in snapshots
+                if s.acceleration_mps2 <= thresholds.hard_braking_mps2
             ),
-            "rolling_roadblock_score": 0.0,
-            "fairness_jain": self._fairness(speeds),
+            # Averaged over segments from the shared implementation. Hardcoding this
+            # to 0.0 removed the -2.0 term that penalises AVs holding every lane of a
+            # segment below free flow, which -- with crash_penalty inert on SUMO --
+            # left every anti-degenerate term in the reward absent at once.
+            "rolling_roadblock_score": (
+                sum(float(m["rolling_roadblock_score"]) for m in segment_metrics.values())
+                / max(len(segment_metrics), 1)
+            ),
+            "all_lane_av_low_speed_occupancy": (
+                sum(float(m["all_lane_av_low_speed_occupancy"]) for m in segment_metrics.values())
+                / max(len(segment_metrics), 1)
+            ),
+            # Over completions per entry branch, which is what highway_env measures
+            # and what inverted_tree exists to study, not over instantaneous speeds.
+            "fairness_jain": self._branch_fairness(),
             "active_vehicle_count": len(snapshots),
             "active_av_count": len(self.agent_ids),
         }
 
-    @staticmethod
-    def _fairness(speeds: list[float]) -> float:
-        """Jain's index over speeds. 1.0 when every vehicle moves alike."""
-        if not speeds:
-            return 1.0
-        total = sum(speeds)
-        squares = sum(v * v for v in speeds)
-        if squares <= 0.0:
-            return 1.0
-        return float(total * total / (len(speeds) * squares))
+    def _track_branches(self) -> None:
+        """Attribute each departure and arrival to the entry branch it used.
+
+        A vehicle is gone by the time it arrives, so its route cannot be read then;
+        the origin is recorded on departure and looked up on arrival. Fairness is
+        Jain's index over completions per branch, which is the branch-fairness
+        objective `inverted_tree` exists to study -- not, as an earlier version
+        computed, Jain's index over instantaneous speeds.
+        """
+        for vehicle_id in _sumo.simulation.getDepartedIDList():
+            try:
+                route = _sumo.vehicle.getRoute(vehicle_id)
+            except Exception:  # noqa: BLE001 - vanished between the two calls
+                continue
+            if route:
+                self._origin_of[vehicle_id] = route[0]
+                self._branch_spawned[route[0]] = self._branch_spawned.get(route[0], 0) + 1
+        for vehicle_id in _sumo.simulation.getArrivedIDList():
+            origin = self._origin_of.pop(vehicle_id, None)
+            if origin is not None:
+                self._branch_completed[origin] = self._branch_completed.get(origin, 0) + 1
+
+    def _vehicle_records(self, snapshots: list[VehicleSnapshot]) -> list[dict[str, Any]]:
+        """Snapshots in the record shape `compute_segment_metrics` reads."""
+        return [{
+            "vehicle_id": s.vehicle_id,
+            "role": s.role,
+            "branch_id": self._origin_of.get(s.vehicle_id),
+            "segment_id": s.segment_id,
+            "lane_id": s.lane_id,
+            "speed": s.speed_mps,
+            "free_flow_speed_mps": s.free_flow_speed_mps,
+        } for s in snapshots]
 
     def get_segment_metrics(self, snapshots: list[VehicleSnapshot] | None = None) -> dict:
-        """Per-segment density, jam fraction and queue length.
+        """Per-segment metrics, from the SHARED implementation.
 
-        A vehicle is queued when it is below `queue_speed_mps`, which is the same
-        threshold the sensing model uses, so the two agree on what a queue is.
+        `compute_segment_metrics` is what highway_env uses, so both simulators agree
+        on what a queue, a roadblock and lane occupancy are. An earlier version
+        computed four fields by hand and left the other seven absent, which starved
+        the MAPPO critic: `encode_physical_global_state` reads eleven fields per
+        segment and received none of them.
         """
         snapshots = snapshots if snapshots is not None else self.vehicle_snapshots()
-        queue_speed = float(self._sensing.config.queue_speed_mps)
-        by_segment: dict[str, list[VehicleSnapshot]] = {}
+        road = (self.config.get("topology") or {}).get("road", {})
+        lengths = road.get("segment_lengths", {}) or {}
+        segment_ids = sorted({s.segment_id for s in snapshots if s.segment_id} | set(lengths))
+        inflow: dict[str, int] = {}
+        outflow: dict[str, int] = {}
         for snapshot in snapshots:
+            previous = self._segment_of.get(snapshot.vehicle_id)
+            if previous != snapshot.segment_id:
+                if snapshot.segment_id:
+                    inflow[snapshot.segment_id] = inflow.get(snapshot.segment_id, 0) + 1
+                if previous:
+                    outflow[previous] = outflow.get(previous, 0) + 1
             if snapshot.segment_id:
-                by_segment.setdefault(snapshot.segment_id, []).append(snapshot)
-        out: dict[str, dict[str, float]] = {}
-        for segment, group in by_segment.items():
-            slow = [s for s in group if s.speed_mps < queue_speed]
-            out[segment] = {
-                "density": float(len(group)),
-                "jam_fraction": float(len(slow)) / float(len(group)),
-                "queue_length": float(len(slow)),
-                "mean_speed": float(sum(s.speed_mps for s in group) / len(group)),
-            }
-        return out
+                self._segment_of[snapshot.vehicle_id] = snapshot.segment_id
+        lane_counts = dict(self.view.lane_counts) if self.view is not None else {}
+        return compute_segment_metrics(
+            segment_ids=segment_ids,
+            segment_lengths_m=lengths,
+            lane_counts=lane_counts,
+            active_vehicle_records=self._vehicle_records(snapshots),
+            step_inflow=inflow,
+            step_outflow=outflow,
+            thresholds=metric_thresholds_from_config(self.config),
+        )
+
+    def _branch_fairness(self) -> float:
+        """Jain's index over completions per entry branch."""
+        from src.metrics.global_metrics import jain_fairness
+
+        return float(jain_fairness(list(self._branch_completed.values())))
+
+    def get_global_state(self) -> dict[str, Any]:
+        """What the MAPPO critic reads, in the shape the encoder expects.
+
+        `encode_physical_global_state` reads `time`, `active_vehicle_count`,
+        `active_av_count`, then ten segments of eleven fields, then two demand
+        fields. An earlier version returned the flat metrics dict, which contains
+        none of `time`, `segment_state` or `demand_state`, so the centralized critic
+        -- the entire point of MAPPO over IPPO -- was fed two non-zero values out of
+        115 and both SUMO training runs are invalid.
+        """
+        snapshots = self.vehicle_snapshots()
+        demand = self.config.get("demand", {})
+        return {
+            "time": self.step_count * float(self.config.get("dt", 1.0)),
+            "topology_id": self.topology_id,
+            "active_vehicle_count": len(snapshots),
+            "active_av_count": sum(1 for s in snapshots if s.role == "av"),
+            "completed_vehicle_count": self.arrived_total,
+            "segment_state": self.get_segment_metrics(snapshots),
+            "branch_state": {
+                "per_branch_spawned": dict(self._branch_spawned),
+                "per_branch_completed": dict(self._branch_completed),
+                "fairness_jain": self._branch_fairness(),
+            },
+            "demand_state": {
+                "current_vehicles_per_hour": float(demand.get("total_vehicles_per_hour", 0.0)),
+                "av_penetration": float(demand.get("av_penetration", 0.0)),
+            },
+            "step_metrics": dict(self._last_metrics),
+        }
 
     def crashed_agent_ids(self) -> list[str]:
         """Always empty: SUMO's car-following cannot produce a collision.
 
         So `crash_penalty` is inert on this simulator. That is the intended
         consequence of the migration rather than an oversight -- the penalty existed
-        because the previous simulator's dense speed reward otherwise drowned a
-        one-step collision term, and there are no collisions to drown it now. The
-        per-step collision counter is what verifies the claim; this does not assert
-        it.
+        because the previous simulator's dense speed reward drowned a one-step
+        collision term, and there are no collisions to drown it now. The per-step
+        collision counter is what verifies the claim; this does not assert it.
         """
         return []
-
-    def get_global_state(self) -> dict[str, Any]:
-        return dict(self._last_metrics)
 
     def get_episode_summary(self) -> dict[str, Any]:
         return {"steps": self.step_count, "collisions": self.collision_count,
