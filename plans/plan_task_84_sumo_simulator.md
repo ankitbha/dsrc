@@ -177,3 +177,41 @@ speed is 26 m/s, because vehicles just inserted and vehicles crossing junctions 
 momentarily slow. Mean speed and arrivals are the reliable congestion indicators at
 this demand range; `jam_fraction` is not, and should not be used as the operating
 point criterion.
+
+
+---
+
+# Steps 7 and 8 complete 2026-09-09: an hour of simulated driving, measured
+
+**The evaluation task 74 asked for has run.** Five seeds per arm, 3600 steps each,
+at `sumo_saturating` with 20% AV penetration, on the checkpoint from a 400-update
+SUMO training run:
+
+| arm | arrivals | mean speed | completed | collisions |
+|---|---|---|---|---|
+| `no_av` | 679.0 ± 8.5 | 1.01 ± 0.11 | 5/5 | 0 |
+| `mappo` | 685.4 ± 3.0 | 1.06 ± 0.07 | 5/5 | 0 |
+| difference | **+6.4 (+0.9%)** | +0.05 | | |
+
+**Every run completed and no run produced a collision.** That has not happened
+before in this project: the same comparison on the previous simulator completed 7
+of 18 conditions and every figure came from runs selected for not having crashed.
+Ten hour-long runs took 2 minutes 18 seconds in total.
+
+**The instrument is now sensitive enough to trust a null.** Arrivals have a standard
+deviation of 3.0 and 8.5 on a mean of 680, so the resolution is about 1%. The 52%
+effect measured under task 86 would be unmistakable at this resolution. The +0.9%
+reported here is therefore a real null and not a measurement failure.
+
+**And the null has a known cause.** Task 86 measured that every action the policy
+can express decodes to 20-30 m/s at a 30 m/s limit, while the effect lives at
+10 m/s, and that arrivals were identical across `slow`, `nominal`, `fast` and no
+action. A policy choosing among equivalent actions cannot produce a difference. So
+this evaluation confirms the instrument rather than the policy, which is the useful
+thing it can do until the action space is rescaled.
+
+**One caveat on the operating point.** Mean speed is about 1.0 m/s across both
+arms, so at 1050 veh/h the network is heavily congested by the end of an hour --
+more so than the 900-step measurements that chose that rate showed. An hour-long
+evaluation wants a demand chosen against hour-long runs, which is a shorter version
+of the capacity sweep at 3600 steps.
