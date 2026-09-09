@@ -91,3 +91,53 @@ class TestItIsReproducible:
         changed = SumoNetwork.build("inverted_tree", narrowed, tmp_path / "changed")
         assert self._network_body(baseline.net_file) != self._network_body(changed.net_file)
         assert changed.lane_counts()["tree_trunk_c"] == 1
+
+
+class TestTheBottleneckVariantIsBuilt:
+    """`SumoNetwork.build` ignored `topology_id` for structure.
+
+    It always emitted six leaves, two middles and one trunk with the exit at
+    `tree_trunk_c`, whatever it was asked for. `inverted_tree_bottleneck` declares a
+    tenth segment `tree_bottleneck_d`, `lane_counts.bottleneck: 1` and
+    `exit_segments: [tree_bottleneck_d]`, so constructing it produced no error and
+    simulated the non-bottleneck topology — and any comparison between the two on
+    SUMO would have been a comparison of one topology with itself.
+    """
+
+    @pytest.fixture(scope="class")
+    def bottleneck(self, tmp_path_factory):
+        return SumoNetwork.build(
+            "inverted_tree_bottleneck",
+            load_named_config("topology", "inverted_tree_bottleneck"),
+            tmp_path_factory.mktemp("bottleneck"),
+        )
+
+    def test_the_bottleneck_segment_exists(self, bottleneck):
+        assert "tree_bottleneck_d" in bottleneck.lane_counts()
+
+    def test_the_bottleneck_drops_to_one_lane(self, bottleneck):
+        counts = bottleneck.lane_counts()
+        assert counts["tree_bottleneck_d"] == 1, counts
+        assert counts["tree_trunk_c"] == 2, counts
+
+    def test_the_exit_is_the_bottleneck(self, bottleneck):
+        assert bottleneck.exit_edge == "tree_bottleneck_d"
+
+    def test_every_entry_still_reaches_the_exit(self, bottleneck):
+        for edge in bottleneck.entry_edges():
+            route = bottleneck.route_to_exit(edge)
+            assert route, f"no route from {edge}"
+            assert route[-1] == "tree_bottleneck_d"
+
+    def test_it_differs_from_the_plain_topology(self, bottleneck, network):
+        # The control. Without it every assertion above would pass on a generator
+        # that ignored the name, since the plain network would also be returned.
+        assert set(bottleneck.lane_counts()) != set(network.lane_counts())
+        assert bottleneck.exit_edge != network.exit_edge
+
+    def test_an_unsupported_layout_is_refused_by_name(self, tmp_path):
+        config = load_named_config("topology", "inverted_tree")
+        road = dict(config["road"])
+        road["layout"] = "cloverleaf"
+        with pytest.raises(ValueError, match="cloverleaf"):
+            SumoNetwork.build("cloverleaf", {**config, "road": road}, tmp_path)

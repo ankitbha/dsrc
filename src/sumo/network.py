@@ -32,7 +32,7 @@ _NODE_XY = {
     "a1": (-500.0, 70.0), "a2": (-500.0, 30.0), "a3": (-500.0, -10.0),
     "a4": (-500.0, 10.0), "a5": (-500.0, -30.0), "a6": (-500.0, -70.0),
     "b1": (0.0, 30.0), "b2": (0.0, -30.0),
-    "c": (600.0, 0.0), "exit": (1500.0, 0.0),
+    "c": (600.0, 0.0), "d": (1200.0, 0.0), "exit": (1500.0, 0.0),
 }
 
 #: leaf -> the node it feeds. Three into each of b1 and b2, matching the spec's
@@ -71,8 +71,12 @@ class SumoNetwork:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+        wanted = set(_NODE_XY)
+        if "tree_bottleneck_d" not in (road.get("segment_ids") or []):
+            wanted.discard("d")   # no bottleneck: `d` would be an unreachable node
         nodes = "\n".join(
-            f'  <node id="{name}" x="{x}" y="{y}"/>' for name, (x, y) in _NODE_XY.items()
+            f'  <node id="{name}" x="{x}" y="{y}"/>'
+            for name, (x, y) in _NODE_XY.items() if name in wanted
         )
         (out_dir / "net.nod.xml").write_text(f"<nodes>\n{nodes}\n</nodes>\n")
 
@@ -93,11 +97,33 @@ class SumoNetwork:
                 f'  <edge id="{segment}" from="{node}" to="c" numLanes="{middle_lanes}"'
                 f' speed="{speed}" length="{float(lengths.get(segment, 600.0))}"/>'
             )
+        # The trunk, and -- when the spec declares one -- a lane-dropping
+        # bottleneck after it. Ignoring the layout here meant
+        # `inverted_tree_bottleneck` built the plain network with no error, so
+        # comparing the two topologies would have compared one with itself.
+        layout = str(road.get("layout", topology_id))
+        if layout not in {"inverted_tree", "inverted_tree_bottleneck"}:
+            raise ValueError(
+                f"unsupported layout {layout!r}: this generator builds inverted_tree "
+                "and inverted_tree_bottleneck"
+            )
+        has_bottleneck = "tree_bottleneck_d" in (road.get("segment_ids") or [])
         trunk = "tree_trunk_c"
+        trunk_to = "d" if has_bottleneck else "exit"
         edges.append(
-            f'  <edge id="{trunk}" from="c" to="exit" numLanes="{trunk_lanes}"'
+            f'  <edge id="{trunk}" from="c" to="{trunk_to}" numLanes="{trunk_lanes}"'
             f' speed="{speed}" length="{float(lengths.get(trunk, 900.0))}"/>'
         )
+        exit_edge = trunk
+        if has_bottleneck:
+            bottleneck = "tree_bottleneck_d"
+            bottleneck_lanes = int(lane_counts.get("bottleneck", 1))
+            edges.append(
+                f'  <edge id="{bottleneck}" from="d" to="exit"'
+                f' numLanes="{bottleneck_lanes}" speed="{speed}"'
+                f' length="{float(lengths.get(bottleneck, 300.0))}"/>'
+            )
+            exit_edge = bottleneck
         (out_dir / "net.edg.xml").write_text("<edges>\n" + "\n".join(edges) + "\n</edges>\n")
 
         net_file = out_dir / "net.net.xml"
@@ -124,7 +150,7 @@ class SumoNetwork:
             _lane_counts=built,
             _entry_edges=frozenset(entry),
             _middle_edges=frozenset(middle),
-            exit_edge=trunk,
+            exit_edge=exit_edge,
         )
 
     @staticmethod
