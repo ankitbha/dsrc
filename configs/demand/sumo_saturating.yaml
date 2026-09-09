@@ -1,0 +1,37 @@
+id: sumo_saturating
+kind: demand
+description: >-
+  Demand just past the capacity of inverted_tree under SUMO, so the network
+  congests with a throughput deficit a controller can recover.
+# Measured on SUMO, inverted_tree, no AVs, 1800-step (30 minute) runs. Insertion
+# kept up throughout, so these are served demands and not requested ones:
+#
+#   veh/h   mean speed   arrived   departed   ratio
+#     450        26.26       222        228    1.01   free flow
+#     600        18.11       289        300    1.00
+#     750        20.25       361        384    1.02
+#     900         7.35       378        456    1.01   <- capacity, arrivals peak
+#    1050         2.11       349        528    1.01   <- this: 8% deficit
+#
+# Capacity is about 900 veh/h: arrivals are maximal there and FALL at 1050 while
+# insertion still keeps up, which is the throughput-versus-demand knee. 1050 sits
+# past it, so 29 of 378 arrivals are lost to congestion and that deficit is the
+# headroom a controller has.
+#
+# Capacity is junction-limited, not lane-limited. The three-into-two merges at b1
+# and b2 are unsignalised, so vehicles yield, and that throttles throughput well
+# below what the two-lane trunk could carry. That is realistic for an uncontrolled
+# merge and it is why SUMO's capacity here (~900 veh/h) is far below the ~1800 the
+# previous simulator appeared to manage.
+total_vehicles_per_hour: 1050
+av_penetration: 0.1
+branch_split:
+  main: 1.0
+burst:
+  enabled: false
+speed_distribution:
+  mean_mps: 24.0
+  std_mps: 2.5
+  min_mps: 12.0
+  max_mps: 32.0
+spawn_min_gap_m: 12.0

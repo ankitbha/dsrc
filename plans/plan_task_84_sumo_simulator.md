@@ -124,3 +124,56 @@ The environment's whole public surface is six methods — `reset`, `step`,
 - [ ] Capacity re-measured on SUMO
 - [ ] MAPPO trained and evaluated over an hour, with every run completing
 - [ ] `validate_dsrc_3` clean
+
+
+---
+
+# Steps 1-6 measured 2026-09-09
+
+**Steps 1 to 5 are implemented and tested.** 22 new tests across network
+generation, the environment, the road view and the control wiring; the simulator
+suite is at 369 passed.
+
+## What SUMO changed, measured
+
+| | highway_env | SUMO |
+|---|---|---|
+| collisions, 600 steps at every demand | 14 to 23 over ten runs | **0** |
+| wall time, 600 steps | ~40 s with CPA | **0.2 s** |
+| runs completing | 6 or 7 of 10 | **all** |
+| congestion reachable | only via crash queueing | **yes, by demand** |
+
+An hour-long episode costs about 1.2 s, so the evaluation that was unmeasurable is
+now nearly free.
+
+## Step 6: capacity is junction-limited and much lower than it appeared
+
+1800-step runs, no AVs, insertion keeping up throughout:
+
+| veh/h | mean speed | arrived | departed | ratio |
+|---|---|---|---|---|
+| 450 | 26.26 | 222 | 228 | 1.01 |
+| 600 | 18.11 | 289 | 300 | 1.00 |
+| 750 | 20.25 | 361 | 384 | 1.02 |
+| **900** | 7.35 | **378** | 456 | 1.01 |
+| 1050 | 2.11 | 349 | 528 | 1.01 |
+| 1800 | 1.18 | 425 | — | — |
+| 3000 | 1.39 | 538 | — | — |
+
+**Capacity is about 900 veh/h**: arrivals are maximal there and fall at 1050 while
+insertion still keeps up. `configs/demand/sumo_saturating.yaml` is 1050, past the
+knee, with 29 of 378 arrivals lost to congestion as the headroom a controller has.
+
+**It is junction-limited, not lane-limited.** The three-into-two merges at b1 and b2
+are unsignalised, so vehicles yield and throughput is throttled well below what the
+two-lane trunk could carry. Realistic for an uncontrolled merge, and the reason
+SUMO's capacity here is far below the ~1800 the previous simulator appeared to
+manage — that figure was measured on a road where vehicles could drive through each
+other.
+
+**One instrument caveat.** `jam_fraction` as computed here is the share of vehicles
+below `queue_speed_mps` of 5 m/s, and it reads 0.167 even at 450 veh/h where mean
+speed is 26 m/s, because vehicles just inserted and vehicles crossing junctions are
+momentarily slow. Mean speed and arrivals are the reliable congestion indicators at
+this demand range; `jam_fraction` is not, and should not be used as the operating
+point criterion.
