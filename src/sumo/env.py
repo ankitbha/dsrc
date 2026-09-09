@@ -143,8 +143,14 @@ class SumoTopologyEnv:
         self._target_headways = {}
         self._arrivals = []
         self._origin_of = {}
-        self._branch_completed = {}
-        self._branch_spawned = {}
+        # Every entry branch starts at zero, so a branch that completes nothing is
+        # in the fairness denominator. Seeding these on first completion instead
+        # measured Jain's index over the branches that had completed a vehicle: one
+        # branch at 1 and five at 0 read 1.0000 against a true 0.1667, and 95 of 120
+        # steps of the default evaluation config reported exactly 1.0. A controller
+        # starving five branches to feed one scored the maximum.
+        self._branch_completed = {edge: 0 for edge in self.network.entry_edges()}
+        self._branch_spawned = {edge: 0 for edge in self.network.entry_edges()}
         self._segment_of = {}
         self.new_collisions_last_step = 0
         self._rng = np.random.RandomState(0 if seed is None else int(seed))
@@ -196,11 +202,23 @@ class SumoTopologyEnv:
             # reached steady state, and throughput_recent read 5.4 over the first 60
             # steps against 11.0 afterwards -- on the term the config gives the
             # largest positive weight.
+            # `arrived_total` counts the EPISODE's completions and is deliberately
+            # not advanced here: warm-up arrivals are not the traffic under study,
+            # and adding them made `arrived_total` read 43 before the episode began
+            # and 153 against the same run's 110.
             arrived = int(_sumo.simulation.getArrivedNumber())
-            self.arrived_total += arrived
             self._arrivals.extend([(index - warmup + 1) * dt] * arrived)
             self._track_branches()
         if warmup > 0:
+            # Branch counts are episode-scoped for the same reason `arrived_total`
+            # is: with a 300-step warm-up they otherwise carried 43 completions that
+            # the episode's controller had no part in, and fairness over 43 evenly
+            # spread warm-up completions is close to 1.0 whatever the episode does.
+            # `_origin_of` is deliberately NOT cleared: a vehicle that departed
+            # during warm-up and arrives during the episode is only attributable to
+            # a branch through the origin recorded at its departure.
+            self._branch_completed = {edge: 0 for edge in self.network.entry_edges()}
+            self._branch_spawned = {edge: 0 for edge in self.network.entry_edges()}
             snapshots = self.vehicle_snapshots()
             self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
 

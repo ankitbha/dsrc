@@ -205,3 +205,133 @@ class TestWarmupArrivalsCountTowardTheWindow:
             )
         finally:
             env.close()
+
+
+class TestFairnessIsMeasuredOverEveryEntryBranch:
+    """`_branch_completed` gained a key only on a branch's first completion, so
+    Jain's index was computed over the branches that had completed a vehicle rather
+    than over all six. One branch at 1 and five at 0 read 1.0000 against a true
+    0.1667, and 95 of 120 steps of the default evaluation config reported exactly
+    1.0: the term reported its best value in the state it exists to detect.
+    """
+
+    def _env(self, tmp_path, **overrides):
+        config = {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 200, "dt": 1.0, "warmup_steps": 0,
+            "work_dir": str(tmp_path),
+        }
+        config.update(overrides)
+        return SumoTopologyEnv("inverted_tree", config)
+
+    def test_every_entry_branch_is_in_the_denominator_from_reset(self, tmp_path):
+        env = self._env(tmp_path)
+        env.reset(seed=7)
+        try:
+            branches = env.get_global_state()["branch_state"]["per_branch_completed"]
+            assert set(branches) == set(env.network.entry_edges())
+            assert len(branches) == 6, f"six entry branches expected, got {branches}"
+            assert set(branches.values()) == {0}
+        finally:
+            env.close()
+
+    def test_a_single_branch_completing_alone_scores_one_sixth(self, tmp_path):
+        # With six branches, one at any count n and five at zero, Jain's index is
+        # n^2 / (6 n^2) = 1/6 whatever n is. This is the state the metric exists to
+        # detect and the state the defect scored 1.0.
+        env = self._env(tmp_path)
+        env.reset(seed=7)
+        try:
+            for _ in range(200):
+                _, _, _, _, info = env.step({})
+                completed = env.get_global_state()["branch_state"]["per_branch_completed"]
+                nonzero = [count for count in completed.values() if count > 0]
+                if len(nonzero) == 1:
+                    assert info["metrics"]["fairness_jain"] == pytest.approx(1.0 / 6.0), (
+                        f"one branch serving alone scored "
+                        f"{info['metrics']['fairness_jain']} over {completed}"
+                    )
+                    break
+            else:
+                pytest.fail("no step had exactly one branch with completions")
+        finally:
+            env.close()
+
+    def test_a_partly_served_network_never_reports_maximal_fairness(self, tmp_path):
+        # The general form of the two assertions above, over a whole episode: while
+        # between one and five of the six branches have completed anything, the
+        # index must be below 1.0. The defect reported exactly 1.0 on every such
+        # step -- 95 of the 120 steps of this configuration.
+        env = self._env(tmp_path, duration_steps=120)
+        env.reset(seed=7)
+        try:
+            partly_served = 0
+            for _ in range(120):
+                _, _, _, _, info = env.step({})
+                completed = env.get_global_state()["branch_state"]["per_branch_completed"]
+                served = sum(1 for count in completed.values() if count > 0)
+                if 0 < served < 6:
+                    partly_served += 1
+                    assert info["metrics"]["fairness_jain"] < 1.0, (
+                        f"{served} of 6 branches served, fairness "
+                        f"{info['metrics']['fairness_jain']} over {completed}"
+                    )
+            # Without this the assertion above would pass on an episode in which the
+            # branches were never partly served, proving nothing.
+            assert partly_served > 10, (
+                f"only {partly_served} steps had between one and five branches served"
+            )
+        finally:
+            env.close()
+
+
+class TestArrivedTotalCountsTheEpisodeOnly:
+    """`arrived_total` is what every recorded arrival figure is measured from and
+    what the critic reads as `completed_vehicle_count`. Adding warm-up arrivals to
+    it made it read 43 before the episode began and 153 against the same run's 110.
+    """
+
+    def test_no_arrivals_are_counted_before_the_episode_starts(self, tmp_path):
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            assert env.arrived_total == 0, (
+                f"{env.arrived_total} arrivals counted during warm-up; the warm-up "
+                "must fill the network without contributing to the episode's total"
+            )
+            # The control: the warm-up did run and vehicles did complete during it,
+            # so the zero above is a scoping decision and not an empty network.
+            assert len(env._arrivals) > 0
+            assert all(time <= 0.0 for time in env._arrivals)
+        finally:
+            env.close()
+
+    def test_the_total_equals_the_arrivals_observed_during_the_episode(self, tmp_path):
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            for _ in range(120):
+                env.step({})
+            # The two counters are computed by different SUMO calls -- a count from
+            # `getArrivedNumber` and a per-vehicle attribution from
+            # `getArrivedIDList` -- so their agreement is a real cross-check that
+            # both cover the episode and only the episode.
+            branch_total = sum(
+                env.get_global_state()["branch_state"]["per_branch_completed"].values()
+            )
+            assert env.arrived_total > 0
+            assert branch_total == env.arrived_total, (
+                f"branch completions {branch_total} disagree with arrived_total "
+                f"{env.arrived_total}; both must be scoped to the episode"
+            )
+        finally:
+            env.close()
