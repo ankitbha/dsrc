@@ -291,3 +291,57 @@ class TestItCannotDriveBackwards:
             for vehicle in env.road.vehicles:
                 worst = min(worst, float(vehicle.speed))
         assert worst > -0.5, f"a vehicle reached {worst} m/s"
+
+
+class TestTheAvPathIsFlooredToo:
+    """The floor lives in the human vehicle; AVs are `ControlledVehicle`.
+
+    `topology_env` applies the safety layer's command AFTER `road.act()`, so it
+    overwrites anything the vehicle floored. Demonstrated in isolation before the
+    fix: a `ControlledVehicle` at 0.3 m/s commanded the safety layer's
+    -emergency_decel_mps2 of -6.0 reached -0.3, -0.9, -1.5 m/s over three
+    substeps, with nothing arresting it -- `clip_actions` floors speed at -40.
+
+    Measured headroom over 16 runs was a minimum AV speed of +0.816 m/s, so the
+    hole was real but unexercised. 0.8 m/s is not much margin when the emergency
+    branch is one gap reading away.
+    """
+
+    def test_an_av_commanded_to_brake_hard_at_low_speed_does_not_reverse(self):
+        from src.analysis.simulator_health import SampleSpec, build_env_config
+        from src.envs.topology_env import HighwayTopologyEnv
+
+        spec = SampleSpec(topology="inverted_tree", controller="backpressure", seed=7,
+                          duration_steps=120, demand="high", human_model="normal",
+                          av_penetration=0.20)
+        env = HighwayTopologyEnv("inverted_tree", build_env_config(spec))
+        env.reset(seed=7)
+        applied = env._floor_av_acceleration
+        # 0.3 m/s with the emergency command: one 1 s step of -6.0 would reach -5.7.
+        assert applied(-6.0, 0.3) >= -0.3 - 1e-9
+        # A stopped vehicle cannot be pushed backwards at all.
+        assert applied(-6.0, 0.0) >= -1e-9
+        # The control: at road speed the emergency command must survive intact, or
+        # the fix would have disabled emergency braking.
+        assert applied(-6.0, 25.0) == pytest.approx(-6.0)
+
+    def test_no_av_reverses_over_full_runs(self):
+        from src.analysis.simulator_health import SampleSpec, build_env_config
+        from src.baselines.registry import make_baseline
+        from src.envs.topology_env import HighwayTopologyEnv
+
+        worst = 0.0
+        for seed in (7, 17):
+            spec = SampleSpec(topology="inverted_tree", controller="backpressure",
+                              seed=seed, duration_steps=120, demand="high",
+                              human_model="normal", av_penetration=0.20)
+            env = HighwayTopologyEnv("inverted_tree", build_env_config(spec))
+            policy = make_baseline("backpressure")
+            policy.reset(env_metadata={"topology_id": "inverted_tree"}, seed=seed)
+            obs, _ = env.reset(seed=seed)
+            terminated = truncated = False
+            while not (terminated or truncated):
+                obs, _, terminated, truncated, _ = env.step(policy.act(obs, global_state=None))
+                for vehicle in env._av_vehicles.values():
+                    worst = min(worst, float(vehicle.speed))
+        assert worst >= -1e-6, f"an AV reached {worst} m/s"

@@ -568,3 +568,62 @@ class TestTheObservationSeesWhatTheSafetyLayerSees:
         # available to anything that may legitimately use it.
         ctx = _gap_context(topology, [ego])
         assert ctx.distance_to_next_merge_m == pytest.approx(50.0, abs=2.0)
+
+
+class TestMeasurementNoiseDoesNotDependOnGeometry:
+    """A cross-arc gap was noiseless while a same-arc gap was not.
+
+    `_measure_neighbor` adds `position_noise_std` to the same-arc delta, but
+    `_route_deltas` recomputed the cross-arc delta from the true `longitudinal_m`
+    and never applied it. Measured with the training configs' 1.5 m: a same-arc
+    leader 40 m ahead spread 3.308 m over 8 seeds, a cross-arc leader 70 m ahead
+    spread 0.000 m.
+
+    That matters because the actor trains on this field, `inverted_tree` sends
+    every vehicle across two arc boundaries per episode, and
+    `mappo_deploysense.yaml` is one of the configs with noise switched on -- so the
+    noise level was correlated with position on the road.
+    """
+
+    NOISY = SensingConfig(position_noise_std=1.5, speed_noise_std=0.15)
+
+    def _spread(self, snapshots):
+        seen = [
+            _gap_context(_tree(), snapshots, config=self.NOISY).leader_gap_m
+            for _ in range(1)
+        ]
+        # Draw across seeds rather than repeats, since the rng is passed in.
+        seen = []
+        for seed in range(8):
+            builder = LocalObservationBuilder(self.NOISY)
+            ctx = builder.lane_gap_context(
+                ego_id="av_0", time_s=0.0, topology=_tree(), snapshots=snapshots,
+                target_lane=None, rng=np.random.RandomState(seed),
+            )
+            seen.append(ctx.leader_gap_m)
+        return max(seen) - min(seen)
+
+    def test_a_cross_arc_gap_carries_measurement_noise(self) -> None:
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        cross = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0)
+        assert self._spread([ego, cross]) > 0.5, (
+            "a cross-arc leader was reported without measurement noise"
+        )
+
+    def test_the_two_geometries_carry_comparable_noise(self) -> None:
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        same = self._spread([ego, _on_lane(topology, "h_1", ("a5_entry", "b2", 0), 490.0)])
+        cross = self._spread([ego, _on_lane(topology, "h_1", ("b2", "c", 1), 20.0)])
+        assert abs(same - cross) < 1.0, (
+            f"noise depends on the geometry: same-arc {same:.3f} m, cross-arc {cross:.3f} m"
+        )
+
+    def test_a_noiseless_config_is_still_exact(self) -> None:
+        # The control: the fix must not inject noise when none was configured.
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        cross = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0)
+        ctx = _gap_context(topology, [ego, cross])
+        assert ctx.leader_gap_m == pytest.approx(70.0, abs=0.1)

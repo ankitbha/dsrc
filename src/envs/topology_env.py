@@ -241,7 +241,9 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             for agent_id, acceleration in physical_accelerations.items():
                 vehicle = self._av_vehicles.get(agent_id)
                 if vehicle is not None:
-                    vehicle.action["acceleration"] = float(acceleration)
+                    vehicle.action["acceleration"] = self._floor_av_acceleration(
+                        float(acceleration), float(vehicle.speed)
+                    )
             self.road.step(sub_dt)
         self._step_count += 1
         self._time += dt
@@ -649,6 +651,28 @@ class HighwayTopologyEnv(BaseCTDEEnv):
         lane_action = None if action["merge_mode"] == "hold_lane" else lane_preference_to_action(action["lane_preference"])
         if self.topology.supports_lane_change and lane_action is not None:
             self._apply_lane_action(agent_id, vehicle, lane_action, diagnostics)
+
+    #: The horizon over which a command may bring an AV to rest, matching
+    #: `MergeAwareIDMVehicle.MERGE_STOP_TAU_S` so both vehicle kinds stop the same
+    #: way.
+    AV_STOP_TAU_S = 1.0
+
+    @classmethod
+    def _floor_av_acceleration(cls, acceleration: float, speed: float) -> float:
+        """Keep a commanded deceleration from driving an AV backwards.
+
+        The human vehicle floors its own command inside `act()`, but this loop
+        overwrites the AV's afterwards, so the AV was unfloored. A
+        `ControlledVehicle` at 0.3 m/s given the safety layer's
+        `-emergency_decel_mps2` of -6.0 reached -0.3, -0.9 and -1.5 m/s over three
+        substeps with nothing arresting it: `clip_actions` floors speed at -40, not
+        at 0.
+
+        Measured headroom before this was a minimum AV speed of +0.816 m/s across
+        16 runs, so the hole was real and unexercised. It binds only below
+        `ACC_MAX`, so emergency braking at road speed is untouched.
+        """
+        return max(float(acceleration), -max(float(speed), 0.0) / cls.AV_STOP_TAU_S)
 
     def _safety_context_for_vehicle(self, vehicle: ControlledVehicle) -> SafetyContext:
         if self.road is None:

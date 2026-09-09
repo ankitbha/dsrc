@@ -424,7 +424,22 @@ LEDGER: dict[str, LedgerEntry] = {
         "live: INF unconditionally -- no map matching exists",
         live_constant=200.0 / sim_contract.FIELD_SCALES["distance_to_downstream_bottleneck"],
     ),
-    "leader_gap": LedgerEntry("leader_gap", CLASS_IDENTICAL, "both: nearest same-lane vehicle ahead, by distance"),
+    # The class is IDENTICAL only for the single-arc scenes this ledger runs, and
+    # that scope is now load-bearing. Since 2026-09-09 the sim finds the leader by
+    # walking `RoadNetwork` successors and accumulating lane lengths, so a vehicle
+    # across a node is a leader; a camera with no map matching cannot know that a
+    # vehicle 70 m ahead past a junction is on its route. Every scene here places
+    # all vehicles on one arc (`_scene_snapshots` fixes `from_node`/`to_node`), so
+    # the route walk never fires and the two sides do agree exactly.
+    #
+    # OUTSTANDING on task 47: add one cross-arc scene and reclassify this slot to
+    # APPROXIMATED. `test_the_ledger_has_no_cross_arc_scene` fails the moment such
+    # a scene is added, which is the reminder.
+    "leader_gap": LedgerEntry(
+        "leader_gap", CLASS_IDENTICAL,
+        "both: nearest vehicle ahead by distance; identical on single-arc scenes, "
+        "where the sim's road-graph route walk cannot fire",
+    ),
     "leader_relative_speed": LedgerEntry(
         "leader_relative_speed", CLASS_IDENTICAL,
         "both: the nearest same-lane neighbour ahead's speed minus the "

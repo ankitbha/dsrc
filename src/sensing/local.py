@@ -407,11 +407,22 @@ class LocalObservationBuilder:
             ahead = forward.get(lane_index)
             behind = backward.get(lane_index)
             length = float(network.get_lane(lane_index).length)
+            # The measurement error this neighbour was already given. Reusing the
+            # draw rather than taking another keeps the same error on the same
+            # vehicle however its geometry was derived, and consumes no extra rng
+            # so seeded runs stay reproducible.
+            #
+            # Without it a cross-arc gap came out noiseless while a same-arc gap
+            # spread 3.3 m at the training configs' 1.5 m, so the actor's leader_gap
+            # had a noise level that depended on which side of an arc boundary the
+            # leader happened to be -- and every vehicle here crosses two per episode.
+            noise = (float(neighbor.longitudinal_delta_m)
+                     - (float(neighbor.snapshot.longitudinal_m) - float(ego.longitudinal_m)))
             candidates = []
             if ahead is not None:
-                candidates.append(ahead + float(neighbor.snapshot.longitudinal_m))
+                candidates.append(ahead + float(neighbor.snapshot.longitudinal_m) + noise)
             if behind is not None:
-                candidates.append(-(behind + (length - float(neighbor.snapshot.longitudinal_m))))
+                candidates.append(-(behind + (length - float(neighbor.snapshot.longitudinal_m)) - noise))
             if not candidates:
                 continue
             # A short circuit can put one lane both ahead and behind. Whichever is

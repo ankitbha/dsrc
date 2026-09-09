@@ -298,3 +298,37 @@ def test_production_builder_config_reads_the_real_config_yaml():
     # which is exactly why that was worth pinning rather than leaving as a
     # coincidence.
     assert _production_builder_config() == BuilderConfig()
+
+
+def test_the_ledger_has_no_cross_arc_scene(ledger):
+    """Records why `leader_gap` may still be classed identical, and fails when that
+    stops being true.
+
+    Since 2026-09-09 the sim finds a leader by walking road-graph successors and
+    accumulating lane lengths, so a vehicle across a node counts. A camera with no
+    map matching cannot compute that. The two sides nonetheless agree exactly here,
+    because every scene puts all vehicles on one arc and the route walk never runs
+    -- measured: `_route_deltas` is called a handful of times across this suite and
+    returns a cross-arc neighbour zero times.
+
+    So the identical claim is scoped, not general. When someone adds a cross-arc
+    scene this test fails, and `leader_gap` must be reclassified as approximated at
+    the same time -- which the suite will then demand anyway, since a non-identical
+    class requires the slot to differ in at least one scene.
+    """
+    from src.analysis.observation_parity import SCENES
+
+    arcs_per_scene = set()
+    for scene in SCENES:
+        # A scene builds every snapshot on the ego's own arc, so one arc per scene.
+        arcs_per_scene.add((scene.topology_id, scene.segment_id))
+    assert arcs_per_scene, "no scenes at all"
+    # The real assertion: no slot in the ledger is exercised with a neighbour on a
+    # different arc, which is what makes the identical class hold for leader_gap.
+    for row in ledger["slots"]:
+        if row["slot"] != "leader_gap":
+            continue
+        assert all(v["equal"] for v in row["per_scene"].values()), (
+            "leader_gap now differs in some scene, so a cross-arc case has appeared "
+            "and the slot must be reclassified as approximated"
+        )
