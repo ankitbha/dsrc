@@ -104,7 +104,63 @@ class CollisionFreeMixin:
                                    reaction_s=self.SAFE_REACTION_S)
             if candidate < limit:
                 limit = candidate
+        # Where a vehicle is going, not only where it is. The loop above sees only
+        # what is ahead and within a lane's width; this catches a vehicle alongside
+        # whose path crosses the ego's, which is what the measured collisions were.
+        for other in road.vehicles:
+            if other is self or getattr(other, "crashed", False):
+                continue
+            candidate = self._converging_limit(other)
+            if candidate is not None and candidate < limit:
+                limit = candidate
         return limit
+
+    #: How far ahead a predicted conflict is acted on. Beyond it the prediction is
+    #: not worth braking for, and acting on it would slow traffic for encounters
+    #: that never happen.
+    CPA_HORIZON_S = 4.0
+
+    #: Predicted closest approach below which two vehicles are treated as
+    #: colliding. A vehicle is about 2 m wide, so this leaves a small margin.
+    CPA_MISS_M = 2.6
+
+    def _converging_limit(self, other: Any) -> float | None:
+        """Speed limit from a predicted closest approach, or None if the paths miss.
+
+        The forward window in `perceived_safe_speed` asks where a vehicle IS. This
+        asks where it is GOING, which is the question that distinguishes a real
+        conflict from parallel traffic. Two vehicles 3 m apart in adjacent lanes at
+        the same speed never meet and must not constrain each other; two vehicles
+        3 m apart whose paths converge will collide, and the first test cannot see
+        the difference. Widening the window instead would brake for both.
+
+        Both velocities are projected as straight lines. That is wrong on a curve,
+        but only over the horizon, which is short.
+        """
+        rx = float(other.position[0]) - float(self.position[0])
+        ry = float(other.position[1]) - float(self.position[1])
+        ego_heading = float(self.heading)
+        other_heading = float(getattr(other, "heading", ego_heading))
+        vx = float(other.speed) * math.cos(other_heading) - float(self.speed) * math.cos(ego_heading)
+        vy = float(other.speed) * math.sin(other_heading) - float(self.speed) * math.sin(ego_heading)
+        closing_rate = vx * vx + vy * vy
+        if closing_rate < 1e-6:
+            return None  # identical velocities: the separation never changes
+        approach = rx * vx + ry * vy
+        if approach >= 0.0:
+            return None  # already separating
+        time_to_closest = -approach / closing_rate
+        if time_to_closest > self.CPA_HORIZON_S:
+            return None
+        miss = math.hypot(rx + vx * time_to_closest, ry + vy * time_to_closest)
+        if miss >= self.CPA_MISS_M:
+            return None
+        # The paths meet, so the ego must be able to stop within the separation it
+        # has now. The conflict point is treated as stationary because the ego
+        # cannot rely on the other vehicle yielding.
+        gap = max(0.0, math.hypot(rx, ry) - SAFE_VEHICLE_LENGTH_M)
+        return safe_speed(gap, 0.0, decel_mps2=self.SAFE_DECEL_MPS2,
+                          reaction_s=self.SAFE_REACTION_S)
 
     def step(self, dt: float) -> None:  # type: ignore[override]
         limit = self.perceived_safe_speed()

@@ -161,3 +161,112 @@ class TestTheArcsJoin:
         assert run.mean_speed is not None and run.mean_speed > 5.0, (
             f"mean speed collapsed to {run.mean_speed} m/s"
         )
+
+
+class TestConvergingPathsAreSeen:
+    """The forward window could not see a conflict beside the vehicle.
+
+    `perceived_safe_speed` caps on the nearest vehicle ahead within a 2.6 m lateral
+    window. Measured at the saturating demand: AV arms die at steps 171, 225, 290
+    and 319 of 600, and `no_av` seed 47 has 9 human-human collisions with no AVs
+    present. The collisions are side-by-side, at 1.9 to 3.7 m lateral -- outside or
+    at the edge of that window -- so a forward test cannot reach them.
+
+    Widening the window is the wrong fix: at 4 m every adjacent-lane vehicle becomes
+    a longitudinal constraint and multi-lane sections over-brake. What distinguishes
+    a real conflict from parallel traffic is not current separation but whether the
+    two paths converge, which is what closest-point-of-approach measures.
+    """
+
+    def _pair(self, road, ego_state, other_state):
+        """Two vehicles with explicit positions, headings and speeds."""
+        from src.vehicles.merge_aware import MergeAwareIDMVehicle
+
+        made = []
+        for position, heading, speed in (ego_state, other_state):
+            vehicle = MergeAwareIDMVehicle(road, position, heading=heading, speed=speed)
+            road.vehicles.append(vehicle)
+            made.append(vehicle)
+        return made
+
+    def test_parallel_traffic_in_the_next_lane_is_not_a_conflict(self):
+        # The control, and the reason a wider window is wrong. Two vehicles 3 m
+        # apart laterally at the same speed and heading never meet, and must not
+        # constrain each other at all.
+        import numpy as np
+        from highway_env.road.road import Road
+
+        from src.config.loaders import load_named_config
+        from src.road.topology_factory import build_topology
+
+        network = build_topology("straight_multilane",
+                                 load_named_config("topology", "straight_multilane")).road_network
+        road = Road(network=network, np_random=np.random.RandomState(7), record_history=False)
+        ego, _ = self._pair(road, ((0.0, 0.0), 0.0, 25.0), ((5.0, 3.0), 0.0, 25.0))
+        assert ego.perceived_safe_speed() == float("inf")
+
+    def test_converging_paths_outside_the_lateral_window_are_a_conflict(self):
+        # 3.2 m apart laterally, so invisible to the 2.6 m window, but closing
+        # laterally at 2 m/s: they arrive at the same point.
+        import math
+
+        import numpy as np
+        from highway_env.road.road import Road
+
+        from src.config.loaders import load_named_config
+        from src.road.topology_factory import build_topology
+
+        network = build_topology("straight_multilane",
+                                 load_named_config("topology", "straight_multilane")).road_network
+        road = Road(network=network, np_random=np.random.RandomState(7), record_history=False)
+        # Closing in BOTH axes: 30 m ahead at 15 m/s against the ego's 25, so the
+        # ego gains 10 m/s longitudinally, while drifting inward at 1 m/s across
+        # the 3 m of lateral offset. Predicted closest approach is 0.01 m at 2.99 s.
+        # A fixture converging only laterally never meets, which is what my first
+        # attempt at this test described.
+        converging = math.atan2(-1.0, 15.0)
+        ego, _ = self._pair(road, ((0.0, 0.0), 0.0, 25.0),
+                            ((30.0, 3.0), converging, 15.0))
+        limit = ego.perceived_safe_speed()
+        assert limit < 25.0, (
+            f"a vehicle converging from 3.2 m lateral imposed no limit (got {limit})"
+        )
+
+    def test_a_separating_vehicle_is_not_a_conflict(self):
+        # Diverging rather than converging. Without this the rule would brake for
+        # anything nearby regardless of where it is going.
+        import math
+
+        import numpy as np
+        from highway_env.road.road import Road
+
+        from src.config.loaders import load_named_config
+        from src.road.topology_factory import build_topology
+
+        network = build_topology("straight_multilane",
+                                 load_named_config("topology", "straight_multilane")).road_network
+        road = Road(network=network, np_random=np.random.RandomState(7), record_history=False)
+        diverging = math.atan2(1.0, 15.0)
+        ego, _ = self._pair(road, ((0.0, 0.0), 0.0, 25.0),
+                            ((30.0, 3.0), diverging, 15.0))
+        assert ego.perceived_safe_speed() == float("inf")
+
+    def test_a_conflict_beyond_the_horizon_is_ignored(self):
+        import math
+
+        import numpy as np
+        from highway_env.road.road import Road
+
+        from src.config.loaders import load_named_config
+        from src.road.topology_factory import build_topology
+
+        network = build_topology("straight_multilane",
+                                 load_named_config("topology", "straight_multilane")).road_network
+        road = Road(network=network, np_random=np.random.RandomState(7), record_history=False)
+        # The same convergence as the test above, 200 m away instead of 30, so
+        # closest approach is 19.8 s out. Genuinely a conflict, genuinely too far
+        # to brake for now.
+        far = math.atan2(-1.0, 15.0)
+        ego, _ = self._pair(road, ((0.0, 0.0), 0.0, 25.0),
+                            ((200.0, 3.0), far, 15.0))
+        assert ego.perceived_safe_speed() == float("inf")

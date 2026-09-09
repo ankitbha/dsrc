@@ -3410,6 +3410,44 @@ correctness fix for the reversing defect that costs 12 collisions. It should sta
 because a vehicle driving backwards through traffic is a worse defect than 12
 collisions, but it must not be credited with any of the completion gain.
 
+# Task 77 resolved 2026-09-09: closest-point-of-approach helps, and does not solve it
+
+`CollisionFreeMixin` now asks where a vehicle is GOING as well as where it is. For
+every pair it projects both velocities, computes the time and distance of closest
+approach, and imposes a stopping limit when the predicted miss is under 2.6 m
+within a 4 s horizon. Parallel traffic in an adjacent lane is untouched, which is
+what a wider lateral window could not have achieved.
+
+Measured at the `saturating` demand over 600 steps, 5 seeds each:
+
+| | before | with CPA |
+|---|---|---|
+| runs completing | 6/10 | **7/10** |
+| total collisions | 23 | **14** |
+
+**Collisions fall 39%. Completion improves by one run in ten. Four seeds get
+worse** — `no_av` seeds 27 and 37 go from 0 collisions to 4 and 2, and
+`backpressure` seed 17 stops completing. Braking for a predicted conflict creates
+work for the vehicle behind, so the rule trades one collision mode for another.
+
+**So collision-freedom is not achieved, and two mechanisms have now been tried.**
+The safe-velocity bound took human-only collisions from 98 to 6 at short durations;
+the geometry fix took the worst node discontinuity from 10 m to 0 m; CPA takes the
+remaining total from 23 to 14. Each helped and none finished the job.
+
+**The decision this now needs.** Constraining `highway_env`'s kinematics from
+outside has produced diminishing returns across three attempts. PTV Vissim and SUMO
+do not constrain a car-following model — their models cannot produce a collision in
+the first place, because the safe speed is the model rather than a cap applied to
+it. Continuing to add constraints is one option; replacing the vehicle model with
+one that is collision-free by construction is another; running the replication on
+SUMO, which is what the target papers use, is a third. That is a modelling decision
+rather than a defect to fix, and it is the user's.
+
+**Cost note.** CPA adds a second O(n²) pass per substep. A 600-step run at the
+saturating demand went from about 12 s to about 40 s, so the 81-run grid is now
+roughly 25 minutes rather than 8.
+
 # PAUSED 2026-09-09
 
 ## The blocking unknown
