@@ -45,6 +45,11 @@ class TrainingConfig:
     output_root: str = "outputs/checkpoints"
     hidden_sizes: tuple[int, ...] = (128, 128)
     sensing: Mapping[str, Any] | None = None
+    #: Overrides for `DEFAULT_REWARD_WEIGHTS`. None leaves the library
+    #: defaults, which are speed-led; a config that wants a throughput-led
+    #: objective says so here rather than editing the library and changing
+    #: every other experiment at the same time.
+    reward_weights: Mapping[str, float] | None = None
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> TrainingConfig:
@@ -69,6 +74,11 @@ class TrainingConfig:
             output_root=str(config.get("output_root", training.get("output_root", "outputs/checkpoints"))),
             hidden_sizes=tuple(int(value) for value in hidden),
             sensing=dict(sensing_cfg) if isinstance(sensing_cfg, Mapping) and sensing_cfg else None,
+            reward_weights=(
+                {str(k): float(v) for k, v in weights_cfg.items()}
+                if isinstance(weights_cfg := training.get("reward_weights"), Mapping) and weights_cfg
+                else None
+            ),
         )
 
 
@@ -186,7 +196,7 @@ class BasePPOTrainer:
             next_observations, _, terminated, truncated, info = env.step(action_map)
             episode_metrics = dict(info.get("metrics", {}))
             metric_history.append(episode_metrics)
-            team_reward = build_team_reward(episode_metrics) * self.ppo_config.reward_scale
+            team_reward = build_team_reward(episode_metrics, self.config.reward_weights) * self.ppo_config.reward_scale
             crashed_agents = {
                 agent_id for agent_id, vehicle in env._av_vehicles.items() if vehicle.crashed
             } if self.ppo_config.crash_penalty else set()
