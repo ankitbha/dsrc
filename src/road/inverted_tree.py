@@ -28,7 +28,12 @@ def _add_sine(net: RoadNetwork, start: str, end: str, p0: list[float], p1: list[
             p1,
             amplitude=2.0,
             pulsation=math.pi / max(length_hint, 1.0),
-            phase=math.pi / 2.0,
+            # Phase 0, not pi/2. At pi/2 the sine is at plus or minus its full
+            # amplitude AT the arc ends, so a lane finished 2 m off the point it was
+            # built to reach and did not meet its successor. At 0 the offset is zero
+            # at both ends and the arc still bulges 2 m in the middle, which is what
+            # the sine was for.
+            phase=0.0,
             line_types=[LineType.CONTINUOUS_LINE, LineType.CONTINUOUS_LINE],
             speed_limit=speed_limit,
         ),
@@ -53,16 +58,27 @@ def build_inverted_tree_topology(config: Mapping | None = None, *, bottleneck: b
         "a5": -18.0,
         "a6": -24.0,
     }
-    for index, (leaf_id, y) in enumerate(leaf_y.items(), start=1):
-        merge_node = "b1" if index <= 3 else "b2"
-        target_y = 12.0 if index <= 3 else -12.0
-        _add_sine(net, f"{leaf_id}_entry", merge_node, [0.0, y], [leaf, target_y], leaf, speed_limit)
-
     lane_width = StraightLane.DEFAULT_WIDTH
     b1_starts = (12.0, 12.0 + lane_width)
-    b1_ends = (4.0, 8.0)
     b2_starts = (-12.0, -12.0 - lane_width)
-    b2_ends = (0.0, -4.0)
+    # The middle arcs end exactly where the trunk lanes begin, so lane k of both
+    # b1 and b2 feeds trunk lane k. Previously they ended at (4, 8) and (0, -4)
+    # against trunk lanes at 0 and 4, so two of the four had nowhere to go and a
+    # vehicle leaving ('b2','c',1) was placed ten metres sideways.
+    trunk_ys = (0.0, lane_width)
+    b1_ends = trunk_ys
+    b2_ends = trunk_ys
+
+    # Each leaf aims at an actual lane start of the node it feeds, alternating
+    # between the two so three leaves distribute over two lanes rather than all
+    # converging on one point. Aiming them at a single y put three arcs within
+    # 0.01 m of each other, which is a collision by geometry rather than a merge.
+    for index, (leaf_id, y) in enumerate(leaf_y.items(), start=1):
+        merge_node = "b1" if index <= 3 else "b2"
+        starts = b1_starts if index <= 3 else b2_starts
+        target_y = starts[(index - 1) % 2]
+        _add_sine(net, f"{leaf_id}_entry", merge_node, [0.0, y], [leaf, target_y], leaf, speed_limit)
+
     for lane_id in range(2):
         net.add_lane(
             "b1",
@@ -72,7 +88,7 @@ def build_inverted_tree_topology(config: Mapping | None = None, *, bottleneck: b
                 [leaf + middle, b1_ends[lane_id]],
                 amplitude=2.0,
                 pulsation=math.pi / middle,
-                phase=math.pi / 2.0,
+                phase=0.0,  # zero lateral offset at both ends; see _add_sine
                 line_types=[c if lane_id == 0 else s, c if lane_id == 1 else n],
                 speed_limit=speed_limit,
             ),
@@ -85,7 +101,7 @@ def build_inverted_tree_topology(config: Mapping | None = None, *, bottleneck: b
                 [leaf + middle, b2_ends[lane_id]],
                 amplitude=2.0,
                 pulsation=math.pi / middle,
-                phase=math.pi / 2.0,
+                phase=0.0,  # zero lateral offset at both ends; see _add_sine
                 line_types=[c if lane_id == 0 else s, c if lane_id == 1 else n],
                 speed_limit=speed_limit,
             ),
@@ -94,12 +110,18 @@ def build_inverted_tree_topology(config: Mapping | None = None, *, bottleneck: b
     trunk_end = leaf + middle + trunk
     if bottleneck:
         for lane_id, y in enumerate((0.0, lane_width)):
+            # The dropped lane TAPERS to the surviving lane rather than ending
+            # beside it. `d->exit` is a single lane at y = 0, so lane 1 ending at
+            # y = 4 left a vehicle to be moved 4 m sideways at the node -- which is
+            # how a lane drop was being modelled, and it is not how one is built.
+            # Tapering makes the drop a merge the vehicles have to negotiate, which
+            # is the phenomenon the bottleneck exists to create.
             net.add_lane(
                 "c",
                 "d",
                 StraightLane(
                     [leaf + middle, y],
-                    [trunk_end, y],
+                    [trunk_end, 0.0 if lane_id else y],
                     line_types=[c if lane_id == 0 else s, c if lane_id == 1 else n],
                     speed_limit=speed_limit,
                 ),

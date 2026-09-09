@@ -2435,6 +2435,43 @@ and on what evidence.
 
 ## K. Found in passing
 
+77. **Two collisions survive the collision-free bound and the geometry fix.** Open.
+
+    With the arcs joined, at `inverted_tree`/high/penetration 0.20 over 6 runs:
+    `no_av` 4 collisions and 6/6 completed, `cooperative_smoothing` 2 and 5/6,
+    `backpressure` **0 and 6/6**. So an AV arm is now fully collision-free and the
+    human-only arm is not, which is the reverse of where this task started.
+
+    Not yet diagnosed. The candidates are the 3-into-2 entry merges, where three
+    arcs still converge onto two lanes and only the later arriver yields, and
+    lateral motion during a lane change, which `RESIDUAL_ALLOWANCE = 2` in
+    `tests/test_collision_free.py` currently tolerates. That constant is a
+    measurement and must not be raised to accommodate a regression.
+
+## Ordering correction 2026-09-09: task 71 precedes training
+
+Raised by the user, and it is right. Task 71 puts a route-aware leader gap on the
+Jetson, and that lands in the **sensing model**, which `src/envs/topology_env.py`
+uses to build every agent observation. It is therefore the same dependency that
+already put task 9 ahead of task 68, and it changes three things:
+
+- **`range_m`** stops being an optics estimate (100.0 m, from a 1.8 m vehicle
+  spanning 14.4 px) and becomes measurable from the replay.
+- **New error terms with no current analogue.** A map-matched gap carries
+  map-matching error, polyline resolution, and a failure mode the sim does not
+  model at all: matching the wrong road.
+- **The parity class for `leader_gap`**, which is `identical` today only because
+  every parity scene is single-arc.
+
+So training before 71 produces a policy tuned to a precision the vehicle will not
+have — the objection recorded in the task 67 round 3 audit, which was then only
+half-acted on. **Revised order: 71, then 9, then 73, then 68, then 69.**
+
+**The one thing this does not block.** A replication is a simulator claim, so the
+throughput number does not depend on the Jetson. Training may proceed on the
+current sensing block if the block is described as provisional; it may not if the
+trained policy is the one to be deployed. That distinction is the user's.
+
 75. **The arcs do not join. Vehicles are teleported sideways at every node.**
     Open, and it is the root cause of what task 72 could not reach.
 

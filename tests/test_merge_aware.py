@@ -40,14 +40,14 @@ def _place(road, lane_index, longitudinal, speed=20.0):
 class TestTheProjection:
 
     def test_no_converging_traffic_means_no_constraint(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0)
         assert ego._merge_acceleration() is None
 
     def test_a_vehicle_arriving_first_becomes_a_constraint(self, road):
         # Ego is 100 m from node b2, the other 60 m: it arrives first and is a
         # leader 40 m ahead.
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0)
-        _place(road, ("a4_entry", "b2", 0), 440.0, speed=5.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0)
+        _place(road, ("a6_entry", "b2", 0), 440.0, speed=5.0)
         acceleration = ego._merge_acceleration()
         assert acceleration is not None
         assert acceleration < 0.0, "closing on a much slower converging vehicle should decelerate"
@@ -55,25 +55,25 @@ class TestTheProjection:
     def test_a_vehicle_arriving_second_is_ignored(self, road):
         # Symmetry matters here: if both vehicles yielded to each other the merge
         # would deadlock, so only the one arriving later gives way.
-        ego = _place(road, ("a5_entry", "b2", 0), 440.0)
-        _place(road, ("a4_entry", "b2", 0), 400.0, speed=5.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 440.0)
+        _place(road, ("a6_entry", "b2", 0), 400.0, speed=5.0)
         assert ego._merge_acceleration() is None
 
     def test_a_vehicle_on_the_same_arc_is_left_to_ordinary_following(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0)
-        _place(road, ("a5_entry", "b2", 0), 440.0, speed=5.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0)
+        _place(road, ("a4_entry", "b2", 0), 440.0, speed=5.0)
         assert ego._merge_acceleration() is None
 
     def test_a_conflict_beyond_the_horizon_is_ignored(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 100.0)     # 400 m from the node
-        _place(road, ("a4_entry", "b2", 0), 480.0, speed=5.0)  # 20 m from it
+        ego = _place(road, ("a4_entry", "b2", 0), 100.0)     # 400 m from the node
+        _place(road, ("a6_entry", "b2", 0), 480.0, speed=5.0)  # 20 m from it
         # A projected gap of 380 m is past MERGE_HORIZON_M; without the horizon a
         # vehicle would crawl the whole length of an empty arc.
         assert ego._merge_acceleration() is None
 
     def test_the_nearest_converging_vehicle_is_the_one_used(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0)
-        _place(road, ("a4_entry", "b2", 0), 420.0, speed=5.0)   # 20 m ahead
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0)
+        _place(road, ("a6_entry", "b2", 0), 420.0, speed=5.0)   # 20 m ahead
         _place(road, ("a6_entry", "b2", 0), 490.0, speed=5.0)   # 90 m ahead
         near_only = ego._merge_acceleration()
         road.vehicles = [v for v in road.vehicles if v.position[0] < 480.0]
@@ -85,8 +85,8 @@ class TestTheProjection:
 class TestItComposesWithOrdinaryFollowing:
 
     def test_act_never_accelerates_more_than_plain_idm_would(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0, speed=25.0)
-        _place(road, ("a4_entry", "b2", 0), 430.0, speed=3.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0, speed=25.0)
+        _place(road, ("a6_entry", "b2", 0), 430.0, speed=3.0)
         ego.act()
         merged = ego.action["acceleration"]
         merge_only = ego._merge_acceleration()
@@ -145,9 +145,15 @@ class TestItCannotProduceAnAbsurdAcceleration:
     """
 
     def test_a_vanishing_projected_gap_stays_within_braking_limits(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0, speed=25.0)
-        # 1 cm ahead in the projection: the worst case the filter allows.
-        _place(road, ("a4_entry", "b2", 0), 400.01, speed=0.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0, speed=25.0)
+        # 1 cm ahead in the PROJECTION, computed rather than assumed: the two entry
+        # arcs have different lengths (500.016 m against 500.064 m, from their
+        # different lateral spans), so equal longitudinals are not equal distances
+        # to the shared node.
+        network = road.network
+        ego_to_node = float(network.get_lane(("a4_entry", "b2", 0)).length) - 400.0
+        other_length = float(network.get_lane(("a6_entry", "b2", 0)).length)
+        _place(road, ("a6_entry", "b2", 0), other_length - (ego_to_node - 0.01), speed=0.0)
         acceleration = ego._merge_acceleration()
         assert acceleration is not None
         assert acceleration >= -abs(ego.ACC_MAX) - 1e-6, (
@@ -189,16 +195,16 @@ class TestWhoCountsAsAConflict:
     """
 
     def test_a_crashed_vehicle_is_not_yielded_to(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0)
-        wreck = _place(road, ("a4_entry", "b2", 0), 440.0, speed=0.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0)
+        wreck = _place(road, ("a6_entry", "b2", 0), 440.0, speed=0.0)
         wreck.crashed = True
         assert ego._merge_acceleration() is None
 
     def test_a_live_vehicle_in_the_same_place_still_counts(self, road):
         # The control: without it the test above would pass on any change that
         # disabled merging altogether.
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0)
-        _place(road, ("a4_entry", "b2", 0), 440.0, speed=0.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0)
+        _place(road, ("a6_entry", "b2", 0), 440.0, speed=0.0)
         assert ego._merge_acceleration() is not None
 
     def test_lanes_that_feed_different_exits_are_not_a_conflict(self, road):
@@ -248,8 +254,8 @@ class TestItCannotDriveBackwards:
     """
 
     def test_braking_vanishes_as_the_vehicle_stops(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0, speed=2.0)
-        _place(road, ("a4_entry", "b2", 0), 400.5, speed=0.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0, speed=2.0)
+        _place(road, ("a6_entry", "b2", 0), 400.5, speed=0.0)
         acceleration = ego._merge_acceleration()
         assert acceleration is not None
         # One second of this must not reverse the vehicle.
@@ -258,16 +264,16 @@ class TestItCannotDriveBackwards:
         )
 
     def test_a_stopped_vehicle_is_not_braked_further(self, road):
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0, speed=0.0)
-        _place(road, ("a4_entry", "b2", 0), 400.5, speed=0.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0, speed=0.0)
+        _place(road, ("a6_entry", "b2", 0), 400.5, speed=0.0)
         acceleration = ego._merge_acceleration()
         assert acceleration is None or acceleration >= -1e-6
 
     def test_hard_braking_is_still_available_at_speed(self, road):
         # The control: the fix must not sedate the yield rule at road speed, or it
         # would trade one defect for another.
-        ego = _place(road, ("a5_entry", "b2", 0), 400.0, speed=25.0)
-        _place(road, ("a4_entry", "b2", 0), 400.5, speed=0.0)
+        ego = _place(road, ("a4_entry", "b2", 0), 400.0, speed=25.0)
+        _place(road, ("a6_entry", "b2", 0), 400.5, speed=0.0)
         acceleration = ego._merge_acceleration()
         assert acceleration is not None
         assert acceleration <= -3.0, f"only {acceleration} m/s^2 at a 0.5 m projected gap"

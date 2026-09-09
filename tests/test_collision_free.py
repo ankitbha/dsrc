@@ -84,7 +84,11 @@ class TestWhatTheBoundAchievesAndWhatItCannot:
     all. Task 75 covers the geometry.
     """
 
-    RESIDUAL_ALLOWANCE = 6
+    #: Not zero yet, and this number is a measurement rather than a tolerance.
+    #: With the arcs joined, `no_av` at high/0.20 produces 2 collisions and
+    #: `backpressure` produces 0. The remaining pair is recorded as open in task 77;
+    #: it must not be raised to accommodate a regression.
+    RESIDUAL_ALLOWANCE = 2
 
     @pytest.mark.parametrize("controller", ["no_av", "backpressure"])
     def test_collisions_are_at_most_the_recorded_geometric_residual(self, controller):
@@ -109,11 +113,18 @@ class TestWhatTheBoundAchievesAndWhatItCannot:
         assert run.steps == 120
 
 
-class TestTheResidualIsGeometric:
-    """Pins the cause, so the residual allowance above cannot quietly become a
-    tolerance for a car-following defect."""
+class TestTheArcsJoin:
+    """The geometry that made collision-freedom unreachable, now fixed.
 
-    def test_arcs_do_not_join_at_the_nodes(self):
+    A vehicle crossing node `c` from ('b2','c',1) was moved TEN METRES sideways,
+    and several other transitions moved it 2 to 4 m. Two causes: the SineLanes used
+    `phase=pi/2`, putting the sine at full amplitude AT the arc ends, and the
+    nominal endpoints did not match their successors' starts. Both fixed, and the
+    dropped lane of the bottleneck now tapers instead of ending beside the lane it
+    merges into.
+    """
+
+    def test_every_transition_is_continuous(self):
         import numpy as np
 
         from src.config.loaders import load_named_config
@@ -136,9 +147,10 @@ class TestTheResidualIsGeometric:
             jumps[(index, nxt)] = float(np.linalg.norm(end - start))
         assert jumps, "no transitions found; the fixture assumption is broken"
         worst = max(jumps.values())
-        assert worst > 2.0, (
-            "the arcs now join within a vehicle width, so the geometric residual "
-            "should be gone and RESIDUAL_ALLOWANCE should drop to 0"
+        assert worst <= 0.5, (
+            f"a transition jumps {worst:.2f} m laterally; a vehicle is 2 m wide, so "
+            "it is being placed into occupied space and no car-following bound can "
+            "prevent the resulting collision"
         )
 
     def test_traffic_still_moves(self):

@@ -323,10 +323,10 @@ class TestLeaderIsFoundAcrossAnArcBoundary:
         topology = _tree()
         # 50 m from the end of a 500 m entry arc, with a vehicle 20 m onto the arc
         # it feeds: a true gap of 70 m. The successor of ('a5_entry','b2',0) is
-        # ('b2','c',1), NOT ordinal 0 -- the b2 arcs end at y = -14 and lane 1 is
+        # ('b2','c',0), and a2/a4/a6 take ordinal 1 -- the b2 arcs end at y = -14 and lane 1 is
         # the one that starts there.
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        lead = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0, speed_mps=8.0)
+        lead = _on_lane(topology, "h_1", ("b2", "c", 0), 20.0, speed_mps=8.0)
         ctx = _gap_context(topology, [ego, lead])
         assert ctx.leader_gap_m == pytest.approx(70.0, abs=2.0), (
             f"leader on the successor arc reported as {ctx.leader_gap_m}"
@@ -335,12 +335,13 @@ class TestLeaderIsFoundAcrossAnArcBoundary:
 
     def test_a_vehicle_in_a_lane_the_ego_never_enters_is_not_a_leader(self) -> None:
         # The control for the test above, and the defect it replaces: an
-        # ordinal-preserving rule reported ('b2','c',0) as the leader, which is a
-        # lane this ego never drives on, while the vehicle it was about to meet on
-        # ('b2','c',1) read as infinitely far away.
+        # ordinal-preserving rule reported the wrong lane of b2->c as the leader,
+        # a lane this ego never drives on, while the vehicle it was about to meet
+        # read as infinitely far away. ('a5_entry','b2',0) continues into
+        # ('b2','c',0), so ('b2','c',1) is the lane it never enters.
         topology = _tree()
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        wrong_lane = _on_lane(topology, "h_1", ("b2", "c", 0), 20.0, speed_mps=8.0)
+        wrong_lane = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0, speed_mps=8.0)
         ctx = _gap_context(topology, [ego, wrong_lane])
         assert ctx.leader_gap_m == float("inf")
 
@@ -351,7 +352,7 @@ class TestLeaderIsFoundAcrossAnArcBoundary:
         network = topology.road_network
         for entry, expected in (
             (("a1_entry", "b1", 0), ("b1", "c", 0)),
-            (("a5_entry", "b2", 0), ("b2", "c", 1)),
+            (("a5_entry", "b2", 0), ("b2", "c", 0)),
         ):
             lane = network.get_lane(entry)
             assert network.next_lane(entry, route=None,
@@ -364,15 +365,15 @@ class TestLeaderIsFoundAcrossAnArcBoundary:
         # 400 m to the end of the ego's arc plus 10 m = 410 m: further away, so
         # the same-arc vehicle at 140 m must still win. This is the control for
         # the test above -- the fix must not simply prefer the other arc.
-        near = _on_lane(topology, "h_next", ("b2", "c", 1), 10.0)
+        near = _on_lane(topology, "h_next", ("b2", "c", 0), 10.0)
         ctx = _gap_context(topology, [ego, far, near])
         assert ctx.leader_gap_m == pytest.approx(140.0, abs=2.0)
 
     def test_a_follower_on_the_previous_arc_is_reported(self) -> None:
         topology = _tree()
-        # ('a5_entry','b2',0) feeds ('b2','c',1), so that is the lane a follower
+        # ('a5_entry','b2',0) feeds ('b2','c',0), so that is the lane a follower
         # from it appears behind.
-        ego = _on_lane(topology, "av_0", ("b2", "c", 1), 30.0, role="av")
+        ego = _on_lane(topology, "av_0", ("b2", "c", 0), 30.0, role="av")
         behind = _on_lane(topology, "h_1", ("a5_entry", "b2", 0), 480.0)
         ctx = _gap_context(topology, [ego, behind])
         assert ctx.follower_gap_m == pytest.approx(50.0, abs=2.0)
@@ -381,7 +382,7 @@ class TestLeaderIsFoundAcrossAnArcBoundary:
         topology = _tree()
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 380.0, role="av")
         # 120 m to the arc end plus 60 m = 180 m, beyond a 100 m range.
-        lead = _on_lane(topology, "h_1", ("b2", "c", 1), 60.0)
+        lead = _on_lane(topology, "h_1", ("b2", "c", 0), 60.0)
         ctx = _gap_context(topology, [ego, lead], config=SensingConfig(range_m=100.0))
         assert ctx.leader_gap_m == float("inf"), (
             "a vehicle beyond range_m must stay invisible; the fix must not make "
@@ -393,11 +394,11 @@ class TestMergingTrafficIsVisible:
 
     def test_a_vehicle_on_a_sibling_arc_produces_a_merge_conflict(self) -> None:
         topology = _tree()
-        # a4_entry and a5_entry both feed b2. Neither is on the other's route,
+        # a4_entry and a6_entry both continue into the same lane of b2->c. Neither is on the other's route,
         # so neither is a leader, but they converge and 53% of the measured
         # collisions were exactly this pair.
-        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        other = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 460.0)
+        ego = _on_lane(topology, "av_0", ("a4_entry", "b2", 0), 450.0, role="av")
+        other = _on_lane(topology, "h_1", ("a6_entry", "b2", 0), 460.0)
         ctx = _gap_context(topology, [ego, other])
         assert ctx.distance_to_next_merge_m == pytest.approx(50.0, abs=2.0)
         # Projected onto the shared node: the ego is 50 m from it, the other 40 m,
@@ -409,12 +410,14 @@ class TestMergingTrafficIsVisible:
         # the one furthest ahead. Measured cost: a conflict reported 85.7 m away
         # while the vehicle actually struck was 4.1 m away, alongside.
         topology = _tree()
-        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        # a4_entry and a6_entry share a successor; a5_entry does not, so the ego
+        # has to be one of the converging pair for there to be a conflict at all.
+        ego = _on_lane(topology, "av_0", ("a4_entry", "b2", 0), 450.0, role="av")
         # Chosen so the two rules give different answers: the old one reports the
         # far vehicle's 5 m to the node, the projection reports the near vehicle's
         # 20 m of following distance. Equal numbers would prove nothing.
-        alongside = _on_lane(topology, "h_near", ("a4_entry", "b2", 0), 470.0)
-        far_ahead = _on_lane(topology, "h_far", ("a4_entry", "b2", 0), 495.0)
+        alongside = _on_lane(topology, "h_near", ("a6_entry", "b2", 0), 470.0)
+        far_ahead = _on_lane(topology, "h_far", ("a6_entry", "b2", 0), 495.0)
         ctx = _gap_context(topology, [ego, alongside, far_ahead])
         assert ctx.merge_conflict_gap_m == pytest.approx(20.0, abs=2.0)
 
@@ -422,8 +425,8 @@ class TestMergingTrafficIsVisible:
         # It arrives behind, so it is not a leader and braking for it would invent
         # an obstacle.
         topology = _tree()
-        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 460.0, role="av")
-        behind = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 430.0)
+        ego = _on_lane(topology, "av_0", ("a4_entry", "b2", 0), 460.0, role="av")
+        behind = _on_lane(topology, "h_1", ("a6_entry", "b2", 0), 430.0)
         ctx = _gap_context(topology, [ego, behind])
         assert ctx.merge_conflict_gap_m == float("inf")
 
@@ -485,8 +488,8 @@ class TestTheSensingSideMergeFilters:
 
     def test_a_crashed_converging_vehicle_is_not_a_conflict(self) -> None:
         topology = _tree()
-        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        wreck = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 460.0, crashed=True)
+        ego = _on_lane(topology, "av_0", ("a4_entry", "b2", 0), 450.0, role="av")
+        wreck = _on_lane(topology, "h_1", ("a6_entry", "b2", 0), 460.0, crashed=True)
         ctx = _gap_context(topology, [ego, wreck])
         assert ctx.merge_conflict_gap_m == float("inf")
 
@@ -494,8 +497,8 @@ class TestTheSensingSideMergeFilters:
         # The control: without it, disabling merge detection entirely would pass
         # the test above.
         topology = _tree()
-        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        live = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 460.0)
+        ego = _on_lane(topology, "av_0", ("a4_entry", "b2", 0), 450.0, role="av")
+        live = _on_lane(topology, "h_1", ("a6_entry", "b2", 0), 460.0)
         ctx = _gap_context(topology, [ego, live])
         assert ctx.merge_conflict_gap_m == pytest.approx(10.0, abs=2.0)
 
@@ -547,7 +550,7 @@ class TestTheObservationSeesWhatTheSafetyLayerSees:
     def test_the_observation_reports_a_leader_on_the_next_arc(self) -> None:
         topology = _tree()
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        lead = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0, speed_mps=8.0)
+        lead = _on_lane(topology, "h_1", ("b2", "c", 0), 20.0, speed_mps=8.0)
         obs = _tree_observation(topology, [ego, lead])
         assert obs["leader_gap"] == pytest.approx(70.0, abs=2.0), (
             f"the observation reported {obs['leader_gap']} for a leader 70 m ahead"
@@ -606,7 +609,7 @@ class TestMeasurementNoiseDoesNotDependOnGeometry:
     def test_a_cross_arc_gap_carries_measurement_noise(self) -> None:
         topology = _tree()
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        cross = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0)
+        cross = _on_lane(topology, "h_1", ("b2", "c", 0), 20.0)
         assert self._spread([ego, cross]) > 0.5, (
             "a cross-arc leader was reported without measurement noise"
         )
@@ -615,7 +618,7 @@ class TestMeasurementNoiseDoesNotDependOnGeometry:
         topology = _tree()
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
         same = self._spread([ego, _on_lane(topology, "h_1", ("a5_entry", "b2", 0), 490.0)])
-        cross = self._spread([ego, _on_lane(topology, "h_1", ("b2", "c", 1), 20.0)])
+        cross = self._spread([ego, _on_lane(topology, "h_1", ("b2", "c", 0), 20.0)])
         assert abs(same - cross) < 1.0, (
             f"noise depends on the geometry: same-arc {same:.3f} m, cross-arc {cross:.3f} m"
         )
@@ -624,6 +627,6 @@ class TestMeasurementNoiseDoesNotDependOnGeometry:
         # The control: the fix must not inject noise when none was configured.
         topology = _tree()
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        cross = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0)
+        cross = _on_lane(topology, "h_1", ("b2", "c", 0), 20.0)
         ctx = _gap_context(topology, [ego, cross])
         assert ctx.leader_gap_m == pytest.approx(70.0, abs=0.1)
