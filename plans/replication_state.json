@@ -1,17 +1,17 @@
 {
   "schema": 1,
-  "updated_at": "2026-09-09T02:21:00Z",
+  "updated_at": "2026-09-09T02:47:26Z",
   "stale_after_minutes": 90,
   "blocking": null,
   "awaiting_user": null,
-  "next_action": "Start task 67. The blocking unknown is WHY 260 of 648 runs never reached their configured duration; nothing downstream is trustworthy until that is known. Reproduce it on inverted_tree alone -- the other five topologies are out of scope -- and report the rate before any fix is attempted.",
+  "next_action": "PAUSED. Blocking unknown: whether a merge-yield rule in the safety layer reduces collisions is unmeasured, and task 67 now rests on it. The sensing half is committed (6efc3bf) and bought nothing -- 48/108 completed before and after, identical -- because SafetyContext has no merge fields so the layer never receives them. Resume at plans/plan_task_67_merge_blind_collisions.md, section 'PAUSED 2026-09-09', steps 1-4.",
   "last_verdict": null,
   "section": "C. Simulation replication",
   "task": {
     "number": 67,
     "what": "fix the 40% episode-truncation rate",
-    "stage": "reproduce",
-    "stage_started_at": "2026-09-09T02:21:00Z",
+    "stage": "paused",
+    "stage_started_at": "2026-09-09T02:47:26Z",
     "background_job": null,
     "needs_hardware": false,
     "remaining": [
@@ -20,7 +20,7 @@
       68,
       69
     ],
-    "stopped_by_user": false
+    "stopped_by_user": true
   },
   "carried_forward": [
     "Jetson suite baseline is 2308 passed / 24 skipped. Reproduce it before quoting any delta.",
@@ -29,6 +29,8 @@
     "stale_after_minutes is a guess until the task 68 pilot measures one training update. Revise it then and record the measurement.",
     "9 gates 68: topology_env.py:109 builds every agent observation through SensingConfig, so the sensing block is the actor's input distribution.",
     "69 must evaluate under the same sensing block 68 trained under.",
-    "--controlled-vehicles is inert outside ring; set AV population via demand.av_penetration."
+    "--controlled-vehicles is inert outside ring; set AV population via demand.av_penetration.",
+    "Grid completion baseline is 48/108 on inverted_tree; simulator suite 263 passed.",
+    "0 of 51 collisions were successor-arc, so the committed route-aware leader fix is nearly inert here; the merge class is 27 of 51."
   ]
 }

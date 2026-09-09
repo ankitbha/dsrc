@@ -133,3 +133,102 @@ the layer is braking for a leader 130 m away. The vehicle finally hit was on
 - [ ] Completion rate on `inverted_tree` reported before and after, by collision class
 - [ ] Residual human-on-AV rear-end share reported, so open item 1 can be decided
 - [ ] `validate_dsrc_3` clean
+
+---
+
+# PAUSED 2026-09-09
+
+## The blocking unknown
+
+**Nobody has measured whether making the safety layer yield at a merge reduces
+collisions, and the whole of task 67 now rests on it.**
+
+The sensing half is committed and **bought nothing**: the 108-run grid returns
+48/108 completed both before and after, identical run for run. That is not a
+disappointing result, it is an expected one — `LaneGapContext` gained
+`merge_conflict_gap_m` and `distance_to_next_merge_m`, but **`SafetyContext` has no
+such fields, so the safety layer never receives them**. The route-aware leader
+search that *is* wired up addresses the successor-arc class, and the classification
+measured **0 of 51** collisions in that class. So the committed change is correct and
+almost inert on this topology.
+
+**How to settle it.** Finish the wiring, then re-run the grid:
+
+1. Add `distance_to_next_merge_m`, `merge_conflict_gap_m` and
+   `merge_conflict_relative_speed_mps` to `SafetyContext` in
+   `src/safety/safety_layer.py` (they exist already on `LaneGapContext`).
+2. Make `_forward_ttc` and `_speed_and_acceleration` consider a merge hazard:
+   priority by arrival, so when `merge_conflict_gap_m < distance_to_next_merge_m`
+   the other vehicle gets the joining point and the ego must be able to stop short
+   of it. Treat the joining point as a stationary obstacle in that case.
+3. Pass the three fields through `_safety_context_for_vehicle` in
+   `src/envs/topology_env.py` (around line 666, where `SafetyContext` is built from
+   `gap_context`).
+4. Re-run the grid and compare against 48/108.
+
+The probe that answers it is already written:
+`scratchpad/repro67.py` runs the 108-run grid in ~220 s and writes
+`scratchpad/repro67.json`. **It lives in the session scratchpad and will be gone** —
+it is 40 lines and re-derivable from the "Steps" table above; the grid is
+`inverted_tree` × demands (low, medium, high, burst) × pen (0.05, 0.10, 0.20) ×
+controllers (`no_av`, `cooperative_smoothing`, `backpressure`) × seeds (7, 17, 27),
+120 steps, via `src.analysis.simulator_health.run_condition`.
+
+## Exactly where I stopped
+
+- Repo `dsrc`, branch `main`, **no worktree**. Not pushed: `main` is **ahead 1** of
+  `origin/main` (`origin/main` = `61b65f0`).
+- **Committed:** `6efc3bf` "Task 67: the gap search could not see across an arc
+  boundary" — `src/sensing/local.py` (route-aware gaps, merge context) and 7 tests in
+  `tests/test_local_sensing.py`. Full simulator suite green at that commit: **263
+  passed**.
+- **Uncommitted:** `tests/test_safety_layer.py` — 4 new tests in `TestMergeConflict`,
+  **currently failing with `TypeError`** because `SafetyContext` does not accept the
+  keyword arguments yet. This is intended TDD red, not a broken tree.
+- **Not started:** steps 1–4 above; nothing in `topology_env.py` has been edited.
+- `validate_dsrc_3` has **not** been run. Per `implement_dsrc` there is no push until
+  validation passes.
+
+## What was learned that would otherwise be re-derived
+
+- **`longitudinal_m` restarts at every arc.** That is why the original code required
+  an exact `lane_index` match: a raw subtraction across a boundary is meaningless.
+  Any fix must accumulate lane lengths along `road_network.graph`.
+- **`inverted_tree` geometry:** six 500 m entry arcs, `a1..a3 → b1` and `a4..a6 → b2`;
+  `b1 → c` and `b2 → c` are 600 m and two-lane; `c → exit`. 12 lanes total.
+- **Two fields are dead on this topology.** `distance_to_next_merge` is hardcoded to
+  `0.0` in `src/sensing/local.py` (task 5 recorded this). `near_merge` in
+  `SafetyContext` is set from `"merge" in segment_id`, and `inverted_tree` segments
+  are named `tree_leaf_a1`, so it is always `False` there.
+- **Collision classification, 51 terminating collisions:** sibling merge arc 27
+  (53%), same lane 18 (35%), adjacent lane 6 (12%), successor arc 0.
+- **Same-lane sub-split:** 10 of 18 were seen too late to stop, 8 had room. When a
+  same-lane leader first became visible the mean gap was 74 m at 27.2 m/s, against a
+  75 m stopping distance at 5 m/s² — the leader appears at almost exactly the
+  distance where it is already too late.
+- **The safety layer is not the defect.** Given a correct gap it brakes: −1.71 m/s² at
+  128 m in the traced run-up. It decayed to −0.01 m/s² at a true 13.6 m gap because it
+  was told the leader was 130.7 m away.
+- **Baselines to reproduce before quoting a delta:** simulator suite 263 passed;
+  Jetson suite 2308 passed / 24 skipped; grid completion 48/108.
+- Use `.venv/bin/python`; system `python3` is 3.14 with no pytest.
+
+## Task order to resume
+
+1. Steps 1–4 under "The blocking unknown" — finish the wiring and measure.
+2. If the merge yield works, decide the adjacent-lane class (6 of 51, 12%) — plan
+   decision D4 says it is in scope via `side_lanes`, and it is not yet started.
+3. `validate_dsrc_3`: one independent `opus` validator, 3 rounds, kept alive, every
+   finding verified before acting. Then push.
+4. `experiment_dsrc`: the full before/after grid and the class table for the plan's
+   sign-off list.
+
+## Open decisions not yet made
+
+- **Open item 1 in the plan is still open and is the user's**: human-on-AV rear-ends
+  were raised as unrealistic. They are not addressed. The recommendation on record is
+  to re-measure after the merge fix and, if they remain material, make the human
+  follower collision-free rather than change the termination rule.
+- Whether the 8 same-lane collisions that "had room to stop" indicate the braking law
+  is too weak. That would be outside this task's scope boundary and needs its own
+  task.

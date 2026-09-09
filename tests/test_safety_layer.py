@@ -188,3 +188,50 @@ def test_unsafe_target_lane_rear_ttc_blocks_lane_preference() -> None:
     assert decision.lane_action is None
     assert decision.diagnostics["safety_masked_action"][0]["reason"] == "target_lane_rear_ttc"
 
+
+
+# ---------------------------------------------------------------------------
+# Yielding at a merge.
+#
+# A vehicle converging from a sibling arc is on nobody's route: it is neither
+# leader nor follower, so no headway rule sees it, and before this the layer had
+# no field that could carry it. On inverted_tree, 27 of 51 terminating collisions
+# were exactly that pair. The rule here is priority by arrival: whoever reaches
+# the joining point first has it, and the other must be able to stop short.
+# ---------------------------------------------------------------------------
+
+class TestMergeConflict:
+
+    def _decide(self, **kwargs):
+        return apply_safety_layer(
+            action(),
+            SafetyState(),
+            SafetyContext(time_s=10.0, ego_speed_mps=27.0, **kwargs),
+        )
+
+    def test_yields_when_the_other_vehicle_reaches_the_merge_first(self) -> None:
+        # 40 m to the joining point at 27 m/s is 1.5 s, inside the 2.0 s minimum,
+        # so this has to read as an emergency rather than a gentle correction.
+        decision = self._decide(distance_to_next_merge_m=40.0, merge_conflict_gap_m=20.0)
+        assert decision.acceleration_mps2 < 0.0
+        assert decision.acceleration_mps2 == pytest.approx(-6.0), (
+            "a converging vehicle with priority 40 m ahead did not trigger emergency braking"
+        )
+
+    def test_does_not_yield_when_the_ego_reaches_the_merge_first(self) -> None:
+        # Ego is 20 m from the point and the other is 60 m from it: the ego has
+        # priority and braking for it would invent a phantom obstacle.
+        decision = self._decide(distance_to_next_merge_m=20.0, merge_conflict_gap_m=60.0)
+        assert decision.acceleration_mps2 >= 0.0
+
+    def test_an_empty_merge_changes_nothing(self) -> None:
+        # The control: a merge with nobody on it must decide exactly as a plain
+        # road does, or the rule is charging for the geometry rather than the
+        # traffic.
+        with_merge = self._decide(distance_to_next_merge_m=30.0)
+        without = self._decide()
+        assert with_merge.acceleration_mps2 == pytest.approx(without.acceleration_mps2)
+
+    def test_a_distant_merge_conflict_does_not_brake(self) -> None:
+        decision = self._decide(distance_to_next_merge_m=400.0, merge_conflict_gap_m=200.0)
+        assert decision.acceleration_mps2 >= 0.0
