@@ -430,3 +430,77 @@ experiment.
 
 **Do not read this as the result.** The run is unfinished; the measured outcome
 goes in when it lands.
+
+---
+
+# TASK 69 RESULT 2026-09-09: the replication does not reproduce a throughput gain
+
+Trained MAPPO, 100 updates, `inverted_tree`, `demand: medium`, seed 7, under the
+`mappo_deploysense` sensing block. Evaluated on 18 conditions per arm — demands
+(low, medium, high) × penetration (0.10, 0.20) × seeds (7, 17, 27) — with the
+sensing block read from the checkpoint's own `config_resolved.yaml`.
+
+## The numbers
+
+| | `no_av` | MAPPO |
+|---|---|---|
+| episodes completed | 18/18 | **7/18** |
+| mean throughput, completed runs only | 10.11 | 9.29 |
+
+**Neither of those columns is a fair comparison and they must not be quoted as
+one.** `no_av` completes 18 of 18 by construction — it contains no AVs, and
+`terminated` tests AV crashes — so its completion rate carries no information. And
+averaging throughput over 18 runs against 7 surviving runs is a selection effect:
+the 7 are the conditions MAPPO did not crash out of.
+
+**Paired on the 7 conditions where both arms completed:**
+
+| condition | `no_av` | MAPPO | delta |
+|---|---|---|---|
+| low / 0.10 / 7 | 5.00 | 5.00 | 0.00 |
+| low / 0.10 / 17 | 8.00 | 8.00 | 0.00 |
+| low / 0.10 / 27 | 11.00 | 11.00 | 0.00 |
+| low / 0.20 / 7 | 5.00 | 5.00 | 0.00 |
+| low / 0.20 / 17 | 8.00 | 11.00 | +3.00 |
+| low / 0.20 / 27 | 11.00 | 10.00 | −1.00 |
+| medium / 0.10 / 27 | 13.00 | 15.00 | +2.00 |
+
+Paired mean **+0.57 vehicles**, with **4 of 7 conditions exactly equal** and one
+negative. Throughput here is an integer vehicle count, so the granularity is one
+vehicle and the sample is seven. **This is not a throughput improvement; it is
+noise on a sample too small to carry one.**
+
+## What the policy did learn
+
+`mean_speed` on the same 7 conditions: `no_av` 19.88 m/s, MAPPO **21.38 m/s**.
+Over 100 updates, `entropy` fell 3.459 → 3.001, so the policy converged;
+`throughput_recent` rose 0.895 → 1.002; `mean_speed` and `score` were flat.
+
+**The agent learned exactly what it was paid for.** The reward is ego speed less a
+crash penalty, recorded above before this run finished. MAPPO drives 1.5 m/s
+faster than undisturbed traffic and crashes out of 11 of 18 evaluation runs. A
+faster, less safe, no-more-productive policy is the correct optimum of that reward,
+not a failure to learn.
+
+## The decision, and it is the user's
+
+1. **Change the reward to a system-level objective** — average speed over all
+   vehicles, or an explicit throughput term — and retrain. This is what Vinitsky
+   et al. and the Flow benchmarks optimise, so a replication arguably has to.
+   Training costs about 25 minutes per run, so this is cheap to try.
+   **Recommended if asked.**
+2. **Keep the ego-speed reward and report the null.** Defensible only if the paper
+   states plainly that the agent optimised individual speed, which is not the
+   published experiment.
+3. **Widen the evaluation before concluding** — more seeds, longer episodes, more
+   demand levels. It would tighten the interval, but 4 of 7 paired conditions being
+   exactly equal suggests the effect is absent rather than merely noisy at this
+   sample size.
+
+Options 1 and 3 compose: change the reward, then evaluate wider.
+
+## What this result does NOT say
+
+It does not show that MAPPO cannot improve throughput in this simulator. The
+agent was never asked to. That distinction is why the reward was recorded before
+the run rather than after.
