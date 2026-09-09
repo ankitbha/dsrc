@@ -421,3 +421,41 @@ class TestSegmentFlowsReachEveryConsumer:
             assert checked > 400
         finally:
             env.close()
+
+
+class TestThresholdsComeFromOnePlace:
+    """The rolling throughput window was read from the top level of the config,
+    where nothing writes it, while `HighwayTopologyEnv` reads it from
+    `metrics.thresholds`. A config setting it there was honoured on one simulator
+    and ignored on the other.
+    """
+
+    def _env(self, tmp_path, window):
+        return SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
+            "metrics": {"thresholds": {"throughput_window_s": window}},
+            "work_dir": str(tmp_path)})
+
+    def test_the_declared_throughput_window_is_honoured(self, tmp_path):
+        # `throughput_recent` counts arrivals inside the window, so a window ten
+        # times as long must count more of them.
+        def mean_recent(window):
+            env = self._env(tmp_path, window)
+            env.reset(seed=7)
+            try:
+                values = []
+                for _ in range(120):
+                    _, _, _, _, info = env.step({})
+                    values.append(info["metrics"]["throughput_recent"])
+                return sum(values) / len(values)
+            finally:
+                env.close()
+
+        narrow = mean_recent(6.0)
+        wide = mean_recent(60.0)
+        assert wide > narrow * 5, (
+            f"a 60 s window counted {wide:.2f} arrivals on average and a 6 s window "
+            f"{narrow:.2f}; the declared window is not reaching the metric"
+        )

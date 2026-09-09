@@ -143,3 +143,45 @@ class TestTheCrashPenaltyPathRuns:
             finally:
                 if hasattr(env, "close"):
                     env.close()
+
+
+class TestTheTrainingConfigsEpisodeLengthIsDeclared:
+    """`mappo_sumo.yaml` declared no `duration_steps` and took the trainer's default
+    of 120. The effect the configuration exists to learn does not exist at that
+    length: AVs holding 10 m/s produce 19.7 arrivals against 22.0 uncommanded over
+    120 steps, and 143.0 against 111.8 over 600. The reward ranking inverts with it,
+    so training at the default would have optimised against the effect under study.
+    """
+
+    def test_the_sumo_config_declares_an_episode_long_enough_to_show_the_effect(self):
+        from src.config.loaders import load_named_config
+
+        config = load_named_config("training", "mappo_sumo")
+        assert "duration_steps" in config, (
+            "mappo_sumo.yaml does not declare duration_steps, so it silently takes "
+            "the trainer's 120-step default"
+        )
+        assert int(config["duration_steps"]) >= 300, (
+            f"{config['duration_steps']}-step episodes are too short: the throughput "
+            "effect is absent at 120 steps and present at 300 and 600"
+        )
+
+    def test_the_declared_length_reaches_the_environment(self, tmp_path):
+        # The control on the assertion above: a declared value that the trainer
+        # ignores would leave the episode at 120 whatever the config says.
+        from src.config.loaders import load_named_config
+
+        config = dict(load_named_config("training", "mappo_sumo"))
+        config["duration_steps"] = 7
+        config["work_dir"] = str(tmp_path)
+        config["warmup_steps"] = 0
+        trainer = make_trainer(
+            TrainingConfig.from_mapping(config), PPOConfig.from_mapping({}))
+        assert trainer.config.duration_steps == 7
+        env = trainer.build_env()
+        try:
+            env.reset(seed=1)
+            truncated = [env.step({})[3] for _ in range(7)]
+            assert truncated == [False] * 6 + [True], truncated
+        finally:
+            env.close()

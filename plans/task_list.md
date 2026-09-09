@@ -2484,14 +2484,25 @@ and on what evidence.
       Measured: 700 of 48,590 vehicle-steps (1.44%) were on internal lanes, and the
       reported `mean_speed` was 6.157 m/s against SUMO's own 6.358 over all
       vehicles — 3.2% low, because junction-crossing vehicles are moving.
-    - **`mappo_sumo.yaml` does not set `duration_steps`**, so it defaults to 120
-      while `rollout_steps` is 512: one rollout spans 4.3 episodes and runs 1500
-      discarded warm-up steps. The reward weights and the operating point were
-      calibrated on 600- and 1800-step runs.
+    - **`mappo_sumo.yaml` does not set `duration_steps`** — FIXED 2026-09-09, and it
+      mattered more than "lower-severity" suggested. It defaulted to 120 while
+      `rollout_steps` is 512. At 120 steps the throughput effect this configuration
+      exists to learn is absent: AVs holding 10 m/s produce 19.7 arrivals against
+      22.0 uncommanded, where at 600 steps the same comparison is 143.0 against
+      111.8. The reward ranking inverts with it, placing 30 m/s first and 10 m/s
+      last, so training at the default would have optimised against the effect under
+      study. Now 600, with the measurement in the config and in
+      `plans/plan_task_84_sumo_simulator.md`.
     - **Threshold sources differ between the simulators.** The SUMO env reads
       `queue_speed_mps` from `config["sensing"]` and `throughput_window_s` from the
       top level; `highway_env` reads both from `config["metrics"]["thresholds"]`, so
-      a config setting them there is silently ignored on SUMO.
+      a config setting them there is silently ignored on SUMO. FIXED 2026-09-09,
+      and the item was half stale as the second audit round reported: by then
+      `queue_speed_mps` already came from the shared
+      `metric_thresholds_from_config`, but `throughput_window_s` was still read
+      from the top level of the config, where nothing writes it. Every experiment
+      config sets it under `metrics.thresholds`, so the window silently stayed at
+      the 60 s default on SUMO whatever a config declared.
 
 86. **A 52% throughput gain exists, and the action space cannot reach it.**
     Measured 2026-09-09 on SUMO. This is the control effect the project has been

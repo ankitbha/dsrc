@@ -402,7 +402,12 @@ class SumoTopologyEnv:
         and a flag would always read clean.
         """
         thresholds = metric_thresholds_from_config(self.config)
-        window = float(self.config.get("throughput_window_s", 60.0))
+        # From `metrics.thresholds`, the same place HighwayTopologyEnv reads it. This
+        # read was against the top level of the config, where nothing writes it, so a
+        # config setting the window under `metrics.thresholds` -- which is where the
+        # experiment configs set it -- was honoured on one simulator and ignored on
+        # the other, and the rolling throughput window silently stayed at 60 s.
+        window = float(thresholds.throughput_window_s)
         self._arrivals = [t for t in self._arrivals if now - t <= window]
         speeds = [s.speed_mps for s in snapshots]
         segment_metrics = self.get_segment_metrics(snapshots)

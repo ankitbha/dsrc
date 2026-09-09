@@ -3,36 +3,39 @@ kind: demand
 description: >-
   Demand for HOUR-LONG runs on inverted_tree under SUMO: congested and still moving
   after 3600 steps, with a throughput deficit a controller can recover.
-# Measured on hour-long runs (3600 steps after a 300-step warm-up), no AVs, ONE
-# SEED. Deficit is one hour of demand minus arrivals:
+# Measured on hour-long runs (3600 steps after a 300-step warm-up), no AVs, over
+# three seeds (7, 17, 27). Deficit is one hour of demand minus arrivals. The first
+# version of this table was one seed and is superseded in both columns; the arrival
+# means below reproduce the three-seed correction previously recorded here to the
+# tenth, so the warm-up double-count of `arrived_total` never reached them.
 #
-#   veh/h   mean speed   arrived   deficit
-#     300        29.76       301         0   free flow
-#     600        25.62       599         1   free flow
-#     750        25.34       749         1   free flow
+# Below 750 veh/h the network is in free flow and every vehicle arrives: 301 of 300
+# at 300 veh/h and 599 of 600 at 600 veh/h, single seed.
 #
-# CORRECTION 2026-09-09, from an independent audit: "arrivals maximal" was on
-# the 750 row and is wrong. The single-seed table reproduces exactly at seed 7,
-# but over three seeds (7, 17, 27) the arrival means are 749.7, 775.3, 802.0,
-# 782.7, 754.3, 732.3 and 677.0 for 750/780/810/840/870/900/1050 -- so the peak
-# is at 810, not 750. 840 remains the choice: it sits past the peak, which is
-# what gives a controller a deficit to recover.
-#     780        13.10       774         6
-#     810        16.62       797        13
-#     840         5.20       775        65   <- this: congested, moving
-#     870         3.32       749       121
-#     900         2.41       730       170
-#    1050         0.89       672       378   GRIDLOCKED
+#   veh/h   mean speed   arrived    sd   deficit
+#     750        22.89     749.7   1.2       0.3   free flow
+#     780        21.59     775.3   1.5       4.7
+#     810        17.33     802.0   7.0       8.0   <- arrivals peak here
+#     840        10.90     782.7   7.5      57.3   <- this: congested, moving
+#     870         7.20     754.3  19.6     115.7
+#     900         5.33     732.3  10.7     167.7
+#    1050         2.64     677.0   7.0     373.0   GRIDLOCKED
+#
+# The single-seed version reported 25.34 m/s at 750 but 16.62 at 810 against 13.10
+# at 780, which cannot be a demand effect, and it labelled 750 as the arrival peak.
+# Over three seeds the mean speed falls monotonically and the peak is at 810.
+# 840 remains the choice: it sits past the peak, which is what gives a controller a
+# deficit to recover.
 #
 # `sumo_saturating` at 1050 veh/h was chosen against 600- and 1800-step runs and
-# GRIDLOCKS over an hour: mean speed 0.89 m/s. The hour-long evaluation on it
+# GRIDLOCKS over an hour: mean speed 2.64 m/s. The hour-long evaluation on it
 # reported 1.01 m/s for no_av, which is why this second level exists rather than a
 # revision of that one -- shorter runs still want the shorter-run rate.
 #
-# CAVEAT: single seed. 810 reports a HIGHER mean speed than 780 (16.62 against
-# 13.10), which cannot be a demand effect, so run-to-run variation near the knee is
-# comparable to the differences between adjacent rates. Confirm with several seeds
-# before quoting any of these numbers as the operating point.
+# CAVEAT: three seeds, and the spread is not small near the knee -- 870 veh/h has a
+# standard deviation of 19.6 arrivals, comparable to the 21.0 difference between 870
+# and 900. The table locates the operating point; it does not resolve adjacent rates
+# from one another.
 total_vehicles_per_hour: 840
 av_penetration: 0.2
 branch_split:

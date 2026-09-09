@@ -220,27 +220,83 @@ of the capacity sweep at 3600 steps.
 ## The operating point depends on the run length
 
 `sumo_saturating` at 1050 veh/h was chosen against 600- and 1800-step runs. Over an
-hour it **gridlocks**: mean speed 0.89 m/s with no AVs, which is why the hour-long
-evaluation reported 1.01 m/s in both arms.
+hour it **gridlocks**: mean speed 2.64 m/s with no AVs over three seeds, which is
+why the hour-long evaluation reported 1.01 m/s in both arms.
 
-Hour-long capacity, measured at 3600 steps after a 300-step warm-up, no AVs:
+Hour-long capacity, measured at 3600 steps after a 300-step warm-up, no AVs, over
+three seeds (7, 17, 27):
 
 | veh/h | mean speed | arrived | deficit against one hour of demand |
 |---|---|---|---|
-| 750 | 25.34 | 749 | 1 — free flow, arrivals maximal |
-| 780 | 13.10 | 774 | 6 |
-| 810 | 16.62 | 797 | 13 |
-| **840** | **5.20** | **775** | **65** — congested and moving |
-| 870 | 3.32 | 749 | 121 |
-| 900 | 2.41 | 730 | 170 |
-| 1050 | 0.89 | 672 | 378 — gridlocked |
+| 750 | 22.89 | 749.7 +/- 1.2 | 0.3 — free flow |
+| 780 | 21.59 | 775.3 +/- 1.5 | 4.7 |
+| 810 | 17.33 | **802.0 +/- 7.0** | 8.0 — arrivals peak here |
+| **840** | **10.90** | **782.7 +/- 7.5** | **57.3** — congested and moving |
+| 870 | 7.20 | 754.3 +/- 19.6 | 115.7 |
+| 900 | 5.33 | 732.3 +/- 10.7 | 167.7 |
+| 1050 | 2.64 | 677.0 +/- 7.0 | 373.0 — gridlocked |
 
 `configs/demand/sumo_hour.yaml` is 840 veh/h. Both levels are kept: shorter runs
 still want the shorter-run rate, and the fact that they differ is itself the
 finding — a demand chosen on 600-step runs does not describe an hour.
 
-**Single seed, and it shows.** 810 reports a higher mean speed than 780 (16.62
-against 13.10), which cannot be a demand effect. Run-to-run variation near the knee
-is comparable to the differences between adjacent rates, so these numbers locate
-the operating point and do not measure it. Several seeds are needed before any of
-them is quoted.
+**Corrected 2026-09-09, from an independent audit, then re-measured.** The first
+version of this table was a single seed. It reported 16.62 m/s at 810 veh/h against
+13.10 at 780, which cannot be a demand effect, and it labelled 750 as the arrival
+peak. Over three seeds the mean speed falls monotonically with demand and the
+arrival peak is at 810. The arrival column reproduces the three-seed figures already
+recorded in `configs/demand/sumo_hour.yaml` to the tenth, so those were measured
+before `arrived_total` began double-counting warm-up arrivals and are unaffected by
+that defect; the mean-speed column is new.
+
+840 veh/h remains the choice: it sits past the arrival peak, which is what gives a
+controller a deficit to recover, and it is congested while still moving.
+
+
+## The measured effect depends on the episode length, and 120 steps hides it
+
+Recorded 2026-09-09, after the second audit round. This supersedes every reward
+figure and every arrival figure quoted for a commanded-speed arm before commit
+`34d2587`, because the fairness term carries weight +0.5 and its denominator was
+wrong: Jain's index was computed over the branches that had completed a vehicle
+rather than over all six, so it read 1.0 while five branches were starved.
+
+Arrivals, and the mean team reward per step under `mappo_sumo`'s weights
+(`throughput_recent` 0.10, `jam_fraction` −2.0), with every AV commanded to hold
+one speed for the whole episode:
+
+| episode | arm | arrivals | mean reward |
+|---|---|---|---|
+| 120 steps, 3 seeds | uncommanded | 22.0 | +0.6027 |
+| | 10 m/s | 19.7 | −0.0002 |
+| | 20 m/s | 23.7 | +0.4313 |
+| | 30 m/s | 22.0 | +0.6430 |
+| 300 steps, 3 seeds | uncommanded | 56.0 | +0.3667 |
+| | 10 m/s | **76.3** | **+0.4929** |
+| | 20 m/s | 61.7 | +0.3225 |
+| | 30 m/s | 59.0 | +0.4780 |
+| 600 steps, 5 seeds | uncommanded | 111.8 +/- 1.5 | −0.0097 |
+| | 10 m/s | **143.0 +/- 18.4** | **+0.3200** |
+| | 20 m/s | 122.8 +/- 9.3 | −0.0054 |
+| | 30 m/s | 116.4 +/- 5.9 | +0.1153 |
+
+Three things follow.
+
+**The effect does not exist at 120 steps.** Holding 10 m/s produces 19.7 arrivals
+against 22.0 uncommanded, and the reward ranks 30 m/s highest and 10 m/s last —
+the reverse of the ranking at 300 and 600 steps. `configs/training/mappo_sumo.yaml`
+declared no `duration_steps` and therefore took the trainer's default of 120, so
+training would have optimised against the effect the configuration exists to study.
+It now declares 600.
+
+**The 52% figure is superseded.** 167 arrivals against 110 was one seed. Over five
+seeds the same comparison is 143.0 +/- 18.4 against 111.8 +/- 1.5, a 28% increase
+with a standard error of about 8 arrivals. The direction holds; the magnitude was
+overstated by a factor of about two by taking a single draw from a wide
+distribution.
+
+**The reward magnitude is a property of the episode length, not of the operating
+point.** Uncommanded traffic scores +0.6027 per step at 120 steps and −0.0097 at
+600, because `jam_fraction` at weight −2.0 grows as the network fills and the
+120-step episode ends before it does. Any statement of the form "the team reward is
+about X" needs the episode length attached to it.

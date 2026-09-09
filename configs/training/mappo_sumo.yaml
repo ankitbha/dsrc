@@ -25,6 +25,26 @@ simulator: sumo
 # hundred seconds and a rollout beginning at t = 0 can see no AV at all.
 warmup_steps: 300
 
+# 600, not the 120 the trainer defaults to. The effect this configuration exists to
+# learn -- AVs holding a speed below free flow to raise throughput through the
+# junction -- does not exist at 120 steps. Arrivals against an uncommanded fleet at
+# the same demand, means over seeds:
+#
+#   episode length   uncommanded   AVs held at 10 m/s   seeds
+#         120 steps          22.0                 19.7       3   no gain
+#         300 steps          56.0                 76.3       3   +36%
+#         600 steps    111.8 +/- 1.5     143.0 +/- 18.4       5   +28%
+#
+# The 600-step spread is what the earlier single-seed figures hid: 167 against 110
+# arrivals was one seed at the top of an 18.4-wide distribution, not a 52% effect.
+#
+# The mean team reward moves with the horizon for the same reason: +0.60 per step
+# uncommanded at 120 steps against -0.01 at 600, because `jam_fraction` at weight
+# -2.0 rises as the network fills. At 120 steps the reward RANKS 30 m/s above
+# 10 m/s, the reverse of the arrival ranking over the longer horizon, so training
+# at the default length would have optimised against the effect under study.
+duration_steps: 600
+
 # The one topology section C is scoped to.
 topology: inverted_tree
 
