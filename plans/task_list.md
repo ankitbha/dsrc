@@ -2468,10 +2468,21 @@ and on what evidence.
     usable, and the existing demand levels bracket the operating point without
     hitting it.
 
-    **What this needs:** a demand between `medium` and `high`, chosen by measuring
-    the capacity of `inverted_tree` rather than guessed. That is a new demand
-    config, and it is the prerequisite for an hour of simulated driving meaning
-    anything. Task 8's advice to raise demand was right in direction and would have
+    **RESOLVED 2026-09-09 by measurement.** `configs/demand/saturating.yaml`, at
+    2000 veh/h. Swept on 600-step runs, 2 seeds, after the collision-free bound and
+    the geometry fix:
+
+    | veh/h | jam | speed | throughput | |
+    |---|---|---|---|---|
+    | 1800 (`medium`) | 0.0000 | 19.66 | 26.5 | free flow, nothing to control |
+    | **2000** | **0.1083** | **10.70** | **11.5** | **congested and moving** |
+    | 2200 | 0.3867 | 8.66 | 15.5 | congested, heavier |
+    | 2700 (`high`) | 1.0000 | 0.00 | 0.0 | gridlock |
+
+    Capacity is about 1800 veh/h. `medium` sits at it, `high` is far past it. At
+    2000 the network congests while still moving, and the throughput deficit
+    against free flow — 11.5 against 26.5 — is the headroom a controller has to
+    recover. Task 8's advice to raise demand was right in direction and would have
     overshot into gridlock.
 
 78. **The simulator must present the sensing model the rig actually has.**
