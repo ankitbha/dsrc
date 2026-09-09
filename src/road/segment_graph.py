@@ -44,6 +44,34 @@ class TopologySpec:
                 return segment_id
         return None
 
+    def downstream_segments(self) -> Mapping[str, tuple[str, ...]]:
+        """The segments a vehicle can reach directly from each segment.
+
+        Derived from `segment_edges` rather than declared, so it cannot disagree
+        with the road: an edge is written "from->to", so segment Y is downstream of
+        segment X when some edge of X ends at the node some edge of Y starts from.
+
+        Read by the rolling-roadblock metric, which excuses AVs holding a clear
+        segment slow when the next one is congested. Without it that metric cannot
+        tell speed metering from obstruction.
+        """
+        starts: dict[str, list[str]] = {}
+        ends: dict[str, list[str]] = {}
+        for segment_id, edges in self.segment_edges.items():
+            for edge in edges:
+                if "->" not in edge:
+                    continue
+                origin, destination = edge.split("->", 1)
+                starts.setdefault(origin, []).append(segment_id)
+                ends.setdefault(destination, []).append(segment_id)
+        downstream: dict[str, set[str]] = {segment_id: set() for segment_id in self.segment_ids}
+        for node, upstream_segments in ends.items():
+            for upstream_segment in upstream_segments:
+                for candidate in starts.get(node, ()):
+                    if candidate != upstream_segment:
+                        downstream.setdefault(upstream_segment, set()).add(candidate)
+        return {segment_id: tuple(sorted(values)) for segment_id, values in downstream.items()}
+
     def validate(self) -> None:
         missing_lengths = [segment_id for segment_id in self.segment_ids if segment_id not in self.segment_lengths]
         if missing_lengths:

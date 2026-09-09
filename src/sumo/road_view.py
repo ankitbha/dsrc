@@ -244,20 +244,37 @@ class SumoTopologyView:
         """
         counts = self.lane_counts
         upstream: dict[str, set[str]] = {}
-        for index in self.road_network.lanes_dict():
-            segment = self.segment_for_lane(index)
-            following = self.road_network.next_lane(index)
-            if segment is None or following is None:
-                continue
-            downstream = self.segment_for_lane(following)
-            if downstream is None or downstream == segment:
-                continue
-            upstream.setdefault(downstream, set()).add(segment)
+        for segment, followers in self.downstream_segments().items():
+            for follower in followers:
+                upstream.setdefault(follower, set()).add(segment)
         bottlenecks = [
             segment for segment, feeders in upstream.items()
             if feeders and all(counts.get(segment, 0) < counts.get(f, 0) for f in feeders)
         ]
         return tuple(sorted(bottlenecks))
+
+    def downstream_segments(self) -> dict[str, tuple[str, ...]]:
+        """The segments a vehicle can reach directly from each segment.
+
+        Taken from SUMO's own lane connections, the same source `next_lane` uses,
+        so it cannot disagree with the road the vehicles drive on. The other
+        simulator derives the same relation from its `segment_edges`; both feed the
+        rolling-roadblock metric, which excuses AVs holding a clear segment slow
+        when the next one is congested, and the two must agree on what "next" means.
+        """
+        following: dict[str, set[str]] = {}
+        for index in self.road_network.lanes_dict():
+            segment = self.segment_for_lane(index)
+            if segment is None:
+                continue
+            following.setdefault(segment, set())
+            successor = self.road_network.next_lane(index)
+            if successor is None:
+                continue
+            downstream = self.segment_for_lane(successor)
+            if downstream is not None and downstream != segment:
+                following[segment].add(downstream)
+        return {segment: tuple(sorted(values)) for segment, values in following.items()}
 
     @property
     def merge_nodes(self) -> tuple[str, ...]:

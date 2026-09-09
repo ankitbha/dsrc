@@ -536,6 +536,11 @@ class SumoTopologyEnv:
             step_inflow=self._step_inflow,
             step_outflow=self._step_outflow,
             thresholds=metric_thresholds_from_config(self.config),
+            # Lets the rolling-roadblock term tell metering from obstruction: AVs
+            # holding a clear segment slow are excused when the next segment is
+            # congested. Without it the term punishes the one mechanism the project
+            # calls legitimate speed metering.
+            downstream_segments=(self.view.downstream_segments() if self.view else None),
         )
         return self._cached_segment_metrics
 

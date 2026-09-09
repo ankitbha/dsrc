@@ -14,6 +14,7 @@ def compute_segment_metrics(
     step_inflow: Mapping[str, int],
     step_outflow: Mapping[str, int],
     thresholds: MetricThresholds,
+    downstream_segments: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     records: dict[str, dict[str, Any]] = {
         segment_id: {
@@ -81,7 +82,17 @@ def compute_segment_metrics(
             free_flow_speed_mps=_mean_free_flow(active_vehicle_records, segment_id),
             thresholds=thresholds,
         )
-        records[segment_id]["rolling_roadblock_score"] = _rolling_roadblock_score(records[segment_id])
+
+    # A second pass, because the roadblock score reads the segment DOWNSTREAM of
+    # the one being scored and that segment's jam fraction and queue length are
+    # only final once the loop above has finished.
+    for segment_id in segment_ids:
+        downstream = [
+            records[other] for other in (downstream_segments or {}).get(segment_id, ())
+            if other in records
+        ]
+        records[segment_id]["rolling_roadblock_score"] = _rolling_roadblock_score(
+            records[segment_id], downstream)
     return records
 
 
@@ -101,13 +112,38 @@ def _all_lane_av_low_speed_occupancy(
     return 1.0 if _mean(av_speeds) < free_flow_speed_mps - thresholds.low_speed_free_flow_delta_mps else 0.0
 
 
-def _rolling_roadblock_score(segment_record: Mapping[str, Any]) -> float:
+def _rolling_roadblock_score(
+    segment_record: Mapping[str, Any],
+    downstream_records: Sequence[Mapping[str, Any]] = (),
+) -> float:
+    """Whether AVs are holding this segment slow with no traffic reason to.
+
+    The first three conditions are the definition of the abuse: AVs occupy every
+    lane below free flow, while this segment is neither jammed nor queued.
+
+    The fourth excuses metering. Holding a clear segment slow BECAUSE the next one
+    is jammed is the mechanism the project calls backpressure-inspired speed
+    metering, and it is not obstruction; the first three conditions cannot tell the
+    two apart because they only ever look at the segment being scored. Measured on
+    `inverted_tree` with every AV commanded to 10 m/s, 38.5% of the 767 firings had
+    a jammed segment immediately downstream and 48.5% had a clear one.
+
+    A segment with several downstream segments is excused if ANY of them is
+    congested, which is the permissive reading: on a diverge, some of the traffic
+    being held really is facing a jam. `inverted_tree` has no diverge, so this
+    choice is documented rather than measured.
+    """
     if not float(segment_record.get("all_lane_av_low_speed_occupancy", 0.0)):
         return 0.0
     if float(segment_record.get("jam_fraction", 0.0)) > 0.25:
         return 0.0
     if int(segment_record.get("queue_length", 0)) > 0:
         return 0.0
+    for downstream in downstream_records:
+        if float(downstream.get("jam_fraction", 0.0)) > 0.25:
+            return 0.0
+        if int(downstream.get("queue_length", 0)) > 0:
+            return 0.0
     return 1.0
 
 

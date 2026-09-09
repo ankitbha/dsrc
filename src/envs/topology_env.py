@@ -335,6 +335,10 @@ class HighwayTopologyEnv(BaseCTDEEnv):
                 step_inflow=self._step_inflow,
                 step_outflow=self._step_outflow,
                 thresholds=self._metric_thresholds(),
+                # See the note on the same argument in the SUMO env: both
+                # simulators must agree on what "the next segment" means, because
+                # the rolling-roadblock term reads it.
+                downstream_segments=self.topology.downstream_segments(),
             )
         return self._cached_segment_metrics
 
