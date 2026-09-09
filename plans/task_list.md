@@ -2435,6 +2435,63 @@ and on what evidence.
 
 ## K. Found in passing
 
+78. **The simulator must present the sensing model the rig actually has.**
+    **DECIDED BY THE USER 2026-09-09.** Supersedes the narrower task 71 ordering
+    question, and blocks 73, 68 and 69.
+
+    **The instruction:** the best possible representation in the simulator of the
+    sensing model we deployed, using HERE to compute whatever HERE can compute.
+
+    **The audit.** `src/analysis/observation_parity.py` already classifies all 39
+    observation slots:
+
+    | class | slots | meaning |
+    |---|---|---|
+    | `identical` | 8 | both sides compute the same thing the same way |
+    | `approximated` | 18 | both compute it, by different mechanisms |
+    | `substituted` | 7 | the sim has a real value; the rig substitutes a constant |
+    | `structurally_absent` | 6 | the rig cannot produce it at all |
+
+    **All six absent fields are rear-facing** — `follower_gap`,
+    `follower_relative_speed`, `left_lane_rear_gap`, `right_lane_rear_gap`,
+    `target_lane_rear_gap`, `target_lane_rear_required_decel` — because the live
+    vehicle list is forward-camera derived and there is no rear sensor. The seven
+    substituted are `ego_lane`, `time_since_last_lane_change`,
+    `lane_changes_last_km`, `distance_to_downstream_bottleneck` and the three
+    `nearby_av_lane_distribution` slots.
+
+    **So the actor currently trains on 13 of 39 fields the deployed vehicle either
+    cannot sense or replaces with a constant.** That is a third of its input, and it
+    is the largest single reason a trained policy would not transfer.
+
+    **What HERE can restore, and what it cannot.**
+    - **Can:** road identity and geometry, hence route awareness for assigning
+      camera detections to the ego's own road — the substance of task 71. And
+      `distance_to_downstream_bottleneck`, from `jamFactor` on the segments ahead,
+      which is currently substituted with a constant 0.4.
+    - **Cannot:** any per-vehicle quantity. HERE's traffic flow API reports
+      aggregate speed, free-flow speed and jam factor per road segment. It has no
+      individual vehicles in it, so it cannot give a leader distance, a follower
+      gap, or a lane distribution. Leader distance stays a camera measurement;
+      HERE's contribution is knowing which road the camera is looking down.
+
+    **Steps, in order:**
+    1. A sensing-fidelity mode that presents the absent six and substituted seven
+       exactly as the rig does, so the actor's input is what the vehicle can produce.
+    2. HERE-derived `distance_to_downstream_bottleneck` from downstream `jamFactor`,
+       replacing the substituted constant on both sides.
+    3. Route-aware assignment of camera detections via map matching (task 71), which
+       is what lets the live `leader_gap` mean what the sim's means.
+    4. Only then retrain, because every step above changes the actor's input
+       distribution.
+
+    **Open:** whether the absent rear fields are dropped from the encoding entirely
+    or held at the rig's constants. Dropping changes the vector width and every
+    checkpoint; holding keeps the width and wastes six inputs. Recommendation: hold
+    at the rig's constants, because the width is baked into `sim_contract` and the
+    Jetson's actor runtime, and a width change is a far larger blast radius than six
+    dead inputs.
+
 77. **Two collisions survive the collision-free bound and the geometry fix.** Open.
 
     With the arcs joined, at `inverted_tree`/high/penetration 0.20 over 6 runs:
