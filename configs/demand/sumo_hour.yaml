@@ -1,0 +1,40 @@
+id: sumo_hour
+kind: demand
+description: >-
+  Demand for HOUR-LONG runs on inverted_tree under SUMO: congested and still moving
+  after 3600 steps, with a throughput deficit a controller can recover.
+# Measured on hour-long runs (3600 steps after a 300-step warm-up), no AVs, ONE
+# SEED. Deficit is one hour of demand minus arrivals:
+#
+#   veh/h   mean speed   arrived   deficit
+#     300        29.76       301         0   free flow
+#     600        25.62       599         1   free flow
+#     750        25.34       749         1   free flow, arrivals maximal
+#     780        13.10       774         6
+#     810        16.62       797        13
+#     840         5.20       775        65   <- this: congested, moving
+#     870         3.32       749       121
+#     900         2.41       730       170
+#    1050         0.89       672       378   GRIDLOCKED
+#
+# `sumo_saturating` at 1050 veh/h was chosen against 600- and 1800-step runs and
+# GRIDLOCKS over an hour: mean speed 0.89 m/s. The hour-long evaluation on it
+# reported 1.01 m/s for no_av, which is why this second level exists rather than a
+# revision of that one -- shorter runs still want the shorter-run rate.
+#
+# CAVEAT: single seed. 810 reports a HIGHER mean speed than 780 (16.62 against
+# 13.10), which cannot be a demand effect, so run-to-run variation near the knee is
+# comparable to the differences between adjacent rates. Confirm with several seeds
+# before quoting any of these numbers as the operating point.
+total_vehicles_per_hour: 840
+av_penetration: 0.2
+branch_split:
+  main: 1.0
+burst:
+  enabled: false
+speed_distribution:
+  mean_mps: 24.0
+  std_mps: 2.5
+  min_mps: 12.0
+  max_mps: 32.0
+spawn_min_gap_m: 12.0

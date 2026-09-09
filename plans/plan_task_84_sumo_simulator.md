@@ -215,3 +215,32 @@ arms, so at 1050 veh/h the network is heavily congested by the end of an hour --
 more so than the 900-step measurements that chose that rate showed. An hour-long
 evaluation wants a demand chosen against hour-long runs, which is a shorter version
 of the capacity sweep at 3600 steps.
+
+
+## The operating point depends on the run length
+
+`sumo_saturating` at 1050 veh/h was chosen against 600- and 1800-step runs. Over an
+hour it **gridlocks**: mean speed 0.89 m/s with no AVs, which is why the hour-long
+evaluation reported 1.01 m/s in both arms.
+
+Hour-long capacity, measured at 3600 steps after a 300-step warm-up, no AVs:
+
+| veh/h | mean speed | arrived | deficit against one hour of demand |
+|---|---|---|---|
+| 750 | 25.34 | 749 | 1 — free flow, arrivals maximal |
+| 780 | 13.10 | 774 | 6 |
+| 810 | 16.62 | 797 | 13 |
+| **840** | **5.20** | **775** | **65** — congested and moving |
+| 870 | 3.32 | 749 | 121 |
+| 900 | 2.41 | 730 | 170 |
+| 1050 | 0.89 | 672 | 378 — gridlocked |
+
+`configs/demand/sumo_hour.yaml` is 840 veh/h. Both levels are kept: shorter runs
+still want the shorter-run rate, and the fact that they differ is itself the
+finding — a demand chosen on 600-step runs does not describe an hour.
+
+**Single seed, and it shows.** 810 reports a higher mean speed than 780 (16.62
+against 13.10), which cannot be a demand effect. Run-to-run variation near the knee
+is comparable to the differences between adjacent rates, so these numbers locate
+the operating point and do not measure it. Several seeds are needed before any of
+them is quoted.
