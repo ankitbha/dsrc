@@ -320,15 +320,41 @@ class TestLeaderIsFoundAcrossAnArcBoundary:
 
     def test_a_leader_on_the_next_arc_is_reported(self) -> None:
         topology = _tree()
-        # 50 m from the end of a 500 m entry arc, with a vehicle 20 m onto the
-        # arc it feeds: a true gap of 70 m.
+        # 50 m from the end of a 500 m entry arc, with a vehicle 20 m onto the arc
+        # it feeds: a true gap of 70 m. The successor of ('a5_entry','b2',0) is
+        # ('b2','c',1), NOT ordinal 0 -- the b2 arcs end at y = -14 and lane 1 is
+        # the one that starts there.
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
-        lead = _on_lane(topology, "h_1", ("b2", "c", 0), 20.0, speed_mps=8.0)
+        lead = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0, speed_mps=8.0)
         ctx = _gap_context(topology, [ego, lead])
         assert ctx.leader_gap_m == pytest.approx(70.0, abs=2.0), (
             f"leader on the successor arc reported as {ctx.leader_gap_m}"
         )
         assert ctx.leader_relative_speed_mps == pytest.approx(8.0 - 20.0, abs=0.5)
+
+    def test_a_vehicle_in_a_lane_the_ego_never_enters_is_not_a_leader(self) -> None:
+        # The control for the test above, and the defect it replaces: an
+        # ordinal-preserving rule reported ('b2','c',0) as the leader, which is a
+        # lane this ego never drives on, while the vehicle it was about to meet on
+        # ('b2','c',1) read as infinitely far away.
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        wrong_lane = _on_lane(topology, "h_1", ("b2", "c", 0), 20.0, speed_mps=8.0)
+        ctx = _gap_context(topology, [ego, wrong_lane])
+        assert ctx.leader_gap_m == float("inf")
+
+    def test_the_successor_ordinal_is_taken_from_the_network(self) -> None:
+        # Pins the fact the rule depends on, so a topology change that alters it
+        # fails here rather than silently blinding the ego.
+        topology = _tree()
+        network = topology.road_network
+        for entry, expected in (
+            (("a1_entry", "b1", 0), ("b1", "c", 0)),
+            (("a5_entry", "b2", 0), ("b2", "c", 1)),
+        ):
+            lane = network.get_lane(entry)
+            assert network.next_lane(entry, route=None,
+                                     position=lane.position(lane.length, 0)) == expected
 
     def test_a_nearer_leader_on_the_next_arc_beats_a_far_one_on_this_arc(self) -> None:
         topology = _tree()
@@ -337,13 +363,15 @@ class TestLeaderIsFoundAcrossAnArcBoundary:
         # 400 m to the end of the ego's arc plus 10 m = 410 m: further away, so
         # the same-arc vehicle at 140 m must still win. This is the control for
         # the test above -- the fix must not simply prefer the other arc.
-        near = _on_lane(topology, "h_next", ("b2", "c", 0), 10.0)
+        near = _on_lane(topology, "h_next", ("b2", "c", 1), 10.0)
         ctx = _gap_context(topology, [ego, far, near])
         assert ctx.leader_gap_m == pytest.approx(140.0, abs=2.0)
 
     def test_a_follower_on_the_previous_arc_is_reported(self) -> None:
         topology = _tree()
-        ego = _on_lane(topology, "av_0", ("b2", "c", 0), 30.0, role="av")
+        # ('a5_entry','b2',0) feeds ('b2','c',1), so that is the lane a follower
+        # from it appears behind.
+        ego = _on_lane(topology, "av_0", ("b2", "c", 1), 30.0, role="av")
         behind = _on_lane(topology, "h_1", ("a5_entry", "b2", 0), 480.0)
         ctx = _gap_context(topology, [ego, behind])
         assert ctx.follower_gap_m == pytest.approx(50.0, abs=2.0)
@@ -352,7 +380,7 @@ class TestLeaderIsFoundAcrossAnArcBoundary:
         topology = _tree()
         ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 380.0, role="av")
         # 120 m to the arc end plus 60 m = 180 m, beyond a 100 m range.
-        lead = _on_lane(topology, "h_1", ("b2", "c", 0), 60.0)
+        lead = _on_lane(topology, "h_1", ("b2", "c", 1), 60.0)
         ctx = _gap_context(topology, [ego, lead], config=SensingConfig(range_m=100.0))
         assert ctx.leader_gap_m == float("inf"), (
             "a vehicle beyond range_m must stay invisible; the fix must not make "

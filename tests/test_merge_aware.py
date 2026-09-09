@@ -174,3 +174,59 @@ class TestItCannotProduceAnAbsurdAcceleration:
             if abs(speed) > abs(worst):
                 worst = speed
         assert abs(worst) < 100.0, f"mean_speed reached {worst} m/s"
+
+
+class TestWhoCountsAsAConflict:
+    """Two filters the first version lacked, both measured on a single run.
+
+    21% of 17,639 phantom leaders were vehicles that had already crashed: a wreck
+    is decelerated to a stop and then sits at the node forever, and everything
+    upstream yielded to it indefinitely.
+
+    48% of the conflicts computed at node `c` were between lanes that never meet.
+    `b1->c` lane 0 and `b2->c` lane 0 both feed `c->exit` lane 0 and really do
+    converge; the cross pairs feed different exit lanes and cannot collide.
+    """
+
+    def test_a_crashed_vehicle_is_not_yielded_to(self, road):
+        ego = _place(road, ("a5_entry", "b2", 0), 400.0)
+        wreck = _place(road, ("a4_entry", "b2", 0), 440.0, speed=0.0)
+        wreck.crashed = True
+        assert ego._merge_acceleration() is None
+
+    def test_a_live_vehicle_in_the_same_place_still_counts(self, road):
+        # The control: without it the test above would pass on any change that
+        # disabled merging altogether.
+        ego = _place(road, ("a5_entry", "b2", 0), 400.0)
+        _place(road, ("a4_entry", "b2", 0), 440.0, speed=0.0)
+        assert ego._merge_acceleration() is not None
+
+    def test_lanes_that_feed_different_exits_are_not_a_conflict(self, road):
+        # At node c, ('b1','c',0) and ('b2','c',1) do not share a successor.
+        network = road.network
+        first = ("b1", "c", 0)
+        second = ("b2", "c", 1)
+        def successor(index):
+            lane = network.get_lane(index)
+            return network.next_lane(index, route=None, position=lane.position(lane.length, 0))
+        assert successor(first) != successor(second), "fixture assumption broken"
+        ego = _place(road, first, 500.0)
+        _place(road, second, 540.0, speed=0.0)
+        assert ego._merge_acceleration() is None
+
+    def test_lanes_that_feed_the_same_exit_are_a_conflict(self, road):
+        network = road.network
+        def successor(index):
+            lane = network.get_lane(index)
+            return network.next_lane(index, route=None, position=lane.position(lane.length, 0))
+        pair = [
+            (a, b)
+            for a in (("b1", "c", 0), ("b1", "c", 1))
+            for b in (("b2", "c", 0), ("b2", "c", 1))
+            if successor(a) == successor(b)
+        ]
+        assert pair, "no converging pair at node c; fixture assumption broken"
+        first, second = pair[0]
+        ego = _place(road, first, 500.0)
+        _place(road, second, 540.0, speed=0.0)
+        assert ego._merge_acceleration() is not None

@@ -56,6 +56,16 @@ class MergeAwareIDMVehicle(IDMVehicle):
             # The more restrictive of the two constraints wins.
             self.action["acceleration"] = min(float(current), merge_acceleration)
 
+    def _successor(self, lane_index):
+        """The lane a vehicle on `lane_index` drives onto next, or None."""
+        try:
+            lane = self.road.network.get_lane(lane_index)
+            return self.road.network.next_lane(
+                lane_index, route=None, position=lane.position(lane.length, 0)
+            )
+        except Exception:  # noqa: BLE001 - an exit lane has no successor
+            return None
+
     def _distance_to_node(self, vehicle: Vehicle) -> float | None:
         lane_index = getattr(vehicle, "lane_index", None)
         if lane_index is None or self.road is None:
@@ -76,16 +86,29 @@ class MergeAwareIDMVehicle(IDMVehicle):
         if own_distance is None:
             return None
 
+        own_successor = self._successor(self.lane_index)
         nearest_gap = float("inf")
         nearest: Vehicle | None = None
         for other in self.road.vehicles:
             if other is self:
+                continue
+            # A wreck is decelerated to a stop and then sits at the node for the
+            # rest of the run. 21% of phantom leaders in one measured run were
+            # already-crashed vehicles, and everything upstream yielded to them
+            # indefinitely.
+            if getattr(other, "crashed", False):
                 continue
             other_lane = getattr(other, "lane_index", None)
             if other_lane is None or other_lane[1] != node:
                 continue
             if other_lane[0] == self.lane_index[0]:
                 continue  # same arc: ordinary in-lane following already covers it
+            # Sharing a node is not the same as converging. At node c, b1->c lane 0
+            # and b2->c lane 0 both feed c->exit lane 0 and really do meet; the
+            # cross pairs feed different exit lanes and never can. 48% of the
+            # conflicts computed at that node were of the second kind.
+            if own_successor is not None and self._successor(other_lane) != own_successor:
+                continue
             other_distance = self._distance_to_node(other)
             if other_distance is None:
                 continue

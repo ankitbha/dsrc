@@ -384,24 +384,46 @@ class LocalObservationBuilder:
         limit = float(self.config.range_m)
         forward = self._forward_lane_offsets(topology, ego.lane_index, ego.longitudinal_m, limit)
         backward = self._backward_lane_offsets(topology, ego.lane_index, ego.longitudinal_m, limit)
-        ordinal = ego.lane_index[2]
         deltas: dict[str, float] = {}
         for neighbor in measured:
             lane_index = neighbor.snapshot.lane_index
             if lane_index is None or lane_index == ego.lane_index or lane_index not in lanes:
                 continue
-            # Where the arc carries a lane with the ego's own ordinal, that lane is
-            # the route and the others are adjacent lanes, which are a lateral
-            # conflict rather than a leader.
-            siblings = [li for li in lanes if li[0] == lane_index[0] and li[1] == lane_index[1]]
-            if lane_index[2] != ordinal and any(li[2] == ordinal for li in siblings):
+            # Membership in one of the walks IS the route test: they follow the
+            # network's successors, so a lane in neither is one the ego does not
+            # drive on, and an adjacent lane is excluded for free.
+            ahead = forward.get(lane_index)
+            behind = backward.get(lane_index)
+            length = float(network.get_lane(lane_index).length)
+            candidates = []
+            if ahead is not None:
+                candidates.append(ahead + float(neighbor.snapshot.longitudinal_m))
+            if behind is not None:
+                candidates.append(-(behind + (length - float(neighbor.snapshot.longitudinal_m))))
+            if not candidates:
                 continue
-            if lane_index in forward:
-                deltas[neighbor.snapshot.vehicle_id] = forward[lane_index] + float(neighbor.snapshot.longitudinal_m)
-            elif lane_index in backward:
-                length = float(network.get_lane(lane_index).length)
-                deltas[neighbor.snapshot.vehicle_id] = -(backward[lane_index] + (length - float(neighbor.snapshot.longitudinal_m)))
+            # A short circuit can put one lane both ahead and behind. Whichever is
+            # nearer is the one the ego will meet, and taking `forward` regardless
+            # reported a follower 75 m back as absent on the ring.
+            deltas[neighbor.snapshot.vehicle_id] = min(candidates, key=abs)
         return deltas
+
+    def _next_lane(self, network, lane_index):
+        """The lane a vehicle on `lane_index` actually drives onto next.
+
+        Asking the network rather than assuming the lane ordinal carries over. It
+        does not: on `inverted_tree`, `a1..a3_entry` continue into `('b1','c',0)`
+        but `a4..a6_entry` continue into `('b2','c',1)`, because the b2 arcs end at
+        y = -14 and lane 1 of `b2->c` is the one that starts there. An
+        ordinal-preserving rule made the ego blind to the lane it was about to
+        enter on three of the six entry arcs, and handed it a headway target in a
+        lane it never occupies.
+        """
+        try:
+            lane = network.get_lane(lane_index)
+            return network.next_lane(lane_index, route=None, position=lane.position(lane.length, 0))
+        except Exception:  # noqa: BLE001 - a lane with no successor is normal at an exit
+            return None
 
     def _forward_lane_offsets(
         self,
@@ -410,42 +432,34 @@ class LocalObservationBuilder:
         longitudinal_m: float,
         limit_m: float,
     ) -> dict[LaneIndex, float]:
-        """Distance from the ego to the START of every lane reachable ahead.
+        """Distance from the ego to the START of each lane ahead on its own route.
 
-        `longitudinal_m` restarts at each arc, so a raw subtraction across an arc
-        boundary is meaningless -- which is why the gap search used to require an
-        identical `lane_index` and so could not see a vehicle metres ahead on the
-        next arc. Walking the graph and accumulating lane lengths is what makes
-        that subtraction meaningful again.
+        `longitudinal_m` restarts at every arc, so a raw subtraction across a
+        boundary is meaningless and the gap search used to require an identical
+        `lane_index` -- which made a vehicle metres ahead on the next arc invisible
+        while one hundreds of metres ahead on the ego's own arc was reported as the
+        leader.
 
-        Breadth-first rather than following one successor, because a node may have
-        several outgoing arcs and picking one arbitrarily would hide traffic on the
-        others.
+        Following the network's own successor gives one chain rather than a search,
+        so there is no traversal order to get wrong and no distance-keyed visited
+        set to round.
         """
         network = topology.road_network
         lanes = network.lanes_dict()
         if lane_index not in lanes:
             return {}
         offsets: dict[LaneIndex, float] = {}
-        start = float(network.get_lane(lane_index).length) - float(longitudinal_m)
-        frontier: list[tuple[Any, float]] = [(lane_index[1], start)]
-        visited: set[tuple[Any, int]] = set()
-        while frontier:
-            node, distance = frontier.pop()
-            if distance > limit_m:
-                continue
-            key = (node, int(distance))
-            if key in visited:
-                continue
-            visited.add(key)
-            for destination in network.graph.get(node, {}):
-                arc = [li for li in lanes if li[0] == node and li[1] == destination]
-                if not arc:
-                    continue
-                for li in arc:
-                    if li not in offsets or distance < offsets[li]:
-                        offsets[li] = distance
-                frontier.append((destination, distance + float(network.get_lane(arc[0]).length)))
+        current = lane_index
+        distance = float(network.get_lane(current).length) - float(longitudinal_m)
+        seen = {current}
+        while distance <= limit_m:
+            nxt = self._next_lane(network, current)
+            if nxt is None or nxt in seen or nxt not in lanes:
+                break
+            offsets[nxt] = distance
+            seen.add(nxt)
+            distance += float(network.get_lane(nxt).length)
+            current = nxt
         return offsets
 
     def _backward_lane_offsets(
@@ -455,37 +469,35 @@ class LocalObservationBuilder:
         longitudinal_m: float,
         limit_m: float,
     ) -> dict[LaneIndex, float]:
-        """Distance from the END of every lane reachable behind, to the ego.
+        """Distance from the END of each lane behind, to the ego.
 
-        The mirror of `_forward_lane_offsets`, used for the follower. A follower on
-        the previous arc was invisible for the same reason a leader was.
+        A predecessor is a lane whose own successor is the lane we are standing on,
+        which is the same question as `_forward_lane_offsets` asks, reversed. Where
+        several arcs feed one lane -- three do at each inner node here -- all of
+        them are genuinely behind and all are recorded at that distance.
         """
         network = topology.road_network
         lanes = network.lanes_dict()
         if lane_index not in lanes:
             return {}
         offsets: dict[LaneIndex, float] = {}
-        start = float(longitudinal_m)
-        frontier: list[tuple[Any, float]] = [(lane_index[0], start)]
-        visited: set[tuple[Any, int]] = set()
-        while frontier:
-            node, distance = frontier.pop()
-            if distance > limit_m:
-                continue
-            key = (node, int(distance))
-            if key in visited:
-                continue
-            visited.add(key)
-            for origin, destinations in network.graph.items():
-                if node not in destinations:
-                    continue
-                arc = [li for li in lanes if li[0] == origin and li[1] == node]
-                if not arc:
-                    continue
-                for li in arc:
-                    if li not in offsets or distance < offsets[li]:
-                        offsets[li] = distance
-                frontier.append((origin, distance + float(network.get_lane(arc[0]).length)))
+        current = lane_index
+        distance = float(longitudinal_m)
+        seen = {current}
+        while distance <= limit_m:
+            predecessors = [
+                li for li in lanes
+                if li[1] == current[0] and self._next_lane(network, li) == current
+            ]
+            predecessors = [li for li in predecessors if li not in seen]
+            if not predecessors:
+                break
+            for li in predecessors:
+                if li not in offsets or distance < offsets[li]:
+                    offsets[li] = distance
+            seen.update(predecessors)
+            current = predecessors[0]
+            distance += float(network.get_lane(current).length)
         return offsets
 
     def _merge_context(
@@ -513,16 +525,24 @@ class LocalObservationBuilder:
         if len(incoming_arcs) < 2:
             # A node only one arc enters is not a merge, however close it is.
             return float("inf"), float("inf"), 0.0
+        own_successor = self._next_lane(network, ego.lane_index)
         nearest_gap = float("inf")
         nearest_speed = 0.0
         for neighbor in measured:
             snapshot = neighbor.snapshot
             if snapshot.lane_index is None or snapshot.lane_index not in lanes:
                 continue
+            if snapshot.crashed:
+                continue  # a wreck sits at the node forever; yielding to it never ends
             if snapshot.lane_index[1] != node:
                 continue
             if snapshot.lane_index[0] == ego.lane_index[0]:
                 continue  # same arc: it is a leader or a follower, not a conflict
+            # Sharing a node is not converging: lanes that feed different successor
+            # lanes never meet, and 48% of the conflicts computed at node c were of
+            # that kind.
+            if own_successor is not None and self._next_lane(network, snapshot.lane_index) != own_successor:
+                continue
             to_merge = float(network.get_lane(snapshot.lane_index).length) - float(snapshot.longitudinal_m)
             if to_merge < 0:
                 continue
