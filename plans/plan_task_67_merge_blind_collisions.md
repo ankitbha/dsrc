@@ -652,3 +652,20 @@ and the parity inconsistency above is a direct consequence.
 
 **So the next expansion of that assumption should be a deliberate decision, not a
 side effect.** Recorded here so it is one.
+
+
+---
+
+# DECISION 2026-09-09: build route-aware leader gap on the Jetson
+
+Taken by the user. **Recorded only; nothing implemented.** Filed as task 71 in
+`plans/task_list.md`, with the scoping, the evidence that the data is already in
+hand, and the two design questions that come first.
+
+This resolves the inconsistency round 3 caught. The route-aware leader gap stays in
+the actor's observation, and the deployed system will be given the means to produce
+the same quantity, rather than the sim being cut back to what the vehicle can
+currently see.
+
+`distance_to_next_merge` is **not** covered by this decision and remains refused:
+the flow API carries road geometry, not junction topology.

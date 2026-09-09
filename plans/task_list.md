@@ -2435,6 +2435,56 @@ and on what evidence.
 
 ## K. Found in passing
 
+71. **Route-aware leader gap on the Jetson, from the HERE link shape.**
+    **DECIDED BY THE USER 2026-09-09. Not started — recorded only.**
+
+    **What.** Use the already-matched HERE link to decide whether a
+    camera-detected vehicle is on the ego's own road, and measure the gap along
+    that link, so the live system produces the same quantity the simulator gets by
+    walking its road graph.
+
+    **Why it is needed.** The simulator's `leader_gap` has, since task 67, meant
+    "nearest vehicle ahead on the ego's road-graph successor chain, at a distance
+    accumulated over lane lengths". The Jetson has no road graph at all — `grep`
+    for `RoadNetwork`, `lanes_dict`, `next_lane` or `road_network` under
+    `deployment/jetson` returns nothing, and its entire road model is
+    `lane_width_m = 3.7` plus `round(lateral / lane_width)` to bin detections into
+    ego, left and right. So the actor now trains on information the deployed
+    vehicle cannot produce. The same objection was used, correctly, to refuse a
+    real `distance_to_next_merge`; it applies here and was applied inconsistently.
+
+    **It is smaller than it first appears, because the primitives exist.**
+    `FlowLink.points` already keeps the link's shape in order, `FlowLink` already
+    has a "how far this link's shape passes from a point" method, and
+    `FlowReading.link` is already a single link selected by shape distance and a
+    fixed heading cone. Rudimentary map matching is therefore already running. The
+    missing piece is projecting camera detections onto that link and measuring
+    along it.
+
+    **The data is already collected and needs no new API call.** The 123 HERE
+    bodies stored on 2026-09-08 hold 915 road segments across 68 named roads and
+    58,453 lat/lng polyline points — 2 to 27 segments per response, up to 126 links
+    and 255 points per segment, with names like `US-1/Brunswick Pike` and
+    `RT-27/Nassau St`. That is enough to develop and validate offline against real
+    drives, without calling HERE.
+
+    **What it does NOT unlock.** `distance_to_next_merge` stays unavailable. This is
+    the traffic *flow* API: it gives named segments with geometry, not junction
+    topology or lane-level connectivity. A merge is a junction between roads and
+    needs routing or map-tile data, which would be a new dependency rather than new
+    processing. Adjacent segments with differing `description` values hint at a road
+    change, but that is inference, not topology.
+
+    **What it does unlock.** Task 47's `leader_gap` slot could be reclassified from
+    `identical` to `approximated` against a real live implementation rather than
+    scoped in a docstring, which is the outstanding item recorded there. And the
+    actor would stop training on a field the vehicle cannot measure.
+
+    **Open before starting:** whether the gap is measured along the link polyline
+    or along the ego's heading ray, and how a detection is assigned to a link when
+    two links pass within the camera's lateral error. Both are design questions,
+    not implementation details.
+
 70. **Selecting live mode on a redial is a silent no-op, and a live drive was
     recorded as shadow because of it.** Open.
 
