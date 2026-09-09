@@ -202,3 +202,31 @@ class TestNoCollisionsEver:
             )
         finally:
             env.close()
+
+
+class TestGeneratedFilesStayOutOfTheRepository:
+    """`work_dir` defaulted to `"."`.
+
+    Any caller that did not set it wrote the generated network and demand files
+    into its working directory, and a `sumo_inverted_tree/` directory appeared in
+    the repository root. Generated artefacts do not belong in the repo.
+    """
+
+    def test_the_default_work_dir_is_not_the_working_directory(self):
+        from pathlib import Path
+
+        from src.config.loaders import load_named_config
+
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "medium"),
+            "duration_steps": 5, "dt": 1.0,
+        })
+        assert Path.cwd() not in env.work_dir.parents, (
+            f"generated files would land under the working directory: {env.work_dir}"
+        )
+
+    def test_an_explicit_work_dir_is_honoured(self, tmp_path):
+        # The control: the default must not be ignoring the setting entirely.
+        env = _env(tmp_path)
+        assert tmp_path in env.work_dir.parents or env.work_dir.parent == tmp_path

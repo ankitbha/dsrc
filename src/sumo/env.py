@@ -26,6 +26,7 @@ un-incremented counter from a genuine zero.
 from __future__ import annotations
 
 import dataclasses
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -81,7 +82,14 @@ class SumoTopologyEnv:
     def __init__(self, topology_id: str, config: Mapping[str, Any]) -> None:
         self.topology_id = topology_id
         self.config = dict(config)
-        self.work_dir = Path(self.config.get("work_dir", ".")) / f"sumo_{topology_id}"
+        # A temporary directory by default, NOT the working directory. Defaulting to
+        # "." wrote generated network and demand files into whatever directory the
+        # caller happened to be in, and a `sumo_inverted_tree/` appeared in the
+        # repository root. Generated artefacts do not belong in the repo, and a
+        # caller that wants to keep them passes `work_dir`.
+        configured = self.config.get("work_dir")
+        base = Path(configured) if configured else Path(tempfile.gettempdir()) / "dsrc_sumo"
+        self.work_dir = base / f"sumo_{topology_id}"
         self.network: SumoNetwork | None = None
         self.step_count = 0
         self.collision_count = 0
