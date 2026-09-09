@@ -3386,6 +3386,30 @@ trained policy is the one to be deployed. That distinction is the user's.
 
 ---
 
+# Three-arm attribution, resolved 2026-09-09
+
+The validator's round 3 finding 1 asked which of two changes the +17pp completion
+gain belonged to, since `MergeAwareIDMVehicle` carries both a merge rule and a
+low-speed stopping floor. Measured on the 81-run distinct grid, three arms:
+
+| arm | completion | collisions (9 `no_av` conditions) |
+|---|---|---|
+| A plain IDM | 43/81 (53%) | 155 |
+| B merge rule only | 57/81 (70%) | 126 |
+| C merge rule + stopping floor | 57/81 (70%) | 138 |
+
+**The merge rule accounts for the entire +17pp. The floor accounts for none of it,
+and costs 12 collisions.** The floor was added to stop vehicles reversing through
+zero speed, which it does — no vehicle reaches a negative speed with it — but the
+extra stopping distance it imposes gives back 12 of the 29 collisions the merge rule
+saves. From 5 m/s, unrestricted braking at 6 m/s² travels 2.08 m to rest while the
+floor's geometric decay travels 3.26 m.
+
+So the honest attribution is: the merge rule is the improvement, and the floor is a
+correctness fix for the reversing defect that costs 12 collisions. It should stay,
+because a vehicle driving backwards through traffic is a worse defect than 12
+collisions, but it must not be credited with any of the completion gain.
+
 # PAUSED 2026-09-09
 
 ## The blocking unknown
