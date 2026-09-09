@@ -2470,49 +2470,46 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
-89. **What the simulation study still needs, against `plan_simulations.md` section
-    8.** Asked 2026-09-09: are the results for the paper in hand? They are not.
-    What exists is the oracle arm of one comparison on one topology.
+89. **What the simulation study still needs.** Asked 2026-09-09: are the results
+    for the paper in hand? Scope corrected by the user in the same exchange, and
+    the correction matters: **the paper is a deployment story.** The simulation
+    exists to replicate that MAPPO works under the sensing model measured on the
+    deployment, not to run the nine-figure study in `plan_simulations.md` section
+    8. Against that narrower target the gap is one training run, not a programme.
 
-    **In hand.** AVs commanded to hold 10 m/s raise arrivals 17.6% over 600 steps
-    (155.2 +/- 10.5 against 132.0 +/- 6.4, five seeds) and 20.9% over an hour
-    (966.3 against 799.0, three seeds), recovering 67% of the throughput deficit,
-    with zero collisions. The hour-long capacity curve locates the operating point.
-    The HotNets prototype paper's own "toward a pilot" section names three
-    controllers to compare -- local-only, aggregate-assisted, oracle -- and this is
-    the oracle.
+    **In hand.**
 
-    **Missing, in order of size.**
+    - The effect is real and measurable in this simulator: AVs commanded to hold
+      10 m/s raise arrivals 17.6% over 600 steps (155.2 +/- 10.5 against
+      132.0 +/- 6.4, five seeds) and 20.9% over an hour, with zero collisions.
+    - The action space can express a usable part of it: `slow` decodes to 13.94 m/s
+      and gives 143.0 +/- 11.7, about half of what is available.
+    - Every prerequisite for a valid run is now in place. The critic receives its
+      115 inputs rather than 2; the fleet is the one the demand config declares;
+      the episode is 600 steps, the horizon at which the effect exists; and
+      `mappo_sumo.yaml` carries the deployment sensing block with
+      `deployed_fidelity: true`.
 
-    1. **Any valid learned-policy result.** `outputs/checkpoints/` is empty and
-       every SUMO training run so far is invalid: the critic received 2 of 115
-       inputs, the action bins were near-equivalent, and the episode was 120 steps
-       where the effect does not exist. Figures 3, 6 and 9 have no data.
-    2. **Baselines on the current simulator.** `evaluate_replication.py` runs
-       `no_av`, `selfish_av` and `density_lookup` on SUMO, but every recorded
-       baseline number predates the defects fixed in `34d2587..d9746a4`.
-    3. **One topology only.** `src/sumo/network.py` builds `inverted_tree` and its
-       bottleneck variant and refuses the rest. Figures 2, 3 and 4 want ring,
-       straight and merge.
-    4. **Throughput against AV penetration** (figure 4), not run on SUMO since the
-       fixes.
-    5. **Human-driver robustness** (figure 7). On SUMO the fleet is one
-       `vTypeDistribution` differing only in `speedFactor`; there is no aggressive
-       or heterogeneous behaviour model.
-    6. **Sensing robustness** (figure 8). `latency_s` is pinned at 0 because at a
-       1 s step any positive value means a full second, and the two noise
-       parameters are marked in the config as not measured, needing a published
-       characterisation before the paper quotes them.
-    7. **Seeds.** The plan asks 10+ for final results; current figures are 3 to 5.
+    **Missing: the run itself.** `outputs/checkpoints/` is empty, and every SUMO
+    training run to date is invalid on grounds found this session. One MAPPO run at
+    `mappo_sumo` plus its evaluation against `no_av` is the deliverable.
 
-    **The risk that bears on the next training run.** The reward does not rank the
-    commanded-speed arms the way arrivals do: over 600 steps arrivals peak at
-    10 m/s and the reward at 15 m/s, and over 120 steps the reward ranks the
-    fastest arms first. `throughput_recent` is a 60 s window rather than the
-    episode total, and `jam_fraction` at weight -2.0 grows as the network fills. A
-    policy maximising this reward is not guaranteed to maximise the paper's
-    headline metric, so the weights deserve a decision before a training run is
-    spent.
+    **Two things to settle before spending it.**
+
+    1. **The reward does not rank the commanded-speed arms the way arrivals do.**
+       Over 600 steps arrivals peak at 10 m/s and the reward at 15 m/s.
+       `throughput_recent` is a 60 s window rather than the episode total, and
+       `jam_fraction` at weight -2.0 grows as the network fills. A policy
+       maximising this reward is not guaranteed to show the effect, so a null
+       result would be uninterpretable.
+    2. **The sensing model is only partly measured.** `range_m: 100.0` is
+       deployment-derived and end-to-end latency was measured over 22,929 ticks,
+       but `latency_s` is pinned at 0 because at a 1 s step any positive value
+       means a full second, and `position_noise_std` and `speed_noise_std` are
+       marked in the config as NOT measured, carried over from an earlier config
+       and needing a published characterisation of monocular bounding-box ranging
+       before the paper describes them as measured. A claim that MAPPO works
+       "under the deployment's sensing model" rests on all three.
 
 88. **Lower-severity items from the same audit.** Recorded, not fixed.
 
