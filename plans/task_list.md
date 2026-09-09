@@ -2470,6 +2470,74 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+91. **The measured throughput gain is largely inadmissible under the project's own
+    contract.** Measured 2026-09-09 while diagnosing why the reward ranks the
+    commanded-speed arms differently from arrivals. The reward is not
+    mis-specified; it is correctly refusing a strategy the project forbids.
+
+    Reward decomposed by term, three seeds, 600 steps, per step:
+
+    | arm | arrivals | reward | `rolling_roadblock_score` contribution |
+    |---|---|---|---|
+    | uncommanded | 132.7 | +0.919 | −0.011 |
+    | 10 m/s | **162.3** | +1.181 | **−0.741** |
+    | 15 m/s | 151.7 | +1.130 | −0.363 |
+    | 20 m/s | 146.0 | **+1.243** | −0.015 |
+
+    Every other term ranks 10 m/s first. `rolling_roadblock_score` at weight −2.0
+    is the whole inversion: remove it and 10 m/s scores 1.922 against 20 m/s at
+    1.258, which is the arrival order.
+
+    **What the term measures.** `_rolling_roadblock_score` fires only when AVs
+    occupy every lane of a segment at a mean speed more than 8 m/s below free flow,
+    AND the segment's `jam_fraction` is at most 0.25, AND its queue length is zero.
+    It is deliberately narrow: slow AVs while the road around them is clear. That
+    is the README's prohibition on rolling roadblocks, made measurable.
+
+    **Where it fires.** Over 300 steps at 10 m/s it fires on 767 segment-steps
+    against 7 for both uncommanded traffic and 20 m/s. Not only on the single-lane
+    leaves, where one AV trivially holds "every lane": 159 of them are on the
+    two-lane `tree_middle_b2` and `tree_trunk_c`.
+
+    **Metering or obstruction?** The guard checks jam and queue on its own segment
+    only, so a segment held slow *because the next one is jammed* would be scored
+    as obstruction although it is metering. Classifying the 767 firings by the
+    state of the downstream segment at the same step:
+
+    | downstream state | segment-steps | share |
+    |---|---|---|
+    | jammed (`jam_fraction` > 0.25) — metering | 295 | 38.5% |
+    | queued but not jammed | 0 | 0.0% |
+    | the trunk, which has no downstream segment | 100 | 13.0% |
+    | **clear — obstruction by the project's definition** | **372** | **48.5%** |
+
+    So it is not simply a mis-specified metric. Nearly half the firings are AVs
+    holding a clear segment with a clear road ahead.
+
+    **Consequence for the headline number.** The 17.6% gain at 10 m/s is achieved
+    substantially through behaviour the project's contract forbids. The arms that
+    do not trigger the penalty do not clearly beat doing nothing: at five seeds,
+    20 m/s gives 138.8 +/- 10.6 against 132.0 +/- 6.4 uncommanded, which is within
+    noise.
+
+    **Decision for the user.** Three readings, and they lead to different papers.
+    (a) The contract stands: the admissible gain is what a policy achieves without
+    triggering the term, and on current evidence that is not distinguishable from
+    zero — a null worth reporting, and the reason to report it is that the
+    unconstrained gain is large. (b) The term is too strict on a segment whose
+    downstream is jammed; exempting those 38.5% would license metering while still
+    forbidding the 48.5%. That is a defensible refinement of the metric, not a
+    weakening, but it must be made before the training run rather than after seeing
+    the result. (c) The prohibition itself is reconsidered for single-lane
+    approaches, where "hold every lane" cannot distinguish a roadblock from an
+    ordinary slow vehicle.
+
+    My recommendation is (b) plus reporting under both, because the exemption has a
+    stated principle -- a jammed downstream segment is a traffic reason for being
+    slow, which is exactly what the guard's other two conditions are testing for --
+    and because the 48.5% that remains forbidden is the part that would make a
+    reviewer uncomfortable.
+
 90. **The two unmeasured sensing parameters now carry citations.** Ankit,
     2026-09-09: use prior papers to fill the values that could not be measured, or
     HERE data if possible.
