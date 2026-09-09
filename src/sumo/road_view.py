@@ -222,6 +222,22 @@ class SumoTopologyView:
         return ()
 
     @property
+    def merge_nodes(self) -> tuple[str, ...]:
+        """Junctions that more than one edge enters.
+
+        Derived from the built network rather than read from the config, so it
+        cannot disagree with the road vehicles actually drive on. On
+        `inverted_tree` this is b1, b2 and c: three entries into each of the first
+        two and two middles into the trunk.
+        """
+        incoming: dict[str, int] = {}
+        for (_, to_node, ordinal) in self.road_network.lanes_dict():
+            if ordinal != 0:
+                continue  # count edges, not lanes
+            incoming[to_node] = incoming.get(to_node, 0) + 1
+        return tuple(sorted(node for node, count in incoming.items() if count > 1))
+
+    @property
     def lane_counts(self) -> Mapping[str, int]:
         """Lanes per segment, as `netconvert` built them.
 
