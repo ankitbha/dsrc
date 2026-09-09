@@ -428,3 +428,79 @@ class TestTheDemandsSpeedDistributionReachesSumo:
             f"declaring 24.0 gave {fast_mean:.2f} and declaring 18.0 gave "
             f"{slow_mean:.2f}; the declared mean is not reaching SUMO"
         )
+
+
+class TestTheCollisionCounterSurvivesAReset:
+    """`_colliding_ids` remembers which vehicles are already in a collision so a
+    collision persisting across steps is counted once. A mutant that never cleared
+    it on reset survived: SUMO reuses vehicle ids across episodes, so a second
+    episode in the same process would not count a collision involving an id the
+    first episode had left in the set.
+
+    Inert while the count is zero, which is the claim this counter exists to check.
+    """
+
+    def test_a_second_episode_counts_a_collision_the_first_one_saw(self, tmp_path, monkeypatch):
+        import src.sumo.env as env_module
+
+        config = {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 3, "dt": 1.0, "warmup_steps": 0,
+            "work_dir": str(tmp_path),
+        }
+        monkeypatch.setattr(
+            env_module._sumo.simulation, "getCollidingVehiclesIDList",
+            lambda: ("f0.1", "f1.1"),
+        )
+        env = SumoTopologyEnv("inverted_tree", config)
+        env.reset(seed=1)
+        try:
+            for _ in range(3):
+                env.step({})
+            assert env.collision_count == 2
+        finally:
+            env.close()
+
+        # The same env, a new episode, the same two vehicle ids colliding.
+        env.reset(seed=1)
+        try:
+            for _ in range(3):
+                env.step({})
+            assert env.collision_count == 2, (
+                f"the second episode counted {env.collision_count} collisions for "
+                "the same two vehicles; the set of colliding ids outlived the reset"
+            )
+        finally:
+            env.close()
+
+
+class TestVehiclesEnterAtTheirDesiredSpeed:
+    """SUMO's default `departSpeed` is 0, so every vehicle was inserted at rest and
+    had to accelerate away from the entry. `src/demand/spawner.py` draws one speed
+    and uses it as both the entry speed and the cruise target, so the faithful
+    mapping is `departSpeed="desired"`.
+
+    This pins a decision rather than an effect: measured over an hour at 1050 veh/h
+    with three seeds, adding it changed arrivals from 798.0 to 799.0 against a
+    standard deviation of 16. The route file is the only place the decision is
+    visible, so the route file is what this asserts.
+    """
+
+    def test_the_flows_declare_the_desired_departure_speed(self, tmp_path):
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 5, "dt": 1.0, "warmup_steps": 0,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=1)
+        try:
+            routes = (env.work_dir / "demand.rou.xml").read_text()
+            flows = [line for line in routes.splitlines() if "<flow " in line]
+            assert len(flows) == 6, f"expected one flow per entry, got {len(flows)}"
+            for flow in flows:
+                assert 'departSpeed="desired"' in flow, (
+                    f"a flow does not declare its departure speed: {flow.strip()}"
+                )
+        finally:
+            env.close()

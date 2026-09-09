@@ -89,15 +89,46 @@ sensing:
   # real sensing delay is unmodelled at this step size rather than represented.
   latency_s: 0.0
 
-  # NOT measured, and not measurable from these drives: calibrating detection
-  # noise needs an independent measurement of other vehicles' true position and
-  # speed, and the vehicle carried no radar, no lidar and no second instrumented
-  # car. Carried over from shared_ppo_deploysense.
-  # OPEN: these two need a citation to a published characterisation of monocular
-  # bounding-box ranging before the paper quotes them. They must not be described
-  # as measured on this vehicle.
-  position_noise_std: 1.5
-  speed_noise_std: 0.15
+  # NOT measured on this vehicle, and not measurable from these drives:
+  # calibrating detection noise needs an independent measurement of other
+  # vehicles' true position and speed, and the vehicle carried no radar, no lidar
+  # and no second instrumented car. These must never be described as measured
+  # here.
+  #
+  # CITED instead, from Song, Lu, Zhang and Li, "End-to-end Learning for
+  # Inter-Vehicle Distance and Relative Velocity Estimation in ADAS with a
+  # Monocular Camera", ICRA 2020 (arXiv:2006.04082), evaluated on the TuSimple
+  # velocity benchmark. That paper measures exactly this pair of quantities for
+  # exactly this sensor -- a forward monocular camera estimating other vehicles'
+  # distance and relative velocity -- and reports, for its full model:
+  #
+  #   position MSE 10.23 m^2                      -> RMSE 3.20 m
+  #   velocity MSE 0.86 m^2/s^2 (range-averaged)  -> RMSE 0.93 m/s
+  #
+  # Its velocity error is range-resolved, and our 100 m sensing range spans all
+  # three of its groups: MSE 0.15 near (< 20 m), 0.34 medium (20-45 m), 2.09 far
+  # (> 45 m), which are RMSE 0.39, 0.58 and 1.45 m/s. The range-averaged 0.93 is
+  # taken rather than the near-range figure because most observed vehicles are
+  # beyond 45 m at a 100 m range.
+  #
+  # These are the errors of a state-of-the-art LEARNED method. This rig runs
+  # YOLOv8n with pinhole geometry and vehicle-width priors, which is simpler and
+  # will not beat them, so treat the values as a floor on the noise rather than an
+  # estimate of it. The previous values, 1.5 m and 0.15 m/s, were carried over
+  # from shared_ppo_deploysense with no source and are optimistic against this
+  # citation by roughly 2x on position and 6x on speed.
+  #
+  # Corroborating, for speed only and from a different setup (roadside camera,
+  # homography, validated against a GNSS and IMU reference vehicle): Bell et al.,
+  # "Accurate Vehicle Speed Estimation from Monocular Camera Footage", ISPRS
+  # Annals V-2-2020, average RMSE 0.625 m/s over four experiments, range 0.130 to
+  # 1.171 m/s.
+  #
+  # Measured after setting them, against a noise-free run on the same seed: the
+  # injected error on `leader_gap` has a standard deviation of 3.00 m and on
+  # `leader_relative_speed` 0.70 m/s over 376 paired observations.
+  position_noise_std: 3.2
+  speed_noise_std: 0.93
 
   # Present only what the rig can sense. The parity ledger classifies six of the
   # 39 observation slots as structurally absent -- every rear-facing field, since

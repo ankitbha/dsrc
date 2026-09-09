@@ -185,3 +185,54 @@ class TestTheTrainingConfigsEpisodeLengthIsDeclared:
             assert truncated == [False] * 6 + [True], truncated
         finally:
             env.close()
+
+
+class TestTheDeploymentSensingModelIsActive:
+    """The paper's claim is that MAPPO works under the sensing model measured on
+    the deployment, so the noise has to actually reach the observations. A
+    defaulted field the constructor never passes reads as a measured zero.
+    """
+
+    def _observations(self, tmp_path, sensing):
+        from src.config.loaders import load_named_config
+        from src.sumo.env import SumoTopologyEnv
+
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 60, "dt": 1.0, "warmup_steps": 300,
+            "sensing": sensing, "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            seen = {}
+            for step in range(60):
+                observations, _, _, _, _ = env.step({})
+                for agent_id, observation in observations.items():
+                    gap = float(observation["leader_gap"])
+                    if gap < 1e6:
+                        seen[(step, agent_id)] = gap
+            return seen
+        finally:
+            env.close()
+
+    def test_the_configs_noise_reaches_the_observations(self, tmp_path):
+        import statistics
+
+        from src.config.loaders import load_named_config
+
+        sensing = dict(load_named_config("training", "mappo_sumo")["sensing"])
+        assert sensing["position_noise_std"] > 0.0
+        assert sensing["speed_noise_std"] > 0.0
+
+        clean = self._observations(tmp_path, {**sensing, "position_noise_std": 0.0,
+                                              "speed_noise_std": 0.0})
+        noisy = self._observations(tmp_path, sensing)
+        shared = set(clean) & set(noisy)
+        assert len(shared) > 100, f"only {len(shared)} paired observations"
+        error_sd = statistics.stdev(noisy[k] - clean[k] for k in shared)
+        # The observed spread is a little below the configured value because a gap
+        # is clipped at zero, so this checks the order rather than the exact figure.
+        assert error_sd > sensing["position_noise_std"] / 2, (
+            f"the configured {sensing['position_noise_std']} m of position noise "
+            f"produced an observed spread of {error_sd:.2f} m"
+        )

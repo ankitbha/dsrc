@@ -400,14 +400,33 @@ class TestSegmentFlowsReachEveryConsumer:
         # The invariant that makes the flows trustworthy rather than merely
         # non-zero: a segment's occupancy changes by exactly its inflow minus its
         # outflow, so no vehicle is counted twice and none is lost.
-        env = self._env(tmp_path)
+        #
+        # On `inverted_tree_bottleneck`, and for 400 steps, because the interesting
+        # case is rare elsewhere. A vehicle usually leaves one segment, spends a step
+        # with no segment inside the junction, and appears on the next, which the
+        # disappearance half of the accounting covers. Crossing directly from one
+        # segment to another within a single step -- the case the transition half
+        # covers -- happens once in 400 steps on `inverted_tree` and 46 times on the
+        # bottleneck variant, so a 60-step run on the plain tree almost never
+        # exercises it and a mutant deleting that half survived.
+        env = SumoTopologyEnv("inverted_tree_bottleneck", {
+            "topology": load_named_config("topology", "inverted_tree_bottleneck"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 400, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
         env.reset(seed=7)
         try:
             previous_counts: dict[str, int] = {}
             checked = 0
-            for step in range(60):
+            direct_transitions = 0
+            for step in range(400):
+                before = dict(env._segment_of)
                 env.step({})
                 state = env.get_global_state()["segment_state"]
+                direct_transitions += sum(
+                    1 for vehicle_id, segment_id in env._segment_of.items()
+                    if before.get(vehicle_id) not in (None, segment_id)
+                )
                 if previous_counts:
                     for segment_id, metrics in state.items():
                         change = metrics["vehicle_count"] - previous_counts.get(segment_id, 0)
@@ -418,7 +437,14 @@ class TestSegmentFlowsReachEveryConsumer:
                         )
                         checked += 1
                 previous_counts = {s: m["vehicle_count"] for s, m in state.items()}
-            assert checked > 400
+            assert checked > 3000
+            # Without this the run could satisfy the invariant while never crossing
+            # a segment boundary within a step, which is the half of the accounting
+            # a surviving mutant deleted.
+            assert direct_transitions > 10, (
+                f"only {direct_transitions} direct segment-to-segment transitions, "
+                "so the transition half of the accounting was barely exercised"
+            )
         finally:
             env.close()
 
@@ -573,5 +599,113 @@ class TestTheAntiDegenerateTermsAreMeasured:
                     if expected > 0:
                         nonzero += 1
             assert nonzero > 20, f"only {nonzero} non-zero values, so the check is vacuous"
+        finally:
+            env.close()
+
+
+class TestTheFirstObservedStepIsNotOneLargeInflow:
+    """`_warm_up` seeds `_segment_of` from the vehicles already on the network. A
+    mutant deleting that seeding survived: without it the first observed step
+    reports every vehicle on the network as having just entered its segment, which
+    is a 32-vehicle inflow spike on the critic's first input of the episode.
+    """
+
+    def test_the_first_step_reports_ordinary_flow(self, tmp_path):
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 20, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            occupied = len(env.vehicle_snapshots())
+            assert occupied > 20, "the warm-up did not fill the network"
+            env.step({})
+            first = sum(m["inflow"] for m in
+                        env.get_global_state()["segment_state"].values())
+            later = []
+            for _ in range(19):
+                env.step({})
+                later.append(sum(m["inflow"] for m in
+                                 env.get_global_state()["segment_state"].values()))
+            assert first <= max(later) + 2, (
+                f"the first observed step reported {first} vehicles entering a "
+                f"segment against at most {max(later)} on later steps, with "
+                f"{occupied} already on the network when the episode began"
+            )
+        finally:
+            env.close()
+
+
+class TestThePenetrationIsVisibleToTheCritic:
+    """`_network_census` classifies a vehicle as an AV by its type id. A mutant
+    classifying every vehicle as an AV survived: `active_av_count` is one of the
+    three top-level inputs the critic receives, and it would have read the total
+    vehicle count at every penetration.
+    """
+
+    def _counts(self, tmp_path, penetration):
+        demand = dict(load_named_config("demand", "sumo_saturating"))
+        demand["av_penetration"] = penetration
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": demand, "duration_steps": 100, "dt": 1.0,
+            "warmup_steps": 300, "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            totals, avs = 0, 0
+            for _ in range(100):
+                env.step({})
+                state = env.get_global_state()
+                totals += state["active_vehicle_count"]
+                avs += state["active_av_count"]
+            return totals, avs
+        finally:
+            env.close()
+
+    def test_no_vehicle_is_an_av_at_zero_penetration(self, tmp_path):
+        totals, avs = self._counts(tmp_path, 0.0)
+        assert totals > 1000
+        assert avs == 0, f"{avs} AVs counted in a fleet declared to have none"
+
+    def test_the_counted_share_follows_the_declared_penetration(self, tmp_path):
+        totals, avs = self._counts(tmp_path, 0.2)
+        share = avs / totals
+        assert 0.1 < share < 0.35, (
+            f"{share:.3f} of vehicle-steps were counted as AVs against a declared "
+            "0.2; the classification is not reading the vehicle type"
+        )
+
+
+class TestFlowMagnitudeIsBoundaryCrossingsNotOccupancy:
+    """A mutant counting every vehicle that stayed on its segment as both an inflow
+    and an outflow survived the conservation invariant, because it adds one to each
+    side and the difference is unchanged. The invariant alone therefore does not
+    pin the magnitude, and the critic would have received a flow of roughly the
+    vehicle count on every segment on every step.
+    """
+
+    def test_flow_is_far_smaller_than_occupancy(self, tmp_path):
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            inflow_total = occupancy_total = 0
+            for _ in range(120):
+                env.step({})
+                state = env.get_global_state()["segment_state"]
+                inflow_total += sum(m["inflow"] for m in state.values())
+                occupancy_total += sum(m["vehicle_count"] for m in state.values())
+            # Vehicles cross a segment boundary about once every few hundred metres
+            # of travel, so boundary crossings per step are a small fraction of the
+            # vehicles present. Measured at roughly 0.8 against 58.
+            assert occupancy_total / 120 > 30, "the network was not occupied enough to compare"
+            assert inflow_total < occupancy_total / 10, (
+                f"{inflow_total} inflow events against {occupancy_total} "
+                "vehicle-steps: the flow is tracking occupancy, not boundary crossings"
+            )
         finally:
             env.close()

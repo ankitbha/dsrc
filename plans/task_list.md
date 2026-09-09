@@ -2470,6 +2470,65 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+90. **The two unmeasured sensing parameters now carry citations.** Ankit,
+    2026-09-09: use prior papers to fill the values that could not be measured, or
+    HERE data if possible.
+
+    HERE does not apply. It is a segment-level traffic feed, so it can characterise
+    aggregate speed on a link but not the per-vehicle position and speed error of a
+    forward monocular camera, which is what these two parameters model.
+
+    `configs/training/mappo_sumo.yaml` now cites Song, Lu, Zhang and Li,
+    "End-to-end Learning for Inter-Vehicle Distance and Relative Velocity
+    Estimation in ADAS with a Monocular Camera", ICRA 2020 (arXiv:2006.04082),
+    on the TuSimple velocity benchmark. It measures this exact pair of quantities
+    for this exact sensor and reports, for its full model, position MSE 10.23 m^2
+    and range-averaged velocity MSE 0.86 m^2/s^2 — RMSE 3.20 m and 0.93 m/s.
+
+    | parameter | was | now | source |
+    |---|---|---|---|
+    | `position_noise_std` | 1.5 | **3.2** | position MSE 10.23 m^2 |
+    | `speed_noise_std` | 0.15 | **0.93** | velocity MSE 0.86 m^2/s^2 |
+
+    The old values were carried over from `shared_ppo_deploysense` with no source
+    and are optimistic against this citation by roughly 2x on position and 6x on
+    speed. The cited figures belong to a state-of-the-art learned method, while
+    this rig runs YOLOv8n with pinhole geometry and vehicle-width priors, so they
+    are a floor on the noise rather than an estimate of it — which is the
+    conservative direction for the claim: a policy that works under them would work
+    under a better sensor.
+
+    Song's velocity error is range-resolved — RMSE 0.39 near (< 20 m), 0.58 medium
+    (20-45 m), 1.45 far (> 45 m) — and the range-averaged figure is taken because
+    most vehicles observed at a 100 m range are beyond 45 m. Corroborating for
+    speed alone, from a roadside camera validated against a GNSS and IMU reference:
+    Bell et al., ISPRS Annals V-2-2020, average RMSE 0.625 m/s over four
+    experiments.
+
+    Verified against a noise-free run on the same seed: the injected error on
+    `leader_gap` has a standard deviation of 3.00 m and on `leader_relative_speed`
+    0.70 m/s over 376 paired observations. A test pins that the configured noise
+    reaches the observations.
+
+    **Only `mappo_sumo.yaml` is changed.** `mappo_deploysense.yaml` and
+    `shared_ppo_deploysense.yaml` still carry 1.5 and 0.15, because their recorded
+    results were produced under those values and changing them would silently
+    supersede those results. Any future run on those configs should adopt the cited
+    values first.
+
+    **Still open: `latency_s`.** This one was measured — end-to-end latency over
+    22,929 ticks on 2026-09-08 was p50 96.7 ms, mean 112.4 ms, p95 172.9 ms — and
+    the obstacle is the simulation's time resolution, not a missing measurement.
+    `SensingBuffer.frame_for_latency` selects whole recorded frames and the buffer
+    records once per step, so at `dt: 1.0` any value in (0, 1.0] imposes a full
+    second and overstates the measured delay tenfold. It is pinned at 0, which
+    understates it by 97 ms. **Decision for the user:** running at `dt: 0.1` would
+    make `latency_s: 0.1` represent the measured p50 almost exactly and would put
+    the policy's decision rate at 10 Hz, closer to the deployment's 30 Hz tick than
+    1 Hz is. The cost is that every capacity and arrival figure would need
+    re-measuring a third time, and each episode becomes 6,000 steps rather than
+    600.
+
 89. **What the simulation study still needs.** Asked 2026-09-09: are the results
     for the paper in hand? Scope corrected by the user in the same exchange, and
     the correction matters: **the paper is a deployment story.** The simulation
