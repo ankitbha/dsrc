@@ -1,41 +1,36 @@
 {
   "schema": 1,
-  "updated_at": "2026-09-09T05:25:31Z",
+  "updated_at": "2026-09-09T16:01:33Z",
   "stale_after_minutes": 45,
   "blocking": null,
   "awaiting_user": null,
-  "next_action": "Two jobs in flight. The validator is on round 2 of 3, auditing the round-1 fixes. MAPPO training is running: 100 updates at 512 rollout steps, ~15 s per update, output under the session scratchpad train/ directory. When training finishes, task 69 evaluates the checkpoint against no_av on inverted_tree, and MUST use the sensing block recorded in the checkpoint's config_resolved.yaml under the `training` key.",
+  "next_action": "PAUSED. Blocking unknown: the collision-free bound is forward-looking only and fails as density rises, so runs at the saturating demand die at steps 171-319 and no evaluation is possible. The fix is closest-point-of-approach in CollisionFreeMixin.perceived_safe_speed (src/vehicles/safe_following.py): project both velocities, and if the predicted miss distance is under a vehicle width inside the braking horizon, treat it as a conflict. Do NOT widen SAFE_LATERAL_M -- 4 m makes every adjacent-lane vehicle a longitudinal constraint and over-brakes multi-lane sections. Second blocking fact: no_av at this demand is BIMODAL (2 of 5 seeds gridlock to throughput 0.0, 3 flow at 23-34), so a reference mean is meaningless and any comparison must report modes or per-seed values.",
   "last_verdict": null,
   "section": "C. Simulation replication",
   "task": {
-    "number": 68,
-    "what": "train MAPPO on inverted_tree",
-    "stage": "experiment",
-    "stage_started_at": "2026-09-09T05:25:31Z",
-    "background_job": {
-      "what": "MAPPO training, 100 updates x 512 rollout steps, seed 7, demand medium",
-      "started_at": "2026-09-09T05:25:31Z",
-      "expect_by": "2026-09-09T06:05:31Z"
-    },
+    "number": 77,
+    "what": "the collision-free bound fails as density rises",
+    "stage": "paused",
+    "stage_started_at": "2026-09-09T16:01:33Z",
+    "background_job": null,
     "needs_hardware": false,
     "remaining": [
-      69
+      74,
+      78
     ],
-    "stopped_by_user": false
+    "stopped_by_user": true
   },
   "carried_forward": [
-    "Jetson suite baseline is 2308 passed / 24 skipped. Reproduce it before quoting any delta.",
-    "Use .venv/bin/python. System python3 is 3.14 and has no pytest.",
-    "zsh does not word-split unquoted variables; `find` is a shell function wrapping bfs. Use /usr/bin/find with explicit arguments.",
-    "stale_after_minutes is a guess until the task 68 pilot measures one training update. Revise it then and record the measurement.",
-    "9 gates 68: topology_env.py:109 builds every agent observation through SensingConfig, so the sensing block is the actor's input distribution.",
-    "69 must evaluate under the same sensing block 68 trained under.",
-    "--controlled-vehicles is inert outside ring; set AV population via demand.av_penetration.",
-    "Task 67 measured on 81 DISTINCT runs against a same-run plain-IDM control: completion 43/81 -> 57/81 (+17pp), collisions 155 -> 126 (-19%).",
-    "burst is byte-identical to medium at 120 steps (its window opens at t=300 s), so any grid including it counts medium twice.",
-    "One MAPPO update at 512 rollout steps takes ~15 s; a 100-update run is ~25 min.",
-    "A checkpoint records its sensing block in config_resolved.yaml under the `training` key. Task 69 must evaluate under it.",
-    "Nothing validates that mean_speed is physical; a value of -2.6e11 propagated into the training score and the health criteria unnoticed."
+    "Use .venv/bin/python. System python3 is 3.14 with no pytest.",
+    "Suites at HEAD: simulator 337 passed, Jetson 2319 passed / 24 skipped. Reproduce before quoting a delta.",
+    "TRAINED CHECKPOINT EXISTS at scratchpad/train2/mappo_inverted_tree_full_seed7 (actor.pt + config_resolved.yaml). The scratchpad is session-local and will be LOST; retraining takes ~40 min at 100 updates.",
+    "Task 81: the throughput-led reward works -- throughput_recent 10.779 -> 14.062 over 100 updates while mean_speed stayed flat.",
+    "Task 82: trainers.py:134 score is still mean_speed - jam_fraction, so best_score and actor.pt selection use a quantity that is NOT the objective. That run's score delta read -0.067 while its objective improved 30%.",
+    "Task 83: config_resolved.yaml is written only at completion, so task 69's harness cannot evaluate an interrupted run.",
+    "configs/demand/saturating.yaml is 2000 veh/h, measured: capacity is ~1800, high (2700) gridlocks.",
+    "Do NOT quote task 80's original table. Retracted at five seeds.",
+    "The arcs now join on all six topologies (worst jump 0.00 m, was 10.00 m).",
+    "burst is byte-identical to medium at 120 steps; any grid including it double-counts medium."
   ],
   "stopped_by_user": false
 }

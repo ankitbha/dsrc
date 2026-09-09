@@ -3383,3 +3383,86 @@ trained policy is the one to be deployed. That distinction is the user's.
     The latch is deliberately **not** cleared when telemetry goes absent, stale or
     unstamped. A gap in the reporting is not evidence the handset cooled, which is
     the same reading of silence the `unknown` tier already takes.
+
+---
+
+# PAUSED 2026-09-09
+
+## The blocking unknown
+
+**The collision-free bound is forward-looking only, and fails as density rises.**
+`CollisionFreeMixin.perceived_safe_speed` in `src/vehicles/safe_following.py` caps
+speed on the nearest vehicle ahead within a 2.6 m lateral window. At the
+`saturating` demand the AV arms die at steps 171, 225, 290 and 319 of 600, and
+`no_av` seed 47 has 9 human-human collisions with no AVs present, so it is not an
+AV-control problem. The collisions are side-by-side at 1.9 to 3.7 m lateral —
+outside or at the edge of that window — because a forward-looking test cannot see a
+conflict that is currently beside the vehicle and converging.
+
+**How to settle it.** Replace the lateral window with closest-point-of-approach:
+for each pair, project both velocities, compute the time of closest approach and
+the miss distance, and treat it as a conflict when the miss distance is under a
+vehicle width inside the braking horizon. **Do not simply widen `SAFE_LATERAL_M`** —
+4 m makes every adjacent-lane vehicle a longitudinal constraint and over-brakes
+multi-lane sections, which `tests/test_collision_free.py::test_traffic_still_moves`
+exists to catch.
+
+**A second fact that blocks evaluation independently.** `no_av` at this demand is
+**bimodal**, not noisy: seeds 7 and 47 gridlock to throughput 0.0 while 17, 27 and
+37 flow at 23 to 34. A reference mean is meaningless there. Any comparison must
+report the modes, or per-seed values, or use a demand below the bistable region.
+
+## Exactly where I stopped
+
+- `dsrc`, branch `main`, **clean tree, 0 commits ahead of `origin/main`**, HEAD
+  `137b125`. Everything is pushed.
+- Suites at HEAD: **simulator 337 passed**, **Jetson 2319 passed / 24 skipped**.
+- **A trained checkpoint exists but will be lost.** The session scratchpad holds
+  `train2/mappo_inverted_tree_full_seed7` with `actor.pt`, `critic.pt` and
+  `config_resolved.yaml`, trained 100 updates under the throughput-led reward.
+  The scratchpad is session-local. Retraining is about 40 minutes.
+- Nothing is running. Two background jobs completed; a third measurement of the
+  reference across more seeds was never started.
+
+## What was learned that would otherwise be re-derived
+
+- **Collisions were most of this simulator's congestion.** `merge` entirely,
+  `inverted_tree` 61%. Task 8's `congestion_reachable` was largely measuring crashes.
+- **The 120-step episode hid that `high` demand is over-saturated**: jam 0.149 at
+  120 steps, 0.681 at 360, 1.000 at 900. Capacity is about 1800 veh/h.
+- **`no_av` cannot fail `episodes_complete`** — it has no AVs and `terminated` tests
+  AV crashes — so that criterion was uninformative for every task 8 cell.
+- **The arcs did not join.** A vehicle crossing node `c` from `('b2','c',1)` was
+  moved 10 m sideways. Fixed; worst jump is now 0.00 m on all six topologies.
+- **The reward is a shared team reward**, not ego speed. Nine weighted network
+  metrics. My earlier claim otherwise is corrected in the plan.
+- **The 55-to-1 speed-to-throughput ratio was demand-specific.** At `medium`
+  throughput averages 0.95; at `saturating` it averages 11.5 and the shipped weights
+  already gave it 19%.
+- Successor map after the geometry fix: `a1+a3 → ('b1','c',0)`, `a2 → ('b1','c',1)`,
+  `a5 → ('b2','c',0)`, `a4+a6 → ('b2','c',1)`. Merge-conflict fixtures need a
+  converging pair, so `a4`+`a6` or `a1`+`a3`.
+
+## Task order to resume
+
+1. **Task 77** — closest-point-of-approach in the bound. Then re-measure per seed;
+   the target is every arm completing 600 steps.
+2. **Re-measure the reference** with enough seeds to bound the bistability, and
+   report modes rather than means.
+3. **Task 74** — the hour-long evaluation, using `scripts/evaluate_replication.py`,
+   which reads the sensing block from the checkpoint and refuses if it is absent.
+4. **Task 82** — score the checkpoint on `build_team_reward`, not
+   `mean_speed − jam_fraction`.
+5. **Task 78 steps 2 and 3** — Jetson-side HERE work, which gates a deployable
+   policy but not a simulator result.
+
+## Open decisions not yet made
+
+- **Whether the replication number waits for task 78 step 3.** A simulator claim
+  does not depend on the Jetson; a deployable policy does. Recorded under task 78.
+- **Whether the six rear fields are dropped from the encoding or held at the rig's
+  constants.** Recommendation on record: hold, because the vector width is baked
+  into `sim_contract` on both sides.
+- **Whether to evaluate at `saturating` (bimodal) or find a demand below the
+  bistable region.** Not yet investigated; 2200 was measured as congested and
+  heavier, and may be more stable than 2000.
