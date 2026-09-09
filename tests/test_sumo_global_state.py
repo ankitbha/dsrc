@@ -459,3 +459,42 @@ class TestThresholdsComeFromOnePlace:
             f"a 60 s window counted {wide:.2f} arrivals on average and a 6 s window "
             f"{narrow:.2f}; the declared window is not reaching the metric"
         )
+
+
+class TestTheAggregatesCoverEveryVehicle:
+    """`mean_speed` and `active_vehicle_count` were computed from the snapshots,
+    which skip vehicles inside a junction because they have no edge and so no
+    segment. That is right for the per-segment metrics and wrong for a network-wide
+    aggregate: junction-crossing vehicles are moving, so the reported mean speed sat
+    below SUMO's own.
+    """
+
+    def test_the_reported_mean_speed_is_sumos_own(self, tmp_path):
+        import statistics
+
+        from src.sumo import env as env_module
+
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 200, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            excluded = 0
+            for _ in range(200):
+                _, _, _, _, info = env.step({})
+                ids = env_module._sumo.vehicle.getIDList()
+                speeds = [env_module._sumo.vehicle.getSpeed(v) for v in ids]
+                assert info["metrics"]["mean_speed"] == pytest.approx(
+                    statistics.fmean(speeds) if speeds else 0.0, abs=1e-6)
+                assert info["metrics"]["active_vehicle_count"] == len(ids)
+                excluded += len(ids) - len(env.vehicle_snapshots())
+            # Without this the assertions above would be satisfied by a run in which
+            # no vehicle was ever inside a junction, where the two agree anyway.
+            assert excluded > 100, (
+                f"only {excluded} vehicle-steps were inside a junction, so the "
+                "comparison never had anything to distinguish"
+            )
+        finally:
+            env.close()

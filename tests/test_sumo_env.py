@@ -378,3 +378,53 @@ class TestTheTopologysSafetyBlockReachesTheObservation:
         assert permissive, "no AV observations produced, so the comparison is empty"
         assert any(permissive), "the permissive threshold raised the flag nowhere"
         assert not any(strict), "the strict threshold still raised the flag"
+
+
+class TestTheDemandsSpeedDistributionReachesSumo:
+    """`_write_routes` read only `max_mps` and hardcoded the desired-speed spread as
+    `normc(1,0.1,0.8,1.2)` on the lane limit, so a config declaring a 24 m/s mean
+    produced a 30 m/s fleet: the measured operating point belonged to a fleet no
+    config described. `mean_mps`, `std_mps` and `min_mps` now map onto the factor.
+    """
+
+    def _sampled_speeds(self, tmp_path, mean_mps):
+        demand = dict(load_named_config("demand", "sumo_saturating"))
+        demand["total_vehicles_per_hour"] = 300.0  # free flow: desired speed is visible
+        demand["speed_distribution"] = {**demand["speed_distribution"],
+                                        "mean_mps": mean_mps}
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": demand, "duration_steps": 400, "dt": 1.0,
+            "warmup_steps": 100, "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            per_vehicle = {}
+            for _ in range(400):
+                env.step({})
+                for snapshot in env.vehicle_snapshots():
+                    per_vehicle[snapshot.vehicle_id] = snapshot.free_flow_speed_mps
+            return list(per_vehicle.values())
+        finally:
+            env.close()
+
+    def test_the_declared_mean_is_what_the_fleet_drives(self, tmp_path):
+        speeds = self._sampled_speeds(tmp_path, 24.0)
+        assert len(speeds) > 20
+        mean = sum(speeds) / len(speeds)
+        assert 22.5 < mean < 25.5, (
+            f"the config declares a 24.0 m/s mean and the fleet drives {mean:.2f}; "
+            "the lane limit is 30.0, so an unmapped distribution reads near that"
+        )
+
+    def test_changing_the_declared_mean_moves_the_fleet(self, tmp_path):
+        # The control. Under the hardcoded factor both configurations produced the
+        # same fleet, so a test of one value alone would pass on a config that is
+        # never read.
+        fast = self._sampled_speeds(tmp_path, 24.0)
+        slow = self._sampled_speeds(tmp_path, 18.0)
+        fast_mean = sum(fast) / len(fast)
+        slow_mean = sum(slow) / len(slow)
+        assert fast_mean - slow_mean > 4.0, (
+            f"declaring 24.0 gave {fast_mean:.2f} and declaring 18.0 gave "
+            f"{slow_mean:.2f}; the declared mean is not reaching SUMO"
+        )

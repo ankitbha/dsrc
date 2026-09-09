@@ -393,6 +393,31 @@ class SumoTopologyEnv:
 
     # ----------------------------------------------------------------- metrics
 
+    def _network_census(self) -> tuple[list[float], int, int]:
+        """Speeds, vehicle count and AV count over every vehicle on the network.
+
+        `vehicle_snapshots` skips vehicles inside a junction, which have no edge and
+        so no segment. That is right for the per-segment metrics and wrong for a
+        network-wide count: `HighwayTopologyEnv` counts every vehicle on the road,
+        junction-crossing vehicles are moving, and excluding them biased `mean_speed`
+        downward -- 6.157 m/s against SUMO's own 6.358 over all vehicles, 3.2% low,
+        on 1.44% of vehicle-steps.
+
+        `agent_ids` stays snapshot-derived, because an agent needs an observation and
+        a vehicle with no segment cannot be given one. `active_av_count` can
+        therefore exceed the number of agents acting in a step, which is the honest
+        reading: the vehicle is on the network and controllable next step.
+        """
+        if not self._running:
+            return [], 0, 0
+        speeds: list[float] = []
+        av_count = 0
+        for vehicle_id in _sumo.vehicle.getIDList():
+            speeds.append(float(_sumo.vehicle.getSpeed(vehicle_id)))
+            if _sumo.vehicle.getTypeID(vehicle_id).startswith(self.AV_TYPE):
+                av_count += 1
+        return speeds, len(speeds), av_count
+
     def _build_metrics(self, snapshots: list[VehicleSnapshot], now: float) -> dict[str, Any]:
         """The metric shape the reward and the health check already read.
 
@@ -409,7 +434,13 @@ class SumoTopologyEnv:
         # the other, and the rolling throughput window silently stayed at 60 s.
         window = float(thresholds.throughput_window_s)
         self._arrivals = [t for t in self._arrivals if now - t <= window]
-        speeds = [s.speed_mps for s in snapshots]
+        # Every vehicle on the network, not only those the snapshots cover.
+        # `vehicle_snapshots` skips vehicles inside a junction, which have no edge
+        # and so no segment; that is right for the per-segment metrics and wrong for
+        # a network-wide mean. Junction-crossing vehicles are moving, so excluding
+        # them biased `mean_speed` downward -- measured at 6.157 m/s against SUMO's
+        # own 6.358 over all vehicles, 3.2% low, on 1.44% of vehicle-steps.
+        speeds, active_count, active_av_count = self._network_census()
         segment_metrics = self.get_segment_metrics(snapshots)
         jam = [m["jam_fraction"] for m in segment_metrics.values()]
         queue = sum(int(m["queue_length"]) for m in segment_metrics.values())
@@ -443,8 +474,8 @@ class SumoTopologyEnv:
             # Over completions per entry branch, which is what highway_env measures
             # and what inverted_tree exists to study, not over instantaneous speeds.
             "fairness_jain": self._branch_fairness(),
-            "active_vehicle_count": len(snapshots),
-            "active_av_count": len(self.agent_ids),
+            "active_vehicle_count": active_count,
+            "active_av_count": active_av_count,
         }
 
     def _track_branches(self) -> None:
@@ -564,12 +595,13 @@ class SumoTopologyEnv:
         115 and both SUMO training runs are invalid.
         """
         snapshots = self.vehicle_snapshots()
+        _, census_count, census_av_count = self._network_census()
         demand = self.config.get("demand", {})
         return {
             "time": self.step_count * float(self.config.get("dt", 1.0)),
             "topology_id": self.topology_id,
-            "active_vehicle_count": len(snapshots),
-            "active_av_count": sum(1 for s in snapshots if s.role == "av"),
+            "active_vehicle_count": census_count,
+            "active_av_count": census_av_count,
             "completed_vehicle_count": self.arrived_total,
             "segment_state": self.get_segment_metrics(snapshots),
             "branch_state": {
@@ -723,7 +755,32 @@ class SumoTopologyEnv:
         # to 11.29 m/s with no controller acting at all. That would have been
         # reported as a control effect.
         max_speed = float(speed.get("max_mps", 32.0))
-        speed_factor = "normc(1,0.1,0.8,1.2)"
+        # The demand config states its speed distribution in m/s; SUMO states a
+        # vehicle's desired speed as a factor on the lane's limit. Every edge this
+        # builder writes carries the topology's single `speed_limit_mps`, so the
+        # configured distribution maps onto a factor exactly, and a config declaring
+        # a 24 m/s mean gets a 24 m/s mean rather than the 30 m/s the limit implies.
+        # The previous form hardcoded normc(1,0.1,0.8,1.2), so `mean_mps`, `std_mps`
+        # and `min_mps` reached SUMO nowhere and the measured operating point
+        # belonged to an undeclared fleet.
+        limit = float((self.config.get("topology") or {}).get("road", {})
+                      .get("speed_limit_mps", 30.0))
+        speed_factor = "normc({:.4f},{:.4f},{:.4f},{:.4f})".format(
+            float(speed.get("mean_mps", 24.0)) / limit,
+            float(speed.get("std_mps", 2.5)) / limit,
+            float(speed.get("min_mps", 12.0)) / limit,
+            max_speed / limit,
+        )
+        # `departSpeed="desired"` enters at the vehicle's own desired speed, which is
+        # what the other simulator's spawner does: it draws one speed and uses it as
+        # both the entry speed and the cruise target.
+        #
+        # `spawn_min_gap_m` is deliberately NOT mapped. On `highway_env` it gates
+        # insertion -- a lane is eligible only if no vehicle sits within that
+        # distance -- and SUMO enforces insertion feasibility itself through the
+        # car-following model, which is the stronger criterion. Mapping it to a vType
+        # `minGap` would instead change the standstill gap, and so jam density, from
+        # a field that on the other simulator changes no physics at all.
         lines = [
             "<routes>",
             f'  <vType id="{self.HUMAN_TYPE}" maxSpeed="{max_speed}"'
@@ -755,7 +812,8 @@ class SumoTopologyEnv:
             # only thing penetration changes is which vehicles are controllable.
             lines.append(
                 f'  <flow id="f{index}" type="{self.MIX_TYPE}" route="r{index}"'
-                f' begin="0" end="{duration_s}" vehsPerHour="{per_entry:.3f}"/>'
+                f' begin="0" end="{duration_s}" vehsPerHour="{per_entry:.3f}"'
+                f' departSpeed="desired"/>'
             )
         lines.append("</routes>")
         route_file = self.work_dir / "demand.rou.xml"

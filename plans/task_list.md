@@ -2472,14 +2472,30 @@ and on what evidence.
 
 88. **Lower-severity items from the same audit.** Recorded, not fixed.
 
-    - **The demand config's speed distribution and spawn gap are ignored on SUMO.**
-      `_write_routes` reads only `speed_distribution.max_mps`. `mean_mps`, `std_mps`,
-      `min_mps`, `spawn_min_gap_m`, `branch_split` and `burst` reach SUMO nowhere,
-      though all are consumed on `highway_env`. Measured: a config declaring a
-      24.0 m/s desired-speed mean produced a sampled `getAllowedSpeed` of 28.35 m/s,
-      about 24% above it, and the minimum gap falls from the configured 12 m to
-      SUMO's vType default of 2.5 m, which raises jam density roughly fourfold. Both
-      set capacity, which is the quantity the sweeps measure.
+    - **The demand config's speed distribution is ignored on SUMO.** FIXED
+      2026-09-09. `_write_routes` read only `speed_distribution.max_mps` and
+      hardcoded the desired-speed spread as `normc(1,0.1,0.8,1.2)` on the lane
+      limit, so a config declaring a 24.0 m/s mean produced a fleet desiring about
+      30 m/s: every capacity measurement belonged to a fleet no config described.
+      Every edge this builder writes carries the topology's single
+      `speed_limit_mps`, so the configured distribution maps onto the factor
+      exactly. Measured after the fix, per distinct vehicle at free flow: declaring
+      24.0 gives 23.68, declaring 18.0 gives 17.88.
+
+      **`spawn_min_gap_m` is deliberately not mapped, and the original wording of
+      this item was wrong about it.** It claimed the minimum gap "falls from the
+      configured 12 m to SUMO's vType default of 2.5 m, which raises jam density
+      roughly fourfold". Those are two different quantities. On `highway_env`
+      `spawn_min_gap_m` gates insertion — `_lane_has_spawn_gap` refuses a lane
+      holding a vehicle within that distance — and changes no car-following
+      behaviour. SUMO enforces insertion feasibility itself through the
+      car-following model, which is the stronger criterion. Mapping the field to a
+      vType `minGap` would change the standstill gap, and so jam density, from a
+      config field that on the other simulator changes no physics at all.
+
+      `branch_split` and `burst` remain unmapped: `branch_split` is `{main: 1.0}` in
+      both SUMO demand configs and the builder already splits the rate evenly across
+      the six entries, and `burst.enabled` is false in both.
     - **`mean_speed` and `active_vehicle_count` exclude vehicles inside junctions.**
       Measured: 700 of 48,590 vehicle-steps (1.44%) were on internal lanes, and the
       reported `mean_speed` was 6.157 m/s against SUMO's own 6.358 over all
