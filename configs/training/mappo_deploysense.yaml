@@ -1,0 +1,72 @@
+id: mappo_deploysense
+kind: training
+description: >-
+  Centralized critic, decentralized actors, trained under the sensing profile the
+  deployed rig actually has. This is the config task 68 trains with and task 69
+  must evaluate under; a checkpoint trained on one sensing block and scored under
+  another measures the mismatch rather than the controller.
+algorithm: mappo
+policy_mode: ctde
+action_profile: full
+total_updates: 100
+rollout_steps: 512
+
+# Every value here has a named source. `src/sensing/local.py` reads exactly these
+# five plus the bin edges, and they define the actor's entire input distribution.
+sensing:
+  # Optics, not measurement. fx_px is 800 on the rotated frame, so a 1.8 m wide
+  # vehicle spans 20 px at 72 m and 14.4 px at 100 m. The 150 m library default
+  # puts it at 9.6 px, which is past what the detector resolves. 100 m is the
+  # optimistic end of the defensible band and is what shared_ppo_deploysense
+  # already used.
+  # PENDING: task 9 replaces this with the replay measurement over the recorded
+  # video, which needs the Jetson's TensorRT detector and so cannot be done from
+  # the laptop.
+  range_m: 100.0
+
+  # Measured: end-to-end latency over 22,929 ticks on 2026-09-08 was p50 96.7 ms,
+  # mean 112.4 ms, p95 172.9 ms, p99 276.4 ms.
+  #
+  # It is deliberately left at 0. `SensingBuffer.frame_for_latency` selects whole
+  # recorded frames and the buffer records once per step, so at dt = 1.0 s ANY
+  # value in (0, 1.0] selects the frame from a full second earlier. Setting the
+  # measured 0.097 would impose a 1000 ms delay, overstating it tenfold; leaving
+  # it at 0 understates by 97 ms. The smaller error is the honest one, and the
+  # real sensing delay is unmodelled at this step size rather than represented.
+  latency_s: 0.0
+
+  # NOT measured, and not measurable from these drives: calibrating detection
+  # noise needs an independent measurement of other vehicles' true position and
+  # speed, and the vehicle carried no radar, no lidar and no second instrumented
+  # car. Carried over from shared_ppo_deploysense.
+  # OPEN: these two need a citation to a published characterisation of monocular
+  # bounding-box ranging before the paper quotes them. They must not be described
+  # as measured on this vehicle.
+  position_noise_std: 1.5
+  speed_noise_std: 0.15
+
+  # The library default, and the drive supports it rather than contradicting it:
+  # ego speed over 17,913 moving ticks is bimodal, with a stop-and-go mass below
+  # about 6 m/s and a cruise mode at 22-26 m/s.
+  queue_speed_mps: 5.0
+
+actor:
+  observation_scope: local
+  hidden_sizes:
+    - 128
+    - 128
+critic:
+  observation_scope: global
+optimization:
+  learning_rate: 0.0003
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_coef: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.01
+  max_grad_norm: 0.5
+  update_epochs: 4
+  minibatch_size: 256
+  reward_scale: 0.05
+  reward_clip: 10.0
+  crash_penalty: 2.0
