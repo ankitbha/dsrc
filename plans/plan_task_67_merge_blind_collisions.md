@@ -669,3 +669,52 @@ currently see.
 
 `distance_to_next_merge` is **not** covered by this decision and remains refused:
 the flow API carries road geometry, not junction topology.
+
+---
+
+# CORRECTION 2026-09-09: the reward IS system-level. The earlier claim was wrong
+
+**What was recorded above and in commit `1c8ee39` is wrong.** It said the reward is
+ego speed with no throughput term. It is neither.
+
+`_reward_for_vehicle` — `0.0 if crashed else vehicle.speed` — populates the
+`rewards` dict that `env.step()` returns, and **the trainer ignores it**.
+`src/rl/trainers.py:189` uses `build_team_reward(episode_metrics)`: one shared
+system-level reward over nine network metrics, which is the MAPPO-style
+formulation. I read the environment and assumed the trainer consumed it.
+
+**What the reward actually is**, with each term's mean contribution over the
+100-update run:
+
+| metric | weight | mean value | contribution | share of positive |
+|---|---|---|---|---|
+| `mean_speed` | +0.05 | 20.860 | **+1.0430** | **69.3%** |
+| `fairness_jain` | +0.50 | 0.885 | +0.4426 | 29.4% |
+| `new_collision_count` | −5.00 | 0.044 | −0.2210 | |
+| `rolling_roadblock_score` | −2.00 | 0.053 | −0.1059 | |
+| `hard_braking_count` | −0.10 | 0.916 | −0.0916 | |
+| `speed_std` | −0.02 | 3.484 | −0.0697 | |
+| `throughput_recent` | +0.02 | 0.948 | **+0.0190** | **1.3%** |
+| `queue_length_total` | −0.02 | 0.710 | −0.0142 | |
+| `jam_fraction` | −1.00 | 0.013 | −0.0127 | |
+
+Team reward +0.9894, times `reward_scale` 0.05, so +0.0495 per agent per step.
+
+**The real finding, which the wrong one obscured.** Throughput is in the reward and
+contributes **1.3%** of the positive signal. `mean_speed` contributes **69%**. The
+ratio is **55 : 1**, because the weights do not normalise for scale: `mean_speed` is
+about 21 in m/s while `throughput_recent` is about 0.95 in vehicles. The agent
+optimises mean speed because that is where the reward is — which is exactly what
+task 69 measured (+1.5 m/s of speed, no throughput gain).
+
+**So the remedy changes.** It is not "add a system-level objective", which already
+exists. It is to reweight so throughput is not 1.3% of the signal, or to normalise
+the terms before weighting. That is a smaller change than a new reward, and it can
+be done in `DEFAULT_REWARD_WEIGHTS` or per-config.
+
+**How the error happened, since it is a repeat.** I read `_reward_for_vehicle` in
+the environment, saw a plausible reward, and did not check whether the trainer
+called it. The same class of mistake as reading `obs.feed_congestion` instead of
+`obs_diagnostics.feed.downstream_congestion` on 2026-09-08: inspecting a producer
+and assuming the consumer used it. Tracing the write path is the rule that would
+have caught both.
