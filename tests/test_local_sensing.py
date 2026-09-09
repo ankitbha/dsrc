@@ -371,9 +371,32 @@ class TestMergingTrafficIsVisible:
         other = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 460.0)
         ctx = _gap_context(topology, [ego, other])
         assert ctx.distance_to_next_merge_m == pytest.approx(50.0, abs=2.0)
-        assert ctx.merge_conflict_gap_m != float("inf"), (
-            "a converging vehicle 40 m from the same merge point reported no conflict"
-        )
+        # Projected onto the shared node: the ego is 50 m from it, the other 40 m,
+        # so the other arrives first and is effectively 10 m ahead.
+        assert ctx.merge_conflict_gap_m == pytest.approx(10.0, abs=2.0)
+
+    def test_the_nearest_converging_vehicle_wins_not_the_one_nearest_the_node(self) -> None:
+        # The defect this replaces picked the vehicle closest to the node, which is
+        # the one furthest ahead. Measured cost: a conflict reported 85.7 m away
+        # while the vehicle actually struck was 4.1 m away, alongside.
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        # Chosen so the two rules give different answers: the old one reports the
+        # far vehicle's 5 m to the node, the projection reports the near vehicle's
+        # 20 m of following distance. Equal numbers would prove nothing.
+        alongside = _on_lane(topology, "h_near", ("a4_entry", "b2", 0), 470.0)
+        far_ahead = _on_lane(topology, "h_far", ("a4_entry", "b2", 0), 495.0)
+        ctx = _gap_context(topology, [ego, alongside, far_ahead])
+        assert ctx.merge_conflict_gap_m == pytest.approx(20.0, abs=2.0)
+
+    def test_a_vehicle_the_ego_beats_to_the_node_is_not_a_conflict(self) -> None:
+        # It arrives behind, so it is not a leader and braking for it would invent
+        # an obstacle.
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 460.0, role="av")
+        behind = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 430.0)
+        ctx = _gap_context(topology, [ego, behind])
+        assert ctx.merge_conflict_gap_m == float("inf")
 
     def test_an_arc_feeding_a_different_node_is_not_a_conflict(self) -> None:
         topology = _tree()

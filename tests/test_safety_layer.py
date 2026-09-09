@@ -211,19 +211,25 @@ class TestMergeConflict:
             SafetyContext(time_s=10.0, ego_speed_mps=27.0, **kwargs),
         )
 
-    def test_yields_when_the_other_vehicle_reaches_the_merge_first(self) -> None:
-        # 40 m to the joining point at 27 m/s is 1.5 s, inside the 2.0 s minimum,
-        # so this has to read as an emergency rather than a gentle correction.
+    def test_follows_a_vehicle_that_will_arrive_first(self) -> None:
+        # `merge_conflict_gap_m` is the projected following distance to a vehicle
+        # reaching the joining node before the ego. 20 m is inside the desired
+        # headway at 27 m/s, so the ego slows -- but matched speeds are not an
+        # emergency, they are car-following.
         decision = self._decide(distance_to_next_merge_m=40.0, merge_conflict_gap_m=20.0)
         assert decision.acceleration_mps2 < 0.0
-        assert decision.acceleration_mps2 == pytest.approx(-6.0), (
-            "a converging vehicle with priority 40 m ahead did not trigger emergency braking"
-        )
+
+    def test_brakes_hard_when_closing_on_a_converging_vehicle(self) -> None:
+        # 20 m and closing at 20 m/s is a 1.0 s time to contact, inside the 2.0 s
+        # minimum, so this one is an emergency.
+        decision = self._decide(distance_to_next_merge_m=40.0, merge_conflict_gap_m=20.0,
+                                merge_conflict_relative_speed_mps=-20.0)
+        assert decision.acceleration_mps2 == pytest.approx(-6.0)
 
     def test_does_not_yield_when_the_ego_reaches_the_merge_first(self) -> None:
-        # Ego is 20 m from the point and the other is 60 m from it: the ego has
-        # priority and braking for it would invent a phantom obstacle.
-        decision = self._decide(distance_to_next_merge_m=20.0, merge_conflict_gap_m=60.0)
+        # A vehicle that arrives behind the ego is reported as no conflict at all,
+        # so the ego keeps its priority.
+        decision = self._decide(distance_to_next_merge_m=20.0, merge_conflict_gap_m=float("inf"))
         assert decision.acceleration_mps2 >= 0.0
 
     def test_an_empty_merge_changes_nothing(self) -> None:

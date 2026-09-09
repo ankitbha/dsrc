@@ -240,10 +240,9 @@ def _forward_hazard(context: SafetyContext) -> tuple[float, float]:
     """
     gap = context.leader_gap_m
     relative_speed = context.leader_relative_speed_mps
-    other_arrives_first = context.merge_conflict_gap_m < context.distance_to_next_merge_m
-    if other_arrives_first and context.distance_to_next_merge_m < gap:
-        gap = context.distance_to_next_merge_m
-        relative_speed = -context.ego_speed_mps
+    if context.merge_conflict_gap_m < gap:
+        gap = context.merge_conflict_gap_m
+        relative_speed = context.merge_conflict_relative_speed_mps
     return gap, relative_speed
 
 

@@ -308,3 +308,26 @@ Three routes, and they produce materially different work:
 
 Option 1 and option 3 are compatible: 3 unblocks training now, 1 makes the result
 defensible later.
+
+## Decision 2026-09-09: option 1, taken by the user
+
+Give the human model merge awareness at funnel nodes. Rationale on record: the
+replication target runs on SUMO, whose car-following is collision-free by
+construction, so a faithful replication should not have human traffic driving
+through itself.
+
+**The mechanism, and a defect it exposes in this task's own earlier work.** The
+standard way to make a merge safe is to project every vehicle approaching a shared
+node onto that node's axis: a vehicle whose distance to the node is smaller arrives
+first, so it is a leader at a gap of `d_ego - d_other`, and ordinary car-following
+handles the rest.
+
+`_merge_context` as committed picks the conflicting vehicle with the **smallest
+distance to the node**, which is the vehicle furthest ahead, not the nearest one.
+The crash data shows what that costs: at one impact it reported a conflict 13.4 m
+from the node while the ego was 99.1 m from it — a projected gap of 85.7 m — and the
+vehicle actually struck was 4.1 m away, alongside. The layer was handed the wrong
+vehicle, which is why a correct yield rule fired on 59% of samples and changed
+nothing.
+
+Both the human model and the safety layer use the same projection.

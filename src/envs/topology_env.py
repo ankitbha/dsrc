@@ -33,6 +33,7 @@ ensure_highway_env_importable()
 
 from highway_env.road.road import LaneIndex, Road
 from highway_env.vehicle.behavior import IDMVehicle
+from src.vehicles.merge_aware import MergeAwareIDMVehicle
 from highway_env.vehicle.controller import ControlledVehicle
 
 
@@ -457,7 +458,10 @@ class HighwayTopologyEnv(BaseCTDEEnv):
                 longitudinal = self._initial_human_longitudinal(lane_index, index, lane.length)
                 speed = float(self.config.get("initial_speed_mps", min(lane.speed_limit or 24.0, 24.0)))
                 target_base = speed
-            vehicle = IDMVehicle.make_on_lane(self.road, lane_index, longitudinal=longitudinal, speed=speed)
+            # Merge-aware, because plain IDM follows only within its own lane and
+            # every node here reduces lane count, so converging humans drove
+            # through each other: a median of 17 collisions per no_av run.
+            vehicle = MergeAwareIDMVehicle.make_on_lane(self.road, lane_index, longitudinal=longitudinal, speed=speed)
             vehicle.enable_lane_change = self.topology.supports_lane_change
             profile_id = self._human_behavior_model.sample_profile_id(self.road.np_random)
             profile = self._human_behavior_model.profile_for(profile_id)

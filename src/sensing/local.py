@@ -526,8 +526,16 @@ class LocalObservationBuilder:
             to_merge = float(network.get_lane(snapshot.lane_index).length) - float(snapshot.longitudinal_m)
             if to_merge < 0:
                 continue
-            if to_merge < nearest_gap:
-                nearest_gap = to_merge
+            # Project both onto the shared node. A smaller distance to it means it
+            # arrives first, so it is a leader at this following distance. Choosing
+            # by distance-to-node instead picks the vehicle FURTHEST ahead, which is
+            # what the first version of this did: it reported a conflict 85.7 m away
+            # while the vehicle actually struck was 4.1 m away, alongside.
+            projected_gap = ego_to_merge - to_merge
+            if projected_gap <= 0:
+                continue  # arrives behind the ego, so not a leader
+            if projected_gap < nearest_gap:
+                nearest_gap = projected_gap
                 nearest_speed = float(neighbor.speed_mps) - float(ego.speed_mps)
         return ego_to_merge, nearest_gap, nearest_speed
 
