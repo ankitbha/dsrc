@@ -261,3 +261,134 @@ def test_lane_gap_context_reuses_frame_recorded_by_build_all() -> None:
     )
 
     assert len(builder.buffer._frames) == frame_count
+
+
+# ---------------------------------------------------------------------------
+# Gaps across arc boundaries.
+#
+# `_lane_gaps` matched neighbours on an exact `lane_index`, and `longitudinal_m`
+# restarts at every arc, so a vehicle metres ahead on the next arc was invisible
+# while one hundreds of metres ahead on the ego's own arc was reported as the
+# leader. Measured on inverted_tree: 51 terminating collisions, of which 27 were
+# with a vehicle on a sibling arc feeding the same node and 18 were same-lane
+# collisions where the leader first became visible at a mean of 74 m while
+# needing 75 m to stop. The safety layer brakes correctly for what it is told.
+# ---------------------------------------------------------------------------
+
+def _tree():
+    from src.config.loaders import load_named_config
+
+    return build_topology("inverted_tree", load_named_config("topology", "inverted_tree"))
+
+
+def _on_lane(topology, vehicle_id, lane_index, longitudinal_m, *, speed_mps=20.0,
+             role="human"):
+    """A snapshot placed at real coordinates on a named lane.
+
+    Position has to be genuine because `_sensed_neighbors` filters on Euclidean
+    range before any lane reasoning happens.
+    """
+    lane = topology.road_network.get_lane(lane_index)
+    x, y = lane.position(longitudinal_m, 0)
+    return VehicleSnapshot(
+        vehicle_id=vehicle_id,
+        role=role,
+        segment_id=topology.segment_for_lane(lane_index),
+        lane_index=lane_index,
+        lane_id=lane_index[2],
+        position=(float(x), float(y)),
+        longitudinal_m=float(longitudinal_m),
+        speed_mps=speed_mps,
+        acceleration_mps2=0.0,
+        free_flow_speed_mps=30.0,
+    )
+
+
+def _gap_context(topology, snapshots, ego_id="av_0", config=None):
+    builder = LocalObservationBuilder(config or SensingConfig())
+    return builder.lane_gap_context(
+        ego_id=ego_id,
+        time_s=0.0,
+        topology=topology,
+        snapshots=snapshots,
+        target_lane=None,
+        rng=np.random.RandomState(7),
+    )
+
+
+class TestLeaderIsFoundAcrossAnArcBoundary:
+
+    def test_a_leader_on_the_next_arc_is_reported(self) -> None:
+        topology = _tree()
+        # 50 m from the end of a 500 m entry arc, with a vehicle 20 m onto the
+        # arc it feeds: a true gap of 70 m.
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        lead = _on_lane(topology, "h_1", ("b2", "c", 0), 20.0, speed_mps=8.0)
+        ctx = _gap_context(topology, [ego, lead])
+        assert ctx.leader_gap_m == pytest.approx(70.0, abs=2.0), (
+            f"leader on the successor arc reported as {ctx.leader_gap_m}"
+        )
+        assert ctx.leader_relative_speed_mps == pytest.approx(8.0 - 20.0, abs=0.5)
+
+    def test_a_nearer_leader_on_the_next_arc_beats_a_far_one_on_this_arc(self) -> None:
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 100.0, role="av")
+        far = _on_lane(topology, "h_far", ("a5_entry", "b2", 0), 240.0)
+        # 400 m to the end of the ego's arc plus 10 m = 410 m: further away, so
+        # the same-arc vehicle at 140 m must still win. This is the control for
+        # the test above -- the fix must not simply prefer the other arc.
+        near = _on_lane(topology, "h_next", ("b2", "c", 0), 10.0)
+        ctx = _gap_context(topology, [ego, far, near])
+        assert ctx.leader_gap_m == pytest.approx(140.0, abs=2.0)
+
+    def test_a_follower_on_the_previous_arc_is_reported(self) -> None:
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("b2", "c", 0), 30.0, role="av")
+        behind = _on_lane(topology, "h_1", ("a5_entry", "b2", 0), 480.0)
+        ctx = _gap_context(topology, [ego, behind])
+        assert ctx.follower_gap_m == pytest.approx(50.0, abs=2.0)
+
+    def test_range_m_still_bounds_the_search(self) -> None:
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 380.0, role="av")
+        # 120 m to the arc end plus 60 m = 180 m, beyond a 100 m range.
+        lead = _on_lane(topology, "h_1", ("b2", "c", 0), 60.0)
+        ctx = _gap_context(topology, [ego, lead], config=SensingConfig(range_m=100.0))
+        assert ctx.leader_gap_m == float("inf"), (
+            "a vehicle beyond range_m must stay invisible; the fix must not make "
+            "the AV clairvoyant"
+        )
+
+
+class TestMergingTrafficIsVisible:
+
+    def test_a_vehicle_on_a_sibling_arc_produces_a_merge_conflict(self) -> None:
+        topology = _tree()
+        # a4_entry and a5_entry both feed b2. Neither is on the other's route,
+        # so neither is a leader, but they converge and 53% of the measured
+        # collisions were exactly this pair.
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        other = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 460.0)
+        ctx = _gap_context(topology, [ego, other])
+        assert ctx.distance_to_next_merge_m == pytest.approx(50.0, abs=2.0)
+        assert ctx.merge_conflict_gap_m != float("inf"), (
+            "a converging vehicle 40 m from the same merge point reported no conflict"
+        )
+
+    def test_an_arc_feeding_a_different_node_is_not_a_conflict(self) -> None:
+        topology = _tree()
+        # a1_entry feeds b1, not b2: these two never meet at this node.
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        other = _on_lane(topology, "h_1", ("a1_entry", "b1", 0), 450.0)
+        ctx = _gap_context(topology, [ego, other])
+        assert ctx.merge_conflict_gap_m == float("inf")
+
+    def test_distance_to_next_merge_decreases_as_the_ego_approaches(self) -> None:
+        topology = _tree()
+        seen = []
+        for longitudinal in (300.0, 380.0, 450.0, 490.0):
+            ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), longitudinal, role="av")
+            other = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), longitudinal + 5.0)
+            seen.append(_gap_context(topology, [ego, other]).distance_to_next_merge_m)
+        assert seen == sorted(seen, reverse=True), f"not monotonic: {seen}"
+        assert seen[-1] == pytest.approx(10.0, abs=2.0)

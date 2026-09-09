@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "updated_at": "2026-09-09T02:21:00Z",
+  "stale_after_minutes": 90,
+  "blocking": null,
+  "awaiting_user": null,
+  "next_action": "Start task 67. The blocking unknown is WHY 260 of 648 runs never reached their configured duration; nothing downstream is trustworthy until that is known. Reproduce it on inverted_tree alone -- the other five topologies are out of scope -- and report the rate before any fix is attempted.",
+  "last_verdict": null,
+  "section": "C. Simulation replication",
+  "task": {
+    "number": 67,
+    "what": "fix the 40% episode-truncation rate",
+    "stage": "reproduce",
+    "stage_started_at": "2026-09-09T02:21:00Z",
+    "background_job": null,
+    "needs_hardware": false,
+    "remaining": [
+      63,
+      9,
+      68,
+      69
+    ],
+    "stopped_by_user": false
+  },
+  "carried_forward": [
+    "Jetson suite baseline is 2308 passed / 24 skipped. Reproduce it before quoting any delta.",
+    "Use .venv/bin/python. System python3 is 3.14 and has no pytest.",
+    "zsh does not word-split unquoted variables; `find` is a shell function wrapping bfs. Use /usr/bin/find with explicit arguments.",
+    "stale_after_minutes is a guess until the task 68 pilot measures one training update. Revise it then and record the measurement.",
+    "9 gates 68: topology_env.py:109 builds every agent observation through SensingConfig, so the sensing block is the actor's input distribution.",
+    "69 must evaluate under the same sensing block 68 trained under.",
+    "--controlled-vehicles is inert outside ring; set AV population via demand.av_penetration."
+  ]
+}

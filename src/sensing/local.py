@@ -75,6 +75,15 @@ class LaneGapContext:
     local_mean_speed_mps: float
     nearby_av_mean_speed_mps: float
     all_lanes_av_occupied: bool
+    #: Distance along the route to the next node where two or more arcs join.
+    #: A property of the road, not of any vehicle, so it is NOT limited by
+    #: `range_m`: a driver knows a merge is coming without seeing anyone on it.
+    distance_to_next_merge_m: float = float("inf")
+    #: Distance to that same merge point of the nearest vehicle approaching it on
+    #: a different arc. This IS a vehicle observation and is range-limited.
+    #: Infinite when nobody is converging.
+    merge_conflict_gap_m: float = float("inf")
+    merge_conflict_relative_speed_mps: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -288,7 +297,9 @@ class LocalObservationBuilder:
         by_id = {snapshot.vehicle_id: snapshot for snapshot in snapshots}
         ego = by_id[ego_id]
         measured = [self._measure_neighbor(ego, neighbor, rng) for neighbor in self._sensed_neighbors(ego, snapshots)]
-        same_lane = self._lane_gaps(ego, measured, ego.lane_index)
+        route_deltas = self._route_deltas(ego, measured, topology)
+        same_lane = self._lane_gaps(ego, measured, ego.lane_index, route_deltas=route_deltas)
+        distance_to_merge, merge_gap, merge_relative_speed = self._merge_context(ego, measured, topology)
         target_lane_exists = target_lane is not None and target_lane in topology.road_network.lanes_dict()
         target_gaps = self._lane_gaps(ego, measured, target_lane if target_lane_exists else None)
         local_av = [neighbor for neighbor in measured if neighbor.snapshot.role == "av"]
@@ -312,6 +323,9 @@ class LocalObservationBuilder:
             local_mean_speed_mps=local_mean_speed,
             nearby_av_mean_speed_mps=nearby_av_mean_speed,
             all_lanes_av_occupied=_all_lanes_av_occupied(ego, local_av, topology),
+            distance_to_next_merge_m=distance_to_merge,
+            merge_conflict_gap_m=merge_gap,
+            merge_conflict_relative_speed_mps=merge_relative_speed,
         )
 
     def _sensed_neighbors(
@@ -348,26 +362,214 @@ class LocalObservationBuilder:
             speed_mps=max(0.0, speed),
         )
 
+    def _route_deltas(
+        self,
+        ego: VehicleSnapshot,
+        measured: Sequence["MeasuredNeighbor"],
+        topology: TopologySpec,
+    ) -> dict[str, float]:
+        """Signed distance to each neighbour that lies on the ego's own route.
+
+        Positive ahead, negative behind. A neighbour on an arc the ego will drive
+        onto, or has just driven off, gets a real distance here; one on a sibling
+        arc or an adjacent lane is left out, because it is not a leader and
+        treating it as one would corrupt headway control.
+        """
+        if ego.lane_index is None:
+            return {}
+        network = topology.road_network
+        lanes = network.lanes_dict()
+        if ego.lane_index not in lanes:
+            return {}
+        limit = float(self.config.range_m)
+        forward = self._forward_lane_offsets(topology, ego.lane_index, ego.longitudinal_m, limit)
+        backward = self._backward_lane_offsets(topology, ego.lane_index, ego.longitudinal_m, limit)
+        ordinal = ego.lane_index[2]
+        deltas: dict[str, float] = {}
+        for neighbor in measured:
+            lane_index = neighbor.snapshot.lane_index
+            if lane_index is None or lane_index == ego.lane_index or lane_index not in lanes:
+                continue
+            # Where the arc carries a lane with the ego's own ordinal, that lane is
+            # the route and the others are adjacent lanes, which are a lateral
+            # conflict rather than a leader.
+            siblings = [li for li in lanes if li[0] == lane_index[0] and li[1] == lane_index[1]]
+            if lane_index[2] != ordinal and any(li[2] == ordinal for li in siblings):
+                continue
+            if lane_index in forward:
+                deltas[neighbor.snapshot.vehicle_id] = forward[lane_index] + float(neighbor.snapshot.longitudinal_m)
+            elif lane_index in backward:
+                length = float(network.get_lane(lane_index).length)
+                deltas[neighbor.snapshot.vehicle_id] = -(backward[lane_index] + (length - float(neighbor.snapshot.longitudinal_m)))
+        return deltas
+
+    def _forward_lane_offsets(
+        self,
+        topology: TopologySpec,
+        lane_index: LaneIndex,
+        longitudinal_m: float,
+        limit_m: float,
+    ) -> dict[LaneIndex, float]:
+        """Distance from the ego to the START of every lane reachable ahead.
+
+        `longitudinal_m` restarts at each arc, so a raw subtraction across an arc
+        boundary is meaningless -- which is why the gap search used to require an
+        identical `lane_index` and so could not see a vehicle metres ahead on the
+        next arc. Walking the graph and accumulating lane lengths is what makes
+        that subtraction meaningful again.
+
+        Breadth-first rather than following one successor, because a node may have
+        several outgoing arcs and picking one arbitrarily would hide traffic on the
+        others.
+        """
+        network = topology.road_network
+        lanes = network.lanes_dict()
+        if lane_index not in lanes:
+            return {}
+        offsets: dict[LaneIndex, float] = {}
+        start = float(network.get_lane(lane_index).length) - float(longitudinal_m)
+        frontier: list[tuple[Any, float]] = [(lane_index[1], start)]
+        visited: set[tuple[Any, int]] = set()
+        while frontier:
+            node, distance = frontier.pop()
+            if distance > limit_m:
+                continue
+            key = (node, int(distance))
+            if key in visited:
+                continue
+            visited.add(key)
+            for destination in network.graph.get(node, {}):
+                arc = [li for li in lanes if li[0] == node and li[1] == destination]
+                if not arc:
+                    continue
+                for li in arc:
+                    if li not in offsets or distance < offsets[li]:
+                        offsets[li] = distance
+                frontier.append((destination, distance + float(network.get_lane(arc[0]).length)))
+        return offsets
+
+    def _backward_lane_offsets(
+        self,
+        topology: TopologySpec,
+        lane_index: LaneIndex,
+        longitudinal_m: float,
+        limit_m: float,
+    ) -> dict[LaneIndex, float]:
+        """Distance from the END of every lane reachable behind, to the ego.
+
+        The mirror of `_forward_lane_offsets`, used for the follower. A follower on
+        the previous arc was invisible for the same reason a leader was.
+        """
+        network = topology.road_network
+        lanes = network.lanes_dict()
+        if lane_index not in lanes:
+            return {}
+        offsets: dict[LaneIndex, float] = {}
+        start = float(longitudinal_m)
+        frontier: list[tuple[Any, float]] = [(lane_index[0], start)]
+        visited: set[tuple[Any, int]] = set()
+        while frontier:
+            node, distance = frontier.pop()
+            if distance > limit_m:
+                continue
+            key = (node, int(distance))
+            if key in visited:
+                continue
+            visited.add(key)
+            for origin, destinations in network.graph.items():
+                if node not in destinations:
+                    continue
+                arc = [li for li in lanes if li[0] == origin and li[1] == node]
+                if not arc:
+                    continue
+                for li in arc:
+                    if li not in offsets or distance < offsets[li]:
+                        offsets[li] = distance
+                frontier.append((origin, distance + float(network.get_lane(arc[0]).length)))
+        return offsets
+
+    def _merge_context(
+        self,
+        ego: VehicleSnapshot,
+        measured: Sequence["MeasuredNeighbor"],
+        topology: TopologySpec,
+    ) -> tuple[float, float, float]:
+        """Distance to the next joining node, and the nearest vehicle converging on it.
+
+        A vehicle on a sibling arc is on nobody's route: it is neither ahead nor
+        behind, and reporting it as a leader would corrupt headway control, which
+        is a different quantity. It still collides. On `inverted_tree` three entry
+        arcs feed each of `b1` and `b2`, and 27 of 51 measured terminating
+        collisions were between two vehicles on sibling arcs approaching the same
+        node.
+        """
+        network = topology.road_network
+        lanes = network.lanes_dict()
+        if ego.lane_index is None or ego.lane_index not in lanes:
+            return float("inf"), float("inf"), 0.0
+        node = ego.lane_index[1]
+        incoming_arcs = {(li[0], li[1]) for li in lanes if li[1] == node}
+        ego_to_merge = float(network.get_lane(ego.lane_index).length) - float(ego.longitudinal_m)
+        if len(incoming_arcs) < 2:
+            # A node only one arc enters is not a merge, however close it is.
+            return float("inf"), float("inf"), 0.0
+        nearest_gap = float("inf")
+        nearest_speed = 0.0
+        for neighbor in measured:
+            snapshot = neighbor.snapshot
+            if snapshot.lane_index is None or snapshot.lane_index not in lanes:
+                continue
+            if snapshot.lane_index[1] != node:
+                continue
+            if snapshot.lane_index[0] == ego.lane_index[0]:
+                continue  # same arc: it is a leader or a follower, not a conflict
+            to_merge = float(network.get_lane(snapshot.lane_index).length) - float(snapshot.longitudinal_m)
+            if to_merge < 0:
+                continue
+            if to_merge < nearest_gap:
+                nearest_gap = to_merge
+                nearest_speed = float(neighbor.speed_mps) - float(ego.speed_mps)
+        return ego_to_merge, nearest_gap, nearest_speed
+
     def _lane_gaps(
         self,
         ego: VehicleSnapshot,
         measured: Sequence[MeasuredNeighbor],
         lane_index: LaneIndex | None,
+        route_deltas: Mapping[str, float] | None = None,
     ) -> LaneGaps:
         if lane_index is None:
             return LaneGaps()
         front: MeasuredNeighbor | None = None
         rear: MeasuredNeighbor | None = None
+        front_gap = float("inf")
+        rear_gap = float("inf")
         for neighbor in measured:
             if neighbor.snapshot.lane_index != lane_index:
+                # On another arc. `route_deltas` holds a signed distance for the
+                # ones that lie on the ego's route; anything absent is on a
+                # sibling arc or an adjacent lane and is not a leader.
+                if route_deltas is None:
+                    continue
+                delta = route_deltas.get(neighbor.snapshot.vehicle_id)
+                if delta is None:
+                    continue
+                gap = delta
+            else:
+                gap = neighbor.longitudinal_delta_m
+            if abs(gap) > self.config.range_m:
+                # A route walk can reach past the sensing horizon; the horizon
+                # still governs. Without this the AV would be clairvoyant across
+                # arc boundaries but not within one, which is worse than either.
                 continue
-            gap = neighbor.longitudinal_delta_m
-            if gap >= 0 and (front is None or gap < front.longitudinal_delta_m):
+            if gap >= 0 and (front is None or gap < front_gap):
                 front = neighbor
-            if gap < 0 and (rear is None or gap > rear.longitudinal_delta_m):
+                front_gap = gap
+            if gap < 0 and (rear is None or gap > -rear_gap):
                 rear = neighbor
-        front_gap = max(0.0, front.longitudinal_delta_m) if front is not None else float("inf")
-        rear_gap = max(0.0, -rear.longitudinal_delta_m) if rear is not None else float("inf")
+                rear_gap = -gap
+        front_gap = max(0.0, front_gap) if front is not None else float("inf")
+        rear_gap = max(0.0, rear_gap) if rear is not None else float("inf")
         return LaneGaps(
             front_gap_m=float(front_gap),
             front_relative_speed_mps=float(front.speed_mps - ego.speed_mps) if front is not None else 0.0,

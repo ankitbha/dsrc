@@ -77,13 +77,25 @@ it. The drives support the deployment claims and calibrate the sensing model.
 off the path.** Nothing here needs hardware, another drive, or a decision from
 outside the project.
 
-1. **Task 67** — fix the 40% episode-truncation rate. Gates all training.
-2. **Task 68** — train MAPPO on `inverted_tree`. The single missing artifact.
-3. **Task 63** — fix the 90-degree frame rotation. Runs in parallel; gates task 9.
-4. **Task 9** — fill the five sensing-model parameters.
+1. **Task 67** — fix the 40% episode-truncation rate. Gates task 68.
+2. **Task 63** — fix the 90-degree frame rotation. Gates task 9.
+3. **Task 9** — fill the five sensing-model parameters. Gates task 68.
+4. **Task 68** — train MAPPO on `inverted_tree`. The single missing artifact.
 5. **Task 69** — evaluate trained MAPPO against `no_av` for throughput.
 6. Write the paper: the deployed system and the safety and etiquette filters, with
    step 5 as the replicated flow-level result.
+
+**Task 9 must precede task 68, and the reason is not bookkeeping.**
+`src/envs/topology_env.py` builds every agent observation through
+`LocalObservationBuilder(SensingConfig.from_config(...))`, so the five sensing
+parameters define the actor's entire input distribution. Training first means the
+policy learns against an observation model the paper then describes as wrong. The
+largest single mismatch is `latency_s: 0.0` in every current config against the
+96.7 ms median measured on the drives.
+
+**Tasks 67 and 63 are independent of each other**, so their relative order is free.
+Doing 63 first lets the task 9 replay pass, which reads 1.676 GB of video, run while
+task 67 is worked.
 
 **Scope boundary.** One topology (`inverted_tree`). One algorithm (MAPPO). One
 throughput comparison. The drives are finished and will not be repeated; the corpus
@@ -295,6 +307,23 @@ term.
     --topology inverted_tree`. This is the single missing artifact — no part of the
     simulation claim can be evaluated until a checkpoint exists.
 
+    **Blocked on tasks 67 and 9.** Not by convention: `src/envs/topology_env.py:109`
+    constructs `LocalObservationBuilder(SensingConfig.from_config(self.config))` and
+    line 281 builds every agent observation through it, so the `sensing:` block in
+    the training YAML is the actor's input distribution. Training under the current
+    defaults and calibrating afterwards produces a policy trained on an observation
+    model the paper does not claim. `configs/training/shared_ppo_deploysense.yaml`
+    already carries such a block and is the file task 9 fills.
+
+    **Record the training config beside the checkpoint.** Task 69 has to evaluate
+    under the same block, and a checkpoint whose sensing block is unknown cannot be
+    evaluated at all.
+
+    **Run a short pilot first**, to shake out the loop and to measure how long one
+    update takes. That measurement sets the watcher's stall threshold, which is a
+    guess until something measures it. A pilot's result is never reported as a
+    result.
+
     Three traps, each already established elsewhere in this list:
 
     - **`--controlled-vehicles` is inert outside ring.** `HighwayTopologyEnv` clears
@@ -311,6 +340,11 @@ term.
       run before depending on it.
 69. **Evaluate trained MAPPO against `no_av` on `inverted_tree` for throughput.**
     The replication claim, and the only flow-level number the paper makes.
+
+    **Gate: the evaluation must use the same `sensing:` block task 68 trained
+    under.** If the two differ, the measured difference is a train/test mismatch
+    rather than the controller, and nothing in the output would say so. Re-use the
+    recorded config verbatim rather than rebuilding it.
 
     Seeds are the axis to spend on, now that topology and demand are fixed. Task 8
     measured single-seed realised penetration swinging between 0.08 and 0.43 at a
