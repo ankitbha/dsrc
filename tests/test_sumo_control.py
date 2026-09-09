@@ -150,3 +150,55 @@ class TestMetrics:
             assert info["metrics"]["throughput_recent"] >= 0
         finally:
             env.close()
+
+
+class TestTheTwoVehicleTypesDifferOnlyInIdentity:
+    """Penetration must not change the fleet, only who is controllable.
+
+    An earlier version gave the human type a speedFactor spread and the AV type
+    none, so it defaulted to 1.0. Raising penetration then made the fleet more
+    homogeneous, which reduces speed variance and congestion: with no controller
+    acting at all, mean speed went 6.15 m/s at 10% penetration to 11.29 at 40% and
+    arrivals 169 to 224. Reported as a control effect, that would have been wrong.
+    """
+
+    def test_both_types_carry_the_same_speed_factor(self, tmp_path):
+        env = _env(tmp_path)
+        try:
+            env.reset(seed=7)
+            routes = (env.work_dir / "demand.rou.xml").read_text()
+            types = [line for line in routes.splitlines()
+                     if "<vType " in line and "probability" not in line]
+            assert len(types) == 2, types
+            factors = [line.split('speedFactor="')[1].split('"')[0] for line in types]
+            assert factors[0] == factors[1], (
+                f"the two vTypes have different speed factors: {factors}"
+            )
+            maxima = [line.split('maxSpeed="')[1].split('"')[0] for line in types]
+            assert maxima[0] == maxima[1], maxima
+        finally:
+            env.close()
+
+    def test_raising_penetration_alone_does_not_change_flow(self, tmp_path):
+        # The measurement the confound would have corrupted: with no actions
+        # applied, penetration must not move mean speed much, because an
+        # uncontrolled AV is just a vehicle.
+        results = {}
+        for pen in (0.10, 0.40):
+            demand = dict(load_named_config("demand", "sumo_saturating"))
+            demand["av_penetration"] = pen
+            env = _env(tmp_path / f"p{int(pen*100)}", demand=demand, duration_steps=600)
+            try:
+                env.reset(seed=7)
+                terminated = truncated = False
+                info = {}
+                while not (terminated or truncated):
+                    _, _, terminated, truncated, info = env.step({})
+                results[pen] = info["metrics"]["mean_speed"]
+            finally:
+                env.close()
+        low, high = results[0.10], results[0.40]
+        assert abs(high - low) < 0.5 * max(low, 1.0), (
+            f"penetration alone moved mean speed {low:.2f} -> {high:.2f} m/s, so the "
+            "two vehicle types still differ in something other than controllability"
+        )

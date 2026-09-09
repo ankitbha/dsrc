@@ -57,6 +57,9 @@ class SumoTopologyEnv:
     #: the demand that created it rather than something inferred from its id.
     AV_TYPE = "av"
     HUMAN_TYPE = "human"
+    #: The distribution the flows draw from, so penetration changes who is
+    #: controllable without changing the arrival process.
+    MIX_TYPE = "mix"
 
     def __init__(self, topology_id: str, config: Mapping[str, Any]) -> None:
         self.topology_id = topology_id
@@ -323,7 +326,7 @@ class SumoTopologyEnv:
             position = _sumo.vehicle.getPosition(vehicle_id)
             snapshots.append(VehicleSnapshot(
                 vehicle_id=vehicle_id,
-                role="av" if _sumo.vehicle.getTypeID(vehicle_id) == self.AV_TYPE else "human",
+                role="av" if _sumo.vehicle.getTypeID(vehicle_id).startswith(self.AV_TYPE) else "human",
                 segment_id=segment_id,
                 lane_index=self._lane_index(edge_id, ordinal),
                 lane_id=ordinal,
@@ -405,14 +408,33 @@ class SumoTopologyEnv:
         per_entry = total_per_hour / max(len(entries), 1)
         duration_s = int(self.config.get("duration_steps", 120)) * float(self.config.get("dt", 1.0))
 
+        # The two vTypes are IDENTICAL except for their id and colour. Anything
+        # else would confound penetration with a change in the fleet: an earlier
+        # version gave humans a speedFactor spread and the AV type none, so raising
+        # penetration made the fleet more homogeneous and mean speed rose from 6.15
+        # to 11.29 m/s with no controller acting at all. That would have been
+        # reported as a control effect.
+        max_speed = float(speed.get("max_mps", 32.0))
+        speed_factor = "normc(1,0.1,0.8,1.2)"
         lines = [
             "<routes>",
-            f'  <vType id="{self.HUMAN_TYPE}" maxSpeed="{float(speed.get("max_mps", 32.0))}"'
-            f' speedFactor="normc(1,0.1,0.8,1.2)"/>',
+            f'  <vType id="{self.HUMAN_TYPE}" maxSpeed="{max_speed}"'
+            f' speedFactor="{speed_factor}"/>',
             # The AV keeps SUMO's safe car-following as a floor; the project's own
             # controller commands speed on top of it through setSpeed.
-            f'  <vType id="{self.AV_TYPE}" maxSpeed="{float(speed.get("max_mps", 32.0))}"'
-            f' color="1,0,0"/>',
+            f'  <vType id="{self.AV_TYPE}" maxSpeed="{max_speed}"'
+            f' speedFactor="{speed_factor}" color="1,0,0"/>',
+            # ONE distribution, drawn per vehicle, rather than one flow per type.
+            # SUMO spaces each flow evenly on its own, so two flows at rates r1 and
+            # r2 do not produce the same arrival process as one flow at r1+r2 --
+            # which made the arrival pattern depend on penetration and moved mean
+            # speed with no controller acting.
+            f'  <vTypeDistribution id="{self.MIX_TYPE}">',
+            f'    <vType id="{self.HUMAN_TYPE}_d" maxSpeed="{max_speed}"'
+            f' speedFactor="{speed_factor}" probability="{1.0 - penetration:.4f}"/>',
+            f'    <vType id="{self.AV_TYPE}_d" maxSpeed="{max_speed}"'
+            f' speedFactor="{speed_factor}" color="1,0,0" probability="{penetration:.4f}"/>',
+            "  </vTypeDistribution>",
         ]
         for index, edge in enumerate(entries):
             route = self.network.route_to_exit(edge)
@@ -420,18 +442,13 @@ class SumoTopologyEnv:
                 continue
             edges = " ".join(route)
             lines.append(f'  <route id="r{index}" edges="{edges}"/>')
-            human_rate = per_entry * (1.0 - penetration)
-            av_rate = per_entry * penetration
-            if human_rate > 0:
-                lines.append(
-                    f'  <flow id="h{index}" type="{self.HUMAN_TYPE}" route="r{index}"'
-                    f' begin="0" end="{duration_s}" vehsPerHour="{human_rate:.3f}"/>'
-                )
-            if av_rate > 0:
-                lines.append(
-                    f'  <flow id="a{index}" type="{self.AV_TYPE}" route="r{index}"'
-                    f' begin="0" end="{duration_s}" vehsPerHour="{av_rate:.3f}"/>'
-                )
+            # One flow at the full rate, its type drawn from the distribution, so
+            # the arrival process is identical whatever the penetration is and the
+            # only thing penetration changes is which vehicles are controllable.
+            lines.append(
+                f'  <flow id="f{index}" type="{self.MIX_TYPE}" route="r{index}"'
+                f' begin="0" end="{duration_s}" vehsPerHour="{per_entry:.3f}"/>'
+            )
         lines.append("</routes>")
         route_file = self.work_dir / "demand.rou.xml"
         route_file.write_text("\n".join(lines) + "\n")
