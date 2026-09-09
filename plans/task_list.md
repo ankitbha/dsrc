@@ -2435,6 +2435,90 @@ and on what evidence.
 
 ## K. Found in passing
 
+86. **A 52% throughput gain exists, and the action space cannot reach it.**
+    Measured 2026-09-09 on SUMO. This is the control effect the project has been
+    trying to measure, and the reason no policy has found it.
+
+    Every AV given the same commanded speed, 600 steps after a 300-step warm-up, at
+    `sumo_saturating` (1050 veh/h, 20% penetration):
+
+    | command | mean AV speed | network mean speed | arrivals |
+    |---|---|---|---|
+    | none | 6.06 | 4.06 | 110 |
+    | 2 m/s | 1.86 | 2.86 | 53 |
+    | 5 m/s | 4.25 | 5.23 | 129 |
+    | **10 m/s** | **8.71** | **12.03** | **167** |
+    | 20 m/s | 7.91 | 4.70 | 138 |
+    | 30 m/s | 6.13 | 3.99 | 110 |
+
+    **Holding AVs at 10 m/s raises arrivals 110 to 167, a 52% gain, and network mean
+    speed 4.06 to 12.03 m/s.** Zero collisions throughout. The relationship is
+    non-monotonic: 2 m/s is much worse than doing nothing, so this is a genuine
+    operating point rather than "slower is better".
+
+    That is the speed-harmonisation result the replication targets, and it is now
+    reproducible in one 600-step run.
+
+    **The action space cannot express it.** `decode_speed_bin` returns the free-flow
+    speed plus an offset: `slow` −10, `nominal` −3, `fast` 0. At the 30 m/s edge
+    limit those are 20, 27 and 30 m/s — all inside the flat region above 20 where
+    the effect is gone. The effect lives near 10 m/s and no bin reaches it.
+
+    **So every policy this project has trained was choosing among equivalent
+    actions.** Measured directly before the flow fix: arrivals were identical at
+    137 for `slow`, `nominal`, `fast` and no action at all. The flat training
+    curves, the unmoving entropy and task 69's null all follow from this, and none
+    of them needed a subtler explanation.
+
+    **This supersedes task 85.** The entropy bonus really was 66% of the reward and
+    `reward_scale: 1.0` really does fix that ratio, but changing it moved nothing --
+    entropy went from −0.025 to +0.021 across 400 updates -- because the binding
+    constraint is that the actions are equivalent. Task 85's arithmetic stands; its
+    implied conclusion does not.
+
+    **The decision this needs, and it is the user's.** The bins are part of the
+    action contract shared with the deployed system through `sim_contract`, so
+    rescaling them changes what the Jetson's actor emits as well. Three routes:
+    make the bins fractions of the free-flow speed rather than offsets from it
+    (`slow` 0.33x gives 10 m/s at a 30 limit); decode them against the local traffic
+    speed rather than the edge limit, so `slow` means slow *for these conditions*;
+    or leave the contract and add absolute low-speed bins. The first is the smallest
+    change and the third is the most explicit.
+
+85. **The entropy bonus is 66% of the reward, so no policy has ever converged.**
+    Found 2026-09-09 on SUMO, but it is not a SUMO defect: it applies to every
+    training run this project has done.
+
+    Measured at the metrics the 400-update SUMO run actually produced —
+    `mean_speed` 7.33, `throughput_recent` 11.53, `jam_fraction` 0.128:
+
+    | quantity | value |
+    |---|---|
+    | team reward | +1.2835 |
+    | after `reward_scale` 0.05 | **+0.0642** — what the agent optimises |
+    | entropy bonus at `entropy_coef` 0.01 and entropy 4.24 | **+0.0424** |
+    | entropy bonus as a share of the reward | **66%** |
+    | policy entropy against a 4.68 maximum | **91% of uniform** |
+
+    PPO's default hyperparameters — learning rate 3e-4, value coefficient 0.5,
+    entropy coefficient 0.01 — assume a reward of order 1. `reward_scale: 0.05`
+    crushes this one to 0.064, so the entropy term is two thirds as large as the
+    entire objective and the policy has almost no incentive to become
+    deterministic. It held 91% of maximum entropy after 400 updates, and entropy
+    moved −0.025 across them.
+
+    **This is why every training run has looked flat.** The 100-update
+    `highway_env` run showed entropy 3.426 → 2.830, which looked like convergence;
+    at the SUMO operating point the reward is smaller still and the same
+    coefficient dominates it. Neither run was learning much.
+
+    **The fix is to stop scaling the reward down.** `reward_scale: 1.0` makes the
+    reward 1.28 and the entropy bonus 3% of it, which is the ratio the default
+    coefficients were chosen for. `reward_clip` at 10 already bounds the magnitude,
+    so the scale-down was not protecting anything.
+
+    Changing one thing at a time, so the effect is attributable.
+
 81. **The reweighting worked: throughput improved 30% during training.** Done.
 
     100 updates, `mappo_deploysense` with `throughput_recent` at 0.10 and

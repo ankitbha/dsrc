@@ -202,3 +202,39 @@ class TestTheTwoVehicleTypesDifferOnlyInIdentity:
             f"penetration alone moved mean speed {low:.2f} -> {high:.2f} m/s, so the "
             "two vehicle types still differ in something other than controllability"
         )
+
+
+class TestTheDemandLastsTheWholeEpisode:
+    """The flow must cover the warm-up as well as the episode.
+
+    It previously ended at `duration_steps * dt`, while the simulation runs
+    `warmup + duration` steps, so demand stopped before the episode did. With a
+    300-step warm-up and a 600-step episode that left a third of the run draining,
+    and the final step reported mean_speed 0.000 on an empty network.
+    """
+
+    def test_vehicles_are_still_present_at_the_final_step(self, tmp_path):
+        env = _env(tmp_path, duration_steps=600, warmup_steps=300)
+        try:
+            env.reset(seed=7)
+            terminated = truncated = False
+            info = {}
+            while not (terminated or truncated):
+                _, _, terminated, truncated, info = env.step({})
+            assert info["metrics"]["active_vehicle_count"] > 0, (
+                "the network was empty at the final step, so demand ran out early"
+            )
+            assert info["metrics"]["mean_speed"] > 0.0
+        finally:
+            env.close()
+
+    def test_the_flow_end_covers_warmup_plus_duration(self, tmp_path):
+        env = _env(tmp_path, duration_steps=600, warmup_steps=300)
+        try:
+            env.reset(seed=7)
+            routes = (env.work_dir / "demand.rou.xml").read_text()
+            ends = {line.split('end="')[1].split('"')[0]
+                    for line in routes.splitlines() if "<flow" in line}
+            assert ends == {"900.0"}, f"flow end is {ends}, expected 900.0"
+        finally:
+            env.close()

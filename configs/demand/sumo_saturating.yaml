@@ -24,7 +24,11 @@ description: >-
 # merge and it is why SUMO's capacity here (~900 veh/h) is far below the ~1800 the
 # previous simulator appeared to manage.
 total_vehicles_per_hour: 1050
-av_penetration: 0.1
+# 0.20 rather than 0.10: mean concurrent AVs 14.1 against 6.0, which is the
+# double-digit actuator count task 8 recommended and never reached. With the
+# arrival process now independent of penetration, this changes only who is
+# controllable.
+av_penetration: 0.2
 branch_split:
   main: 1.0
 burst:

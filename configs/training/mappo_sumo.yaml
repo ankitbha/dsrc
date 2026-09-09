@@ -12,6 +12,14 @@ description: >-
 # et al. and the Flow benchmarks run on.
 simulator: sumo
 
+# reward_scale 1.0, not the 0.05 the other configs use. At the SUMO operating point
+# the team reward is about 1.28; scaled by 0.05 it becomes 0.064, while the entropy
+# bonus at entropy_coef 0.01 and the entropy the policy actually held (4.24) is
+# 0.042 -- 66% of the objective. The policy therefore had almost no incentive to
+# become deterministic and held 91% of maximum entropy after 400 updates. PPO's
+# default coefficients assume a reward of order 1, and reward_clip at 10 already
+# bounds the magnitude, so scaling down was not protecting anything.
+
 # Let the network fill before the episode is observed. A vehicle must cover
 # 500 + 600 + 900 m before it can arrive, so nothing completes for the first
 # hundred seconds and a rollout beginning at t = 0 can see no AV at all.
@@ -112,6 +120,13 @@ optimization:
   max_grad_norm: 0.5
   update_epochs: 4
   minibatch_size: 256
-  reward_scale: 0.05
+  # 1.0, not the 0.05 the other configs use. At the SUMO operating point the team
+  # reward is about 1.28; scaled by 0.05 it becomes 0.064, while the entropy bonus
+  # at entropy_coef 0.01 and the entropy the policy actually held (4.24) is 0.042 --
+  # 66% of the objective. The policy therefore had almost no incentive to become
+  # deterministic and held 91% of maximum entropy after 400 updates. PPO's default
+  # coefficients assume a reward of order 1, and reward_clip already bounds the
+  # magnitude, so scaling down was not protecting anything.
+  reward_scale: 1.0
   reward_clip: 10.0
   crash_penalty: 2.0

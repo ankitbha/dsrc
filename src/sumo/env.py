@@ -429,7 +429,13 @@ class SumoTopologyEnv:
         speed = demand.get("speed_distribution", {}) or {}
         entries = sorted(self.network.entry_edges())
         per_entry = total_per_hour / max(len(entries), 1)
-        duration_s = int(self.config.get("duration_steps", 120)) * float(self.config.get("dt", 1.0))
+        # The flow must cover the warm-up as well as the episode, or demand stops
+        # before the episode does and the last stretch is a draining network. With
+        # a 300-step warm-up and a 600-step episode that was a third of the run,
+        # and it read as mean_speed 0.000 at the final step.
+        total_steps = (int(self.config.get("warmup_steps", 0))
+                       + int(self.config.get("duration_steps", 120)))
+        duration_s = total_steps * float(self.config.get("dt", 1.0))
 
         # The two vTypes are IDENTICAL except for their id and colour. Anything
         # else would confound penetration with a change in the fleet: an earlier
