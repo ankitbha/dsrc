@@ -229,7 +229,35 @@ class SumoTopologyView:
 
     @property
     def bottleneck_segments(self) -> tuple[str, ...]:
-        return ()
+        """Segments with fewer lanes than every segment feeding them.
+
+        Derived from the built network for the same reason `merge_nodes` is: a
+        lane drop is a property of the road, and reading it from the config would
+        let the two disagree. On `inverted_tree_bottleneck` this is
+        `tree_bottleneck_d`, one lane below the two-lane trunk; on `inverted_tree`
+        there is no lane drop and the result is empty.
+
+        Two sensing fields read it -- `distance_to_downstream_bottleneck`, and the
+        branch that decides whether cooperation is scored at all -- so returning an
+        empty tuple unconditionally, as an earlier version did, made the bottleneck
+        variant sense identically to the plain one.
+        """
+        counts = self.lane_counts
+        upstream: dict[str, set[str]] = {}
+        for index in self.road_network.lanes_dict():
+            segment = self.segment_for_lane(index)
+            following = self.road_network.next_lane(index)
+            if segment is None or following is None:
+                continue
+            downstream = self.segment_for_lane(following)
+            if downstream is None or downstream == segment:
+                continue
+            upstream.setdefault(downstream, set()).add(segment)
+        bottlenecks = [
+            segment for segment, feeders in upstream.items()
+            if feeders and all(counts.get(segment, 0) < counts.get(f, 0) for f in feeders)
+        ]
+        return tuple(sorted(bottlenecks))
 
     @property
     def merge_nodes(self) -> tuple[str, ...]:

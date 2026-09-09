@@ -26,6 +26,7 @@ un-incremented counter from a genuine zero.
 from __future__ import annotations
 
 import dataclasses
+import os
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -87,8 +88,13 @@ class SumoTopologyEnv:
         # caller happened to be in, and a `sumo_inverted_tree/` appeared in the
         # repository root. Generated artefacts do not belong in the repo, and a
         # caller that wants to keep them passes `work_dir`.
+        # The default is per process. A fixed shared path let two processes running
+        # the same topology -- an evaluation sweep, or a pytest-xdist worker --
+        # overwrite each other's demand file between the write and the read, so a
+        # run could silently use another run's penetration or duration.
         configured = self.config.get("work_dir")
-        base = Path(configured) if configured else Path(tempfile.gettempdir()) / "dsrc_sumo"
+        base = (Path(configured) if configured
+                else Path(tempfile.gettempdir()) / "dsrc_sumo" / f"pid_{os.getpid()}")
         self.work_dir = base / f"sumo_{topology_id}"
         self.network: SumoNetwork | None = None
         self.step_count = 0
@@ -96,6 +102,11 @@ class SumoTopologyEnv:
         #: How many times the collision count has been read. Exposed so a test can
         #: distinguish "no collisions happened" from "nobody looked".
         self.collision_checks = 0
+        #: Vehicles currently registered as colliding, so a collision that persists
+        #: across steps is counted once. `--collision.action warn` leaves the
+        #: vehicles on the network, so summing `getCollidingVehiclesNumber` counted
+        #: vehicle-steps: two vehicles in contact for three steps read as 6.
+        self._colliding_ids: set[str] = set()
         self._running = False
         self.view: SumoTopologyView | None = None
         self.agent_ids: list[str] = []
@@ -171,6 +182,7 @@ class SumoTopologyEnv:
         self.step_count = 0
         self.collision_count = 0
         self.collision_checks = 0
+        self._colliding_ids = set()
         args = [
             "-n", str(self.network.net_file),
             "-r", str(route_file),
@@ -214,7 +226,7 @@ class SumoTopologyEnv:
         for index in range(max(0, warmup)):
             _sumo.simulationStep()
             # Collisions during warm-up would still be collisions.
-            self.collision_count += int(_sumo.simulation.getCollidingVehiclesNumber())
+            self.collision_count += self._new_collisions()
             self.collision_checks += 1
             # Warm-up arrivals count toward the rolling throughput window, at a
             # NEGATIVE time so the window sees them as already elapsed. Without
@@ -245,6 +257,22 @@ class SumoTopologyEnv:
             # arrival into its segment.
             self._segment_of = {s.vehicle_id: s.segment_id for s in snapshots if s.segment_id}
             self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
+
+    def _new_collisions(self) -> int:
+        """Vehicles that entered a collision since the previous step.
+
+        `getCollidingVehiclesNumber` reports how many vehicles are in a collision
+        right now, and `--collision.action warn` leaves them on the network, so
+        adding it up each step counted vehicle-steps rather than events: two
+        vehicles in contact for three steps would read as 6. The reward's -5.0
+        weight is applied per event, so the difference is not cosmetic -- it is
+        inert only while the count is zero, which is the claim the counter exists
+        to check.
+        """
+        current = set(_sumo.simulation.getCollidingVehiclesIDList())
+        new = len(current - self._colliding_ids)
+        self._colliding_ids = current
+        return new
 
     def close(self) -> None:
         global _LIVE
@@ -279,10 +307,9 @@ class SumoTopologyEnv:
         _sumo.simulationStep()
         self.step_count += 1
 
-        before = self.collision_count
-        self.collision_count += int(_sumo.simulation.getCollidingVehiclesNumber())
+        self.new_collisions_last_step = self._new_collisions()
+        self.collision_count += self.new_collisions_last_step
         self.collision_checks += 1
-        self.new_collisions_last_step = self.collision_count - before
         arrived = int(_sumo.simulation.getArrivedNumber())
         self.arrived_total += arrived
         now = self.step_count * float(self.config.get("dt", 1.0))

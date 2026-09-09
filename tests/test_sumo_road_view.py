@@ -122,3 +122,53 @@ class TestItWorksWithTheRealSensingModel:
         )
         assert context.leader_gap_m == pytest.approx(40.0, abs=2.0)
         assert context.leader_relative_speed_mps == pytest.approx(-12.0, abs=0.5)
+
+
+class TestTheLaneDropIsSensed:
+    """`bottleneck_segments` returned an empty tuple whatever the network, so the
+    bottleneck variant sensed identically to the plain one although netconvert had
+    built the lane drop. Two sensing fields read it: the distance to the downstream
+    bottleneck, and the branch deciding whether cooperation is scored at all.
+    """
+
+    def test_the_plain_tree_has_no_lane_drop(self, tmp_path):
+        network = SumoNetwork.build(
+            "inverted_tree", load_named_config("topology", "inverted_tree"), tmp_path)
+        assert SumoTopologyView(network).bottleneck_segments == ()
+
+    def test_the_bottleneck_variant_reports_its_lane_drop(self, tmp_path):
+        network = SumoNetwork.build(
+            "inverted_tree_bottleneck",
+            load_named_config("topology", "inverted_tree_bottleneck"), tmp_path)
+        view = SumoTopologyView(network)
+        assert view.bottleneck_segments == ("tree_bottleneck_d",)
+        # Derived from the built lane counts rather than declared, so it agrees with
+        # the road by construction: the drop is from the two-lane trunk to one lane.
+        assert view.lane_counts["tree_trunk_c"] == 2
+        assert view.lane_counts["tree_bottleneck_d"] == 1
+
+    def test_a_vehicle_on_the_lane_drop_senses_zero_distance_to_it(self, tmp_path):
+        from src.sumo.env import SumoTopologyEnv
+
+        env = SumoTopologyEnv("inverted_tree_bottleneck", {
+            "topology": load_named_config("topology", "inverted_tree_bottleneck"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 200, "dt": 1.0, "warmup_steps": 200,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=5)
+        try:
+            on_drop = elsewhere = 0
+            for _ in range(200):
+                observations, _, _, _, _ = env.step({})
+                segment_of = {s.vehicle_id: s.segment_id for s in env.vehicle_snapshots()}
+                for agent_id, observation in observations.items():
+                    distance = observation["distance_to_downstream_bottleneck"]
+                    if segment_of.get(agent_id) == "tree_bottleneck_d":
+                        assert distance == 0.0
+                        on_drop += 1
+                    else:
+                        elsewhere += 1
+            assert on_drop > 0, "no AV was ever observed on the lane drop"
+            assert elsewhere > 0
+        finally:
+            env.close()

@@ -161,29 +161,42 @@ class TestNoCollisionsEver:
             env.close()
 
     def test_the_collision_count_reflects_what_sumo_reports(self, tmp_path, monkeypatch):
-        # The previous version asserted `collision_checks == 20`, but that counter
-        # is incremented by a separate statement, so replacing the collision read
-        # with `+= 0` left it passing. The guard on this migration's central
-        # premise was defeated by a one-token change.
+        # The first version asserted `collision_checks == 20`, but that counter is
+        # incremented by a separate statement, so replacing the collision read with
+        # `+= 0` left it passing: the guard on this migration's central premise was
+        # defeated by a one-token change. This drives the count from SUMO's side.
         #
-        # This drives the count from SUMO's side instead: if the env stops reading
-        # the reported number, the assertion fails.
+        # It also pins the counting unit. `--collision.action warn` leaves colliding
+        # vehicles on the network, so adding up how many are colliding each step
+        # counted vehicle-steps rather than events: the sequence below has four
+        # vehicles enter a collision and would read 8 when summed.
         import src.sumo.env as env_module
 
         env = _env(tmp_path, duration_steps=10)
         env.reset(seed=7)
         try:
-            reported = [0, 3, 0, 2, 0, 0, 1, 0, 0, 0]
+            reported = [
+                (),                       # nothing
+                ("v1", "v2"),             # two vehicles enter a collision: 2 events
+                ("v1", "v2"),             # the same collision persists: 0 events
+                ("v1", "v2", "v3"),       # a third joins: 1 event
+                (),                       # cleared
+                ("v1",),                  # v1 collides again: 1 event
+                (), (), (), (),
+            ]
             calls = iter(reported)
             monkeypatch.setattr(
-                env_module._sumo.simulation, "getCollidingVehiclesNumber",
-                lambda: next(calls, 0),
+                env_module._sumo.simulation, "getCollidingVehiclesIDList",
+                lambda: next(calls, ()),
             )
+            per_step = []
             for _ in range(10):
                 env.step({})
-            assert env.collision_count == sum(reported), (
-                f"SUMO reported {sum(reported)} collisions and the env counted "
-                f"{env.collision_count}"
+                per_step.append(env.new_collisions_last_step)
+            assert per_step == [0, 2, 0, 1, 0, 1, 0, 0, 0, 0], per_step
+            assert env.collision_count == 4, (
+                f"four vehicles entered a collision and the env counted "
+                f"{env.collision_count}; summing the per-step totals would give 8"
             )
             assert env.collision_checks == 10
         finally:
@@ -224,6 +237,20 @@ class TestGeneratedFilesStayOutOfTheRepository:
         })
         assert Path.cwd() not in env.work_dir.parents, (
             f"generated files would land under the working directory: {env.work_dir}"
+        )
+
+    def test_the_default_work_dir_is_private_to_this_process(self):
+        # A fixed shared path let two processes running the same topology -- an
+        # evaluation sweep, or a pytest-xdist worker -- overwrite each other's
+        # demand file between the write and the read, so a run could silently use
+        # another run's penetration or duration.
+        import os
+
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating")})
+        assert str(os.getpid()) in str(env.work_dir), (
+            f"the default work_dir is shared between processes: {env.work_dir}"
         )
 
     def test_an_explicit_work_dir_is_honoured(self, tmp_path):
@@ -287,3 +314,67 @@ class TestTheProcessLockIsReleasedOnFailure:
                 second.reset(seed=1)
         finally:
             first.close()
+
+
+class TestTheTopologysSafetyBlockReachesTheObservation:
+    """`_safety_constraints` reads the topology's declared limits instead of
+    passing a bare `SafetyConstraints()`. Nothing could tell the two apart: the
+    four values `inverted_tree` declares are numerically equal to the library
+    defaults, and the only two fields the SUMO sensing path consumes --
+    `uncongested_density_threshold_veh_per_km` and `low_speed_free_flow_delta_mps`
+    -- are not declared at all. The plumbing was correct and inert, so a mutant
+    reverting it survived. These tests give it a premise that is actually active.
+    """
+
+    def _config(self, tmp_path, safety_overrides=None):
+        topology = dict(load_named_config("topology", "inverted_tree"))
+        if safety_overrides is not None:
+            topology["safety"] = {**(topology.get("safety") or {}), **safety_overrides}
+        return {
+            "topology": topology,
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 30, "dt": 1.0, "warmup_steps": 0,
+            "work_dir": str(tmp_path),
+        }
+
+    def test_a_declared_value_overrides_the_library_default(self, tmp_path):
+        env = SumoTopologyEnv("inverted_tree", self._config(
+            tmp_path, {"uncongested_density_threshold_veh_per_km": 999.0,
+                       "lane_change_dwell_s": 42.0}))
+        constraints = env._safety_constraints()
+        assert constraints.uncongested_density_threshold_veh_per_km == 999.0
+        assert constraints.lane_change_dwell_s == 42.0
+        # A field the topology does not declare keeps the library default, so the
+        # test above is not satisfied by a constructor that takes everything.
+        assert constraints.emergency_decel_mps2 == 6.0
+
+    def test_an_undeclared_key_does_not_reach_the_constraints(self, tmp_path):
+        # SafetyConstraints is a dataclass, so an unknown key would raise rather
+        # than be ignored; a topology carrying an unrelated safety key must still
+        # build.
+        env = SumoTopologyEnv("inverted_tree", self._config(
+            tmp_path, {"not_a_constraint_field": 1.0}))
+        assert env._safety_constraints().lane_change_dwell_s == 15.0
+
+    def test_the_declared_threshold_changes_the_observations(self, tmp_path):
+        # End to end: the two constraints the sensing path consumes decide
+        # `uncongested_low_speed_flag`. Setting the density threshold to zero makes
+        # every segment count as congested, so the flag cannot be raised anywhere.
+        def flags(overrides):
+            env = SumoTopologyEnv("inverted_tree", self._config(tmp_path, overrides))
+            env.reset(seed=11)
+            try:
+                seen = []
+                for _ in range(30):
+                    observations, _, _, _, _ = env.step({})
+                    seen += [o["uncongested_low_speed_flag"] for o in observations.values()]
+                return seen
+            finally:
+                env.close()
+
+        permissive = flags({"uncongested_density_threshold_veh_per_km": 1000.0,
+                            "low_speed_free_flow_delta_mps": 0.1})
+        strict = flags({"uncongested_density_threshold_veh_per_km": 0.0})
+        assert permissive, "no AV observations produced, so the comparison is empty"
+        assert any(permissive), "the permissive threshold raised the flag nowhere"
+        assert not any(strict), "the strict threshold still raised the flag"
