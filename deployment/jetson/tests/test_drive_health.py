@@ -149,3 +149,66 @@ class TestTheHealthyCaseStillPasses:
         line = health.to_record()["line"]
         assert health.verdict == BROKEN
         assert "thermal" in line and "severe" in line
+
+
+class TestItWatchesTheRunThatIsActuallyBeingWritten:
+    """Both defects below shipped, and both were found by the same drive.
+
+    On 2026-09-08 the watcher reported a stall on a healthy drive because it was
+    reading a run that had already ended. Nothing in the twenty tests above could
+    have caught it: they all hand `assess` a facts dict and never ask which run the
+    facts came from.
+    """
+
+    def test_a_finished_run_does_not_outrank_the_live_one(self, tmp_path):
+        import os
+
+        from drive_health import newest_run
+
+        # The live run was created first and is still appending to metadata.
+        live = tmp_path / "run_20260908_182926"
+        (live / "here").mkdir(parents=True)
+        (live / "metadata.jsonl").write_text('{"type": "tick"}\n')
+
+        # The finished run was created later, wrote less, and then had summary.json
+        # created at teardown -- which is what bumps a DIRECTORY's mtime. Its name
+        # also sorts above the live run's, so name ordering cannot save us either.
+        dead = tmp_path / "run_20260908_183538"
+        dead.mkdir()
+        (dead / "metadata.jsonl").write_text('{"type": "tick"}\n')
+        os.utime(dead / "metadata.jsonl", (1000, 1000))
+        (dead / "summary.json").write_text("{}")
+
+        # Live metadata written most recently; dead directory touched most recently.
+        os.utime(live / "metadata.jsonl", (9000, 9000))
+        os.utime(live, (1, 1))
+        os.utime(dead, (9999, 9999))
+
+        assert newest_run(str(tmp_path)) == str(live), (
+            "picked the run whose directory was touched last, not the one being written"
+        )
+
+    def test_a_short_run_does_not_lose_its_first_tick(self, tmp_path):
+        from drive_health import _tail_ticks
+
+        path = tmp_path / "metadata.jsonl"
+        # Well under the 400 KB tail window, so the seek starts at 0 and every line
+        # is a complete record.
+        path.write_text("".join(
+            '{"type": "tick", "tick_id": %d}\n' % i for i in range(3)
+        ))
+        ticks = _tail_ticks(str(path))
+        assert [t["tick_id"] for t in ticks] == [0, 1, 2]
+
+    def test_a_long_run_still_drops_the_partial_first_record(self, tmp_path):
+        from drive_health import _tail_ticks
+
+        path = tmp_path / "metadata.jsonl"
+        # Past the window, so the seek lands mid-record and the leading fragment
+        # must still be discarded rather than parsed.
+        filler = '{"type": "tick", "tick_id": -1, "pad": "%s"}\n' % ("x" * 900)
+        body = filler * 500 + '{"type": "tick", "tick_id": 7}\n'
+        path.write_text(body)
+        ticks = _tail_ticks(str(path))
+        assert ticks, "the tail window produced nothing"
+        assert ticks[-1]["tick_id"] == 7

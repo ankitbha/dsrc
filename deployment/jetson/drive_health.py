@@ -239,11 +239,40 @@ def assess(facts: dict[str, Any]) -> Health:
 # transient is worse than no watcher, because its silence reads as calm.
 # ---------------------------------------------------------------------------
 def newest_run(log_dir: str) -> str | None:
+    """The run being written right now, chosen by when its metadata was last
+    written.
+
+    Not by directory name, and not by directory mtime. A directory's mtime moves
+    only when an entry is created or removed inside it, so a run that is actively
+    appending to `metadata.jsonl` does not touch it, while a finished run bumps
+    it at teardown by creating `summary.json`. On 2026-09-08 that ordered a dead
+    run above the live one, and reading the dead run's frozen counters produced a
+    "writers frozen" report on a drive that was healthy. Run names cannot break
+    the tie either: a run directory is named when the process starts and the
+    process may then wait minutes for the phone to dial, so the names sorted in
+    the opposite order to the runs themselves on that same day.
+    """
     try:
         runs = [os.path.join(log_dir, d) for d in os.listdir(log_dir)
                 if d.startswith("run_")]
         runs = [r for r in runs if os.path.isdir(r)]
-        return max(runs, key=os.path.getmtime) if runs else None
+        if not runs:
+            return None
+
+        def last_written(run: str) -> float:
+            meta = os.path.join(run, "metadata.jsonl")
+            try:
+                return os.path.getmtime(meta)
+            except OSError:
+                # No metadata yet: the run has just been created and has not been
+                # written to. Fall back to the directory so a brand-new run is
+                # still visible, but rank it below any run with real writes.
+                try:
+                    return os.path.getmtime(run)
+                except OSError:
+                    return 0.0
+
+        return max(runs, key=last_written)
     except OSError:
         return None
 
@@ -254,13 +283,21 @@ def _tail_ticks(path: str, want: int = 200) -> list[dict]:
     the load."""
     try:
         size = os.path.getsize(path)
+        start = max(0, size - 400_000)
         with open(path, "rb") as fh:
-            fh.seek(max(0, size - 400_000))
+            fh.seek(start)
             chunk = fh.read().decode("utf-8", "ignore")
     except OSError:
         return []
+    lines = chunk.splitlines()
+    if start > 0:
+        # The seek landed mid-record, so the first line is a fragment. When the
+        # whole file fits in the window `start` is 0 and that first line is a
+        # complete record: dropping it unconditionally lost one tick from every
+        # short run, which is exactly when a watcher has fewest to work with.
+        lines = lines[1:]
     out = []
-    for line in chunk.splitlines()[1:]:
+    for line in lines:
         try:
             r = json.loads(line)
         except Exception:
