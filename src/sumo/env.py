@@ -119,6 +119,11 @@ class SumoTopologyEnv:
         #: The segment each vehicle occupied last step, for per-segment in and out
         #: flow.
         self._segment_of: dict[str, str] = {}
+        self._step_inflow: dict[str, int] = {}
+        self._step_outflow: dict[str, int] = {}
+        #: Segment metrics are a pure function of one step, and the getter is called
+        #: two or three times per step, so they are computed once and reused.
+        self._cached_segment_metrics: dict | None = None
         #: New collisions this step, exposed so a test can tell a measured zero from
         #: a hardcoded one.
         self.new_collisions_last_step = 0
@@ -128,10 +133,16 @@ class SumoTopologyEnv:
     def reset(self, seed: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         global _LIVE
         if _LIVE is not None and _LIVE is not self:
-            raise RuntimeError(
-                "another SumoTopologyEnv already holds the SUMO connection; "
-                "libsumo is process-global, so close it before resetting this one"
-            )
+            if _LIVE._running:
+                raise RuntimeError(
+                    "another SumoTopologyEnv already holds the SUMO connection; "
+                    "libsumo is process-global, so close it before resetting this one"
+                )
+            # The marker outlived the env that set it, which holds no connection and
+            # must not block this one. Without this an env dropped without `close`
+            # locked the process: every later reset raised, so one failing test
+            # cascaded into every SUMO test that followed it.
+            _LIVE = None
         self.close()
         topology_cfg = self.config.get("topology", {})
         self.network = SumoNetwork.build(self.topology_id, topology_cfg, self.work_dir)
@@ -152,6 +163,9 @@ class SumoTopologyEnv:
         self._branch_completed = {edge: 0 for edge in self.network.entry_edges()}
         self._branch_spawned = {edge: 0 for edge in self.network.entry_edges()}
         self._segment_of = {}
+        self._step_inflow = {}
+        self._step_outflow = {}
+        self._cached_segment_metrics = None
         self.new_collisions_last_step = 0
         self._rng = np.random.RandomState(0 if seed is None else int(seed))
         self.step_count = 0
@@ -174,8 +188,14 @@ class SumoTopologyEnv:
         _sumo.start([self._binary()] + args)
         self._running = True
         _LIVE = self
-        self._warm_up()
-        return self.get_local_observations(), {"binding": _BINDING}
+        try:
+            self._warm_up()
+            return self.get_local_observations(), {"binding": _BINDING}
+        except BaseException:
+            # Releasing the connection on the way out, so a failure here does not
+            # leave the process holding a marker no one can clear.
+            self.close()
+            raise
 
     def _warm_up(self) -> None:
         """Fill the network before the episode is observed.
@@ -220,6 +240,10 @@ class SumoTopologyEnv:
             self._branch_completed = {edge: 0 for edge in self.network.entry_edges()}
             self._branch_spawned = {edge: 0 for edge in self.network.entry_edges()}
             snapshots = self.vehicle_snapshots()
+            # Seed the segment map without emitting flows: the first observed step
+            # would otherwise report every vehicle already on the network as an
+            # arrival into its segment.
+            self._segment_of = {s.vehicle_id: s.segment_id for s in snapshots if s.segment_id}
             self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
 
     def close(self) -> None:
@@ -266,6 +290,8 @@ class SumoTopologyEnv:
         self._track_branches()
 
         snapshots = self.vehicle_snapshots()
+        self._cached_segment_metrics = None
+        self._update_flows(snapshots)
         self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
         for agent_id in self.agent_ids:
             self._safety_states.setdefault(agent_id, SafetyState())
@@ -432,31 +458,62 @@ class SumoTopologyEnv:
         the MAPPO critic: `encode_physical_global_state` reads eleven fields per
         segment and received none of them.
         """
+        if self._cached_segment_metrics is not None:
+            return self._cached_segment_metrics
         snapshots = snapshots if snapshots is not None else self.vehicle_snapshots()
         road = (self.config.get("topology") or {}).get("road", {})
         lengths = road.get("segment_lengths", {}) or {}
         segment_ids = sorted({s.segment_id for s in snapshots if s.segment_id} | set(lengths))
-        inflow: dict[str, int] = {}
-        outflow: dict[str, int] = {}
-        for snapshot in snapshots:
-            previous = self._segment_of.get(snapshot.vehicle_id)
-            if previous != snapshot.segment_id:
-                if snapshot.segment_id:
-                    inflow[snapshot.segment_id] = inflow.get(snapshot.segment_id, 0) + 1
-                if previous:
-                    outflow[previous] = outflow.get(previous, 0) + 1
-            if snapshot.segment_id:
-                self._segment_of[snapshot.vehicle_id] = snapshot.segment_id
         lane_counts = dict(self.view.lane_counts) if self.view is not None else {}
-        return compute_segment_metrics(
+        self._cached_segment_metrics = compute_segment_metrics(
             segment_ids=segment_ids,
             segment_lengths_m=lengths,
             lane_counts=lane_counts,
             active_vehicle_records=self._vehicle_records(snapshots),
-            step_inflow=inflow,
-            step_outflow=outflow,
+            step_inflow=self._step_inflow,
+            step_outflow=self._step_outflow,
             thresholds=metric_thresholds_from_config(self.config),
         )
+        return self._cached_segment_metrics
+
+    def _update_flows(self, snapshots: list[VehicleSnapshot]) -> None:
+        """Vehicles crossing each segment's boundaries during the step just taken.
+
+        Called once per step, before the metric getters, because the flows are a
+        difference between two steps and cannot be recovered from a single one. An
+        earlier version computed them inside `get_segment_metrics` and advanced
+        `_segment_of` there as a side effect; that getter is called two or three
+        times per step and `get_global_state` is always last, so the critic and the
+        logs read the flows of a comparison of the step against itself -- zero on
+        every segment, on 2 of the 11 fields the critic receives per segment.
+
+        A vehicle entering the network counts as inflow to its first segment, one
+        crossing a boundary as outflow from the old segment and inflow to the new,
+        and one that is no longer on any segment -- it arrived, or it is inside a
+        junction -- as outflow from its last. `HighwayTopologyEnv` counts only the
+        first and last of those, so its interior segments always report zero flow;
+        this is a deliberate divergence, recorded in the migration plan, because the
+        global state is read by the critic alone and is not part of the deployed
+        contract.
+        """
+        current = {s.vehicle_id: s.segment_id for s in snapshots if s.segment_id}
+        inflow: dict[str, int] = {}
+        outflow: dict[str, int] = {}
+        for vehicle_id, segment_id in current.items():
+            previous = self._segment_of.get(vehicle_id)
+            if previous == segment_id:
+                continue
+            inflow[segment_id] = inflow.get(segment_id, 0) + 1
+            if previous is not None:
+                outflow[previous] = outflow.get(previous, 0) + 1
+        for vehicle_id, previous in self._segment_of.items():
+            if vehicle_id not in current:
+                outflow[previous] = outflow.get(previous, 0) + 1
+        # Rebinding rather than updating also prunes vehicles that have left, which
+        # otherwise accumulated: 120 entries against 58 live vehicles.
+        self._segment_of = current
+        self._step_inflow = inflow
+        self._step_outflow = outflow
 
     def _branch_fairness(self) -> float:
         """Jain's index over completions per entry branch."""

@@ -230,3 +230,60 @@ class TestGeneratedFilesStayOutOfTheRepository:
         # The control: the default must not be ignoring the setting entirely.
         env = _env(tmp_path)
         assert tmp_path in env.work_dir.parents or env.work_dir.parent == tmp_path
+
+
+class TestTheProcessLockIsReleasedOnFailure:
+    """`_LIVE` was set after the simulation started and cleared only by `close`, so
+    an exception between the two left it set for the life of the process and every
+    later `reset` raised. One failing test cascaded into every SUMO test after it.
+    """
+
+    def _config(self, tmp_path):
+        return {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 5, "dt": 1.0, "warmup_steps": 0,
+            "work_dir": str(tmp_path),
+        }
+
+    def test_a_reset_that_raises_does_not_lock_the_process(self, tmp_path):
+        from src.sumo import env as env_module
+
+        failing = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+        failing._warm_up = lambda: (_ for _ in ()).throw(RuntimeError("simulated"))
+        with pytest.raises(RuntimeError, match="simulated"):
+            failing.reset(seed=1)
+        assert env_module._LIVE is None, "the failed env still holds the connection"
+
+        survivor = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+        try:
+            survivor.reset(seed=1)
+            survivor.step({})
+        finally:
+            survivor.close()
+
+    def test_a_dropped_env_does_not_block_the_next_one(self, tmp_path):
+        from src.sumo import env as env_module
+
+        dropped = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+        dropped.reset(seed=1)
+        dropped.close()
+        # A closed env that is still referenced by the marker holds no connection.
+        env_module._LIVE = dropped
+        successor = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+        try:
+            successor.reset(seed=1)
+            assert env_module._LIVE is successor
+        finally:
+            successor.close()
+
+    def test_a_live_env_still_refuses_a_second_one(self, tmp_path):
+        # The control: the guard must still do the job it exists for.
+        first = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+        first.reset(seed=1)
+        try:
+            second = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+            with pytest.raises(RuntimeError, match="already holds the SUMO connection"):
+                second.reset(seed=1)
+        finally:
+            first.close()

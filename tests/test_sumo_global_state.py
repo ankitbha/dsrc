@@ -335,3 +335,89 @@ class TestArrivedTotalCountsTheEpisodeOnly:
             )
         finally:
             env.close()
+
+
+class TestSegmentFlowsReachEveryConsumer:
+    """`inflow` and `outflow` were computed inside `get_segment_metrics`, which also
+    advanced the segment map as a side effect. That getter runs two or three times
+    per step and `get_global_state` runs last, so the critic and the logs compared
+    the step against itself and read zero on both fields, on 2 of the 11 fields
+    supplied per segment.
+    """
+
+    def _env(self, tmp_path, **overrides):
+        config = {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path),
+        }
+        config.update(overrides)
+        return SumoTopologyEnv("inverted_tree", config)
+
+    def test_every_call_within_one_step_reports_the_same_flows(self, tmp_path):
+        env = self._env(tmp_path)
+        env.reset(seed=7)
+        try:
+            moved = 0
+            for _ in range(40):
+                env.step({})
+                direct = env.get_segment_metrics()
+                state_view = env.get_global_state()["segment_state"]
+                for segment_id, metrics in direct.items():
+                    moved += metrics["inflow"] + metrics["outflow"]
+                    assert (metrics["inflow"], metrics["outflow"]) == (
+                        state_view[segment_id]["inflow"],
+                        state_view[segment_id]["outflow"],
+                    ), f"{segment_id} reports different flows to different consumers"
+            # Without this the assertion above is satisfied by two sets of zeros,
+            # which is exactly the state the defect produced.
+            assert moved > 20, f"only {moved} boundary crossings seen in 40 steps"
+        finally:
+            env.close()
+
+    def test_the_critic_sees_flow_on_interior_segments(self, tmp_path):
+        env = self._env(tmp_path)
+        env.reset(seed=7)
+        try:
+            with_inflow, with_outflow = set(), set()
+            for _ in range(120):
+                env.step({})
+                for segment_id, metrics in env.get_global_state()["segment_state"].items():
+                    if metrics["inflow"]:
+                        with_inflow.add(segment_id)
+                    if metrics["outflow"]:
+                        with_outflow.add(segment_id)
+            assert len(with_inflow) >= 8, f"inflow only ever seen on {sorted(with_inflow)}"
+            assert len(with_outflow) >= 8, f"outflow only ever seen on {sorted(with_outflow)}"
+            # Interior segments carry no spawns and no exits, so they are the ones a
+            # spawn-and-exit-only accounting leaves permanently at zero.
+            assert {"tree_middle_b1", "tree_middle_b2", "tree_trunk_c"} <= with_inflow
+        finally:
+            env.close()
+
+    def test_flow_accounts_for_every_change_in_segment_occupancy(self, tmp_path):
+        # The invariant that makes the flows trustworthy rather than merely
+        # non-zero: a segment's occupancy changes by exactly its inflow minus its
+        # outflow, so no vehicle is counted twice and none is lost.
+        env = self._env(tmp_path)
+        env.reset(seed=7)
+        try:
+            previous_counts: dict[str, int] = {}
+            checked = 0
+            for step in range(60):
+                env.step({})
+                state = env.get_global_state()["segment_state"]
+                if previous_counts:
+                    for segment_id, metrics in state.items():
+                        change = metrics["vehicle_count"] - previous_counts.get(segment_id, 0)
+                        assert change == metrics["inflow"] - metrics["outflow"], (
+                            f"step {step}, {segment_id}: occupancy changed by {change} "
+                            f"against inflow {metrics['inflow']} and outflow "
+                            f"{metrics['outflow']}"
+                        )
+                        checked += 1
+                previous_counts = {s: m["vehicle_count"] for s, m in state.items()}
+            assert checked > 400
+        finally:
+            env.close()
