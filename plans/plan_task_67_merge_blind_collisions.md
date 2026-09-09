@@ -573,3 +573,82 @@ would let the policy use merge distance legitimately. Until then the sim must no
 
 The collision figure was −19% before the stopping floor. Part of that gain was
 vehicles reversing out of trouble, and it is now gone.
+
+---
+
+# VALIDATOR ROUND 3, AND THE ATTRIBUTION SETTLED
+
+Round 3 reproduced both headline numbers and found five things. The mutation table
+closed every gap round 2 had reported, and the only surviving mutation
+(`_stopping_floor` using `abs(speed)`) has no behavioural effect.
+
+## The attribution, which round 3 showed was ambiguous
+
+The stopping floor is not a merge fix: 73% of its interventions happen with no
+merge conflict in view, and on `ring` — where the merge logic is provably inert,
+every node having one incoming arc — it still changes behaviour. So the plain-IDM
+control differed from the treatment in **two** ways, and the earlier statement
+attributed the whole gain to "the merge rule".
+
+Three arms, 243 runs, same seeds:
+
+| arm | completion | collisions |
+|---|---|---|
+| A — plain IDM, neither change | 43/81 (53%) | 155 |
+| B — merge rule only, floor disabled | **57/81 (70%)** | **126** |
+| C — merge rule + stopping floor | 57/81 (70%) | 138 |
+
+| change | completion | collisions |
+|---|---|---|
+| merge rule, A→B | **+17pp** | **−29** |
+| stopping floor, B→C | **+0pp** | **+12** |
+
+**The whole +17pp is the merge rule.** The floor buys no completion and costs 12
+collisions, from the extra stopping distance: unrestricted −6 m/s² from 5 m/s
+travels 2.08 m to rest, the floor's geometric decay 3.26 m. It is kept because a
+vehicle reversing at −7.5 m/s is not a physical model, and 12 collisions is the
+honest price of that correctness. Anyone quoting these numbers should quote C, and
+say that B is the same result with an unphysical vehicle.
+
+## Acted on
+
+- **Noise asymmetry in the actor's input.** `_route_deltas` read the true
+  `longitudinal_m` while the same-arc path read the noisy delta: at the training
+  configs' 1.5 m, 3.308 m of spread same-arc against 0.000 m cross-arc. It now
+  reuses the draw that neighbour already received.
+- **The AV path was unfloored.** The env overwrites the AV command after
+  `road.act()`. A `ControlledVehicle` at 0.3 m/s given −6.0 reached −1.5 m/s over
+  three substeps. Measured headroom was +0.816 m/s over 16 runs. Both vehicle kinds
+  now stop over the same 1 s horizon.
+- **The parity ledger's `leader_gap` claim.** Scoped, not reclassified. See below.
+
+## The inconsistency round 3 caught in this task's own reasoning
+
+A real `distance_to_next_merge` was refused because the deployed vehicle has no map
+matching. The route-aware leader gap uses **the same map** — a camera cannot know a
+vehicle past a junction is on its route, nor accumulate lane length to it — and it
+went into the actor's observation anyway.
+
+Reverting is worse: an arc-blind actor beside a route-aware safety layer is the
+larger defect. So the ledger description now scopes the identical claim to
+single-arc scenes, which is all it was ever validated on: `_route_deltas` returns a
+cross-arc neighbour **zero times across the entire parity suite**, because every
+scene fixes one arc. Reclassifying to `approximated` cannot be done alone — the
+suite requires a non-identical class to differ somewhere — so
+`test_the_ledger_has_no_cross_arc_scene` fails the moment a cross-arc scene is
+added, which is when reclassification becomes possible.
+
+**Outstanding on task 47:** one cross-arc parity scene, then reclassify.
+
+## Residuals, and one qualification worth acting on
+
+Round 3 agreed the round 2 residuals are correctly scoped — the static successor
+map versus the acquired `lane_index`, the single colliding pair the successor filter
+excludes, `predecessors[0]`, the never-executed reset-time wiring — with one
+qualification: **that assumption is now load-bearing in five places, not two.**
+`_forward_lane_offsets`, the backward predecessor test, both successor filters, and
+now the actor's observation. The surface grew this round rather than holding still,
+and the parity inconsistency above is a direct consequence.
+
+**So the next expansion of that assumption should be a deliberate decision, not a
+side effect.** Recorded here so it is one.
