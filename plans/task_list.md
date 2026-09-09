@@ -2435,6 +2435,52 @@ and on what evidence.
 
 ## K. Found in passing
 
+81. **The reweighting worked: throughput improved 30% during training.** Done.
+
+    100 updates, `mappo_deploysense` with `throughput_recent` at 0.10 and
+    `jam_fraction` at −2.0, `inverted_tree` at the `saturating` demand, 3600-step
+    episodes:
+
+    | metric | first half | second half | change |
+    |---|---|---|---|
+    | `throughput_recent` | 10.779 | 14.062 | **+3.283 (+30%)** |
+    | `entropy` | 3.426 | 2.830 | −0.596, converging |
+    | `mean_speed` | 20.355 | 20.288 | −0.066, flat |
+    | `jam_fraction` | 0.004 | 0.005 | +0.001 |
+    | `collision_count` | 0.053 | 0.068 | +0.015 |
+
+    Under the old weights the agent raised its own speed and left throughput
+    untouched; under the new ones it does the reverse. That is the objective
+    change working as intended, and it is the first time throughput has moved
+    during training at all.
+
+    **This is a training-metric result, not the replication.** The evaluation is
+    still blocked: the reference is bistable at capacity and the arms do not
+    complete reliably. See the retraction under task 80 and task 77.
+
+82. **The `score` column no longer measures what is being optimised.** Open, small.
+
+    `src/rl/trainers.py:134` computes `score = mean_speed − jam_fraction` and uses
+    it for `best_score` and for choosing which checkpoint is "best". Since the
+    reward became configurable and throughput-led, that expression is not the
+    objective: a run whose throughput improves 30% while speed stays flat shows a
+    `score` delta of −0.067, i.e. it looks slightly worse.
+
+    So `actor.pt` is selected on a quantity the trainer is no longer maximising.
+    `latest_actor.pt` is unaffected. The fix is to score with
+    `build_team_reward(metrics, self.config.reward_weights)`, which is the thing
+    actually being maximised.
+
+83. **`config_resolved.yaml` is written only when training completes.** Open, small.
+
+    Observed mid-run: the checkpoint directory held `actor.pt`, `critic.pt`,
+    `latest_actor.pt`, `latest_critic.pt`, `trainer_state.pt` and
+    `training_metrics.csv`, but no `config_resolved.yaml`; it appeared at
+    completion. Task 69's evaluation harness refuses a checkpoint whose sensing
+    block it cannot read, by design, so an interrupted or still-running training
+    run cannot be evaluated even though its weights are on disk. Writing it
+    alongside the first checkpoint would cost nothing.
+
 80. **Controllers DO have a large measurable effect, once the simulator is fixed
     and measured at the right operating point.** PRELIMINARY — two seeds.
 
