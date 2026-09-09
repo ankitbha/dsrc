@@ -284,9 +284,15 @@ def test_real_run_metrics_come_from_the_expected_env_fields():
     instead would change every ratio in the report without any test objecting."""
     cell = CellSpec(topology="merge", demand="high", av_penetration=0.10)
     run = run_condition(cell, "no_av", 7, duration_steps=120)
-    assert run.mean_speed == pytest.approx(12.40, abs=0.5)
+    # Re-pinned 2026-09-09 for MergeAwareIDMVehicle. With plain IDMVehicle this
+    # same run reproduces the previous pin exactly -- 12.400, 20.0, 0.208 -- so the
+    # move is entirely the human model and not the extraction layer this test
+    # exists to guard. Throughput is identical either way; speed rose and jam fell,
+    # which is the merge topology's version of the same improvement measured on
+    # inverted_tree.
+    assert run.mean_speed == pytest.approx(14.13, abs=0.5)
     assert run.throughput == pytest.approx(20.0, abs=2.0)
-    assert run.jam_fraction == pytest.approx(0.208, abs=0.02)
+    assert run.jam_fraction == pytest.approx(0.174, abs=0.02)
 
 
 # --------------------------------------------------------------------------

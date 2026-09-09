@@ -216,30 +216,30 @@ class TestMergeConflict:
         # reaching the joining node before the ego. 20 m is inside the desired
         # headway at 27 m/s, so the ego slows -- but matched speeds are not an
         # emergency, they are car-following.
-        decision = self._decide(distance_to_next_merge_m=40.0, merge_conflict_gap_m=20.0)
+        decision = self._decide(merge_conflict_gap_m=20.0)
         assert decision.acceleration_mps2 < 0.0
 
     def test_brakes_hard_when_closing_on_a_converging_vehicle(self) -> None:
         # 20 m and closing at 20 m/s is a 1.0 s time to contact, inside the 2.0 s
         # minimum, so this one is an emergency.
-        decision = self._decide(distance_to_next_merge_m=40.0, merge_conflict_gap_m=20.0,
+        decision = self._decide(merge_conflict_gap_m=20.0,
                                 merge_conflict_relative_speed_mps=-20.0)
         assert decision.acceleration_mps2 == pytest.approx(-6.0)
 
     def test_does_not_yield_when_the_ego_reaches_the_merge_first(self) -> None:
         # A vehicle that arrives behind the ego is reported as no conflict at all,
         # so the ego keeps its priority.
-        decision = self._decide(distance_to_next_merge_m=20.0, merge_conflict_gap_m=float("inf"))
+        decision = self._decide(merge_conflict_gap_m=float("inf"))
         assert decision.acceleration_mps2 >= 0.0
 
     def test_an_empty_merge_changes_nothing(self) -> None:
         # The control: a merge with nobody on it must decide exactly as a plain
         # road does, or the rule is charging for the geometry rather than the
         # traffic.
-        with_merge = self._decide(distance_to_next_merge_m=30.0)
+        with_merge = self._decide(merge_conflict_gap_m=float("inf"))
         without = self._decide()
         assert with_merge.acceleration_mps2 == pytest.approx(without.acceleration_mps2)
 
     def test_a_distant_merge_conflict_does_not_brake(self) -> None:
-        decision = self._decide(distance_to_next_merge_m=400.0, merge_conflict_gap_m=200.0)
+        decision = self._decide(merge_conflict_gap_m=200.0)
         assert decision.acceleration_mps2 >= 0.0

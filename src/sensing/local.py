@@ -196,7 +196,12 @@ class LocalObservationBuilder:
         local_mean_speed = _mean(local_speeds) if local_speeds else ego.speed_mps
         local_queue_estimate = sum(1 for neighbor in measured if neighbor.speed_mps < self.config.queue_speed_mps)
 
-        same_lane = self._lane_gaps(ego, measured, ego.lane_index)
+        # The same route-aware gaps the safety layer gets. Without this the
+        # observation the policy trains on was still arc-blind while
+        # `lane_gap_context` was not, so the actor and the safety layer disagreed
+        # about where the traffic was.
+        route_deltas = self._route_deltas(ego, measured, topology)
+        same_lane = self._lane_gaps(ego, measured, ego.lane_index, route_deltas=route_deltas)
         left_lane = self._lane_gaps(ego, measured, _adjacent_lane(ego.lane_index, -1, topology))
         right_lane = self._lane_gaps(ego, measured, _adjacent_lane(ego.lane_index, 1, topology))
         target_lane_exists = target_lane is not None and target_lane in topology.road_network.lanes_dict()
@@ -247,6 +252,13 @@ class LocalObservationBuilder:
             "time_since_last_lane_change": time_since_last_lane_change,
             "lane_changes_last_km": int(safety_state.lane_changes_last_km),
             "current_segment": ego.segment_id,
+            # Deliberately 0.0, matching the live side, NOT an oversight. The
+            # real distance is computed -- `_merge_context` returns it and the
+            # safety layer could take it -- but `deployment/jetson`'s observation
+            # builder has no map matching and sets this to 0.0 for sim parity, so
+            # putting a real value here would train the policy on information the
+            # deployed vehicle cannot measure. Task 47's parity ledger caught the
+            # divergence immediately when it was tried.
             "distance_to_next_merge": 0.0,
             "distance_to_downstream_bottleneck": 0.0 if ego.segment_id in topology.bottleneck_segments else float("inf"),
             "leader_gap": same_lane.front_gap_m,

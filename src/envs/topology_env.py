@@ -700,9 +700,6 @@ class HighwayTopologyEnv(BaseCTDEEnv):
             # every inverted_tree segment (`tree_leaf_a1` and friends) even though
             # three arcs join at each of its inner nodes. These three carry the
             # geometry instead of the naming convention.
-            distance_to_next_merge_m=(
-                gap_context.distance_to_next_merge_m if gap_context is not None else float("inf")
-            ),
             merge_conflict_gap_m=(
                 gap_context.merge_conflict_gap_m if gap_context is not None else float("inf")
             ),

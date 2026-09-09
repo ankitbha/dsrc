@@ -504,3 +504,72 @@ Options 1 and 3 compose: change the reward, then evaluate wider.
 It does not show that MAPPO cannot improve throughput in this simulator. The
 agent was never asked to. That distinction is why the reward was recorded before
 the run rather than after.
+
+---
+
+# VALIDATOR ROUND 2 2026-09-09
+
+All four numbers reproduced exactly, and the crashed-vehicle filter was checked
+empirically rather than argued: yielding to wrecks gives **167** collisions and
+14.04 m/s against **126** and 15.81 for skipping them, so it is better on both axes.
+
+## Acted on, each verified here first
+
+| finding | what it was | now |
+|---|---|---|
+| backwards driving | the clamp bounded acceleration, not speed. A projected gap does not shrink with the ego's speed, so ACC_MAX could be commanded at a standstill; vehicles reversed at **−7.5 m/s** and the mean over 40 vehicles read 28.1, hiding it | a stopping floor of `−speed / 1 s`, applied to the **composed** acceleration on **every** call. Flooring only the merge term left −0.87 m/s, because `act()` returned early when no conflict was in view |
+| `min(candidates, key=abs)` untested | reverting it to the exact pre-fix bug left 52/52 passing | a ring test: a vehicle 75 m behind, 185 m ahead around the loop, must read as a follower |
+| `_merge_context` filters untested | both could be deleted with 0 tests failing, and this is the half feeding the safety layer | three tests plus a live-vehicle control |
+| docstrings and a dead field | `distance_to_next_merge_m` was plumbed through two dataclasses and read by nothing, while five tests passed it as input | removed from `SafetyContext`; `_forward_hazard`'s "stationary obstacle" wording corrected |
+
+**Every one of those four is now mutation-caught**, verified in a throwaway mirror:
+each mutation fails exactly one test, baseline and restored both 42 passed.
+
+## A finding of my own, made while fixing theirs
+
+`build_one` — the observation the **actor** trains on — never got the route-aware
+gaps that `lane_gap_context` got, and `distance_to_next_merge` was still the literal
+`0.0`. So the policy trained in task 68 could see neither a leader across an arc
+boundary nor that a merge existed, on a topology whose every node is a merge.
+
+The gaps are now fixed there too. **The merge distance is deliberately not**, and
+task 47's parity ledger is what settled it: `deployment/jetson`'s observation
+builder has no map matching and sets the field to `0.0` explicitly for sim parity.
+Putting a real value in the sim observation would train the policy on information
+the deployed vehicle cannot measure. The ledger failed the moment it was tried,
+which is what that ledger is for.
+
+**This is a decision the user may want to revisit:** giving the Jetson map matching
+would let the policy use merge distance legitimately. Until then the sim must not.
+
+## Residuals, measured and not fixed
+
+- **The static successor map disagrees with the lane index vehicles acquire.**
+  `_next_lane` returns `target_lane_index`, the steering target;
+  `VehicleSnapshot.lane_index` is `get_closest_lane_index`, the geometrically
+  nearest. 14 of 93 observed transitions disagree, systematically for
+  `('b2','c',1) → ('c','exit',0)` (9 of 9), because the b2 arc ends at y = −6 while
+  `c→exit` lane 0 starts at y = 0. Roughly 1% of ego observations lose their
+  leader — the same mechanism as the entry-arc defect, one arc downstream.
+- **The successor filter therefore excludes one pair that does collide**, 1 of 13
+  classified collision pairs, 5–7 m past node `c`. The 48% false-conflict
+  reduction stands; the filter is not sound.
+  Both share one root cause and want one fix built on where vehicles physically
+  travel rather than on the static map. That is a task, not a patch.
+- **`predecessors[0]` explores a branching ancestor tree as a single chain.** Zero
+  mismatches at `range_m` 150 on all six topologies; the trigger needs `range_m`
+  above 600. Latent.
+- **Half the wiring in `ae4f993` has never run.** `initial_human_vehicles` is 0 for
+  every non-ring topology, so the reset-time spawn path never fires, and on `ring`
+  every node has one incoming arc so no merge conflict can exist. Harmless, and it
+  is why toggling the spawner alone is a sound experiment.
+
+## Re-measured after these fixes
+
+| | plain IDM | merge-aware |
+|---|---|---|
+| completion, 81 distinct runs | 43/81 (53%) | **57/81 (70%)** |
+| collisions, 9 distinct `no_av` conditions | 155 | **138 (−11%)** |
+
+The collision figure was −19% before the stopping floor. Part of that gain was
+vehicles reversing out of trouble, and it is now gone.

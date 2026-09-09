@@ -42,19 +42,37 @@ class MergeAwareIDMVehicle(IDMVehicle):
     #: not yet relevant and including it makes vehicles crawl along empty arcs.
     MERGE_HORIZON_M = 150.0
 
+    #: The horizon over which a yield may bring the vehicle to rest. One second
+    #: matches the simulator's decision step, so the strongest permitted brake
+    #: reaches exactly zero rather than passing through it.
+    MERGE_STOP_TAU_S = 1.0
+
     def act(self, action: Any = None) -> None:
         super().act(action)
         if not isinstance(self.action, dict):
             return
         merge_acceleration = self._merge_acceleration()
-        if merge_acceleration is None:
-            return
         current = self.action.get("acceleration")
-        if current is None:
-            self.action["acceleration"] = merge_acceleration
+        if merge_acceleration is None:
+            combined = current
+        elif current is None:
+            combined = merge_acceleration
         else:
             # The more restrictive of the two constraints wins.
-            self.action["acceleration"] = min(float(current), merge_acceleration)
+            combined = min(float(current), merge_acceleration)
+        if combined is None:
+            return
+        # The floor is applied on every call, not only when a merge constrains the
+        # vehicle. Applying it only on the merge branch left vehicles reversing at
+        # -0.87 m/s: yielding puts them into near-contact states plain IDM never
+        # reaches, and IDM's own gap term then brakes hard at walking pace on a
+        # later step when no conflict is in view. Whichever constraint wins, and
+        # whether or not one exists, a vehicle must not be told to drive backwards.
+        self.action["acceleration"] = max(float(combined), self._stopping_floor())
+
+    def _stopping_floor(self) -> float:
+        """The steepest deceleration that cannot carry the speed below zero."""
+        return -max(float(self.speed), 0.0) / self.MERGE_STOP_TAU_S
 
     def _successor(self, lane_index):
         """The lane a vehicle on `lane_index` drives onto next, or None."""
@@ -127,13 +145,21 @@ class MergeAwareIDMVehicle(IDMVehicle):
         if phantom is None:
             return None
         acceleration = float(self.acceleration(ego_vehicle=self, front_vehicle=phantom))
+        # Two separate floors, for two separate failures.
+        #
         # IDM's gap term is `(desired_gap / d)^2`, which diverges as d approaches
         # zero. Real vehicles never get that close because a collision is detected
-        # first, but a PROJECTED leader can sit a centimetre ahead, and without this
-        # clamp a no_av run reached a mean_speed of -2.6e11 m/s -- a number that
-        # feeds the trainer's score directly. Braking is allowed to be hard; it is
-        # not allowed to be unbounded.
-        return max(acceleration, -abs(self.ACC_MAX))
+        # first, but a PROJECTED leader can sit a centimetre ahead, and without a
+        # bound a no_av run reached a mean_speed of -2.6e11 m/s.
+        #
+        # A magnitude bound alone is not enough, because it bounds acceleration and
+        # the defect is in speed. IDM's own braking fades out as a vehicle stops --
+        # its desired gap scales with the ego's speed -- but a projected gap is a
+        # difference of distances-to-node and does not, so the full ACC_MAX could be
+        # commanded at a standstill. Vehicles then reversed at up to -7.5 m/s, which
+        # the mean over forty vehicles hid completely. Stopping within
+        # MERGE_STOP_TAU_S is the strongest brake that cannot reverse the vehicle.
+        return max(acceleration, -abs(self.ACC_MAX), self._stopping_floor())
 
     def _phantom_leader(self, other: Vehicle, gap: float) -> Vehicle | None:
         """The converging vehicle, restated as a leader on the ego's own lane.

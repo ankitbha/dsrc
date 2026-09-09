@@ -96,16 +96,16 @@ class TestItComposesWithOrdinaryFollowing:
 class TestWhatItDoesAndDoesNotBuy:
     """Measured on the 108-run grid, and the result is mixed.
 
-    AV episodes complete more often -- 48/108 to 58/108 -- which is the criterion
-    that gates training. Human-on-human collisions in `no_av` traffic go UP, 212 to
-    301 over 12 identical conditions, because a vehicle yielding to a projected
-    conflict slows and the traffic behind it in its own lane does not always react
-    in time.
+    Measured on 81 DISTINCT runs against a same-run plain-IDM control: AV episodes
+    complete 43/81 to 57/81, +17 points, and collisions fall 155 to 138 over the 9
+    distinct `no_av` conditions at penetration 0.10.
 
-    An earlier version of this class appeared to cut collisions by 43%. That was an
-    artifact of a numerical blow-up, not merge behaviour: mean_speed reached
-    -2.6e11 m/s. The test below asserts the claim that survived the fix, not the
-    one that did not.
+    Two earlier readings of this are superseded and should not be quoted. A 43%
+    collision cut was an artifact of unbounded braking -- mean_speed reached
+    -2.6e11 m/s. A later -19% still included vehicles reversing out of trouble at
+    up to -7.5 m/s. Both are gone, and so is the `burst` condition, which is
+    byte-identical to `medium` at 120 steps and made every total count `medium`
+    twice.
     """
 
     def test_av_episodes_complete_more_often_than_with_plain_idm(self):
@@ -230,3 +230,64 @@ class TestWhoCountsAsAConflict:
         ego = _place(road, first, 500.0)
         _place(road, second, 540.0, speed=0.0)
         assert ego._merge_acceleration() is not None
+
+
+class TestItCannotDriveBackwards:
+    """The clamp bounds the acceleration; it does not bound the speed.
+
+    IDM's own braking vanishes as a vehicle stops, because its desired gap scales
+    with the ego's speed. A PROJECTED gap is a difference of distances-to-node and
+    does not shrink with speed, so the full -6 m/s^2 can be commanded at a
+    standstill: one 1 s step from 2.5 m/s reaches -3.5 m/s, and highway_env only
+    floors speed at -40. Measured on demand=medium, seed 7: minimum vehicle speed
+    -7.473 m/s, 11 vehicle-steps in reverse.
+
+    `test_a_full_run_keeps_mean_speed_physical` does not catch it -- the mean over
+    ~40 vehicles reads 28.1 on that same run. That guard is on the aggregate that
+    blew up before, not on the quantity that is wrong.
+    """
+
+    def test_braking_vanishes_as_the_vehicle_stops(self, road):
+        ego = _place(road, ("a5_entry", "b2", 0), 400.0, speed=2.0)
+        _place(road, ("a4_entry", "b2", 0), 400.5, speed=0.0)
+        acceleration = ego._merge_acceleration()
+        assert acceleration is not None
+        # One second of this must not reverse the vehicle.
+        assert acceleration >= -2.0 - 1e-6, (
+            f"a vehicle at 2.0 m/s was told to decelerate at {acceleration} m/s^2"
+        )
+
+    def test_a_stopped_vehicle_is_not_braked_further(self, road):
+        ego = _place(road, ("a5_entry", "b2", 0), 400.0, speed=0.0)
+        _place(road, ("a4_entry", "b2", 0), 400.5, speed=0.0)
+        acceleration = ego._merge_acceleration()
+        assert acceleration is None or acceleration >= -1e-6
+
+    def test_hard_braking_is_still_available_at_speed(self, road):
+        # The control: the fix must not sedate the yield rule at road speed, or it
+        # would trade one defect for another.
+        ego = _place(road, ("a5_entry", "b2", 0), 400.0, speed=25.0)
+        _place(road, ("a4_entry", "b2", 0), 400.5, speed=0.0)
+        acceleration = ego._merge_acceleration()
+        assert acceleration is not None
+        assert acceleration <= -3.0, f"only {acceleration} m/s^2 at a 0.5 m projected gap"
+
+    def test_no_vehicle_reverses_over_a_full_run(self):
+        from src.analysis.simulator_health import SampleSpec, build_env_config
+        from src.baselines.registry import make_baseline
+        from src.envs.topology_env import HighwayTopologyEnv
+
+        spec = SampleSpec(topology="inverted_tree", controller="no_av", seed=7,
+                          duration_steps=120, demand="medium", human_model="normal",
+                          av_penetration=0.0)
+        env = HighwayTopologyEnv("inverted_tree", build_env_config(spec))
+        policy = make_baseline("no_av")
+        policy.reset(env_metadata={"topology_id": "inverted_tree"}, seed=7)
+        obs, _ = env.reset(seed=7)
+        terminated = truncated = False
+        worst = 0.0
+        while not (terminated or truncated):
+            obs, _, terminated, truncated, _ = env.step(policy.act(obs, global_state=None))
+            for vehicle in env.road.vehicles:
+                worst = min(worst, float(vehicle.speed))
+        assert worst > -0.5, f"a vehicle reached {worst} m/s"

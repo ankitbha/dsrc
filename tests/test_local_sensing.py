@@ -282,7 +282,7 @@ def _tree():
 
 
 def _on_lane(topology, vehicle_id, lane_index, longitudinal_m, *, speed_mps=20.0,
-             role="human"):
+             role="human", crashed=False):
     """A snapshot placed at real coordinates on a named lane.
 
     Position has to be genuine because `_sensed_neighbors` filters on Euclidean
@@ -301,6 +301,7 @@ def _on_lane(topology, vehicle_id, lane_index, longitudinal_m, *, speed_mps=20.0
         speed_mps=speed_mps,
         acceleration_mps2=0.0,
         free_flow_speed_mps=30.0,
+        crashed=crashed,
     )
 
 
@@ -443,3 +444,127 @@ class TestMergingTrafficIsVisible:
             seen.append(_gap_context(topology, [ego, other]).distance_to_next_merge_m)
         assert seen == sorted(seen, reverse=True), f"not monotonic: {seen}"
         assert seen[-1] == pytest.approx(10.0, abs=2.0)
+
+
+class TestASingleLaneReachableBothWays:
+    """On a closed loop a lane is both ahead and behind, and the nearer wins.
+
+    Taking the forward distance regardless reported a follower 75 m back as
+    absent in both slots -- `leader_gap_m` infinite because the forward route to
+    it exceeded `range_m`, and `follower_gap_m` infinite because the forward
+    branch had already claimed the lane. `inverted_tree` is acyclic, so nothing
+    there can exercise this and it needs the ring.
+    """
+
+    def test_a_near_follower_beats_a_far_forward_route(self) -> None:
+        from src.config.loaders import load_named_config
+
+        topology = build_topology("ring", load_named_config("topology", "ring"))
+        # Four 65 m arcs. Ego 5 m onto ('r0','r1',0); the other 60 m onto
+        # ('r2','r3',0), which is 185 m ahead around the loop -- past the 150 m
+        # range -- but only 75 m behind. The nearer reading is the one that exists.
+        ego = _on_lane(topology, "av_0", ("r0", "r1", 0), 5.0, role="av")
+        behind = _on_lane(topology, "h_1", ("r2", "r3", 0), 60.0)
+        ctx = _gap_context(topology, [ego, behind])
+        assert not (ctx.leader_gap_m == float("inf")
+                    and ctx.follower_gap_m == float("inf")), (
+            "a vehicle 75 m behind and inside sensing range was reported as absent "
+            "in both slots"
+        )
+        assert ctx.follower_gap_m == pytest.approx(75.0, abs=3.0)
+        assert ctx.leader_gap_m == float("inf")
+
+
+class TestTheSensingSideMergeFilters:
+    """The same two filters as the vehicle, on the half that feeds the safety layer.
+
+    Both were added in two places. The vehicle copy carries four tests and two
+    controls; this copy carried none, and it is the one whose output reaches
+    `SafetyContext` and therefore the controller under study.
+    """
+
+    def test_a_crashed_converging_vehicle_is_not_a_conflict(self) -> None:
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        wreck = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 460.0, crashed=True)
+        ctx = _gap_context(topology, [ego, wreck])
+        assert ctx.merge_conflict_gap_m == float("inf")
+
+    def test_a_live_converging_vehicle_still_is(self) -> None:
+        # The control: without it, disabling merge detection entirely would pass
+        # the test above.
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        live = _on_lane(topology, "h_1", ("a4_entry", "b2", 0), 460.0)
+        ctx = _gap_context(topology, [ego, live])
+        assert ctx.merge_conflict_gap_m == pytest.approx(10.0, abs=2.0)
+
+    def test_lanes_with_different_successors_are_not_a_conflict(self) -> None:
+        topology = _tree()
+        network = topology.road_network
+
+        def successor(index):
+            lane = network.get_lane(index)
+            return network.next_lane(index, route=None, position=lane.position(lane.length, 0))
+
+        first, second = ("b1", "c", 0), ("b2", "c", 1)
+        assert successor(first) != successor(second), "fixture assumption broken"
+        ego = _on_lane(topology, "av_0", first, 550.0, role="av")
+        other = _on_lane(topology, "h_1", second, 560.0)
+        ctx = _gap_context(topology, [ego, other])
+        assert ctx.merge_conflict_gap_m == float("inf")
+
+
+def _tree_observation(topology, snapshots, ego_id="av_0", config=None):
+    """One encoded-observation dict from the tree topology."""
+    builder = LocalObservationBuilder(config or SensingConfig())
+    result = builder.build_all(
+        time_s=0.0,
+        topology=topology,
+        snapshots=snapshots,
+        current_av_ids=[ego_id],
+        safety_states={ego_id: SafetyState()},
+        target_headways={ego_id: 1.6},
+        target_lanes={ego_id: None},
+        segment_metrics={},
+        constraints=SafetyConstraints(),
+        rng=np.random.RandomState(7),
+    )
+    return result[ego_id]
+
+
+class TestTheObservationSeesWhatTheSafetyLayerSees:
+    """The policy's input had neither of the two fixes the safety layer got.
+
+    `lane_gap_context` feeds `SafetyContext`; `build_one` builds the observation the
+    actor is trained on. Only the first was given route-aware gaps, and
+    `distance_to_next_merge` was still the literal 0.0 task 5 recorded as one of
+    two structurally uninformative fields. So the MAPPO policy trained in task 68
+    could see neither a leader across an arc boundary nor that a merge existed --
+    on a topology whose every node is a merge.
+    """
+
+    def test_the_observation_reports_a_leader_on_the_next_arc(self) -> None:
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        lead = _on_lane(topology, "h_1", ("b2", "c", 1), 20.0, speed_mps=8.0)
+        obs = _tree_observation(topology, [ego, lead])
+        assert obs["leader_gap"] == pytest.approx(70.0, abs=2.0), (
+            f"the observation reported {obs['leader_gap']} for a leader 70 m ahead"
+        )
+
+    def test_the_observation_keeps_merge_distance_at_sim_parity(self) -> None:
+        # Deliberately 0.0 and asserted so, because `deployment/jetson`'s
+        # observation builder has no map matching and sets the same. The real
+        # distance IS computed -- `lane_gap_context` reports it -- but putting it
+        # in the observation would train the policy on information the deployed
+        # vehicle cannot measure, and task 47's parity ledger failed immediately
+        # when it was tried.
+        topology = _tree()
+        ego = _on_lane(topology, "av_0", ("a5_entry", "b2", 0), 450.0, role="av")
+        obs = _tree_observation(topology, [ego])
+        assert obs["distance_to_next_merge"] == 0.0
+        # And the sensing model does know the real value, so the information is
+        # available to anything that may legitimately use it.
+        ctx = _gap_context(topology, [ego])
+        assert ctx.distance_to_next_merge_m == pytest.approx(50.0, abs=2.0)

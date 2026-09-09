@@ -42,11 +42,14 @@ class SafetyContext:
     in_passing_lane: bool = False
     local_mean_speed_mps: float = 30.0
     near_merge: bool = False
-    #: Distance along the route to the next node where arcs join. A road fact, so
-    #: it is not limited by sensing range.
-    distance_to_next_merge_m: float = float("inf")
-    #: Distance to that same node of the nearest vehicle converging on it from a
-    #: different arc. Infinite when nobody is converging.
+    #: Distance to the joining node of the nearest vehicle converging on it from a
+    #: different arc, projected onto that node so it reads as a following
+    #: distance. Infinite when nobody is converging.
+    #:
+    #: There is deliberately no `distance_to_next_merge_m` here. It was added,
+    #: plumbed through two dataclasses and read by nothing, while looking
+    #: load-bearing because five tests passed it as an input. The live system has
+    #: no map matching and so cannot supply it at all.
     merge_conflict_gap_m: float = float("inf")
     merge_conflict_relative_speed_mps: float = 0.0
 
@@ -232,11 +235,11 @@ def _forward_hazard(context: SafetyContext) -> tuple[float, float]:
     sees it, and on `inverted_tree` 27 of 51 terminating collisions were exactly
     that pair.
 
-    Priority is by arrival. When the other vehicle is closer to the joining point
-    than the ego is, it has the point, and the ego must be able to stop short of
-    it -- so the point is treated as a stationary obstacle. When the ego arrives
-    first it has priority and nothing is imposed, because braking for a vehicle
-    that will arrive behind you invents an obstacle that is not there.
+    `merge_conflict_gap_m` is already a following distance: the sensing model
+    projects both vehicles onto the shared node and reports the gap to the nearest
+    one that will arrive first, or infinity when the ego arrives first. So this is
+    a plain `min` against the leader, and the converging vehicle carries its own
+    relative speed rather than being treated as a stationary point.
     """
     gap = context.leader_gap_m
     relative_speed = context.leader_relative_speed_mps
