@@ -127,6 +127,20 @@ optimization:
   # deterministic and held 91% of maximum entropy after 400 updates. PPO's default
   # coefficients assume a reward of order 1, and reward_clip already bounds the
   # magnitude, so scaling down was not protecting anything.
+  # CORRECTED 2026-09-09 from an independent audit. The note above claimed a team
+  # reward of "about 1.28", which does not reproduce. Measured over 300 steps at the
+  # operating point after the metric fixes: mean +0.2737, min -0.6442, max +0.9489.
+  # The largest single term is queue_length_total at -0.020 x 65 = -1.30, larger in
+  # magnitude than throughput's +1.20, and the earlier note did not mention it.
+  #
+  # The decision holds on the corrected numbers, less dramatically: at scale 0.05 the
+  # reward would be 0.014 against an entropy bonus of 0.042, three times the
+  # objective; at 1.0 the bonus is about 15% of it.
+  #
+  # Changing this did NOT make the policy converge -- entropy went -0.025 to +0.021
+  # across 400 updates -- because the binding constraints were elsewhere: the action
+  # bins cannot reach the effective range (task 86), and the critic was receiving 2
+  # of 115 inputs (validator round 1).
   reward_scale: 1.0
   reward_clip: 10.0
   crash_penalty: 2.0

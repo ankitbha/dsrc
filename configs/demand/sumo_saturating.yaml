@@ -13,6 +13,16 @@ description: >-
 #     900         7.35       378        456    1.01   <- capacity, arrivals peak
 #    1050         2.11       349        528    1.01   <- this: 8% deficit
 #
+# CORRECTION 2026-09-09, from an independent audit. The arrival figures above were
+# measured with a superseded route writer -- two flows per entry, and an AV vType
+# without the humans' speedFactor spread -- so the arrival process depended on the
+# AV/human split. Re-measured at HEAD, one flow drawing from a vTypeDistribution,
+# 1800 steps, no AVs, seed 7: 900 veh/h gives 358 arrivals against the 378 recorded,
+# and 1050 gives 326 against 349. The conclusion survives -- arrivals peak near 900
+# and fall at 1050, a drop of 8.9% against the recorded 7.7% -- but the numbers do
+# not, and the recorded mean-speed column is non-monotonic (600 below 750) where the
+# re-measurement is monotone.
+#
 # Capacity is about 900 veh/h: arrivals are maximal there and FALL at 1050 while
 # insertion still keeps up, which is the throughput-versus-demand knee. 1050 sits
 # past it, so 29 of 378 arrivals are lost to congestion and that deficit is the

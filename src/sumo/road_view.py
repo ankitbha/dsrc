@@ -13,6 +13,16 @@ arc -- the undiagnosable class of defect the generated network exists to avoid.
 
 Lane identity is `(from_junction, to_junction, ordinal)`, the same tuple
 `highway_env` used, because a SUMO edge also runs between two junctions.
+
+**Correction 2026-09-09.** An earlier version of this docstring claimed a wrong
+mapping would "silently move every gap the sensing model computes". That is false on
+this path, and measuring it is what showed so: over a 200-step episode `position` is
+called 1384 times, `local_coordinates` 0 times and `heading_at` 0 times, and every
+`position` call comes from one line of `lane_gap_context` which passes the result
+only as the `position=` argument of `next_lane` -- which ignores it. What the sensing
+model reads from a lane is its `length`, and from the network, `next_lane`. The
+geometry here is correct, with a round-trip error of 0.000 m at both ends of every
+arc, and it is currently unused.
 """
 from __future__ import annotations
 
