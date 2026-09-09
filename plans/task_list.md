@@ -2435,6 +2435,45 @@ and on what evidence.
 
 ## K. Found in passing
 
+79. **The 120-step episode was hiding that `inverted_tree`/high is over-saturated.**
+    Open, and it decides what task 74 can measure.
+
+    Measured `no_av`, penetration 0.10, before the geometry fix:
+
+    | topology | demand | steps | jam | speed | throughput | collisions |
+    |---|---|---|---|---|---|---|
+    | `merge` | high | 120 / 360 / 900 | 0.00 / 0.00 / 0.00 | 19.3 / 18.7 / 19.6 | 20 / 41 / 40 | 0 |
+    | `inverted_tree` | high | 120 | 0.149 | 14.75 | 11.5 | 3 |
+    | `inverted_tree` | high | 360 | 0.681 | **1.88** | **0.0** | 7 |
+    | `inverted_tree` | high | 900 | **1.000** | **0.00** | **0.0** | 17 |
+
+    **`inverted_tree` at high demand gridlocks.** Jam fraction reaches 1.0, mean
+    speed 0.00 and throughput 0.0 — demand exceeds capacity, the network fills, and
+    it never recovers. The 120-step episode measured only the transient before
+    saturation, so every number this project has taken from that cell describes a
+    filling network rather than a steady state.
+
+    **After the geometry fix and the collision-free bound**, `low` and `medium` are
+    clean at every duration tested — zero collisions and zero jam, speed 19.7 to
+    22.7, throughput scaling with duration as a 60 s rolling window should:
+
+    | demand | steps | jam | speed | throughput |
+    |---|---|---|---|---|
+    | low | 120 / 600 / 1800 | 0.000 | 22.4 / 22.3 / 22.7 | 6.5 / 13.5 / 14.5 |
+    | medium | 120 / 600 | 0.000 | 20.4 / 19.7 | 9.0 / 26.5 |
+
+    **The problem for task 74.** An hour-long run needs a demand that is congested
+    AND moving. `low` and `medium` are free-flowing, so a controller has nothing to
+    improve; `high` gridlocks, so there is no throughput to compare. Neither is
+    usable, and the existing demand levels bracket the operating point without
+    hitting it.
+
+    **What this needs:** a demand between `medium` and `high`, chosen by measuring
+    the capacity of `inverted_tree` rather than guessed. That is a new demand
+    config, and it is the prerequisite for an hour of simulated driving meaning
+    anything. Task 8's advice to raise demand was right in direction and would have
+    overshot into gridlock.
+
 78. **The simulator must present the sensing model the rig actually has.**
     **DECIDED BY THE USER 2026-09-09.** Supersedes the narrower task 71 ordering
     question, and blocks 73, 68 and 69.
