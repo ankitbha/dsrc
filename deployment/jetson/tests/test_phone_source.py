@@ -1292,3 +1292,30 @@ class TestFrameRotation:
         out = source._decode_and_orient(b"ignored")
         captured["shape"] = out.shape
         assert captured["shape"] == (1280, 720, 3)
+
+
+class TestReplayRotation:
+    """Stored video is self-describing, and replay must not double-rotate it.
+
+    Runs recorded before task 63 hold raw sideways frames; runs after it hold
+    frames that were already oriented on the way in. Applying the mount rotation
+    blindly would tip the later ones on their side, which is the same class of
+    silent error the rotation was added to end.
+    """
+
+    def test_an_old_run_gets_the_mount_rotation(self):
+        from replay_demo import replay_rotation
+
+        assert replay_rotation({}, {"rotate_cw_deg": 90}) == 90
+        assert replay_rotation({"rotate_cw_deg": 0}, {"rotate_cw_deg": 90}) == 90
+
+    def test_a_run_recorded_already_oriented_is_left_alone(self):
+        from replay_demo import replay_rotation
+
+        assert replay_rotation({"rotate_cw_deg": 90}, {"rotate_cw_deg": 90}) == 0
+
+    def test_a_changed_mount_angle_needs_no_special_case(self):
+        from replay_demo import replay_rotation
+
+        assert replay_rotation({"rotate_cw_deg": 90}, {"rotate_cw_deg": 180}) == 90
+        assert replay_rotation({"rotate_cw_deg": 180}, {"rotate_cw_deg": 90}) == 270

@@ -28,8 +28,26 @@ import numpy as np  # noqa: E402
 
 from run_demo import build_components, load_config  # noqa: E402
 from sensors.camera_stream import Frame  # noqa: E402
+from sensors.phone_source import rotate_frame  # noqa: E402
 from sensors.gps_reader import GpsFix  # noqa: E402
 from sensors.time_sync import now_mono, now_wall  # noqa: E402
+
+
+def replay_rotation(run_camera: dict, mount_camera: dict) -> int:
+    """Quarter turns to apply to stored video so the scene comes out upright.
+
+    A run archives the camera config it ran under, which makes each recording
+    self-describing. A run that recorded `rotate_cw_deg: 0`, or nothing at all,
+    stored raw frames straight off the phone and needs the mount's rotation applied
+    now. A run recorded after task 63 stored frames that were already oriented, and
+    applying it again would tip the road on its side a second time.
+
+    Returning the difference covers both, and covers a future change of mount angle
+    without another special case.
+    """
+    stored = int((run_camera or {}).get("rotate_cw_deg", 0) or 0)
+    mount = int((mount_camera or {}).get("rotate_cw_deg", 0) or 0)
+    return (mount - stored) % 360
 
 
 def load_tick_records(metadata_path: Path) -> list[dict]:
@@ -68,6 +86,11 @@ def main() -> int:
     parser.add_argument("--log", required=True, help="run directory (with video.avi + metadata.jsonl)")
     parser.add_argument("--config", help="defaults to the config recorded with the run")
     parser.add_argument("--max-ticks", type=int, default=0)
+    parser.add_argument(
+        "--rotate-cw-deg", type=int, default=None,
+        help="quarter turns to apply to stored frames; derived from the run and "
+             "mount configs when omitted",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.log).expanduser()
@@ -88,6 +111,21 @@ def main() -> int:
     _, _, pipeline, actor = build_components(config, "file:/dev/null", use_gps=False)
     pipeline.detector.warmup()
 
+    # The mount angle lives in the deployment config; the run's own config says
+    # whether the stored frames already had it applied.
+    mount_config_path = Path(__file__).resolve().parent / "config.yaml"
+    mount_camera = {}
+    if mount_config_path.exists():
+        mount_camera = (load_config(str(mount_config_path)).get("camera") or {})
+    rotate_cw_deg = (
+        args.rotate_cw_deg
+        if getattr(args, "rotate_cw_deg", None) is not None
+        else replay_rotation(config.get("camera") or {}, mount_camera)
+    )
+    print(f"[replay] rotating stored frames {rotate_cw_deg} deg clockwise "
+          f"(run recorded {int((config.get('camera') or {}).get('rotate_cw_deg', 0) or 0)}, "
+          f"mount is {int(mount_camera.get('rotate_cw_deg', 0) or 0)})")
+
     video = cv2.VideoCapture(str(video_path))
     speed_deltas: list[float] = []
     action_matches = 0
@@ -99,6 +137,8 @@ def main() -> int:
         if not ok or i >= len(records):
             break
         live = records[i]
+        if rotate_cw_deg:
+            image = rotate_frame(image, rotate_cw_deg)
         frame = Frame(image=image, frame_id=i, t_mono=now_mono(), t_wall=now_wall())
         tick = pipeline.step(frame, fix_from_record(live), detections_override=None)
         live_adv = live.get("advisory", {})
