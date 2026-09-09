@@ -53,6 +53,46 @@ Out of scope entirely: any traffic-flow effect (one vehicle, advisory-only),
 human compliance with the advisory, and anything fleet-level. Those claims come
 from simulation or not at all.
 
+## The paper
+
+**The contribution is the deployed system: the phone-plus-Jetson advisory rig, the
+sampling controller, and the safety and etiquette filters.** Those are what this
+project built and what the paper argues for. `src/safety/` holds the filters
+(`safety_layer.py`, `etiquette.py`, `constraints.py`); sections D through I hold the
+system and the evidence it runs on a road.
+
+**The road-network-level result is a replication, not a claim.** Decentralized MAPPO
+control improving throughput is established in the literature (Vinitsky et al., and
+the Flow benchmarks). The paper reproduces it once, in this simulator, on one
+topology, to show the setting behaves as published. It is not a study, and it is
+scoped in section C accordingly.
+
+**One instrumented vehicle can never demonstrate throughput or delay.** That is why
+the flow-level half comes from simulation and the drives are never asked to support
+it. The drives support the deployment claims and calibrate the sensing model.
+
+## Critical path
+
+**Six items, in order. Everything else in this list is either done or deliberately
+off the path.** Nothing here needs hardware, another drive, or a decision from
+outside the project.
+
+1. **Task 67** — fix the 40% episode-truncation rate. Gates all training.
+2. **Task 68** — train MAPPO on `inverted_tree`. The single missing artifact.
+3. **Task 63** — fix the 90-degree frame rotation. Runs in parallel; gates task 9.
+4. **Task 9** — fill the five sensing-model parameters.
+5. **Task 69** — evaluate trained MAPPO against `no_av` for throughput.
+6. Write the paper: the deployed system and the safety and etiquette filters, with
+   step 5 as the replicated flow-level result.
+
+**Scope boundary.** One topology (`inverted_tree`). One algorithm (MAPPO). One
+throughput comparison. The drives are finished and will not be repeated; the corpus
+is recorded in section I.
+
+**Open decisions.** Whether the rotation fix belongs on the phone or the Jetson
+(task 63) — the camera intrinsics assume landscape, so it is not purely cosmetic
+either way. Everything else on the path has a defensible default.
+
 ## A. Status: what already exists
 
 **Simulator foundation** — maintain, do not rebuild: simulator integration,
@@ -79,20 +119,40 @@ Tailscale at `ssh jetson`, so its runtime can be developed remotely.
 3. ~~`adb` on the Jetson.~~ **DONE** — adb 1.0.41 (platform-tools 28.0.2-debian) at `/usr/bin/adb`, plus `51-android.rules`; 8 packages added, nothing else changed. Carries the `adb forward` TCP tunnel that is the in-car transport (D1). RSA authorization still deferred to task 41. Plan: `scratchpad/plan_task_03_jetson_adb.md`.
 4. ~~Tailscale on the phone.~~ **DONE** — `moto-g-power` `100.75.142.126` under `bhardwaj.ankit275@` (same account matters: the Jetson is a *shared* node from `taila2630c`, and sharing is per-account). Phone→Jetson TCP verified with a real payload in both directions; path upgraded DERP→direct, 55 ms. Plan: `scratchpad/plan_task_04_phone_tailscale.md`.
 
-## C. Simulation study — BLOCKED IN SUBSTANCE by the task 8 result
+## C. Simulation: replicate the MAPPO throughput result on `inverted_tree`
 
-**Tasks 10 and 11 cannot produce meaningful numbers until the simulator can show
-a control effect.** The sufficiency study degrades an observation and measures
-what the controller loses; the sampling-policy evaluation credits a flow-level
-benefit. Both require an effect to degrade or to credit, and task 8 established
-there is none — +0.12 to +0.14 m/s where the measurement is cleanest.
+**Replication, not discovery.** The task is to reproduce a published result in this
+simulator with this project's settings, on one topology. No topology ladder, no
+penetration sweep, no large-scale verification of the setting.
 
-**Project-level risk, recorded here deliberately:** the paper's only outcome
-claim comes from simulation, and the simulator currently cannot produce one. One
-instrumented vehicle can never demonstrate throughput or delay. Repairing the
-simulator is therefore a prerequisite for the paper having a result at all, not a
-tidying task. It is not scheduled — sections D through G are unblocked and come
-first — but it must not be filed as done.
+**`inverted_tree` is the chosen topology and the only one to be run.** Task 8
+measured it congesting in 12 of 12 cells, which is the property a replication needs.
+The other five are out of scope, `merge` and `straight_multilane` especially: they
+congested in 0 of 12.
+
+### Correction 2026-09-08: the task 8 result does not apply to MAPPO
+
+This section read "BLOCKED IN SUBSTANCE by the task 8 result" on the strength of
+"+0.12 to +0.14 m/s". **That number describes hand-written baselines.**
+`src/analysis/simulator_health.py` calls `make_baseline(controller)` against
+`REFERENCE_CONTROLLER = "no_av"`, and `src/baselines/registry.py` holds `no_av`,
+`random_av`, `selfish_av`, `density_lookup`, `dynamic_speed_limit`,
+`av_mediated_speed_harmonization`, `backpressure` and `cooperative_smoothing`. **None
+of them is learned.**
+
+**MAPPO is implemented and has never been trained.** `src/rl/trainers.py` defines
+`MAPPOTrainer` with `critic_scope = "global"` and a critic over
+`physical_global_state_dim() + local_obs_dim()` — a centralized critic with
+decentralized actors, which is the algorithm the replication needs — distinct from
+the `IPPOTrainer` and `SharedPPOTrainer` beside it. `scripts/train_policy.py` is the
+entry point and supports `--resume-from` and `--resume-latest`. `outputs/` holds no
+checkpoint.
+
+So task 8 is evidence about controllers this project does not intend to ship, and it
+is not evidence about the method the paper replicates. **What task 8 does still bind
+are the conditions a training or evaluation run must meet**, and tasks 67 to 69 carry
+those forward: the truncation rate, the concurrent AV count, and the run-to-run
+term.
 
 5. ~~Per-field variance audit to identify inert inputs before any ablation.~~
    **DONE** — `src/analysis/observation_audit.py` + `scripts/audit_observation_fields.py`,
@@ -130,8 +190,13 @@ first — but it must not be filed as done.
      as Amendment 2 in the plan.
 6. Sufficiency harness: evaluate a fixed policy under configurable observation
    degradation (field ablation, added lag, added noise, forced fallbacks).
+   **OFF THE CRITICAL PATH 2026-09-08.** It exists to derive a sensing requirement
+   specification, which the paper described above does not claim. Build it only if
+   the replication lands with time to spare.
 7. Baseline sweep with the current sensing defaults, to establish the reference
-   the degraded conditions are measured against.
+   the degraded conditions are measured against. **OFF THE CRITICAL PATH
+   2026-09-08** — the only reference the paper needs is `no_av` against trained
+   MAPPO on one topology, which task 69 measures directly.
 8. ~~Exercise the topology ladder beyond ring so the study is not
    single-topology.~~ **DONE — superseded by a simulator health check**, which
    absorbed and extended it. `src/analysis/simulator_health.py` +
@@ -185,11 +250,73 @@ first — but it must not be filed as done.
    concurrent count in single figures for the same small-sample reason. That run
    distinguishes "too few actuators" from "these controllers do not control this
    simulator" — two diagnoses leading to completely different work.
-9. Sensing model calibrated from drive measurements. *Waits on section G data;
-   the harness is built now and the parameters filled in later.*
+9. Sensing model calibrated from drive measurements. **SCOPED 2026-09-08 to the
+   five parameters that exist.** `src/sensing/local.py` has exactly five, and each
+   now has a named source:
+
+   | parameter | default | source |
+   |---|---|---|
+   | `latency_s` | 0.0 | Measured on the drives: p50 96.7 ms, p95 172.9 ms, p99 276.4 ms over 22,929 ticks |
+   | `queue_speed_mps` | 5.0 | Ego GPS speed distribution, 22,734 valid fixes, p50 11.14 m/s |
+   | `range_m` | 150.0 | Offline `replay_demo.py` over stored video — **needs task 63 first** |
+   | `position_noise_std` | 0.0 | Published characterisations of monocular detectors |
+   | `speed_noise_std` | 0.0 | Published characterisations of monocular detectors |
+
+   **The two noise terms come from the literature by decision, not by omission.**
+   Calibrating them requires an independent measurement of other vehicles' true
+   position and speed, and the vehicle carried no radar, no lidar and no second
+   instrumented car. Reprocessing frames yields the estimator's frame-to-frame
+   self-consistency, which is a different quantity from error against truth. The
+   paper must attribute these two to published characterisations and not to this
+   vehicle.
+
+   **`range_m` needs no further driving.** `deployment/jetson/replay_demo.py`
+   re-runs the whole perception, observation and policy pipeline over a run's raw
+   video and logged GPS. It applies to the six runs holding `video_index.jsonl`;
+   `run_20260908_142253` recorded no video and `run_20260908_144642` has video with
+   no index. Any distance it produces is only as good as the mount geometry, so task
+   63 must land first and the horizon must be re-established for the real mount.
 10. Sufficiency study proper: derive the sensing requirement specification.
+    **OFF THE CRITICAL PATH 2026-09-08**, with task 6.
 11. Sampling policy evaluated in simulation for the flow-level benefit one
-    vehicle cannot demonstrate. *Waits on the policy from section F.*
+    vehicle cannot demonstrate. **OFF THE CRITICAL PATH 2026-09-08.** The
+    flow-level benefit the paper reports is the replication in task 69; crediting
+    the *sampling* policy at flow level is a second claim the paper does not make.
+67. **Fix the truncation rate before any training run.** Task 8 measured 260 of 648
+    runs never reaching their configured duration, a 40% rate. Training against that
+    corrupts the return signal: a bad policy and a broken episode become
+    indistinguishable. This precedes task 68 rather than running beside it.
+
+    Two config defects task 8 found belong here, because both shrink the usable
+    grid: `burst` is bit-identical to `medium` on all six topologies (162 of 648
+    runs), and ring disables demand so its four demand levels collapse to one (81
+    runs). Only the `inverted_tree` half of either matters now.
+68. **Train MAPPO on `inverted_tree`.** `scripts/train_policy.py --training mappo
+    --topology inverted_tree`. This is the single missing artifact — no part of the
+    simulation claim can be evaluated until a checkpoint exists.
+
+    Three traps, each already established elsewhere in this list:
+
+    - **`--controlled-vehicles` is inert outside ring.** `HighwayTopologyEnv` clears
+      `agent_ids` and defers to the demand spawner whenever continuous demand is
+      active, so AV population must be set through `demand.av_penetration`. This bit
+      the first run of task 5 and is recorded there as Amendment 2.
+    - **The defaults are too small.** `--duration-steps` defaults to 120, and task 8
+      measured concurrent AV count peaking at 5–6 out of ~40 active vehicles. Raise
+      demand, episode length and penetration **together** until concurrent AV count
+      reaches double digits; raising penetration alone leaves the realised count in
+      single figures for the small-sample reason task 8 records.
+    - **Resume, do not restart.** This is the project's first long run. Use
+      `--resume-from` / `--resume-latest`, and prove resumption works by killing a
+      run before depending on it.
+69. **Evaluate trained MAPPO against `no_av` on `inverted_tree` for throughput.**
+    The replication claim, and the only flow-level number the paper makes.
+
+    Seeds are the axis to spend on, now that topology and demand are fixed. Task 8
+    measured single-seed realised penetration swinging between 0.08 and 0.43 at a
+    nominal 0.20, and only 24 of 216 (cell, controller) pairs were ever measured
+    with a congested shared seed. A throughput difference must clear that
+    run-to-run term before it is reported.
 
 ## D. Transport
 
@@ -1810,6 +1937,24 @@ Everything above is done before the devices meet.
     USB and `--live-rates`: `sensing.shadow` is `False` on all 3,486 ticks, the
     first live-mode run in the project.
 
+    **ADVANCED 2026-09-08 on the road, and still open.** Two live drives, `run_20260908_161422` (2,555
+    ticks, 44.4 min span, 26.6 min moving) and `run_20260908_170849` (2,426 ticks,
+    27.1 min, 20.9 min moving): 4,981 live ticks over 40.7 to 42.4 km. The loop
+    closed throughout and the advisory stayed populated at highway speed.
+
+    **What is still not verified is the clause the task is named for.** That the
+    loop closes and the advisory is sane are both now shown on the road. That live
+    gating *genuinely changes sampling rates* was not measured: it needs the
+    achieved-rate series compared between a live and a shadow run under comparable
+    conditions, which the recorded data supports and nobody has run.
+
+    **One defect found, and it is not fixed.** Selecting live mode on a redial is a
+    silent no-op: `run_demo.py` reads the mode once at startup, so a phone
+    reconnecting to a running `run_demo` rejoins in the mode the process already
+    has. On 2026-09-08 a live-mode tap was absorbed into a running shadow session
+    and the drive continued in shadow. The operational workaround is to restart
+    `dsrc-drive` between modes; the code fix is unwritten.
+
     **The actuation link is closed.** Every rate command the controller issued was
     applied. Eleven segments and ten transitions, delivered frame rate measured on
     the Jetson against the rate commanded on the same tick:
@@ -2043,8 +2188,17 @@ Everything above is done before the devices meet.
     So the deliverable is a **parity ledger with a per-slot claim**, not a
     field-for-field equality: it says which slots agree, which are approximations and
     by what, and which the device cannot produce.
-48. **[COLOCATED]** In-car install: 12 V power for both devices, mounts, cable
-    routing.
+48. ~~**[COLOCATED]** In-car install: 12 V power for both devices, mounts, cable
+    routing.~~ **DONE 2026-09-08.** Both devices ran from the car for 152.8 minutes
+    across eight runs with no power interruption. The phone is USB-attached to the
+    Jetson, which is both the sensor link and the phone's charge source; the Jetson
+    reaches the network through the phone (task 61).
+
+    **Two install faults worth recording, because both cost drive time.** Cable
+    type is not interchangeable: the Moto's cable failed in the car and the app was
+    moved to the OnePlus Nord N10 (`a1411577`) mid-session. And direct sunlight on
+    the dashboard heated the phone enough that the tethering handset's hotspot shut
+    off, which ended a drive; the mount needs shade, not just a clamp.
 
 ## I. Measurement drives — **[COLOCATED]**
 
@@ -2075,10 +2229,26 @@ Everything above is done before the devices meet.
     position could not be tied to ticks at the time -- that is what task 64 added
     afterwards, and the second drive `run_20260908_155910` is the first with
     `video_index.jsonl` beside `video.avi`.
-50. Drive set 1, shadow mode at maximum rate: the full-rate reference plus every
-    candidate policy's decisions against identical traffic.
-51. Drive set 2, live mode: the controller gating for real, verifying the
-    shadow-mode predictions held.
+50. ~~Drive set 1, shadow mode at maximum rate: the full-rate reference plus every
+    candidate policy's decisions against identical traffic.~~ **DONE 2026-09-08,
+    with one qualification.** Six shadow runs, 17,948 ticks, 45.9 to 47.7 km:
+    `run_20260908_142253`, `_144642`, `_155910`, `_173809`, `_183538`, `_190548`.
+
+    **The qualification is that HERE did not run at maximum rate.** It was set to
+    one query per minute in shadow mode on 2026-09-08 so that shadow drives collect
+    HERE at all, a deliberate change made mid-session. The camera sustained 5.0 Hz.
+    A reader must not treat these as a full-rate HERE reference.
+
+    **The "every candidate policy" half is still available offline and was not
+    run.** `deployment/jetson/score_shadow.py` replays the logged decisions and
+    scores candidate sensing controllers against the same recorded per-tick inputs.
+    It first requires the incumbent to replay byte-for-byte and refuses otherwise,
+    so the first step is running that gate against these six runs.
+51. ~~Drive set 2, live mode: the controller gating for real, verifying the
+    shadow-mode predictions held.~~ **DONE 2026-09-08.** Recorded under task 44:
+    `run_20260908_161422` and `run_20260908_170849`, 4,981 live ticks over 40.7 to
+    42.4 km. Whether the shadow-mode predictions held is the offline comparison
+    named in task 50 and has not been run.
 52. ~~Repeat across congested and free-flow conditions on at least three separate
     days, on a corridor known to congest.~~ **DROPPED 2026-09-05** — the drives will
     happen once. This is not a deferral: there is no later occasion on which the
@@ -2122,6 +2292,45 @@ scalar; how often the camera changes the advisory; provenance and missingness on
 real roads; advisory bin distribution and churn; safety-layer intervention
 counts; thermal behavior; and failure and recovery events.
 
+**Four of those depend on seeing other vehicles and were not obtained**, because of
+task 63: camera-derived local speed variance, how often the camera changes the
+advisory, and any quantity built on detection range or count. They are recoverable
+offline from the stored frames once the rotation is fixed. The rest were recorded.
+
+### Data collected 2026-09-08
+
+One day, eight runs, one vehicle. This is the whole corpus; there will not be
+another collection day.
+
+| | |
+|---|---|
+| runs | 8 — six shadow (17,948 ticks), two live (4,981 ticks) |
+| recorded span | 152.8 min, of which 114.3 min above walking pace |
+| distance | between 86.55 km and 90.06 km |
+| ticks | 22,929, with a valid GPS fix on 22,734 (99.1%) |
+| video | 1.676 GB, 19,000 indexed frames across six runs |
+| HERE | 123 response bodies, 3.7 MB, every one HTTP 200 |
+| phone-side | 658,862 raw IMU samples in 783,519 records |
+| archive | 187 files, 2,180,405,759 bytes, SHA-256 verified against the Jetson |
+
+**Distance is a bracket, not a number.** 86.55 km sums great-circle steps between
+fixes less than 3 s apart, which omits distance covered during gaps; 90.06 km
+integrates GPS speed, which counts gaps but trusts the speed field. Quoting either
+alone overstates the precision.
+
+**Two runs are not fully usable.** `run_20260908_142253` recorded no video at all
+(`video.avi` is 0 bytes). `run_20260908_144642` holds 180.7 MB of video with no
+index, because the frame index (task 64) was added mid-day — the imagery exists but
+cannot be tied to ticks.
+
+**One run lost its tail.** `run_20260908_183538` has no `summary.json` and its
+`metadata.jsonl` ends in 1,246 NUL bytes: the filesystem extended the file but the
+buffered tail never flushed, because the process was killed by a service restart
+rather than shut down. 386 ticks survive against 478 frames indexed. The lesson is
+recorded because it is general: a run must be closed by stopping the service, which
+flushes, and never by killing it — the final teardown of `run_20260908_190548` wrote
+283,845 bytes of buffered metadata.
+
 ## J. Reproducibility
 
 53. One-command dry runs for the simulation matrices.
@@ -2148,8 +2357,18 @@ counts; thermal behavior; and failure and recovery events.
 
 ## Blockers
 
-None outstanding. All three items below are struck; they are kept so a reader can
-see what was cleared and on what evidence.
+**Two items gate the critical path as of 2026-09-08.** Neither needs hardware, a
+drive, or a decision from anyone outside the project.
+
+- **Task 63, the 90-degree frame rotation, gates `range_m` in task 9.** Until it is
+  fixed and the horizon re-established for the real mount, the offline replay cannot
+  produce a distance worth calibrating against. It does not gate anything else: the
+  frames are stored, so nothing is being lost while it waits.
+- **Task 67, the 40% truncation rate, gates task 68.** Training against episodes that
+  do not complete cannot distinguish a bad policy from a broken run.
+
+The three items below are struck; they are kept so a reader can see what was cleared
+and on what evidence.
 
 - ~~**HERE API key** — blocks task 21 only. Everything else in E proceeds.~~
   **CLEARED** — the key is shared with Nash production, and task 21 is done. It
@@ -2167,6 +2386,26 @@ see what was cleared and on what evidence.
   `phone/app/src/main/kotlin/com/dsrc/phone`. The Jetson half is correct.
 
 ## K. Found in passing
+
+70. **Selecting live mode on a redial is a silent no-op, and a live drive was
+    recorded as shadow because of it.** Open.
+
+    `run_demo.py` resolves the drive mode once at process start. A phone that
+    reconnects to an already-running `run_demo` rejoins in whatever mode the process
+    already holds, and the handshake's `requested_mode` is ignored. On 2026-09-08 a
+    live-mode tap was absorbed into a running shadow session; the drive continued in
+    shadow and nothing said so. The user's own report is what caught it: "It did not
+    restart by itself, it was a live run getting added to a shadow run."
+
+    **The failure is silent, which is the part that matters.** The phone shows the
+    mode it asked for, the Jetson logs the mode it started in, and neither compares
+    them. A reader of the logs alone cannot tell an intended shadow run from a live
+    request that was dropped.
+
+    Workaround in use: restart `dsrc-drive` between modes. Two candidate fixes —
+    re-resolve the mode on each handshake, or refuse a handshake whose
+    `requested_mode` differs from the running mode and say so on the phone. The
+    second is smaller and fails loudly, which suits a rig operated from a car.
 
 66. ~~**HERE response bodies were discarded, and a HERE response cannot be fetched
     again.**~~ **DONE 2026-09-08.** `_read_here` received every body, handed it to
@@ -2231,6 +2470,17 @@ see what was cleared and on what evidence.
 
 63. **The camera frames arrive rotated 90 degrees, and that is why no drive has ever
     seen a vehicle.** Open: the fix is not yet written.
+
+    **This is now on the critical path.** It gates `range_m` in task 9, which is one
+    of the five sensing-model parameters the replication needs. Nothing else waits on
+    it, and no data is being lost while it waits, because raw frames are stored.
+
+    **Full-day measurement, 2026-09-08:** 16 detection-bearing ticks out of 22,929,
+    or 0.070%, never more than one vehicle in a tick. Worse than the count suggests,
+    the `vehicles` array is **empty even on those 16 ticks** — a detection was counted
+    but no tracked vehicle reached the observation stage — so **zero distance
+    estimates were recorded on the entire day**. The three detection-dependent
+    sensing parameters have zero observations, not few.
 
     Found on the first real drive, 2026-09-08. Same frame, same detector, one
     rotation:
