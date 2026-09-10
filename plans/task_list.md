@@ -2470,6 +2470,79 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+104. **The credit-assignment diagnosis is now measured, and the speed head is
+     inert on 84% of decisions.** Measured 2026-09-10 by
+     `scripts/measure_credit_signal.py` while the task 103 run was in flight. Both
+     halves were found by the same measurement.
+
+     **The local reward carries the signal the team reward does not.** The
+     measurement is a counterfactual on identical traffic: run the warm-up, hold one
+     AV at 20 m/s for a 20 s window, repeat from the same seed holding it at 30 m/s,
+     and record EVERY tracked agent's reward in both. Three seeds, three agents each,
+     nine own and eighteen cross pairs:
+
+     | quantity | value |
+     |---|---|
+     | agent i's local reward moved by agent i's own action | 22.82 |
+     | agent i's local reward moved by another agent's action | 1.28 |
+     | ratio, own over other | **17.8** |
+     | team reward moved by one agent's action | 2.06 |
+     | team reward over the same window, uncommanded | 193.03 |
+
+     So one agent's action moves the team reward by **1.07%** of its magnitude, and
+     moves its own neighbourhood reward by 17.8 times what its neighbours' actions
+     move it. Task 96 diagnosed this from the policy loss; this measures it directly,
+     and it is the justification for the per-agent term.
+
+     **The control that had to come first.** Two uncommanded runs at the same seed
+     differ by 0.000e+00 in the summed team reward. Without that, every difference
+     above would be unattributable rather than small.
+
+     **THE SPEED HEAD IS EQUIVALENT ACROSS ITS VALUES ON MOST DECISIONS.**
+     `decode_speed_bin` returns `free_flow + offset` with offsets of -10, -3 and 0
+     m/s and a floor of 12 m/s, and the SUMO env passes the lane limit as the
+     context, so at a 30 m/s limit the three values are **20, 27 and 30 m/s**.
+     `setSpeed` is an upper bound that SUMO's car-following then dominates, so a
+     value above the speed the vehicle would take anyway changes nothing. Measured
+     over 114,889 AV-steps at this operating point, mean AV speed 7.33 m/s:
+
+     | value | m/s | share of AV-steps where it binds |
+     |---|---|---|
+     | `slow` | 20 | **15.6%** |
+     | `nominal` | 27 | 0.9% |
+     | `fast` | 30 | 0.07% |
+     | (stopped, below 0.1 m/s) | | 25.6% |
+
+     **On 84% of AV-steps all three values do the same thing, and on 99% `nominal`
+     and `fast` do the same thing.** This is how the first version of the credit
+     measurement was caught: it selected the three lowest-numbered agent ids, which
+     after a 300 s warm-up are the oldest vehicles and so the deepest in the queue,
+     and every commanded speed from 0.5 to 30 m/s produced a bit-identical
+     trajectory. Exact zeros, not small numbers.
+
+     **What this does and does not mean.** It is NOT that the head is unwired -- that
+     was task 86 and it is fixed. The 15.6% of AV-steps where `slow` binds are the
+     vehicles still moving fast as they approach the queue, which is exactly where
+     speed metering has to act, so the mechanism the project studies IS expressible.
+     What is lost is the other 84%, where the choice cannot matter, and those
+     decisions put pure noise into the gradient. A vehicle stopped in a queue cannot
+     help by any speed command, so part of that 84% is the operating point rather
+     than the action space.
+
+     **Consequence for task 103's gate, re-derived rather than moved.** Criterion 1
+     asked for summed entropy below 1.978, which is 90% of ln(9). With the speed head
+     equivalent across its values on 84% of decisions, an optimal policy is
+     indifferent there, so the achievable mean summed entropy is about
+     0.84 x ln(3) + a deterministic headway head, which is roughly 0.92. The gate
+     threshold is therefore still reachable and is NOT changed. The confound is that
+     a FAILURE of criterion 1 would be ambiguous between "the policy did not learn"
+     and "most of its decisions had nothing to choose between".
+
+     **The run was not restarted.** Rescaling the speed bins changes what the
+     deployed actor's heads mean, on both sides of the contract, and task 86 already
+     recorded that as the user's decision rather than mine. The run in flight is
+     still informative under the reading above, and it costs no human time.
+
 103. **PRE-REGISTERED: one configuration, everything enabled, one seed.** Written
      2026-09-10 BEFORE the run. The plan is `plans/plan_task_103_local_credit.md`.
 
