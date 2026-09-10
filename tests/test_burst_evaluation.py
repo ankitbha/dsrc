@@ -83,3 +83,52 @@ class TestThePreRegisteredBar:
         arm = [{"seed": s, "recovery_s": None} for s in range(5)]
         mean, se, verdict = paired_verdict(arm, reference, "recovery_s")
         assert verdict == "too few pairs"
+
+
+class TestTheEvaluationUsesTheTrainingEnvironment:
+    """A policy has to be evaluated on the road it learned on. The evaluation built
+    its environment from the training config but omitted `human_model`, so it ran
+    SUMO's default Krauss -- a road with no capacity drop -- while the policy had
+    trained under the calibrated Wiedemann-99. Every field that defines the
+    environment is checked here, because the next one omitted will fail the same way
+    and just as quietly.
+    """
+
+    def test_every_environment_field_reaches_the_run(self, monkeypatch):
+        from src.config.loaders import load_named_config
+        from scripts import evaluate_burst_scenario as module
+
+        captured = {}
+
+        class Recorder:
+            def __init__(self, topology, config):
+                captured["topology"] = topology
+                captured["config"] = config
+
+            def reset(self, seed=None):
+                return {}, {}
+
+            def step(self, actions):
+                return {}, 0.0, False, True, {"metrics": {}}
+
+            def close(self):
+                pass
+
+            view = None
+            arrived_total = 0
+            collision_count = 0
+
+        monkeypatch.setattr(module, "SumoTopologyEnv", Recorder)
+        training = load_named_config("training", "mappo_sumo")
+        module.run_one(controller=None, seed=7, training=training, work_dir=None)
+
+        config = captured["config"]
+        assert captured["topology"] == training["topology"]
+        assert config["dt"] == training["dt"]
+        assert config["duration_steps"] == training["duration_steps"]
+        assert config["warmup_steps"] == training["warmup_steps"]
+        assert config["sensing"] == training["sensing"]
+        assert config["human_model"]["id"] == training["human_model"], (
+            "the evaluation is not using the driving model the policy trained under"
+        )
+        assert config["demand"]["id"] == training["demand"]

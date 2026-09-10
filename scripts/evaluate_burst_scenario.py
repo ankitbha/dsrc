@@ -37,12 +37,21 @@ def run_one(*, controller, seed, training, work_dir):
     duration = int(training["duration_steps"])
     demand = load_named_config("demand", str(training["demand"]))
     burst_end_s = float((demand.get("burst") or {}).get("end_s", 0.0))
-    env = SumoTopologyEnv(str(training["topology"]), {
+    config = {
         "topology": load_named_config("topology", str(training["topology"])),
         "demand": demand, "duration_steps": duration, "dt": dt,
         "warmup_steps": int(training["warmup_steps"]),
         "sensing": dict(training.get("sensing") or {}),
-        "work_dir": work_dir})
+        "work_dir": work_dir,
+    }
+    # The driving model MUST come from the training config. Without this the policy
+    # was evaluated under SUMO's default Krauss while it had been trained under the
+    # calibrated Wiedemann-99: a road with no capacity drop, which is not the road
+    # it learned on, and a comparison between two different environments.
+    if training.get("human_model"):
+        config["human_model"] = load_named_config(
+            "human_model", str(training["human_model"]))
+    env = SumoTopologyEnv(str(training["topology"]), config)
     observations, _ = env.reset(seed=seed)
     try:
         speeds, queues, roadblock = [], [], 0.0

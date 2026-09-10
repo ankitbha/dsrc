@@ -2519,6 +2519,12 @@ and on what evidence.
     sustainable 900 base doubled for 150 s, re-profiled as speed 23.0 to 10.2 m/s
     with the queue peaking at 23 and recovering to 19.5.
 
+    **The evaluation seeds, named before the run: 57, 67, 77, 87, 97, 107, 117,
+    127, 137, 147.** All ten are disjoint from the five the policies trained on
+    (7, 17, 27, 37, 47). The trainer seeds each episode as `seed + update`, so a
+    shared base seed does not reproduce a training episode exactly, but evaluating
+    on unseen traffic realisations removes the question.
+
     **Seeds: 10 for the evaluation, not 5.** The oracle's paired standard deviation
     at this operating point is 15.2 arrivals against 7.8 on the old road, because
     the congestion is now genuinely stochastic. At five seeds the two-standard-error
