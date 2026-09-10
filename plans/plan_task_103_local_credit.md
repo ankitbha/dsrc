@@ -61,10 +61,39 @@ training seeds, as task 99 already required.
   which is one standard error. So a null here does not separate "the policy cannot
   learn" from "there is nothing at this operating point to learn". Recorded before
   the run rather than after it.
-- **Whether the reward weights are right.** Fixed from a measurement of each
-  metric's magnitude and per-step spread at this operating point with no control,
-  taken before the run, so no term is a hundredth or a hundred times another by
-  accident.
+
+  **SETTLED, in part, by the measurement below.** At 2400 veh/h the road serves
+  about 2000 veh/h for five minutes and about 1200 after it collapses, so the
+  difference between collapsing and not collapsing is large. That is headroom in
+  the environment; whether a decentralised policy can reach it is what the run
+  asks.
+- **Which demand.** SETTLED: `sumo_capacity_drop` at 2400 veh/h. Measured with no
+  control at dt 0.1 over a 900 s episode after a 300 s warm-up, in 60 s buckets
+  (speed in m/s, throughput in completions per 60 s):
+
+  | minute | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | ... | 14 |
+  |---|---|---|---|---|---|---|---|---|---|---|---|
+  | 2400 speed | 6.6 | 7.2 | 7.0 | 6.8 | 5.9 | 3.6 | 2.8 | 2.3 | 2.2 | | 1.9 |
+  | 2400 throughput | 16.3 | 19.8 | 28.0 | 32.1 | 32.7 | 30.5 | 11.6 | 8.3 | 9.0 | | 27.7 |
+  | 3000 speed | 3.0 | 3.4 | 2.3 | 2.8 | 2.3 | 2.0 | 2.2 | 2.3 | 2.5 | | 1.3 |
+  | 3000 throughput | 13.6 | 12.7 | 14.4 | 13.5 | 19.5 | 11.6 | 9.3 | 12.7 | 18.3 | | 13.5 |
+
+  At 3000 the warm-up alone gridlocks the road. The episode is shortened to 600 s
+  so it sits around the collapse rather than trailing five minutes of gridlock.
+- **Whether the reward weights are right.** SETTLED from the same measurement,
+  before the run. The contribution table is in
+  `configs/training/mappo_sumo.yaml`; no term is more than five times another
+  except throughput, which leads deliberately, and the total is +0.91 per step.
+
+## A known bias, measured and left in place
+
+An agent inside a junction has no segment and so no neighbourhood, so a sub-step in
+which it is there contributes nothing to its local reward although the agent was
+answerable for it. Measured over 11,489 agent-decisions at this operating point:
+sub-step coverage 99.38%, and 1.02% of agent-decisions are covered for fewer than
+all ten sub-steps. The resulting understatement is about 0.6% of the local reward
+on the affected agents, which is far below its own variation, so the run was not
+restarted for it.
 
 ## Steps
 
