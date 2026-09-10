@@ -2470,6 +2470,35 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+118. **A limitation of the segment-as-agent test, stated before its arms
+     reported.** 2026-09-10.
+
+     The test samples one action per segment per decision and applies it to every AV
+     there, which makes the effective agent the link. But the action is sampled from
+     **one representative vehicle's observation**, and that observation is dominated
+     by that vehicle's own kinematics: of the 39 inputs, only
+     `downstream_congestion_estimate` is genuinely link-level, and the rest -- ego
+     speed, leader gap, lane gaps, headway -- describe an arbitrary vehicle rather
+     than the segment.
+
+     **So the segment policy keys mostly on a quantity that is close to random with
+     respect to the state it is meant to control.** A null on these arms therefore
+     supports "an action chosen from one vehicle's kinematics does not help" more
+     strongly than it supports "segment-level control does not help". The two are
+     not the same claim and the test cannot separate them.
+
+     **What a clean version needs** is link-level observation features -- the paper's
+     five per super-segment, density, mean speed, mean gap, inflow and outflow -- so
+     the policy is a function of the road rather than of whoever happens to be on it.
+     That was built and then backed out (task 110) because six new slots pulled in
+     the parity ledger and the Jetson observation builder; the smaller correction to
+     `downstream_congestion_estimate` was taken instead. If the segment formulation
+     is worth pursuing, those five fields are the prerequisite and the contract work
+     is the cost.
+
+     Recorded before the arms reported, so it is a limitation of the design and not
+     an explanation reached for afterwards.
+
 117. **What the gradient instrument can resolve at each level, worked out before
      the readings.** 2026-09-10. Every arm reports a synthetic action-correlated
      ceiling beside its permutation floor, and the RATIO of those two is the
