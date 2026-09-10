@@ -29,6 +29,32 @@ from src.sumo.env import SumoTopologyEnv  # noqa: E402
 SEEDS = (7, 17, 27, 37, 47)
 #: The queue is "cleared" below this many vehicles; the burst peaks it near 40.
 CLEARED_QUEUE = 10
+#: Metrics reported as a mean over the episode's steps. `mean_delay_recent`,
+#: `stopped_fraction` and `mean_abs_jerk` were added in task 103 and are the axes
+#: the predecessor paper's gains were largest on; without them an evaluation can
+#: only see throughput and speed.
+EPISODE_MEANS = ("mean_speed", "speed_std", "throughput_recent",
+                 "mean_delay_recent", "stopped_fraction", "mean_abs_jerk")
+#: What is paired against `no_av` and judged on the two-standard-error bar.
+PAIRED_KEYS = ("arrivals", "mean_delay_recent", "stopped_fraction",
+               "mean_abs_jerk", "trough_speed")
+
+
+def decision_interval_steps(training) -> int:
+    """How many simulation steps one action is held for, from the training config.
+
+    A policy trained at one decision per simulated second and evaluated at ten
+    decisions per second is not the policy that was trained: it would be asked for
+    an action in states it never saw itself in, and the actuation rate -- which is
+    what the reward was earned at -- would differ by a factor of ten. Read from the
+    same config the environment is built from, for the same reason `human_model`
+    is.
+    """
+    interval = training.get("decision_interval_s")
+    if interval is None:
+        return 1
+    dt = float(training["dt"]) or 1.0
+    return max(1, int(round(float(interval) / dt)))
 
 
 def run_one(*, controller, seed, training, work_dir):
@@ -52,32 +78,53 @@ def run_one(*, controller, seed, training, work_dir):
         config["human_model"] = load_named_config(
             "human_model", str(training["human_model"]))
     env = SumoTopologyEnv(str(training["topology"]), config)
+    every = decision_interval_steps(training)
+    has_burst = bool((demand.get("burst") or {}).get("enabled", False))
     observations, _ = env.reset(seed=seed)
     try:
         speeds, queues, roadblock = [], [], 0.0
+        series = {key: [] for key in EPISODE_MEANS}
+        latent = 0
         recovered_at = None
+        actions: dict = {}
         for step in range(duration):
-            actions = controller.act(observations, global_state=None) if controller else {}
+            # The action is chosen once per decision interval and held, which is
+            # what the trainer does. `setSpeed` and `setTau` persist in SUMO, so
+            # holding means passing nothing rather than re-issuing.
+            if step % every == 0:
+                actions = controller.act(observations, global_state=None) if controller else {}
+            else:
+                actions = {}
             observations, _, _, _, info = env.step(actions)
             metrics = info.get("metrics", {}) or {}
+            for key in EPISODE_MEANS:
+                series[key].append(float(metrics.get(key, 0.0) or 0.0))
             speeds.append(float(metrics.get("mean_speed", 0.0)))
             queues.append(int(metrics.get("queue_length_total", 0)))
             roadblock += float(metrics.get("rolling_roadblock_score", 0.0))
+            latent = int(metrics.get("latent_demand", 0) or 0)
             now = step * dt
-            if recovered_at is None and now > burst_end_s and queues[-1] < CLEARED_QUEUE:
+            if (has_burst and recovered_at is None and now > burst_end_s
+                    and queues[-1] < CLEARED_QUEUE):
                 recovered_at = now - burst_end_s
         window = max(1, int(round(60.0 / dt)))
         rolling = [statistics.fmean(speeds[i:i + window])
                    for i in range(0, len(speeds) - window + 1)]
-        return {
+        row = {
             "seed": seed,
             "arrivals": env.arrived_total,
             "trough_speed": min(rolling) if rolling else 0.0,
-            # None means the queue never cleared before the episode ended.
+            # None under a demand that declares no burst: there is no shock for the
+            # queue to recover from, and a number computed anyway would be the time
+            # the queue first fell below ten vehicles for an unrelated reason.
             "recovery_s": recovered_at,
             "roadblock_sum": roadblock,
             "collisions": env.collision_count,
+            "latent_end": latent,
         }
+        row.update({key: statistics.fmean(values) if values else 0.0
+                    for key, values in series.items()})
+        return row
     finally:
         env.close()
 
@@ -145,7 +192,8 @@ def main() -> int:
                 if not per_policy:
                     continue
                 merged = {"seed": seed, "policies": len(per_policy)}
-                for key in ("arrivals", "trough_speed", "roadblock_sum", "collisions"):
+                for key in ("arrivals", "trough_speed", "roadblock_sum", "collisions",
+                            "latent_end", *EPISODE_MEANS):
                     merged[key] = statistics.fmean(r[key] for r in per_policy)
                 recovered = [r["recovery_s"] for r in per_policy if r["recovery_s"] is not None]
                 merged["recovery_s"] = statistics.fmean(recovered) if recovered else None
@@ -159,23 +207,26 @@ def main() -> int:
                                          training=training, work_dir=args.work_dir))
             print(f"  {arm} seed {seed}: {rows[arm][-1]}", flush=True)
 
-    print(f"\n{'arm':>16} {'arrivals':>16} {'trough m/s':>11} {'recovery s':>11} "
-          f"{'roadblock':>10} {'collisions':>11}")
+    print(f"\n{'arm':>16} {'arrivals':>16} {'delay s':>9} {'stopped':>8} "
+          f"{'jerk':>7} {'trough m/s':>11} {'latent':>7} {'roadblock':>10} "
+          f"{'collisions':>11}")
     for arm in ("no_av", "density_lookup", "mappo"):
         if not rows[arm]:
             continue
         arrivals = [r["arrivals"] for r in rows[arm]]
-        recovered = [r["recovery_s"] for r in rows[arm] if r["recovery_s"] is not None]
         print(f"{arm:>16} {statistics.fmean(arrivals):>9.1f} +/- "
               f"{statistics.stdev(arrivals) if len(arrivals) > 1 else 0.0:>4.1f} "
+              f"{statistics.fmean(r['mean_delay_recent'] for r in rows[arm]):>9.1f} "
+              f"{statistics.fmean(r['stopped_fraction'] for r in rows[arm]):>8.3f} "
+              f"{statistics.fmean(r['mean_abs_jerk'] for r in rows[arm]):>7.3f} "
               f"{statistics.fmean(r['trough_speed'] for r in rows[arm]):>11.2f} "
-              f"{(statistics.fmean(recovered) if recovered else float('nan')):>11.1f} "
+              f"{statistics.fmean(r['latent_end'] for r in rows[arm]):>7.1f} "
               f"{statistics.fmean(r['roadblock_sum'] for r in rows[arm]):>10.1f} "
               f"{sum(r['collisions'] for r in rows[arm]):>11}")
 
     print("\nPaired against no_av on the same seeds; the bar is two standard errors.")
     for arm in ("density_lookup", "mappo"):
-        for key in ("arrivals", "trough_speed"):
+        for key in PAIRED_KEYS:
             mean, se, verdict = paired_verdict(rows[arm], rows["no_av"], key)
             if mean is None:
                 continue

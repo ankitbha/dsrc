@@ -132,3 +132,117 @@ class TestTheEvaluationUsesTheTrainingEnvironment:
             "the evaluation is not using the driving model the policy trained under"
         )
         assert config["demand"]["id"] == training["demand"]
+
+
+class TestTheEvaluationDecidesAtTheRateItTrainedAt:
+    """A policy trained at one decision per simulated second must be evaluated at
+    one decision per simulated second. Asked ten times as often it is asked for
+    actions in states it never saw itself in, and the actuation rate -- which is
+    what its reward was earned at -- differs by a factor of ten. The interval is a
+    field that has to be passed, and a field built and never passed reads as a
+    measured default.
+    """
+
+    def test_the_interval_is_read_from_the_training_config(self):
+        from scripts.evaluate_burst_scenario import decision_interval_steps
+
+        assert decision_interval_steps({"dt": 0.1, "decision_interval_s": 1.0}) == 10
+        assert decision_interval_steps({"dt": 0.5, "decision_interval_s": 1.0}) == 2
+        # A config that declares none decides every step, which is what every
+        # config written before task 103 does.
+        assert decision_interval_steps({"dt": 0.1}) == 1
+
+    def test_the_shipped_config_is_not_evaluated_every_step(self):
+        from src.config.loaders import load_named_config
+        from scripts.evaluate_burst_scenario import decision_interval_steps
+
+        assert decision_interval_steps(load_named_config("training", "mappo_sumo")) == 10
+
+    def test_the_controller_is_asked_once_per_interval(self, monkeypatch):
+        from scripts import evaluate_burst_scenario as module
+
+        class Recorder:
+            def __init__(self, topology, config):
+                pass
+
+            def reset(self, seed=None):
+                return {}, {}
+
+            def step(self, actions):
+                return {}, 0.0, False, True, {"metrics": {}}
+
+            def close(self):
+                pass
+
+            view = None
+            arrived_total = 0
+            collision_count = 0
+
+        class CountingController:
+            def __init__(self):
+                self.calls = 0
+
+            def act(self, observations, global_state=None):
+                self.calls += 1
+                return {}
+
+        monkeypatch.setattr(module, "SumoTopologyEnv", Recorder)
+        controller = CountingController()
+        training = {
+            "topology": "inverted_tree", "demand": "sumo_capacity_drop",
+            "dt": 0.1, "duration_steps": 100, "warmup_steps": 0,
+            "sensing": {}, "human_model": "w99_calibrated",
+            "decision_interval_s": 1.0,
+        }
+        module.run_one(controller=controller, seed=7, training=training, work_dir=None)
+        assert controller.calls == 10, "the policy was not asked once per second"
+
+        # The control: with no interval declared it is asked every step, so the
+        # assertion above is about the interval and not about some other cap.
+        every_step = CountingController()
+        module.run_one(controller=every_step, seed=7,
+                       training={**training, "decision_interval_s": None},
+                       work_dir=None)
+        assert every_step.calls == 100
+
+
+class TestTheBurstOnlyMetricsAreAbsentWithoutABurst:
+
+    def test_recovery_is_none_under_a_steady_demand(self, monkeypatch):
+        # `recovery_s` is the time from the end of the burst until the queue clears.
+        # Under a demand that declares no burst, `burst.end_s` defaults to 0.0, so
+        # every step is "after the burst" and the metric would report the first
+        # moment the queue happened to fall below ten vehicles -- a number with no
+        # referent, printed in the same column as one that had one.
+        from src.config.loaders import load_named_config
+        from scripts import evaluate_burst_scenario as module
+
+        class Recorder:
+            def __init__(self, topology, config):
+                pass
+
+            def reset(self, seed=None):
+                return {}, {}
+
+            def step(self, actions):
+                return {}, 0.0, False, True, {"metrics": {"queue_length_total": 0}}
+
+            def close(self):
+                pass
+
+            view = None
+            arrived_total = 0
+            collision_count = 0
+
+        monkeypatch.setattr(module, "SumoTopologyEnv", Recorder)
+        training = dict(load_named_config("training", "mappo_sumo"))
+        assert not (load_named_config("demand", str(training["demand"]))
+                    .get("burst", {}).get("enabled", False))
+        steady = module.run_one(controller=None, seed=7, training=training, work_dir=None)
+        assert steady["recovery_s"] is None
+
+        # The control: under a demand that DOES declare a burst, an empty queue
+        # after it produces a number.
+        training["demand"] = "sumo_burst"
+        bursty = module.run_one(controller=None, seed=7, training=training, work_dir=None)
+        assert bursty["recovery_s"] is not None

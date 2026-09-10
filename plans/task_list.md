@@ -2470,6 +2470,76 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+103. **PRE-REGISTERED: one configuration, everything enabled, one seed.** Written
+     2026-09-10 BEFORE the run. The plan is `plans/plan_task_103_local_credit.md`.
+
+     **What is being tested.** Whether a decentralised policy learns anything on
+     this environment when every change that attacks the diagnosed cause is enabled
+     at once. NOT how large its effect is: one seed cannot detect a 5% effect, since
+     the paired standard error across seeds is 5 to 10%.
+
+     **The five changes, deliberately confounded.** A per-agent reward measured over
+     the agent's own segment and the segments downstream of it, blended half and
+     half with the team reward; one decision per simulated second, with the action
+     held for the ten simulation steps in between; the reward re-weighted to price
+     delay, stopping and jerk; AV penetration 0.25; `deployed_fidelity` false.
+     Ablations come after something works.
+
+     **A sixth change that is not a treatment.** `sumo_burst` is replaced by
+     `sumo_capacity_drop` at 2400 veh/h. Measured with no control at dt 0.1 over a
+     900 s episode after a 300 s warm-up, in 60 s buckets: at 3000 veh/h the warm-up
+     alone gridlocks the road, so the episode opens at 3.0 m/s with 70% of vehicles
+     below 0.1 m/s and every minute of it is post-collapse; at 2400 the episode opens
+     at 6.6 m/s and 33 completions per minute, collapses between minutes 5 and 6,
+     and settles near 2.3 m/s. The episode is shortened to 600 s to sit around that
+     collapse.
+
+     **Latent demand does not engage on this road, and that is a finding.** Pending
+     vehicles measured 0.0 at 2400 veh/h and 0.45 at 3000. Two lanes on every
+     approach absorb the excess onto the carriageway rather than refusing entry, so
+     the queue forms on the road. It reaches 181 only at 4500 veh/h, where the
+     network is gridlocked from the first observed step. The saturated design's
+     "served plus on-road plus latent" accounting therefore cannot separate the arms
+     here; completed trips and delay have to.
+
+     **THE GATE, fixed now.** Read off the training curve of seed 7, and nothing
+     else:
+
+     1. **Entropy falls** below 90% of its maximum. The maximum is ln(9) = 2.197 for
+        the 9-action `speed_headway` profile; 90% is 1.978. The 4.38 figures from
+        tasks 96 and 101 were against ln(81) = 4.394 and are NOT comparable.
+     2. **The score trends up** by more than the variation between consecutive
+        updates. The score is not comparable across configurations -- the local term
+        changes its magnitude -- so only its trend within this run counts.
+     3. **The action distribution leaves uniform**: the modal action's share exceeds
+        1/9 by a clear margin.
+
+     Passing all three earns a five-seed run, reported on evaluation seeds disjoint
+     from the training seeds, exactly as task 99 required. Failing means the next
+     iteration is on the reward, not on more seeds and not on more environment
+     changes.
+
+     **What a null would mean, stated now.** The metering oracle on this road at
+     `sumo_oversaturated` measured -0.8 and +0.8 against no control, which is
+     indistinguishable from doing nothing (task 102), and the only positive figure
+     in that whole progression is +7.6 +/- 15.2 at congestion onset, which is one
+     standard error. So a null here does not separate "a decentralised policy cannot
+     learn this" from "there is nothing at this operating point to learn". It would
+     be reported as the first, qualified by the second.
+
+     **The metrics the five-seed run would report, also fixed now.** Primary:
+     completed trips per episode, paired against `no_av` on the same traffic seeds,
+     with the bar at two standard errors. Secondary: mean delay of completed trips,
+     stopped fraction, mean absolute jerk, the trough of the 60 s rolling mean speed,
+     summed `rolling_roadblock_score`, and collisions, which must be zero. Delay,
+     stopping and jerk did not exist as measurements before this task; the first
+     three are the axes the predecessor paper's gains were largest on.
+
+     **One reading guard on the delay metric.** `mean_delay_recent` is a mean over
+     COMPLETED trips, so a controller that stops a vehicle from completing improves
+     it. That is why completed trips is the primary metric and why `latent_demand`
+     and `throughput_recent` are reported beside it.
+
 102. **Two lanes everywhere, and the oracle progression that made the case.**
      Decided by the user 2026-09-10; the measurements that led there are below,
      and they are a sequence of removed harms rather than a found benefit.
