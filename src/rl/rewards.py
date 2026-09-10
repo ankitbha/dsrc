@@ -97,6 +97,51 @@ def blend_rewards(team: float, local: float, local_weight: float) -> float:
     return float((1.0 - weight) * float(team) + weight * float(local))
 
 
+#: The normalised density above which a segment is past the peak of its
+#: flow-density curve, from the predecessor paper (arXiv:2506.11973). Flow rises
+#: with density up to this point and falls after it, so a controller's job is to
+#: keep the link just below it.
+CRITICAL_DENSITY_RATIO = 0.3
+
+
+def build_threshold_reward(
+    segment_metrics: Mapping[str, Mapping[str, Any]],
+    density_ratios: Mapping[str, float],
+    *,
+    congestion_penalty: float = 1.0,
+    speed_weight: float = 0.05,
+    critical_ratio: float = CRITICAL_DENSITY_RATIO,
+) -> float:
+    """The predecessor paper's reward, ported: a threshold, not a gradient.
+
+        r_i = -alpha * 1[rho_i > rho*] + beta * v_i,   r = sum over segments
+
+    **Why a threshold and not a continuous congestion penalty.** The reward this
+    replaces had eleven weighted terms -- throughput, mean speed, fairness, jam
+    fraction, stopped fraction, delay, speed spread, jerk, hard braking, roadblock
+    and queue -- and none of them encoded the mechanism. A continuous `jam_fraction`
+    penalty pays a little everywhere, so a policy is rewarded for reducing
+    congestion it has already failed to prevent. A step at the critical density pays
+    for keeping the link BELOW it, which is the anticipatory behaviour the mechanism
+    needs: hold traffic back before the link breaks down, not after.
+
+    It also makes the objective legible. Two terms with two weights can be reasoned
+    about; eleven cannot, and the eleven-term version was measured to be dominated
+    by whichever term happened to have the largest raw magnitude at the operating
+    point.
+
+    Summed over segments rather than averaged, as in the paper, so a network with
+    more congested links is worse than one with fewer.
+    """
+    reward = 0.0
+    for segment_id, metric in segment_metrics.items():
+        ratio = _float(density_ratios.get(segment_id), 0.0)
+        if ratio > critical_ratio:
+            reward -= float(congestion_penalty)
+        reward += float(speed_weight) * _float(metric.get("mean_speed"), 0.0)
+    return float(reward)
+
+
 def safety_penalty_for_agent(info: Mapping[str, Any], agent_id: str) -> float:
     safety = info.get("safety", {})
     if not isinstance(safety, Mapping):

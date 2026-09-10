@@ -131,6 +131,10 @@ class Scene:
     #: case it is forced to 0.0 regardless -- live has no segment-level jam
     #: reading at all, cooperating-AV or not.
     jam_fraction: float = 0.0
+    #: Sim only: vehicles per kilometre on the segments DOWNSTREAM of the ego's,
+    #: which is what `downstream_congestion_estimate` reads. At least one scene needs
+    #: a real value or that slot is 0.0 on both sides and its claim is untested.
+    downstream_density_veh_per_km: float = 0.0
 
 
 SCENES: tuple[Scene, ...] = (
@@ -206,6 +210,22 @@ SCENES: tuple[Scene, ...] = (
         jam_fraction=0.5,
     ),
     Scene(
+        # AN EGO WITH A LINK AHEAD, and that link congested. The `bottleneck` scene
+        # cannot exercise `downstream_congestion_estimate`: `tree_bottleneck_d` is
+        # the last segment before the exit, so it has no successor and the corrected
+        # field returns 0.0 there -- correctly, and uninformatively. `tree_trunk_c`
+        # runs into it, so an ego here has something downstream to read.
+        #
+        # NO AV NEIGHBOUR, deliberately. The field used to be forced to 0.0 without
+        # one; it is a map reading now, so sim reports the congestion ahead while
+        # live, which still derives it from V2V peers, reports nothing.
+        name="downstream_congested", topology_id="inverted_tree_bottleneck",
+        segment_id="tree_trunk_c",
+        ego_lane=0, ego_longitudinal_m=100.0, ego_speed_mps=18.0,
+        vehicles=(SceneVehicle("human", 40.0, 0, 16.0),),
+        downstream_density_veh_per_km=120.0,
+    ),
+    Scene(
         # Locally-sensed AV neighbours, in every lane, with no V2V peer
         # behind any of them. The simulator's cooperation fields read from
         # whatever neighbour its OWN sensing model calls an "av", full stop.
@@ -270,7 +290,20 @@ def sim_observation(scene: Scene) -> dict[str, Any]:
         time_s=0.0, topology=topology, snapshots=[ego, *neighbors],
         current_av_ids=["ego"], safety_states={"ego": safety_state},
         target_headways={"ego": 1.6}, target_lanes={"ego": target_lane_index},
-        segment_metrics={scene.segment_id: {"density": 0.0, "jam_fraction": scene.jam_fraction}},
+        # The DOWNSTREAM segments carry a reading too. `downstream_congestion_estimate`
+        # now reads the link ahead rather than the ego link, so a scene that gives
+        # metrics only for the ego segment leaves it at 0.0 on both sides and its
+        # ledger claim is never exercised -- which is exactly what happened when the
+        # field was corrected, and the parity check caught it.
+        segment_metrics={
+            scene.segment_id: {"density": 0.0, "jam_fraction": scene.jam_fraction},
+            **{
+                name: {"density": scene.downstream_density_veh_per_km,
+                       "jam_fraction": scene.jam_fraction}
+                for name in build_topology(scene.topology_id)
+                .downstream_segments().get(scene.segment_id, ())
+            },
+        },
         constraints=SafetyConstraints(), rng=np.random.RandomState(7),
     )
     return result["ego"]
@@ -495,11 +528,14 @@ LEDGER: dict[str, LedgerEntry] = {
     ),
     "downstream_congestion_estimate": LedgerEntry(
         "downstream_congestion_estimate", CLASS_APPROXIMATED,
-        "both: 0.0 with no cooperating AV neighbours, else a function of "
-        "them -- but sim's population is every locally-sensed role=='av' "
-        "neighbour and live's is V2V peers only, a channel the camera "
-        "cannot populate: a locally-tracked AV with no beacon is invisible "
-        "to this field on live and not on sim",
+        "sim reads the density of the segments DOWNSTREAM of the ego's, as a "
+        "fraction of jam density, and reads it whether or not a cooperating AV is "
+        "nearby -- it is a map reading, not a V2V one. Live still derives it from "
+        "V2V peers and still returns 0.0 without one, so the two diverge both in "
+        "which link they describe and in when they have anything to say. Corrected "
+        "with task 110: it previously read the EGO segment's jam fraction on sim "
+        "despite its name, and was forced to 0.0 with no AV neighbour, which "
+        "blinded a metering controller exactly when the AV was isolated",
     ),
     "merge_pressure": LedgerEntry(
         "merge_pressure", CLASS_APPROXIMATED, "same mechanism as downstream_congestion_estimate",

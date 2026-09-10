@@ -442,6 +442,12 @@ class SumoTopologyEnv:
                 # What a per-agent reward is priced from; empty when no agent is on
                 # a segment. See `neighbourhood_metrics`.
                 "neighbourhood": self.neighbourhood_metrics(snapshots),
+                # Per-segment density as a fraction of jam density, which is what
+                # the threshold reward reads. Reported alongside the metrics rather
+                # than folded into them, because it is a per-segment mapping and
+                # they are network aggregates.
+                "density_ratios": self.density_ratios(snapshots),
+                "segment_metrics": self.get_segment_metrics(snapshots),
                 "safety": {"penalties": {}, "layer_ran": False}}
         return observations, {}, terminated, truncated, info
 
@@ -473,7 +479,31 @@ class SumoTopologyEnv:
                              action.get("merge_mode"))
 
     def _apply_speed(self, agent_id: str, bin_name: Any) -> None:
+        """Command the speed the chosen bin names.
+
+        `speed_bins_mps` in the config, when present, gives the three bins ABSOLUTE
+        values in m/s and bypasses `decode_speed_bin`. Without it the bins are
+        `free_flow + offset` with a 12 m/s floor, which at a 30 m/s limit is 20, 27
+        and 30 m/s; measured over 114,889 AV-steps at a mean AV speed of 7.33 m/s,
+        `slow` binds on 15.6% of them, `nominal` on 0.9% and `fast` on 0.07%, so all
+        three values do the same thing on 84% of steps. The predecessor paper
+        commands 30, 45 and 60 km/h -- 8.3, 12.5 and 16.7 m/s -- which is the band
+        congested traffic is actually in.
+
+        The default is unchanged, so every configuration written before this reads
+        the contract's own bins.
+        """
         if bin_name is None:
+            return
+        absolute = self.config.get("speed_bins_mps") or {}
+        if absolute:
+            target = absolute.get(str(bin_name))
+            if target is None:
+                raise ValueError(
+                    f"speed_bins_mps declares {sorted(absolute)} and the policy chose "
+                    f"{bin_name!r}; every bin the action space can emit needs a value"
+                )
+            self.command_speed(agent_id, float(target))
             return
         allowed = float(_sumo.vehicle.getAllowedSpeed(agent_id))
         try:
@@ -707,6 +737,25 @@ class SumoTopologyEnv:
             # measure: `speed_std` is a spread across vehicles at one instant,
             # which a uniformly stop-and-go fleet leaves small.
             "mean_abs_jerk": jerk,
+        }
+
+    def density_ratios(self, snapshots: list[VehicleSnapshot] | None = None) -> dict[str, float]:
+        """Each segment's density as a fraction of its jam density.
+
+        The quantity the critical threshold of 0.3 is a fraction OF, and the one the
+        threshold reward is priced on. `segment_metrics["density"]` counts vehicles
+        per kilometre over the whole segment rather than per lane, so the
+        denominator scales with the lane count: a two-lane segment at 130 veh/km is
+        at half of jam density, not all of it.
+        """
+        from src.sensing.local import JAM_DENSITY_VEH_PER_KM_PER_LANE
+
+        segments = self.get_segment_metrics(snapshots)
+        lane_counts = dict(self.view.lane_counts) if self.view is not None else {}
+        return {
+            segment_id: float(metric.get("density", 0.0))
+            / (JAM_DENSITY_VEH_PER_KM_PER_LANE * max(int(lane_counts.get(segment_id, 1)), 1))
+            for segment_id, metric in segments.items()
         }
 
     def _mean_abs_jerk(self, snapshots: list[VehicleSnapshot]) -> float:
@@ -1173,6 +1222,21 @@ class SumoTopologyEnv:
             periods.append((end, duration_s, per_entry))
         return periods
 
+    def _entry_weights(self, entries: list[str]) -> dict[str, float]:
+        """Each entry edge's share of the total demand, normalised to sum to 1.
+
+        Uniform unless `demand.branch_split` names entries with positive weights.
+        The keys are entry edge ids; a name that matches no entry is ignored rather
+        than raising, because `branch_split` also carries the other simulator's
+        branch ids and a shared demand config has to remain loadable on both.
+        """
+        split = (self.config.get("demand", {}) or {}).get("branch_split", {}) or {}
+        weights = {edge: float(split.get(edge, 0.0)) for edge in entries}
+        total = sum(value for value in weights.values() if value > 0.0)
+        if total <= 0.0:
+            return {edge: 1.0 / max(len(entries), 1) for edge in entries}
+        return {edge: max(0.0, weights[edge]) / total for edge in entries}
+
     def _write_routes(self) -> Path:
         """Demand as SUMO flows, one AV flow and one human flow per entry edge.
 
@@ -1186,6 +1250,17 @@ class SumoTopologyEnv:
         penetration = float(demand.get("av_penetration", 0.0))
         speed = demand.get("speed_distribution", {}) or {}
         entries = sorted(self.network.entry_edges())
+        # `branch_split` reached this writer NOWHERE: the rate was split evenly over
+        # the entries and the field, declared in every demand config, was consumed
+        # only by `src/demand/spawner.py` on the other simulator. So every SUMO run
+        # ever made loaded all six branches identically, and any control law whose
+        # mechanism is correcting an imbalance had nothing to correct.
+        #
+        # Weights are per entry edge, by name; an entry the split does not mention
+        # keeps an equal share. An empty or all-zero split is uniform, which is what
+        # every existing config resolves to, so no recorded run changes.
+        weights = self._entry_weights(entries)
+        per_entry_rates = {edge: total_per_hour * weight for edge, weight in weights.items()}
         per_entry = total_per_hour / max(len(entries), 1)
         # The flow must cover the warm-up as well as the episode, or demand stops
         # before the episode does and the last stretch is a draining network. With
@@ -1251,7 +1326,6 @@ class SumoTopologyEnv:
             f'{following}/>',
             "  </vTypeDistribution>",
         ]
-        periods = self._demand_periods(duration_s, per_entry)
         # An explicit departure schedule rather than `<flow>`, because a flow cannot
         # express a demand that changes over time without being split, and splitting
         # it loses vehicles: three sequential flows carrying the same total rate as
@@ -1269,7 +1343,8 @@ class SumoTopologyEnv:
                 continue
             edges = " ".join(route)
             lines.append(f'  <route id="r{index}" edges="{edges}"/>')
-            for begin, end, rate in periods:
+            for begin, end, rate in self._demand_periods(
+                    duration_s, per_entry_rates.get(edge, per_entry)):
                 if rate <= 0.0:
                     continue
                 headway = 3600.0 / rate

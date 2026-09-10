@@ -30,6 +30,7 @@ from src.rl.rewards import (
     blend_rewards,
     build_local_reward,
     build_team_reward,
+    build_threshold_reward,
     safety_penalty_for_agent,
 )
 from src.rl.rollout_buffer import RolloutBuffer
@@ -84,6 +85,20 @@ class TrainingConfig:
     #: the critic could not centre it -- the global-state vector carries every
     #: segment in a fixed order and nothing in it says which is this agent's.
     critic_privileged_neighbourhood: bool = False
+    #: Which reward the team term is built from. "weighted" is the eleven-term
+    #: weighted sum every configuration before this used, and stays the default.
+    #: "threshold" is the predecessor paper's two-term form: a step penalty for a
+    #: segment past critical density plus a linear speed reward. See
+    #: `src.rl.rewards.build_threshold_reward` for why the shape matters.
+    reward_kind: str = "weighted"
+    #: Weights for the threshold reward, read only when `reward_kind` is
+    #: "threshold": `congestion_penalty`, `speed_weight`, `critical_ratio`.
+    threshold_reward: Mapping[str, float] | None = None
+    #: Absolute speed-bin values in m/s, by bin name. None leaves the action
+    #: contract's own `free_flow + offset` bins, which at a 30 m/s limit are 20, 27
+    #: and 30 -- above the speed congested traffic holds, so all three do the same
+    #: thing on most decisions.
+    speed_bins_mps: Mapping[str, float] | None = None
     #: How long one action is held, in simulated seconds. None means one decision
     #: per simulation step, which is what every configuration written before task
     #: 103 does. At dt 0.1 that is ten decisions a second, and a single one of them
@@ -126,6 +141,17 @@ class TrainingConfig:
                 {str(k): float(v) for k, v in local_cfg.items()}
                 if isinstance(local_cfg := training.get("local_reward_weights"), Mapping) and local_cfg
                 else None
+            ),
+            reward_kind=str(training.get("reward_kind", "weighted")),
+            threshold_reward=(
+                {str(k): float(v) for k, v in threshold_cfg.items()}
+                if isinstance(threshold_cfg := training.get("threshold_reward"), Mapping)
+                and threshold_cfg else None
+            ),
+            speed_bins_mps=(
+                {str(k): float(v) for k, v in bins_cfg.items()}
+                if isinstance(bins_cfg := training.get("speed_bins_mps"), Mapping)
+                and bins_cfg else None
             ),
             critic_privileged_neighbourhood=bool(
                 training.get("critic_privileged_neighbourhood", False)),
@@ -317,10 +343,7 @@ class BasePPOTrainer:
                 # per simulation step and unchanged: at dt 0.1 with a 1 s interval
                 # the value targets have the same magnitude as one decision per
                 # step at a gamma ten times closer to 1.
-                team_reward = scale * sum(
-                    build_team_reward(info.get("metrics", {}), self.config.reward_weights)
-                    for info in infos
-                )
+                team_reward = scale * sum(self.step_reward(info) for info in infos)
                 local_reward = self._local_rewards(agent_ids, infos, scale)
                 for index, agent_id in enumerate(agent_ids):
                     reward = blend_rewards(team_reward, local_reward[agent_id], local_weight)
@@ -353,6 +376,30 @@ class BasePPOTrainer:
             # behind and the next environment cannot start.
             if hasattr(env, "close"):
                 env.close()
+
+    def step_reward(self, info: Mapping[str, Any]) -> float:
+        """One step's team reward, in whichever form the config asks for.
+
+        The threshold form needs the per-segment density ratios and the segment
+        metrics, which the SUMO environment reports beside the aggregates; it raises
+        rather than scoring zero if they are absent, because a reward that silently
+        reads nothing looks exactly like a reward the policy cannot move.
+        """
+        if self.config.reward_kind == "weighted":
+            return build_team_reward(info.get("metrics", {}), self.config.reward_weights)
+        if self.config.reward_kind != "threshold":
+            raise ValueError(
+                f"unsupported reward_kind {self.config.reward_kind!r}; "
+                "expected 'weighted' or 'threshold'"
+            )
+        segments = info.get("segment_metrics")
+        ratios = info.get("density_ratios")
+        if not isinstance(segments, Mapping) or not isinstance(ratios, Mapping) or not ratios:
+            raise ValueError(
+                "reward_kind 'threshold' needs per-segment metrics and density "
+                "ratios in the step info; this environment reports neither"
+            )
+        return build_threshold_reward(segments, ratios, **dict(self.config.threshold_reward or {}))
 
     def _local_rewards(
         self,
@@ -443,6 +490,8 @@ class BasePPOTrainer:
             config = self.env_config()
             if self.config.work_dir:
                 config["work_dir"] = self.config.work_dir
+            if self.config.speed_bins_mps:
+                config["speed_bins_mps"] = dict(self.config.speed_bins_mps)
             config.setdefault("warmup_steps", self.config.warmup_steps)
             return SumoTopologyEnv(self.config.topology, config)
         raise ValueError(
