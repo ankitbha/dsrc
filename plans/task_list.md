@@ -2470,6 +2470,35 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+126. **The segment arms are UNDERPOWERED for the question they were built to
+     answer.** Computed 2026-09-10 from each arm's own ceiling and null, before the
+     segment readings were complete.
+
+     The instrument's dynamic range is the synthetic ceiling over the null, and the
+     detectable correlation follows from it and the null's spread:
+
+     | arm | transitions | ceiling | z per unit rho | rho detectable at z = 2 |
+     |---|---|---|---|---|
+     | vehicle / shared, 1 s | 5,760 | 30.0 | 128.6 | **0.016** |
+     | vehicle / shared, 60 s | 1,627 | 17.2 | 60.7 | **0.033** |
+     | segment / own reward | 171 | 6.5 | 20.8 | **0.096** |
+
+     **So the segment arm resolves about 0.10, and the vehicle arms have already
+     excluded everything above 0.033.** As sized, a null there tells us nothing the
+     earlier measurements did not. It can only contribute if it reads POSITIVE.
+
+     **The cause is structural.** One action per segment per decision gives 9
+     segments times 20 decisions, about 171 transitions, against 5,760 at the vehicle
+     level. The formulation that fixes the credit assignment is the same one that
+     starves the sample size, which is the same trade as task 115's -- a bigger lever
+     costs data -- appearing at the level of the batch rather than the trajectory.
+
+     **What would make it informative**: three episodes per rollout instead of one,
+     taking n to about 510 and the detectable rho to roughly 0.05, at three times the
+     runtime. Worth doing only if the current three seeds read positive or ambiguous;
+     a clean null at 0.096 is already uninformative and running it longer to get a
+     cleaner uninformative null is not worth the machine.
+
 125. **PREDICTION, recorded at update 3 of 20 so it can be wrong.** The ported
      run's entropy is falling monotonically for the first time in this project:
      2.1898, 2.1837, 2.1775, a slope of **-0.00611 per update**.
