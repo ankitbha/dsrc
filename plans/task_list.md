@@ -2497,6 +2497,20 @@ and on what evidence.
      with the cause measured rather than inferred, and the two segment arms as the
      remaining open question.
 
+     **DEPARTED FROM, the same evening, and the reason matters.** The run was resumed
+     from update 3 before the third seed reported. That contradicts the rule above,
+     so the grounds are stated rather than left implicit: the rule's rationale was
+     COST -- "spending eighty minutes to watch a flat curve is not worth it" -- and
+     the cost changed. Pausing was forced by three heavy jobs contending for ten
+     cores; with one measurement left running the machine is idle, and Ankit asked
+     whether the run was still going, which is a signal that the pre-registered gate
+     of task 113 is wanted whatever the gradient says.
+
+     It is NOT a departure because the numbers were disliked. The two seeds available
+     when the decision was taken read -1.33 and +0.44, and the rule would have
+     refused the resume on that basis; the resume happened anyway, on cost grounds,
+     and the gate will be read as task 113 specifies.
+
 120. **The instrument was repaired and the vehicle-level result reproduced.**
      Measured 2026-09-10 with `scripts/measure_action_alignment.py`, which replaces
      the permutation floor of tasks 105 to 119.
