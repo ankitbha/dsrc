@@ -101,7 +101,12 @@ def main() -> int:
     parser.add_argument("--training", default="mappo_sumo")
     parser.add_argument("--checkpoint-root", required=True,
                         help="directory holding mappo_<topology>_<profile>_seed<N>/")
-    parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS),
+                        help="traffic seeds every arm is evaluated on")
+    parser.add_argument("--policy-seeds", type=int, nargs="+", default=list(SEEDS),
+                        help="the seeds the policies were TRAINED with; each policy is "
+                             "run on every traffic seed and averaged, because a policy "
+                             "and a traffic realisation are independent choices")
     parser.add_argument("--work-dir", default=None)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--out", default=None)
@@ -115,20 +120,43 @@ def main() -> int:
         rows[arm] = []
         for seed in args.seeds:
             if arm == "mappo":
-                actor = (root / f"mappo_{training['topology']}_"
-                                f"{training['action_profile']}_seed{seed}" / "latest_actor.pt")
-                if not actor.exists():
-                    print(f"  missing {actor}", flush=True)
+                # Every trained policy is run on this traffic seed and the results
+                # averaged, so the arm's value at a seed is "what a policy from this
+                # training procedure does on this traffic" rather than the result of
+                # one policy. Pairing against no_av then compares like with like on
+                # the same traffic. The previous form looked for a checkpoint whose
+                # seed equalled the traffic seed, which finds nothing as soon as the
+                # evaluation seeds are chosen disjoint from the training seeds.
+                per_policy = []
+                for policy_seed in args.policy_seeds:
+                    actor = (root / f"mappo_{training['topology']}_"
+                                    f"{training['action_profile']}_seed{policy_seed}"
+                             / "latest_actor.pt")
+                    if not actor.exists():
+                        print(f"  missing {actor}", flush=True)
+                        continue
+                    controller = LearnedPolicyController.from_checkpoint(
+                        actor, device=args.device)
+                    if hasattr(controller, "reset"):
+                        controller.reset(env_metadata={"topology_id": training["topology"]},
+                                         seed=seed)
+                    per_policy.append(run_one(controller=controller, seed=seed,
+                                              training=training, work_dir=args.work_dir))
+                if not per_policy:
                     continue
-                controller = LearnedPolicyController.from_checkpoint(actor, device=args.device)
-            elif arm == "no_av":
-                controller = None
+                merged = {"seed": seed, "policies": len(per_policy)}
+                for key in ("arrivals", "trough_speed", "roadblock_sum", "collisions"):
+                    merged[key] = statistics.fmean(r[key] for r in per_policy)
+                recovered = [r["recovery_s"] for r in per_policy if r["recovery_s"] is not None]
+                merged["recovery_s"] = statistics.fmean(recovered) if recovered else None
+                rows[arm].append(merged)
             else:
-                controller = make_baseline(arm)
-            if controller is not None and hasattr(controller, "reset"):
-                controller.reset(env_metadata={"topology_id": training["topology"]}, seed=seed)
-            rows[arm].append(run_one(controller=controller, seed=seed,
-                                     training=training, work_dir=args.work_dir))
+                controller = None if arm == "no_av" else make_baseline(arm)
+                if controller is not None and hasattr(controller, "reset"):
+                    controller.reset(env_metadata={"topology_id": training["topology"]},
+                                     seed=seed)
+                rows[arm].append(run_one(controller=controller, seed=seed,
+                                         training=training, work_dir=args.work_dir))
             print(f"  {arm} seed {seed}: {rows[arm][-1]}", flush=True)
 
     print(f"\n{'arm':>16} {'arrivals':>16} {'trough m/s':>11} {'recovery s':>11} "

@@ -1,0 +1,258 @@
+{
+ "no_av": [
+  {
+   "seed": 57,
+   "arrivals": 247,
+   "trough_speed": 8.665170766528725,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 14.888888888888852,
+   "collisions": 0
+  },
+  {
+   "seed": 67,
+   "arrivals": 251,
+   "trough_speed": 9.473818986724746,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 9.777777777777759,
+   "collisions": 0
+  },
+  {
+   "seed": 77,
+   "arrivals": 258,
+   "trough_speed": 16.83249841835625,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 0.8888888888888891,
+   "collisions": 0
+  },
+  {
+   "seed": 87,
+   "arrivals": 228,
+   "trough_speed": 7.510798718505416,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 7.888888888888876,
+   "collisions": 0
+  },
+  {
+   "seed": 97,
+   "arrivals": 255,
+   "trough_speed": 9.069060634388993,
+   "recovery_s": 245.10000000000002,
+   "roadblock_sum": 21.111111111111054,
+   "collisions": 0
+  },
+  {
+   "seed": 107,
+   "arrivals": 261,
+   "trough_speed": 13.462527275860475,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 12.99999999999997,
+   "collisions": 0
+  },
+  {
+   "seed": 117,
+   "arrivals": 252,
+   "trough_speed": 10.04161400465513,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 12.777777777777748,
+   "collisions": 0
+  },
+  {
+   "seed": 127,
+   "arrivals": 242,
+   "trough_speed": 9.484298085131435,
+   "recovery_s": 455.80000000000007,
+   "roadblock_sum": 3.666666666666668,
+   "collisions": 0
+  },
+  {
+   "seed": 137,
+   "arrivals": 241,
+   "trough_speed": 10.382382982729064,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 18.77777777777773,
+   "collisions": 0
+  },
+  {
+   "seed": 147,
+   "arrivals": 260,
+   "trough_speed": 17.274079760302076,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 1.6666666666666672,
+   "collisions": 0
+  }
+ ],
+ "density_lookup": [
+  {
+   "seed": 57,
+   "arrivals": 257,
+   "trough_speed": 12.06558043703399,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 24.444444444444375,
+   "collisions": 0
+  },
+  {
+   "seed": 67,
+   "arrivals": 261,
+   "trough_speed": 20.835364994504534,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 0.0,
+   "collisions": 0
+  },
+  {
+   "seed": 77,
+   "arrivals": 259,
+   "trough_speed": 20.591774956610312,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 0.0,
+   "collisions": 0
+  },
+  {
+   "seed": 87,
+   "arrivals": 248,
+   "trough_speed": 7.262257719072921,
+   "recovery_s": 441.70000000000005,
+   "roadblock_sum": 12.2222222222222,
+   "collisions": 0
+  },
+  {
+   "seed": 97,
+   "arrivals": 236,
+   "trough_speed": 9.910605256464182,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 31.333333333333254,
+   "collisions": 0
+  },
+  {
+   "seed": 107,
+   "arrivals": 246,
+   "trough_speed": 10.02420974988371,
+   "recovery_s": 295.5,
+   "roadblock_sum": 22.555555555555493,
+   "collisions": 0
+  },
+  {
+   "seed": 117,
+   "arrivals": 227,
+   "trough_speed": 7.3716522768466,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 26.66666666666659,
+   "collisions": 0
+  },
+  {
+   "seed": 127,
+   "arrivals": 261,
+   "trough_speed": 16.030331987448417,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 35.222222222222214,
+   "collisions": 0
+  },
+  {
+   "seed": 137,
+   "arrivals": 225,
+   "trough_speed": 6.627194681594958,
+   "recovery_s": null,
+   "roadblock_sum": 60.55555555555628,
+   "collisions": 0
+  },
+  {
+   "seed": 147,
+   "arrivals": 260,
+   "trough_speed": 10.765323546054654,
+   "recovery_s": 0.10000000000002274,
+   "roadblock_sum": 12.99999999999997,
+   "collisions": 0
+  }
+ ],
+ "mappo": [
+  {
+   "seed": 57,
+   "policies": 5,
+   "arrivals": 243.0,
+   "trough_speed": 9.574903309159925,
+   "roadblock_sum": 218.9777777777646,
+   "collisions": 0.4,
+   "recovery_s": 91.22500000000002
+  },
+  {
+   "seed": 67,
+   "policies": 5,
+   "arrivals": 247.0,
+   "trough_speed": 11.72531285629773,
+   "roadblock_sum": 326.7111111110932,
+   "collisions": 0.0,
+   "recovery_s": 99.28000000000002
+  },
+  {
+   "seed": 77,
+   "policies": 5,
+   "arrivals": 239.2,
+   "trough_speed": 12.566456964970342,
+   "roadblock_sum": 407.1777777777496,
+   "collisions": 0.0,
+   "recovery_s": 0.12000000000002728
+  },
+  {
+   "seed": 87,
+   "policies": 5,
+   "arrivals": 223.4,
+   "trough_speed": 7.668105965712536,
+   "roadblock_sum": 335.44444444442695,
+   "collisions": 1.2,
+   "recovery_s": 0.10000000000002274
+  },
+  {
+   "seed": 97,
+   "policies": 5,
+   "arrivals": 231.8,
+   "trough_speed": 7.6031356260688,
+   "roadblock_sum": 300.1999999999831,
+   "collisions": 0.8,
+   "recovery_s": 122.43333333333335
+  },
+  {
+   "seed": 107,
+   "policies": 5,
+   "arrivals": 245.6,
+   "trough_speed": 10.290422367093772,
+   "roadblock_sum": 327.466666666646,
+   "collisions": 0.4,
+   "recovery_s": 97.05000000000003
+  },
+  {
+   "seed": 117,
+   "policies": 5,
+   "arrivals": 220.6,
+   "trough_speed": 7.0929377549400785,
+   "roadblock_sum": 241.822222222206,
+   "collisions": 0.0,
+   "recovery_s": 173.50000000000003
+  },
+  {
+   "seed": 127,
+   "policies": 5,
+   "arrivals": 238.6,
+   "trough_speed": 8.827773886335319,
+   "roadblock_sum": 472.3777777777411,
+   "collisions": 0.0,
+   "recovery_s": 136.57500000000002
+  },
+  {
+   "seed": 137,
+   "policies": 5,
+   "arrivals": 239.6,
+   "trough_speed": 9.983675541540482,
+   "roadblock_sum": 419.46666666663333,
+   "collisions": 0.8,
+   "recovery_s": 82.75000000000003
+  },
+  {
+   "seed": 147,
+   "policies": 5,
+   "arrivals": 234.0,
+   "trough_speed": 9.280400020190445,
+   "roadblock_sum": 334.86666666663643,
+   "collisions": 0.0,
+   "recovery_s": 32.47500000000002
+  }
+ ]
+}

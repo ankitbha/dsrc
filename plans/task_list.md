@@ -2470,6 +2470,69 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+101. **RESULT on the corrected road: the environment is now right and the
+     learning is not.** Run 2026-09-10 per the amended pre-registration (task 99):
+     zipper merges, the calibrated Wiedemann-99 fleet, `sumo_burst`, 900 s episodes
+     at dt 0.1, 50 updates of three episodes each, five policies, evaluated on ten
+     traffic seeds disjoint from training. Rows in
+     `plans/result_task99_corrected_road.json`.
+
+     | arm | arrivals | trough m/s | recovery s | roadblock | collisions |
+     |---|---|---|---|---|---|
+     | `no_av` | **249.5 +/- 10.3** | 11.22 | 70.2 | 10.4 | 0 |
+     | `density_lookup` | 248.0 +/- 14.1 | 12.15 | 82.0 | 22.6 | 0 |
+     | `mappo` | 236.3 +/- 8.9 | 9.46 | 83.6 | 338.5 | 3.6 |
+
+     Paired against `no_av` on the same traffic:
+
+     | arm | metric | difference | verdict |
+     |---|---|---|---|
+     | `density_lookup` | arrivals | **−1.50 +/- 5.17** | **no effect** |
+     | `density_lookup` | trough speed | +0.93 +/- 1.72 | no effect |
+     | `density_lookup` | recovery | +4.03 +/- 87.39 | no effect |
+     | `density_lookup` | roadblock | +12.16 +/- 4.70 | real |
+     | `mappo` | arrivals | **−13.22 +/- 3.51** | **real** |
+     | `mappo` | trough speed | −1.76 +/- 0.93 | no effect |
+     | `mappo` | recovery | +13.38 +/- 44.80 | no effect |
+     | `mappo` | roadblock | +328.01 +/- 25.62 | real |
+
+     **The road fix moved the non-learning baseline from harmful to neutral.**
+     `density_lookup` was −17.40 +/- 7.97 arrivals on the network with the permanent
+     yield and is −1.50 +/- 5.17 now: indistinguishable from doing nothing. That is
+     the clearest evidence that the earlier failures were the environment. A local
+     density-and-queue heuristic can now act without paying for it.
+
+     **MAPPO is still worse than doing nothing, and now more clearly so.** −13.22
+     +/- 3.51 arrivals, a 5.3% reduction that clears the bar comfortably at ten
+     seeds. It also causes 3.6 collisions against zero for both baselines, which is
+     possible at all only because the calibrated model can collide (task 100).
+
+     **Because the policy still did not learn.** Over 50 updates the score rose from
+     1.636 to about 1.71 and plateaued, and entropy ended at 4.3822 against a
+     maximum of 4.394 -- 99.7% of maximum, essentially uniform. Tripling the
+     episodes per update improved the gradient enough to show a trend where the
+     previous run had none, and not enough to move the policy. So this measures a
+     near-uniform policy over the action space, and a near-uniform policy on this
+     action space slows AVs at random, holds lanes (roadblock 338.5 against 10.4)
+     and crashes occasionally.
+
+     **What is now isolated.** The environment supports the phenomenon: the
+     fundamental diagram has a 24% capacity drop, a perfect-information oracle
+     scores positive at the operating point (+7.6 +/- 15.2), and the non-learning
+     baseline is neutral rather than harmed. What remains is the learning problem,
+     and it is quantified rather than guessed: a team reward shared among about
+     twelve agents moves less than its own noise under one agent's action, and even
+     at three episodes per update this is 1/17th of the per-update trajectory count
+     Flow's benchmarks use, at 1/10th of their iteration count.
+
+     **The next thing to try, and it is a decision.** Three options, in increasing
+     order of departure from the current design: raise the trajectory count per
+     update towards Flow's 50, which is a pure compute cost; give each agent a
+     reward component it can move on its own, which changes the objective; or adopt
+     Flow's formulation of one policy emitting all AVs' actions jointly, which
+     abandons decentralised execution and so the project's premise. The first is the
+     only one that does not change what is being claimed.
+
 100. **The calibrated driving model gives up the collision-free guarantee, and
      that is the same trade in both directions.** Measured 2026-09-10 at 1200 veh/h
      with no AVs, three 600 s runs: SUMO's default Krauss produces **0** collisions
