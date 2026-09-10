@@ -184,7 +184,26 @@ lever.** They do not bound what a macroscopic one does, in either direction. Ank
 statement of it: each vehicle is changing decisions too quickly, nearby vehicles are
 not matching, and too fine a control resolution devolves into noise.
 
-`configs/training/mappo_src.yaml` ports the formulation and is under test. What it
+**THE VEHICLE-LEVEL HALF OF THAT PORT IS NOW MEASURED, AND IT IS ALSO A NULL.**
+`mappo_src` under the valid resampled-action null, three seeds: mean z
+**-0.47 +/- 0.51** (per seed -1.33, +0.44, -0.53) against the one-second baseline's
++0.00 +/- 0.29. With a ceiling near 17 and a null standard deviation of 0.029 on a
+null of 0.11, expected z is about 60 times the true action-advantage correlation, so
+the arm resolves about 0.03 and bounds the correlation within +/- 0.017 of zero. This
+is a null from a sensitive instrument, not an insensitive one.
+
+So holding one action for a simulated minute -- with the paper's threshold reward, its
+speed bins, its discount horizon, and a link-level congestion signal the actor can
+see -- produces no more action-attributable signal than holding it for a second.
+
+**One confound this cannot resolve.** The lever change carries a cost: at 60 s each
+agent makes 7.1 decisions in its lifetime instead of 90.5, a thirteenfold loss of
+temporal structure, because the agent is a vehicle that leaves rather than a road that
+persists. A larger per-decision effect and a much shorter trajectory pull opposite
+ways and this measurement cannot separate them. The segment-as-agent arms, where the
+agent persists for the whole episode, are what can.
+
+`configs/training/mappo_src.yaml` ports the formulation. What it
 changes and what was measured about each is task 113; the honest accounting of which
 change is large is:
 
