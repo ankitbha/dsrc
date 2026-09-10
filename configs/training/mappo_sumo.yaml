@@ -118,13 +118,26 @@ demand: sumo_burst
 algorithm: mappo
 policy_mode: ctde
 action_profile: full
-total_updates: 100
-# One rollout is exactly one episode. `collect_rollout` builds a fresh environment
-# and resets at the start of every update, so the policy only ever experiences the
-# first `rollout_steps` of an episode: at 512 it saw the first 512 s of a 600 s
-# episode and never the last 88, and at dt 0.1 it would have seen the first 51 s of
-# 600 -- entirely inside the window where the throughput effect does not yet exist.
-rollout_steps: 9000
+total_updates: 50
+# THREE episodes per update, not one. `collect_rollout` resets on truncation and
+# keeps collecting until `rollout_steps`, so 27000 steps at a 9000-step episode is
+# three episodes averaged into one gradient.
+#
+# The previous run learned nothing: entropy ended at 99.1% of its maximum and the
+# score was flat across all 100 updates (task 96). The diagnosis was that with a
+# team reward shared among about twelve agents, one agent's action moves the reward
+# by far less than the noise in it, so a gradient estimated from a single episode is
+# dominated by that noise. Flow's benchmarks, which this project is measured
+# against, average 50 rollouts per iteration for 500 iterations
+# (Vinitsky et al. 2018); one rollout per update is 1/50th of their gradient
+# quality, and 100 updates 1/5th of their count.
+#
+# Three is what the wall clock allows: with the episode at 900 s and five seeds in
+# parallel this costs about the same as the previous 100 single-episode updates, so
+# `total_updates` drops to 50 in exchange. The trade is deliberate -- a smaller
+# number of much less noisy updates, for a policy whose problem was noise rather
+# than step count.
+rollout_steps: 27000
 
 # Every value here has a named source. `src/sensing/local.py` reads exactly these
 # five plus the bin edges, and they define the actor's entire input distribution.

@@ -2470,6 +2470,45 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+99. **AMENDED PRE-REGISTRATION for the re-run on the corrected road.** Written
+    2026-09-10, before training, superseding task 93. Amended for two reasons that
+    are both about the instrument and neither about a result: the road and the
+    driving model changed (task 98 and the W99 calibration), and the variance
+    changed with them.
+
+    **What changed in the setup.** Merge nodes are zipper junctions. The fleet uses
+    the predecessor paper's calibrated Wiedemann-99 parameters, so the fundamental
+    diagram has a capacity drop: served flow peaks at 1298 veh/h and falls 24%,
+    where the old road rose monotonically to 1110 with no drop at all.
+    `sumo_saturating` is 1200 veh/h, the congestion onset. `sumo_burst` keeps a
+    sustainable 900 base doubled for 150 s, re-profiled as speed 23.0 to 10.2 m/s
+    with the queue peaking at 23 and recovering to 19.5.
+
+    **Seeds: 10 for the evaluation, not 5.** The oracle's paired standard deviation
+    at this operating point is 15.2 arrivals against 7.8 on the old road, because
+    the congestion is now genuinely stochastic. At five seeds the two-standard-error
+    bar admits only effects above 13.6 arrivals, or 5.4%; at ten it is 9.5, or 3.8%.
+    Training stays at five seeds because it costs hours where evaluation costs
+    minutes, and the evaluation is where the power is needed.
+
+    **Training budget: three episodes per update, 50 updates.** The previous run's
+    policy never left its initialisation, and the diagnosis was gradient noise
+    rather than step count: a team reward shared among twelve agents moves less than
+    its own noise under one agent's action, and one episode per update is 1/50th of
+    the gradient quality Flow's benchmarks use. Three episodes per update at 50
+    updates costs the same wall clock as the previous 100 single-episode updates.
+
+    **Everything else is unchanged from task 93** and is what will be reported:
+    completed trips as the primary metric; trough speed, recovery time, roadblock
+    sum and collisions as secondaries; `no_av` and `density_lookup` as comparators;
+    the final checkpoint rather than the best; a two-standard-error bar paired on
+    seed; no commanded-speed arm as a comparator; and a null reported as a null.
+
+    **Recorded before the run, so it cannot be claimed afterwards:** the oracle on
+    the corrected road at this operating point scores +7.6 +/- 15.2, which is about
+    one standard error. The honest prior is that any effect available here is small
+    enough that ten seeds may still not resolve it.
+
 98. **Why nothing works: the network has an unintended permanent yield, and it
     sets capacity.** Asked 2026-09-10 why MAPPO fails here when Flow reports gains
     on similar networks, and whether the sensing model is the cause. It is not the

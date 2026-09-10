@@ -266,9 +266,16 @@ class TestTheCommandLineDoesNotOverrideTheConfig:
         assert config.dt == 0.1
         assert config.duration_steps == 9000
         assert config.warmup_steps == 3000
-        assert config.rollout_steps == 9000
+        # Three episodes per update: 27000 steps at a 9000-step episode. One episode
+        # per update was 1/50th of the gradient quality Flow's benchmarks use, and
+        # the previous run's policy never left its initialisation.
+        assert config.rollout_steps == 27000
+        assert config.rollout_steps % config.duration_steps == 0
         assert config.topology == "inverted_tree"
         assert config.demand == "sumo_burst"
+        # The calibrated driving model, without which the fundamental diagram
+        # has no capacity drop and there is nothing to recover.
+        assert config.human_model == "w99_calibrated"
         assert config.action_profile == "full"
 
     def test_an_explicit_argument_still_overrides(self):
