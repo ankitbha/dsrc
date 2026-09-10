@@ -49,9 +49,10 @@ decision_interval_s: 60.0
 # runs 1200 to 2500 s episodes.
 warmup_steps: 3000
 duration_steps: 12000
-# Three episodes per update: 60 decisions at 20 per episode.
-rollout_steps: 60
-total_updates: 25
+# TWO episodes per update: 40 decisions at 20 per episode. An episode is 15000
+# simulation steps and costs about 113 s, so this is roughly 4 minutes per update.
+rollout_steps: 40
+total_updates: 20
 
 # ABSOLUTE speed values in m/s, not the contract's `free_flow + offset`. 8.33, 12.5
 # and 16.67 are the paper's 30, 45 and 60 km/h. The contract's bins are 20, 27 and
