@@ -504,3 +504,87 @@ class TestVehiclesEnterAtTheirDesiredSpeed:
                 )
         finally:
             env.close()
+
+
+class TestTheProcessLockSurvivesAFailingClose:
+    """`close` updated `_running` and `_LIVE` after its try/except, and it caught
+    only `Exception`. A `KeyboardInterrupt` or `SystemExit` from the close
+    propagated past both, leaving the marker set and the environment marked
+    running, so every later reset in the process raised -- the same cascade the
+    reset path was hardened against, one step to the side.
+    """
+
+    def _config(self, tmp_path):
+        return {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 3, "dt": 1.0, "warmup_steps": 0,
+            "work_dir": str(tmp_path),
+        }
+
+    def test_a_base_exception_from_close_still_releases_the_lock(self, tmp_path, monkeypatch):
+        import src.sumo.env as env_module
+
+        env = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+        env.reset(seed=1)
+        monkeypatch.setattr(
+            env_module._sumo, "close",
+            lambda: (_ for _ in ()).throw(KeyboardInterrupt("ctrl-c during close")))
+        with pytest.raises(KeyboardInterrupt):
+            env.close()
+        monkeypatch.undo()
+        assert env_module._LIVE is None, "the failed close still holds the connection"
+        assert not env._running
+
+        successor = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+        try:
+            successor.reset(seed=1)
+            successor.step({})
+        finally:
+            successor.close()
+
+    def test_a_failing_close_does_not_mask_the_error_being_reported(self, tmp_path, monkeypatch):
+        import src.sumo.env as env_module
+
+        env = SumoTopologyEnv("inverted_tree", self._config(tmp_path))
+        env._warm_up = lambda: (_ for _ in ()).throw(ValueError("the real failure"))
+        monkeypatch.setattr(
+            env_module._sumo, "close",
+            lambda: (_ for _ in ()).throw(RuntimeError("and the close failed too")))
+        with pytest.raises(ValueError, match="the real failure"):
+            env.reset(seed=1)
+        monkeypatch.undo()
+        assert env_module._LIVE is None
+
+
+class TestAFreshEpisodeReportsNoStaleMetrics:
+    """Every episode-scoped counter is cleared by `reset` except `_last_metrics`,
+    which `get_episode_summary` and `get_global_state()["step_metrics"]` both read.
+    A freshly reset environment reported the previous episode's mean speed.
+    """
+
+    def test_the_summary_after_reset_is_not_the_previous_episode(self, tmp_path):
+        config = {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 30, "dt": 1.0, "warmup_steps": 0,
+            "work_dir": str(tmp_path),
+        }
+        env = SumoTopologyEnv("inverted_tree", config)
+        env.reset(seed=3)
+        try:
+            for _ in range(30):
+                env.step({})
+            finished = env.get_episode_summary()["metrics"]["mean_speed"]
+            assert finished > 0.0, "the first episode produced no speed to go stale"
+
+            env.reset(seed=5)
+            assert env.step_count == 0 and env.arrived_total == 0
+            summary = env.get_episode_summary()
+            assert summary["metrics"] == {}, (
+                f"a freshly reset environment reports {summary['metrics']}, which is "
+                "the previous episode's"
+            )
+            assert env.get_global_state()["step_metrics"] == {}
+        finally:
+            env.close()

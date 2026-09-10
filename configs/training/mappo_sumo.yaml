@@ -12,6 +12,22 @@ description: >-
 # et al. and the Flow benchmarks run on.
 simulator: sumo
 
+# 0.1 s, not the 1.0 s the trainer defaults to. The deployment's end-to-end sensing
+# latency was measured at p50 96.7 ms over 22,929 ticks, and it could not be
+# represented at all at a 1 s step: `SensingBuffer.frame_for_latency` selects whole
+# recorded frames and the buffer records once per step, so ANY value in (0, 1.0]
+# imposed a full second and overstated the measurement tenfold. It was pinned at 0,
+# understating it by 97 ms. At dt 0.1 a `latency_s` of 0.1 selects the frame one
+# step back and represents the measured p50 almost exactly.
+#
+# It also puts the policy's decision rate at 10 Hz rather than 1 Hz, against the
+# deployed loop's 30 Hz tick.
+#
+# EVERY quantity below that is expressed in steps rather than seconds moves with
+# this: warmup_steps, duration_steps, rollout_steps, gamma, gae_lambda and
+# reward_scale. Each is annotated with the invariant it preserves.
+dt: 0.1
+
 # reward_scale 1.0, not the 0.05 the other configs use. At the SUMO operating point
 # the team reward is about 0.82 per step for uncommanded traffic over a 600-step
 # episode -- the "about 1.28" this comment previously quoted was measured with the
@@ -26,7 +42,8 @@ simulator: sumo
 # Let the network fill before the episode is observed. A vehicle must cover
 # 500 + 600 + 900 m before it can arrive, so nothing completes for the first
 # hundred seconds and a rollout beginning at t = 0 can see no AV at all.
-warmup_steps: 300
+# 3000 steps at dt 0.1 is the same 300 s of warm-up as 300 steps at dt 1.0.
+warmup_steps: 3000
 
 # 600, not the 120 the trainer defaults to. The effect this configuration exists to
 # learn -- AVs holding a speed below free flow to raise throughput through the
@@ -50,7 +67,30 @@ warmup_steps: 300
 # at 120 steps against +0.82 at 600, because `jam_fraction` at weight -2.0 grows as
 # the network fills. Any statement of the form "the team reward is about X" needs
 # the episode length attached to it.
-duration_steps: 600
+# 6000 steps at dt 0.1 is the same 600 s episode as 600 steps at dt 1.0.
+#
+# The arm table this comment used to carry is RETRACTED. It recorded that AVs held
+# at 10 m/s complete 155.2 trips against 132.0 uncommanded, a 17.6% gain, and that
+# the effect was absent at a 120-step episode. Both were measured at dt 1.0, where
+# SUMO integrates the physics in 1 s steps and a vehicle at 24 m/s advances 24 m
+# per step. Sweeping the step size (scripts/measure_step_size_convergence.py, five
+# seeds, 600 s episodes):
+#
+#   dt     uncommanded        10 m/s          gain
+#   1.0    132.0 +/-  6.4   155.2 +/- 10.5   +17.6%
+#   0.5    134.4 +/-  5.9   157.8 +/- 16.0   +17.4%
+#   0.2    157.6 +/- 12.3   160.4 +/-  7.2    +1.8%
+#   0.1    168.4 +/- 11.3   161.2 +/-  8.6    -4.3%
+#   0.05   173.0 +/-  8.4   161.6 +/-  8.6    -6.6%
+#
+# The commanded arm moves by 6.4 arrivals across a twentyfold change in step size,
+# inside its own standard deviation; the uncommanded arm rises 31%. Commanding a
+# lower speed was recovering resolution the integration had destroyed. At a
+# converged step size, holding AVs at 10 m/s LOWERS throughput.
+#
+# The full arm table at dt 0.1 is in plans/plan_task_84_sumo_simulator.md and is
+# produced by scripts/measure_commanded_arms.py.
+duration_steps: 6000
 
 # The one topology section C is scoped to.
 topology: inverted_tree
@@ -63,7 +103,12 @@ algorithm: mappo
 policy_mode: ctde
 action_profile: full
 total_updates: 100
-rollout_steps: 512
+# One rollout is exactly one episode. `collect_rollout` builds a fresh environment
+# and resets at the start of every update, so the policy only ever experiences the
+# first `rollout_steps` of an episode: at 512 it saw the first 512 s of a 600 s
+# episode and never the last 88, and at dt 0.1 it would have seen the first 51 s of
+# 600 -- entirely inside the window where the throughput effect does not yet exist.
+rollout_steps: 6000
 
 # Every value here has a named source. `src/sensing/local.py` reads exactly these
 # five plus the bin edges, and they define the actor's entire input distribution.
@@ -81,13 +126,18 @@ sensing:
   # Measured: end-to-end latency over 22,929 ticks on 2026-09-08 was p50 96.7 ms,
   # mean 112.4 ms, p95 172.9 ms, p99 276.4 ms.
   #
-  # It is deliberately left at 0. `SensingBuffer.frame_for_latency` selects whole
-  # recorded frames and the buffer records once per step, so at dt = 1.0 s ANY
-  # value in (0, 1.0] selects the frame from a full second earlier. Setting the
-  # measured 0.097 would impose a 1000 ms delay, overstating it tenfold; leaving
-  # it at 0 understates by 97 ms. The smaller error is the honest one, and the
-  # real sensing delay is unmodelled at this step size rather than represented.
-  latency_s: 0.0
+  # 0.1 s represents the p50 almost exactly. `SensingBuffer.frame_for_latency`
+  # selects whole recorded frames and the buffer records once per step, so at dt 0.1
+  # this selects the frame from one step -- 100 ms -- earlier. It was pinned at 0
+  # while dt was 1.0, because at that step size any positive value imposed a full
+  # second and overstated the measurement tenfold; the sensing delay was unmodelled
+  # rather than represented. The step size was changed for this reason.
+  #
+  # It is the p50, not the mean or the p95: the buffer holds whole frames, so the
+  # delay is a whole number of steps and the distribution's spread is not
+  # representable at all. p50 96.7 ms rounds to one step; the p95 of 172.9 ms would
+  # round to two.
+  latency_s: 0.1
 
   # NOT measured on this vehicle, and not measurable from these drives:
   # calibrating detection noise needs an independent measurement of other
@@ -170,35 +220,51 @@ critic:
   observation_scope: global
 optimization:
   learning_rate: 0.0003
-  gamma: 0.99
-  gae_lambda: 0.95
+  # 0.999, not 0.99. Both are horizons expressed in steps, and the step changed.
+  # 1/(1-gamma) is 100 steps, which was 100 s at dt 1.0 and would be 10 s at dt 0.1
+  # -- against a phenomenon that takes 300 s or more to appear. 0.999 restores the
+  # 100 s horizon exactly. Whether 100 s is itself long enough is a separate
+  # question, and one the previous configuration had too.
+  gamma: 0.999
+  # 0.995 for the same reason: 1/(1-lambda) is the advantage-averaging horizon, 20
+  # steps, which was 20 s and would become 2 s.
+  gae_lambda: 0.995
   clip_coef: 0.2
   value_coef: 0.5
   entropy_coef: 0.01
   max_grad_norm: 0.5
   update_epochs: 4
   minibatch_size: 256
-  # 1.0, not the 0.05 the other configs use. At the SUMO operating point the team
-  # reward is about 1.28; scaled by 0.05 it becomes 0.064, while the entropy bonus
-  # at entropy_coef 0.01 and the entropy the policy actually held (4.24) is 0.042 --
-  # 66% of the objective. The policy therefore had almost no incentive to become
-  # deterministic and held 91% of maximum entropy after 400 updates. PPO's default
-  # coefficients assume a reward of order 1, and reward_clip already bounds the
-  # magnitude, so scaling down was not protecting anything.
-  # CORRECTED 2026-09-09 from an independent audit. The note above claimed a team
-  # reward of "about 1.28", which does not reproduce. Measured over 300 steps at the
-  # operating point after the metric fixes: mean +0.2737, min -0.6442, max +0.9489.
-  # The largest single term is queue_length_total at -0.020 x 65 = -1.30, larger in
-  # magnitude than throughput's +1.20, and the earlier note did not mention it.
+  # 0.1 at dt 0.1, which is 1.0 at dt 1.0 -- the scale is per step and the step
+  # changed, so this keeps the reward's integral over an episode the same. Without
+  # it a 6000-step episode at gamma 0.999 gives value targets ten times larger than
+  # a 600-step episode at gamma 0.99, and the value loss is a mean squared error on
+  # them, so it would grow a hundredfold and dominate the objective.
   #
-  # The decision holds on the corrected numbers, less dramatically: at scale 0.05 the
-  # reward would be 0.014 against an entropy bonus of 0.042, three times the
-  # objective; at 1.0 the bonus is about 15% of it.
+  # WHY THE SCALE MATTERS, AND WHAT IT DOES NOT AFFECT. `compute_returns_and_advantages`
+  # normalises advantages by default, and `policy_loss` is computed from those, so
+  # the policy gradient is invariant to this scale. Only `value_loss` sees it,
+  # through unnormalised returns. Task 85's argument -- that at scale 0.05 the
+  # entropy bonus of 0.042 was 66% of the objective and left the policy no incentive
+  # to become deterministic -- compared the bonus against the raw reward, which is
+  # not what the policy loss is built from. That explains the measured outcome:
+  # changing the scale moved entropy only from -0.025 to +0.021 over 400 updates.
+  # Task 85's arithmetic was right and the quantities it compared were not.
   #
-  # Changing this did NOT make the policy converge -- entropy went -0.025 to +0.021
-  # across 400 updates -- because the binding constraints were elsewhere: the action
-  # bins cannot reach the effective range (task 86), and the critic was receiving 2
-  # of 115 inputs (validator round 1).
-  reward_scale: 1.0
+  # CORRECTED 2026-09-09 from a second independent audit. This block previously
+  # recorded a team reward of "mean +0.2737, min -0.6442, max +0.9489" over 300
+  # steps, which reproduces under no combination of episode length and warm-up: the
+  # measured values are +1.1165 at 300 steps with a 300-step warm-up, +1.5451 with
+  # none, and +0.8313 over 600 steps -- and the last of those is the figure the
+  # header of this file quotes, so the two statements contradicted each other. It
+  # also claimed queue_length_total was the largest single term at -1.30; measured
+  # over 300 steps the contributions are throughput_recent +1.2437, mean_speed
+  # +0.5825, queue_length_total -0.4497, fairness_jain +0.3767, speed_std -0.2192,
+  # jam_fraction -0.2083, hard_braking_count -0.1083. Throughput exceeds queue
+  # length by a factor of 2.8.
+  #
+  # All of those figures were measured at dt 1.0 and are superseded by the dt 0.1
+  # re-measurement recorded in plans/plan_task_84_sumo_simulator.md.
+  reward_scale: 0.1
   reward_clip: 10.0
   crash_penalty: 2.0

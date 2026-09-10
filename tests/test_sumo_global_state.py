@@ -21,6 +21,8 @@ the branch-fairness objective `inverted_tree` exists to study.
 """
 from __future__ import annotations
 
+import statistics
+
 import pytest
 
 from src.config.loaders import load_named_config
@@ -707,5 +709,223 @@ class TestFlowMagnitudeIsBoundaryCrossingsNotOccupancy:
                 f"{inflow_total} inflow events against {occupancy_total} "
                 "vehicle-steps: the flow is tracking occupancy, not boundary crossings"
             )
+        finally:
+            env.close()
+
+
+class TestMeteringIsNotScoredAsObstruction:
+    """`_rolling_roadblock_score` forbids AVs holding every lane of a segment below
+    free flow while that segment is neither jammed nor queued. Its three conditions
+    only ever look at the segment being scored, so holding a clear segment slow
+    BECAUSE the next one is congested -- speed metering, which the project calls a
+    legitimate mechanism -- was scored identically to obstruction.
+
+    Measured before the exemption, with every AV commanded to 10 m/s over 300
+    steps: 767 segment-steps scored a roadblock, of which 295 had a jammed segment
+    immediately downstream and 372 had a clear one.
+    """
+
+    def _holding(self, **overrides):
+        record = {"all_lane_av_low_speed_occupancy": 1.0, "jam_fraction": 0.0,
+                  "queue_length": 0}
+        record.update(overrides)
+        return record
+
+    def test_a_clear_road_ahead_is_still_obstruction(self, tmp_path):
+        from src.metrics.segment_metrics import _rolling_roadblock_score
+
+        clear = self._holding(jam_fraction=0.0, queue_length=0)
+        assert _rolling_roadblock_score(self._holding(), [clear]) == 1.0
+        # No downstream segment at all -- the trunk -- is also unexcused, because
+        # there is no traffic reason to be slow.
+        assert _rolling_roadblock_score(self._holding(), []) == 1.0
+
+    def test_a_jammed_road_ahead_excuses_the_hold(self, tmp_path):
+        from src.metrics.segment_metrics import _rolling_roadblock_score
+
+        assert _rolling_roadblock_score(
+            self._holding(), [self._holding(jam_fraction=0.5)]) == 0.0
+        assert _rolling_roadblock_score(
+            self._holding(), [self._holding(queue_length=3)]) == 0.0
+        # Just below the threshold the term still fires, so the boundary is the
+        # same one the segment applies to itself.
+        assert _rolling_roadblock_score(
+            self._holding(), [self._holding(jam_fraction=0.25)]) == 1.0
+
+    def test_any_congested_downstream_segment_excuses_it(self, tmp_path):
+        from src.metrics.segment_metrics import _rolling_roadblock_score
+
+        # The permissive reading, documented rather than measured: inverted_tree
+        # has no diverge, so no topology here produces more than one.
+        assert _rolling_roadblock_score(
+            self._holding(),
+            [self._holding(), self._holding(jam_fraction=0.9)]) == 0.0
+
+    def test_the_first_three_conditions_still_hold(self, tmp_path):
+        from src.metrics.segment_metrics import _rolling_roadblock_score
+
+        # The control on the whole class: the exemption must not have turned the
+        # term off. A segment that is itself jammed, or itself queued, or that has
+        # no AV holding every lane, scores zero whatever is downstream.
+        clear = [self._holding(jam_fraction=0.0, queue_length=0)]
+        assert _rolling_roadblock_score(self._holding(jam_fraction=0.5), clear) == 0.0
+        assert _rolling_roadblock_score(self._holding(queue_length=1), clear) == 0.0
+        assert _rolling_roadblock_score(
+            self._holding(all_lane_av_low_speed_occupancy=0.0), clear) == 0.0
+
+    def test_metering_is_excused_in_a_live_run(self, tmp_path):
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 300, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            scored = excused = 0
+            for _ in range(300):
+                for agent_id in list(env.agent_ids):
+                    env.command_speed(agent_id, 10.0)
+                env.step({})
+                for metrics in env.get_segment_metrics().values():
+                    holding = (metrics["all_lane_av_low_speed_occupancy"] > 0
+                               and metrics["jam_fraction"] <= 0.25
+                               and metrics["queue_length"] == 0)
+                    if metrics["rolling_roadblock_score"] > 0:
+                        scored += 1
+                    elif holding:
+                        excused += 1
+            assert excused > 100, (
+                f"only {excused} segment-steps were excused as metering; the "
+                "downstream mapping may not be reaching the metric"
+            )
+            # The other half must still be scored: the exemption licenses metering,
+            # it does not license obstruction.
+            assert scored > 100, f"only {scored} segment-steps still score a roadblock"
+        finally:
+            env.close()
+
+
+class TestEveryWeightedRewardTermIsMeasured:
+    """Five mutants that each replace a reward term with a constant survived two
+    audits. Every one changes a number the project reports, and the reward is what
+    a training run maximises, so a term that is silently constant is a term the
+    policy is not being asked about.
+
+    Contributions measured over 300 steps at the operating point: throughput_recent
+    +1.2437, mean_speed +0.5825, queue_length_total -0.4497, fairness_jain +0.3767,
+    speed_std -0.2192, jam_fraction -0.2083, hard_braking_count -0.1083.
+    """
+
+    def _metrics(self, tmp_path, steps=120, commanded=None):
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": steps, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            history = []
+            for _ in range(steps):
+                if commanded is not None:
+                    for agent_id in list(env.agent_ids):
+                        env.command_speed(agent_id, commanded)
+                _, _, _, _, info = env.step({})
+                history.append(dict(info["metrics"]))
+            return history
+        finally:
+            env.close()
+
+    def test_queue_length_total_is_the_sum_over_segments(self, tmp_path):
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 60, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            nonzero = 0
+            for _ in range(60):
+                _, _, _, _, info = env.step({})
+                expected = sum(int(m["queue_length"])
+                               for m in env.get_segment_metrics().values())
+                assert info["metrics"]["queue_length_total"] == expected
+                nonzero += expected > 0
+            assert nonzero > 30, f"a queue formed on only {nonzero} of 60 steps"
+        finally:
+            env.close()
+
+    def test_speed_std_is_the_spread_of_the_fleet(self, tmp_path):
+        history = self._metrics(tmp_path)
+        values = [m["speed_std"] for m in history]
+        assert min(values) > 0.0, "speed_std reads zero on some step"
+        assert statistics.mean(values) > 1.0, (
+            f"mean speed_std is {statistics.mean(values):.3f}; a congesting network "
+            "has a wide speed distribution"
+        )
+
+    def test_hard_braking_is_counted(self, tmp_path):
+        # Braking is rare in ordinary traffic here, so the premise is made active by
+        # commanding a low speed, which forces followers to decelerate.
+        idle = self._metrics(tmp_path, commanded=None)
+        braking = self._metrics(tmp_path, commanded=2.0)
+        idle_total = sum(m["hard_braking_count"] for m in idle)
+        braking_total = sum(m["hard_braking_count"] for m in braking)
+        assert braking_total > idle_total, (
+            f"commanding 2 m/s produced {braking_total} hard-braking events against "
+            f"{idle_total} uncommanded"
+        )
+        assert braking_total > 20
+
+    def test_jam_fraction_is_a_mean_and_not_a_maximum(self, tmp_path):
+        # Aggregated as a max instead of a mean, jam_fraction reads 1.0 whenever any
+        # single vehicle on a segment is below the queue speed, and the mean team
+        # reward moves from +1.21 to -0.27 per step -- larger than the leading term.
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 60, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            strictly_between = 0
+            for _ in range(60):
+                env.step({})
+                for segment_id, metrics in env.get_segment_metrics().items():
+                    fraction = metrics["jam_fraction"]
+                    assert 0.0 <= fraction <= 1.0
+                    if 0.0 < fraction < 1.0:
+                        strictly_between += 1
+            # A maximum can only ever be 0.0 or 1.0, so a value strictly between the
+            # two is what distinguishes the mean from it.
+            assert strictly_between > 50, (
+                f"only {strictly_between} segment-steps had a jam fraction strictly "
+                "between 0 and 1, so this cannot tell a mean from a maximum"
+            )
+        finally:
+            env.close()
+
+    def test_the_collision_metric_carries_the_counter_not_a_constant(self, tmp_path, monkeypatch):
+        # The existing test asserts the metric equals the attribute, and both are 0
+        # in every real run: it compares two zeros. This drives collisions from
+        # SUMO's side and reads the METRIC, which is what the reward consumes.
+        import src.sumo.env as env_module
+
+        reported = [(), ("v1", "v2"), ("v1", "v2"), ("v1", "v2", "v3"), (), ("v1",)]
+        calls = iter(reported)
+        monkeypatch.setattr(env_module._sumo.simulation, "getCollidingVehiclesIDList",
+                            lambda: next(calls, ()))
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 6, "dt": 1.0, "warmup_steps": 0,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            seen = []
+            for _ in range(6):
+                _, _, _, _, info = env.step({})
+                seen.append(info["metrics"]["new_collision_count"])
+            assert seen == [0, 2, 0, 1, 0, 1], seen
+            assert any(seen), "the metric never left zero, so this proves nothing"
         finally:
             env.close()

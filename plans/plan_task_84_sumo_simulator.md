@@ -343,3 +343,64 @@ fastest arms first — the reverse of the 600-step arrival order. The reward's
 monotone function of the quantity the experiment is about. Recorded, not fixed: it
 bears on task 85 and on any claim that a trained policy maximising this reward
 maximises throughput.
+
+
+## Retraction: the throughput effect was an artefact of the simulation step
+
+Measured 2026-09-09 by `scripts/measure_step_size_convergence.py`, after the step
+size was changed to 0.1 s so the deployment's measured 96.7 ms sensing latency
+could be represented at all. Five seeds, 600 s episodes after 300 s of warm-up, at
+`sumo_saturating`:
+
+| dt | steps | uncommanded | AVs at 10 m/s | gain |
+|---|---|---|---|---|
+| 1.0 | 600 | 132.0 +/- 6.4 | 155.2 +/- 10.5 | **+17.6%** |
+| 0.5 | 1200 | 134.4 +/- 5.9 | 157.8 +/- 16.0 | +17.4% |
+| 0.2 | 3000 | 157.6 +/- 12.3 | 160.4 +/- 7.2 | +1.8% |
+| 0.1 | 6000 | 168.4 +/- 11.3 | 161.2 +/- 8.6 | **−4.3%** |
+| 0.05 | 12000 | 173.0 +/- 8.4 | 161.6 +/- 8.6 | **−6.6%** |
+
+The commanded arm moves by 6.4 arrivals across a twentyfold change in the step
+size, which is inside its own standard deviation. The uncommanded arm rises 31%,
+from 132.0 to 173.0. The treatment is invariant to the numerical parameter and the
+control is not, so what separated them was never a property of the traffic.
+
+**Mechanism.** SUMO's `--step-length` is the physics step, and this migration
+passed `dt` straight into it. At dt 1.0 a vehicle travelling 24 m/s advances 24 m
+per step, so junction gap acceptance and car following are resolved at 24 m
+granularity and an uncommanded fleet loses throughput to the integration. A fleet
+held at 10 m/s advances 10 m per step and loses much less of it.
+
+**The other simulator already handled this.** `HighwayTopologyEnv` integrates at
+`physics_substeps: 10` and says why at `src/envs/topology_env.py:233-236`: "a
+single 1 s Euler step drives IDM vehicles through each other and to negative
+speeds". Its decisions are taken once per second while its physics runs at 0.1 s.
+The SUMO env had no equivalent, so from the first commit of this migration the
+SUMO fleet integrated ten times more coarsely than the fleet it was being compared
+against. Every capacity figure in this document above this section was measured on
+the coarse integration, including the junction-limited capacity the demand levels
+were chosen against.
+
+Full arm table at dt 0.1, five seeds, from `scripts/measure_commanded_arms.py`:
+
+| arm | arrivals | team reward per step | roadblock score |
+|---|---|---|---|
+| uncommanded | **168.4 +/- 11.3** | +2.159 | 0.002 |
+| 8 m/s | 150.0 +/- 8.5 | +1.408 | 0.306 |
+| 10 m/s | 161.2 +/- 8.6 | +1.534 | 0.257 |
+| 12 m/s | 163.2 +/- 10.8 | +1.642 | 0.206 |
+| 15 m/s | 168.0 +/- 11.7 | +2.090 | 0.122 |
+| 20 m/s | 172.4 +/- 8.7 | +2.238 | 0.004 |
+| 24 m/s | 172.6 +/- 10.8 | +2.323 | 0.002 |
+
+No arm beats an uncommanded fleet by more than one standard error, and the reward
+now ranks the arms in the same order as arrivals — which it did not at dt 1.0. The
+disagreement that motivated the metering exemption was itself a symptom of the
+coarse integration: the roadblock term was firing on AVs whose slowness was
+recovering discretisation error.
+
+**Two decision rates now differ between the simulators.** SUMO takes a decision
+every 0.1 s and highway_env every 1.0 s. That is deliberate: the deployed loop runs
+at about 30 Hz, so 10 Hz is the closer of the two, and it is what makes the
+measured sensing latency representable. It does mean a per-step quantity is not
+comparable across the two simulators without dividing by the step.

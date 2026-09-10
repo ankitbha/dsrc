@@ -2470,8 +2470,73 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
-91. **The measured throughput gain is largely inadmissible under the project's own
-    contract.** Measured 2026-09-09 while diagnosing why the reward ranks the
+92. **RETRACTION: the throughput gain was an artefact of the simulation step.**
+    Measured 2026-09-09 after the user asked for `dt: 0.1` so the deployment's
+    measured sensing latency could be represented. It retracts task 86 and moots
+    task 91.
+
+    `scripts/measure_step_size_convergence.py`, 600 s episode after 300 s of
+    warm-up, five seeds, `sumo_saturating`, arrivals:
+
+    | dt | steps | uncommanded | AVs at 10 m/s | gain |
+    |---|---|---|---|---|
+    | 1.0 | 600 | 132.0 +/- 6.4 | 155.2 +/- 10.5 | **+17.6%** |
+    | 0.5 | 1200 | 134.4 +/- 5.9 | 157.8 +/- 16.0 | +17.4% |
+    | 0.2 | 3000 | 157.6 +/- 12.3 | 160.4 +/- 7.2 | +1.8% |
+    | 0.1 | 6000 | 168.4 +/- 11.3 | 161.2 +/- 8.6 | **−4.3%** |
+    | 0.05 | 12000 | 173.0 +/- 8.4 | 161.6 +/- 8.6 | **−6.6%** |
+
+    **The commanded arm barely moves: 155.2, 157.8, 160.4, 161.2, 161.6, a drift of
+    6.4 arrivals across a twentyfold change in step size and well inside its own
+    standard deviation. The uncommanded arm rises 31%, from 132.0 to 173.0.** The
+    treatment is invariant to the numerical parameter and the control is not, so
+    the difference between them was never a property of the traffic.
+
+    **Mechanism.** SUMO's `--step-length` is the physics step, and the migration
+    passed `dt` straight to it. A vehicle travelling 24 m/s advances 24 m per step
+    at dt 1.0, so junction gap acceptance and car following were resolved at 24 m
+    granularity and the uncommanded fleet lost throughput to the integration. A
+    fleet held at 10 m/s advances 10 m per step and loses much less. Commanding a
+    lower speed was buying back numerical resolution, not damping waves.
+
+    **The project already knew this and the migration lost it.**
+    `HighwayTopologyEnv` integrates at `physics_substeps: 10`, with a comment at
+    `src/envs/topology_env.py:233-236` saying why: "decisions happen once per dt,
+    but the physics must integrate at a finer grid (highway_env is built for ~10-15
+    Hz): a single 1 s Euler step drives IDM vehicles through each other and to
+    negative speeds". The SUMO env has no equivalent, so from the first commit of
+    the migration the SUMO fleet integrated at 1 s where the highway_env fleet it
+    was compared against integrated at 0.1 s. Every SUMO capacity figure, including
+    the "junction-limited at about 900 veh/h" that the demand configs were chosen
+    against, was measured on the coarse integration.
+
+    **What is retracted.** Task 86's throughput gain, in all three of its recorded
+    magnitudes: 52% at one seed, 28% at five, 17.6% after the fleet correction. At
+    a converged step size holding AVs at 10 m/s does not raise throughput, it
+    lowers it by 4 to 7%. Task 91's finding that 48.5% of the gain came from
+    behaviour the contract forbids is moot, because there is no gain. The metering
+    exemption committed in `2d313cc` is kept: it is a correct refinement of a
+    metric that could not tell metering from obstruction, and it stands on its own
+    reasoning, but the measurement that motivated it is withdrawn.
+
+    **What this does NOT establish.** That no controller can raise throughput here.
+    The retracted evidence came from an oracle -- every AV commanded to the same
+    speed for a whole episode, which no policy can express. A learned policy acting
+    on local conditions might still find something. What is gone is the evidence
+    that an effect was there to be found, which is what justified the training run.
+
+    **Open, and the user's call: whether the simulation leg still has a question.**
+    The paper is a deployment story and the simulation exists to replicate that
+    MAPPO works under the deployment-measured sensing model. That replication can
+    still be run and reported -- including as a null -- but it should be commissioned
+    knowing that the uniform-speed oracle now shows no effect to find at this
+    operating point and topology.
+
+91. **MOOT after task 92: there is no gain to be admissible or not.** The metering
+    exemption is kept on its own reasoning. Original text follows.
+
+    ~~The measured throughput gain is largely inadmissible under the project's own
+    contract.~~ Measured 2026-09-09 while diagnosing why the reward ranks the
     commanded-speed arms differently from arrivals. The reward is not
     mis-specified; it is correctly refusing a strategy the project forbids.
 
@@ -2688,7 +2753,11 @@ and on what evidence.
       config sets it under `metrics.thresholds`, so the window silently stayed at
       the 60 s default on SUMO whatever a config declared.
 
-86. **A 17.6% throughput gain exists, and the action space cannot reach it.**
+86. **RETRACTED by task 92 — the gain was a discretisation artefact.** The text
+    below is kept as the record of how it was measured and corrected twice before
+    being withdrawn; every arrival figure in it was taken at dt 1.0.
+
+    ~~A 17.6% throughput gain exists, and the action space cannot reach it.~~
     Measured 2026-09-09 on SUMO, then re-measured twice after defects found in the
     measurement itself. This is the control effect the project has been trying to
     measure, and the reason no policy has found it.

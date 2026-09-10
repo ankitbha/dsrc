@@ -163,6 +163,10 @@ class SumoTopologyEnv:
         self.arrived_total = 0
         self._safety_states = {}
         self._target_headways = {}
+        # Cleared like every other episode-scoped value. Left over, it made
+        # `get_episode_summary()` and `get_global_state()["step_metrics"]` report
+        # the previous episode's numbers on a freshly reset environment.
+        self._last_metrics = {}
         self._arrivals = []
         self._origin_of = {}
         # Every entry branch starts at zero, so a branch that completes nothing is
@@ -206,7 +210,14 @@ class SumoTopologyEnv:
         except BaseException:
             # Releasing the connection on the way out, so a failure here does not
             # leave the process holding a marker no one can clear.
-            self.close()
+            try:
+                self.close()
+            except BaseException:  # noqa: BLE001 - see below
+                # A failure to close must not replace the failure being reported.
+                # `close` has already released the marker in its own `finally`, so
+                # the only thing lost here is the close's own error, and losing the
+                # original would leave no way to diagnose what actually failed.
+                pass
             raise
 
     def _warm_up(self) -> None:
@@ -282,9 +293,15 @@ class SumoTopologyEnv:
             _sumo.close()
         except Exception:  # noqa: BLE001 - closing an already-dead connection
             pass
-        self._running = False
-        if _LIVE is self:
-            _LIVE = None
+        finally:
+            # In a `finally`, because a BaseException from the close -- a
+            # KeyboardInterrupt or a SystemExit -- propagates past the `except
+            # Exception` above. It left `_running` True and `_LIVE` set, and every
+            # later reset in the process then raised: the same cascade the reset
+            # path was hardened against, one step to the side.
+            self._running = False
+            if _LIVE is self:
+                _LIVE = None
 
     def __enter__(self) -> "SumoTopologyEnv":
         return self
