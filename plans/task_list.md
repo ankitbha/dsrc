@@ -2470,6 +2470,69 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+132. **The two waiters holding the queued segment arms could never have fired.**
+     2026-09-10.
+
+     Each was `while pgrep -f 'measure_segment_own_reward|local_reward_align|...'`.
+     `pgrep -f` matches the full command line of every process, and the waiter's OWN
+     command line contains that pattern as literal text, so each waiter matched itself
+     and one matched the other. Both jobs they were holding -- `measure_segment_as_agent`
+     and the higher-power own-reward arm -- would have waited indefinitely.
+
+     Replaced with one shell script that runs the two in sequence, with no matching.
+     The third process-identification failure of the session, after `pgrep -f "a\|b"`
+     (where `\|` is a literal in this shell) and a `grep -E "train_mappo|measure_threshold"`
+     against scripts actually named `train_policy.py` and `threshold_reward_sweep.py`,
+     which reported two healthy jobs as dead and led to duplicates being started
+     against the same checkpoint directory. Recorded as a memory: identify a job by
+     PID or by a sentinel file it writes, never by a pattern.
+
+131. **RESULT: the threshold objective is NOT flat, so the null stays in the mechanism
+     rather than moving to the reward.** 2026-09-10.
+
+     The open question was whether the objective can be moved by behaviour at all. If
+     it were flat, no learner could exploit it however well credit were assigned, and
+     the entire gradient investigation would have been measuring the attribution of a
+     quantity with nothing to attribute. It is not flat.
+
+     Each AV independently issues the config's own `slow` command (8.33 m/s) with
+     probability p at each decision and is otherwise released to SUMO's car-following.
+     Three seeds, 600 s observed after 300 s of fill.
+
+     | p | reward/step | penalty term | speed term | arrivals |
+     |---|---|---|---|---|
+     | 0 | **+1.531** +/- 1.082 | -1.50 | 3.031 | 182.7 |
+     | 0.25 | +0.290 +/- 0.567 | -1.86 | 2.150 | 156.0 |
+     | 0.5 | +0.744 +/- 0.497 | -1.29 | 2.034 | 153.3 |
+     | 0.75 | +0.315 +/- 0.079 | -1.61 | 1.925 | 141.7 |
+     | 1 | **-0.136** +/- 0.707 | -2.01 | 1.874 | 130.7 |
+
+     The objective falls by 1.667 across the range and is MAXIMISED at p=0, by not
+     metering at all. Arrivals fall by 52.0 over the same range. Reward and outcome
+     agree in direction, so the reward is a coherent objective on this road and the
+     null is not about it.
+
+     **The decomposition says something the total hides.** `congestion_penalty` is
+     1.0, so the penalty term is exactly minus the count of segments over rho* and the
+     speed term is the remainder. The speed term declines strictly monotonically and
+     tracks arrivals. The penalty term does not order at all: -1.50, -1.86, -1.29,
+     -1.61, -2.01. **The half of the objective designed to pay for keeping a link
+     below critical density -- the anticipatory behaviour the whole mechanism is
+     supposed to produce -- does not respond coherently to this behaviour cut, and
+     the half that does is the half that restates mean segment speed.**
+
+     **What this pass cannot settle.** The comparison is unpaired, and the road is
+     bistable: at p=0 the reward's seed-to-seed standard deviation is 1.082, so its
+     two-standard-error bar over three seeds is 1.25 against a between-arm range of
+     1.667. Per-seed values at p=0 are +3.021, +1.088 and +0.485, tracking that seed's
+     arrivals (198, 194, 156). A paired pass over five seeds is running; its p=0 cells
+     reproduce the fleet-mix sweep's reference arrivals exactly, seed for seed.
+
+     **It is also one cut through a much larger action space** -- a uniform random
+     command at one speed value -- so it bounds what an unselective fleet can do to
+     the objective, not what a selective policy could. The metering oracle covers the
+     selective case with perfect information and gains nothing.
+
 130. **CORRECTION: the threshold penalty fires on 1.5 of 9 segments, not 7 of 9.**
      2026-09-10, caught by reconciling the fleet-mix sweep's reward against the
      training score.
