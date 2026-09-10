@@ -2470,6 +2470,93 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+98. **Why nothing works: the network has an unintended permanent yield, and it
+    sets capacity.** Asked 2026-09-10 why MAPPO fails here when Flow reports gains
+    on similar networks, and whether the sensing model is the cause. It is not the
+    sensing model. `inverted_tree` as generated is not the network it was meant to
+    be.
+
+    **The evidence, in the order it was found.**
+
+    A perfect-information oracle also fails. `scripts/measure_oracle_metering.py`
+    slows AVs only while the segment downstream of them is congested -- the
+    project's own declared backpressure metering -- reading true simulator state
+    rather than the sensing model, with no learning involved. Five seeds on
+    `sumo_burst`: `no_av` 259.8 +/- 7.2 arrivals, metering at 8 m/s
+    −16.6 +/- 7.8, at 12 m/s −6.4 +/- 4.4, at 16 m/s −1.2 +/- 2.6. Nothing beats
+    inaction and the gentlest intervention is merely the least harmful. Whatever is
+    wrong is upstream of both sensing and learning.
+
+    Neither topology has a capacity drop at dt 0.1. Served flow rises
+    monotonically with demand -- 890, 908, 950, 1100, 1110 veh/h on `inverted_tree`
+    at 900 to 2400 veh/h offered, and 802 to 1068 on the bottleneck variant. A
+    capacity drop, throughput FALLING past a critical point, is the inefficiency
+    every mixed-autonomy control result exploits; Flow's bottleneck benchmark has
+    one, and its paper describes the opportunity as arranging vehicles "so that
+    they merge optimally without the sharp decelerations that eventually give rise
+    to the bottleneck".
+
+    **Then the segment profile gave it away.** At 1800 veh/h with no AVs:
+
+    | segment | lanes | mean speed | queue | vehicles |
+    |---|---|---|---|---|
+    | `tree_middle_b1` | 2 | **1.74** | **64.4** | 69.3 |
+    | `tree_middle_b2` | 2 | 22.76 | 0.0 | 5.9 |
+    | `tree_trunk_c` | 2 | 22.87 | 0.0 | 12.1 |
+
+    `b1` is jammed solid between neighbours that are both free-flowing, and the
+    trunk it feeds is nearly empty. That is not congestion physics.
+
+    **The cause is in the generated network.** Every edge is written with
+    `priority="-1"`, so `netconvert` broke the tie at junction `c` by geometry. The
+    built connections read `state="M"` for `tree_middle_b2` into the trunk and
+    `state="m"` for `tree_middle_b1`: b1 yields permanently, so its three leaves
+    (a1, a2, a3) starve behind a yield that never clears while the trunk runs
+    empty.
+
+    **Confirmed by fixing it.** Rebuilding the merge nodes as SUMO `zipper`
+    junctions, which alternate between approaches, no AVs, three seeds, arrivals
+    per 600 s:
+
+    | veh/h | as built | zipper merge |
+    |---|---|---|
+    | 900 | 148.3 | 148.0 |
+    | 1500 | 158.3 | **252.3** |
+    | 1800 | 183.3 | **252.0** |
+    | 2400 | 185.0 | **268.0** |
+
+    Capacity goes from about 1110 veh/h to about 1600, and the two middles
+    symmetrise: b1 rises from 1.02 to 11.95 m/s while b2 falls from 22.87 to 11.26,
+    with the starved leaves clearing (a5 from 4.70 to 23.63). At 900 veh/h nothing
+    changes, because that is below capacity either way.
+
+    **What this invalidates.** Every capacity figure in this project measured the
+    yield rather than the road, and both demand configs were chosen against it. It
+    also means **branch fairness -- the objective `inverted_tree` exists to study --
+    was structurally unattainable**: b1's three branches could never be served
+    equally with b2's, whatever a controller did. And it explains why every
+    controller tried so far does harm: the constraint is right-of-way, and slowing
+    vehicles that are already yield-limited only reduces what arrives.
+
+    **On Flow specifically, four differences beyond this one**, checked against
+    Vinitsky et al. 2018 rather than recalled: its benchmarks are the figure-eight,
+    merge, grid and bottleneck -- there is no tree; they use a single centralized
+    policy emitting all AVs' continuous accelerations, not decentralized agents
+    sharing one reward, so the policy's action moves the reward substantially; they
+    train 500 iterations of 50 rollouts each, against our 100 updates of one
+    rollout; and their merge reward is dense and normalised in every vehicle's
+    velocity, where ours is led by a 60 s rolling throughput count whose response
+    to an action arrives long after the GAE horizon. Their own merge benchmark
+    "started to gradually degrade after certain iterations, suggesting that the
+    problem is difficult to solve with existing optimization methods".
+
+    **DECISION FOR THE USER, because it changes the research object.** Fixing the
+    merge makes `inverted_tree` the network it was described as, but it invalidates
+    every capacity table and both demand levels, and the operating point, the burst
+    scenario and the dt-convergence result all need re-measuring on the corrected
+    road. The alternative -- keeping it -- means studying a network whose capacity
+    is set by an arbitrary tie-break and whose fairness objective is unreachable.
+
 97. **RESULT of the pre-registered run: MAPPO does not beat doing nothing, and is
     measurably worse.** Executed 2026-09-09 exactly as task 93 fixed it in advance:
     five seeds (7, 17, 27, 37, 47), `sumo_burst`, 900 s episodes at dt 0.1, the
