@@ -2470,6 +2470,40 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+117. **What the gradient instrument can resolve at each level, worked out before
+     the readings.** 2026-09-10. Every arm reports a synthetic action-correlated
+     ceiling beside its permutation floor, and the RATIO of those two is the
+     instrument's dynamic range on that batch. It varies enormously with the number
+     of transitions, so the same z means different things at different levels.
+
+     | level | transitions | ceiling over floor |
+     |---|---|---|
+     | vehicle-agent, 1 s lever | about 5,200 | 25 to 39 |
+     | vehicle-agent, 60 s lever | about 1,600 | (measured per arm) |
+     | segment-agent, 60 s lever | about 171 | **5.8** |
+
+     Fewer samples means less cancellation in the shuffled gradient, so the floor
+     sits higher relative to a perfect signal and the range compresses.
+
+     **The sensitivity that follows.** Writing the measured ratio as
+     `1 + rho * (ceiling_ratio - 1)` for a true action-advantage correlation `rho`,
+     the segment-agent arm at a ceiling ratio of 5.8, a floor of 0.337 and a floor
+     standard deviation of 0.092 needs:
+
+     | rho | expected ratio | expected z |
+     |---|---|---|
+     | 0.20 | 1.96 | **+3.5** |
+     | 0.10 | 1.48 | +1.8 |
+     | 0.05 | 1.24 | +0.9 |
+
+     So this arm resolves **rho above about 0.1** and is marginal below that. Weaker
+     than the vehicle-level test, which resolves about 0.05, and not toothless: a
+     null here excludes the size of effect that would matter, and does not exclude a
+     small one.
+
+     Recorded before the arm completed, so the sensitivity is not a caveat chosen
+     after seeing whether the result was liked.
+
 116. **Two harness defects from running several heavy jobs at once, recorded
      because neither announced itself.** 2026-09-10.
 
