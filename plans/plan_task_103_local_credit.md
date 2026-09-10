@@ -113,8 +113,34 @@ restarted for it.
 
 ## Sign-off
 
-- [ ] Every new metric has a test that fails without the instrumentation.
-- [ ] `local_reward_weight` 0.0 and `decision_interval_s` unset reproduce the
-      previous trainer behaviour exactly.
-- [ ] The weights are set from a measurement, and the measurement is recorded.
-- [ ] The gate is read off the training curve without being renegotiated.
+- [x] Every new metric has a test that fails without the instrumentation. Three
+      mutants run and killed: the neighbourhood reduced to the agent's own segment,
+      the warm-up flow tail removed, and `_departure_time` cleared at the end of
+      warm-up. Each was killed by the test written for it and by no other.
+- [x] `local_reward_weight` 0.0 and `decision_interval_s` unset reproduce the
+      previous trainer behaviour exactly. `tests/test_local_credit.py` asserts that
+      two agents in different neighbourhoods receive identical rewards until the
+      local weight is set, which is the control that makes the separation test
+      meaningful.
+- [x] The weights are set from a measurement, and the measurement is recorded. One
+      uncontrolled episode at this operating point, taken before the run; the
+      contribution table is in `configs/training/mappo_sumo.yaml`.
+- [x] The gate is read off the training curve without being renegotiated.
+      `scripts/read_training_gate.py` derives the entropy threshold from the action
+      profile rather than taking it as an argument. Criteria 1 and 2 fail. Criterion
+      3 as written had no numeric threshold, which is a defect in this plan and is
+      recorded as task 109 rather than resolved after the fact.
+
+## Outcome
+
+**The gate fails, and the five changes were not what was wrong.** Measured while the
+run was in flight: the advantage carries no action-attributable signal, at its own
+shuffled noise floor, on every configuration tried -- four reward decompositions,
+three hold lengths, five discount horizons, two critic input sets, four speed-bin
+scalings, three operating points and three penetrations up to 100%. The instrument
+reads 14 to 80 times the floor when an action-correlated advantage is supplied, so it
+could have produced a positive reading in each. Tasks 105 to 109 carry the detail.
+
+None of the five changes in this plan could have worked, and the plan could not have
+known that: the instrument that shows it did not exist when the plan was written. The
+lesson is task 105's -- bracket a statistic before comparing arms on it.
