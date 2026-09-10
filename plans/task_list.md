@@ -2556,6 +2556,14 @@ and on what evidence.
      evaluation seeds disjoint from training: completed trips as the primary metric,
      paired, two standard errors; mean delay, stopped fraction and jerk beside it.
 
+     **The evaluation seeds, pinned now: 57, 67, 77, 87, 97, 107, 117, 127, 137,
+     147.** The same ten task 99 used, and disjoint from everything training touches
+     -- `collect_rollout` draws `seed + update` for each update and `+ episode_index`
+     within it, so a 20-update run from seed 7 consumes 8 through 28. Ten seeds, not
+     five, because this operating point is bistable: served trips range 156 to 198
+     across five seeds of identical demand (task 114), and five seeds can only
+     resolve effects above about 8%.
+
      **What a null would mean here, stated now.** Two caveats are already on record
      and neither is created after the fact. The paper's rho* = 0.3 barely fires on
      this road -- measured over three seeds, only `tree_middle_b1` crosses it, with
