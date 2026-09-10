@@ -2470,6 +2470,34 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+127. **Two copies of one measurement ran at once, sharing their work directories.**
+     2026-09-10, and it nearly produced numbers from two interleaved simulations with
+     nothing looking wrong.
+
+     **What happened.** A chained waiter was still holding the local-reward arm; I
+     killed what I believed was that waiter, matching by pattern rather than by
+     identity, and killed a different one. The surviving waiter then fired the arm at
+     the same moment I started it by hand. Parent pids settled it: the second copy's
+     PPID was the waiter's.
+
+     **Why it matters.** Both wrote `/tmp/dsrc_localalign_<weight>_<seed>`, so each
+     was rewriting the other's `net.net.xml` between write and read. That surfaces as
+     an XML parse error from netconvert output that was never finished -- and when it
+     does NOT error, the run simply mixes two simulations and reports a number.
+
+     **What was done.** The 32 s overlap fell on the team-only seed-7 arm, so most
+     rows were probably unaffected; "probably" is not a basis for a results table, so
+     the whole arm was discarded and restarted. Work directories are now keyed by
+     process id, which makes the collision impossible rather than unlikely.
+
+     **The readings from the discarded run**, recorded so they are not quietly reused:
+     local 0.5 at seed 7 z = -1.08 with correlation +0.0017, at seed 17 z = -0.61 with
+     correlation -0.0105.
+
+     **The rule this session keeps relearning.** Kill by pid, not by pattern; wait on
+     a pid, not on a name; and check what a "seed" or a "process" actually is before
+     trusting that two of them are two.
+
 126. **The segment arms are UNDERPOWERED for the question they were built to
      answer.** Computed 2026-09-10 from each arm's own ceiling and null, before the
      segment readings were complete.
