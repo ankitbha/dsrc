@@ -97,6 +97,10 @@ class SumoTopologyEnv:
     #: 512 (respect other drivers) + 1024 (sublane), the two bits the default sets
     #: that are not a motivation to change lane.
     HOLD_LANE_MODE = 1536
+    #: Below this a vehicle counts as stopped. SUMO's own definition of a waiting
+    #: vehicle uses the same value, so `stopped_fraction` summed over the episode
+    #: and multiplied by dt is total waiting time in vehicle-seconds.
+    STOPPED_SPEED_MPS = 0.1
 
     def __init__(self, topology_id: str, config: Mapping[str, Any]) -> None:
         self.topology_id = topology_id
@@ -160,6 +164,26 @@ class SumoTopologyEnv:
         #: this counts requests and not changes; it is what tells an inert lane head
         #: from one the policy simply does not use.
         self.lane_change_requests = 0
+        #: When each live vehicle departed, so a completed trip's duration can be
+        #: measured. Kept for the same reason `_origin_of` is: the vehicle is gone
+        #: by the time it arrives, so nothing about it can be read then.
+        self._departure_time: dict[str, float] = {}
+        #: (arrival time, travel time, free-flow travel time) per completed trip,
+        #: pruned to the same rolling window `_arrivals` uses.
+        self._completed_trips: list[tuple[float, float, float]] = []
+        #: Free-flow travel time of each route, by the entry edge that identifies
+        #: it: the route's length divided by the speed limit. The subtrahend in
+        #: delay, and a property of the road rather than of any run.
+        self._route_free_flow_s: dict[str, float] = {}
+        #: Each vehicle's acceleration last step, for jerk. Rebound rather than
+        #: updated every step, so a vehicle that was inside a junction last step --
+        #: and so absent from the snapshots -- contributes nothing rather than a
+        #: difference taken across the gap.
+        self._last_accel: dict[str, float] = {}
+        #: When each segment last passed a vehicle downstream, pruned to the
+        #: rolling window. The per-segment analogue of `_arrivals`, which is what
+        #: lets a local reward price throughput near the agent.
+        self._segment_outflow_times: dict[str, list[float]] = {}
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -205,6 +229,15 @@ class SumoTopologyEnv:
         self._cached_segment_metrics = None
         self.new_collisions_last_step = 0
         self.lane_change_requests = 0
+        self._departure_time = {}
+        self._completed_trips = []
+        self._last_accel = {}
+        self._segment_outflow_times = {}
+        # Rebuilt every reset, because `reset` rebuilds the network and a cache
+        # carried across a change of lane count or segment length would describe
+        # the previous road.
+        self._edge_node_cache = None
+        self._route_free_flow_s = self._route_free_flow_times()
         self._rng = np.random.RandomState(0 if seed is None else int(seed))
         self.step_count = 0
         self.collision_count = 0
@@ -257,6 +290,15 @@ class SumoTopologyEnv:
         """
         warmup = int(self.config.get("warmup_steps", 0))
         dt = float(self.config.get("dt", 1.0))
+        # Over the last window-worth of warm-up steps the per-segment flows are
+        # recorded too, at the same negative times `_arrivals` uses. Without it the
+        # per-segment rolling outflow that the local reward prices starts empty and
+        # refills over the first 60 s of the episode, so the same traffic scores
+        # lower at the start than in the middle. Only the tail, because building the
+        # snapshots costs about six TraCI calls per vehicle and the warm-up is
+        # twelve thousand steps at four hundred vehicles.
+        flow_from = max(0, warmup - int(round(
+            float(metric_thresholds_from_config(self.config).throughput_window_s) / (dt or 1.0))))
         for index in range(max(0, warmup)):
             _sumo.simulationStep()
             # Collisions during warm-up would still be collisions.
@@ -273,8 +315,11 @@ class SumoTopologyEnv:
             # and adding them made `arrived_total` read 43 before the episode began
             # and 153 against the same run's 110.
             arrived = int(_sumo.simulation.getArrivedNumber())
-            self._arrivals.extend([(index - warmup + 1) * dt] * arrived)
-            self._track_branches()
+            now = (index - warmup + 1) * dt
+            self._arrivals.extend([now] * arrived)
+            self._track_trips(now)
+            if index >= flow_from:
+                self._update_flows(self.vehicle_snapshots(), now)
         if warmup > 0:
             # Branch counts are episode-scoped for the same reason `arrived_total`
             # is: with a 300-step warm-up they otherwise carried 43 completions that
@@ -288,8 +333,15 @@ class SumoTopologyEnv:
             snapshots = self.vehicle_snapshots()
             # Seed the segment map without emitting flows: the first observed step
             # would otherwise report every vehicle already on the network as an
-            # arrival into its segment.
+            # arrival into its segment. Redundant when the warm-up was longer than
+            # the flow window, since the tail above has already advanced it, and
+            # kept because a warm-up shorter than the window does not reach that
+            # branch.
             self._segment_of = {s.vehicle_id: s.segment_id for s in snapshots if s.segment_id}
+            # Seeded for the same reason as `_segment_of`: without it every vehicle
+            # already on the network reads its whole acceleration as a one-step
+            # change on the first observed step.
+            self._last_accel = {s.vehicle_id: s.acceleration_mps2 for s in snapshots}
             self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
 
     def _new_collisions(self) -> int:
@@ -354,11 +406,11 @@ class SumoTopologyEnv:
         self.arrived_total += arrived
         now = self.step_count * float(self.config.get("dt", 1.0))
         self._arrivals.extend([now] * arrived)
-        self._track_branches()
+        self._track_trips(now)
 
         snapshots = self.vehicle_snapshots()
         self._cached_segment_metrics = None
-        self._update_flows(snapshots)
+        self._update_flows(snapshots, now)
         self.agent_ids = [s.vehicle_id for s in snapshots if s.role == "av"]
         for agent_id in self.agent_ids:
             self._safety_states.setdefault(agent_id, SafetyState())
@@ -381,6 +433,9 @@ class SumoTopologyEnv:
         # you, and this one means "nothing was measured".
         info = {"collisions": self.collision_count, "step": self.step_count,
                 "metrics": self._last_metrics,
+                # What a per-agent reward is priced from; empty when no agent is on
+                # a segment. See `neighbourhood_metrics`.
+                "neighbourhood": self.neighbourhood_metrics(snapshots),
                 "safety": {"penalties": {}, "layer_ran": False}}
         return observations, {}, terminated, truncated, info
 
@@ -568,6 +623,15 @@ class SumoTopologyEnv:
         segment_metrics = self.get_segment_metrics(snapshots)
         jam = [m["jam_fraction"] for m in segment_metrics.values()]
         queue = sum(int(m["queue_length"]) for m in segment_metrics.values())
+        # Same window as `throughput_recent`, for the same reason: a completion is a
+        # rare event per step and the reward needs a quantity that is not zero on
+        # most of them.
+        self._completed_trips = [t for t in self._completed_trips if now - t[0] <= window]
+        for times in self._segment_outflow_times.values():
+            times[:] = [t for t in times if now - t <= window]
+        travel = [t[1] for t in self._completed_trips]
+        delay = [max(0.0, t[1] - t[2]) for t in self._completed_trips if t[2] > 0.0]
+        jerk = self._mean_abs_jerk(snapshots)
         return {
             "mean_speed": float(sum(speeds) / len(speeds)) if speeds else 0.0,
             "speed_std": float(np.std(speeds)) if speeds else 0.0,
@@ -612,16 +676,105 @@ class SumoTopologyEnv:
             "fairness_jain": self._branch_fairness(),
             "active_vehicle_count": active_count,
             "active_av_count": active_av_count,
+            # How long a completed trip took, over the rolling window. 0.0 when
+            # nothing completed in it, which is a gap in the measurement rather
+            # than a fast trip -- `throughput_recent` is what says which.
+            "mean_travel_time_recent": float(sum(travel) / len(travel)) if travel else 0.0,
+            # Travel time above the route's free-flow time, floored at zero. The
+            # axis the predecessor paper's largest gain was on, and one this
+            # environment did not measure at all before task 103.
+            #
+            # It is a mean over COMPLETED trips, so a controller that stops a
+            # vehicle from completing improves it. `latent_demand` and
+            # `throughput_recent` are what make that visible, and both are reported
+            # beside it.
+            "mean_delay_recent": float(sum(delay) / len(delay)) if delay else 0.0,
+            # The share of vehicles on the network below `STOPPED_SPEED_MPS`.
+            # Summed over the episode and multiplied by dt this is total waiting
+            # time in vehicle-seconds, which is SUMO's own definition.
+            "stopped_fraction": (
+                float(sum(1 for v in speeds if v < self.STOPPED_SPEED_MPS) / len(speeds))
+                if speeds else 0.0
+            ),
+            # Mean |change in acceleration| per second, over vehicles present in
+            # both this step's snapshots and the previous step's. The smoothness
+            # measure: `speed_std` is a spread across vehicles at one instant,
+            # which a uniformly stop-and-go fleet leaves small.
+            "mean_abs_jerk": jerk,
         }
 
-    def _track_branches(self) -> None:
-        """Attribute each departure and arrival to the entry branch it used.
+    def _mean_abs_jerk(self, snapshots: list[VehicleSnapshot]) -> float:
+        """Mean |da/dt| over vehicles seen in both this step and the previous one.
 
-        A vehicle is gone by the time it arrives, so its route cannot be read then;
-        the origin is recorded on departure and looked up on arrival. Fairness is
-        Jain's index over completions per branch, which is the branch-fairness
-        objective `inverted_tree` exists to study -- not, as an earlier version
-        computed, Jain's index over instantaneous speeds.
+        Rebinds the acceleration map rather than updating it, so a vehicle that was
+        inside a junction last step -- and therefore absent from the snapshots --
+        contributes nothing, instead of a difference taken across however many
+        steps it was away.
+        """
+        dt = float(self.config.get("dt", 1.0)) or 1.0
+        previous = self._last_accel
+        changes = [
+            abs(s.acceleration_mps2 - previous[s.vehicle_id]) / dt
+            for s in snapshots if s.vehicle_id in previous
+        ]
+        self._last_accel = {s.vehicle_id: s.acceleration_mps2 for s in snapshots}
+        return float(sum(changes) / len(changes)) if changes else 0.0
+
+    def neighbourhood_metrics(
+        self, snapshots: list[VehicleSnapshot] | None = None
+    ) -> dict[str, dict[str, float]]:
+        """Per agent, the state of its own segment and of the segments downstream.
+
+        What a per-agent reward is priced from. The environment measures and the
+        reward weights it, so the weights stay in the training config rather than
+        being spread across the simulator.
+
+        **The neighbourhood includes the segments downstream, not only the agent's
+        own.** Speed metering means holding the own segment below free flow to
+        relieve the next one, so an own-segment-only term would penalise exactly the
+        behaviour this project exists to study. Immediate successors only, from the
+        same relation the rolling-roadblock metric uses.
+
+        Each field is the MEAN over the neighbourhood, so an agent with two
+        successors is not rewarded more than one with a single successor for the
+        same conditions.
+        """
+        snapshots = snapshots if snapshots is not None else self.vehicle_snapshots()
+        segments = self.get_segment_metrics(snapshots)
+        downstream = self.view.downstream_segments() if self.view is not None else {}
+        segment_of = {s.vehicle_id: s.segment_id for s in snapshots}
+        result: dict[str, dict[str, float]] = {}
+        for agent_id in self.agent_ids:
+            own = segment_of.get(agent_id)
+            if own is None:
+                continue
+            names = [own, *downstream.get(own, ())]
+            present = [segments[name] for name in names if name in segments]
+            if not present:
+                continue
+            result[agent_id] = {
+                "mean_speed": float(sum(float(m["mean_speed"]) for m in present) / len(present)),
+                "jam_fraction": float(sum(float(m["jam_fraction"]) for m in present) / len(present)),
+                "queue_length": float(sum(float(m["queue_length"]) for m in present) / len(present)),
+                "outflow_recent": float(
+                    sum(len(self._segment_outflow_times.get(name, ())) for name in names) / len(names)
+                ),
+            }
+        return result
+
+    def _track_trips(self, now: float) -> None:
+        """Attribute each departure and arrival to its branch, and time the trip.
+
+        A vehicle is gone by the time it arrives, so neither its route nor its
+        departure time can be read then; both are recorded on departure and looked
+        up on arrival. Fairness is Jain's index over completions per branch, which
+        is the branch-fairness objective `inverted_tree` exists to study -- not, as
+        an earlier version computed, Jain's index over instantaneous speeds.
+
+        `now` is negative during warm-up, counting back to the first observed step,
+        which is the convention `_arrivals` already uses: the rolling windows then
+        start already filled rather than refilling from empty on a network that has
+        reached a steady state.
         """
         for vehicle_id in _sumo.simulation.getDepartedIDList():
             try:
@@ -631,10 +784,16 @@ class SumoTopologyEnv:
             if route:
                 self._origin_of[vehicle_id] = route[0]
                 self._branch_spawned[route[0]] = self._branch_spawned.get(route[0], 0) + 1
+            self._departure_time[vehicle_id] = now
         for vehicle_id in _sumo.simulation.getArrivedIDList():
             origin = self._origin_of.pop(vehicle_id, None)
             if origin is not None:
                 self._branch_completed[origin] = self._branch_completed.get(origin, 0) + 1
+            departed = self._departure_time.pop(vehicle_id, None)
+            if departed is not None:
+                self._completed_trips.append(
+                    (now, now - departed, self._route_free_flow_s.get(origin or "", 0.0))
+                )
 
     def _vehicle_records(self, snapshots: list[VehicleSnapshot]) -> list[dict[str, Any]]:
         """Snapshots in the record shape `compute_segment_metrics` reads."""
@@ -680,7 +839,7 @@ class SumoTopologyEnv:
         )
         return self._cached_segment_metrics
 
-    def _update_flows(self, snapshots: list[VehicleSnapshot]) -> None:
+    def _update_flows(self, snapshots: list[VehicleSnapshot], now: float) -> None:
         """Vehicles crossing each segment's boundaries during the step just taken.
 
         Called once per step, before the metric getters, because the flows are a
@@ -718,6 +877,13 @@ class SumoTopologyEnv:
         self._segment_of = current
         self._step_inflow = inflow
         self._step_outflow = outflow
+        # The per-segment analogue of `_arrivals`: when each segment last passed a
+        # vehicle on. A local reward needs a throughput term, and a single step's
+        # outflow is 0 on almost every step at any realistic flow -- 1300 veh/h is
+        # 0.036 vehicles per step at dt 0.1 -- so the count is accumulated over the
+        # same rolling window `throughput_recent` uses and pruned in `_build_metrics`.
+        for segment_id, count in outflow.items():
+            self._segment_outflow_times.setdefault(segment_id, []).extend([now] * count)
 
     def _branch_fairness(self) -> float:
         """Jain's index over completions per entry branch."""
@@ -816,16 +982,61 @@ class SumoTopologyEnv:
         return (from_node, to_node, ordinal)
 
     def _edge_nodes(self, edge_id: str) -> tuple[str, str]:
-        if not hasattr(self, "_edge_node_cache"):
+        facts = self._edge_facts().get(edge_id)
+        return (facts[0], facts[1]) if facts else (edge_id, edge_id)
+
+    def _edge_facts(self) -> dict[str, tuple[str, str, float, float]]:
+        """`(from node, to node, length in m, speed limit in m/s)` per edge.
+
+        Read once per episode from the built network rather than from the topology
+        config, so it describes the road the vehicles actually drive on. Cleared by
+        `reset`, which rebuilds that road.
+        """
+        if getattr(self, "_edge_node_cache", None) is None:
             import sumolib
 
             net = sumolib.net.readNet(str(self.network.net_file))
             self._edge_node_cache = {
-                edge.getID(): (edge.getFromNode().getID(), edge.getToNode().getID())
+                edge.getID(): (
+                    edge.getFromNode().getID(),
+                    edge.getToNode().getID(),
+                    float(edge.getLength()),
+                    float(edge.getSpeed()),
+                )
                 for edge in net.getEdges()
                 if not edge.getID().startswith(":")
             }
-        return self._edge_node_cache.get(edge_id, (edge_id, edge_id))
+        return self._edge_node_cache
+
+    def _route_free_flow_times(self) -> dict[str, float]:
+        """How long each route takes at the speed limit, keyed by its entry edge.
+
+        The subtrahend in delay: a trip that took 180 s on a route whose free-flow
+        time is 95 s was delayed 85 s. Computed from edge lengths and limits rather
+        than from a measured uncongested run, so it is a property of the road and
+        does not move with the demand.
+
+        It uses the LIMIT and not the vehicle's own desired speed, which is drawn
+        from the demand's speed distribution and is lower on average (a 24 m/s mean
+        against a 30 m/s limit). Delay measured this way therefore includes the
+        part of the difference that comes from a driver choosing to go slower than
+        the limit, which is constant across arms and does not affect a comparison
+        between them.
+        """
+        if self.network is None:
+            return {}
+        facts = self._edge_facts()
+        times: dict[str, float] = {}
+        for entry in self.network.entry_edges():
+            route = self.network.route_to_exit(entry)
+            total = 0.0
+            for edge_id in route or ():
+                edge = facts.get(edge_id)
+                if edge is None or edge[3] <= 0.0:
+                    continue
+                total += edge[2] / edge[3]
+            times[entry] = total
+        return times
 
     def get_local_observations(self, snapshots: list[VehicleSnapshot] | None = None) -> dict[str, Any]:
         """Per-AV observations, from the unchanged sensing model.

@@ -24,6 +24,11 @@ class PPOConfig:
     reward_clip: float = 10.0
     reward_scale: float = 0.05
     crash_penalty: float = 0.0
+    #: How much of each agent's reward is measured over its own neighbourhood
+    #: rather than over the whole network. 0.0 is the team reward alone, which is
+    #: what every configuration written before task 103 gets and what both earlier
+    #: SUMO training runs used. See `src.rl.rewards.blend_rewards`.
+    local_reward_weight: float = 0.0
 
     @classmethod
     def from_mapping(cls, config: dict[str, Any] | None) -> PPOConfig:
@@ -44,6 +49,9 @@ class PPOConfig:
             reward_clip=float(opt.get("reward_clip", cfg.get("reward_clip", cls.reward_clip))),
             reward_scale=float(opt.get("reward_scale", cfg.get("reward_scale", cls.reward_scale))),
             crash_penalty=max(0.0, float(opt.get("crash_penalty", cfg.get("crash_penalty", cls.crash_penalty)))),
+            local_reward_weight=float(
+                opt.get("local_reward_weight", cfg.get("local_reward_weight", cls.local_reward_weight))
+            ),
         )
 
 

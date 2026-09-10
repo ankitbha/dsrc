@@ -24,7 +24,12 @@ from src.rl.encoders import (
 )
 from src.rl.models import GlobalCritic, LocalCritic, MultiCategoricalActor
 from src.rl.ppo import PPOConfig, ppo_update
-from src.rl.rewards import build_team_reward, safety_penalty_for_agent
+from src.rl.rewards import (
+    blend_rewards,
+    build_local_reward,
+    build_team_reward,
+    safety_penalty_for_agent,
+)
 from src.rl.rollout_buffer import RolloutBuffer
 
 
@@ -62,6 +67,16 @@ class TrainingConfig:
     #: Steps run before the episode is observed, so a rollout does not begin on an
     #: empty network. Only meaningful for SUMO.
     warmup_steps: int = 0
+    #: Overrides for `DEFAULT_LOCAL_REWARD_WEIGHTS`, the per-agent term. Priced by
+    #: the config for the same reason the team weights are: the environment
+    #: measures the neighbourhood and the config decides what it is worth.
+    local_reward_weights: Mapping[str, float] | None = None
+    #: How long one action is held, in simulated seconds. None means one decision
+    #: per simulation step, which is what every configuration written before task
+    #: 103 does. At dt 0.1 that is ten decisions a second, and a single one of them
+    #: changes the next observation almost not at all, so the credit for an action
+    #: is diluted by the step size before the team reward divides it among agents.
+    decision_interval_s: float | None = None
 
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> TrainingConfig:
@@ -94,6 +109,16 @@ class TrainingConfig:
             simulator=str(training.get("simulator", "highway_env")),
             work_dir=(str(training["work_dir"]) if training.get("work_dir") else None),
             warmup_steps=int(training.get("warmup_steps", 0)),
+            local_reward_weights=(
+                {str(k): float(v) for k, v in local_cfg.items()}
+                if isinstance(local_cfg := training.get("local_reward_weights"), Mapping) and local_cfg
+                else None
+            ),
+            decision_interval_s=(
+                float(training["decision_interval_s"])
+                if training.get("decision_interval_s") is not None
+                else None
+            ),
         )
 
 
@@ -186,12 +211,64 @@ class BasePPOTrainer:
         write_resolved_config(output_dir / "config_resolved.yaml", self.config, self.ppo_config)
         return {"output_dir": str(output_dir), "updates": self.config.total_updates, "best_score": best_score}
 
+    def action_repeat(self) -> int:
+        """How many simulation steps one action is held for.
+
+        1 unless `decision_interval_s` is set, so every configuration written
+        before task 103 decides once per simulation step exactly as it did.
+        """
+        interval = self.config.decision_interval_s
+        if interval is None:
+            return 1
+        dt = float(self.config.dt) or 1.0
+        return max(1, int(round(float(interval) / dt)))
+
+    def hold_action(
+        self,
+        env: Any,
+        action_map: Mapping[str, Any],
+        repeat: int,
+    ) -> tuple[dict[str, Any], bool, bool, list[Mapping[str, Any]], set[str]]:
+        """Advance the simulation `repeat` steps, applying the action on the first.
+
+        The action is applied ONCE. `setSpeed` and `setTau` persist in SUMO until
+        they are changed, so re-issuing them every step would change nothing about the
+        traffic while multiplying the actuation counters -- `lane_change_requests`
+        exists to tell an inert head from an unused one, and it would read ten
+        times the number of decisions.
+
+        Returns every step's info, because the reward is the sum over the interval
+        rather than the value at the end of it: a decision that causes a queue to
+        clear halfway through the second should be credited with the whole of it.
+        """
+        infos: list[Mapping[str, Any]] = []
+        crashed: set[str] = set()
+        observations: dict[str, Any] = {}
+        terminated = truncated = False
+        for index in range(max(1, repeat)):
+            observations, _, terminated, truncated, info = env.step(action_map if index == 0 else {})
+            infos.append(info)
+            if self.ppo_config.crash_penalty:
+                # Asked of the environment rather than read out of its internals. The
+                # previous form reached into `_av_vehicles`, which only exists on one
+                # of the two simulators, so it failed the moment a second one appeared.
+                #
+                # Collected over every step of the interval, not only the last: a
+                # collision the simulator resolves within the second is still a
+                # collision the action is answerable for.
+                crashed |= set(env.crashed_agent_ids())
+            if terminated or truncated:
+                break
+        return observations, terminated, truncated, infos, crashed
+
     def collect_rollout(self, *, seed: int) -> tuple[RolloutBuffer, dict[str, Any]]:
         env = self.build_env()
+        repeat = self.action_repeat()
+        scale = self.ppo_config.reward_scale
+        local_weight = self.ppo_config.local_reward_weight
         try:
             observations, _ = env.reset(seed=seed)
             buffer = RolloutBuffer()
-            episode_metrics: dict[str, Any] = {}
             metric_history: list[dict[str, Any]] = []
             terminated = False
             truncated = False
@@ -205,9 +282,8 @@ class BasePPOTrainer:
                     truncated = False
                 agent_ids, obs_tensor = encode_local_batch(observations)
                 if not agent_ids:
-                    observations, _, terminated, truncated, info = env.step({})
-                    episode_metrics = dict(info.get("metrics", {}))
-                    metric_history.append(episode_metrics)
+                    observations, terminated, truncated, infos, _ = self.hold_action(env, {}, repeat)
+                    metric_history.extend(dict(info.get("metrics", {})) for info in infos)
                     steps += 1
                     continue
                 obs_tensor = obs_tensor.to(self.device)
@@ -216,18 +292,25 @@ class BasePPOTrainer:
                     value_obs = self.value_observation_tensor(env.get_global_state(), obs_tensor, len(agent_ids))
                     values = self.critic(value_obs)
                 action_map = {agent_id: action for agent_id, action in zip(agent_ids, actions, strict=True)}
-                next_observations, _, terminated, truncated, info = env.step(action_map)
-                episode_metrics = dict(info.get("metrics", {}))
-                metric_history.append(episode_metrics)
-                team_reward = build_team_reward(episode_metrics, self.config.reward_weights) * self.ppo_config.reward_scale
-                # Asked of the environment rather than read out of its internals. The
-                # previous form reached into `_av_vehicles`, which only exists on one
-                # of the two simulators, so it failed the moment a second one appeared.
-                crashed_agents = (
-                    set(env.crashed_agent_ids()) if self.ppo_config.crash_penalty else set()
+                next_observations, terminated, truncated, infos, crashed_agents = self.hold_action(
+                    env, action_map, repeat)
+                metric_history.extend(dict(info.get("metrics", {})) for info in infos)
+                # Summed over the interval the action was held for, so a longer
+                # interval carries proportionally more reward. `reward_scale` is
+                # per simulation step and unchanged: at dt 0.1 with a 1 s interval
+                # the value targets have the same magnitude as one decision per
+                # step at a gamma ten times closer to 1.
+                team_reward = scale * sum(
+                    build_team_reward(info.get("metrics", {}), self.config.reward_weights)
+                    for info in infos
                 )
+                local_reward = self._local_rewards(agent_ids, infos, scale)
                 for index, agent_id in enumerate(agent_ids):
-                    reward = team_reward - safety_penalty_for_agent(info, agent_id)
+                    reward = blend_rewards(team_reward, local_reward[agent_id], local_weight)
+                    # From the last step of the interval. Inert on SUMO, where the
+                    # safety layer does not run, and the previous form read the
+                    # single step there was.
+                    reward -= safety_penalty_for_agent(infos[-1], agent_id)
                     if agent_id in crashed_agents:
                         # the dense speed reward otherwise dominates the one-step
                         # collision term and argmax collapses to constant "fast"
@@ -253,6 +336,32 @@ class BasePPOTrainer:
             # behind and the next environment cannot start.
             if hasattr(env, "close"):
                 env.close()
+
+    def _local_rewards(
+        self,
+        agent_ids: list[str],
+        infos: list[Mapping[str, Any]],
+        scale: float,
+    ) -> dict[str, float]:
+        """Each agent's own reward, summed over the interval and scaled.
+
+        Zero for an agent the environment reported no neighbourhood for, which is
+        an agent between segments rather than an agent in clear traffic. Summed
+        over the same interval as the team reward, so the two are comparable and
+        the blend weight means what it says.
+        """
+        totals = {agent_id: 0.0 for agent_id in agent_ids}
+        if not self.ppo_config.local_reward_weight:
+            return totals
+        for info in infos:
+            neighbourhood = info.get("neighbourhood") or {}
+            if not isinstance(neighbourhood, Mapping):
+                continue
+            for agent_id in agent_ids:
+                values = neighbourhood.get(agent_id)
+                if isinstance(values, Mapping):
+                    totals[agent_id] += build_local_reward(values, self.config.local_reward_weights)
+        return {agent_id: scale * total for agent_id, total in totals.items()}
 
     def critic_input_dim(self) -> int:
         return physical_global_state_dim() if self.critic_scope == "global" else local_obs_dim()

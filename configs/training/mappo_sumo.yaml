@@ -28,72 +28,31 @@ simulator: sumo
 # reward_scale. Each is annotated with the invariant it preserves.
 dt: 0.1
 
-# reward_scale 1.0, not the 0.05 the other configs use. At the SUMO operating point
-# the team reward is about 0.82 per step for uncommanded traffic over a 600-step
-# episode -- the "about 1.28" this comment previously quoted was measured with the
-# fairness denominator defect and on the undeclared fleet, and the quantity also
-# moves with the episode length. Scaled by 0.05 it becomes 0.041, while the entropy
-# bonus at entropy_coef 0.01 and the entropy the policy actually held (4.24) is
-# 0.042 -- more than half of the objective, and on the earlier figures 66%. The policy therefore had almost no incentive to
-# become deterministic and held 91% of maximum entropy after 400 updates. PPO's
-# default coefficients assume a reward of order 1, and reward_clip at 10 already
-# bounds the magnitude, so scaling down was not protecting anything.
-
 # Let the network fill before the episode is observed. A vehicle must cover
 # 500 + 600 + 900 m before it can arrive, so nothing completes for the first
 # hundred seconds and a rollout beginning at t = 0 can see no AV at all.
 # 3000 steps at dt 0.1 is the same 300 s of warm-up as 300 steps at dt 1.0.
 warmup_steps: 3000
 
-# 600, not the 120 the trainer defaults to. The effect this configuration exists to
-# learn -- AVs holding a speed below free flow to raise throughput through the
-# junction -- does not exist at 120 steps. Arrivals with every AV commanded to hold
-# one speed, five seeds, at this demand and penetration:
+# 6000 steps at dt 0.1 is a 600 s episode. What it has to contain is the road's own
+# capacity collapse, which happens between minutes 5 and 6 after the 300 s warm-up
+# at this demand; 600 s covers the approach to it, the collapse, and four minutes
+# after. The previous 900 s ended in five minutes of gridlock in which nothing a
+# controller does changes anything, which diluted the signal and cost a third of the
+# wall clock. The trajectory is in configs/demand/sumo_capacity_drop.yaml.
 #
-#   arm            120 steps        600 steps
-#   uncommanded    27.8 +/- 3.1     132.0 +/- 6.4
-#   8 m/s          24.4 +/- 1.9     148.8 +/- 9.0
-#   10 m/s         26.2 +/- 4.3     155.2 +/- 10.5   <- best over the longer episode
-#   15 m/s         27.4 +/- 4.0     148.0 +/- 17.1
-#   20 m/s         28.4 +/- 4.2     138.8 +/- 10.6
-#   24 m/s         28.8 +/- 2.9     137.0 +/- 4.7
+# THE EPISODE LENGTH IS PART OF THE OPERATING POINT, not a free parameter: the mean
+# team reward per step, the mean speed and the throughput all move with it, because
+# the network fills as the episode runs. Any statement of the form "the team reward
+# is about X" needs the episode length attached to it.
 #
-# At 120 steps no commanded arm beats an uncommanded fleet: the best is 28.8 +/- 2.9
-# against 27.8 +/- 3.1, which is noise, and the reward ranks the fastest arms first.
-# At 600 steps holding 10 m/s gives 17.6% more arrivals. Training at the default
-# length would have run at the one horizon where the effect is absent.
-#
-# The mean team reward is also a function of the horizon: +1.34 per step uncommanded
-# at 120 steps against +0.82 at 600, because `jam_fraction` at weight -2.0 grows as
-# the network fills. Any statement of the form "the team reward is about X" needs
-# the episode length attached to it.
-# 9000 steps at dt 0.1 is a 900 s episode: 200 s of steady demand, a 150 s burst,
-# and 550 s to recover. The last of those is what sets the length -- the network
-# takes about seven minutes to clear the queue the burst leaves, and an episode that
-# ends before it does cannot measure a controller on the recovery.
-#
-# The arm table this comment used to carry is RETRACTED. It recorded that AVs held
-# at 10 m/s complete 155.2 trips against 132.0 uncommanded, a 17.6% gain, and that
-# the effect was absent at a 120-step episode. Both were measured at dt 1.0, where
-# SUMO integrates the physics in 1 s steps and a vehicle at 24 m/s advances 24 m
-# per step. Sweeping the step size (scripts/measure_step_size_convergence.py, five
-# seeds, 600 s episodes):
-#
-#   dt     uncommanded        10 m/s          gain
-#   1.0    132.0 +/-  6.4   155.2 +/- 10.5   +17.6%
-#   0.5    134.4 +/-  5.9   157.8 +/- 16.0   +17.4%
-#   0.2    157.6 +/- 12.3   160.4 +/-  7.2    +1.8%
-#   0.1    168.4 +/- 11.3   161.2 +/-  8.6    -4.3%
-#   0.05   173.0 +/-  8.4   161.6 +/-  8.6    -6.6%
-#
-# The commanded arm moves by 6.4 arrivals across a twentyfold change in step size,
-# inside its own standard deviation; the uncommanded arm rises 31%. Commanding a
-# lower speed was recovering resolution the integration had destroyed. At a
-# converged step size, holding AVs at 10 m/s LOWERS throughput.
-#
-# The full arm table at dt 0.1 is in plans/plan_task_84_sumo_simulator.md and is
-# produced by scripts/measure_commanded_arms.py.
-duration_steps: 9000
+# TWO EARLIER ARM TABLES ARE RETRACTED and are not reproduced here. They recorded a
+# 17.6% throughput gain from holding AVs at 10 m/s. It was an artefact of the 1 s
+# physics step: across dt 1.0 to 0.05 the commanded arm moved 6.4 arrivals, inside
+# its own standard deviation, while the uncommanded arm rose 31%, so at a converged
+# step size holding AVs at 10 m/s LOWERS throughput by 4 to 7%. Full tables and the
+# retraction are in plans/plan_task_84_sumo_simulator.md and task 92.
+duration_steps: 6000
 
 # The calibrated Wiedemann-99 driving model, NOT SUMO's default Krauss. Krauss
 # computes a collision-free safe speed exactly and recovers from a disturbance
@@ -106,14 +65,15 @@ human_model: w99_calibrated
 # The one topology section C is scoped to.
 topology: inverted_tree
 
-# A medium-high steady state, a burst of extreme traffic, and a fall back to the
-# steady state. A controller measured only on a steady state can be judged on one
-# thing, how well it holds; this scenario also asks what it does while the network is
-# overloaded and how quickly it clears the queue afterwards. Profiled with no AVs at
-# dt 0.1: mean speed holds near 19 m/s, falls to 7.5 and the queue peaks at 40
-# vehicles four minutes after the burst, then recovers to 17.7 m/s with the queue
-# back to 6 by the end of the episode.
-demand: sumo_burst
+# A steady demand above capacity, at the rate where the road's collapse happens
+# inside the observed episode. The burst scenario is retired here: its transient was
+# a change in what was offered, and the timing of that transient was a design choice
+# that could flatter or punish a controller. The transient now belongs to the road.
+# Measured with no AVs at dt 0.1: 33 completions per minute and 6.6 m/s for the
+# first five minutes, then a collapse to 2.3 m/s and about 12 completions per
+# minute. See configs/demand/sumo_capacity_drop.yaml for the trajectory and for why
+# 3000 veh/h is the wrong rate -- at 3000 the warm-up alone gridlocks the road.
+demand: sumo_capacity_drop
 
 algorithm: mappo
 policy_mode: ctde
@@ -130,7 +90,7 @@ policy_mode: ctde
 # it. The lane head can come back when there is a source to calibrate lane changing
 # against.
 action_profile: speed_headway
-total_updates: 50
+total_updates: 25
 # THREE episodes per update, not one. `collect_rollout` resets on truncation and
 # keeps collecting until `rollout_steps`, so 27000 steps at a 9000-step episode is
 # three episodes averaged into one gradient.
@@ -149,7 +109,28 @@ total_updates: 50
 # `total_updates` drops to 50 in exchange. The trade is deliberate -- a smaller
 # number of much less noisy updates, for a policy whose problem was noise rather
 # than step count.
-rollout_steps: 27000
+# 1800 DECISIONS, not simulation steps. `decision_interval_s` below makes one
+# decision per simulated second, so a 6000-step episode is 600 decisions and this is
+# the same three episodes per update as before.
+rollout_steps: 1800
+
+# ONE DECISION PER SIMULATED SECOND, holding the action for the ten simulation steps
+# in between. `setSpeed` and `setTau` persist in SUMO until they are changed, so the
+# action is issued once and stays in force.
+#
+# WHY. Both SUMO training runs produced no learning, and the diagnosed cause is the
+# credit-assignment signal (task 96). At dt 0.1 the step size dilutes it before the
+# team reward divides it: a single action changes the next observation almost not at
+# all, so the advantage it earns is dominated by the noise around it. Holding the
+# action for a second gives each decision ten times the effect on the state that
+# follows it, and cuts the number of transitions per episode by the same factor.
+#
+# The simulation still integrates at dt 0.1. This changes what the controller does,
+# not what the traffic does, so an uncontrolled baseline is unaffected and the
+# comparison against it is unchanged.
+#
+# `gamma` and `gae_lambda` below are expressed in DECISIONS and move with this.
+decision_interval_s: 1.0
 
 # Every value here has a named source. `src/sensing/local.py` reads exactly these
 # five plus the bin edges, and they define the actor's entire input distribution.
@@ -221,36 +202,112 @@ sensing:
   position_noise_std: 3.2
   speed_noise_std: 0.93
 
-  # Present only what the rig can sense. The parity ledger classifies six of the
-  # 39 observation slots as structurally absent -- every rear-facing field, since
-  # the live vehicle list is forward-camera derived and there is no rear sensor --
-  # and seven more as substituted with a constant. Without this the actor learns
-  # from 13 of 39 inputs the deployed vehicle cannot produce.
-  deployed_fidelity: true
+  # FALSE as of task 103, and this is a deliberate step away from the deployment.
+  #
+  # The parity ledger classifies six of the 39 observation slots as structurally
+  # absent -- every rear-facing field, since the live vehicle list is forward-camera
+  # derived and there is no rear sensor -- and seven more as substituted with a
+  # constant. With this true the actor learns from 26 of 39 inputs.
+  #
+  # The question this run asks is whether a decentralised policy can be learned on
+  # this environment at all. Masking a third of the observation is a sim-to-real
+  # transfer constraint, and transfer is deferred work; imposing it while the prior
+  # question is unanswered confounds "the policy cannot learn" with "the policy
+  # cannot learn from what the rig can sense". It goes back to true before any claim
+  # about the deployed vehicle is made.
+  deployed_fidelity: false
 
   # The library default, and the drive supports it rather than contradicting it:
   # ego speed over 17,913 moving ticks is bimodal, with a stop-and-go mass below
   # about 6 m/s and a cruise mode at 22-26 m/s.
   queue_speed_mps: 5.0
 
-# Throughput leads the objective, because that is what the replication claims.
+# Throughput leads the objective, because that is what the replication claims, and
+# delay and smoothness are now priced beside it, because those are the axes the
+# predecessor paper's gains were largest on and this environment did not measure
+# them at all before task 103.
 #
-# Balanced at the saturating operating point measured on inverted_tree at 2000
-# veh/h: mean_speed 10.70, throughput_recent 11.5, jam_fraction 0.108,
-# fairness_jain 0.885. With the library defaults those give mean_speed 44% of the
-# positive reward and throughput 19%. Raising throughput_recent from 0.02 to 0.10
-# makes it 54%, against mean_speed 25% and fairness 21%.
+# EVERY WEIGHT BELOW WAS SET FROM A MEASUREMENT, taken before the run rather than
+# after it: one uncontrolled episode at this demand, this fleet, this warm-up and
+# this length, at dt 0.1. The metric's mean over the episode is in the first column
+# and the contribution the weight gives it in the second.
 #
-# mean_speed is NOT zeroed. throughput_recent counts completions in a 60 s rolling
-# window and is zero on most early steps, so it is a sparse signal; the speed term
-# is what provides a gradient in between.
+#   metric                     mean     weight    contribution
+#   throughput_recent          18.88     0.10        +1.89
+#   mean_speed                  3.88     0.05        +0.19
+#   fairness_jain               0.82     0.50        +0.41
+#   jam_fraction                0.585   -1.00        -0.59
+#   stopped_fraction            0.467   -1.00        -0.47
+#   mean_delay_recent         317.5     -0.002       -0.64
+#   speed_std                   6.79    -0.05        -0.34
+#   mean_abs_jerk               0.211   -0.50        -0.11
+#   hard_braking_count          0.338   -0.10        -0.03
+#   rolling_roadblock_score     0.0003  -2.00        -0.00
+#   queue_length_total        215.8      0.00         0.00
+#                                                   ------
+#                                                   +0.91
 #
-# jam_fraction doubles to -2.0 so relieving congestion pays. At 0.108 it is still
-# only a -0.216 contribution, which is the right order: congestion is the thing to
-# relieve, not the thing to be scored on.
+# No term is more than five times another except throughput, which leads
+# deliberately. The total is positive and of order 1, which is what PPO's default
+# coefficients assume.
+#
+# queue_length_total IS ZEROED, and this is the one weight that is a change of
+# objective rather than a rescaling. It is an unnormalised count of queued vehicles
+# summed over segments, so at this operating point the library's -0.02 gives it
+# -4.32 -- larger in magnitude than every other term combined and larger than the
+# total. It measures the same congestion as jam_fraction and stopped_fraction, both
+# of which are normalised by the network rather than growing with it. Keeping the
+# normalised pair and dropping the raw count is a decision taken before the run and
+# recorded here; it is not a term removed because a result depended on it.
+#
+# mean_speed is NOT zeroed, and neither is it large. throughput_recent counts
+# completions in a 60 s rolling window and mean_delay_recent is a mean over the
+# trips that completed in it, so both are gaps on a step where nothing completed;
+# the speed term is what provides a gradient in between.
 reward_weights:
   throughput_recent: 0.10
-  jam_fraction: -2.0
+  mean_speed: 0.05
+  fairness_jain: 0.50
+  jam_fraction: -1.0
+  stopped_fraction: -1.0
+  mean_delay_recent: -0.002
+  speed_std: -0.05
+  mean_abs_jerk: -0.5
+  hard_braking_count: -0.1
+  rolling_roadblock_score: -2.0
+  queue_length_total: 0.0
+
+# THE PER-AGENT TERM, over the agent's own segment and the segments downstream of
+# it. `local_reward_weight` under `optimization` is how much of each agent's reward
+# comes from here rather than from the team reward above.
+#
+# Same three quantities as the team reward's leading terms, measured near the agent
+# instead of over the network, so the two are the same objective at two scales and
+# blending them is meaningful. `outflow_recent` is the local analogue of
+# `throughput_recent`: how many vehicles the neighbourhood passed downstream in the
+# same 60 s window.
+#
+# Measured on the same uncontrolled episode, averaged over agents and steps:
+#
+#   metric              mean    weight   contribution
+#   outflow_recent      11.56    0.10       +1.16
+#   mean_speed           8.63    0.05       +0.43
+#   jam_fraction         0.569  -1.00       -0.57
+#                                          ------
+#                                          +1.02
+#
+# +1.02 against the team reward's +0.91, so a blend of 0.5 is a mixture of two
+# quantities of the same magnitude and the blend weight means what it says.
+#
+# The neighbourhood INCLUDES the downstream segments, which is the environment's
+# decision and is documented at SumoTopologyEnv.neighbourhood_metrics. Speed
+# metering means holding the own segment below free flow to relieve the next one, so
+# an own-segment-only term would penalise the mechanism this project exists to
+# study.
+local_reward_weights:
+  outflow_recent: 0.10
+  mean_speed: 0.05
+  jam_fraction: -1.0
 
 actor:
   observation_scope: local
@@ -261,15 +318,14 @@ critic:
   observation_scope: global
 optimization:
   learning_rate: 0.0003
-  # 0.999, not 0.99. Both are horizons expressed in steps, and the step changed.
-  # 1/(1-gamma) is 100 steps, which was 100 s at dt 1.0 and would be 10 s at dt 0.1
-  # -- against a phenomenon that takes 300 s or more to appear. 0.999 restores the
-  # 100 s horizon exactly. Whether 100 s is itself long enough is a separate
-  # question, and one the previous configuration had too.
-  gamma: 0.999
-  # 0.995 for the same reason: 1/(1-lambda) is the advantage-averaging horizon, 20
-  # steps, which was 20 s and would become 2 s.
-  gae_lambda: 0.995
+  # Both are horizons expressed in DECISIONS, and `decision_interval_s` makes a
+  # decision one simulated second. 1/(1-gamma) is 100 decisions, so 100 s, which is
+  # the horizon the 0.999 of the previous configuration bought at ten decisions a
+  # second. The horizon is unchanged; only the unit is.
+  gamma: 0.99
+  # 1/(1-lambda) is the advantage-averaging horizon, 20 decisions, so 20 s. Same
+  # reasoning.
+  gae_lambda: 0.95
   clip_coef: 0.2
   value_coef: 0.5
   entropy_coef: 0.01
@@ -306,6 +362,23 @@ optimization:
   #
   # All of those figures were measured at dt 1.0 and are superseded by the dt 0.1
   # re-measurement recorded in plans/plan_task_84_sumo_simulator.md.
+  # 0.1 per SIMULATION step, and the reward summed over a decision's ten steps is
+  # scaled by it once, so a decision carries about 0.91 and the value targets have
+  # the same magnitude they had at one decision per step with gamma 0.999. The
+  # scale did not have to change when the decision rate did.
   reward_scale: 0.1
   reward_clip: 10.0
   crash_penalty: 2.0
+  # HALF of each agent's reward is measured over its own neighbourhood. The whole
+  # point of task 103: with the team reward alone, one agent among about 66 moves
+  # the reward by far less than the noise in it over a 20 s advantage horizon, which
+  # is what both earlier runs measured and what stopped either from learning.
+  #
+  # 0.5 rather than a smaller value because the diagnosis is that the team signal is
+  # not merely weak but below the noise, so a small local admixture would not clear
+  # it; and rather than 1.0 because at 1.0 nothing in the objective refers to the
+  # network and there is no reason for an agent to help a segment it is not in.
+  #
+  # It does NOT change what the deployed vehicle sees. The term is used to compute a
+  # reward during training; the actor reads the local observation alone.
+  local_reward_weight: 0.5

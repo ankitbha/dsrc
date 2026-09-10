@@ -264,15 +264,24 @@ class TestTheCommandLineDoesNotOverrideTheConfig:
 
         config = TrainingConfig.from_mapping(load_training_bundle(self._namespace()))
         assert config.dt == 0.1
-        assert config.duration_steps == 9000
+        assert config.duration_steps == 6000
         assert config.warmup_steps == 3000
-        # Three episodes per update: 27000 steps at a 9000-step episode. One episode
-        # per update was 1/50th of the gradient quality Flow's benchmarks use, and
-        # the previous run's policy never left its initialisation.
-        assert config.rollout_steps == 27000
-        assert config.rollout_steps % config.duration_steps == 0
+        # ONE DECISION PER SIMULATED SECOND, so `rollout_steps` counts decisions and
+        # `duration_steps` counts simulation steps, and the two are not comparable
+        # without it.
+        assert config.decision_interval_s == 1.0
+        decisions_per_episode = config.duration_steps / (config.decision_interval_s / config.dt)
+        # Three episodes per update. One episode per update was 1/50th of the
+        # gradient quality Flow's benchmarks use, and the run that used it never
+        # left its initialisation.
+        assert config.rollout_steps == 3 * decisions_per_episode
         assert config.topology == "inverted_tree"
-        assert config.demand == "sumo_burst"
+        # A steady demand above capacity, at the rate whose collapse happens inside
+        # the episode rather than during the warm-up.
+        assert config.demand == "sumo_capacity_drop"
+        # Half of each agent's reward comes from its own neighbourhood, which is the
+        # change task 103 exists to test.
+        assert config.local_reward_weights
         # The calibrated driving model, without which the fundamental diagram
         # has no capacity drop and there is nothing to recover.
         assert config.human_model == "w99_calibrated"
