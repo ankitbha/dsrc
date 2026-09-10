@@ -255,10 +255,25 @@ But it means a null on those arms cannot distinguish two things:
 
 **Only an unshared reward separates them**, and exactly two arms have one: the
 per-agent local reward of task 103, and the segment-as-agent arm paid its own term.
-The first was measured only against the permutation floor that has since been shown
-invalid -- its reading was one of the four results retracted -- and the second had not
-been run. Both are now queued against the valid null. They are the arms that decide
-whether an unshared reward produces signal where a shared one cannot.
+
+**THE FIRST HAS NOW BEEN MEASURED AND THE HYPOTHESIS IS WRONG.** Paired on identical
+rollouts with the network draw varying, three seeds:
+
+| arm | mean z | correlation between choosing `slow` and the advantage |
+|---|---|---|
+| team only, shared reward | -0.44 +/- 0.56 | **-0.0042** |
+| local 0.5, UNSHARED reward | -0.81 +/- 0.14 | **+0.0016** |
+
+At n about 5,500 the correlation's standard error is 0.0135, so both are noise and
+they are indistinguishable from each other. **Giving each agent a reward that
+genuinely differs from its neighbours' produces no more action-advantage alignment
+than a shared one**, at sensitivity to a correlation of about 0.016.
+
+So the shared reward is NOT the reason the advantage is silent. That was the best
+remaining explanation and it is ruled out. What is left is the third item in the short
+version -- the agent is a vehicle that makes 7.1 decisions and leaves, where the
+paper's is a road that persists -- and the segment arm that tests it resolves only
+about 0.10, so it can contribute by reading positive and not by reading null.
 
 It also explains why the shared-reward segment arm reads consistently negative:
 with a common reward its advantage is essentially a function of the untrained critic,
