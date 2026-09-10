@@ -2470,6 +2470,51 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+93. **PRE-REGISTERED: what the MAPPO run will be judged on.** Written 2026-09-09
+    BEFORE the run, because the previous headline was a number chosen after the
+    fact from a sweep of constant commanded speeds, and Ankit's instruction was
+    "no cheating and cherry picking". Everything below is fixed in advance. If the
+    run does not clear these bars it is reported as a null.
+
+    **What is run.** `configs/training/mappo_sumo.yaml` unchanged: MAPPO, `full`
+    action profile (all four heads now actuate), `deployed_fidelity: true`, the
+    cited sensing noise, dt 0.1, 900 s episodes on `sumo_burst`, one rollout per
+    episode, 100 updates. Seeds fixed in advance: **7, 17, 27, 37, 47.** These are
+    NOT the seeds the retracted arm tables were measured on (3, 7, 11, 19, 23),
+    deliberately.
+
+    **What it is compared against.** `no_av` at the same seeds and the same
+    scenario, and `density_lookup`, the project's existing non-learning baseline.
+    No commanded-speed arm is a comparator: a constant speed chosen from a sweep is
+    an oracle, not a controller, and the sweep that produced one is retracted.
+
+    **Primary metric, decided now: completed trips per episode.** One number,
+    reported as a mean over the five seeds with its standard deviation and the
+    paired difference against `no_av` on the same seeds.
+
+    **Secondary metrics, also decided now**, because the scenario has a shape a
+    single total hides:
+    - the minimum of the 60 s rolling mean speed, which is the depth of the trough;
+    - the time from the end of the burst until the queue returns below 10 vehicles,
+      which is the recovery;
+    - `rolling_roadblock_score`, summed, which is whether the policy bought its
+      result with behaviour the contract forbids;
+    - collisions, which must be zero.
+
+    **The bar.** A gain is reported as real only if the paired difference against
+    `no_av` exceeds two standard errors over the five seeds. Anything smaller is
+    reported as no effect. No seed is dropped, no arm is selected, and the metric
+    is not chosen after the numbers are seen.
+
+    **What a null would mean, stated now so it cannot be reinterpreted later.**
+    Task 92 retracted the evidence that a throughput effect exists here at a
+    converged step size, so a null is the expected outcome rather than a
+    disappointment, and it is still worth reporting: it would say that under the
+    deployment's own sensing model, on this network, a policy with speed, headway,
+    lane and merge control does not beat doing nothing. The alternative reading --
+    that the reward does not ask for the right thing -- is guarded against by
+    reporting arrivals directly rather than the reward.
+
 92. **RETRACTION: the throughput gain was an artefact of the simulation step.**
     Measured 2026-09-09 after the user asked for `dt: 0.1` so the deployment's
     measured sensing latency could be represented. It retracts task 86 and moots
