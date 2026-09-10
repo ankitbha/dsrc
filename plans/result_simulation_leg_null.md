@@ -31,11 +31,16 @@ transfer to a vehicle-attached agent on this road.
    network" is not proven and cannot be proven this way.
 2. Every arm that produced a clean null pays each agent the SAME reward, so those
    nulls cannot separate "the reward does not respond to individual actions" from
-   "nothing responds to individual actions". The two arms with an unshared reward are
-   the ones that decide it and were still running when this was written.
+   "nothing responds to individual actions". Two arms have an unshared reward and BOTH
+   HAVE NOW BEEN MEASURED: a per-agent local reward at the vehicle level reads a
+   correlation of +0.0016 against the shared arm's -0.0042 at a standard error of
+   0.0135, and a segment paid its own threshold term reads z -0.12 +/- 0.51. Neither
+   separation appears, so the shared reward is not the reason.
 3. The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
    makes 7.1 decisions and leaves. That difference is confounded with every lever
-   measurement and only a segment-attached agent separates it.
+   measurement, and the segment-attached agent that separates it reads null at an
+   exclusion threshold of about 0.15 -- five times coarser than the vehicle arms'
+   0.03. It rules out a large effect, not a small one.
 
 **The instrument was rebuilt mid-investigation.** Its original permutation floor is
 not a valid null when advantages are temporally correlated, and it made arms read
@@ -280,6 +285,32 @@ with a common reward its advantage is essentially a function of the untrained cr
 and both the advantage and the action are then functions of the same observation
 through independently initialised networks. Task 123.
 
+**THE SECOND HAS NOW BEEN MEASURED TOO, AND IT IS ALSO A NULL.** The segment-as-agent
+arm paid each segment its own threshold term rather than the network sum -- verified a
+genuine decomposition, in that a clear segment reads +1.000 and a jammed one -0.850,
+summing to the network's +0.150 -- and was measured against the resampled-action null
+with the network initialisation redrawn per seed:
+
+| seed | segment-decisions | measured | null | z |
+|---|---|---|---|---|
+| 7 | 171 | 0.26741 | 0.30232 +/- 0.08000 | -0.44 |
+| 17 | 171 | 0.24793 | 0.30957 +/- 0.07627 | -0.81 |
+| 27 | 175 | 0.38380 | 0.31322 +/- 0.07969 | +0.89 |
+
+Mean z **-0.12 +/- 0.51** over the three seeds, against an instrument ceiling of 6.2
+to 6.6 on a supplied correlated advantage. So neither unshared-reward arm reads above
+its null, and the reading is centred on the null rather than below it, which is what
+the void permutation-floor arms did.
+
+**This does not yet close the road-agent candidate, because of power.** At about 171
+segment-decisions the standard error of a correlation is 0.076, so the arm excludes
+correlations above roughly 0.15; the vehicle arms at n about 5,500 exclude above 0.03.
+A null at 0.15 is consistent with an effect the vehicle arms would already have seen.
+The higher-power version runs three episodes per rollout instead of one, taking n to
+about 513 and the exclusion threshold to about 0.09 -- still coarser than the vehicle
+arms, and still short of a clean test, which needs the paper's five per-super-segment
+observation fields and therefore a wider deployed contract. Task 124.
+
 ## A property of the operating point that bounds every comparison here
 
 The network is bistable. Five seeds of identical demand on an identical, structurally
@@ -293,7 +324,8 @@ effects above roughly 8%. Task 114.
 
 Every candidate for why the advantage is silent about the action, with what closed it.
 The point of the table is that the eliminations are measurements rather than
-arguments, and that exactly one candidate is left.
+arguments. Every row now has one; the last row's is the weakest, because it excludes
+only correlations five times larger than the rest of the table does.
 
 | explanation | status | what closed it |
 |---|---|---|
@@ -305,25 +337,44 @@ arguments, and that exactly one candidate is left.
 | the critic cannot centre the advantage | **ruled out** | privileged neighbourhood features raise out-of-sample R2 from 0.808 to 0.886 and leave the gradient unchanged |
 | penetration is too low | **ruled out** | 100% penetration, commanding the entire fleet, reads the same |
 | the operating point has no headroom | **partly** | the metering oracle gains nothing, but it is one heuristic and a lower bound |
-| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **UNTESTED at adequate power** | the segment arm resolves only about 0.10, where the vehicle arms already exclude 0.033 |
+| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **measured null, at a quarter of the power** | a segment paid its own reward reads -0.12 +/- 0.51 over three seeds; the arm excludes correlations above about 0.15, where the vehicle arms exclude above 0.03 |
 
-**One candidate is left and the instrument built for it is too coarse to settle it.**
-Making it adequate needs three episodes per rollout rather than one, and a clean
+**Every candidate now has a measurement against it, and the last one's is the
+weakest.** The road-attached agent reads null, but only at an exclusion threshold of
+0.15 against the vehicle arms' 0.03, so it rules out a large effect and not a small
+one. Making it adequate needs three episodes per rollout rather than one, and a clean
 version needs the paper's five per-super-segment observation fields -- which means
 widening the deployed contract that the Jetson builder and the parity ledger both
 depend on.
 
 ## What this leaves
 
-1. **Report the simulation leg as a null**, with the deployment carrying the
-   feasibility claim as it already does.
-2. **Change what the AVs can do** rather than how their reward is priced: platoon
-   coordination, or an explicit meter at the junction rather than in-stream
-   vehicles. Penetration is measured and does not do it.
-3. **Change the advantage estimator** to a counterfactual one, which is precisely
-   targeted at the measurement above and would probably raise the correlation -- and
-   would fix the learning of a mechanism that gains nothing when handed perfect
-   information.
+Four directions, of which the second has changed since it was first written here,
+because one of its two halves has since been measured.
 
-The order matters: an estimator that learns better is worth building after an oracle
-shows headroom to reach, and oracles are the cheap way to look for headroom.
+1. **Report the simulation leg as a null**, with the deployment carrying the
+   feasibility claim as it already does. This is my recommendation.
+2. **Change what the AVs can do** rather than how their reward is priced. Of the two
+   candidates originally listed under this heading, the explicit junction meter is now
+   measured and is not a direction: a perfect-information metering oracle serves 0.8
+   fewer and 0.8 more vehicles than no control on the two demands, against a
+   seed-to-seed spread of about 16 arrivals. Platoon coordination is untested and is
+   what remains of this option.
+3. **Raise the power of the road-attached agent.** It is the one candidate whose null
+   is measured only against correlations above 0.15, where every vehicle arm excludes
+   above 0.03. Three episodes per rollout takes the threshold to about 0.09. Testing
+   the paper's formulation rather than an approximation of it needs its five
+   per-super-segment observation fields, which widens the deployed contract that the
+   Jetson builder and the parity ledger depend on.
+4. **Change the advantage estimator** to a counterfactual one. It is aimed exactly at
+   the quantity that reads null and would probably raise the correlation.
+
+**On the order.** An estimator that learns better is worth building after something
+shows headroom to reach, and oracles are the cheap way to look for headroom, so 4 is
+last. For the same reason 3 comes before 4: it asks whether the mechanism is learnable
+at the granularity the paper used, before spending on a better learner at the
+granularity this project uses.
+
+**The decision is Ankit's and is open.** Nothing further should be built until he
+answers, because 2, 3 and 4 are each several days and they are alternatives rather
+than a sequence.
