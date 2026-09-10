@@ -504,6 +504,19 @@ class SumoTopologyEnv:
 
     # ----------------------------------------------------------------- metrics
 
+    def _latent_demand(self) -> int:
+        """How many vehicles are waiting to enter and cannot.
+
+        SUMO holds a scheduled vehicle until its entry lane has room, and the route
+        file sets no departure deadline, so nothing is discarded: this is the queue
+        outside the network. At 3000 veh/h offered it stays at zero for the first
+        900 s while the 500 m leaves absorb the excess, then grows linearly once
+        they saturate -- 198 vehicles at t = 900 s and 398 at t = 1350 s.
+        """
+        if not self._running:
+            return 0
+        return len(_sumo.simulation.getPendingVehicles())
+
     def _network_census(self) -> tuple[list[float], int, int]:
         """Speeds, vehicle count and AV count over every vehicle on the network.
 
@@ -559,6 +572,12 @@ class SumoTopologyEnv:
             "mean_speed": float(sum(speeds) / len(speeds)) if speeds else 0.0,
             "speed_std": float(np.std(speeds)) if speeds else 0.0,
             "throughput_recent": len(self._arrivals),
+            # Vehicles that cannot get onto the road at all, because the entry lanes
+            # are full. Under a demand above capacity this is where the unserved
+            # demand goes, and counting it is what makes the accounting complete:
+            # served plus on-road plus latent equals offered. Reported rather than
+            # weighted, so it cannot silently enter the objective.
+            "latent_demand": self._latent_demand(),
             "jam_fraction": float(sum(jam) / len(jam)) if jam else 0.0,
             "queue_length_total": queue,
             "collision_count": self.collision_count,

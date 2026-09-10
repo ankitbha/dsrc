@@ -117,7 +117,19 @@ demand: sumo_burst
 
 algorithm: mappo
 policy_mode: ctde
-action_profile: full
+# speed_headway, not full. The full profile has four heads and 81 combinations, of
+# which the lane-preference and merge-mode heads act through SUMO's DEFAULT
+# lane-change model (LC2013, every eagerness parameter at 1.00): nothing in this
+# project calibrates lane changing, and the predecessor paper's appendix calibrates
+# car following only, because its action space was speed modulation alone.
+#
+# Dropping them does three things at once. It aligns the action space with the
+# dynamics that ARE calibrated; it matches the actuation the predecessor's result was
+# obtained with; and it cuts the action space from 81 to 9, which is a direct attack
+# on the learning problem, since both exploration and per-action credit scale with
+# it. The lane head can come back when there is a source to calibrate lane changing
+# against.
+action_profile: speed_headway
 total_updates: 50
 # THREE episodes per update, not one. `collect_rollout` resets on truncation and
 # keeps collecting until `rollout_steps`, so 27000 steps at a 9000-step episode is
