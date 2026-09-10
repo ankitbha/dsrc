@@ -309,7 +309,7 @@ A null at 0.15 is consistent with an effect the vehicle arms would already have 
 The higher-power version runs three episodes per rollout instead of one, taking n to
 about 513 and the exclusion threshold to about 0.09 -- still coarser than the vehicle
 arms, and still short of a clean test, which needs the paper's five per-super-segment
-observation fields and therefore a wider deployed contract. Task 124.
+observation fields and therefore a wider deployed contract. Task 129.
 
 ## A property of the operating point that bounds every comparison here
 

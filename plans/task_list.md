@@ -2505,8 +2505,14 @@ and on what evidence.
      independent structure is the one that centres.
 
      **So the last explanation standing after task 128's eliminations does not
-     survive either**, at a sensitivity of about 0.10. The higher-power version, three
-     episodes per rollout and a sensitivity near 0.05, is queued.
+     survive either** -- but at a much coarser sensitivity than the arms before it,
+     and the first version of this entry understated that by quoting ONE standard
+     error where the rest of the project quotes two. At 171 segment-decisions the
+     standard error of a correlation is 0.077, so the arm excludes correlations above
+     **0.15**, against the vehicle arms' 0.03 at n about 5,500. It rules out a large
+     effect and not a small one. The higher-power version, three episodes per rollout,
+     takes n to about 513 and the exclusion threshold to **0.09** -- still three times
+     coarser than the vehicle arms. It is queued.
 
      **The full set, all measured against the same tested null:**
 
