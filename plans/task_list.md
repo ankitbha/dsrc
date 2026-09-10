@@ -2470,6 +2470,43 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+124. **Every error bar on a z-score in this investigation was built from ONE
+     network draw.** Found 2026-09-10 from a standard error that was too good.
+
+     The segment arm reported mean z **-1.32 +/- 0.16** over three seeds. A tight
+     spread around a consistent value reads as a robust finding; it was one draw
+     repeated. Every arm called `seed_everything(0)` before building the trainer, so
+     **the actor and critic weights were bit-identical across all three seeds** --
+     confirmed by comparing parameters directly, not inferred. The seeds varied the
+     TRAFFIC only.
+
+     **Why that produces exactly this signature.** With a fixed initialisation the
+     relationship between the critic's value function and the actor's action
+     distribution is the same function in every run. Where that relationship happens
+     to be systematic -- which it can be, since both are functions of the same
+     observation through independently initialised networks -- the sign repeats and
+     the spread collapses. The arm was not measuring three samples of a population; it
+     was measuring one network on three traffic realisations.
+
+     **What this does to the readings.**
+
+     | quantity | status |
+     |---|---|
+     | point estimates (+0.00, -0.47, -1.32) | stand: that is what those configurations read at that initialisation |
+     | every `+/-` quoted on a z | understates the uncertainty; it reflects traffic variation alone |
+     | the conclusions | probably unchanged, since a null at a narrow bar is still a null at a wider one -- but "probably" is not "measured" |
+
+     **Fixed**: `seed_everything(seed)`, so the initialisation varies with the seed in
+     `measure_action_alignment.py`, `measure_segment_as_agent.py` and
+     `measure_segment_own_reward.py`. Arms are being re-run.
+
+     **This is the fourth instrument fault this session**, after a set of comparisons
+     that were floor-to-floor (task 105), a process check whose pattern could not
+     match (task 116), and a null that was not exchangeable with the data (task 119).
+     Each was caught, each is recorded, and the underlying conclusion has survived all
+     four. The failure rate is in the measurements rather than in the system under
+     test, which is worth weighing when deciding how much of this to rely on.
+
 123. **The shared-reward segment arm is near-uninformative BY CONSTRUCTION, and
      its negative readings are an artefact of that.** Noticed 2026-09-10 from the
      readings being consistently negative under a null that is now valid.
