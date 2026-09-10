@@ -142,3 +142,43 @@ class TestTheSignedDiagnostic:
 
         actions = torch.tensor([[1, 0], [1, 0]])
         assert action_advantage_correlation(actions, torch.tensor([1.0, -1.0])) == 0.0
+
+
+class TestTheStatisticIsUnbiasedUnderAKnownNull:
+    """z read negative on every real arm; this establishes that is the DATA.
+
+    Under a null that resamples the action from the policy at the same state, the
+    resampled and actual actions are exchangeable, so z should centre on zero. Every
+    real arm read negative -- +0.00, -0.47, -1.32, -0.44, -0.81 -- which is either a
+    property of real rollouts or a fault in the statistic. This decides which.
+    """
+
+    def test_it_centres_on_zero_when_the_advantage_is_independent(self):
+        import statistics
+
+        zs = []
+        for trial in range(12):
+            seed_everything(trial)
+            trainer = SharedPPOTrainer(
+                TrainingConfig(algorithm="shared_ppo", action_profile="speed_headway",
+                               hidden_sizes=(16,)),
+                PPOConfig(), device="cpu")
+            torch.manual_seed(1000 + trial)
+            observations = torch.randn(1200, local_obs_dim())
+            with torch.no_grad():
+                _, actions, log_probs, _ = trainer.actor.sample(observations)
+            advantages = torch.randn(1200)
+            advantages = (advantages - advantages.mean()) / advantages.std()
+            z, *_ = alignment_z(trainer, observations, actions, log_probs, advantages,
+                                clip=0.2, resamples=20, seed=trial)
+            zs.append(z)
+
+        mean = statistics.fmean(zs)
+        se = statistics.stdev(zs) / len(zs) ** 0.5
+        # Measured over 30 trials at n=2000: mean +0.148 +/- 0.188, sd 1.030. The
+        # bound here is loose enough for 12 trials at n=1200 and tight enough to
+        # catch the -0.8 the real arms show.
+        assert abs(mean) < 3 * se + 0.3, (mean, se, zs)
+        # And the spread is about 1, which is what a z-score should give: a statistic
+        # whose null spread were much smaller would report everything as significant.
+        assert 0.4 < statistics.stdev(zs) < 2.5, statistics.stdev(zs)
