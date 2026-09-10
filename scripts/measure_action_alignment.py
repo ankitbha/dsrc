@@ -55,6 +55,28 @@ def gradient_norm(trainer, observations, actions, old_log_probs, advantages, cli
                                 if q.grad is not None)))
 
 
+def alignment_z(trainer, observations, actions, old_log_probs, advantages, *,
+                clip: float, resamples: int = 60, seed: int = 0):
+    """How far the measured gradient sits above a null that keeps the advantages.
+
+    Returns `(z, measured, null_mean, null_sd)`. The null draws a fresh action from
+    the policy at each observation and keeps that transition's advantage, so states,
+    advantages and their temporal structure survive and only the pairing between an
+    advantage and the action that earned it is broken.
+    """
+    measured = gradient_norm(trainer, observations, actions, old_log_probs,
+                             advantages, clip)
+    torch.manual_seed(seed)
+    null = []
+    for _ in range(resamples):
+        with torch.no_grad():
+            _, resampled, resampled_log_probs, _ = trainer.actor.sample(observations)
+        null.append(gradient_norm(trainer, observations, resampled,
+                                  resampled_log_probs, advantages, clip))
+    mean, sd = statistics.fmean(null), statistics.pstdev(null)
+    return (measured - mean) / max(sd, 1e-12), measured, mean, sd
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--training", default="mappo_src")
@@ -86,26 +108,15 @@ def main() -> int:
             gamma=base_p.gamma, gae_lambda=base_p.gae_lambda,
             group_by_agent=trainer.advantage_group_by_agent)
         observations, advantages = batch.observations, batch.advantages
-        measured = gradient_norm(trainer, observations, batch.actions,
-                                 batch.old_log_probs, advantages, base_p.clip_coef)
-
-        torch.manual_seed(seed)
-        null = []
-        for _ in range(args.resamples):
-            with torch.no_grad():
-                # A fresh action at the SAME state, and its own log-prob, so the
-                # probability ratio is 1 exactly as it is for the measured arm.
-                _, resampled, resampled_log_probs, _ = trainer.actor.sample(observations)
-            null.append(gradient_norm(trainer, observations, resampled,
-                                      resampled_log_probs, advantages, base_p.clip_coef))
-        mean, sd = statistics.fmean(null), statistics.pstdev(null)
+        z, measured, mean, sd = alignment_z(
+            trainer, observations, batch.actions, batch.old_log_probs, advantages,
+            clip=base_p.clip_coef, resamples=args.resamples, seed=seed)
 
         ceiling_adv = (batch.actions[:, 0] == 0).float() * 2.0 - 1.0
         ceiling_adv = (ceiling_adv - ceiling_adv.mean()) / (ceiling_adv.std() + 1e-8)
         ceiling = gradient_norm(trainer, observations, batch.actions,
                                 batch.old_log_probs, ceiling_adv, base_p.clip_coef)
 
-        z = (measured - mean) / max(sd, 1e-12)
         zs.append(z)
         print(f"{seed:>5} {advantages.shape[0]:>7} {measured:>10.5f} {mean:>10.5f} "
               f"{sd:>9.5f} {z:>+7.2f} {ceiling/max(mean, 1e-12):>8.1f}", flush=True)
