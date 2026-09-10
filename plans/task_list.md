@@ -2470,6 +2470,44 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+114. **The network is bistable at this operating point, and the branch imbalance
+     is emergent rather than structural.** Measured 2026-09-10 by
+     `scripts/measure_branch_asymmetry.py`, five seeds, 2400 veh/h, no control, mean
+     density ratio over a 600 s episode after a 300 s warm-up.
+
+     | seed | b1 | b2 | a1-a3 | a4-a6 | trunk | served |
+     |---|---|---|---|---|---|---|
+     | 7 | 0.237 | 0.325 | 0.222 | 0.026 | 0.062 | 198 |
+     | 17 | 0.255 | 0.209 | 0.192 | 0.184 | 0.062 | 194 |
+     | 27 | 0.189 | 0.297 | 0.216 | 0.212 | 0.047 | 156 |
+     | 37 | **0.532** | **0.663** | 0.057 | 0.046 | 0.054 | 179 |
+     | 47 | **0.427** | **0.572** | 0.032 | 0.081 | 0.060 | 196 |
+
+     **Two regimes, from the same demand on the same network.** Seeds 37 and 47 put
+     the congestion in the middles with the leaves nearly empty; seeds 7, 17 and 27
+     put it on the leaves with the middles moderate. Which branch leads varies -- b2
+     is denser on four of five seeds and b1 on one -- so the imbalance is not built
+     into the road.
+
+     **The road is symmetric, checked rather than assumed.** In the generated
+     network, `b1` and `b2` are both `type="zipper"`, each takes six incoming lanes,
+     and both connect into the trunk with lanes 0 to 0 and 1 to 1, every connection
+     `state="Z"`. There is no priority difference to find.
+
+     **A reading trap this exposes.** A low density ratio can mean free flow OR an
+     empty road, and at fixed flow the two are the same measurement: 400 veh/h at 25
+     m/s is 4.4 veh/km, and at 3 m/s it is 37. So `a4-a6` at 0.026 on seed 7 are
+     carrying the same demand as `a1-a3` at 0.222 -- they are moving, not idle. An
+     earlier note in this file read that as "b1 congested and b2 free", which is
+     wrong on both halves.
+
+     **Why it matters for every comparison in this project.** Served trips range from
+     156 to 198 across five seeds of identical demand, a spread of 27%. That is where
+     the paired standard deviation of 17 to 32 arrivals comes from, and it is a
+     property of the operating point rather than of any controller. Comparisons here
+     must be paired by seed, and a five-seed comparison can only detect effects above
+     roughly 8%.
+
 113. **PRE-REGISTERED: the predecessor paper's formulation, ported.** Written
      2026-09-10 BEFORE the run finishes, and before any of its numbers are seen.
      Ankit's instruction was to read the paper and port its reward; reading it showed
