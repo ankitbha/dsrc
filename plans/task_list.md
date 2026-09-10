@@ -2470,6 +2470,50 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+115. **The deepest difference from the paper is what the agent is ATTACHED to, and
+     the macroscopic lever makes it worse before it makes it better.** Recorded
+     2026-09-10 while the ported run was still training.
+
+     **In the paper the controller is the ROAD.** A super-segment persists for the
+     whole episode, so its agent takes twenty consecutive decisions on the same
+     state and accumulates a trajectory. **In this project the controller is a
+     VEHICLE.** It enters, traverses, and leaves.
+
+     Mean travel time at this operating point is 250 to 300 s, so a vehicle makes:
+
+     | lever | decisions in one agent's lifetime |
+     |---|---|
+     | 1 s | 250 to 300 |
+     | 60 s | **4 or 5** |
+
+     That is the hidden cost of the macroscopic lever here. It buys each decision a
+     much larger effect and it leaves GAE almost no temporal structure per agent:
+     with four transitions, an advantage is barely more than the reward minus the
+     value. Both effects are real and they pull in opposite directions, which is a
+     reason the ported configuration might show nothing even with every other gap
+     closed.
+
+     **The first two seeds of the gradient test are consistent with that**: `mappo_src`
+     reads z = -1.82 and +0.21 against `mappo_sumo`'s completed -0.10 +/- 0.42, and
+     the training score has gone from -5.777 to -6.567 over two updates. Neither is
+     conclusive and the third seed is outstanding.
+
+     **THE CANDIDATE THAT FOLLOWS, and it keeps decentralized execution.** Give the
+     actor LINK STATE ONLY -- drop the per-vehicle fields from its input. Then every
+     AV on a link computes the same action, the fleet implements a variable speed
+     limit on that link, and the effective agent is the LINK, realised by whichever
+     vehicles happen to be on it. The road-attached property is recovered without any
+     vehicle reading a global state, which is the project's actual claim.
+
+     It is the coherence argument taken to its conclusion: co-located agents already
+     see the same `downstream_congestion_estimate`, and what stops them acting
+     together is that their own kinematics differ and dominate the input.
+
+     **It is testable before it is trained.** The gradient instrument
+     (`scripts/measure_gradient_signal.py`, with the floor distribution of task 110)
+     reads a z-score from three short rollouts, so masking the per-vehicle inputs and
+     re-measuring costs minutes rather than an hour of training.
+
 114. **The network is bistable at this operating point, and the branch imbalance
      is emergent rather than structural.** Measured 2026-09-10 by
      `scripts/measure_branch_asymmetry.py`, five seeds, 2400 veh/h, no control, mean
