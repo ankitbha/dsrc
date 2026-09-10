@@ -2470,6 +2470,33 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+121. **PRE-COMMITTED: what decides whether the paused training run resumes.**
+     Written 2026-09-10 while the measurement was still running, so the rule is not
+     chosen to fit the number.
+
+     The `mappo_src` run is paused at update 2 of 20 with a complete checkpoint. The
+     question is whether finishing it is worth about eighty minutes.
+
+     **The rule.** Resume if `mappo_src` under the valid null reads a mean z above
+     two standard errors over its three seeds -- the same two-standard-error bar this
+     project uses everywhere else. Otherwise do not resume, and report the run as it
+     stands.
+
+     **Why the gradient reading decides a training question.** The z measures whether
+     the advantage carries information about the action at the START of training. If
+     it does not, PPO has nothing to ascend on its first updates, and the run is
+     predictable from the first two: score -5.777 then -6.567, entropy 2.1898 then
+     2.1837 against a 2.1972 maximum. Spending eighty minutes to watch a flat curve
+     is not worth it when the reason is already measured.
+
+     **What a resume would NOT be.** Evidence that the port works. It would only be
+     the pre-registered gate of task 113 being read on a run whose gradient is known
+     to carry signal, which is the condition under which that gate means anything.
+
+     **What a non-resume is.** A null on the ported formulation at the vehicle level,
+     with the cause measured rather than inferred, and the two segment arms as the
+     remaining open question.
+
 120. **The instrument was repaired and the vehicle-level result reproduced.**
      Measured 2026-09-10 with `scripts/measure_action_alignment.py`, which replaces
      the permutation floor of tasks 105 to 119.
