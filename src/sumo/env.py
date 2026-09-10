@@ -88,6 +88,15 @@ class SumoTopologyEnv:
     #: controller that could force an unsafe change would defeat the reason this
     #: simulator was chosen.
     LANE_CHANGE_MODE = 1621
+    #: `hold_lane`: the vehicle's own lane-change motivations are off (the low bits
+    #: are cleared) while collision avoidance stays on. NOT 0. Bits 8-9 of a SUMO
+    #: lane-change mode are the collision-avoidance bits, so mode 0 does not mean
+    #: "no lane changes", it means "no lane changes and no safety". Measured: with
+    #: mode 0, actions varying lane preference and merge mode together produced 646
+    #: collisions over 3000 steps, and neither head alone produced any. 1536 is
+    #: 512 (respect other drivers) + 1024 (sublane), the two bits the default sets
+    #: that are not a motivation to change lane.
+    HOLD_LANE_MODE = 1536
 
     def __init__(self, topology_id: str, config: Mapping[str, Any]) -> None:
         self.topology_id = topology_id
@@ -448,7 +457,15 @@ class SumoTopologyEnv:
         if lane_preference is None and merge_mode is None:
             return
         if str(merge_mode) == "hold_lane":
-            _sumo.vehicle.setLaneChangeMode(agent_id, 0)
+            _sumo.vehicle.setLaneChangeMode(agent_id, self.HOLD_LANE_MODE)
+            # Cancel a change this agent asked for on an earlier step. `changeLane`
+            # holds its choice for a duration, so without this a vehicle told to
+            # hold its lane carries on into a change requested before it.
+            edge_id = _sumo.vehicle.getRoadID(agent_id)
+            if not edge_id.startswith(":"):
+                _sumo.vehicle.changeLane(
+                    agent_id, int(_sumo.vehicle.getLaneIndex(agent_id)),
+                    float(self.config.get("dt", 1.0)))
             return
         _sumo.vehicle.setLaneChangeMode(agent_id, self.LANE_CHANGE_MODE)
         try:

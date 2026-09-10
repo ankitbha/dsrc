@@ -2470,6 +2470,45 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+94. **The action heads could cause collisions, and the first training run was
+    invalid because of it.** Found 2026-09-09 by the collision counter, on the
+    smoke evaluation of a two-update checkpoint: 30 collisions on the learned arm
+    against 0 for every baseline. SUMO's car-following being unable to produce a
+    collision is the premise of the whole migration, so this was a defect in the
+    actuation I had just added, not in SUMO.
+
+    `hold_lane` set the lane-change mode to 0. Bits 8-9 of a SUMO lane-change mode
+    are the collision-avoidance bits, so 0 does not mean "no lane changes", it
+    means "no lane changes and no safety". Separately, `changeLane` holds its
+    choice for a duration, so a vehicle told to prefer a lane on one step and to
+    hold its lane on the next carried on into the change with the checks removed.
+
+    Measured over 3000 steps, actions varying per agent per step:
+
+    | heads varied | collisions |
+    |---|---|
+    | speed alone, headway alone, lane alone, merge alone | 0 each |
+    | speed + lane | 0 |
+    | speed + merge | 0 |
+    | headway + merge | 0 |
+    | **lane + merge** | **646** |
+    | all four | 703 |
+
+    **Every single head was clean and the pair was not**, which is why the guard
+    now varies the heads together. A single-head test would have passed throughout.
+
+    Two fixes, and each is sufficient on its own -- confirmed by reverting them
+    separately, where either alone keeps the count at zero and only the shipped
+    combination fails. Both are kept because both are right independently:
+    `hold_lane` now uses mode 1536, which clears the vehicle's own motivations to
+    change lane while leaving collision avoidance on, and it cancels any pending
+    change by requesting the current lane.
+
+    **The first five training runs were killed.** They had been training against an
+    environment in which the policy's own actions could cause collisions, which
+    contradicts the premise and makes the crash penalty fire on the environment's
+    defect rather than the policy's behaviour.
+
 93. **PRE-REGISTERED: what the MAPPO run will be judged on.** Written 2026-09-09
     BEFORE the run, because the previous headline was a number chosen after the
     fact from a sweep of constant commanded speeds, and Ankit's instruction was

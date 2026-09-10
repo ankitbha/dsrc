@@ -340,7 +340,11 @@ class TestEveryActionHeadActuates:
                 f"hold_lane still requested {env.lane_change_requests} lane changes"
             )
             for agent_id in list(env.agent_ids):
-                assert env_module._sumo.vehicle.getLaneChangeMode(agent_id) == 0
+                # 1536, not 0. Bits 8-9 of a lane-change mode are the
+                # collision-avoidance bits, so 0 disables safety as well as
+                # motivation; see TestActionsCannotCauseACollision.
+                assert (env_module._sumo.vehicle.getLaneChangeMode(agent_id)
+                        == SumoTopologyEnv.HOLD_LANE_MODE)
         finally:
             env.close()
 
@@ -353,4 +357,72 @@ class TestEveryActionHeadActuates:
         left = self._run(tmp_path, self._action(lane_preference="prefer_left_if_safe"))
         assert left["left_fraction"] < 1.0, (
             "every AV-step ended in the left lane, so no request was ever refused"
+        )
+
+
+class TestActionsCannotCauseACollision:
+    """SUMO's car-following being unable to produce a collision is the premise of
+    this migration, and the actuation of the action heads has to preserve it.
+
+    It did not. `hold_lane` set the lane-change mode to 0, meaning "no lane
+    changes" -- but bits 8-9 of a SUMO lane-change mode are the collision-avoidance
+    bits, so 0 also turns safety off. `changeLane` holds its choice for a duration,
+    so a vehicle told to prefer a lane on one step and to hold its lane on the next
+    carried on into the change with no safety checks.
+
+    Measured over 3000 steps with actions varying per agent per step: lane
+    preference and merge mode together produced 646 collisions, and all four heads
+    703, while each head alone produced none. That is why this test varies the
+    heads together and does not trust a single-head check.
+    """
+
+    CHOICES = {
+        "desired_speed_bin": ("slow", "nominal", "fast"),
+        "desired_headway_bin": ("normal", "larger", "largest"),
+        "lane_preference": ("keep", "prefer_left_if_safe", "prefer_right_if_safe"),
+        "merge_mode": ("normal", "create_gap", "hold_lane"),
+    }
+
+    def _run(self, tmp_path, heads, steps=1500):
+        import random
+
+        rng = random.Random(1)
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_burst"),
+            "duration_steps": steps, "dt": 0.1, "warmup_steps": 3000,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            acted = 0
+            for _ in range(steps):
+                actions = {}
+                for agent_id in list(env.agent_ids):
+                    action = {"desired_speed_bin": "fast", "desired_headway_bin": "normal",
+                              "lane_preference": "keep", "merge_mode": "normal"}
+                    for head in heads:
+                        action[head] = rng.choice(self.CHOICES[head])
+                    actions[agent_id] = action
+                    acted += 1
+                env.step(actions)
+            return env.collision_count, acted, env.collision_checks
+        finally:
+            env.close()
+
+    def test_no_combination_of_actions_collides(self, tmp_path):
+        collisions, acted, checks = self._run(tmp_path, tuple(self.CHOICES))
+        # The premise, and the control that the premise was actually tested: an
+        # action was issued on most steps and the counter was read on every one.
+        assert acted > 1000, f"only {acted} agent-actions were issued"
+        # The counter is read on every step of the warm-up as well as the episode,
+        # which is what makes a zero here a measured zero rather than an unread one.
+        assert checks == 3000 + 1500
+        assert collisions == 0, f"{collisions} collisions from the action heads alone"
+
+    def test_the_pair_that_broke_it_is_covered(self, tmp_path):
+        collisions, _, _ = self._run(
+            tmp_path, ("lane_preference", "merge_mode"))
+        assert collisions == 0, (
+            f"{collisions} collisions from lane preference and merge mode together; "
+            "neither head alone produces any, which is why they are varied together"
         )
