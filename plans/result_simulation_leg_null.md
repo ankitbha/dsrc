@@ -289,6 +289,30 @@ spread. That is where the paired standard deviation of 17 to 32 arrivals comes f
 It belongs to the road, not to any controller, and it caps a five-seed comparison at
 effects above roughly 8%. Task 114.
 
+## The explanations, and which survive
+
+Every candidate for why the advantage is silent about the action, with what closed it.
+The point of the table is that the eliminations are measurements rather than
+arguments, and that exactly one candidate is left.
+
+| explanation | status | what closed it |
+|---|---|---|
+| the reward does not respond to an individual action, because it is shared | **ruled out** | an unshared per-agent reward is equally silent: correlation +0.0016 against -0.0042 shared, standard error 0.0135 |
+| the control resolution is too fine | **ruled out** | 60 s per decision reads -0.47 against 1 s at +0.00 |
+| the speed bins do not bind | **ruled out** | 8.33 m/s binds on 21.4% of AV-steps against 10.0%, and changes nothing |
+| the reward shape is wrong -- eleven weighted terms | **ruled out** | the paper's own two-term threshold reward gives the same result |
+| the actor cannot see what the reward pays for | **ruled out** | it sees the exact density ratio of the link ahead, spread 0.282 across agents, agreeing with truth on 100% of observations |
+| the critic cannot centre the advantage | **ruled out** | privileged neighbourhood features raise out-of-sample R2 from 0.808 to 0.886 and leave the gradient unchanged |
+| penetration is too low | **ruled out** | 100% penetration, commanding the entire fleet, reads the same |
+| the operating point has no headroom | **partly** | the metering oracle gains nothing, but it is one heuristic and a lower bound |
+| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **UNTESTED at adequate power** | the segment arm resolves only about 0.10, where the vehicle arms already exclude 0.033 |
+
+**One candidate is left and the instrument built for it is too coarse to settle it.**
+Making it adequate needs three episodes per rollout rather than one, and a clean
+version needs the paper's five per-super-segment observation fields -- which means
+widening the deployed contract that the Jetson builder and the parity ledger both
+depend on.
+
 ## What this leaves
 
 1. **Report the simulation leg as a null**, with the deployment carrying the
