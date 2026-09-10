@@ -236,3 +236,104 @@ class TestTheDeploymentSensingModelIsActive:
             f"the configured {sensing['position_noise_std']} m of position noise "
             f"produced an observed spread of {error_sd:.2f} m"
         )
+
+
+class TestTheCommandLineDoesNotOverrideTheConfig:
+    """`train_policy.py` built its `env` block from argparse defaults, and
+    `TrainingConfig.from_mapping` prefers that block over everything else, so the
+    literal defaults -- topology "ring", demand "medium", duration_steps 120 --
+    silently replaced whatever the training config declared. A run of
+    `mappo_sumo`, which declares 9000-step episodes at dt 0.1 on `sumo_burst`,
+    resolved to 120 steps at dt 1.0 on `medium`: the wrong scenario, the wrong
+    episode length, and the step size the throughput result was retracted at.
+    """
+
+    def _namespace(self, **overrides):
+        import argparse
+
+        base = dict(training="mappo_sumo", topology=None, demand=None,
+                    human_model=None, seed=7, total_updates=None, rollout_steps=None,
+                    duration_steps=None, dt=None, controlled_vehicles=None,
+                    initial_human_vehicles=None, output_root="outputs/checkpoints")
+        base.update(overrides)
+        return argparse.Namespace(**base)
+
+    def test_the_configs_declarations_survive_an_unqualified_run(self):
+        from scripts.train_policy import load_training_bundle
+
+        config = TrainingConfig.from_mapping(load_training_bundle(self._namespace()))
+        assert config.dt == 0.1
+        assert config.duration_steps == 9000
+        assert config.warmup_steps == 3000
+        assert config.rollout_steps == 9000
+        assert config.topology == "inverted_tree"
+        assert config.demand == "sumo_burst"
+        assert config.action_profile == "full"
+
+    def test_an_explicit_argument_still_overrides(self):
+        # The control: the fix must not have made the command line inert.
+        from scripts.train_policy import load_training_bundle
+
+        config = TrainingConfig.from_mapping(load_training_bundle(
+            self._namespace(dt=0.5, duration_steps=300, demand="sumo_saturating")))
+        assert config.dt == 0.5
+        assert config.duration_steps == 300
+        assert config.demand == "sumo_saturating"
+
+
+class TestTheCheckpointIsSelectedOnTheObjective:
+    """`actor.pt` was selected on `mean_speed - jam_fraction`, which is neither the
+    reward the policy maximises nor a monotone function of it. A recorded run whose
+    objective improved 30% showed a score change of -0.067, so the saved policy was
+    chosen by a quantity nothing was optimising.
+    """
+
+    def test_the_score_is_the_team_reward(self):
+        from src.rl.rewards import build_team_reward
+
+        weights = {"throughput_recent": 0.10, "jam_fraction": -2.0}
+        # Two rollouts, ordered oppositely by the old proxy and the objective: the
+        # first has the higher mean speed, the second far more throughput.
+        slow_but_productive = {"mean_speed": 5.0, "jam_fraction": 0.4,
+                               "throughput_recent": 40.0}
+        fast_but_empty = {"mean_speed": 20.0, "jam_fraction": 0.0,
+                          "throughput_recent": 1.0}
+        proxy = lambda m: m["mean_speed"] - m["jam_fraction"]  # noqa: E731
+        assert proxy(fast_but_empty) > proxy(slow_but_productive)
+        assert (build_team_reward(slow_but_productive, weights)
+                > build_team_reward(fast_but_empty, weights)), (
+            "the objective must rank these the other way, or the test proves nothing"
+        )
+
+    def test_a_short_run_reports_the_objective_as_its_score(self, tmp_path):
+        from src.config.loaders import load_named_config
+        from src.rl.ppo import PPOConfig
+
+        config = dict(load_named_config("training", "mappo_sumo"))
+        config["duration_steps"] = 60
+        config["warmup_steps"] = 300
+        config["rollout_steps"] = 60
+        config["total_updates"] = 1
+        config["work_dir"] = str(tmp_path / "sumo")
+        config["output_root"] = str(tmp_path / "out")
+        trainer = make_trainer(TrainingConfig.from_mapping(config),
+                               PPOConfig.from_mapping(config))
+        result = trainer.train()
+        rows = list((Path(result["output_dir"]) / "training_metrics.csv").read_text().splitlines())
+        assert len(rows) >= 2
+        header = rows[0].split(",")
+        values = dict(zip(header, rows[1].split(",")))
+        from src.rl.rewards import build_team_reward
+
+        metrics = {k: float(v) for k, v in values.items()
+                   if k not in ("update", "score") and _is_number(v)}
+        assert float(values["score"]) == pytest.approx(
+            build_team_reward(metrics, trainer.config.reward_weights), abs=1e-6)
+
+
+def _is_number(value: str) -> bool:
+    try:
+        float(value)
+    except ValueError:
+        return False
+    return True

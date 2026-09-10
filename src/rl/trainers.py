@@ -156,7 +156,14 @@ class BasePPOTrainer:
                 config=self.ppo_config,
                 device=self.device,
             )
-            score = float(episode_metrics.get("mean_speed", 0.0)) - float(episode_metrics.get("jam_fraction", 0.0))
+            # The objective, not a proxy for it. This was
+            # `mean_speed - jam_fraction`, which is neither the reward the policy
+            # maximises nor a monotone function of it: a run whose objective
+            # improved 30% recorded a score change of -0.067, so `actor.pt` was
+            # selected on a quantity nothing was optimising. `episode_metrics` is
+            # already the mean over the rollout and the reward is linear in the
+            # metrics, so this is the mean team reward per step.
+            score = build_team_reward(episode_metrics, self.config.reward_weights)
             is_best = score > best_score
             best_score = max(best_score, score)
             row = {"update": update, "score": score, **stats, **episode_metrics}

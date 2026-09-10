@@ -20,15 +20,22 @@ from src.rl.trainers import TrainingConfig, make_trainer
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a DSRC PPO/IPPO/MAPPO policy.")
     parser.add_argument("--training", default="shared_ppo", help="Training config name or YAML path.")
-    parser.add_argument("--topology", default="ring")
-    parser.add_argument("--demand", default="medium")
-    parser.add_argument("--human-model", default="normal")
+    # These default to None so the training config's own declarations win. They
+    # previously carried literal defaults -- topology "ring", demand "medium",
+    # duration_steps 120 -- which SILENTLY OVERRODE the config, because
+    # `TrainingConfig.from_mapping` prefers the `env` block this script builds. A
+    # config declaring 9000-step episodes at dt 0.1 was resolved to 120 steps at
+    # dt 1.0, which is the step size the throughput result was retracted at.
+    parser.add_argument("--topology", default=None)
+    parser.add_argument("--demand", default=None)
+    parser.add_argument("--human-model", default=None)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--total-updates", type=int, default=None)
     parser.add_argument("--rollout-steps", type=int, default=None)
-    parser.add_argument("--duration-steps", type=int, default=120)
-    parser.add_argument("--controlled-vehicles", type=int, default=2)
-    parser.add_argument("--initial-human-vehicles", type=int, default=12)
+    parser.add_argument("--duration-steps", type=int, default=None)
+    parser.add_argument("--dt", type=float, default=None)
+    parser.add_argument("--controlled-vehicles", type=int, default=None)
+    parser.add_argument("--initial-human-vehicles", type=int, default=None)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-root", default="outputs/checkpoints")
     parser.add_argument("--resume-from", default=None, help="Resume training from an existing checkpoint directory.")
@@ -62,16 +69,31 @@ def load_training_bundle(args: argparse.Namespace) -> dict[str, Any]:
         training["total_updates"] = args.total_updates
     if args.rollout_steps is not None:
         training["rollout_steps"] = args.rollout_steps
+    # Only what was actually given on the command line. `TrainingConfig.from_mapping`
+    # prefers `env` over everything else, so putting a default here overrides the
+    # config silently.
+    overrides = {
+        "topology": args.topology,
+        "demand": args.demand,
+        "human_model": args.human_model,
+        "duration_steps": args.duration_steps,
+        "dt": args.dt,
+        "controlled_vehicles": args.controlled_vehicles,
+        "initial_human_vehicles": args.initial_human_vehicles,
+    }
+    env = {key: value for key, value in overrides.items() if value is not None}
+    # The config's own declarations, lifted to where `from_mapping` looks for them
+    # when `env` does not carry an override.
+    declared = {
+        key: training[key]
+        for key in ("topology", "demand", "human_model", "duration_steps", "dt",
+                    "controlled_vehicles", "initial_human_vehicles")
+        if key in training
+    }
     return {
         "training": training,
-        "env": {
-            "topology": args.topology,
-            "demand": args.demand,
-            "human_model": args.human_model,
-            "duration_steps": args.duration_steps,
-            "controlled_vehicles": args.controlled_vehicles,
-            "initial_human_vehicles": args.initial_human_vehicles,
-        },
+        "env": env,
+        **declared,
         "seed": args.seed,
         "output_root": args.output_root,
     }
