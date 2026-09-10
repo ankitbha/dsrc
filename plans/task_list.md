@@ -2470,6 +2470,45 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+120. **The instrument was repaired and the vehicle-level result reproduced.**
+     Measured 2026-09-10 with `scripts/measure_action_alignment.py`, which replaces
+     the permutation floor of tasks 105 to 119.
+
+     **The valid null.** For each transition, resample an action from the policy at
+     the SAME observation and keep the advantage:
+
+         a'_i ~ pi(.|s_i),    g_null = mean_i A_i * grad log pi(a'_i | s_i)
+
+     States, advantages and their temporal structure all survive; only the pairing
+     between an advantage and the action that earned it is broken. Under the
+     score-function identity its expectation is zero.
+
+     **It is tested, which the old floor never was** (`tests/test_action_alignment.py`):
+     an advantage aligned with the action reads z above 5; one drawn independently
+     reads within 3; **a temporally smooth but uninformative advantage -- a random
+     walk with lag-1 autocorrelation above 0.9, asserted in the fixture -- also reads
+     within 3**, which is the case that broke the permutation floor; and a partial
+     signal reads monotonically between them.
+
+     **THE REPRODUCTION CHECK PASSED.** `mappo_sumo`, three seeds, the same rollouts
+     the old instrument measured:
+
+     | null | mean z | ceiling over null |
+     |---|---|---|
+     | permutation floor (tasks 105 to 108) | -0.10 +/- 0.42 | 25 to 39 |
+     | resampled action (valid) | **+0.00 +/- 0.29** | 31 to 33 |
+
+     Same conclusion, better precision. **So the seven-dimension table stands**: at
+     the vehicle level with a one-second lever, the advantage carries no information
+     about the action, and that is now established against a null that is valid
+     rather than one that merely looked reasonable.
+
+     **What is void.** The segment-as-agent arms measured under the old floor,
+     z = -1.18 and -1.75, are artefacts of the biased null and are discarded rather
+     than reported with a caveat. Two more arms were mid-flight under the same floor
+     and were stopped rather than completed, because finishing them would have put
+     numbers on the record that read as evidence.
+
 119. **The permutation floor is not a valid null when advantages are temporally
      correlated, and the segment arms are where that bites.** Noticed 2026-09-10 from
      the pattern of the readings rather than from theory.
