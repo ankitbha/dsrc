@@ -2470,6 +2470,35 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+116. **Two harness defects from running several heavy jobs at once, recorded
+     because neither announced itself.** 2026-09-10.
+
+     **A measurement process died after two of three seeds with no error.** The
+     gradient test writing `lever.log` completed `mappo_src` seeds 7 and 17 and then
+     ended: no traceback, no error text, the log simply stops mid-table. Its command
+     line does not match the `pkill` pattern used to pause the training run a moment
+     earlier, so that is not the explanation, and there is nothing else to point at.
+     Three SUMO simulations plus torch were resident at about 450 MB each, so memory
+     pressure is the plausible cause and it is NOT established. The missing seed is
+     re-run rather than a two-seed mean being reported as if three had been planned.
+
+     **`pgrep -f <script name>` matches the waiting shell itself.** Chaining one job
+     behind another with
+
+         while pgrep -f lever_signal.py > /dev/null; do sleep 20; done
+
+     never terminates when the waiting `bash -c` command line contains that same
+     string, which it does. The chain happened to fire only because the process it
+     was waiting for exited before the shell was scheduled. Every chain since waits
+     on a PID:
+
+         while kill -0 $PID 2>/dev/null; do sleep 20; done
+
+     **What this costs if unnoticed.** A queued measurement that never starts leaves
+     a gap that reads as "not run yet" indefinitely, and a partial result table looks
+     the same as a complete one unless the seed count is checked against what was
+     planned. Both are the shape of failure that looks like success.
+
 115. **The deepest difference from the paper is what the agent is ATTACHED to, and
      the macroscopic lever makes it worse before it makes it better.** Recorded
      2026-09-10 while the ported run was still training.
