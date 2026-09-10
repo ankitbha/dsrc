@@ -2470,6 +2470,30 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+108. **The control on tasks 105 to 107: a trained actor reads the same as a fresh
+     one.** Measured 2026-09-10 by `scripts/measure_trained_actor_signal.py`.
+
+     Every gradient reading in tasks 105 to 107 was taken at a randomly initialised
+     actor. If the correlation between the advantage and the action rises as the
+     policy trains, those readings describe a starting condition rather than the
+     problem, and the conclusion drawn from them is wrong. The seed-7 run had
+     reached 23 updates, so its checkpoint answers this directly. Same environment,
+     same seeds, same reward, same floor and ceiling:
+
+     | actor | measured over floor | per seed | oracle over floor | implied correlation |
+     |---|---|---|---|---|
+     | fresh initialisation | 0.848 | 0.608, 1.330, 0.607 | 26.2 | -0.0060 |
+     | 23 updates of training | 0.812 | 0.465, 0.640, 1.332 | 34.0 | -0.0057 |
+
+     **Indistinguishable.** The measurement is about the environment and the reward,
+     not about where the policy happens to start, so tasks 105 to 107 stand.
+
+     **A defect in this script, caught by the failure rather than by the result.**
+     The first version read the checkpoint path from `sys.argv` AFTER replacing
+     `sys.argv` for the config loader, so the path was None. It raised rather than
+     loading nothing silently, which is the only reason it did not report a fresh
+     actor twice under two labels and call them the same.
+
 107. **Penetration does not produce a learning signal either, up to 100%.**
      Measured 2026-09-10 by `scripts/measure_penetration_signal.py`, closing the
      cheapest branch of task 106's option 2. Two demands, three penetrations, three
