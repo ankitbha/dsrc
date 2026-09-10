@@ -2546,9 +2546,23 @@ and on what evidence.
      | vehicle / shared, 60 s | 1,627 | 17.2 | 60.7 | **0.033** |
      | segment / own reward | 171 | 6.5 | 20.8 | **0.096** |
 
-     **So the segment arm resolves about 0.10, and the vehicle arms have already
-     excluded everything above 0.033.** As sized, a null there tells us nothing the
-     earlier measurements did not. It can only contribute if it reads POSITIVE.
+     **So the segment arm resolves about 0.10, against 0.033 for the vehicle arm at
+     the same lever.**
+
+     **CORRECTED, later the same evening: the sentence that followed was wrong.** It
+     read "a null there tells us nothing the earlier measurements did not; it can only
+     contribute if it reads POSITIVE". That conflates two different configurations.
+     The vehicle arms bound the VEHICLE formulation; they say nothing whatever about
+     an agent attached to a segment, which has a different action, a different
+     trajectory length and a different reward. A null on the segment arm excludes
+     rho above about 0.10 **for the segment formulation**, and that is a real
+     exclusion -- the more so because if a road-attached agent had signal one would
+     expect it to be large, that being the entire point of the bigger lever.
+
+     What remains true is the power comparison: the segment arm is six times coarser
+     than the vehicle arm, so its null is correspondingly weaker, and three episodes
+     per rollout rather than one would take n from about 171 to about 510 and the
+     detectable rho to roughly 0.05.
 
      **The cause is structural.** One action per segment per decision gives 9
      segments times 20 decisions, about 171 transitions, against 5,760 at the vehicle
@@ -2556,11 +2570,14 @@ and on what evidence.
      starves the sample size, which is the same trade as task 115's -- a bigger lever
      costs data -- appearing at the level of the batch rather than the trajectory.
 
-     **What would make it informative**: three episodes per rollout instead of one,
+     **What would make it stronger**: three episodes per rollout instead of one,
      taking n to about 510 and the detectable rho to roughly 0.05, at three times the
-     runtime. Worth doing only if the current three seeds read positive or ambiguous;
-     a clean null at 0.096 is already uninformative and running it longer to get a
-     cleaner uninformative null is not worth the machine.
+     runtime. The earlier version of this paragraph made that conditional on the
+     current seeds reading positive, on the mistaken ground that a null would be
+     uninformative. It would not be: it is the only measurement bearing on the one
+     explanation that survives task 128's eliminations, and tightening it from 0.10 to
+     0.05 is the difference between excluding a large effect and excluding a moderate
+     one.
 
 125. **PREDICTION, recorded at update 3 of 20 so it can be wrong.** The ported
      run's entropy is falling monotonically for the first time in this project:
