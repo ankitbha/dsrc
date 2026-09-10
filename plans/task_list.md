@@ -2470,6 +2470,47 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+96. **The policy is not learning, and the cause is the credit-assignment signal
+    rather than a defect.** Diagnosed 2026-09-09 at update 26 of the pre-registered
+    run, before spending the remaining four hours on it.
+
+    **The symptom.** Over 26 updates and five seeds: score flat at 1.60 to 1.73,
+    throughput flat at 16.7 to 16.9 arrivals per 60 s, and entropy 4.3714 to 4.3674
+    against a maximum of ln(81) = 4.394. The policy moved 0.004 in entropy and is
+    effectively frozen. Zero collisions throughout.
+
+    **A wrong diagnosis, and the control that caught it.** The objective is 99.96%
+    value loss: `loss` about 116, of which `value_coef * value_loss` is 115.9,
+    against a policy loss of -0.0004 and an entropy bonus of 0.044. Measured
+    gradient norms on one minibatch: the critic's is 79.7 and the actor's 0.378,
+    and `ppo_update` clips ONE norm over both networks, so `max_grad_norm` 0.5
+    scaled every parameter by 0.0063. That looks decisive -- the actor apparently
+    trained at 0.6% of its intended rate -- and it is wrong.
+
+    **Adam makes a uniform gradient rescaling irrelevant.** Its update is
+    `lr * m / sqrt(v)`, and scaling every gradient by a constant scales both
+    moments, so the step is unchanged. Measured directly: 20 Adam steps on the same
+    problem move a parameter by 0.383268 with unscaled gradients and 0.383267 with
+    gradients scaled by 0.0063. The separate-clipping change was reverted rather
+    than shipped, because it changes shared code that every experiment in this
+    project uses and it has no measurable effect under Adam. The test written for
+    it passed against the un-separated control, which is how the wrong diagnosis
+    was caught before it was acted on.
+
+    **What is left, and it is not a bug.** With advantages normalised, a policy
+    loss of -0.0004 means the ratio barely leaves 1, which means the advantages
+    carry almost no information about the actions. That is the expected shape of a
+    shared team reward divided among about twelve agents: one agent's choice moves
+    the team reward by far less than the noise in it over the GAE horizon of 20 s.
+    The signal is weak because the problem is configured that way, not because a
+    knob is set wrong.
+
+    **The run continues unchanged.** This is what the pre-registration exists for:
+    it fixed the metric and the bar before any of this was visible, so a null gets
+    reported as a null. Task 92 already retracted the evidence that a throughput
+    effect exists here at a converged step size, and a policy that cannot find a
+    signal that is not there is the consistent outcome rather than a surprise.
+
 95. **Round 3 leftovers, recorded rather than fixed, with the reason.**
 
     - **The critic's `time` input is far outside its normalisation range.**
