@@ -38,6 +38,15 @@ def build_team_reward(metrics: Mapping[str, Any], weights: Mapping[str, float] |
 #: experiment in this project the moment `local_reward_weight` became non-zero
 #: anywhere, and the weights that suit one operating point do not suit another.
 DEFAULT_LOCAL_REWARD_WEIGHTS = {
+    # The agent's own vehicle. These respond to its own action within one step and
+    # to nobody else's, which the neighbourhood fields below do not: measured over
+    # 5,765 decisions, an advantage built from the neighbourhood fields alone sits
+    # at its own shuffled noise floor.
+    "own_speed": 0.0,
+    "own_abs_jerk": 0.0,
+    "own_stopped": 0.0,
+    # The road around it: the agent's own segment and the segments downstream,
+    # averaged. What the actions are for.
     "outflow_recent": 0.0,
     "mean_speed": 0.0,
     "jam_fraction": 0.0,

@@ -180,6 +180,11 @@ class SumoTopologyEnv:
         #: and so absent from the snapshots -- contributes nothing rather than a
         #: difference taken across the gap.
         self._last_accel: dict[str, float] = {}
+        #: The acceleration map as it stood BEFORE `_mean_abs_jerk` rebound it.
+        #: `_build_metrics` runs before `neighbourhood_metrics` in a step, so by the
+        #: time the per-agent reward is priced `_last_accel` already holds this
+        #: step's values and a difference against it would be identically zero.
+        self._previous_accel: dict[str, float] = {}
         #: When each segment last passed a vehicle downstream, pruned to the
         #: rolling window. The per-segment analogue of `_arrivals`, which is what
         #: lets a local reward price throughput near the agent.
@@ -232,6 +237,7 @@ class SumoTopologyEnv:
         self._departure_time = {}
         self._completed_trips = []
         self._last_accel = {}
+        self._previous_accel = {}
         self._segment_outflow_times = {}
         # Rebuilt every reset, because `reset` rebuilds the network and a cache
         # carried across a change of lane count or segment length would describe
@@ -717,6 +723,7 @@ class SumoTopologyEnv:
             abs(s.acceleration_mps2 - previous[s.vehicle_id]) / dt
             for s in snapshots if s.vehicle_id in previous
         ]
+        self._previous_accel = previous
         self._last_accel = {s.vehicle_id: s.acceleration_mps2 for s in snapshots}
         return float(sum(changes) / len(changes)) if changes else 0.0
 
@@ -743,6 +750,8 @@ class SumoTopologyEnv:
         segments = self.get_segment_metrics(snapshots)
         downstream = self.view.downstream_segments() if self.view is not None else {}
         segment_of = {s.vehicle_id: s.segment_id for s in snapshots}
+        by_id = {s.vehicle_id: s for s in snapshots}
+        dt = float(self.config.get("dt", 1.0)) or 1.0
         result: dict[str, dict[str, float]] = {}
         for agent_id in self.agent_ids:
             own = segment_of.get(agent_id)
@@ -752,7 +761,27 @@ class SumoTopologyEnv:
             present = [segments[name] for name in names if name in segments]
             if not present:
                 continue
+            vehicle = by_id.get(agent_id)
             result[agent_id] = {
+                # THE AGENT'S OWN VEHICLE, which responds to its own action within
+                # one step and to nobody else's. The neighbourhood fields below are
+                # what the agent's actions are FOR; these are what they immediately
+                # are. Measured over 5,765 decisions, the advantage built from the
+                # neighbourhood fields alone sits at its own shuffled noise floor
+                # (ratio 0.784), so a term the action provably moves is what the
+                # gradient was missing.
+                #
+                # True values, no sensing noise and no fidelity mask: these price a
+                # reward during training and never reach the actor.
+                "own_speed": float(vehicle.speed_mps) if vehicle else 0.0,
+                "own_abs_jerk": (
+                    abs(float(vehicle.acceleration_mps2)
+                        - self._previous_accel.get(agent_id, float(vehicle.acceleration_mps2))) / dt
+                    if vehicle else 0.0
+                ),
+                "own_stopped": (
+                    1.0 if vehicle and vehicle.speed_mps < self.STOPPED_SPEED_MPS else 0.0
+                ),
                 "mean_speed": float(sum(float(m["mean_speed"]) for m in present) / len(present)),
                 "jam_fraction": float(sum(float(m["jam_fraction"]) for m in present) / len(present)),
                 "queue_length": float(sum(float(m["queue_length"]) for m in present) / len(present)),

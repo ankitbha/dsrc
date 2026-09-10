@@ -18,8 +18,10 @@ from src.metrics import MetricsLogger
 from src.rl.actions import ActionSpec
 from src.rl.encoders import (
     encode_local_batch,
+    encode_neighbourhood_batch,
     encode_physical_global_state,
     local_obs_dim,
+    neighbourhood_feature_dim,
     physical_global_state_dim,
 )
 from src.rl.models import GlobalCritic, LocalCritic, MultiCategoricalActor
@@ -71,6 +73,17 @@ class TrainingConfig:
     #: the config for the same reason the team weights are: the environment
     #: measures the neighbourhood and the config decides what it is worth.
     local_reward_weights: Mapping[str, float] | None = None
+    #: Whether the CENTRALIZED critic is given each agent's own neighbourhood
+    #: metrics -- the same quantities the per-agent reward is priced from, unnoised.
+    #: Default False, so every configuration written before task 104 has the critic
+    #: input dimension it had, and a checkpoint from one still loads.
+    #:
+    #: It exists because the per-agent reward alone did not raise the actor's
+    #: policy-gradient norm: measured on paired trajectories, local over team was
+    #: 0.962. The reward raised the cross-agent variance as much as the signal, and
+    #: the critic could not centre it -- the global-state vector carries every
+    #: segment in a fixed order and nothing in it says which is this agent's.
+    critic_privileged_neighbourhood: bool = False
     #: How long one action is held, in simulated seconds. None means one decision
     #: per simulation step, which is what every configuration written before task
     #: 103 does. At dt 0.1 that is ten decisions a second, and a single one of them
@@ -114,6 +127,8 @@ class TrainingConfig:
                 if isinstance(local_cfg := training.get("local_reward_weights"), Mapping) and local_cfg
                 else None
             ),
+            critic_privileged_neighbourhood=bool(
+                training.get("critic_privileged_neighbourhood", False)),
             decision_interval_s=(
                 float(training["decision_interval_s"])
                 if training.get("decision_interval_s") is not None
@@ -287,9 +302,11 @@ class BasePPOTrainer:
                     steps += 1
                     continue
                 obs_tensor = obs_tensor.to(self.device)
+                privileged = self.privileged_features(env, agent_ids)
                 with torch.no_grad():
                     actions, action_indices, log_probs, _ = self.actor.sample(obs_tensor)
-                    value_obs = self.value_observation_tensor(env.get_global_state(), obs_tensor, len(agent_ids))
+                    value_obs = self.value_observation_tensor(
+                        env.get_global_state(), obs_tensor, len(agent_ids), privileged)
                     values = self.critic(value_obs)
                 action_map = {agent_id: action for agent_id, action in zip(agent_ids, actions, strict=True)}
                 next_observations, terminated, truncated, infos, crashed_agents = self.hold_action(
@@ -366,7 +383,22 @@ class BasePPOTrainer:
     def critic_input_dim(self) -> int:
         return physical_global_state_dim() if self.critic_scope == "global" else local_obs_dim()
 
-    def value_observation_tensor(self, global_state: Mapping[str, Any], obs_tensor: torch.Tensor, agent_count: int) -> torch.Tensor:
+    def privileged_features(self, env: Any, agent_ids: list[str]) -> torch.Tensor | None:
+        """Per-agent inputs for the critic that the actor never sees.
+
+        None unless a trainer asks for them. `BasePPOTrainer` has a local critic
+        that reads the same observation the actor does, so there is nothing
+        privileged to add.
+        """
+        return None
+
+    def value_observation_tensor(
+        self,
+        global_state: Mapping[str, Any],
+        obs_tensor: torch.Tensor,
+        agent_count: int,
+        privileged: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         return obs_tensor
 
     def _set_bootstrap_values(
@@ -382,8 +414,10 @@ class BasePPOTrainer:
         if not agent_ids:
             return
         obs_tensor = obs_tensor.to(self.device)
+        privileged = self.privileged_features(env, agent_ids)
         with torch.no_grad():
-            value_obs = self.value_observation_tensor(env.get_global_state(), obs_tensor, len(agent_ids))
+            value_obs = self.value_observation_tensor(
+                env.get_global_state(), obs_tensor, len(agent_ids), privileged)
             values = self.critic(value_obs)
         bootstrap_values = {
             agent_id: float(values[index].detach().cpu().item())
@@ -591,11 +625,44 @@ class MAPPOTrainer(BasePPOTrainer):
     advantage_group_by_agent = True
 
     def critic_input_dim(self) -> int:
-        return physical_global_state_dim() + local_obs_dim()
+        extra = (neighbourhood_feature_dim()
+                 if self.config.critic_privileged_neighbourhood else 0)
+        return physical_global_state_dim() + local_obs_dim() + extra
 
-    def value_observation_tensor(self, global_state: Mapping[str, Any], obs_tensor: torch.Tensor, agent_count: int) -> torch.Tensor:
+    def privileged_features(self, env: Any, agent_ids: list[str]) -> torch.Tensor | None:
+        """Each agent's own neighbourhood, unnoised, for the critic alone.
+
+        Asked of the environment rather than reconstructed from the global state,
+        because the global state carries every segment in a fixed order and nothing
+        in it says which segment is this agent's -- which is precisely why the
+        critic could not centre the per-agent reward.
+
+        The environment need not offer it: `highway_env` has no
+        `neighbourhood_metrics`, so a MAPPO run there keeps the input it had.
+        """
+        if not self.config.critic_privileged_neighbourhood:
+            return None
+        getter = getattr(env, "neighbourhood_metrics", None)
+        neighbourhood = getter() if callable(getter) else {}
+        return encode_neighbourhood_batch(agent_ids, neighbourhood or {}).to(self.device)
+
+    def value_observation_tensor(
+        self,
+        global_state: Mapping[str, Any],
+        obs_tensor: torch.Tensor,
+        agent_count: int,
+        privileged: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         encoded = encode_physical_global_state(global_state).to(self.device)
-        return torch.cat([encoded.unsqueeze(0).repeat(agent_count, 1), obs_tensor], dim=1)
+        parts = [encoded.unsqueeze(0).repeat(agent_count, 1), obs_tensor]
+        if self.config.critic_privileged_neighbourhood:
+            # Zeros rather than a shorter vector when the environment offers
+            # nothing, so the critic's input width is a property of the config and
+            # not of what a particular step happened to report.
+            parts.append(privileged if privileged is not None
+                         else torch.zeros((agent_count, neighbourhood_feature_dim()),
+                                          device=self.device))
+        return torch.cat(parts, dim=1)
 
 
 def make_trainer(config: TrainingConfig, ppo_config: PPOConfig, *, device: str | torch.device = "cpu") -> BasePPOTrainer:
