@@ -276,7 +276,10 @@ class TestTheCommandLineDoesNotOverrideTheConfig:
         # The calibrated driving model, without which the fundamental diagram
         # has no capacity drop and there is nothing to recover.
         assert config.human_model == "w99_calibrated"
-        assert config.action_profile == "full"
+        # speed_headway, not full: the lane and merge heads act through an
+        # uncalibrated lane-change model, and dropping them cuts the action space
+        # from 81 combinations to 9.
+        assert config.action_profile == "speed_headway"
 
     def test_an_explicit_argument_still_overrides(self):
         # The control: the fix must not have made the command line inert.
