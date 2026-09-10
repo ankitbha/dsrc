@@ -2470,6 +2470,33 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+125. **PREDICTION, recorded at update 3 of 20 so it can be wrong.** The ported
+     run's entropy is falling monotonically for the first time in this project:
+     2.1898, 2.1837, 2.1775, a slope of **-0.00611 per update**.
+
+     Criterion 1 of task 113 needs summed entropy below **1.9775** by update 20,
+     which from the starting 2.1898 requires **-0.01117 per update**. The observed
+     rate is **55% of that**, and at the observed rate update 20 lands at **2.0736**.
+
+     **So the prediction is that criterion 1 fails, at about 2.07, unless the decline
+     accelerates.** Recorded now rather than after the fact, because "the entropy was
+     falling" is the kind of observation that reads as encouraging in hindsight
+     whatever the endpoint turns out to be.
+
+     **What would make this interesting even so.** The previous run moved entropy
+     0.0147 in TWENTY-FIVE updates; this one has moved 0.0123 in three. That is an
+     eightfold difference in rate, and it is the first quantity in this investigation
+     that has moved in the direction the mechanism requires. A policy that is
+     genuinely becoming less uniform, but too slowly for a 20-update budget, is a
+     different situation from one that never moves -- and it would argue for more
+     updates rather than for another change of formulation.
+
+     **The caveat that comes with it.** Three points are not a trend, entropy can fall
+     because a policy is collapsing onto one action for reasons unrelated to the
+     objective, and the joint modal share is what distinguishes those. That is
+     criterion 3, and it is measured at the end by
+     `scripts/measure_action_distribution.py`.
+
 124. **Every error bar on a z-score in this investigation was built from ONE
      network draw.** Found 2026-09-10 from a standard error that was too good.
 
