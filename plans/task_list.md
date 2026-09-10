@@ -2470,6 +2470,30 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+130. **CORRECTION: the threshold penalty fires on 1.5 of 9 segments, not 7 of 9.**
+     2026-09-10, caught by reconciling the fleet-mix sweep's reward against the
+     training score.
+
+     I inferred "roughly 7 of 9 segments above critical" from the training score by
+     assuming every segment runs at the NETWORK mean speed. That is vehicle-weighted:
+     a nearly-empty free-flowing leaf has a segment mean speed of 25 m/s while
+     contributing almost nothing to the network mean, so the sum of per-segment means
+     is far above nine times it. The reconstruction missed the reported reward by 1.9
+     out of 1.5, which is how the error surfaced.
+
+     **Measured directly** by the sweep at p = 0 over a 600 s episode: **1.50 of 9
+     segments over rho\*** with a reward of +1.531 per step.
+
+     **What it changes.** The claim that the threshold reward "has real range where the
+     eleven-term reward sat near zero" survives -- the range is roughly -1.5 to +4 per
+     step rather than -7 to +1.3 -- and the claim that the penalty fires constantly
+     does not. It fires on one or two links at a time, which is the bottleneck, and
+     that is arguably the intended behaviour rather than a defect.
+
+     **The lesson is the one this session keeps producing**: a quantity reconstructed
+     from an aggregate is an inference, and it needs the same scepticism as a
+     measurement. The sweep measured it in one line.
+
 129. **RESULT: the road-attached agent is a null too, so every candidate
      explanation is now measured and none survives.** 2026-09-10.
 

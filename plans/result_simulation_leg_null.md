@@ -231,7 +231,7 @@ change is large is:
 
 | change | size, measured |
 |---|---|
-| threshold reward | LARGE: fires on about 7 of 9 segments, range about -7 to +1.3, against an eleven-term reward that sat near zero |
+| threshold reward | LARGE, but not as large as first claimed: the penalty fires on **1.50 of 9 segments** on average, measured directly by the fleet-mix sweep at p = 0 over a 600 s episode. The earlier figure of "about 7 of 9" was INFERRED from the training score using a bad approximation -- it assumed every segment runs at the network mean speed, but that is vehicle-weighted, so a nearly-empty free-flowing leaf contributes a segment mean of 25 m/s and almost nothing to the network mean |
 | decision interval 60 s from 1 s | LARGE, and untested before this |
 | `downstream_congestion_estimate` corrected to the link ahead, ungated | real: it was reading the ego link and vanishing whenever no AV was in range |
 | speed bins 8.33/12.5/16.67 from 20/27/30 | SMALL: the band on which the three values differ is 6.2% against roughly 5%, because the median AV speed is 0.11 m/s and no command binds on a stopped vehicle |
