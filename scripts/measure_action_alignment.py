@@ -115,7 +115,13 @@ def main() -> int:
           f"{'z':>7} {'ceiling':>8} {'corr(slow,A)':>13}")
     zs, corrs = [], []
     for seed in args.seeds:
-        seed_everything(0)
+        # THE NETWORK INITIALISATION VARIES WITH THE SEED, not just the traffic.
+        # With `seed_everything(0)` the actor and critic weights were bit-identical
+        # across every seed -- verified by comparing parameters -- so a statistic that
+        # depends on the initialisation had ONE draw and its cross-seed standard error
+        # understated the uncertainty. It is how the segment arm came to read
+        # -1.32 +/- 0.16: a systematic actor-critic relationship, repeated three times.
+        seed_everything(seed)
         t = dataclasses.replace(base_t, rollout_steps=decisions,
                                 work_dir=f"/tmp/dsrc_align_{args.training}_{seed}")
         trainer = make_trainer(t, base_p, device="cpu")

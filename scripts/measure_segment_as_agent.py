@@ -48,7 +48,13 @@ print(f"{'seed':>5} {'segment-decisions':>18} {'measured':>10} {'null':>9} {'sd'
       f"{'z':>7} {'ceiling':>9}")
 zs = []
 for seed in (7, 17, 27):
-    seed_everything(0)
+    # THE NETWORK INITIALISATION VARIES WITH THE SEED, not just the traffic.
+    # With `seed_everything(0)` the actor and critic weights were bit-identical
+    # across every seed -- verified by comparing parameters -- so a statistic that
+    # depends on the initialisation had ONE draw and its cross-seed standard error
+    # understated the uncertainty. It is how the segment arm came to read
+    # -1.32 +/- 0.16: a systematic actor-critic relationship, repeated three times.
+    seed_everything(seed)
     t = dataclasses.replace(base_t, rollout_steps=DECISIONS,
                             work_dir=f"/tmp/dsrc_segagent_{seed}")
     trainer = make_trainer(t, base_p, device="cpu")
