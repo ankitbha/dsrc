@@ -55,6 +55,22 @@ def gradient_norm(trainer, observations, actions, old_log_probs, advantages, cli
                                 if q.grad is not None)))
 
 
+def action_advantage_correlation(actions: torch.Tensor, advantages: torch.Tensor,
+                                 *, head: int = 0, value: int = 0) -> float:
+    """Correlation between choosing one action value and the advantage earned.
+
+    The gradient norm is a MAGNITUDE and cannot show sign, so it cannot tell an
+    advantage that says "slow down" from one that says "do not". This can: it is the
+    point-biserial correlation between the indicator of `value` on `head` and the
+    advantage. Positive means that choice earned more than average, negative means it
+    earned less, and near zero means the advantage is silent about it.
+    """
+    chose = (actions[:, head] == value).float()
+    if chose.std() < 1e-8 or advantages.std() < 1e-8:
+        return 0.0
+    return float(torch.corrcoef(torch.stack([chose, advantages]))[0, 1])
+
+
 def alignment_z(trainer, observations, actions, old_log_probs, advantages, *,
                 clip: float, resamples: int = 60, seed: int = 0):
     """How far the measured gradient sits above a null that keeps the advantages.
@@ -96,8 +112,8 @@ def main() -> int:
     print(f"{args.training}: {decisions} decisions per rollout, "
           f"{args.resamples} resamples per seed")
     print(f"{'seed':>5} {'n':>7} {'measured':>10} {'null mean':>10} {'null sd':>9} "
-          f"{'z':>7} {'ceiling':>8}")
-    zs = []
+          f"{'z':>7} {'ceiling':>8} {'corr(slow,A)':>13}")
+    zs, corrs = [], []
     for seed in args.seeds:
         seed_everything(0)
         t = dataclasses.replace(base_t, rollout_steps=decisions,
@@ -117,13 +133,20 @@ def main() -> int:
         ceiling = gradient_norm(trainer, observations, batch.actions,
                                 batch.old_log_probs, ceiling_adv, base_p.clip_coef)
 
+        correlation = action_advantage_correlation(batch.actions, advantages)
         zs.append(z)
+        corrs.append(correlation)
         print(f"{seed:>5} {advantages.shape[0]:>7} {measured:>10.5f} {mean:>10.5f} "
-              f"{sd:>9.5f} {z:>+7.2f} {ceiling/max(mean, 1e-12):>8.1f}", flush=True)
+              f"{sd:>9.5f} {z:>+7.2f} {ceiling/max(mean, 1e-12):>8.1f} "
+              f"{correlation:>+13.4f}", flush=True)
 
     if len(zs) > 1:
         se = statistics.stdev(zs) / len(zs) ** 0.5
         print(f"\nmean z {statistics.fmean(zs):+.2f} +/- {se:.2f} over {len(zs)} seeds")
+        corr_se = statistics.stdev(corrs) / len(corrs) ** 0.5
+        print(f"mean corr(chose slow, advantage) {statistics.fmean(corrs):+.4f} "
+              f"+/- {corr_se:.4f} -- sign says WHICH WAY the advantage points, which "
+              f"a gradient norm cannot")
     return 0
 
 

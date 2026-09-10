@@ -107,3 +107,38 @@ class TestTheInstrumentReadsWhatItShould:
                                 clip=0.2, resamples=40, seed=0)
             readings.append(z)
         assert readings[0] < readings[1] < readings[2], readings
+
+
+class TestTheSignedDiagnostic:
+    """The gradient norm is a magnitude and cannot say which way the advantage points.
+
+    An advantage that is silent about the action and one that says "this action is
+    bad" both reduce the norm relative to a perfectly aligned advantage, and the two
+    call for opposite conclusions: nothing to learn, against something to learn that
+    contradicts the mechanism under study.
+    """
+
+    def test_it_separates_aligned_anti_aligned_and_silent(self):
+        from scripts.measure_action_alignment import action_advantage_correlation
+
+        actions = torch.tensor([[0, 0], [0, 0], [1, 0], [2, 0]])
+        assert action_advantage_correlation(
+            actions, torch.tensor([1.0, 1.0, -1.0, -1.0])) == pytest.approx(1.0)
+        assert action_advantage_correlation(
+            actions, torch.tensor([-1.0, -1.0, 1.0, 1.0])) == pytest.approx(-1.0)
+        assert action_advantage_correlation(
+            actions, torch.tensor([1.0, -1.0, 1.0, -1.0])) == pytest.approx(0.0)
+
+    def test_a_constant_advantage_reads_zero_rather_than_dividing_by_zero(self):
+        from scripts.measure_action_alignment import action_advantage_correlation
+
+        actions = torch.tensor([[0, 0], [1, 0]])
+        assert action_advantage_correlation(actions, torch.tensor([1.0, 1.0])) == 0.0
+
+    def test_a_constant_action_reads_zero_rather_than_dividing_by_zero(self):
+        # Every agent choosing the same value is what a collapsed policy looks like,
+        # and it must not read as a correlation of any sign.
+        from scripts.measure_action_alignment import action_advantage_correlation
+
+        actions = torch.tensor([[1, 0], [1, 0]])
+        assert action_advantage_correlation(actions, torch.tensor([1.0, -1.0])) == 0.0
