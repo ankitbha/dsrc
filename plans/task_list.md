@@ -2470,6 +2470,39 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+123. **The shared-reward segment arm is near-uninformative BY CONSTRUCTION, and
+     its negative readings are an artefact of that.** Noticed 2026-09-10 from the
+     readings being consistently negative under a null that is now valid.
+
+     Under the valid resampled-action null the arm reads z = -1.03 and -1.57 (it read
+     -1.18 and -1.75 under the invalid permutation floor, so the repair moved it
+     toward zero by about 0.16 and did not explain it).
+
+     **Why it cannot say much.** In that arm every segment is paid the SAME
+     network-wide reward at every decision. So every segment's reward sequence is
+     identical, and the whole cross-segment variation in the advantage comes from the
+     critic's value estimates -- which at measurement time are randomly initialised.
+     The GAE residual is `r + gamma V(s') - V(s)` with `r` common, so the advantage is
+     essentially a function of `V` alone.
+
+     **And that makes a spurious correlation available.** The advantage and the
+     action are then both functions of the same observation, through two independently
+     initialised networks. Nothing forces their relationship to be zero, and a
+     systematic one of either sign is exactly what a consistently negative z looks
+     like.
+
+     **So the arm mostly measures the untrained critic**, not whether a road-level
+     agent has a learnable signal. It is kept because it is the paper's own reward
+     shape -- the paper sums per-segment terms and its agent is centralized, so the
+     sum is the right credit THERE -- and its reading should be quoted with this
+     attached rather than as evidence about segment-level control.
+
+     **The own-reward arm is the one that tests the question.** Each segment paid its
+     own term makes the reward sequences differ across segments, so the advantage
+     carries something other than critic noise. Verified a genuine decomposition
+     before it ran: a clear segment reads +1.000 and a jammed one -0.850, summing to
+     the network's +0.150.
+
 122. **RESULT: the macroscopic lever does not restore the learning signal.**
      Measured 2026-09-10 with `scripts/measure_action_alignment.py` against the valid
      resampled-action null, three seeds.
