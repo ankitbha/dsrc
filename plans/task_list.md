@@ -2497,13 +2497,28 @@ and on what evidence.
      **It does not change this run's verdict**, because criteria 1 and 2 are
      numeric and both fail, and the gate required all three.
 
-     **One observation worth keeping.** The head that moved is
-     `desired_speed_bin`, toward `slow`, and the head that did not is
+     **One observation worth keeping, with its own control.** The head that moved
+     is `desired_speed_bin`, toward `slow`, and the head that did not is
      `desired_headway_bin`, which sits at 1.0970 of a 1.0986 maximum. That is the
      opposite of what task 105 would predict: the speed head is the one measured to
      be equivalent across its values on 97% of decisions, and the headway head sets
-     `tau`, which affects car following at any speed. Whether that drift is a weak
-     real signal or 23 updates of random walk is not settled by this run.
+     `tau`, which affects car following at any speed.
+
+     The control is the same measurement taken at update 1, when the actor had had
+     one gradient step and was effectively at its initialisation:
+
+     | update | speed head probabilities | speed head entropy | joint modal share |
+     |---|---|---|---|
+     | 1 | 0.362 / 0.326 / 0.312 | 1.0966 | 0.1378 |
+     | 23 | 0.423 / 0.257 / 0.320 | 1.0778 | 0.1486 |
+
+     **A randomly initialised network is already 0.1378 rather than 0.1111**, so
+     most of the departure from uniform at update 23 is initialisation and not
+     learning. What moved over 23 updates is the speed head's modal share, from
+     0.362 to 0.423, and its entropy by 0.0188 of a 1.0986 range -- 1.7%. That is
+     movement in the direction speed metering would need, at a rate consistent with
+     the roughly 1% action-advantage correlation of task 107, and it is far too
+     small to clear any of the three criteria.
 
 108. **The control on tasks 105 to 107: a trained actor reads the same as a fresh
      one.** Measured 2026-09-10 by `scripts/measure_trained_actor_signal.py`.
