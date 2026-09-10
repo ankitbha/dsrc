@@ -2482,22 +2482,32 @@ and on what evidence.
      pressure is the plausible cause and it is NOT established. The missing seed is
      re-run rather than a two-seed mean being reported as if three had been planned.
 
-     **`pgrep -f <script name>` matches the waiting shell itself.** Chaining one job
-     behind another with
+     **`pgrep -f <script name>` also matches the shell that LAUNCHED it.** Tested
+     rather than asserted: with one measurement running, `pgrep -f segment_agent.py`
+     returned two pids -- the python process and the `bash -c` wrapper that started
+     it. So
 
          while pgrep -f lever_signal.py > /dev/null; do sleep 20; done
 
-     never terminates when the waiting `bash -c` command line contains that same
-     string, which it does. The chain happened to fire only because the process it
-     was waiting for exited before the shell was scheduled. Every chain since waits
-     on a PID:
+     inside such a wrapper can wait on itself and never terminate. Chains now wait on
+     a pid, `while kill -0 $PID`, and it is worth knowing that the pid `pgrep`
+     returns first is the WRAPPER's, not the python process's -- which happens to be
+     equivalent, because the wrapper exits with its child.
 
-         while kill -0 $PID 2>/dev/null; do sleep 20; done
+     **AND MY OWN PROCESS CHECK WAS BROKEN AND REPORTED ABSENCE.** This is the one
+     that matters. `pgrep -f "segment_agent\|lever_seed27"` in zsh searches for a
+     LITERAL backslash-pipe: `pgrep` takes an extended regular expression, where the
+     alternation is a bare `|`, so the escaped form matches a string that cannot
+     exist. It returned zero, I read that as two measurement processes having died,
+     and wrote it up. Nothing had died -- `ps aux | grep -E` a moment later showed
+     the job running with three minutes of CPU.
 
-     **What this costs if unnoticed.** A queued measurement that never starts leaves
-     a gap that reads as "not run yet" indefinitely, and a partial result table looks
-     the same as a complete one unless the seed count is checked against what was
-     planned. Both are the shape of failure that looks like success.
+     **What this costs if unnoticed.** A queued measurement that never starts reads
+     as "not run yet" indefinitely; a partial result table looks complete unless the
+     seed count is checked against the plan; and a broken liveness check reports a
+     healthy job as dead, which is what nearly caused a running measurement to be
+     relaunched on top of itself. All three are failures that look like success, and
+     the third is the same shape as the noise floor that was never measured.
 
 115. **The deepest difference from the paper is what the agent is ATTACHED to, and
      the macroscopic lever makes it worse before it makes it better.** Recorded
