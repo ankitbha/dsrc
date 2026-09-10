@@ -1,26 +1,48 @@
 # The simulation leg: what was measured, and why it is a null
 
-One account of a result currently spread across task-list entries 92 to 109. It
-states what was measured, what each measurement was controlled against, and exactly
-what is and is not established.
+One account of a result spread across task-list entries 92 to 123. It states what was
+measured, what each measurement was controlled against, and exactly what is and is not
+established. Sections below are in the order they were written; this summary is
+current as of 2026-09-10 evening.
 
 ## Short version
 
 **The mechanism this project posits -- in-stream AV speed modulation -- neither gains
-when handed perfect information nor presents a learnable gradient, on this road, at
-every operating point and penetration tried.** Two instruments built for different
-purposes agree:
+when handed perfect information nor presents a learnable gradient, on this road.** Two
+instruments built for different purposes agree:
 
 - a perfect-information metering oracle serves **-0.8 and +0.8** more vehicles than
   no control, against a spread of about 16;
-- the correlation between one AV's action and its own advantage is **about 1%**,
-  where the same instrument reads 14 to 80 times its noise floor when a correlated
-  advantage is supplied.
+- the correlation between one AV's action and its own advantage is indistinguishable
+  from zero: **+0.00 +/- 0.29** at a one-second lever and **-0.47 +/- 0.51** at a
+  one-minute one, against an instrument that reads 17 to 33 times its null when a
+  correlated advantage is supplied.
 
-**What is NOT established.** The oracle is one hand-written heuristic given perfect
-state, so it is a lower bound on what the best controller could do and not an upper
-bound. "No controller can gain on this network" is not proven and cannot be proven
-this way.
+**The predecessor paper's own formulation was ported in full and is also a null at
+the vehicle level.** Its two-term threshold reward, its 8.33/12.5/16.67 m/s speed
+bins, one decision per simulated minute at gamma 0.9, and a corrected link-level
+congestion signal every co-located AV sees identically. The paper's design does not
+transfer to a vehicle-attached agent on this road.
+
+**Three things are NOT established, and each is written out below.**
+
+1. The oracle is one hand-written heuristic given perfect state, so it is a LOWER
+   bound on the best controller and not an upper one. "No controller can gain on this
+   network" is not proven and cannot be proven this way.
+2. Every arm that produced a clean null pays each agent the SAME reward, so those
+   nulls cannot separate "the reward does not respond to individual actions" from
+   "nothing responds to individual actions". The two arms with an unshared reward are
+   the ones that decide it and were still running when this was written.
+3. The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
+   makes 7.1 decisions and leaves. That difference is confounded with every lever
+   measurement and only a segment-attached agent separates it.
+
+**The instrument was rebuilt mid-investigation.** Its original permutation floor is
+not a valid null when advantages are temporally correlated, and it made arms read
+WORSE than random. The replacement resamples the action from the policy at the same
+state; it has seven controls, and it reproduced the vehicle-level result at higher
+precision, so the earlier work stands rather than falls. Readings taken under the old
+floor were discarded rather than reported with a caveat.
 
 ## The environment is sound, and four defects had to be fixed to make it so
 
