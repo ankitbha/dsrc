@@ -147,6 +147,41 @@ A randomly initialised actor already reads a joint modal share of 0.1378 against
 uniform 0.1111, and 23 updates take it to 0.1486, so most of the departure from
 uniform is initialisation.
 
+## SUPERSEDED IN SCOPE, 2026-09-10: this is a null about ONE formulation
+
+Everything above was measured with a per-vehicle action taken once a second. Reading
+the predecessor paper (arXiv:2506.11973) showed that is not the problem it solved.
+Its agent sets a maximum speed for a 2-3 km super-segment once a MINUTE, from a state
+of per-segment density, speed, gap, inflow and outflow, and rewards
+`-alpha * 1[rho > rho*] + beta * v` -- two terms, not eleven. Its action is thousands
+of times the lever, and it is a centralized controller with AVs as the compliance
+mechanism, tested at 25 to 100% compliance.
+
+**So the seven dimensions in the table above were all varied around a one-second
+lever.** They do not bound what a macroscopic one does, in either direction. Ankit's
+statement of it: each vehicle is changing decisions too quickly, nearby vehicles are
+not matching, and too fine a control resolution devolves into noise.
+
+`configs/training/mappo_src.yaml` ports the formulation and is under test. What it
+changes and what was measured about each is task 113; the honest accounting of which
+change is large is:
+
+| change | size, measured |
+|---|---|
+| threshold reward | LARGE: fires on about 7 of 9 segments, range about -7 to +1.3, against an eleven-term reward that sat near zero |
+| decision interval 60 s from 1 s | LARGE, and untested before this |
+| `downstream_congestion_estimate` corrected to the link ahead, ungated | real: it was reading the ego link and vanishing whenever no AV was in range |
+| speed bins 8.33/12.5/16.67 from 20/27/30 | SMALL: the band on which the three values differ is 6.2% against roughly 5%, because the median AV speed is 0.11 m/s and no command binds on a stopped vehicle |
+
+## A property of the operating point that bounds every comparison here
+
+The network is bistable. Five seeds of identical demand on an identical, structurally
+symmetric road produce two regimes -- congestion in the middles with empty leaves, or
+on the leaves with moderate middles -- and served trips range from 156 to 198, a 27%
+spread. That is where the paired standard deviation of 17 to 32 arrivals comes from.
+It belongs to the road, not to any controller, and it caps a five-seed comparison at
+effects above roughly 8%. Task 114.
+
 ## What this leaves
 
 1. **Report the simulation leg as a null**, with the deployment carrying the
