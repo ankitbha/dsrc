@@ -2470,6 +2470,40 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+119. **The permutation floor is not a valid null when advantages are temporally
+     correlated, and the segment arms are where that bites.** Noticed 2026-09-10 from
+     the pattern of the readings rather than from theory.
+
+     Segment-as-agent with the shared network reward read z = -1.18 and -1.75 on its
+     first two seeds: the measured gradient norm SYSTEMATICALLY BELOW its own
+     shuffled floor. A measured value below its null is the signature of a null that
+     is not exchangeable with the data.
+
+     **The mechanism.** Permuting advantages across the batch destroys two things at
+     once: the association between action and advantage, which is what the test is
+     meant to isolate, AND the temporal correlation within each agent's trajectory. A
+     segment agent now holds about 19 consecutive decisions whose advantages are
+     smooth; shuffling makes that sequence rough, and a rough sequence cancels less
+     when summed against `grad log pi`, so the floor comes out HIGH. The z is biased
+     negative by the design of the null, not by the data.
+
+     **Why it did not show at the vehicle level.** There the readings sat at zero
+     rather than below it, so the bias was either small or masked. It is not safe to
+     assume it was absent: the same mechanism applies wherever `group_by_agent` gives
+     an agent a long trajectory, and at the 1 s lever an agent holds about 90.
+
+     **What a valid null would be.** Permute advantages WITHIN each agent's
+     trajectory, preserving its temporal profile and destroying only the alignment
+     with the actions taken; or permute the ACTIONS while holding advantages fixed.
+     Either isolates the quantity the test claims to measure. The current floor does
+     not.
+
+     **What this does to the readings so far.** The vehicle-level nulls of tasks 105
+     to 108 are not overturned -- a z near zero is consistent with no signal under
+     either null -- but their precision is now in question, and the segment arms'
+     negative z values should NOT be read as "worse than random". They should be read
+     as "this instrument cannot presently distinguish them from random".
+
 118. **A limitation of the segment-as-agent test, stated before its arms
      reported.** 2026-09-10.
 
