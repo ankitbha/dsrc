@@ -2470,6 +2470,45 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+129. **RESULT: the road-attached agent is a null too, so every candidate
+     explanation is now measured and none survives.** 2026-09-10.
+
+     The segment-as-agent arm paid its OWN per-segment reward -- an agent attached to
+     the road, persisting for the whole episode, with a reward that differs from its
+     neighbours' -- reads **mean z -0.12 +/- 0.51** over three seeds (-0.44, -0.81,
+     +0.89). Indistinguishable from zero, and the CLOSEST TO ZERO of any arm measured
+     today, which is itself a small check on the corrected null: the arm with the most
+     independent structure is the one that centres.
+
+     **So the last explanation standing after task 128's eliminations does not
+     survive either**, at a sensitivity of about 0.10. The higher-power version, three
+     episodes per rollout and a sensitivity near 0.05, is queued.
+
+     **The full set, all measured against the same tested null:**
+
+     | arm | agent | reward | mean z |
+     |---|---|---|---|
+     | `mappo_sumo`, 1 s | vehicle | shared | +0.00 +/- 0.29 |
+     | `mappo_src`, 60 s | vehicle | shared | -0.47 +/- 0.51 |
+     | paired team-only | vehicle | shared | -0.44 +/- 0.56 |
+     | local blend 0.5 | vehicle | **unshared** | -0.81 +/- 0.14 |
+     | segment, network reward | **road** | shared | (void: fixed init) |
+     | segment, own term | **road** | **unshared** | **-0.12 +/- 0.51** |
+
+     **What this means, stated carefully.** On this network, at this operating point,
+     no configuration tried produces an advantage that carries information about the
+     action -- across two agent attachments, two reward scopes, two decision rates,
+     four bin scalings, three operating points, three penetrations and two reward
+     shapes. That is a strong statement about THIS road and a weak one about
+     decentralised traffic RL in general, because a single network with fixed routes
+     to one exit and a junction-limited capacity is one instance.
+
+     **What has NOT been measured** is whether the objective can be moved by behaviour
+     at all. That sweep is running. If the threshold reward turns out flat across the
+     whole fleet-mix range, the null is about the reward rather than the learning, and
+     the entire gradient investigation was measuring the attribution of a quantity
+     that had nothing to attribute.
+
 128. **RESULT: an unshared per-agent reward produces no action alignment either,
      and the z statistic has a residual bias I cannot explain.** Measured 2026-09-10,
      three seeds, network initialisation varying with the seed, work directories keyed
