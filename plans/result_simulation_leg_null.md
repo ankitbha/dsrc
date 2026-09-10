@@ -47,12 +47,34 @@ a term uncorrelated with the action cancels across the batch, an aligned one add
 the mean normalised advantage, which is zero by construction however informative the
 advantage is.
 
-**Its two controls, without which every reading is uninterpretable.** The floor is
-the same advantages permuted across the batch: identical distribution, no correlation
-with the action. The ceiling is a SYNTHETIC advantage built to correlate with the
-action -- it drives no vehicle and is not a controller; it exists to show the
-statistic can move. Measured on the shipped configuration, three seeds, 17,296
-decisions:
+**Its two controls, without which every reading is uninterpretable -- and the floor
+had to be rebuilt.** The ceiling is a SYNTHETIC advantage built to correlate with the
+action; it drives no vehicle and is not a controller, it exists to show the statistic
+can move.
+
+The floor was originally the same advantages permuted across the batch. **That is not
+a valid null when advantages are temporally correlated**: it destroys the
+action-advantage pairing AND each agent's temporal profile, so a smooth advantage
+sequence becomes rough, cancels less against `grad log pi`, and the floor comes out
+high. It was caught when two segment-level arms read a measured value systematically
+BELOW their own null, which is that bias showing rather than data worse than random.
+
+The valid null resamples an action from the policy at the SAME observation and keeps
+the advantage, so states, advantages and their temporal structure all survive and only
+the pairing breaks; under the score-function identity its expectation is zero. It is
+tested (`tests/test_action_alignment.py`) against a signal it must see, noise it must
+not, an autocorrelated-but-uninformative sequence, and a partial signal it must grade
+-- none of which the permutation floor ever was.
+
+**The result survived the repair.** On `mappo_sumo`, three seeds:
+
+| null | mean z | ceiling |
+|---|---|---|
+| permutation floor | -0.10 +/- 0.42 | 25 to 39 |
+| resampled action (valid) | **+0.00 +/- 0.29** | 31 to 33 |
+
+Same conclusion, better precision. The table below therefore stands. Measured on the
+shipped configuration, three seeds, 17,296 decisions:
 
 | advantage | gradient norm | over the floor |
 |---|---|---|
