@@ -214,6 +214,35 @@ change is large is:
 | `downstream_congestion_estimate` corrected to the link ahead, ungated | real: it was reading the ego link and vanishing whenever no AV was in range |
 | speed bins 8.33/12.5/16.67 from 20/27/30 | SMALL: the band on which the three values differ is 6.2% against roughly 5%, because the median AV speed is 0.11 m/s and no command binds on a stopped vehicle |
 
+## The structure underneath every null here: the reward is shared
+
+Stated late, because it took the segment arms to make it obvious. **In every arm that
+has produced a clean null, each agent is paid the SAME reward at each step.** The team
+reward is a network aggregate; so is the threshold reward, summed over segments. With
+a common reward the reward SEQUENCES are identical across agents, so the whole
+cross-agent variation in the advantage comes from the critic's value estimates.
+
+At the vehicle level that is not a defect, it is the configuration under test: a
+shared reward that does not respond to an individual action is precisely the
+credit-assignment problem. The measurement says so cleanly.
+
+But it means a null on those arms cannot distinguish two things:
+
+- the reward does not respond to individual actions;
+- nothing responds to individual actions.
+
+**Only an unshared reward separates them**, and exactly two arms have one: the
+per-agent local reward of task 103, and the segment-as-agent arm paid its own term.
+The first was measured only against the permutation floor that has since been shown
+invalid -- its reading was one of the four results retracted -- and the second had not
+been run. Both are now queued against the valid null. They are the arms that decide
+whether an unshared reward produces signal where a shared one cannot.
+
+It also explains why the shared-reward segment arm reads consistently negative:
+with a common reward its advantage is essentially a function of the untrained critic,
+and both the advantage and the action are then functions of the same observation
+through independently initialised networks. Task 123.
+
 ## A property of the operating point that bounds every comparison here
 
 The network is bistable. Five seeds of identical demand on an identical, structurally
