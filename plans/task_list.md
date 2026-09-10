@@ -2470,6 +2470,117 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+105. **THE ADVANTAGE CARRIES NO ACTION SIGNAL, and the speed bins are why.**
+     Measured 2026-09-10 with `scripts/measure_gradient_signal.py`. This is the
+     answer to why tasks 96 and 101 produced no learning, and it retracts four
+     comparisons made earlier the same day.
+
+     **The instrument, and the two controls it needed.** With advantages normalised
+     to unit standard deviation, the norm of `d(policy_loss)/d(actor)` measures how
+     much the advantage CORRELATES with the action: a term uncorrelated with the
+     action cancels across the batch and the norm falls as 1/sqrt(N), while an
+     aligned one adds. `policy_loss` itself says nothing -- at a probability ratio
+     of 1 it is minus the mean normalised advantage, which is zero by construction
+     however informative the advantage is, which is why task 96 could not settle
+     this from the loss.
+
+     The floor is the same advantages permuted across the batch: identical
+     distribution, no correlation with the action. The ceiling is an advantage built
+     to correlate with the action, +1 where the policy chose `slow` and -1
+     otherwise. Three seeds, 17,296 decisions on the shipped configuration:
+
+     | advantage | gradient norm | over the floor |
+     |---|---|---|
+     | as measured | 0.0499 | **0.784** |
+     | shuffled (the floor) | 0.0637 | 1.000 |
+     | action-correlated (the ceiling) | 1.5971 | **25.1** |
+
+     **The advantage sits at its own noise floor and the instrument can read
+     twenty-five times it.** PPO therefore has nothing to ascend, which is exactly
+     what a policy frozen at 99% of maximum entropy looks like.
+
+     **Every arm tried is at the floor.** Same instrument, same controls:
+
+     | arm | measured over floor |
+     |---|---|
+     | team reward alone | 0.784 |
+     | per-agent neighbourhood reward, blended 0.5 | 0.850 |
+     | per-agent own-vehicle reward | 0.750 |
+     | both together | 0.696 |
+     | action held 1 s / 5 s / 20 s | 0.784 / 0.927 / 0.945 |
+     | discount horizon 10 to 1000 decisions | within a factor of 1.1 |
+
+     **FOUR RESULTS RETRACTED, all from the same session.** Before the floor existed
+     I reported that the per-agent reward lowered the policy gradient (a paired ratio
+     of 0.962), that the discount horizon does not matter, that privileged critic
+     features do not help the gradient, and that a longer action hold does not help.
+     Each was a comparison between two floors and none of them carried information.
+     The paired construction was sound -- identical trajectories, verified by
+     transition count and action sums -- and it was measuring a quantity that could
+     not move.
+
+     **What still stands from that work.** The critic regression, which is a
+     different statistic: giving the centralized critic the agent's own
+     neighbourhood raises out-of-sample R2 on the per-agent return from 0.808 to
+     0.886, and leaves it at 0.854 against 0.858 under the team reward, which is the
+     control that says the improvement is about the per-agent term. And the reward
+     counterfactual of task 104, which is about the reward and not the advantage:
+     one agent's action moves its own neighbourhood reward 17.8 times what its
+     neighbours' actions move it. Both are real; neither reaches the gradient.
+
+     **THE CAUSE. The action is inert on 97% of decisions.** `decode_speed_bin`
+     returns `free_flow + offset` for offsets of -10, -3 and 0 m/s with a 12 m/s
+     floor, so at a 30 m/s limit the three values are 20, 27 and 30 m/s.
+     `setSpeed` is an upper bound that SUMO's car-following dominates, so on a
+     vehicle already slower than the commanded value all three do the same thing. Of
+     the 17,296 decisions above, **511 -- 3.0% -- were taken on a vehicle moving fast
+     enough for the command to bind.** On that subset the ratio is 1.605, but at
+     about 170 decisions per seed the per-seed values are 0.416, 3.811 and 0.588,
+     which is too few to conclude. The 15.6% figure in task 104 is over AV-STEPS; 3%
+     is over AV-DECISIONS, which is the population the gradient is built from.
+
+     **The seed-7 run of task 103 is reported as a null in advance of finishing.**
+     Nine of 25 updates at the time of writing: entropy 2.1847, 2.1783, 2.1811,
+     2.1875, 2.1835, 2.1821, 2.1832, 2.1854, 2.1869 against a maximum of 2.1972 --
+     flat to within 0.009, which is 0.4% of the range -- and the score random-walking
+     between -0.254 and +0.119. It was left running rather than killed, so the
+     pre-registered gate is read on the run as specified rather than on a run
+     stopped when its numbers were disliked.
+
+     **What this does NOT say.** It does not say a decentralised policy cannot help
+     here. It says that with an action whose three values are indistinguishable on 97%
+     of the decisions taken, no reward decomposition, discount horizon, critic input
+     or hold length can produce a gradient, and none of the changes in task 103 could
+     have worked. The environment question -- whether there is headroom at this
+     operating point -- is still open and separate.
+
+     **THE DECISION THIS NEEDS, and it is the user's.** Rescaling the speed bins
+     changes what `desired_speed_bin` means on both sides of the deployed contract:
+     the phone executes it and the Jetson logs it. Task 86 recorded that as the
+     user's call and it now blocks the simulation leg. The options, with what each
+     costs:
+
+     1. **Keep the offsets, lower the floor, and make the context the local
+        conditions rather than the lane limit.** `decode_speed_bin` already takes a
+        `free_flow_speed_mps` argument; the SUMO env passes the lane limit. Passing
+        the segment's prevailing speed and dropping the 12 m/s floor makes `slow`
+        bind wherever the vehicle is moving. The head keeps its three names and its
+        meaning becomes relative rather than absolute.
+     2. **Rescale the offsets to a congested range**, for instance multiplicative
+        0.6 / 0.85 / 1.0 of the vehicle's current achievable speed. Same effect,
+        expressed on the action rather than on the context.
+     3. **Leave the contract alone and change the operating point** so the traffic
+        runs near 20 m/s, where the existing bins bind. That means a demand below
+        the capacity collapse, which is the regime where the metering oracle
+        measured +7.6 +/- 15.2 -- the one positive figure on record.
+     4. **Leave everything and report the simulation leg as a null**, with this
+        measurement as the reason.
+
+     Recommendation: option 1. It is the smallest change that makes the head
+     functional, it is what the argument name already says the parameter is, and it
+     leaves the three action names -- which is what the deployed executor and the
+     logs carry -- untouched.
+
 104. **The credit-assignment diagnosis is now measured, and the speed head is
      inert on 84% of decisions.** Measured 2026-09-10 by
      `scripts/measure_credit_signal.py` while the task 103 run was in flight. Both
