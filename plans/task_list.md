@@ -2470,6 +2470,71 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+113. **PRE-REGISTERED: the predecessor paper's formulation, ported.** Written
+     2026-09-10 BEFORE the run finishes, and before any of its numbers are seen.
+     Ankit's instruction was to read the paper and port its reward; reading it showed
+     the gap is not the reward alone.
+
+     **What the paper actually does** (arXiv:2506.11973), against what this project
+     built:
+
+     | | the paper | `mappo_sumo` |
+     |---|---|---|
+     | agent | ONE centralized agent over all segments | ~39 independent AVs |
+     | action | max speed for a 2-3 km super-segment | one vehicle's speed bin |
+     | speed values | 30/45/60 km/h = 8.3/12.5/16.7 m/s | 20/27/30 m/s |
+     | decision interval | 60 s | 1 s |
+     | gamma | 0.9 per minute, ~10 min | 0.99 per second, 100 s |
+     | observation | per-super-segment density, speed, gap, inflow, outflow | per-vehicle kinematics |
+     | reward | `-alpha * 1[rho > rho*] + beta * v`, two terms | eleven weighted terms |
+     | network | real highway, Mainz, ramp inflows | symmetric six-branch merge tree |
+     | AVs | the compliance mechanism, 25/50/75/100% ablation | independent decision-makers |
+
+     **Its action sets a speed limit over kilometres of road for a whole minute; ours
+     set one vehicle's speed for one second.** That is the credit-assignment problem
+     and the paper never had it. It also means tasks 105 to 108 do NOT predict this
+     run: every one of those measurements was taken with a one-second lever, and what
+     changes here is the lever rather than any knob they varied.
+
+     **What `mappo_src` changes**, all of it from the paper: the two-term threshold
+     reward at rho* = 0.3 of jam density; absolute speed bins of 8.33/12.5/16.67 m/s;
+     one decision a minute with gamma 0.9; and
+     `downstream_congestion_estimate` corrected to read the density of the link
+     AHEAD, ungated on having an AV peer, so that co-located agents see the same
+     thing and can act coherently. Decentralized execution is unchanged: nothing
+     reads a global state at run time.
+
+     **THE GATE, the same three criteria as task 103 and with criterion 3 given the
+     numeric threshold it lacked.** Read off seed 7's training curve:
+
+     1. summed entropy below 1.978, which is 90% of ln 9 = 2.197;
+     2. the score trends up by more than the standard deviation of the change
+        between consecutive updates;
+     3. **the joint modal action share exceeds 0.20**, against a uniform 1/9 = 0.111
+        and against the 0.138 a randomly initialised network already reads. "A clear
+        margin" was not a threshold and is the defect recorded as task 109.
+
+     **Then, and only if the gate passes**, the learned arm against `no_av` on
+     evaluation seeds disjoint from training: completed trips as the primary metric,
+     paired, two standard errors; mean delay, stopped fraction and jerk beside it.
+
+     **What a null would mean here, stated now.** Two caveats are already on record
+     and neither is created after the fact. The paper's rho* = 0.3 barely fires on
+     this road -- measured over three seeds, only `tree_middle_b1` crosses it, with
+     peak ratios of 0.03 to 0.25 on the leaves, 0.33 on b1, 0.29 on b2 and 0.12 on
+     the trunk -- so the reward is effectively "keep the bottleneck below critical
+     and go fast elsewhere". And the network is a merge tree with fixed routes to one
+     exit, where throughput is set by gap acceptance at the junction, while the paper
+     ran a real highway with ramp inflows. A null would therefore not separate "the
+     formulation does not transfer" from "the threshold never fired" or from "this
+     road has no capacity to recover".
+
+     **The measurement that would settle the first of those** is a critical ratio
+     taken from this network's own fundamental diagram instead of imported. A first
+     attempt pooled segments and produced a non-monotone curve, because a trunk at
+     1890 veh/h and a leaf at 350 do not belong on one axis; it has to be per
+     segment.
+
 112. **The one arm with a positive reading, on ten seeds: 1.66 standard errors,
      which does not clear the bar and is not nothing.** Measured 2026-09-10 by
      `scripts/measure_full_penetration_signal.py`, settling the loose end task 110
