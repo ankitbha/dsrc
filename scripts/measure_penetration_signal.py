@@ -50,7 +50,7 @@ def gradient_norm(trainer, batch, advantages, clip):
 
 
 print(f"{'demand':>20} {'pen':>5} {'agents':>7} {'meas/floor':>11} "
-      f"{'oracle':>7} {'implied corr':>13}")
+      f"{'ceiling':>7} {'implied corr':>13}")
 for demand in ("sumo_saturating", "sumo_capacity_drop"):
     for penetration in (0.25, 0.5, 1.0):
         trainers_module.BasePPOTrainer.env_config = with_penetration(penetration)
@@ -69,10 +69,10 @@ for demand in ("sumo_saturating", "sumo_capacity_drop"):
                 permutation = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
                 shuffled = gradient_norm(trainer, batch, batch.advantages[permutation],
                                          base_p.clip_coef)
-                oracle_advantage = (batch.actions[:, 0] == 0).float() * 2.0 - 1.0
-                oracle_advantage = ((oracle_advantage - oracle_advantage.mean())
-                                    / (oracle_advantage.std() + 1e-8))
-                ceilings.append(gradient_norm(trainer, batch, oracle_advantage,
+                ceiling_advantage = (batch.actions[:, 0] == 0).float() * 2.0 - 1.0
+                ceiling_advantage = ((ceiling_advantage - ceiling_advantage.mean())
+                                    / (ceiling_advantage.std() + 1e-8))
+                ceilings.append(gradient_norm(trainer, batch, ceiling_advantage,
                                               base_p.clip_coef) / max(shuffled, 1e-12))
                 ratios.append(measured / max(shuffled, 1e-12))
                 agents.append(float(metrics.get("active_av_count", 0) or 0))

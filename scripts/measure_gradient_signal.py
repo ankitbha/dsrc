@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """Is the policy-gradient norm above its own noise floor at all?
 
+TWO SENSES OF THE WORD "ORACLE" WERE CONFLATED and one is gone from this file. The
+metering oracle elsewhere in this project is a CONTROLLER: perfect state, hand
+written, it drives real vehicles and is measured on vehicles served. The quantity
+below was also called an oracle and is not a controller at all -- it drives nothing.
+It is a synthetic advantage vector, +1 where the policy chose one particular value
+and -1 otherwise, injected into the gradient formula to check that the statistic can
+move. It is the instrument's CEILING and is named that here.
+
+THE FLOOR NEEDS ITS OWN ERROR BAR, which this script does not give it: it takes ONE
+permutation, which is a single draw from the floor's distribution rather than the
+floor. Measured with 60 permutations by
+`scripts/measure_gradient_floor_distribution.py`, that distribution has a standard
+deviation of 20 to 30% of its mean, so a ratio of 1.4 from this script is inside it.
+Read the two together, and prefer the z-score the other one reports.
+
     .venv/bin/python scripts/measure_gradient_signal.py
 
 THIS IS THE INSTRUMENT THAT SHOULD HAVE BEEN BUILT FIRST. Before it existed, four
@@ -22,7 +37,7 @@ Three arms on the SAME batch:
   measured  the advantages as computed;
   shuffled  the same advantages permuted across the batch, which destroys any
             correlation with the action while keeping the distribution exactly;
-  oracle    an advantage constructed to correlate perfectly with the action
+  ceiling   a SYNTHETIC advantage constructed to correlate perfectly with the action
             (+1 where the policy chose `slow`, -1 otherwise), which is what a strong
             signal looks like on this batch.
 
@@ -54,7 +69,7 @@ def gradient_norm(trainer, batch, advantages, clip):
                                 if q.grad is not None)))
 
 
-results = {"measured": [], "shuffled": [], "oracle": []}
+results = {"measured": [], "shuffled": [], "ceiling": []}
 for seed in (7, 17, 27):
     seed_everything(0)
     t = dataclasses.replace(base_t, rollout_steps=150,
@@ -71,16 +86,16 @@ for seed in (7, 17, 27):
         gradient_norm(trainer, batch, batch.advantages[permutation], base_p.clip_coef))
     # Column 0 of the action indices is `desired_speed_bin`; index 0 is `slow`.
     chose_slow = (batch.actions[:, 0] == 0).float()
-    oracle = (chose_slow * 2.0 - 1.0)
-    oracle = (oracle - oracle.mean()) / (oracle.std() + 1e-8)
-    results["oracle"].append(gradient_norm(trainer, batch, oracle, base_p.clip_coef))
+    ceiling = (chose_slow * 2.0 - 1.0)
+    ceiling = (oracle - oracle.mean()) / (oracle.std() + 1e-8)
+    results["ceiling"].append(gradient_norm(trainer, batch, ceiling, base_p.clip_coef))
     print(f"  seed {seed}: n {n}, slow share {float(chose_slow.mean()):.3f}", flush=True)
 
 print()
-for label in ("measured", "shuffled", "oracle"):
+for label in ("measured", "shuffled", "ceiling"):
     values = results[label]
     print(f"  {label:>9}: {statistics.fmean(values):.6f}  {[round(v, 5) for v in values]}")
 print(f"\n  measured / shuffled = "
       f"{statistics.fmean(results['measured'])/statistics.fmean(results['shuffled']):.3f}")
-print(f"  oracle   / shuffled = "
-      f"{statistics.fmean(results['oracle'])/statistics.fmean(results['shuffled']):.3f}")
+print(f"  ceiling  / shuffled = "
+      f"{statistics.fmean(results['ceiling'])/statistics.fmean(results['shuffled']):.3f}")

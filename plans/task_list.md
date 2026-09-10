@@ -2470,6 +2470,61 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+111. **RESULT of the pre-registered run, and it is a null on all three criteria.**
+     Read 2026-09-10 by `scripts/read_training_gate.py` on the completed 25 updates
+     of seed 7.
+
+     | criterion | bar | measured | verdict |
+     |---|---|---|---|
+     | 1: summed entropy falls | below 1.9775, which is 90% of 2 ln 3 | lowest 2.1754, first 2.1847, range 0.0147 | **fail** |
+     | 2: the score trends up | move exceeds the step-to-step standard deviation | move -0.1091, step sd 0.2186 | **fail** |
+     | 3: the action distribution leaves uniform | "a clear margin" -- no threshold, see task 109 | joint modal share 0.1502 against 0.1111 uniform and 0.1378 at initialisation | **fail** |
+
+     Final head probabilities over 300 decisions: `desired_speed_bin` 0.393 / 0.263
+     / 0.344 at entropy 1.0854, `desired_headway_bin` 0.313 / 0.305 / 0.382 at
+     1.0934, both against a 1.0986 maximum. **Most of the departure from uniform is
+     the network's initialisation, which already reads 0.1378.**
+
+     The gate required all three and none is met. The five changes of task 103 are
+     reported as a null, and tasks 105 to 110 say why none of them could have
+     worked.
+
+110. **A DEFECT IN MY OWN INSTRUMENT, found by Ankit: the floor had no error bar.**
+     Every ratio in tasks 105 to 107 divided the measured gradient norm by the norm
+     from ONE random permutation of the advantages. One permutation is a single draw
+     from the floor's distribution, not the floor. Ankit's question was direct:
+     several arms read 10% or more above 1.0, so why are they called floor readings?
+
+     **Measured with 60 permutations per rollout, three seeds, reporting where the
+     measured value sits in the floor's own distribution in standard deviations:**
+
+     | arm | floor mean | floor sd | mean z |
+     |---|---|---|---|
+     | `sumo_capacity_drop`, penetration 0.25 | 0.054 | 0.016 | -0.10 |
+     | `sumo_saturating`, penetration 0.25 | 0.088 | 0.025 | -0.01 |
+     | `sumo_saturating`, penetration 1.00 | 0.042 | 0.011 | **+0.82** |
+     | `sumo_capacity_drop`, gamma 0.999 | 0.052 | 0.013 | +0.33 |
+
+     **The floor's standard deviation is 20 to 30% of its mean.** So the ratios of
+     1.12, 1.27 and 1.40 that looked like improvements are inside one standard
+     deviation of the floor's sampling noise, and the per-seed z values swing from
+     -0.30 to +1.45 on the same arm. The conclusion of tasks 105 to 107 survives,
+     but it was not properly supported until now: the correct statistic is the
+     z-score against a permutation distribution, not a ratio against one draw.
+
+     **The largest reading is penetration 1.00 at +0.82**, which is under one
+     standard deviation on three seeds and is nothing on its own. It is the one arm
+     worth more seeds if the question is ever reopened.
+
+     **A NAMING ERROR OF MINE, also from Ankit's question.** "Oracle" was used for
+     two unrelated things and they read as contradictory. The **metering oracle** is
+     a CONTROLLER: perfect state, hand-written, it drives real vehicles and serves
+     -0.8 and +0.8 more of them than no control. The "oracle" in the gradient probes
+     drives nothing -- it is a synthetic advantage vector, +1 where the policy chose
+     one value and -1 otherwise, injected into the gradient formula to check the
+     statistic can move at all. One is about traffic, the other calibrates a
+     measuring instrument. It is renamed **ceiling** throughout the scripts.
+
 109. **A defect in my own pre-registration, recorded before the final numbers.**
      Task 103's criterion 3 reads "the modal action's share exceeds 1/9 by a clear
      margin". **"A clear margin" is not a threshold**, so unlike criteria 1 and 2 it

@@ -39,7 +39,7 @@ def gradient_norm(trainer, batch, advantages, clip):
                                 if q.grad is not None)))
 
 
-print(f"{'actor':>14} {'meas/floor':>11} {'per seed':>28} {'oracle':>7} {'implied corr':>13}")
+print(f"{'actor':>14} {'meas/floor':>11} {'per seed':>28} {'ceiling':>7} {'implied corr':>13}")
 for label in ("fresh", "trained"):
     ratios, ceilings = [], []
     for seed in (7, 17, 27):
@@ -58,9 +58,9 @@ for label in ("fresh", "trained"):
         permutation = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
         shuffled = gradient_norm(trainer, batch, batch.advantages[permutation],
                                  base_p.clip_coef)
-        oracle = (batch.actions[:, 0] == 0).float() * 2.0 - 1.0
-        oracle = (oracle - oracle.mean()) / (oracle.std() + 1e-8)
-        ceilings.append(gradient_norm(trainer, batch, oracle, base_p.clip_coef)
+        ceiling = (batch.actions[:, 0] == 0).float() * 2.0 - 1.0
+        ceiling = (oracle - oracle.mean()) / (oracle.std() + 1e-8)
+        ceilings.append(gradient_norm(trainer, batch, ceiling, base_p.clip_coef)
                         / max(shuffled, 1e-12))
         ratios.append(measured / max(shuffled, 1e-12))
     r, c = statistics.fmean(ratios), statistics.fmean(ceilings)

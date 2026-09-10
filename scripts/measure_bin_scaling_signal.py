@@ -76,7 +76,7 @@ def gradient_norm(trainer, batch, advantages, clip):
 
 
 original = env_module.SumoTopologyEnv._apply_speed
-print(f"{'arm':>12} {'measured/floor':>15} {'per seed':>28} {'oracle/floor':>13} {'binds':>7}")
+print(f"{'arm':>12} {'measured/floor':>15} {'per seed':>28} {'ceiling/floor':>13} {'binds':>7}")
 for kind in ("shipped", "prevailing", "factor_a", "factor_b"):
     env_module.SumoTopologyEnv._apply_speed = make_apply(kind)
     bind_events["binding"] = bind_events["total"] = 0
@@ -95,9 +95,9 @@ for kind in ("shipped", "prevailing", "factor_a", "factor_b"):
             permutation = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
             shuffled = gradient_norm(trainer, batch, batch.advantages[permutation],
                                      base_p.clip_coef)
-            oracle = (batch.actions[:, 0] == 0).float() * 2.0 - 1.0
-            oracle = (oracle - oracle.mean()) / (oracle.std() + 1e-8)
-            ceilings.append(gradient_norm(trainer, batch, oracle, base_p.clip_coef)
+            ceiling = (batch.actions[:, 0] == 0).float() * 2.0 - 1.0
+            ceiling = (oracle - oracle.mean()) / (oracle.std() + 1e-8)
+            ceilings.append(gradient_norm(trainer, batch, ceiling, base_p.clip_coef)
                             / max(shuffled, 1e-12))
             ratios.append(measured / max(shuffled, 1e-12))
     finally:

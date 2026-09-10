@@ -49,8 +49,10 @@ advantage is.
 
 **Its two controls, without which every reading is uninterpretable.** The floor is
 the same advantages permuted across the batch: identical distribution, no correlation
-with the action. The ceiling is an advantage built to correlate with the action.
-Measured on the shipped configuration, three seeds, 17,296 decisions:
+with the action. The ceiling is a SYNTHETIC advantage built to correlate with the
+action -- it drives no vehicle and is not a controller; it exists to show the
+statistic can move. Measured on the shipped configuration, three seeds, 17,296
+decisions:
 
 | advantage | gradient norm | over the floor |
 |---|---|---|
@@ -73,6 +75,22 @@ ceiling on every arm:
 
 At 100% penetration the policy commands the entire fleet -- 168 vehicles at 2400
 veh/h -- and one agent's action still does not correlate with its own advantage.
+
+**Those ratios are against ONE permutation, which is a single draw from the floor and
+not the floor.** Estimated properly from 60 permutations per rollout, the floor's
+standard deviation is 20 to 30% of its mean, so every ratio above is inside it. The
+correct statistic is the z-score of the measured value in the permutation
+distribution:
+
+| arm | floor mean | floor sd | mean z over three seeds |
+|---|---|---|---|
+| `sumo_capacity_drop`, penetration 0.25 | 0.054 | 0.016 | -0.10 |
+| `sumo_saturating`, penetration 0.25 | 0.088 | 0.025 | -0.01 |
+| `sumo_saturating`, penetration 1.00 | 0.042 | 0.011 | +0.82 |
+| `sumo_capacity_drop`, gamma 0.999 | 0.052 | 0.013 | +0.33 |
+
+The largest is under one standard deviation. Penetration 1.00 is the only arm worth
+more seeds if the question is reopened.
 
 **The control on the instrument itself.** Every reading above was taken at a randomly
 initialised actor, so a rising correlation with training would invalidate them. A
