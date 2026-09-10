@@ -1,0 +1,66 @@
+id: sumo_burst
+kind: demand
+description: >-
+  Medium-high demand on inverted_tree under SUMO, interrupted by a burst of extreme
+  traffic that then falls back. The scenario a controller has to be measured on: a
+  shock it can absorb or fail to, rather than a steady state it can only hold.
+
+# Capacity measured at dt 0.1, 600 s episodes after 300 s of warm-up, no AVs, three
+# seeds. Throughput saturates near 900 veh/h; beyond that the extra demand does not
+# arrive, it queues:
+#
+#   veh/h   arrived/600s   delivered/h   deficit   mean speed
+#     900       148.3            890       1.1%       19.18
+#    1050       147.0            882      16.0%       13.34
+#    1200       151.3            908      24.3%        8.89
+#    1350       152.7            916      32.1%        7.18
+#    1500       158.3            950      36.7%        6.25
+#    1800       183.3           1100      38.9%        5.69
+#
+# EVERY EARLIER CAPACITY FIGURE IN THIS PROJECT IS SUPERSEDED. They were measured
+# at dt 1.0, where SUMO integrates the physics in 1 s steps and an uncommanded fleet
+# loses about a fifth of its throughput to the integration. See task 92.
+
+# 900 veh/h, just under the ~900-950 knee. The base rate has to be a demand the
+# network can actually sustain, or "recovery" means nothing: at 1050 the queue grows
+# without any burst at all -- mean speed falls from 15.1 to 5.5 m/s across an episode
+# and never returns -- so a controller would be measured against a network that was
+# failing on its own. At 900 the deficit is 1.1% and mean speed holds at 19.2, so the
+# network is at a steady state with no headroom, which is what makes the burst a
+# shock rather than the last straw.
+total_vehicles_per_hour: 900
+
+av_penetration: 0.2
+
+branch_split:
+  main: 1.0
+
+# The burst doubles the rate to 1800 veh/h for 150 s, twice the sustainable rate:
+# at 1800 the network delivers 1100 veh/h of what is offered, a 39% deficit, and
+# mean speed falls to 5.7 m/s. The window leaves 200 s of steady demand before it and
+# 550 s after, so a controller is measured on three things and not one -- how it
+# holds a steady state with no headroom, what it does while the network is
+# overloaded, and how quickly the queue clears once the demand falls back. The last
+# of those is the one a steady-state experiment cannot ask.
+#
+# The times are EPISODE times, measured from the first observed step, which is what
+# they mean on the other simulator. The SUMO env offsets them by the warm-up.
+burst:
+  enabled: true
+  start_s: 200.0
+  end_s: 350.0
+  multiplier: 2.0
+
+# Identical to sumo_saturating: the fleet is what the config declares rather than
+# the lane limit, cited in configs/training/mappo_sumo.yaml.
+speed_distribution:
+  mean_mps: 24.0
+  std_mps: 2.5
+  min_mps: 12.0
+  max_mps: 32.0
+
+# Consumed on highway_env, where it gates insertion. Not mapped on SUMO, which
+# enforces insertion feasibility through its car-following model instead; mapping it
+# to a vType minGap would change the standstill gap and so jam density, which is a
+# different quantity. See task 88.
+spawn_min_gap_m: 12.0

@@ -67,7 +67,10 @@ warmup_steps: 3000
 # at 120 steps against +0.82 at 600, because `jam_fraction` at weight -2.0 grows as
 # the network fills. Any statement of the form "the team reward is about X" needs
 # the episode length attached to it.
-# 6000 steps at dt 0.1 is the same 600 s episode as 600 steps at dt 1.0.
+# 9000 steps at dt 0.1 is a 900 s episode: 200 s of steady demand, a 150 s burst,
+# and 550 s to recover. The last of those is what sets the length -- the network
+# takes about seven minutes to clear the queue the burst leaves, and an episode that
+# ends before it does cannot measure a controller on the recovery.
 #
 # The arm table this comment used to carry is RETRACTED. It recorded that AVs held
 # at 10 m/s complete 155.2 trips against 132.0 uncommanded, a 17.6% gain, and that
@@ -90,14 +93,19 @@ warmup_steps: 3000
 #
 # The full arm table at dt 0.1 is in plans/plan_task_84_sumo_simulator.md and is
 # produced by scripts/measure_commanded_arms.py.
-duration_steps: 6000
+duration_steps: 9000
 
 # The one topology section C is scoped to.
 topology: inverted_tree
 
-# 1050 veh/h, past the ~900 veh/h knee where arrivals peak. See the config file for
-# the sweep.
-demand: sumo_saturating
+# A medium-high steady state, a burst of extreme traffic, and a fall back to the
+# steady state. A controller measured only on a steady state can be judged on one
+# thing, how well it holds; this scenario also asks what it does while the network is
+# overloaded and how quickly it clears the queue afterwards. Profiled with no AVs at
+# dt 0.1: mean speed holds near 19 m/s, falls to 7.5 and the queue peaks at 40
+# vehicles four minutes after the burst, then recovers to 17.7 m/s with the queue
+# back to 6 by the end of the episode.
+demand: sumo_burst
 
 algorithm: mappo
 policy_mode: ctde
@@ -108,7 +116,7 @@ total_updates: 100
 # first `rollout_steps` of an episode: at 512 it saw the first 512 s of a 600 s
 # episode and never the last 88, and at dt 0.1 it would have seen the first 51 s of
 # 600 -- entirely inside the window where the throughput effect does not yet exist.
-rollout_steps: 6000
+rollout_steps: 9000
 
 # Every value here has a named source. `src/sensing/local.py` reads exactly these
 # five plus the bin edges, and they define the actor's entire input distribution.

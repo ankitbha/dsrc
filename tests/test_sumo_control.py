@@ -233,13 +233,124 @@ class TestTheDemandLastsTheWholeEpisode:
         finally:
             env.close()
 
-    def test_the_flow_end_covers_warmup_plus_duration(self, tmp_path):
+    def test_the_schedule_covers_warmup_plus_duration(self, tmp_path):
         env = _env(tmp_path, duration_steps=600, warmup_steps=300)
         try:
             env.reset(seed=7)
             routes = (env.work_dir / "demand.rou.xml").read_text()
-            ends = {line.split('end="')[1].split('"')[0]
-                    for line in routes.splitlines() if "<flow" in line}
-            assert ends == {"900.0"}, f"flow end is {ends}, expected 900.0"
+            departs = [float(line.split('depart="')[1].split('"')[0])
+                       for line in routes.splitlines() if "<vehicle " in line]
+            assert departs, "no vehicles were scheduled"
+            # 900 s of simulation: a 300-step warm-up and a 600-step episode at
+            # dt 1.0. The last departure must be near the end of it, or the episode
+            # finishes on a draining network.
+            assert max(departs) > 850.0, (
+                f"the last vehicle departs at {max(departs):.1f} s of a 900 s run"
+            )
+            assert min(departs) < 50.0
         finally:
             env.close()
+
+
+class TestEveryActionHeadActuates:
+    """Three of the four heads of the action contract reached the simulator
+    nowhere: the headway bin changed an observation field and nothing else, and
+    lane preference and merge mode were discarded in `_apply_actions`. A policy
+    trained on the `full` profile was choosing three of its four outputs against no
+    consequence, which is not a control experiment.
+    """
+
+    def _run(self, tmp_path, action, steps=400):
+        import src.sumo.env as env_module
+
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": steps, "dt": 0.1, "warmup_steps": 3000,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            taus, left_lane, total = [], 0, 0
+            for _ in range(steps):
+                env.step({agent_id: dict(action) for agent_id in list(env.agent_ids)})
+                for agent_id in list(env.agent_ids):
+                    taus.append(float(env_module._sumo.vehicle.getTau(agent_id)))
+                    left_lane += int(env_module._sumo.vehicle.getLaneIndex(agent_id)) == 1
+                    total += 1
+            return {
+                "tau": sum(taus) / max(len(taus), 1),
+                "left_fraction": left_lane / max(total, 1),
+                "requests": env.lane_change_requests,
+            }
+        finally:
+            env.close()
+
+    def _action(self, **overrides):
+        action = {"desired_speed_bin": "fast", "desired_headway_bin": "normal",
+                  "lane_preference": "keep", "merge_mode": "normal"}
+        action.update(overrides)
+        return action
+
+    def test_the_headway_bin_becomes_the_car_following_tau(self, tmp_path):
+        normal = self._run(tmp_path, self._action(desired_headway_bin="normal"))
+        largest = self._run(tmp_path, self._action(desired_headway_bin="largest"))
+        assert normal["tau"] == pytest.approx(1.6, abs=0.05)
+        assert largest["tau"] == pytest.approx(3.0, abs=0.05)
+
+    def test_create_gap_adds_the_declared_merge_bonus(self, tmp_path):
+        without = self._run(tmp_path, self._action(desired_headway_bin="largest"))
+        with_gap = self._run(tmp_path, self._action(desired_headway_bin="largest",
+                                                    merge_mode="create_gap"))
+        # 0.8 s is `SafetyConstraints.merge_gap_headway_bonus_s`, which exists for
+        # exactly this, rather than a number invented here.
+        assert with_gap["tau"] - without["tau"] == pytest.approx(0.8, abs=0.05)
+
+    def test_lane_preference_moves_the_fleet_between_lanes(self, tmp_path):
+        # 600 steps, which is 60 s at dt 0.1. AVs enter in the right lane and
+        # migrate, so the occupancy shift accumulates: it is +0.095 after 40 s and
+        # +0.19 after 60 s.
+        keep = self._run(tmp_path, self._action(lane_preference="keep"), steps=600)
+        left = self._run(tmp_path, self._action(lane_preference="prefer_left_if_safe"),
+                         steps=600)
+        right = self._run(tmp_path, self._action(lane_preference="prefer_right_if_safe"),
+                          steps=600)
+        assert keep["requests"] == 0, "keeping lane should request no change"
+        assert left["requests"] > 100 and right["requests"] > 100
+        assert left["left_fraction"] > keep["left_fraction"] + 0.1, (
+            f"preferring left put {left['left_fraction']:.3f} of AV-steps in the left "
+            f"lane against {keep['left_fraction']:.3f} when keeping"
+        )
+        assert right["left_fraction"] < keep["left_fraction"] - 0.1
+
+    def test_hold_lane_suppresses_changes(self, tmp_path):
+        import src.sumo.env as env_module
+
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "duration_steps": 60, "dt": 0.1, "warmup_steps": 3000,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            for _ in range(60):
+                env.step({agent_id: self._action(merge_mode="hold_lane",
+                                                 lane_preference="prefer_left_if_safe")
+                          for agent_id in list(env.agent_ids)})
+            assert env.lane_change_requests == 0, (
+                f"hold_lane still requested {env.lane_change_requests} lane changes"
+            )
+            for agent_id in list(env.agent_ids):
+                assert env_module._sumo.vehicle.getLaneChangeMode(agent_id) == 0
+        finally:
+            env.close()
+
+    def test_an_unsafe_change_is_still_sumos_to_refuse(self, tmp_path):
+        # The requests are asks. SUMO's lane-change model may refuse any of them,
+        # and the mode is the library default rather than one that forces a change,
+        # because a controller that could force an unsafe change would defeat the
+        # reason this simulator was chosen.
+        assert SumoTopologyEnv.LANE_CHANGE_MODE == 1621
+        left = self._run(tmp_path, self._action(lane_preference="prefer_left_if_safe"))
+        assert left["left_fraction"] < 1.0, (
+            "every AV-step ended in the left lane, so no request was ever refused"
+        )

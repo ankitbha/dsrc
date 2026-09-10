@@ -487,20 +487,26 @@ class TestVehiclesEnterAtTheirDesiredSpeed:
     visible, so the route file is what this asserts.
     """
 
-    def test_the_flows_declare_the_desired_departure_speed(self, tmp_path):
+    def test_the_schedule_declares_the_desired_departure_speed(self, tmp_path):
+        # 120 s, not 5. Each entry carries a sixth of the demand, so its headway is
+        # about 20 s and the first vehicle departs half a headway in; a five-second
+        # run schedules nothing at all.
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
-            "duration_steps": 5, "dt": 1.0, "warmup_steps": 0,
+            "duration_steps": 120, "dt": 1.0, "warmup_steps": 0,
             "work_dir": str(tmp_path)})
         env.reset(seed=1)
         try:
             routes = (env.work_dir / "demand.rou.xml").read_text()
-            flows = [line for line in routes.splitlines() if "<flow " in line]
-            assert len(flows) == 6, f"expected one flow per entry, got {len(flows)}"
-            for flow in flows:
-                assert 'departSpeed="desired"' in flow, (
-                    f"a flow does not declare its departure speed: {flow.strip()}"
+            # Vehicles rather than flows: a flow cannot express a demand that
+            # changes over time without being split, and splitting it loses
+            # vehicles. See TestDemandPeriodsDoNotLoseVehicles.
+            vehicles = [line for line in routes.splitlines() if "<vehicle " in line]
+            assert vehicles, "no vehicles were scheduled"
+            for vehicle in vehicles:
+                assert 'departSpeed="desired"' in vehicle, (
+                    f"a vehicle does not declare its departure speed: {vehicle.strip()}"
                 )
         finally:
             env.close()
@@ -588,3 +594,87 @@ class TestAFreshEpisodeReportsNoStaleMetrics:
             assert env.get_global_state()["step_metrics"] == {}
         finally:
             env.close()
+
+
+class TestDemandPeriodsDoNotLoseVehicles:
+    """The demand config's `burst` block was accepted and ignored on SUMO, so a
+    config declaring a burst produced a flat demand. The first implementation wrote
+    one `<flow>` per period, which loses vehicles: three sequential flows carrying
+    the same total rate as one delivered 71 departures against 150 over the same
+    episode. The departure schedule is now written explicitly, one vehicle at a
+    time, and SUMO still decides whether each can enter.
+    """
+
+    def _departures(self, tmp_path, burst=None, rate=900.0, steps=6000):
+        import src.sumo.env as env_module
+
+        demand = dict(load_named_config("demand", "sumo_saturating"))
+        demand["total_vehicles_per_hour"] = rate
+        if burst is not None:
+            demand["burst"] = burst
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": demand, "duration_steps": steps, "dt": 0.1,
+            "warmup_steps": 3000, "work_dir": str(tmp_path)})
+        env.reset(seed=7)
+        try:
+            per_minute = [0] * (steps // 600)
+            total = 0
+            for step in range(steps):
+                env.step({})
+                departed = len(env_module._sumo.simulation.getDepartedIDList())
+                total += departed
+                per_minute[min(len(per_minute) - 1, int(step * 0.1 // 60))] += departed
+            return total, per_minute
+        finally:
+            env.close()
+
+    def test_splitting_the_demand_into_periods_changes_nothing_on_its_own(self, tmp_path):
+        # The control that caught the defect: a burst whose multiplier is 1.0 splits
+        # the schedule into three periods and must deliver exactly what one period
+        # delivers.
+        flat, _ = self._departures(tmp_path)
+        split, _ = self._departures(tmp_path, burst={
+            "enabled": True, "start_s": 200.0, "end_s": 400.0, "multiplier": 1.0})
+        assert flat == split, (
+            f"one period delivered {flat} departures and three delivered {split}; "
+            "splitting the schedule must not change the demand"
+        )
+
+    def test_the_declared_demand_is_delivered(self, tmp_path):
+        # 900 veh/h over a 600 s episode is 150 vehicles.
+        total, _ = self._departures(tmp_path)
+        assert total == pytest.approx(150, abs=6), f"{total} departures against 150 declared"
+
+    def test_a_burst_raises_departures_inside_its_window_and_not_outside(self, tmp_path):
+        flat_total, flat_minutes = self._departures(tmp_path)
+        burst_total, burst_minutes = self._departures(tmp_path, burst={
+            "enabled": True, "start_s": 200.0, "end_s": 400.0, "multiplier": 2.0})
+        # The window is episode seconds 200-400, which is minutes 3 to 6.
+        inside = range(3, 7)
+        burst_inside = sum(burst_minutes[i] for i in inside)
+        flat_inside = sum(flat_minutes[i] for i in inside)
+        burst_outside = sum(b for i, b in enumerate(burst_minutes) if i not in inside)
+        flat_outside = sum(b for i, b in enumerate(flat_minutes) if i not in inside)
+        assert burst_inside > flat_inside * 1.4, (
+            f"the burst window carried {burst_inside} departures against "
+            f"{flat_inside} without a burst"
+        )
+        assert burst_outside == pytest.approx(flat_outside, abs=6), (
+            f"outside the window the burst run carried {burst_outside} departures "
+            f"against {flat_outside}; a burst must not change the base demand"
+        )
+        # 900 veh/h for 400 s plus 1800 for 200 s is 200 vehicles.
+        assert burst_total == pytest.approx(200, abs=10)
+        assert burst_total > flat_total
+
+    def test_the_burst_window_is_measured_from_the_start_of_the_episode(self, tmp_path):
+        # The config's times are episode times, as they are on the other simulator,
+        # so a burst declared at t=0 must land in the first minute of the episode
+        # and not during the warm-up.
+        _, minutes = self._departures(tmp_path, burst={
+            "enabled": True, "start_s": 0.0, "end_s": 120.0, "multiplier": 3.0})
+        assert minutes[0] + minutes[1] > minutes[5] + minutes[6] * 1.5, (
+            f"a burst declared at episode t=0 produced {minutes[:2]} departures in "
+            f"the first two minutes against {minutes[5:7]} later"
+        )

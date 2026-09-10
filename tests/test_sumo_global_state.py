@@ -566,7 +566,11 @@ class TestTheAntiDegenerateTermsAreMeasured:
         blocking, _ = self._run(tmp_path, commanded=5.0)
         idle_mean = sum(idle) / len(idle)
         blocking_mean = sum(blocking) / len(blocking)
-        assert blocking_mean > 0.15, (
+        # 0.10, measured at 0.1350. It was 0.3161 before the metering exemption,
+        # which now excuses the firings whose downstream segment was congested; the
+        # separation from uncommanded traffic is what this asserts, and that is
+        # still a factor of about 80.
+        assert blocking_mean > 0.10, (
             f"AVs held at 5 m/s scored {blocking_mean:.4f} on the term that exists "
             "to penalise exactly that"
         )

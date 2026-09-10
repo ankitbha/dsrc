@@ -34,7 +34,11 @@ from typing import Any
 
 import numpy as np
 
-from src.envs.wrappers import decode_headway_bin, decode_speed_bin
+from src.envs.wrappers import (
+    decode_headway_bin,
+    decode_speed_bin,
+    lane_preference_to_action,
+)
 from src.metrics.global_metrics import metric_thresholds_from_config
 from src.metrics.segment_metrics import compute_segment_metrics
 from src.safety import SafetyConstraints, SafetyState
@@ -79,6 +83,11 @@ class SumoTopologyEnv:
     #: place; anything that removes them would make the collision count read zero
     #: whatever happened.
     collision_action = "warn"
+    #: SUMO's default lane-change mode: the vehicle obeys its own safety checks and
+    #: may refuse a requested change. Named rather than left implicit because a
+    #: controller that could force an unsafe change would defeat the reason this
+    #: simulator was chosen.
+    LANE_CHANGE_MODE = 1621
 
     def __init__(self, topology_id: str, config: Mapping[str, Any]) -> None:
         self.topology_id = topology_id
@@ -138,6 +147,10 @@ class SumoTopologyEnv:
         #: New collisions this step, exposed so a test can tell a measured zero from
         #: a hardcoded one.
         self.new_collisions_last_step = 0
+        #: Lane changes the controller asked for. SUMO may refuse any of them, so
+        #: this counts requests and not changes; it is what tells an inert lane head
+        #: from one the policy simply does not use.
+        self.lane_change_requests = 0
 
     # ---------------------------------------------------------------- lifecycle
 
@@ -182,6 +195,7 @@ class SumoTopologyEnv:
         self._step_outflow = {}
         self._cached_segment_metrics = None
         self.new_collisions_last_step = 0
+        self.lane_change_requests = 0
         self._rng = np.random.RandomState(0 if seed is None else int(seed))
         self.step_count = 0
         self.collision_count = 0
@@ -364,33 +378,96 @@ class SumoTopologyEnv:
     # ---------------------------------------------------------------- actuation
 
     def _apply_actions(self, actions: Mapping[str, Any]) -> None:
-        """Turn each AV's action into a commanded speed.
+        """Actuate every head of the action contract.
 
         `setSpeed` rather than `setAcceleration`: SUMO applies its own safe-speed
         bound to whatever is asked either way, so speed is the more direct
         expression of what the controller decided and the bound stays SUMO's rather
         than being reimplemented here. Its safety guarantee is the reason for the
         migration, so nothing here may bypass it.
+
+        The other three heads previously reached the simulator nowhere: the
+        headway bin changed an observation field and nothing else, and lane
+        preference and merge mode were discarded. A policy trained on the `full`
+        profile was therefore choosing three of its four outputs against no
+        consequence, which is not a control experiment.
         """
         for agent_id, action in (actions or {}).items():
             if agent_id not in self.agent_ids:
                 continue
-            bin_name = (action or {}).get("desired_speed_bin")
-            if bin_name is None:
-                continue
-            allowed = float(_sumo.vehicle.getAllowedSpeed(agent_id))
-            try:
-                # Returns a contextual speed in m/s, not a factor.
-                target = float(decode_speed_bin(str(bin_name), free_flow_speed_mps=allowed))
-            except Exception:  # noqa: BLE001 - an unknown bin is a caller error
-                continue
-            self.command_speed(agent_id, target)
-            headway = (action or {}).get("desired_headway_bin")
-            if headway is not None:
-                try:
-                    self._target_headways[agent_id] = float(decode_headway_bin(str(headway)))
-                except Exception:  # noqa: BLE001
-                    pass
+            action = action or {}
+            self._apply_speed(agent_id, action.get("desired_speed_bin"))
+            self._apply_headway(agent_id, action.get("desired_headway_bin"),
+                                action.get("merge_mode"))
+            self._apply_lane(agent_id, action.get("lane_preference"),
+                             action.get("merge_mode"))
+
+    def _apply_speed(self, agent_id: str, bin_name: Any) -> None:
+        if bin_name is None:
+            return
+        allowed = float(_sumo.vehicle.getAllowedSpeed(agent_id))
+        try:
+            # Returns a contextual speed in m/s, not a factor.
+            target = float(decode_speed_bin(str(bin_name), free_flow_speed_mps=allowed))
+        except Exception:  # noqa: BLE001 - an unknown bin is a caller error
+            return
+        self.command_speed(agent_id, target)
+
+    def _apply_headway(self, agent_id: str, headway_bin: Any, merge_mode: Any) -> None:
+        """The desired time headway, as SUMO's own car-following parameter.
+
+        `setTau` is the direct expression of a desired headway: it is the tau of
+        the Krauss model the vehicle is already following, so asking for a larger
+        headway makes the vehicle keep one rather than merely reporting that it
+        wants to. `create_gap` adds the project's declared
+        `merge_gap_headway_bonus_s` on top, which is what that constant is for.
+        """
+        if headway_bin is None:
+            return
+        try:
+            target = float(decode_headway_bin(str(headway_bin)))
+        except Exception:  # noqa: BLE001 - an unknown bin is a caller error
+            return
+        if str(merge_mode) == "create_gap":
+            target += float(self._safety_constraints().merge_gap_headway_bonus_s)
+        self._target_headways[agent_id] = target
+        _sumo.vehicle.setTau(agent_id, target)
+
+    def _apply_lane(self, agent_id: str, lane_preference: Any, merge_mode: Any) -> None:
+        """A lane-change request, left for SUMO's lane-change model to accept.
+
+        `changeLane` asks; the model still refuses a change it considers unsafe,
+        which keeps the safety guarantee where the migration put it. `hold_lane`
+        suppresses changes outright by setting the lane-change mode to zero, and is
+        restored on the next step by any other action.
+
+        On a single-lane segment there is no lane to move to and the request is a
+        no-op. Six of this topology's nine segments have one lane, so this head is
+        actionable on a minority of steps; `lane_change_requests` counts how often.
+        """
+        if lane_preference is None and merge_mode is None:
+            return
+        if str(merge_mode) == "hold_lane":
+            _sumo.vehicle.setLaneChangeMode(agent_id, 0)
+            return
+        _sumo.vehicle.setLaneChangeMode(agent_id, self.LANE_CHANGE_MODE)
+        try:
+            candidate = lane_preference_to_action(str(lane_preference))
+        except KeyError:
+            return
+        if candidate is None:
+            return
+        edge_id = _sumo.vehicle.getRoadID(agent_id)
+        if edge_id.startswith(":"):
+            return  # inside a junction: no lane index to move within
+        lane_count = int(_sumo.edge.getLaneNumber(edge_id))
+        current = int(_sumo.vehicle.getLaneIndex(agent_id))
+        # SUMO numbers lanes from the right, so a higher index is further left.
+        target = current + 1 if candidate == "LANE_LEFT" else current - 1
+        if not 0 <= target < lane_count:
+            return
+        self.lane_change_requests += 1
+        _sumo.vehicle.changeLane(agent_id, target, float(self.config.get("dt", 1.0)))
 
     def command_speed(self, agent_id: str, speed_mps: float) -> float:
         """Ask SUMO to drive this AV at `speed_mps`, and report what was asked.
@@ -748,6 +825,39 @@ class SumoTopologyEnv:
 
     # ------------------------------------------------------------------ demand
 
+    def _demand_periods(self, duration_s: float, per_entry: float
+                        ) -> list[tuple[float, float, float]]:
+        """The demand rate per entry as (begin, end, vehicles per hour) periods.
+
+        A steady demand is one period. A burst is three: the base rate, the raised
+        rate, and the base rate again -- which is the shape
+        `DemandProfile.vehicles_per_hour_at` already describes on the other
+        simulator, where the multiplier applies inside [start_s, end_s] and 1.0
+        outside it. The config was accepted here and ignored, so a demand declaring
+        a burst produced a flat one.
+
+        The config's times are EPISODE times, because that is what they mean on the
+        other simulator, which has no warm-up. They are offset by the warm-up here
+        so a burst declared at t = 200 s lands 200 s into the observed episode
+        rather than during the fill.
+        """
+        burst = (self.config.get("demand", {}) or {}).get("burst", {}) or {}
+        if not bool(burst.get("enabled", False)):
+            return [(0.0, duration_s, per_entry)]
+        multiplier = float(burst.get("multiplier", 1.0))
+        offset = int(self.config.get("warmup_steps", 0)) * float(self.config.get("dt", 1.0))
+        start = max(0.0, offset + float(burst.get("start_s", 0.0)))
+        end = min(duration_s, offset + float(burst.get("end_s", 0.0)))
+        if end <= start:
+            return [(0.0, duration_s, per_entry)]
+        periods = []
+        if start > 0.0:
+            periods.append((0.0, start, per_entry))
+        periods.append((start, end, per_entry * multiplier))
+        if end < duration_s:
+            periods.append((end, duration_s, per_entry))
+        return periods
+
     def _write_routes(self) -> Path:
         """Demand as SUMO flows, one AV flow and one human flow per entry edge.
 
@@ -823,19 +933,39 @@ class SumoTopologyEnv:
             f' speedFactor="{speed_factor}" color="1,0,0" probability="{penetration:.4f}"/>',
             "  </vTypeDistribution>",
         ]
+        periods = self._demand_periods(duration_s, per_entry)
+        # An explicit departure schedule rather than `<flow>`, because a flow cannot
+        # express a demand that changes over time without being split, and splitting
+        # it loses vehicles: three sequential flows carrying the same total rate as
+        # one delivered 71 departures against 150 over the same episode. Every
+        # vehicle is written with its own departure time, so the schedule is exactly
+        # what the demand profile says.
+        #
+        # This is a departure SCHEDULE, not a spawner. SUMO still decides whether a
+        # vehicle can enter at its time and holds it until it can, which is the
+        # property that made flows worth using in the first place.
+        departures: list[tuple[float, int, str]] = []
         for index, edge in enumerate(entries):
             route = self.network.route_to_exit(edge)
             if not route:
                 continue
             edges = " ".join(route)
             lines.append(f'  <route id="r{index}" edges="{edges}"/>')
-            # One flow at the full rate, its type drawn from the distribution, so
-            # the arrival process is identical whatever the penetration is and the
-            # only thing penetration changes is which vehicles are controllable.
+            for begin, end, rate in periods:
+                if rate <= 0.0:
+                    continue
+                headway = 3600.0 / rate
+                # Offset by half a headway so the first vehicle of a period does not
+                # depart at the same instant as the last of the previous one.
+                time = begin + headway / 2.0
+                while time < end:
+                    departures.append((time, index, f"v{index}_{len(departures)}"))
+                    time += headway
+        # SUMO requires a route file sorted by departure time.
+        for time, index, vehicle_id in sorted(departures):
             lines.append(
-                f'  <flow id="f{index}" type="{self.MIX_TYPE}" route="r{index}"'
-                f' begin="0" end="{duration_s}" vehsPerHour="{per_entry:.3f}"'
-                f' departSpeed="desired"/>'
+                f'  <vehicle id="{vehicle_id}" type="{self.MIX_TYPE}"'
+                f' route="r{index}" depart="{time:.3f}" departSpeed="desired"/>'
             )
         lines.append("</routes>")
         route_file = self.work_dir / "demand.rou.xml"
