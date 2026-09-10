@@ -2554,6 +2554,18 @@ and on what evidence.
      larger changes, and if this run shows something it should not be attributed to
      the bins.
 
+     **The observation carries the reward's own quantity, checked before the run.**
+     The threshold penalises a link whose density ratio exceeds 0.3, and the actor
+     sees exactly that ratio for the link ahead. Over 1,140 agent-observations at
+     this operating point: the spread across agents at one instant is 0.282 on
+     average and 0.327 at most, so the field differentiates rather than sitting at a
+     constant; 11.2% of agents have a link ahead genuinely over critical; and the
+     observed field agrees with the truth on 100% of them, because it is not one of
+     the noised fields.
+
+     This rules out one explanation in advance. If the run does not learn, it is not
+     because the quantity the reward pays for is invisible to the actor.
+
      **What `mappo_src` changes**, all of it from the paper: the two-term threshold
      reward at rho* = 0.3 of jam density; absolute speed bins of 8.33/12.5/16.67 m/s;
      one decision a minute with gamma 0.9; and
