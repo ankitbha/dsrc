@@ -2470,6 +2470,34 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+95. **Round 3 leftovers, recorded rather than fixed, with the reason.**
+
+    - **The critic's `time` input is far outside its normalisation range.**
+      `FIELD_SCALES["time"]` is 120.0, so at the 900 s episodes `mappo_sumo` now
+      runs it reaches 7.5 while every other input sits near [0, 1]. It is one of
+      only three top-level inputs among the critic's 115. NOT changed: `FIELD_SCALES`
+      is shared with `sim_contract`, this is a conditioning problem rather than a
+      correctness one, and a finite-horizon value function should see the clock. If
+      it is changed it should become the episode duration so the feature spans
+      [0, 1], and that must not be done while a pre-registered run is in flight.
+    - **`get_segment_metrics(snapshots)` ignores its argument when the cache is
+      warm.** No external caller passes it -- `base_ctde_env.py`, `run_baseline.py`,
+      `evaluate_policy.py` and `validate_topology_baselines.py` all call it with no
+      argument -- so it is latent, but the signature invites a caller to be silently
+      ignored. The fix is to hold the step's snapshots on the environment and drop
+      the parameter. NOT done while a training run is in flight, because it changes
+      the environment the run is training against and the evaluation must use the
+      same one.
+    - **`all_lane_av_low_speed_occupancy` reaches the reward at weight zero.** It
+      has no entry in `DEFAULT_REWARD_WEIGHTS` and no config overrides one. Not a
+      defect: the per-segment version is one of the eleven fields the critic reads,
+      and `rolling_roadblock_score`, which carries -2.0, is built from it. Now
+      documented at the point it is computed so nobody reads it as a penalised
+      quantity.
+    - **The comment round 3 reported as misattributing the -2.0 weight does not
+      reproduce.** At HEAD that comment sits above `rolling_roadblock_score` and
+      describes it correctly.
+
 94. **The action heads could cause collisions, and the first training run was
     invalid because of it.** Found 2026-09-09 by the collision counter, on the
     smoke evaluation of a two-update checkpoint: 30 collisions on the learned arm

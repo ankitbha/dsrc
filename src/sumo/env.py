@@ -578,6 +578,12 @@ class SumoTopologyEnv:
                 sum(float(m["rolling_roadblock_score"]) for m in segment_metrics.values())
                 / max(len(segment_metrics), 1)
             ),
+            # Reported and logged, but NOT weighted: there is no entry for it in
+            # DEFAULT_REWARD_WEIGHTS and no config overrides one, so this aggregate
+            # reaches `build_team_reward` at weight zero. The per-segment version is
+            # one of the eleven fields the critic reads, so the metric is not dead;
+            # only this aggregate is unpriced. `rolling_roadblock_score` above is the
+            # term that carries -2.0, and it is built from this one.
             "all_lane_av_low_speed_occupancy": (
                 sum(float(m["all_lane_av_low_speed_occupancy"]) for m in segment_metrics.values())
                 / max(len(segment_metrics), 1)
