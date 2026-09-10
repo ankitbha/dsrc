@@ -1,41 +1,41 @@
 {
   "schema": 1,
-  "updated_at": "2026-09-09T23:47:56Z",
-  "stale_after_minutes": 45,
+  "updated_at": "2026-09-10T01:57:16Z",
+  "stale_after_minutes": 420,
   "blocking": null,
   "awaiting_user": null,
-  "next_action": "PAUSED at 2d313cc, tree clean, 10 commits ahead of origin/main, 447 tests passing, NOT PUSHED. Two blocking unknowns, in order.\n\n(1) The metering exemption committed in 2d313cc is UNMEASURED and UNTESTED. `_rolling_roadblock_score` in src/metrics/segment_metrics.py now takes the downstream segments' records and returns 0 when any is jammed (jam_fraction > 0.25) or queued (queue_length > 0). Both simulators pass the mapping. Nothing yet checks that the exemption fires, and nothing has re-measured whether the reward now ranks the commanded-speed arms by arrivals -- which is the entire point of the change. Before this commit the reward ranked 20 m/s first (+1.243) and 10 m/s third (+1.181) while arrivals ranked 10 m/s first (162.3 vs 146.0), and rolling_roadblock_score at weight -2.0 was the whole inversion (-0.741 at 10 m/s against -0.015 at 20). Re-run the decomposition at /private/tmp/.../scratchpad/arms/decompose.py; if 10 m/s does not now rank first, the exemption did not do its job and the user's decision (b) needs revisiting. Add a test that fires the exemption, run against the un-exempted control.\n\n(2) dt: 0.1 is DECIDED BY THE USER AND NOT STARTED. Set dt 0.1 and latency_s 0.1 in configs/training/mappo_sumo.yaml so the measured 96.7 ms p50 sensing latency becomes representable -- at dt 1.0 any positive value imposes a full second. Rescale duration_steps 600 -> 6000 and warmup_steps 300 -> 3000 to hold the episode at 600 s and the warm-up at 300 s. TWO DERIVED CONSEQUENCES THE USER HAS NOT YET SEEN: gamma 0.99 gives a credit-assignment horizon of ~100 steps, which is 100 s at dt 1.0 but only 10 s at dt 0.1, against a phenomenon that needs 300+ s -- gamma must go to about 0.999; and rollout_steps 512 covers 51 s rather than 512 s. Every capacity and arrival figure needs re-measuring at dt 0.1 afterwards. Do (1) and (2) together and measure once.",
+  "next_action": "WAITING on five MAPPO training runs, then execute the pre-registration. Nothing is blocked and no decision is outstanding.\n\nTHE RUNS. Five processes started from scripts/train_policy.py --training mappo_sumo --seed {7,17,27,37,47} --output-root <scratch>/train/runs, 100 updates each, about 3.6 min per update, so roughly six hours from 2026-09-09. Progress: count lines in <run>/training_metrics.csv. All five reported ZERO collisions through update 7, which is the property that invalidated the previous attempt. If the scratch directory is gone, retrain: the runs are reproducible from the committed config and the seeds are fixed.\n\nTHEN, and only then: .venv/bin/python scripts/evaluate_burst_scenario.py --checkpoint-root <scratch>/train/runs. It implements task 93 and nothing else. Do NOT change the metric, the seeds, the comparators or the bar after seeing the numbers; that is the whole point of the pre-registration. Report whatever it says, including a null -- task 92 retracted the evidence that a throughput effect exists here at a converged step size, so a null is the expected outcome.\n\nDO NOT modify src/sumo/env.py or the metric path until the evaluation has run. The policy must be evaluated in the environment it trained in. Three round-3 findings are deliberately parked on that ground and recorded as task 95.",
   "last_verdict": null,
   "section": "C. Simulation replication, task 84 SUMO migration",
   "task": {
-    "number": 91,
-    "what": "rolling-roadblock metering exemption, then dt 0.1",
-    "stage": "paused",
-    "stage_started_at": "2026-09-09T23:47:56Z",
-    "background_job": null,
+    "number": 93,
+    "what": "the pre-registered MAPPO run on the burst scenario",
+    "stage": "training",
+    "stage_started_at": "2026-09-10T01:57:16Z",
+    "background_job": {
+      "what": "5 MAPPO seeds, 100 updates each",
+      "started_at": "2026-09-10T01:57:16Z",
+      "expect_by": "about six hours from the start"
+    },
     "needs_hardware": false,
     "remaining": [
-      90,
-      91,
+      95,
       89
     ],
-    "stopped_by_user": true
+    "stopped_by_user": false
   },
   "carried_forward": [
     "Use .venv/bin/python. System python3 is 3.14 with no pytest.",
-    "HEAD 2d313cc, 447 tests pass in ~166 s, 10 commits ahead of origin/main and NOT PUSHED. Push is the last step of validate_dsrc_3 and has not happened.",
-    "THE GOAL: the paper is a deployment story. The simulation replicates that MAPPO works under the deployment-measured sensing model. NOT plan_simulations.md section 8's nine-figure study. Recorded as task 89 and as the memory dsrc-paper-is-a-deployment-story.",
-    "The deliverable is ONE MAPPO run at mappo_sumo plus its evaluation against no_av. outputs/checkpoints/ is empty; every earlier SUMO run is invalid.",
-    "VALIDATOR ROUND 3 REPORTED AND ITS FINDINGS ARE UNADDRESSED. Two confirmed defects: (a) close() catches only Exception, so a BaseException leaves _LIVE set and _running True and every later reset in the process raises -- the same cascade 3562483 fixed, one step to the side; the fix is a finally block, and note close() raising inside reset's own handler also masks the original exception. (b) reset() does not clear _last_metrics, so get_episode_summary() and get_global_state()['step_metrics'] return the previous episode's values on a freshly reset env.",
-    "ROUND 3, claims that do not reproduce: the optimization: block of mappo_sumo.yaml states mean +0.2737 over 300 steps; no combination of episode length and warm-up reproduces it (300/300 gives +1.1165, 600/300 gives +0.8313 which matches the header comment). The same block says queue_length_total is the largest term at -1.30; measured it is -0.4497 and throughput_recent is +1.2437, 2.8x larger. The block contradicts the header of its own file and still carries the retracted 'about 1.28'.",
-    "ROUND 3: the recorded arm tables reproduce EXACTLY on seeds (3,7,11,19,23) -- the validator recovered them by exhaustive search because no committed script produces the tables. On seeds (7,17,27,37,47) the 10 m/s gain is +6.7% and over seeds 0..9 it is +14.1% (t=3.6), against the recorded +17.6%. Direction and significance hold; the recorded magnitude is at the optimistic end of the seed distribution. COMMIT THE MEASUREMENT SCRIPTS.",
-    "ROUND 3 mutation: 53 of 78 killed. Survivors that change a reported number: R6 (jam_fraction aggregated as max not mean -- reward moves +1.2121 to -0.2668), R7 (queue_length_total hardcoded 0, +0.4497), F6e (new_collision_count hardcoded 0 -- the existing test compares two zeros), R11 (_lane_index ordinal flattened -- 11.1% of observation slots move and the whole suite stays green), R9, R8, R20, F1g, F3i.",
-    "ROUND 3, other real findings: get_segment_metrics(snapshots) ignores its argument when the cache is warm (latent, no caller passes it); all_lane_av_low_speed_occupancy has NO entry in DEFAULT_REWARD_WEIGHTS so its aggregate reaches the reward at weight zero, and the comment at env.py:463-466 wrongly attributes the -2.0 weight to it; the critic's `time` feature is scaled by 120.0 so at duration_steps 600 it reaches 5.0 against a maximum of 1.0 before, one of only three top-level critic inputs now far outside its normalisation range; rollout_steps 512 < duration_steps 600 means the last 88 steps of every episode are never sampled.",
-    "TASK 91 FINDING, unchanged by the fix: 48.5% of the roadblock firings at 10 m/s had a CLEAR downstream segment, which is obstruction by the project's own definition. Report the headline under both definitions.",
-    "The reward does not rank the arms by arrivals -- see memory dsrc-sumo-reward-does-not-rank-by-throughput. That is what the exemption is meant to address and it is unverified.",
-    "Sensing: position_noise_std 3.2 and speed_noise_std 0.93 now cite Song et al. ICRA 2020 (arXiv:2006.04082), position MSE 10.23 m^2 and velocity MSE 0.86 m^2/s^2. Only mappo_sumo.yaml changed; the two deploysense configs keep 1.5 and 0.15 because their recorded results were produced under those.",
-    "configs/demand/sumo_hour.yaml was deleted: it existed because 1050 veh/h appeared to gridlock over an hour, which was a property of a fleet the demand config never described.",
-    "Every SUMO figure recorded before 9066106 is superseded twice: once by the fairness denominator defect and once by the route writer ignoring the demand config's speed distribution."
+    "HEAD 064e688, 475 tests pass, everything pushed to origin/main.",
+    "THE GOAL: the paper is a deployment story; the simulation replicates that MAPPO works under the deployment-measured sensing model. Task 89.",
+    "TASK 92 IS THE HEADLINE: the 17.6% throughput effect was an artefact of the 1 s physics step. The commanded arm is invariant across a twentyfold change in dt while the uncommanded baseline rises 31%; at a converged step, holding AVs at 10 m/s LOWERS throughput. SUMO's --step-length is the physics step and the migration passed dt into it; HighwayTopologyEnv substeps ten times per decision and says why. Tasks 86 and 91 are retracted and moot respectively.",
+    "TASK 94: making the action heads actuate introduced a collision path. hold_lane set SUMO's lane-change mode to 0, which disables collision avoidance rather than lane changes. Every head alone gave 0 collisions and lane+merge together gave 646, so the guard varies the heads together. The first five training runs were killed because of it.",
+    "The demand config's burst was accepted and ignored on SUMO. The first fix wrote one <flow> per period and lost half the demand (71 departures against 150); the schedule is now written vehicle by vehicle. The control that caught it is a burst with multiplier 1.0, which must change nothing.",
+    "configs/demand/sumo_burst.yaml: 900 veh/h medium-high, doubled for 150 s, then back. Base is 900 because at 1050 the queue grows with no burst at all and recovery is undefined. Profiled with no AVs: speed 19 -> 7.5 m/s, queue peaks at 40, recovers to 17.7 with the queue at 6.",
+    "Capacity at dt 0.1 saturates near 900-950 veh/h. Every capacity figure measured at dt 1.0 is superseded.",
+    "Measurement scripts are committed: scripts/measure_commanded_arms.py, scripts/measure_step_size_convergence.py, scripts/evaluate_burst_scenario.py. Round 3 could not reproduce the arm tables and had to recover the seed set (3,7,11,19,23) by exhaustive search; quote no figure a committed script does not produce.",
+    "Validator rounds 1, 2 and 3 are complete and every finding is either fixed or recorded with a reason. Round 3's remaining three are task 95.",
+    "Sensing: position_noise_std 3.2 and speed_noise_std 0.93 cite Song et al. ICRA 2020 (arXiv:2006.04082). latency_s is 0.1, representing the measured 96.7 ms p50, which is why dt is 0.1."
   ],
-  "stopped_by_user": true
+  "stopped_by_user": false
 }
