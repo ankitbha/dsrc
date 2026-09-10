@@ -1,14 +1,28 @@
-"""Evaluate a trained policy on the burst scenario, per the pre-registration.
+"""Evaluate a trained policy against no control, per the pre-registration.
 
 The metrics, seeds, comparators and the bar for calling a difference real were
-fixed in `plans/task_list.md` task 93 BEFORE any policy was trained. This script
-implements that and nothing else: it does not choose a metric, a seed or an arm.
+fixed in `plans/task_list.md` BEFORE any policy was trained -- task 93 for the burst
+scenario, task 99 for the corrected road, task 103 for the steady demand above
+capacity that the shipped config now uses. This script implements that and nothing
+else: it does not choose a metric, a seed or an arm.
 
     .venv/bin/python scripts/evaluate_burst_scenario.py --checkpoint-root <dir>
+
+The name is historical: it reads the scenario out of the training config, so it runs
+whatever demand the policy trained on. The burst-only metric, `recovery_s`, is None
+under a demand that declares no burst rather than being computed from a shock that
+did not happen.
 
 The learned arm uses `latest_actor.pt`, the FINAL policy, not `actor.pt`, the one
 the trainer scored highest. Selecting a checkpoint is a choice made after seeing
 results, and the point of the pre-registration is that no such choice is made.
+
+**Penetration is NOT zeroed for the `no_av` arm**, and that is deliberate. The two
+vTypes are identical except for their id and colour, so an uncommanded AV is a human
+driver; but the fleet is drawn from one vTypeDistribution per vehicle, so changing
+the penetration changes the random draw and therefore the traffic realisation. Every
+arm sees the same traffic and the arms differ only in whether a controller commands
+anything.
 """
 from __future__ import annotations
 
