@@ -2534,6 +2534,26 @@ and on what evidence.
      run: every one of those measurements was taken with a one-second lever, and what
      changes here is the lever rather than any knob they varied.
 
+     **A CORRECTION to the claim that the new bins bind, made before the result.**
+     Measured over 286,352 AV-steps at this operating point, 600 s after the warm-up:
+     mean AV speed 4.67 m/s and MEDIAN 0.11 m/s -- over half of AV-steps are on a
+     vehicle that is essentially stopped, where no command binds at any value.
+
+     | command | binds on |
+     |---|---|
+     | 8.33 m/s | 21.4% |
+     | 12.50 m/s | 18.6% |
+     | 16.67 m/s | 15.2% |
+     | 20.00 m/s (the contract's `slow`) | 10.0% |
+
+     So the new bins bind about twice as often in absolute terms, but the band where
+     the three values DIFFER FROM EACH OTHER -- `slow` bites and `fast` does not -- is
+     21.4 minus 15.2 = 6.2%, against roughly 5% for the old ones. The bin change is a
+     real improvement and a smaller one than "8 to 17 m/s is the band congested
+     traffic is in" implied. The decision interval and the reward shape are the
+     larger changes, and if this run shows something it should not be attributed to
+     the bins.
+
      **What `mappo_src` changes**, all of it from the paper: the two-term threshold
      reward at rho* = 0.3 of jam density; absolute speed bins of 8.33/12.5/16.67 m/s;
      one decision a minute with gamma 0.9; and
