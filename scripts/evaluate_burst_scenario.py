@@ -1,0 +1,154 @@
+"""Evaluate a trained policy on the burst scenario, per the pre-registration.
+
+The metrics, seeds, comparators and the bar for calling a difference real were
+fixed in `plans/task_list.md` task 93 BEFORE any policy was trained. This script
+implements that and nothing else: it does not choose a metric, a seed or an arm.
+
+    .venv/bin/python scripts/evaluate_burst_scenario.py --checkpoint-root <dir>
+
+The learned arm uses `latest_actor.pt`, the FINAL policy, not `actor.pt`, the one
+the trainer scored highest. Selecting a checkpoint is a choice made after seeing
+results, and the point of the pre-registration is that no such choice is made.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import sys
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.baselines.registry import make_baseline  # noqa: E402
+from src.config.loaders import load_named_config  # noqa: E402
+from src.rl.controller import LearnedPolicyController  # noqa: E402
+from src.sumo.env import SumoTopologyEnv  # noqa: E402
+
+SEEDS = (7, 17, 27, 37, 47)
+#: The queue is "cleared" below this many vehicles; the burst peaks it near 40.
+CLEARED_QUEUE = 10
+
+
+def run_one(*, controller, seed, training, work_dir):
+    """One episode. Returns the pre-registered metrics and nothing else."""
+    dt = float(training["dt"])
+    duration = int(training["duration_steps"])
+    demand = load_named_config("demand", str(training["demand"]))
+    burst_end_s = float((demand.get("burst") or {}).get("end_s", 0.0))
+    env = SumoTopologyEnv(str(training["topology"]), {
+        "topology": load_named_config("topology", str(training["topology"])),
+        "demand": demand, "duration_steps": duration, "dt": dt,
+        "warmup_steps": int(training["warmup_steps"]),
+        "sensing": dict(training.get("sensing") or {}),
+        "work_dir": work_dir})
+    observations, _ = env.reset(seed=seed)
+    try:
+        speeds, queues, roadblock = [], [], 0.0
+        recovered_at = None
+        for step in range(duration):
+            actions = controller.act(observations, global_state=None) if controller else {}
+            observations, _, _, _, info = env.step(actions)
+            metrics = info.get("metrics", {}) or {}
+            speeds.append(float(metrics.get("mean_speed", 0.0)))
+            queues.append(int(metrics.get("queue_length_total", 0)))
+            roadblock += float(metrics.get("rolling_roadblock_score", 0.0))
+            now = step * dt
+            if recovered_at is None and now > burst_end_s and queues[-1] < CLEARED_QUEUE:
+                recovered_at = now - burst_end_s
+        window = max(1, int(round(60.0 / dt)))
+        rolling = [statistics.fmean(speeds[i:i + window])
+                   for i in range(0, len(speeds) - window + 1)]
+        return {
+            "seed": seed,
+            "arrivals": env.arrived_total,
+            "trough_speed": min(rolling) if rolling else 0.0,
+            # None means the queue never cleared before the episode ended.
+            "recovery_s": recovered_at,
+            "roadblock_sum": roadblock,
+            "collisions": env.collision_count,
+        }
+    finally:
+        env.close()
+
+
+def paired_verdict(arm_rows, reference_rows, key):
+    """The pre-registered bar: a difference counts only above two standard errors."""
+    by_seed = {row["seed"]: row for row in reference_rows}
+    paired = [(row[key] - by_seed[row["seed"]][key])
+              for row in arm_rows if row["seed"] in by_seed
+              and row[key] is not None and by_seed[row["seed"]][key] is not None]
+    if len(paired) < 2:
+        return None, None, "too few pairs"
+    mean = statistics.fmean(paired)
+    standard_error = statistics.stdev(paired) / len(paired) ** 0.5
+    verdict = "real" if abs(mean) > 2 * standard_error else "no effect"
+    return mean, standard_error, verdict
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--training", default="mappo_sumo")
+    parser.add_argument("--checkpoint-root", required=True,
+                        help="directory holding mappo_<topology>_<profile>_seed<N>/")
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(SEEDS))
+    parser.add_argument("--work-dir", default=None)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--out", default=None)
+    args = parser.parse_args()
+
+    training = load_named_config("training", args.training)
+    root = Path(args.checkpoint_root)
+    rows: dict[str, list[dict[str, Any]]] = {}
+
+    for arm in ("no_av", "density_lookup", "mappo"):
+        rows[arm] = []
+        for seed in args.seeds:
+            if arm == "mappo":
+                actor = (root / f"mappo_{training['topology']}_"
+                                f"{training['action_profile']}_seed{seed}" / "latest_actor.pt")
+                if not actor.exists():
+                    print(f"  missing {actor}", flush=True)
+                    continue
+                controller = LearnedPolicyController.from_checkpoint(actor, device=args.device)
+            elif arm == "no_av":
+                controller = None
+            else:
+                controller = make_baseline(arm)
+            if controller is not None and hasattr(controller, "reset"):
+                controller.reset(env_metadata={"topology_id": training["topology"]}, seed=seed)
+            rows[arm].append(run_one(controller=controller, seed=seed,
+                                     training=training, work_dir=args.work_dir))
+            print(f"  {arm} seed {seed}: {rows[arm][-1]}", flush=True)
+
+    print(f"\n{'arm':>16} {'arrivals':>16} {'trough m/s':>11} {'recovery s':>11} "
+          f"{'roadblock':>10} {'collisions':>11}")
+    for arm in ("no_av", "density_lookup", "mappo"):
+        if not rows[arm]:
+            continue
+        arrivals = [r["arrivals"] for r in rows[arm]]
+        recovered = [r["recovery_s"] for r in rows[arm] if r["recovery_s"] is not None]
+        print(f"{arm:>16} {statistics.fmean(arrivals):>9.1f} +/- "
+              f"{statistics.stdev(arrivals) if len(arrivals) > 1 else 0.0:>4.1f} "
+              f"{statistics.fmean(r['trough_speed'] for r in rows[arm]):>11.2f} "
+              f"{(statistics.fmean(recovered) if recovered else float('nan')):>11.1f} "
+              f"{statistics.fmean(r['roadblock_sum'] for r in rows[arm]):>10.1f} "
+              f"{sum(r['collisions'] for r in rows[arm]):>11}")
+
+    print("\nPaired against no_av on the same seeds; the bar is two standard errors.")
+    for arm in ("density_lookup", "mappo"):
+        for key in ("arrivals", "trough_speed"):
+            mean, se, verdict = paired_verdict(rows[arm], rows["no_av"], key)
+            if mean is None:
+                continue
+            print(f"  {arm:>15} {key:>13}: {mean:+8.2f} +/- {se:5.2f}  -> {verdict}")
+
+    if args.out:
+        Path(args.out).write_text(json.dumps(rows, indent=1))
+        print(f"\n  rows written to {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
