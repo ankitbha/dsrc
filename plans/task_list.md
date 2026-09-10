@@ -2470,6 +2470,76 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+106. **RETRACTION OF MY OWN RECOMMENDATION: rescaling the speed bins does not
+     help, and neither does the operating point.** Measured 2026-09-10, minutes
+     after task 105 recommended the rescale. The recommendation was an argument from
+     a mechanism; this is the measurement, and it contradicts it.
+
+     **The prediction that failed.** Task 105 established that the three speed values
+     are equivalent on 97% of decisions and inferred that a rescaling which binds
+     would produce a gradient. Four arms, shipped bins against three rescalings,
+     three seeds each, with the same floor and ceiling controls:
+
+     | speed bins | measured over floor | decisions the command binds on |
+     |---|---|---|
+     | shipped: 20 / 27 / 30 m/s | 0.848 | 6.0% |
+     | prevailing segment speed as the context, no 12 m/s floor | **0.727** | 19.1% |
+     | 0.60 / 0.85 / 1.00 of the vehicle's own speed | **1.020** | 29.2% |
+     | 0.50 / 0.75 / 1.00 of the vehicle's own speed | **0.415** | 20.3% |
+
+     **The binding share rose fivefold and the gradient stayed at its floor.** The
+     recommended option 1 is the worst of the three rescalings. So inertness was a
+     true description of the action and not the cause of the missing gradient.
+
+     **The operating point does not do it either.** Shipped bins, demand varied:
+
+     | demand | veh/h | AVs present | mean speed | measured over floor | oracle over floor |
+     |---|---|---|---|---|---|
+     | `sumo_burst` | 900 | 5.6 | 21.04 | 1.018 | 14.0 |
+     | `sumo_saturating` | 1200 | 9.9 | 13.29 | 1.269 | 20.8 |
+     | `sumo_capacity_drop` | 2400 | 42.4 | 4.70 | 0.848 | 26.2 |
+
+     At 900 veh/h the traffic holds 21.0 m/s, so the shipped bins DO bind, and there
+     are 5.6 agents rather than 42, so one agent is eight times as large a share of
+     the fleet. The ratio is 1.018. The per-seed spread is 0.80 to 1.68 and nothing
+     clears the floor.
+
+     **What the ratio implies about the correlation.** With the advantage written as
+     a correlation `rho` with the action plus independent noise, the measured ratio
+     is about `1 + rho * (oracle_ratio - 1)`. At an oracle ratio of 14 to 39, a
+     measured ratio of 1.02 to 1.27 puts **rho at or below about 0.01**, and the
+     instrument would see rho of 0.05.
+
+     **The convergence that matters.** Two instruments built for different purposes
+     now agree. The perfect-information metering oracle measured -0.8 and +0.8
+     arrivals against no control on this road (task 102), which is indistinguishable
+     from doing nothing. The policy-gradient signal-to-noise puts the correlation
+     between one AV's speed choice and its own advantage at about 1%. **A single
+     AV's speed choice on this network at these penetrations changes almost
+     nothing, and that is why no policy learns: there is very little to find.** The
+     oracle says it from perfect information and no learning; the gradient says it
+     from the learning signal and no oracle.
+
+     **The revised decision for the user, replacing the four options in task 105.**
+     The speed-bin rescale is off the table -- measured, not argued. What is left:
+
+     1. **Report the simulation leg as a null**, with two independent lines of
+        evidence rather than one, and the deployment carrying the feasibility claim
+        as it already does.
+     2. **Change what the AVs can do**, not how their reward is priced: raise
+        penetration well above 25%, coordinate them as platoons rather than
+        independently, or give the junction an explicit meter rather than relying on
+        in-stream vehicles. Penetration is the cheapest of these and is being
+        measured now with the same instrument, at 0.25, 0.5 and 1.0 on two demands.
+     3. **Change the advantage estimator** to a counterfactual one -- a COMA-style
+        baseline that marginalises the agent's own action -- which is the standard
+        answer to exactly this measurement and is a research change rather than a
+        configuration one.
+
+     No recommendation yet: the penetration measurement is in flight and it bears
+     directly on option 2. Recording the retraction now rather than after it, so the
+     failed recommendation is on the record in its own right.
+
 105. **THE ADVANTAGE CARRIES NO ACTION SIGNAL, and the speed bins are why.**
      Measured 2026-09-10 with `scripts/measure_gradient_signal.py`. This is the
      answer to why tasks 96 and 101 produced no learning, and it retracts four
