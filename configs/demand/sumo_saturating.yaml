@@ -1,43 +1,41 @@
 id: sumo_saturating
 kind: demand
 description: >-
-  Demand just past the capacity of inverted_tree under SUMO, so the network
+  Demand just past the congestion onset of inverted_tree under SUMO, so the network
   congests with a throughput deficit a controller can recover.
-# Measured on SUMO, inverted_tree, no AVs, 1800-step (30 minute) runs. Insertion
-# kept up throughout, so these are served demands and not requested ones:
+
+# RE-MEASURED on the corrected road (zipper merges, task 98) with the calibrated
+# Wiedemann-99 driving model (configs/human_models/w99_calibrated.yaml). Every
+# earlier figure here measured a network whose capacity was set by an unintended
+# permanent yield, and a fleet whose car following had no capacity drop.
 #
-#   veh/h   mean speed   arrived   departed   ratio
-#     450        26.26       222        228    1.01   free flow
-#     600        18.11       289        300    1.00
-#     750        20.25       361        384    1.02
-#     900         7.35       378        456    1.01   <- capacity, arrivals peak
-#    1050         2.11       349        528    1.01   <- this: 8% deficit
+# Fundamental diagram, 600 s episodes after 300 s of warm-up, no AVs, dt 0.1, three
+# seeds, from scripts/measure_fundamental_diagram.py:
 #
-# CORRECTION 2026-09-09, from an independent audit. The arrival figures above were
-# measured with a superseded route writer -- two flows per entry, and an AV vType
-# without the humans' speedFactor spread -- so the arrival process depended on the
-# AV/human split. Re-measured at HEAD, one flow drawing from a vTypeDistribution,
-# 1800 steps, no AVs, seed 7: 900 veh/h gives 358 arrivals against the 378 recorded,
-# and 1050 gives 326 against 349. The conclusion survives -- arrivals peak near 900
-# and fall at 1050, a drop of 8.9% against the recorded 7.7% -- but the numbers do
-# not, and the recorded mean-speed column is non-monotonic (600 below 750) where the
-# re-measurement is monotone.
+#   offered   density   speed   served/h   served/offered
+#       600       3.9   23.41        598             1.00
+#       900       4.1   22.86        884             0.98   <- last sustainable point
+#      1200       9.1   12.24        948             0.79   <- congestion onset
+#      1500      18.7    7.05       1130             0.75
+#      1800      26.3    5.84       1072             0.60
+#      2100      33.2    5.00       1298             0.62   <- peak served flow
+#      2400      46.6    3.47       1052             0.44
+#      3000      67.6    2.52        992             0.33
 #
-# Capacity is about 900 veh/h: arrivals are maximal there and FALL at 1050 while
-# insertion still keeps up, which is the throughput-versus-demand knee. 1050 sits
-# past it, so 29 of 378 arrivals are lost to congestion and that deficit is the
-# headroom a controller has.
-#
-# Capacity is junction-limited, not lane-limited. The three-into-two merges at b1
-# and b2 are unsignalised, so vehicles yield, and that throttles throughput well
-# below what the two-lane trunk could carry. That is realistic for an uncontrolled
-# merge and it is why SUMO's capacity here (~900 veh/h) is far below the ~1800 the
-# previous simulator appeared to manage.
-total_vehicles_per_hour: 1050
-# 0.20 rather than 0.10: mean concurrent AVs 14.1 against 6.0, which is the
-# double-digit actuator count task 8 recommended and never reached. With the
-# arrival process now independent of penetration, this changes only who is
-# controllable.
+# The curve now has the shape the phenomenon requires: served flow peaks and then
+# FALLS, which is the capacity drop a controller holding density below critical can
+# recover. With SUMO's default Krauss model on the same road the peak is 1764 veh/h
+# and the drop is only 9%; with Krauss on the UNCORRECTED road there was no drop at
+# all and served flow rose monotonically to 1110.
+
+# 1200 veh/h: the congestion onset. Speed has fallen from 22.9 to 12.2 m/s and 21%
+# of the offered demand is not being served, so there is a deficit to recover, while
+# the network is not so far past critical that nothing can help. Measured with a
+# perfect-information metering oracle at 20% penetration, five seeds: +7.6 +/- 15.2
+# arrivals against no control at this level, and -20 to -39 at 1500. The sign is
+# right here and wrong beyond it.
+total_vehicles_per_hour: 1200
+
 av_penetration: 0.2
 branch_split:
   main: 1.0

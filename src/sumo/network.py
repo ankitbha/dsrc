@@ -28,6 +28,11 @@ from sumolib import checkBinary
 
 #: Where each node sits. Chosen only to be unambiguous for `netconvert`; the
 #: distances vehicles actually travel come from the explicit edge lengths.
+#: Junctions where more than one edge merges, and which therefore need a merge
+#: discipline rather than an arbitrary priority tie-break: three leaves enter each
+#: of b1 and b2, and both middles enter the trunk at c.
+_MERGE_NODES = frozenset({"b1", "b2", "c"})
+
 _NODE_XY = {
     "a1": (-500.0, 70.0), "a2": (-500.0, 30.0), "a3": (-500.0, -10.0),
     "a4": (-500.0, 10.0), "a5": (-500.0, -30.0), "a6": (-500.0, -70.0),
@@ -74,8 +79,21 @@ class SumoNetwork:
         wanted = set(_NODE_XY)
         if "tree_bottleneck_d" not in (road.get("segment_ids") or []):
             wanted.discard("d")   # no bottleneck: `d` would be an unreachable node
+        # The merge nodes are ZIPPER junctions, which alternate between approaches.
+        # Left as the default `priority` type, every edge is written with
+        # priority="-1" and netconvert breaks the tie by geometry: it made
+        # tree_middle_b1 a permanent minor approach (state "m") into the trunk while
+        # tree_middle_b2 was major (state "M"). b1's three leaves then starved behind
+        # a yield that never cleared, while the trunk it fed ran nearly empty --
+        # 1.74 m/s and 64 queued vehicles on b1 against 22.87 m/s on the trunk. That
+        # yield, not the road, set the network's capacity: making these zipper
+        # junctions raises served flow from about 1110 to about 1600 veh/h and
+        # equalises the two middles. It also makes branch fairness attainable at
+        # all, which is the objective this topology exists to study.
         nodes = "\n".join(
-            f'  <node id="{name}" x="{x}" y="{y}"/>'
+            f'  <node id="{name}" x="{x}" y="{y}"'
+            + (' type="zipper"' if name in _MERGE_NODES else "")
+            + "/>"
             for name, (x, y) in _NODE_XY.items() if name in wanted
         )
         (out_dir / "net.nod.xml").write_text(f"<nodes>\n{nodes}\n</nodes>\n")

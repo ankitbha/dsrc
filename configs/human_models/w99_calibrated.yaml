@@ -1,0 +1,71 @@
+id: w99_calibrated
+kind: human_model
+description: >-
+  Wiedemann-99 car following, with the parameters the predecessor paper calibrated so
+  that the simulated traffic reproduces a realistic speed-density-flow relationship.
+  Use this on SUMO wherever the fundamental diagram matters.
+
+# WHY THIS EXISTS. The SUMO env previously wrote no car-following parameters at all,
+# so every vehicle used SUMO's default Krauss model with tau 1.0 s, minGap 2.5 m and
+# accel 2.6 m/s^2. Krauss computes a collision-free safe speed exactly and recovers
+# from a disturbance immediately, so it produces no capacity drop: measured on
+# inverted_tree at dt 0.1, served flow rose monotonically from 890 to 1110 veh/h as
+# demand went 900 to 2400, and a perfect-information metering oracle could not beat
+# doing nothing. A capacity drop is the inefficiency every mixed-autonomy control
+# result exploits, and without one there is nothing for a controller to recover.
+#
+# SOURCE. Bhardwaj, Asim, Chauhan, Zaki and Subramanian, "Self-Regulating Cars:
+# Automating Traffic Control in Free Flow Road Networks", AAAI 2026
+# (arXiv:2506.11973), Appendix A "Tuning PTV Vissim". Every value below is that
+# appendix's, with its own stated reason. SUMO implements the same model as
+# `carFollowModel="W99"` with cc1..cc9, so these transfer directly rather than being
+# re-derived.
+sumo:
+  car_following_model: W99
+  # CC0. "Ensures that vehicles are tightly packed in jammed conditions, influencing
+  # the jam density of the traffic curve." SUMO spells CC0 as the vType's minGap.
+  min_gap_m: 0.5
+  # CC1. "Set to align with empirical observations of car-following behaviour,
+  # affecting critical density and maximum throughput." The paper gives 2-3 s; the
+  # midpoint is taken, and it is the single largest departure from SUMO's default
+  # tau of 1.0 s -- which is why the default fleet had roughly twice the capacity it
+  # should and never congested.
+  cc1: 2.5
+  # CC2 and CC6. "Help introduce stop-and-go dynamics, ensuring that congestion
+  # waves propagate realistically." Krauss has no equivalent: its randomness is a
+  # speed reduction, not an oscillation in the following distance, which is why it
+  # produces no waves to damp.
+  cc2: 20.0
+  cc6: 10.0
+  # CC3. "Defines how aggressively vehicles respond to upstream slowdowns, impacting
+  # the onset of congestion."
+  cc3: -25.0
+  # CC4 and CC5. "Control braking and acceleration tendencies when adapting to
+  # varying traffic speeds, influencing CAPACITY DROP effects in the fundamental
+  # diagram." These two are the ones that decide whether the phenomenon this project
+  # studies exists in the simulation at all.
+  cc4: -0.5
+  cc5: 0.6
+  # CC7, CC8, CC9. "Tuned to ensure a smooth transition between free-flow and
+  # congested regimes, preventing unrealistic acceleration spikes that could distort
+  # the traffic curve." They are 2 to 5 times gentler than SUMO's default accel of
+  # 2.6 m/s^2, and a queue that discharges slowly is what makes the capacity drop.
+  cc7: 0.5
+  cc8: 1.0
+  cc9: 0.75
+
+# Carried over unchanged from `normal`, for the highway_env path, which does not read
+# the block above.
+profile:
+  speed_multiplier: 1.0
+  TIME_WANTED: 1.5
+  POLITENESS: 0.0
+  LANE_CHANGE_DELAY: 2.0
+  LANE_CHANGE_MIN_ACC_GAIN: 0.2
+  LANE_CHANGE_MAX_BRAKING_IMPOSED: 2.0
+  COMFORT_ACC_MAX: 3.0
+  COMFORT_ACC_MIN: -5.0
+  ACC_MAX: 6.0
+defaults:
+  lane_change_model: mobil
+  car_following_model: idm

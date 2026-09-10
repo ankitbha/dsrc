@@ -848,6 +848,39 @@ class SumoTopologyEnv:
 
     # ------------------------------------------------------------------ demand
 
+    #: The vType attribute each `human_model.sumo` key becomes. Named rather than
+    #: derived so an unknown key is a caller error instead of silently ignored.
+    _FOLLOWING_ATTRIBUTES = {
+        "car_following_model": "carFollowModel",
+        "min_gap_m": "minGap",
+        "cc1": "cc1", "cc2": "cc2", "cc3": "cc3", "cc4": "cc4", "cc5": "cc5",
+        "cc6": "cc6", "cc7": "cc7", "cc8": "cc8", "cc9": "cc9",
+    }
+
+    def _car_following_attributes(self) -> str:
+        """The human model's car-following parameters, as vType attributes.
+
+        Absent, every vehicle uses SUMO's default Krauss model, which computes a
+        collision-free safe speed exactly and recovers from a disturbance
+        immediately. That produces no capacity drop -- served flow rose
+        monotonically from 890 to 1110 veh/h as demand went 900 to 2400 -- and with
+        no capacity drop there is nothing for a controller to recover, which a
+        perfect-information metering oracle confirmed by failing to beat inaction.
+
+        `configs/human_models/w99_calibrated.yaml` carries the Wiedemann-99
+        parameters the predecessor paper calibrated for exactly this reason.
+        """
+        model = (self.config.get("human_model") or {}).get("sumo") or {}
+        unknown = set(model) - set(self._FOLLOWING_ATTRIBUTES)
+        if unknown:
+            raise ValueError(
+                f"unsupported human_model.sumo keys {sorted(unknown)}; "
+                f"known keys are {sorted(self._FOLLOWING_ATTRIBUTES)}"
+            )
+        parts = [f' {self._FOLLOWING_ATTRIBUTES[key]}="{model[key]}"'
+                 for key in self._FOLLOWING_ATTRIBUTES if key in model]
+        return "".join(parts)
+
     def _demand_periods(self, duration_s: float, per_entry: float
                         ) -> list[tuple[float, float, float]]:
         """The demand rate per entry as (begin, end, vehicles per hour) periods.
@@ -910,6 +943,7 @@ class SumoTopologyEnv:
         # to 11.29 m/s with no controller acting at all. That would have been
         # reported as a control effect.
         max_speed = float(speed.get("max_mps", 32.0))
+        following = self._car_following_attributes()
         # The demand config states its speed distribution in m/s; SUMO states a
         # vehicle's desired speed as a factor on the lane's limit. Every edge this
         # builder writes carries the topology's single `speed_limit_mps`, so the
@@ -939,11 +973,11 @@ class SumoTopologyEnv:
         lines = [
             "<routes>",
             f'  <vType id="{self.HUMAN_TYPE}" maxSpeed="{max_speed}"'
-            f' speedFactor="{speed_factor}"/>',
+            f' speedFactor="{speed_factor}"{following}/>',
             # The AV keeps SUMO's safe car-following as a floor; the project's own
             # controller commands speed on top of it through setSpeed.
             f'  <vType id="{self.AV_TYPE}" maxSpeed="{max_speed}"'
-            f' speedFactor="{speed_factor}" color="1,0,0"/>',
+            f' speedFactor="{speed_factor}" color="1,0,0"{following}/>',
             # ONE distribution, drawn per vehicle, rather than one flow per type.
             # SUMO spaces each flow evenly on its own, so two flows at rates r1 and
             # r2 do not produce the same arrival process as one flow at r1+r2 --
@@ -951,9 +985,11 @@ class SumoTopologyEnv:
             # speed with no controller acting.
             f'  <vTypeDistribution id="{self.MIX_TYPE}">',
             f'    <vType id="{self.HUMAN_TYPE}_d" maxSpeed="{max_speed}"'
-            f' speedFactor="{speed_factor}" probability="{1.0 - penetration:.4f}"/>',
+            f' speedFactor="{speed_factor}" probability="{1.0 - penetration:.4f}"'
+            f'{following}/>',
             f'    <vType id="{self.AV_TYPE}_d" maxSpeed="{max_speed}"'
-            f' speedFactor="{speed_factor}" color="1,0,0" probability="{penetration:.4f}"/>',
+            f' speedFactor="{speed_factor}" color="1,0,0" probability="{penetration:.4f}"'
+            f'{following}/>',
             "  </vTypeDistribution>",
         ]
         periods = self._demand_periods(duration_s, per_entry)

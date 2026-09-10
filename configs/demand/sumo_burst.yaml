@@ -5,29 +5,17 @@ description: >-
   traffic that then falls back. The scenario a controller has to be measured on: a
   shock it can absorb or fail to, rather than a steady state it can only hold.
 
-# Capacity measured at dt 0.1, 600 s episodes after 300 s of warm-up, no AVs, three
-# seeds. Throughput saturates near 900 veh/h; beyond that the extra demand does not
-# arrive, it queues:
+# RE-MEASURED on the corrected road (zipper merges, task 98) with the calibrated
+# Wiedemann-99 driving model. See configs/demand/sumo_saturating.yaml for the full
+# fundamental diagram; the points that set this file are 900 veh/h served at 0.98 of
+# offered and 22.9 m/s, which is sustainable, and 1800 served at 0.60 and 5.8 m/s,
+# which is not.
 #
-#   veh/h   arrived/600s   delivered/h   deficit   mean speed
-#     900       148.3            890       1.1%       19.18
-#    1050       147.0            882      16.0%       13.34
-#    1200       151.3            908      24.3%        8.89
-#    1350       152.7            916      32.1%        7.18
-#    1500       158.3            950      36.7%        6.25
-#    1800       183.3           1100      38.9%        5.69
-#
-# EVERY EARLIER CAPACITY FIGURE IN THIS PROJECT IS SUPERSEDED. They were measured
-# at dt 1.0, where SUMO integrates the physics in 1 s steps and an uncommanded fleet
-# loses about a fifth of its throughput to the integration. See task 92.
+# EVERY EARLIER FIGURE IN THIS FILE IS SUPERSEDED TWICE: once because the network's
+# capacity was set by an unintended permanent yield at the merge (task 98), and once
+# because the fleet used SUMO's default Krauss car following, which produces no
+# capacity drop and so nothing for a controller to recover.
 
-# 900 veh/h, just under the ~900-950 knee. The base rate has to be a demand the
-# network can actually sustain, or "recovery" means nothing: at 1050 the queue grows
-# without any burst at all -- mean speed falls from 15.1 to 5.5 m/s across an episode
-# and never returns -- so a controller would be measured against a network that was
-# failing on its own. At 900 the deficit is 1.1% and mean speed holds at 19.2, so the
-# network is at a steady state with no headroom, which is what makes the burst a
-# shock rather than the last straw.
 total_vehicles_per_hour: 900
 
 av_penetration: 0.2

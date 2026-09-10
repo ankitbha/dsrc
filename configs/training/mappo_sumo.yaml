@@ -95,6 +95,14 @@ warmup_steps: 3000
 # produced by scripts/measure_commanded_arms.py.
 duration_steps: 9000
 
+# The calibrated Wiedemann-99 driving model, NOT SUMO's default Krauss. Krauss
+# computes a collision-free safe speed exactly and recovers from a disturbance
+# immediately, so it produces no capacity drop and there is nothing for a controller
+# to recover: a perfect-information oracle could not beat inaction under it. The
+# parameters come from the predecessor paper's own calibration appendix
+# (arXiv:2506.11973, Appendix A), which tuned them for exactly this reason.
+human_model: w99_calibrated
+
 # The one topology section C is scoped to.
 topology: inverted_tree
 

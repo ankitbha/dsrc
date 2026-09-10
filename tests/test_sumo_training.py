@@ -200,6 +200,7 @@ class TestTheDeploymentSensingModelIsActive:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 60, "dt": 1.0, "warmup_steps": 300,
             "sensing": sensing, "work_dir": str(tmp_path)})
         env.reset(seed=7)

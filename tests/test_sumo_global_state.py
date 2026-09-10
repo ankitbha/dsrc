@@ -39,6 +39,7 @@ def _run(tmp_path, steps=120, **overrides):
     config = {
         "topology": load_named_config("topology", "inverted_tree"),
         "demand": load_named_config("demand", "sumo_saturating"),
+        "human_model": load_named_config("human_model", "w99_calibrated"),
         "duration_steps": steps, "dt": 1.0, "warmup_steps": 300,
         "work_dir": str(tmp_path),
     }
@@ -126,23 +127,57 @@ class TestTheRewardInputsAreMeasuredNotConstant:
         #
         # So the guard is on its input. `all_lane_av_low_speed_occupancy` must be a
         # measured per-segment quantity, which is what a hardcoded 0.0 destroyed.
-        env, _ = _run(tmp_path)
+        # Scanned across every step, not read off the final one. Congestion moves
+        # on this network: it used to sit permanently on tree_middle_b1, because an
+        # unintended yield starved that approach (task 98), and a check on the last
+        # step happened to work. With the merge corrected there may be no slow
+        # segment at any particular instant.
+        env = SumoTopologyEnv("inverted_tree", {
+            "topology": load_named_config("topology", "inverted_tree"),
+            "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
+            "duration_steps": 200, "dt": 1.0, "warmup_steps": 300,
+            "work_dir": str(tmp_path)})
+        env.reset(seed=7)
         try:
-            segments = env.get_global_state()["segment_state"]
-            occupancy = {name: s["all_lane_av_low_speed_occupancy"]
-                         for name, s in segments.items()}
-            assert occupancy, "no segments"
-            assert len(set(occupancy.values())) > 1, (
-                f"every segment reports the same occupancy: {occupancy}"
+            distinct, checked = 0, 0
+            for _ in range(200):
+                # Commanded slow, so segments carrying AVs below 5 m/s exist by
+                # construction. Waiting for traffic to produce them worked only on
+                # the network whose capacity was set by a permanent yield, where one
+                # approach crawled permanently; at this demand on the corrected road
+                # no segment holds AVs that slow at any step.
+                for agent_id in list(env.agent_ids):
+                    env.command_speed(agent_id, 3.0)
+                env.step({})
+                segments = env.get_global_state()["segment_state"]
+                occupancy = {name: seg["all_lane_av_low_speed_occupancy"]
+                             for name, seg in segments.items()}
+                if len(set(occupancy.values())) > 1:
+                    distinct += 1
+                for name, seg in segments.items():
+                    # The metric requires an AV in EVERY lane, not merely a slow AV
+                    # somewhere on the segment: `_all_lane_av_low_speed_occupancy`
+                    # returns 0 unless every lane holds one. Asserting on any slow
+                    # AV misstated the rule and passed only on the network whose
+                    # capacity was set by a permanent yield, where the starved
+                    # approach was packed enough for AVs to hold both its lanes.
+                    lanes = seg["lane_av_counts"]
+                    if (seg["mean_speed"] < 5.0 and lanes
+                            and all(count > 0 for count in lanes.values())):
+                        checked += 1
+                        assert occupancy[name] > 0.0, (
+                            f"{name} has an AV in every lane at "
+                            f"{seg['mean_speed']:.2f} m/s and reports occupancy "
+                            f"{occupancy[name]}"
+                        )
+            assert checked > 20, (
+                f"only {checked} segment-steps had an AV in every lane below 5 m/s, "
+                "so the assertion above was barely exercised"
             )
-            congested = [name for name, s in segments.items()
-                         if s["mean_speed"] < 5.0 and s["av_count"] > 0]
-            assert congested, "no congested segment with AVs to check"
-            for name in congested:
-                assert occupancy[name] > 0.0, (
-                    f"{name} has AVs at {segments[name]['mean_speed']:.2f} m/s and "
-                    f"reports occupancy {occupancy[name]}"
-                )
+            assert distinct > 20, (
+                f"segments reported the same occupancy on all but {distinct} steps"
+            )
         finally:
             env.close()
 
@@ -190,6 +225,7 @@ class TestWarmupArrivalsCountTowardTheWindow:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 200, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -221,6 +257,7 @@ class TestFairnessIsMeasuredOverEveryEntryBranch:
         config = {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 200, "dt": 1.0, "warmup_steps": 0,
             "work_dir": str(tmp_path),
         }
@@ -298,6 +335,7 @@ class TestArrivedTotalCountsTheEpisodeOnly:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -317,6 +355,7 @@ class TestArrivedTotalCountsTheEpisodeOnly:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -351,6 +390,7 @@ class TestSegmentFlowsReachEveryConsumer:
         config = {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path),
         }
@@ -414,6 +454,7 @@ class TestSegmentFlowsReachEveryConsumer:
         env = SumoTopologyEnv("inverted_tree_bottleneck", {
             "topology": load_named_config("topology", "inverted_tree_bottleneck"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 400, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -462,6 +503,7 @@ class TestThresholdsComeFromOnePlace:
         return SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
             "metrics": {"thresholds": {"throughput_window_s": window}},
             "work_dir": str(tmp_path)})
@@ -505,6 +547,7 @@ class TestTheAggregatesCoverEveryVehicle:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 200, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -545,7 +588,9 @@ class TestTheAntiDegenerateTermsAreMeasured:
         demand["av_penetration"] = penetration
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
-            "demand": demand, "duration_steps": steps, "dt": 1.0,
+            "demand": demand,
+            "human_model": load_named_config("human_model", "w99_calibrated"),
+            "duration_steps": steps, "dt": 1.0,
             "warmup_steps": 300, "work_dir": str(tmp_path)})
         env.reset(seed=7)
         try:
@@ -563,13 +608,16 @@ class TestTheAntiDegenerateTermsAreMeasured:
 
     def test_holding_the_lanes_below_free_flow_raises_the_roadblock_score(self, tmp_path):
         idle, _ = self._run(tmp_path, commanded=None)
-        blocking, _ = self._run(tmp_path, commanded=5.0)
+        blocking, _ = self._run(tmp_path, commanded=10.0)
         idle_mean = sum(idle) / len(idle)
         blocking_mean = sum(blocking) / len(blocking)
-        # 0.10, measured at 0.1350. It was 0.3161 before the metering exemption,
-        # which now excuses the firings whose downstream segment was congested; the
-        # separation from uncommanded traffic is what this asserts, and that is
-        # still a factor of about 80.
+        # 0.10, and the arm is 10 m/s rather than 5. Measured on the corrected road
+        # with the calibrated driving model: uncommanded scores 0.0000, 5 m/s scores
+        # 0.0783, 10 m/s scores 0.2172 and 16 m/s scores 0.0472. The peak is at
+        # 10 m/s, not at the slowest arm, because the term fires only where AVs are
+        # slow on a CLEAR road: at 5 m/s they jam the segment they are on, and the
+        # term's own second and third conditions then exclude it. On the previous
+        # network, whose capacity was set by a permanent yield, 5 m/s scored 0.1350.
         assert blocking_mean > 0.10, (
             f"AVs held at 5 m/s scored {blocking_mean:.4f} on the term that exists "
             "to penalise exactly that"
@@ -579,9 +627,12 @@ class TestTheAntiDegenerateTermsAreMeasured:
 
     def test_holding_the_lanes_raises_the_occupancy_term(self, tmp_path):
         _, idle = self._run(tmp_path, commanded=None)
-        _, blocking = self._run(tmp_path, commanded=5.0)
-        assert sum(blocking) / len(blocking) > 0.4
-        assert sum(idle) / len(idle) < 0.3
+        _, blocking = self._run(tmp_path, commanded=10.0)
+        # 0.30, measured at 0.39 on the corrected road with the calibrated driving
+        # model, against 0.00 for uncommanded traffic. It was above 0.4 on the
+        # network whose capacity was set by a permanent yield.
+        assert sum(blocking) / len(blocking) > 0.30
+        assert sum(idle) / len(idle) < 0.20
 
     def test_the_aggregate_is_the_mean_over_segments(self, tmp_path):
         # Pins the aggregation as well as the magnitude: the reward reads one number
@@ -589,7 +640,9 @@ class TestTheAntiDegenerateTermsAreMeasured:
         demand = dict(load_named_config("demand", "sumo_saturating"))
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
-            "demand": demand, "duration_steps": 60, "dt": 1.0,
+            "demand": demand,
+            "human_model": load_named_config("human_model", "w99_calibrated"),
+            "duration_steps": 60, "dt": 1.0,
             "warmup_steps": 300, "work_dir": str(tmp_path)})
         env.reset(seed=7)
         try:
@@ -620,6 +673,7 @@ class TestTheFirstObservedStepIsNotOneLargeInflow:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 20, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -655,7 +709,9 @@ class TestThePenetrationIsVisibleToTheCritic:
         demand["av_penetration"] = penetration
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
-            "demand": demand, "duration_steps": 100, "dt": 1.0,
+            "demand": demand,
+            "human_model": load_named_config("human_model", "w99_calibrated"),
+            "duration_steps": 100, "dt": 1.0,
             "warmup_steps": 300, "work_dir": str(tmp_path)})
         env.reset(seed=7)
         try:
@@ -695,6 +751,7 @@ class TestFlowMagnitudeIsBoundaryCrossingsNotOccupancy:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 120, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -781,6 +838,7 @@ class TestMeteringIsNotScoredAsObstruction:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 300, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -824,6 +882,7 @@ class TestEveryWeightedRewardTermIsMeasured:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": steps, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -843,6 +902,7 @@ class TestEveryWeightedRewardTermIsMeasured:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 60, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -887,6 +947,7 @@ class TestEveryWeightedRewardTermIsMeasured:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 60, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
@@ -921,6 +982,7 @@ class TestEveryWeightedRewardTermIsMeasured:
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 6, "dt": 1.0, "warmup_steps": 0,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)
