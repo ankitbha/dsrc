@@ -2470,6 +2470,66 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+107. **Penetration does not produce a learning signal either, up to 100%.**
+     Measured 2026-09-10 by `scripts/measure_penetration_signal.py`, closing the
+     cheapest branch of task 106's option 2. Two demands, three penetrations, three
+     seeds each, shipped bins, with the same floor and ceiling controls. The last
+     column is the implied correlation between the advantage and the action,
+     `(measured/floor - 1) / (oracle/floor - 1)`:
+
+     | demand | penetration | AVs present | measured over floor | oracle over floor | implied correlation |
+     |---|---|---|---|---|---|
+     | `sumo_saturating` | 0.25 | 12.4 | 1.055 | 19.1 | +0.0030 |
+     | `sumo_saturating` | 0.50 | 24.7 | 0.869 | 27.0 | -0.0050 |
+     | `sumo_saturating` | 1.00 | 50.3 | 1.403 | 45.1 | +0.0091 |
+     | `sumo_capacity_drop` | 0.25 | 42.4 | 0.848 | 26.2 | -0.0060 |
+     | `sumo_capacity_drop` | 0.50 | 86.5 | 0.589 | 35.1 | -0.0121 |
+     | `sumo_capacity_drop` | 1.00 | 168.2 | 0.960 | 80.2 | -0.0005 |
+
+     **Every value is within 0.012 of zero and the sign is random.** At 100%
+     penetration the policy commands the entire fleet -- 168 vehicles at 2400 veh/h,
+     50 at 1200 -- and one agent's action still does not correlate with its own
+     advantage. That is multi-agent credit assignment in its pure form: the other
+     167 agents are exploring at the same time, and their contribution to the return
+     swamps the one being credited.
+
+     **The complete list of what has now been measured against the floor.** Every
+     row uses the shuffled advantage as its floor and an action-correlated advantage
+     as its ceiling, three seeds each:
+
+     | varied | range | best measured over floor |
+     |---|---|---|
+     | reward decomposition | team, neighbourhood, own-vehicle, both | 0.850 |
+     | action hold length | 1 s, 5 s, 20 s | 0.945 |
+     | discount horizon | 10 to 1000 decisions | within 1.1x |
+     | critic input | with and without privileged neighbourhood | within 1.05x |
+     | speed bin scaling | four schemes, binding share 6% to 29% | 1.020 |
+     | operating point | 900, 1200, 2400 veh/h | 1.269 |
+     | AV penetration | 0.25, 0.50, 1.00 | 1.403 |
+
+     Nothing clears the floor. The oracle reads 14 to 80 times it throughout, so the
+     instrument was capable of a positive reading in every one of those arms.
+
+     **WHAT IS AND IS NOT ESTABLISHED, stated precisely.** The metering oracle of
+     task 102 is a specific heuristic given perfect state, so it is a lower bound on
+     what the best controller could do and NOT an upper bound: "no controller can
+     gain here" is not proven and cannot be proven this way. What is established is
+     narrower and still decisive for the plan: **the mechanism this project posits --
+     in-stream AV speed modulation -- neither gains when given perfect information
+     nor presents a learnable gradient, on this road, at every operating point and
+     penetration tried.**
+
+     **The recommendation, now on evidence.** Report the simulation leg as a null,
+     which is task 106's option 1. The reasoning is the order of the two problems:
+     a counterfactual advantage estimator (option 3, COMA-style) is precisely
+     targeted at the measurement above and would probably raise the correlation, but
+     it fixes the learning of a mechanism that gains nothing when handed perfect
+     information. Spending a research change on a better estimator is worth it only
+     after an oracle shows headroom for some controller to reach, and the cheap way
+     to look for that headroom is more oracles, not more training. The one positive
+     figure on record remains +7.6 +/- 15.2 arrivals at congestion onset, which is
+     one standard error.
+
 106. **RETRACTION OF MY OWN RECOMMENDATION: rescaling the speed bins does not
      help, and neither does the operating point.** Measured 2026-09-10, minutes
      after task 105 recommended the rescale. The recommendation was an argument from
