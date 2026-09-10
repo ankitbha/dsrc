@@ -50,7 +50,7 @@ zs = []
 for seed in (7, 17, 27):
     seed_everything(0)
     t = dataclasses.replace(base_t, rollout_steps=DECISIONS,
-                            work_dir=f"/tmp/dsrc_segagent_{seed}")
+                            work_dir=f"/tmp/dsrc_segown_{seed}")
     trainer = make_trainer(t, base_p, device="cpu")
     env = trainer.build_env()
     repeat = trainer.action_repeat()
@@ -89,15 +89,25 @@ for seed in (7, 17, 27):
                 if segment in by_segment:
                     action_map[agent_id] = actions[by_segment[segment]]
             nxt, terminated, _, infos, _ = trainer.hold_action(env, action_map, repeat)
-            reward = base_p.reward_scale * sum(
-                build_threshold_reward(i.get("segment_metrics", {}),
-                                       i.get("density_ratios", {}),
-                                       **dict(base_t.threshold_reward or {}))
-                for i in infos)
-            reward = max(-base_p.reward_clip, min(base_p.reward_clip, reward))
+            # EACH SEGMENT IS PAID ITS OWN TERM, not the network sum. The paper's
+            # reward is a sum of per-segment terms and its agent is centralized, so
+            # the sum is the right credit there. For a per-SEGMENT agent it is not: a
+            # shared network reward is moved by one segment's action by about a
+            # ninth, which is the same dilution that defeated the per-vehicle
+            # formulation, one level up. Verified a genuine decomposition: a clear
+            # segment reads +1.000 and a jammed one -0.850, summing to the network's
+            # +0.150.
+            weights = dict(base_t.threshold_reward or {})
             for segment, k in by_segment.items():
+                own = base_p.reward_scale * sum(
+                    build_threshold_reward(
+                        {segment: i.get("segment_metrics", {}).get(segment, {})},
+                        {segment: i.get("density_ratios", {}).get(segment, 0.0)},
+                        **weights)
+                    for i in infos)
+                own = max(-base_p.reward_clip, min(base_p.reward_clip, own))
                 buffer.add(observation=obs_tensor[rows[k]], action=indices[k],
-                           log_prob=log_probs[k], reward=reward, value=values[k],
+                           log_prob=log_probs[k], reward=own, value=values[k],
                            done=False, value_observation=value_obs[k],
                            agent_id=segment)
             observations = nxt
@@ -120,5 +130,5 @@ for seed in (7, 17, 27):
           f"{ceiling:>9.1f}", flush=True)
 
 se = statistics.stdev(zs) / len(zs) ** 0.5
-print(f"\nsegment-as-agent, {len(zs)} seeds: mean z {statistics.fmean(zs):+.2f} +/- {se:.2f}")
+print(f"\nsegment-as-agent with its OWN reward term, {len(zs)} seeds: mean z {statistics.fmean(zs):+.2f} +/- {se:.2f}")
 print("vehicle-as-agent under the same valid null: see scripts/measure_action_alignment.py")
