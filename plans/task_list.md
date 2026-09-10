@@ -2470,6 +2470,35 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+112. **The one arm with a positive reading, on ten seeds: 1.66 standard errors,
+     which does not clear the bar and is not nothing.** Measured 2026-09-10 by
+     `scripts/measure_full_penetration_signal.py`, settling the loose end task 110
+     left open.
+
+     `sumo_saturating` at 100% penetration, ten seeds, the measured gradient norm
+     against a 60-permutation floor distribution per seed:
+
+     | seed | 7 | 17 | 27 | 37 | 47 | 57 | 67 | 77 | 87 | 97 |
+     |---|---|---|---|---|---|---|---|---|---|---|
+     | z | -0.30 | +1.30 | +1.45 | -1.92 | +0.34 | **+2.36** | +1.34 | +1.32 | +0.16 | +0.25 |
+
+     **Mean z +0.630 +/- 0.379, which is 1.66 standard errors.** The project's bar
+     is two standard errors, so this is reported as no effect. Stated fully rather
+     than only as a verdict, because the shape matters: **eight of ten seeds are
+     positive**, one reaches +2.36, and one reaches -1.92.
+
+     **What it does and does not change.** It is the single place in this whole
+     investigation where "there is no signal" might be wrong, and it is the arm to
+     run more seeds on if the question is reopened. It does NOT reopen the headroom
+     question: a learning signal at 100% penetration would say a policy could be
+     trained, not that a trained policy would gain anything, and the metering oracle
+     with perfect information still serves -0.8 and +0.8 more vehicles than no
+     control. The two are separate and both would have to move.
+
+     **It is also not the deployment's operating point.** 100% penetration means
+     every vehicle on the road is controlled, against the 25% the predecessor paper
+     used and the far lower fraction any deployment would have.
+
 111. **RESULT of the pre-registered run, and it is a null on all three criteria.**
      Read 2026-09-10 by `scripts/read_training_gate.py` on the completed 25 updates
      of seed 7.

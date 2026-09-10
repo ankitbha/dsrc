@@ -89,8 +89,17 @@ distribution:
 | `sumo_saturating`, penetration 1.00 | 0.042 | 0.011 | +0.82 |
 | `sumo_capacity_drop`, gamma 0.999 | 0.052 | 0.013 | +0.33 |
 
-The largest is under one standard deviation. Penetration 1.00 is the only arm worth
-more seeds if the question is reopened.
+The largest is under one standard deviation. Penetration 1.00 was then run on ten
+seeds: **mean z +0.630 +/- 0.379, which is 1.66 standard errors and does not clear
+the project's two-standard-error bar.** Eight of the ten seeds are positive, one
+reaches +2.36 and one -1.92. It is the single place in this investigation where "no
+signal" might be wrong, and it is the arm to extend if the question is reopened.
+
+It does not reopen the headroom question. A learning signal at 100% penetration would
+say a policy could be trained, not that a trained policy would gain anything, and the
+metering oracle still serves -0.8 and +0.8 more vehicles than no control. Both would
+have to move. 100% penetration is also not a deployment operating point: every vehicle
+on the road is controlled, against the 25% of the predecessor paper.
 
 **The control on the instrument itself.** Every reading above was taken at a randomly
 initialised actor, so a rising correlation with training would invalidate them. A
