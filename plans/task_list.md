@@ -2479,12 +2479,19 @@ and on what evidence.
      state and accumulates a trajectory. **In this project the controller is a
      VEHICLE.** It enters, traverses, and leaves.
 
-     Mean travel time at this operating point is 250 to 300 s, so a vehicle makes:
+     MEASURED over one rollout per configuration, rather than estimated. The first
+     version of this entry said "4 or 5" from an arithmetic estimate off the mean
+     travel time; the measurement says 7:
 
-     | lever | decisions in one agent's lifetime |
-     |---|---|
-     | 1 s | 250 to 300 |
-     | 60 s | **4 or 5** |
+     | config | decisions | distinct agents | decisions per agent, mean / median / max | agents with ONE decision |
+     |---|---|---|---|---|
+     | `mappo_sumo`, 1 s lever | 150 | 57 | **90.5 / 99 / 150** | 0.0% |
+     | `mappo_src`, 60 s lever | 20 | 227 | **7.1 / 7 / 19** | 6.2% |
+
+     A thirteenfold reduction in temporal structure per agent, and four times as many
+     distinct agents passing through -- 227 against 57 -- each contributing a short
+     fragment instead of a trajectory. The agent count rises because the episode is
+     twice as long and more congested, so more vehicles enter and leave.
 
      That is the hidden cost of the macroscopic lever here. It buys each decision a
      much larger effect and it leaves GAE almost no temporal structure per agent:
