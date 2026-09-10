@@ -2663,6 +2663,23 @@ and on what evidence.
      different situation from one that never moves -- and it would argue for more
      updates rather than for another change of formulation.
 
+     **RETIRED AT UPDATE 5: the decline was not a trend.** Entropy went 2.1898,
+     2.1837, 2.1775, 2.1743, then **rose** to 2.1762. The steps are -0.0061, -0.0061,
+     -0.0032, +0.0019 -- deceleration and then reversal. The slope over five updates
+     is -0.00338, projecting to **2.13** at update 20, further from the 1.9775 gate
+     than the 2.07 predicted at update 3.
+
+     The score flattened at the same time: -6.567, -6.446, -6.463, -6.462, three
+     consecutive updates inside 0.02.
+
+     **This is what the gradient measurements predict.** A policy whose advantage
+     carries no information about its actions drifts rather than descends, and four
+     steps of -0.006, -0.006, -0.003, +0.002 is drift. The paragraph above was written
+     from three points and should not have been given the weight of a trend; it is
+     kept rather than deleted because the reasoning it contains -- that a slow genuine
+     decline would argue for more updates -- is still the right test, and it simply
+     did not apply.
+
      **The caveat that comes with it.** Three points are not a trend, entropy can fall
      because a policy is collapsing onto one action for reasons unrelated to the
      objective, and the joint modal share is what distinguishes those. That is
