@@ -133,6 +133,44 @@ class TestTheEvaluationUsesTheTrainingEnvironment:
         )
         assert config["demand"]["id"] == training["demand"]
 
+    def test_absolute_speed_bins_reach_the_run(self, monkeypatch):
+        # A field built and never passed reads as a measured default. The bins are
+        # the difference between commanding 8.33 m/s and commanding 20 m/s under the
+        # same action name, and at this operating point the second does nothing.
+        from src.config.loaders import load_named_config
+        from scripts import evaluate_burst_scenario as module
+
+        captured = {}
+
+        class Recorder:
+            def __init__(self, topology, config):
+                captured["config"] = config
+
+            def reset(self, seed=None):
+                return {}, {}
+
+            def step(self, actions):
+                return {}, 0.0, False, True, {"metrics": {}}
+
+            def close(self):
+                pass
+
+            view = None
+            arrived_total = 0
+            collision_count = 0
+
+        monkeypatch.setattr(module, "SumoTopologyEnv", Recorder)
+        training = load_named_config("training", "mappo_src")
+        module.run_one(controller=None, seed=7, training=training, work_dir=None)
+        assert captured["config"]["speed_bins_mps"] == training["speed_bins_mps"]
+
+        # The control: a config that declares no absolute bins must not acquire any,
+        # or every earlier run is silently re-interpreted.
+        module.run_one(controller=None, seed=7,
+                       training=load_named_config("training", "mappo_sumo"),
+                       work_dir=None)
+        assert "speed_bins_mps" not in captured["config"]
+
 
 class TestTheEvaluationDecidesAtTheRateItTrainedAt:
     """A policy trained at one decision per simulated second must be evaluated at

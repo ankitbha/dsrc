@@ -91,6 +91,15 @@ def run_one(*, controller, seed, training, work_dir):
     if training.get("human_model"):
         config["human_model"] = load_named_config(
             "human_model", str(training["human_model"]))
+    # The absolute speed bins, for the same reason `human_model` is passed: a policy
+    # evaluated under different bins from the ones it trained on is commanding
+    # different speeds with the same action names. Without this the paper's
+    # 8.33/12.5/16.67 m/s silently become the contract's 20/27/30, which do the same
+    # thing as each other on 84% of steps -- so the learned arm would be evaluated
+    # with its action head very nearly inert.
+    if training.get("speed_bins_mps"):
+        config["speed_bins_mps"] = {
+            str(k): float(v) for k, v in training["speed_bins_mps"].items()}
     env = SumoTopologyEnv(str(training["topology"]), config)
     every = decision_interval_steps(training)
     has_burst = bool((demand.get("burst") or {}).get("enabled", False))
