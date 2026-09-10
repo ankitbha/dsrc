@@ -1,0 +1,136 @@
+# The simulation leg: what was measured, and why it is a null
+
+One account of a result currently spread across task-list entries 92 to 109. It
+states what was measured, what each measurement was controlled against, and exactly
+what is and is not established.
+
+## Short version
+
+**The mechanism this project posits -- in-stream AV speed modulation -- neither gains
+when handed perfect information nor presents a learnable gradient, on this road, at
+every operating point and penetration tried.** Two instruments built for different
+purposes agree:
+
+- a perfect-information metering oracle serves **-0.8 and +0.8** more vehicles than
+  no control, against a spread of about 16;
+- the correlation between one AV's action and its own advantage is **about 1%**,
+  where the same instrument reads 14 to 80 times its noise floor when a correlated
+  advantage is supplied.
+
+**What is NOT established.** The oracle is one hand-written heuristic given perfect
+state, so it is a lower bound on what the best controller could do and not an upper
+bound. "No controller can gain on this network" is not proven and cannot be proven
+this way.
+
+## The environment is sound, and four defects had to be fixed to make it so
+
+Each of these alone prevented any result. They are listed because the null means
+nothing without them: a null on a broken environment is not a measurement.
+
+| defect | what it did | fix |
+|---|---|---|
+| 1 s physics step | manufactured a 17.6% "throughput gain" that vanished at a converged step size | dt 0.1, and the result retracted (task 92) |
+| unintended permanent yield at the merge | every edge had `priority="-1"`, so netconvert broke the tie by geometry and one approach was permanently minor | zipper junctions; capacity 1110 -> 1600 veh/h (task 98) |
+| Krauss car-following | computes a collision-free safe speed exactly and recovers immediately, so there is no capacity drop and nothing to recover | the predecessor paper's calibrated Wiedemann-99, giving a 24% capacity drop (task 100) |
+| single-lane approaches | a slow AV cannot be overtaken, so it is an obstruction and not a meter | two lanes on every approach (task 102) |
+
+The oracle progression across those fixes is a sequence of removed harms and no
+found benefit: -16.6 +/- 7.8, then +7.6 +/- 15.2 at congestion onset, then -21 to
+-38 at the capacity peak, then -0.8 and +0.8 oversaturated with two lanes.
+
+## The learning result, and the instrument that produced it
+
+**The statistic.** With advantages normalised to unit standard deviation, the norm of
+`d(policy_loss)/d(actor)` measures how much the advantage correlates with the action:
+a term uncorrelated with the action cancels across the batch, an aligned one adds.
+`policy_loss` itself says nothing, because at a probability ratio of 1 it is minus
+the mean normalised advantage, which is zero by construction however informative the
+advantage is.
+
+**Its two controls, without which every reading is uninterpretable.** The floor is
+the same advantages permuted across the batch: identical distribution, no correlation
+with the action. The ceiling is an advantage built to correlate with the action.
+Measured on the shipped configuration, three seeds, 17,296 decisions:
+
+| advantage | gradient norm | over the floor |
+|---|---|---|
+| as measured | 0.0499 | **0.784** |
+| shuffled -- the floor | 0.0637 | 1.000 |
+| action-correlated -- the ceiling | 1.5971 | **25.1** |
+
+**Seven dimensions varied, none clearing the floor.** Three seeds each, floor and
+ceiling on every arm:
+
+| varied | range | best measured over floor |
+|---|---|---|
+| reward decomposition | team, neighbourhood, own-vehicle, both | 0.850 |
+| action hold length | 1 s, 5 s, 20 s | 0.945 |
+| discount horizon | 10 to 1000 decisions | within 1.1x |
+| critic input | with and without privileged neighbourhood | within 1.05x |
+| speed bin scaling | four schemes, binding share 6% to 29% | 1.020 |
+| operating point | 900, 1200, 2400 veh/h | 1.269 |
+| AV penetration | 0.25, 0.50, 1.00 | 1.403 |
+
+At 100% penetration the policy commands the entire fleet -- 168 vehicles at 2400
+veh/h -- and one agent's action still does not correlate with its own advantage.
+
+**The control on the instrument itself.** Every reading above was taken at a randomly
+initialised actor, so a rising correlation with training would invalidate them. A
+checkpoint 23 updates in reads 0.812 against a fresh actor's 0.848: indistinguishable.
+
+## Two measurements that stand and do not reach the gradient
+
+Both are real and neither changes the conclusion, which is worth stating so they are
+not mistaken for support.
+
+- **The reward counterfactual.** Holding one AV at 20 m/s for a 20 s window and
+  repeating from the same seed at 30 m/s: the agent's own local reward moves 22.82,
+  another agent's action moves it 1.28, a ratio of **17.8**. The team reward moves
+  2.06 against a window total of 193.03, which is **1.07%**. So the per-agent reward
+  is far better attributed than the team reward -- and neither survives into the
+  advantage.
+- **The critic regression.** Giving the centralized critic the agent's own
+  neighbourhood raises out-of-sample R2 on the per-agent return from 0.808 to 0.886,
+  and leaves it at 0.854 against 0.858 under the team reward, which is the control
+  saying the improvement is about the per-agent term. The actor's gradient is
+  unchanged.
+
+## What was retracted, and by what
+
+Recorded because the retractions are part of the result.
+
+| claim | retracted by |
+|---|---|
+| AVs held at 10 m/s raise throughput 17.6% | the step-size sweep: the treatment was invariant to dt and only the control moved (task 92) |
+| joint gradient clipping starved the actor | Adam is invariant to a uniform gradient rescale; 20 steps move a parameter 0.383268 unscaled and 0.383267 scaled by 0.0063 |
+| the per-agent reward lowered the policy gradient; the horizon does not matter; privileged critic features do not help the gradient | all three were comparisons between two noise floors, taken before the floor was measured (task 105) |
+| rescaling the speed bins would produce a gradient | three rescalings raise the binding share from 6% to 29% and leave the gradient at its floor; the recommended one is the worst (task 106) |
+
+## The pre-registered run
+
+`configs/training/mappo_sumo.yaml`, seed 7, 25 updates of three episodes each, with
+the gate fixed before the run. Criterion 1, summed entropy below 1.9775 of a 2.1972
+maximum: the lowest reached is 2.1778. Criterion 2, the score trending up by more
+than the variation between consecutive updates: it moves -0.1772 against a step
+standard deviation of 0.2186. Criterion 3 as written carried no numeric threshold,
+which is a defect in the pre-registration and is recorded as such rather than
+resolved after the fact.
+
+A randomly initialised actor already reads a joint modal share of 0.1378 against a
+uniform 0.1111, and 23 updates take it to 0.1486, so most of the departure from
+uniform is initialisation.
+
+## What this leaves
+
+1. **Report the simulation leg as a null**, with the deployment carrying the
+   feasibility claim as it already does.
+2. **Change what the AVs can do** rather than how their reward is priced: platoon
+   coordination, or an explicit meter at the junction rather than in-stream
+   vehicles. Penetration is measured and does not do it.
+3. **Change the advantage estimator** to a counterfactual one, which is precisely
+   targeted at the measurement above and would probably raise the correlation -- and
+   would fix the learning of a mechanism that gains nothing when handed perfect
+   information.
+
+The order matters: an estimator that learns better is worth building after an oracle
+shows headroom to reach, and oracles are the cheap way to look for headroom.
