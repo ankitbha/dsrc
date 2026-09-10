@@ -2470,6 +2470,41 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+128. **RESULT: an unshared per-agent reward produces no action alignment either,
+     and the z statistic has a residual bias I cannot explain.** Measured 2026-09-10,
+     three seeds, network initialisation varying with the seed, work directories keyed
+     by process id.
+
+     | arm | per seed z | mean z | corr(chose slow, advantage) |
+     |---|---|---|---|
+     | team only, shared reward | -1.12, +0.67, -0.87 | -0.44 +/- 0.56 | **-0.0043** |
+     | local 0.5, UNSHARED reward | -1.08, -0.61, -0.73 | -0.81 +/- 0.14 | **+0.0016** |
+
+     **The correlation is the statistic to read, and it is zero.** At n about 5,500
+     its standard error is about 0.0135, so both values are well inside noise. Giving
+     each agent a reward that genuinely differs from its neighbours' produces no
+     more action-advantage alignment than a shared one.
+
+     **This rules out the explanation named in the result document** as the structure
+     underneath every null here -- that the nulls came from paying every agent the
+     same reward. They do not. At the vehicle level, with sensitivity to a
+     correlation of about 0.016, an unshared reward is silent about the action too.
+
+     **AND THE z STATISTIC HAS A RESIDUAL BIAS.** It reads consistently negative
+     across every arm measured today: +0.00, -0.47, -1.32, -0.44, -0.81. Under a null
+     that resamples the action from the same policy at the same state, the resampled
+     action and the action actually taken are exchangeable -- both are draws from
+     `pi(.|s)` with the same parameters, since no update intervenes between collection
+     and measurement -- so z should centre on zero. It does not, and I cannot say why.
+
+     **What that does to the readings.** The correlations are unaffected: they are a
+     direct point-biserial statistic with an analytic standard error and no null
+     construction at all. Every conclusion in tasks 105 to 128 that rests on "z near
+     zero" should be re-read as resting on the correlation instead, and the z values
+     should be treated as an instrument with a known offset until the offset is
+     explained. The two agree on the substance -- no alignment -- which is why the
+     conclusions stand.
+
 127. **Two copies of one measurement ran at once, sharing their work directories.**
      2026-09-10, and it nearly produced numbers from two interleaved simulations with
      nothing looking wrong.
