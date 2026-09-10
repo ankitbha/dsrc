@@ -2533,7 +2533,27 @@ and on what evidence.
      taken from this network's own fundamental diagram instead of imported. A first
      attempt pooled segments and produced a non-monotone curve, because a trunk at
      1890 veh/h and a leaf at 350 do not belong on one axis; it has to be per
-     segment.
+     segment. The per-segment half of that run is usable, and it argues that 0.3 is
+     about right. Density ratio at which each segment's flow is highest, three
+     seeds, 1200 s episodes, no control:
+
+     | segment | ratio at peak flow | peak flow veh/h |
+     |---|---|---|
+     | `tree_leaf_a1` | 0.325 | 340 |
+     | `tree_leaf_a2` | 0.275 | 294 |
+     | `tree_leaf_a3` | 0.425 | 349 |
+     | `tree_middle_b1` | 0.525 | 687 |
+     | `tree_leaf_a4`, `a5`, `a6` | 0.025 | 352-360 |
+     | `tree_middle_b2` | 0.075 | 1110 |
+     | `tree_trunk_c` | 0.125 | 1890 |
+
+     The last two groups never congest, so their "peak" is just the density they run
+     at and says nothing about a critical point. **The segments that DO congest peak
+     between 0.275 and 0.525**, so the paper's 0.3 sits at the bottom of the measured
+     critical band rather than outside it. For an anticipatory controller that is the
+     right side to err on: the penalty starts as the link approaches capacity rather
+     than after it has passed it. It is imported rather than measured, and it lands
+     in the right place, which is worth stating as two separate facts.
 
 112. **The one arm with a positive reading, on ten seeds: 1.66 standard errors,
      which does not clear the bar and is not nothing.** Measured 2026-09-10 by
