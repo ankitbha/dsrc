@@ -2470,6 +2470,41 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+109. **A defect in my own pre-registration, recorded before the final numbers.**
+     Task 103's criterion 3 reads "the modal action's share exceeds 1/9 by a clear
+     margin". **"A clear margin" is not a threshold**, so unlike criteria 1 and 2 it
+     cannot be evaluated mechanically and could be resolved either way once the
+     number was in front of me. That is the failure a pre-registration exists to
+     prevent, and I wrote it.
+
+     It is recorded now, with the number already visible at update 23 of 25 and
+     before the run finished, so the record shows what the criterion was worth
+     rather than how it was applied. The reading at update 23, over 13,531
+     observations:
+
+     | head | mean probability | entropy | maximum |
+     |---|---|---|---|
+     | `desired_speed_bin` | 0.423 / 0.257 / 0.320 | 1.0778 | 1.0986 |
+     | `desired_headway_bin` | 0.351 / 0.307 / 0.342 | 1.0970 | 1.0986 |
+
+     Joint modal share 0.1486 against a uniform 0.1111, which is 34% above uniform
+     in relative terms and 0.037 in absolute terms.
+
+     **How it should have been written**: a numeric bar, for instance a modal share
+     above 0.2, or a summed entropy below the criterion 1 threshold, which would
+     have made criterion 3 redundant and revealed that at the time of writing.
+
+     **It does not change this run's verdict**, because criteria 1 and 2 are
+     numeric and both fail, and the gate required all three.
+
+     **One observation worth keeping.** The head that moved is
+     `desired_speed_bin`, toward `slow`, and the head that did not is
+     `desired_headway_bin`, which sits at 1.0970 of a 1.0986 maximum. That is the
+     opposite of what task 105 would predict: the speed head is the one measured to
+     be equivalent across its values on 97% of decisions, and the headway head sets
+     `tau`, which affects car following at any speed. Whether that drift is a weak
+     real signal or 23 updates of random walk is not settled by this run.
+
 108. **The control on tasks 105 to 107: a trained actor reads the same as a fresh
      one.** Measured 2026-09-10 by `scripts/measure_trained_actor_signal.py`.
 
