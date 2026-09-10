@@ -2470,6 +2470,37 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+122. **RESULT: the macroscopic lever does not restore the learning signal.**
+     Measured 2026-09-10 with `scripts/measure_action_alignment.py` against the valid
+     resampled-action null, three seeds.
+
+     | config | lever | mean z | ceiling |
+     |---|---|---|---|
+     | `mappo_sumo` | 1 s | +0.00 +/- 0.29 | 28 to 33 |
+     | `mappo_src` | 60 s | **-0.47 +/- 0.51** | 17 to 18 |
+
+     Per seed, `mappo_src`: -1.33, +0.44, -0.53.
+
+     **The sensitivity, so the null is bounded rather than merely stated.** With a
+     ceiling of about 17, a null of about 0.11 and a null standard deviation of about
+     0.029, the expected z for a true action-advantage correlation `rho` is roughly
+     60 x rho. The arm therefore resolves rho near 0.03, and the reading bounds rho
+     within about +/- 0.017 of zero. This is not a null from an insensitive
+     instrument.
+
+     **What it means.** Holding one action for a simulated minute instead of a second
+     -- with the paper's threshold reward, its speed bins, its discount horizon, and a
+     link-level congestion signal the actor can see -- produces no more
+     action-attributable signal than the one-second version. Ankit's spatio-temporal
+     argument is right about the mechanism and does not, on this road, produce a
+     learnable gradient at the vehicle level.
+
+     **What it does NOT mean.** The lever change is confounded with a cost measured
+     in task 115: at 60 s each agent makes 7.1 decisions in its life rather than
+     90.5, a thirteenfold loss of temporal structure. The two pull opposite ways and
+     this measurement cannot separate them. Separating them needs an agent that
+     persists -- which is the segment arms, still running.
+
 121. **PRE-COMMITTED: what decides whether the paused training run resumes.**
      Written 2026-09-10 while the measurement was still running, so the rule is not
      chosen to fit the number.

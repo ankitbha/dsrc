@@ -44,7 +44,7 @@ bundle = {"training": cfg, "env": {k: cfg[k] for k in env_keys if k in cfg}, "se
 base_t = TrainingConfig.from_mapping(bundle)
 base_p = PPOConfig.from_mapping(cfg)
 
-print(f"{'seed':>5} {'segment-decisions':>18} {'measured':>10} {'floor':>9} {'sd':>8} "
+print(f"{'seed':>5} {'segment-decisions':>18} {'measured':>10} {'null':>9} {'sd':>8} "
       f"{'z':>7} {'ceiling':>9}")
 zs = []
 for seed in (7, 17, 27):
