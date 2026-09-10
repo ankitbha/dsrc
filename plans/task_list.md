@@ -2470,6 +2470,41 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+100. **The calibrated driving model gives up the collision-free guarantee, and
+     that is the same trade in both directions.** Measured 2026-09-10 at 1200 veh/h
+     with no AVs, three 600 s runs: SUMO's default Krauss produces **0** collisions
+     and the calibrated Wiedemann-99 produces **2**.
+
+     This is not a defect in either model. Krauss computes a collision-free safe
+     speed exactly and recovers from a disturbance immediately, which is why task 84
+     chose SUMO over highway_env in the first place -- "SUMO's car-following cannot
+     produce a collision" was the premise of the whole migration. The same property
+     is why it has no capacity drop and nothing for a controller to recover: a model
+     that never over-brakes cannot produce the stop-and-go instability the
+     controller exists to damp. W99's psycho-physical thresholds do over-brake, on
+     purpose (CC2 and CC6 "help introduce stop-and-go dynamics"), and the price is
+     that a collision becomes possible.
+
+     **Three consequences, recorded rather than resolved.**
+
+     - Every "zero collisions" claim in this project is now conditional on the
+       driving model. The claims stand for Krauss; under W99 the rate is small but
+       not zero. `TestNoCollisionsEver` and the action-head collision guard both
+       exercise the Krauss path, so they still pass and now cover less than their
+       names suggest.
+     - `crash_penalty` in the reward is no longer inert on SUMO. It was recorded as
+       structurally absent because `crashed_agent_ids()` returns nothing and SUMO
+       could not collide; under W99 the collision counter does move, so the -5.0
+       collision weight can now charge a policy.
+     - The safety layer matters again. It was reasonable to leave
+       `apply_safety_layer` unrun on SUMO while the simulator's own model was the
+       guarantee. It is not reasonable under W99, and whether to run it is a
+       decision that now has consequences.
+
+     The honest framing for the paper is that the simulator offers a choice between
+     a fleet that cannot crash and a fleet that can congest, and the phenomenon
+     under study requires the second.
+
 99. **AMENDED PRE-REGISTRATION for the re-run on the corrected road.** Written
     2026-09-10, before training, superseding task 93. Amended for two reasons that
     are both about the instrument and neither about a result: the road and the
