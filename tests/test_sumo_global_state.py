@@ -583,7 +583,10 @@ class TestTheAntiDegenerateTermsAreMeasured:
     of a segment. A constant 0.0 removes the only term that penalises exactly that.
     """
 
-    def _run(self, tmp_path, commanded, penetration=0.2, steps=200):
+    def _run(self, tmp_path, commanded, penetration=0.7, steps=200):
+        # 0.7, not 0.2. `all_lane_av_low_speed_occupancy` requires an AV in EVERY
+        # lane of a segment, and with two lanes everywhere a fifth of the fleet
+        # rarely manages it: the term fired on 0 segment-steps at 0.2.
         demand = dict(load_named_config("demand", "sumo_saturating"))
         demand["av_penetration"] = penetration
         env = SumoTopologyEnv("inverted_tree", {
@@ -628,11 +631,13 @@ class TestTheAntiDegenerateTermsAreMeasured:
     def test_holding_the_lanes_raises_the_occupancy_term(self, tmp_path):
         _, idle = self._run(tmp_path, commanded=None)
         _, blocking = self._run(tmp_path, commanded=10.0)
-        # 0.30, measured at 0.39 on the corrected road with the calibrated driving
-        # model, against 0.00 for uncommanded traffic. It was above 0.4 on the
-        # network whose capacity was set by a permanent yield.
-        assert sum(blocking) / len(blocking) > 0.30
-        assert sum(idle) / len(idle) < 0.20
+        # Measured with two lanes everywhere at penetration 0.7: commanded 0.53
+        # against uncommanded 0.20, a factor of 2.6. The uncommanded figure is no
+        # longer near zero because at this penetration AVs sometimes occupy both
+        # lanes of a segment without being told to, which is the honest reading of
+        # a metric that asks whether every lane holds a slow AV.
+        assert sum(blocking) / len(blocking) > 0.40
+        assert sum(idle) / len(idle) < 0.30
 
     def test_the_aggregate_is_the_mean_over_segments(self, tmp_path):
         # Pins the aggregation as well as the magnitude: the reward reads one number
@@ -835,9 +840,15 @@ class TestMeteringIsNotScoredAsObstruction:
             self._holding(all_lane_av_low_speed_occupancy=0.0), clear) == 0.0
 
     def test_metering_is_excused_in_a_live_run(self, tmp_path):
+        # Penetration 0.7. The exemption can only fire where the roadblock
+        # conditions hold, which needs an AV in EVERY lane, and with two lanes
+        # everywhere a fifth of the fleet manages that on 80 segment-steps against
+        # 186 at 0.7.
+        demand = dict(load_named_config("demand", "sumo_saturating"))
+        demand["av_penetration"] = 0.7
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
-            "demand": load_named_config("demand", "sumo_saturating"),
+            "demand": demand,
             "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": 300, "dt": 1.0, "warmup_steps": 300,
             "work_dir": str(tmp_path)})

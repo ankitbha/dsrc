@@ -39,11 +39,13 @@ class TestTheNetworkMatchesTheSpec:
         assert len(entries) == 6, f"expected 6 entry edges, got {sorted(entries)}"
 
     def test_the_lane_counts_come_from_the_spec(self, network):
-        # leaves: 1, middle: 2, trunk: 2. A wrong lane count changes capacity, which
-        # is the quantity the whole replication turns on.
+        # Two lanes everywhere. A wrong lane count changes capacity, which is the
+        # quantity the whole replication turns on; the leaves were one lane, which
+        # also made in-stream speed control structurally a roadblock rather than a
+        # meter, because a slow vehicle on a single lane cannot be passed.
         counts = network.lane_counts()
         for edge in network.entry_edges():
-            assert counts[edge] == 1, f"{edge} has {counts[edge]} lanes, spec says 1"
+            assert counts[edge] == 2, f"{edge} has {counts[edge]} lanes, spec says 2"
         assert all(counts[e] == 2 for e in network.middle_edges()), counts
 
     def test_edges_map_back_to_segment_ids(self, network):

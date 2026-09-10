@@ -8,10 +8,20 @@ road:
   trunk_m: 600.0
   bottleneck_m: 300.0
   speed_limit_mps: 30.0
+  # Two lanes everywhere. The leaves were one lane, which made speed control by an
+  # in-stream AV structurally impossible: on a single-lane approach a slow vehicle
+  # cannot be overtaken, so it blocks the traffic behind it rather than metering the
+  # flow ahead of it. Ramp metering works because the meter sits beside the road;
+  # an AV is in it. Measured under a demand above capacity with single-lane leaves,
+  # every control arm reduced served throughput by 10 to 32 vehicles and left latent
+  # demand unchanged within +/- 5 -- unambiguous harm with no compensating gain.
   lane_counts:
-    leaves: 1
+    leaves: 2
     middle: 2
     trunk: 2
+    # The lane DROP is the point of this variant, so the bottleneck stays at one
+    # lane: it is the only place where a reduction is intended rather than an
+    # accident of how the network was written.
     bottleneck: 1
   segment_ids:
     - tree_leaf_a1

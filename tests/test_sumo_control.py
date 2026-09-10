@@ -263,9 +263,14 @@ class TestEveryActionHeadActuates:
     def _run(self, tmp_path, action, steps=400):
         import src.sumo.env as env_module
 
+        # With the calibrated driving model, so the road congests. A lane-change
+        # request is only issued when the target lane exists and differs from the
+        # current one, so on a free-flowing road the AVs settle in the left lane and
+        # stop asking: 26 requests under Krauss against 376 under W99.
         env = SumoTopologyEnv("inverted_tree", {
             "topology": load_named_config("topology", "inverted_tree"),
             "demand": load_named_config("demand", "sumo_saturating"),
+            "human_model": load_named_config("human_model", "w99_calibrated"),
             "duration_steps": steps, "dt": 0.1, "warmup_steps": 3000,
             "work_dir": str(tmp_path)})
         env.reset(seed=7)

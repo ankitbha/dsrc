@@ -36,7 +36,7 @@ class TestItAnswersWhatTheSensingModelAsks:
     def test_every_lane_is_listed(self, view):
         lanes = view.road_network.lanes_dict()
         # 6 single-lane entries, 2 two-lane middles, 1 two-lane trunk = 12.
-        assert len(lanes) == 12, sorted(lanes)
+        assert len(lanes) == 18, sorted(lanes)
 
     def test_lane_lengths_match_the_spec(self, view):
         network = view.road_network

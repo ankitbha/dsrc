@@ -2470,6 +2470,57 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+102. **Two lanes everywhere, and the oracle progression that made the case.**
+     Decided by the user 2026-09-10; the measurements that led there are below,
+     and they are a sequence of removed harms rather than a found benefit.
+
+     The metering oracle -- perfect state, the project's own backpressure
+     mechanism, no learning -- against no control, in the order the setup was
+     corrected:
+
+     | setup | metering vs no control |
+     |---|---|
+     | permanent yield at the merge, Krauss fleet | −16.6 +/- 7.8 |
+     | zipper merge, calibrated W99, at congestion onset | **+7.6 +/- 15.2** |
+     | zipper merge, W99, at the capacity peak (2100 veh/h) | −21 to −38 |
+     | zipper merge, W99, past the peak (2400 veh/h) | −4 to −30 |
+     | oversaturated, single-lane leaves | −10 to −32, latent unchanged |
+     | **oversaturated, two lanes everywhere** | **−0.8 and +0.8** |
+
+     **Each correction has removed harm and none has produced benefit.** The final
+     row is the important one: with two lanes everywhere, metering is
+     indistinguishable from doing nothing (−0.8 and +0.8 against a standard
+     deviation of about 16), where on single-lane leaves it cost 10 to 32 vehicles.
+
+     **Why the lane count mattered.** On a single-lane approach a slow vehicle
+     cannot be overtaken, so an in-stream AV that slows is a rolling roadblock and
+     not a meter. Ramp metering works because the meter sits beside the road; an AV
+     is in it. The six entry leaves were one lane, so the mechanism the project
+     exists to study was structurally unavailable on the segments where it would
+     have to act. Both topologies now have two lanes on every approach; the
+     bottleneck variant keeps its single-lane drop, which is intended rather than
+     accidental.
+
+     **The saturated design, and what it measures.** `sumo_oversaturated` holds
+     3000 veh/h against a peak served flow near 1300, so the accounting closes:
+     every scheduled vehicle is served, on the road, or latent. A controller must
+     raise served and lower latent, and moving vehicles from the road into the queue
+     is visible as one improving while the other worsens. Measured with no AVs at
+     3000 veh/h on single-lane leaves: served settles near 1150 veh/h, the road
+     holds about 480 vehicles, and latent grows about 0.44 vehicles per second once
+     the leaves saturate. With two lanes the road absorbs far more, so at the same
+     1200 s warm-up latent is 61 rather than 506 -- the two lane counts are NOT at
+     the same point in their saturation trajectory, and comparisons across them are
+     not like for like. Comparisons within a lane count are.
+
+     **Three measurement defects found and fixed while doing this**, all in my own
+     scripts rather than the simulator: the runs were sequential on one core of ten;
+     a shared working directory had parallel runs overwriting each other's network
+     file mid-read; and `ProcessPoolExecutor` hangs because libsumo keeps the
+     simulation in module-level state and a forked child inherits a copy of it. The
+     measurement now runs one independent subprocess per seed and takes control
+     decisions at 1 Hz rather than 10 Hz, which is also the more realistic rate.
+
 101. **RESULT on the corrected road: the environment is now right and the
      learning is not.** Run 2026-09-10 per the amended pre-registration (task 99):
      zipper merges, the calibrated Wiedemann-99 fleet, `sumo_burst`, 900 s episodes
