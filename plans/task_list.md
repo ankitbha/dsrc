@@ -2470,6 +2470,63 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+97. **RESULT of the pre-registered run: MAPPO does not beat doing nothing, and is
+    measurably worse.** Executed 2026-09-09 exactly as task 93 fixed it in advance:
+    five seeds (7, 17, 27, 37, 47), `sumo_burst`, 900 s episodes at dt 0.1, the
+    final checkpoint of each seed, comparators `no_av` and `density_lookup`,
+    completed trips as the primary metric, a two-standard-error bar paired on seed.
+    Produced by `scripts/evaluate_burst_scenario.py`.
+
+    | arm | arrivals | trough m/s | recovery s | roadblock | collisions |
+    |---|---|---|---|---|---|
+    | `no_av` | **259.8 +/- 7.2** | 8.80 | 264.5 | 32.9 | 0 |
+    | `density_lookup` | 242.4 +/- 19.2 | 8.10 | 342.3 | 173.7 | 0 |
+    | `mappo` | 242.8 +/- 17.4 | 8.27 | 213.6 | 1365.3 | 0 |
+
+    Paired against `no_av` on the same seeds:
+
+    | arm | metric | difference | verdict |
+    |---|---|---|---|
+    | `density_lookup` | arrivals | −17.40 +/- 7.97 | **real** |
+    | `density_lookup` | trough speed | −0.70 +/- 0.53 | no effect |
+    | `density_lookup` | recovery | +17.17 +/- 75.35 | no effect |
+    | `density_lookup` | roadblock | +140.80 +/- 36.45 | **real** |
+    | `mappo` | arrivals | **−17.00 +/- 7.55** | **real** |
+    | `mappo` | trough speed | −0.53 +/- 1.27 | no effect |
+    | `mappo` | recovery | −91.40 +/- 87.66 | no effect |
+    | `mappo` | roadblock | +1332.38 +/- 134.75 | **real** |
+
+    **The primary metric says both controllers reduce throughput.** MAPPO completes
+    17.0 +/- 7.6 fewer trips than an uncontrolled fleet, a 6.5% reduction, and the
+    project's existing non-learning baseline is indistinguishable from it at
+    −17.4 +/- 8.0. Zero collisions in all fifteen runs.
+
+    **Nothing else clears the bar.** The trough is unchanged for both. MAPPO's
+    recovery is 91 s faster on average but the spread is 88, so it does not clear
+    two standard errors; on the pre-registration that is no effect, and it is
+    recorded here rather than promoted.
+
+    **The one term that moves decisively is the wrong one.** MAPPO's
+    `rolling_roadblock_score` is 1365 against 33 for uncontrolled traffic, 41 times
+    higher and far outside the noise. A policy that emits `slow` about a third of
+    the time holds lanes below free flow constantly, which is exactly what that
+    term exists to detect.
+
+    **The qualification, recorded BEFORE this result was measured (task 96): the
+    policy did not learn.** Entropy ended at 4.3548 against a maximum of 4.394, so
+    it finished at 99.1% of maximum entropy, and the score and throughput were flat
+    across all 100 updates. This measures a near-uniform policy over the action
+    space more than it measures what MAPPO can do. The honest reading is therefore
+    narrow: **with a team reward shared among about twelve agents, 100 updates of
+    MAPPO produced no learning signal, and acting near-randomly over this action
+    space costs 6.5% of throughput.**
+
+    **It is consistent with task 92.** There is no throughput effect at a converged
+    step size for a policy to find, so a policy that finds nothing is the expected
+    outcome, and one that acts anyway does harm. What this run does NOT establish
+    is that a policy with a working learning signal would fail; that question needs
+    the credit-assignment problem addressed first, and it is the natural next task.
+
 96. **The policy is not learning, and the cause is the credit-assignment signal
     rather than a defect.** Diagnosed 2026-09-09 at update 26 of the pre-registered
     run, before spending the remaining four hours on it.
