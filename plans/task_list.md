@@ -2487,6 +2487,51 @@ and on what evidence.
      against the same checkpoint directory. Recorded as a memory: identify a job by
      PID or by a sentinel file it writes, never by a pattern.
 
+133. **PAIRED: the objective discriminates fleet behaviour at least as well as an
+     arrival count, and its entire resolved response is the speed term.** 2026-09-10.
+
+     Task 131's pass was unpaired and could not resolve its own arms. This one pairs:
+     each of five seeds fixes the traffic and the metering draw sequence, so the same
+     seed at two mixes differs only in the mix. Its p=0 cells reproduce the fleet-mix
+     sweep's reference arrivals EXACTLY, seed for seed -- 198, 194, 156, 179, 196 --
+     and its p=0 reward over seeds 7, 17 and 27 reproduces task 131's +1.531 exactly,
+     so the two instruments agree before any comparison is drawn.
+
+     Paired differences from p=0, two-standard-error bars, n=5:
+
+     | p | d reward | d speed term | d penalty term | d arrivals |
+     |---|---|---|---|---|
+     | 0.25 | **-1.51** +/- 0.54 | **-1.24** +/- 0.72 | **-0.28** +/- 0.19 | **-25.4** +/- 8.7 |
+     | 0.5 | **-1.29** +/- 0.73 | **-1.47** +/- 0.82 | +0.18 +/- 0.37 | **-36.8** +/- 23.0 |
+     | 0.75 | **-1.70** +/- 0.97 | **-1.74** +/- 0.93 | +0.04 +/- 0.35 | **-32.0** +/- 24.7 |
+     | 1 | **-1.86** +/- 0.71 | **-1.72** +/- 0.83 | -0.14 +/- 0.50 | -27.8 +/- 32.8 |
+
+     Bold means the bar excludes zero.
+
+     **CORRECTS what task 131 said about noise.** Unpaired, the reward's arm bar
+     (1.25) spanned its between-arm range and arrivals' did not, which reads as the
+     objective being the noisier measure. Paired, it is not: the ratio of the
+     difference to its own bar is 2.79, 1.76, 1.75 and 2.63 for the reward against
+     2.91, 1.60, 1.29 and 0.85 for arrivals. At p=1 the objective resolves the change
+     and the arrival count does not. The reward is a sound discriminator of fleet
+     behaviour on this road, so **no part of the null is attributable to the objective
+     being unmovable or noisy.**
+
+     **The decomposition stands and is sharper than task 131 could show.** The speed
+     term is resolved and negative at every mix level and is essentially the whole of
+     the reward difference. The penalty term resolves at one of four and changes sign
+     across them: -0.28, +0.18, +0.04, -0.14. **The half of the objective that pays
+     for keeping a link below critical density does not respond consistently to this
+     behaviour, and the half that does is the half that restates mean segment speed.**
+
+     **A consequence worth stating for the training run.** Within this cut the
+     objective is maximised at p=0, by not metering. A policy that has learned nothing
+     and a policy that has learned to leave the fleet alone produce the same
+     behaviour, so this objective cannot demonstrate learning through improvement on
+     this axis. The cut is one dimension -- a uniform random command at one speed --
+     and a selective policy is not bounded by it; the metering oracle covers the
+     selective case with perfect information and gains nothing.
+
 131. **RESULT: the threshold objective is NOT flat, so the null stays in the mechanism
      rather than moving to the reward.** 2026-09-10.
 
