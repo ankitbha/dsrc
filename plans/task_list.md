@@ -2470,23 +2470,6 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
-132. **The two waiters holding the queued segment arms could never have fired.**
-     2026-09-10.
-
-     Each was `while pgrep -f 'measure_segment_own_reward|local_reward_align|...'`.
-     `pgrep -f` matches the full command line of every process, and the waiter's OWN
-     command line contains that pattern as literal text, so each waiter matched itself
-     and one matched the other. Both jobs they were holding -- `measure_segment_as_agent`
-     and the higher-power own-reward arm -- would have waited indefinitely.
-
-     Replaced with one shell script that runs the two in sequence, with no matching.
-     The third process-identification failure of the session, after `pgrep -f "a\|b"`
-     (where `\|` is a literal in this shell) and a `grep -E "train_mappo|measure_threshold"`
-     against scripts actually named `train_policy.py` and `threshold_reward_sweep.py`,
-     which reported two healthy jobs as dead and led to duplicates being started
-     against the same checkpoint directory. Recorded as a memory: identify a job by
-     PID or by a sentinel file it writes, never by a pattern.
-
 137. **MEASURED: the gradient-norm z is strongly SUB-LINEAR in the action-advantage
      correlation, so the ceiling extrapolation of task 136 was optimistic.**
      2026-09-10. `scratchpad/calibrate_instrument.py`.
@@ -2682,6 +2665,23 @@ and on what evidence.
      this axis. The cut is one dimension -- a uniform random command at one speed --
      and a selective policy is not bounded by it; the metering oracle covers the
      selective case with perfect information and gains nothing.
+
+132. **The two waiters holding the queued segment arms could never have fired.**
+     2026-09-10.
+
+     Each was `while pgrep -f 'measure_segment_own_reward|local_reward_align|...'`.
+     `pgrep -f` matches the full command line of every process, and the waiter's OWN
+     command line contains that pattern as literal text, so each waiter matched itself
+     and one matched the other. Both jobs they were holding -- `measure_segment_as_agent`
+     and the higher-power own-reward arm -- would have waited indefinitely.
+
+     Replaced with one shell script that runs the two in sequence, with no matching.
+     The third process-identification failure of the session, after `pgrep -f "a\|b"`
+     (where `\|` is a literal in this shell) and a `grep -E "train_mappo|measure_threshold"`
+     against scripts actually named `train_policy.py` and `threshold_reward_sweep.py`,
+     which reported two healthy jobs as dead and led to duplicates being started
+     against the same checkpoint directory. Recorded as a memory: identify a job by
+     PID or by a sentinel file it writes, never by a pattern.
 
 131. **RESULT: the threshold objective is NOT flat, so the null stays in the mechanism
      rather than moving to the reward.** 2026-09-10.
