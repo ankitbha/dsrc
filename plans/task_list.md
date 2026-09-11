@@ -2487,6 +2487,61 @@ and on what evidence.
      against the same checkpoint directory. Recorded as a memory: identify a job by
      PID or by a sentinel file it writes, never by a pattern.
 
+137. **MEASURED: the gradient-norm z is strongly SUB-LINEAR in the action-advantage
+     correlation, so the ceiling extrapolation of task 136 was optimistic.**
+     2026-09-10. `scratchpad/calibrate_instrument.py`.
+
+     Task 136 converted z to a correlation by extrapolating linearly from the
+     instrument's ceiling and flagged that as approximate. This measures the curve
+     instead. One rollout of `mappo_src` seed 7, the resampled-action null computed
+     once on it, then advantages synthesised at known correlations:
+     `A(c) = c*u + sqrt(1-c^2)*w`, with u the standardised indicator of `slow` and w
+     noise orthogonalised against u. The construction is verified, not assumed: every
+     target c is reproduced to four decimals.
+
+     | c | 0.01 | 0.02 | 0.05 | 0.10 | 0.20 | 0.35 | 0.50 | 0.75 | 1.00 |
+     |---|---|---|---|---|---|---|---|---|---|
+     | z | -0.48 | -0.34 | +0.18 | +1.23 | +3.50 | +7.01 | +10.54 | +16.39 | +22.02 |
+     | z/c | -48.0 | -17.1 | 3.7 | 12.3 | 17.5 | 20.0 | 21.1 | 21.9 | 22.0 |
+
+     **z/c is not constant.** It rises from 3.7 at c = 0.05 to 22.0 at c = 1.0, so the
+     statistic is far less responsive to small correlations than to large ones, which
+     is what a norm does: a gradient norm is the norm of a noise vector plus an
+     aligned component, and a small aligned component adds almost nothing in
+     quadrature. Linear extrapolation from the ceiling predicts z = 2 at c = 0.091;
+     measured, z crosses 2 at **c = 0.134**, a factor of 1.47.
+
+     **Every threshold, corrected by that factor:**
+
+     | arm | SE of mean z | linear | corrected |
+     |---|---|---|---|
+     | vehicle, shared, 1 s | 0.29 | 0.005 | **0.007** |
+     | vehicle, shared, 60 s | 0.51 | 0.017 | **0.025** |
+     | road, own reward, 171 | 0.52 | 0.048 | **0.071** |
+     | road, own reward, 533 | 0.66 | 0.050 | **0.074** |
+
+     **The conclusions do not change and the bounds widen.** Every arm still reads
+     null; the road arms now bound the correlation at about 0.07 rather than 0.05.
+
+     **A limitation of this calibration, stated because it is real.** The synthetic
+     advantages are i.i.d. where the real advantage is temporally autocorrelated, and
+     that shows: at c = 0 the curve reads z = -0.59 rather than 0, because pure i.i.d.
+     noise produces a lower gradient norm than the null's real advantages do. The
+     SHAPE conclusion is robust to that offset -- z/c varies sixfold across the range
+     -- but the crossing point carries it, so 1.47 is an estimate of the correction
+     and not an exact factor.
+
+     **The tightest bound on the vehicle arms does not come from z at all.** Those
+     arms report `corr(slow, A)` directly -- +0.0153 and -0.0052 on the speed-only
+     arm at n about 3,300, where two standard errors is 0.035. A directly measured
+     correlation needs no conversion and no calibration. The segment arms do not
+     report one, which is why they depend on this curve.
+
+     This is the third statement of these thresholds in one day. The first applied a
+     correlation's sampling error to a statistic that is not a correlation; the second
+     used the instrument's own scale but assumed linearity; this one measured the
+     curve. Related: [[feedback_run_your_guard_against_a_control]].
+
 136. **CORRECTION: the segment arms' sensitivity was quoted from the wrong formula,
      and the extra episodes bought none.** 2026-09-10.
 
