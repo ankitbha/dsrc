@@ -384,7 +384,18 @@ link below critical density -- the anticipatory behaviour the mechanism is suppo
 produce -- does not respond consistently to this behaviour, and the half that does is
 the half that restates mean segment speed.**
 
-**Two limits.** The objective is maximised at p=0, by not metering at all, so within
+**It tracks throughput in the mean and not per application.** Across the twenty
+individual (mix, seed) treatment applications, the correlation between the change in
+the objective and the change in arrivals is -0.035, with the speed term at -0.182 and
+the penalty term at +0.318. The objective detects that metering happened; it does not
+measure how much throughput it cost. At n=20 the two-standard-error bar on a
+correlation is 0.485, so this excludes a tight relationship and not a moderate one.
+The pooled correlation over all 25 cells is +0.582, but that mixes the shared
+treatment trend with seed bistability and is the wrong statistic: two quantities that
+both fall on average correlate positively whether or not their fluctuations are
+related.
+
+**Two further limits.** The objective is maximised at p=0, by not metering at all, so within
 this cut a policy that has learned nothing and a policy that has learned to leave the
 fleet alone produce identical behaviour; improvement on this axis cannot demonstrate
 learning. And the cut is one dimension, a uniform random command at a single speed

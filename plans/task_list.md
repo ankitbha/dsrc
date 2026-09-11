@@ -2487,6 +2487,29 @@ and on what evidence.
      against the same checkpoint directory. Recorded as a memory: identify a job by
      PID or by a sentinel file it writes, never by a pattern.
 
+135. **The objective tracks throughput in the MEAN and not per application.**
+     2026-09-10. Computed on task 133's own 25 cells, so it costs nothing extra.
+
+     Averaged over seeds, the objective and the arrival count agree: both fall when
+     metering is applied, and both differences are resolved at three of four mix
+     levels. But across the twenty individual (mix, seed) treatment applications, the
+     correlation between the change in the objective and the change in arrivals is
+     **-0.035**, with the speed term at -0.182 and the penalty term at +0.318.
+
+     **So the objective detects THAT metering happened and does not measure HOW MUCH
+     throughput it cost.** A learner improving this objective is not thereby improving
+     throughput beyond the coarse direction, which matters because throughput is the
+     quantity the project claims.
+
+     **The power is weak and the claim is limited to match.** At n=20 the
+     two-standard-error bar on a correlation is 0.485, so this excludes a tight
+     relationship and does not exclude a moderate one. A pooled correlation over all
+     25 cells reads +0.582, but that mixes the shared treatment trend with seed
+     bistability and is the wrong statistic for the question: both quantities falling
+     together on average produces a positive pooled correlation whether or not their
+     fluctuations are related. See [[opt506_pooled_median_inverts_ranking]] for the
+     same shape of error.
+
 134. **RESULT: the road-attached agent is a null at three times the power too, so
      the last candidate explanation is closed at an exclusion threshold of 0.09.**
      2026-09-10.
