@@ -230,7 +230,8 @@ def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration-s", type=float, default=2500.0,
-                        help="SRC's episode length; End_of_simulation in its train.py")
+                        help="episode length; departures are never written past it, so "
+                             "raising --demand-duration-s alone does nothing")
     # The published RL.py controls every second vehicle, but that script produces the
     # paper's ABLATION row, not its main table. The main table is at full penetration,
     # so matching the headline result means 1.0 and reading the code would have given

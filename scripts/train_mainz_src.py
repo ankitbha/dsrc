@@ -38,17 +38,26 @@ TEST_SEEDS = tuple(range(16, 21))
 
 def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
                 duration_s: float, epsilon: float,
-                generator: torch.Generator | None, step_length: float = 1.0) -> dict:
-    """One episode. Returns the trajectory and the outcome metrics."""
+                generator: torch.Generator | None, step_length: float = 1.0,
+                window_start_s: float = 0.0) -> dict:
+    """One episode. Returns the trajectory and the outcome metrics.
+
+    The controller acts from t=0 so it can prevent a jam rather than inherit one, but
+    throughput is counted only from `window_start_s`, after the network has filled.
+    """
     env = MainzEnv(seed=seed, duration_s=duration_s, features=features,
                    step_length_s=step_length)
     states, actions, rewards = [], [], []
+    marked = window_start_s <= 0.0
     try:
         state = torch.tensor(env.reset(), dtype=torch.float)
         while True:
             action = (greedy_actions(model, state) if generator is None
                       else epsilon_actions(model, state, epsilon, generator))
             raw, reward, done = env.step(action.tolist())
+            if not marked and env.metrics()["time_s"] >= window_start_s:
+                env.mark_window()
+                marked = True
             states.append(state)
             actions.append(action)
             rewards.append(torch.tensor(reward, dtype=torch.float))
@@ -64,16 +73,19 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
         "rewards": torch.stack(rewards),
         "return": float(torch.stack(rewards).mean(dim=1).sum()),
         "arrived": metrics["arrived"],
+        "flow": metrics["flow_veh_per_h"],
         "mean_speed_kmh": metrics["mean_speed_kmh"],
     }
 
 
-def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0) -> dict:
-    runs = [run_episode(model, s, features, duration_s, 0.0, None, step_length)
-            for s in seeds]
+def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
+             window_start_s=0.0) -> dict:
+    runs = [run_episode(model, s, features, duration_s, 0.0, None, step_length,
+                        window_start_s) for s in seeds]
     return {
         "return": statistics.fmean(r["return"] for r in runs),
         "arrived": statistics.fmean(r["arrived"] for r in runs),
+        "flow": statistics.fmean(r["flow"] for r in runs),
         "mean_speed_kmh": statistics.fmean(r["mean_speed_kmh"] for r in runs),
     }
 
@@ -86,6 +98,10 @@ def main() -> int:
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--epsilon", type=float, default=0.3)
     parser.add_argument("--epsilon-final", type=float, default=0.02)
+    parser.add_argument("--window-start-s", type=float, default=0.0,
+                        help="open the throughput window here, so the ramp-up is "
+                             "excluded and the score is a steady-state flow rate "
+                             "rather than a count dominated by how far the fill got")
     parser.add_argument("--step-length", type=float, default=1.0,
                         help="0.1 to resolve the capacity drop; at 1.0 served flow "
                              "RISES with density and there is nothing to recover")
@@ -108,7 +124,7 @@ def main() -> int:
     print(f"{num_segments} super-segments, {sum(p.numel() for p in model.parameters())} parameters")
     print(f"train {TRAIN_SEEDS}  validate {VALIDATION_SEEDS}  test {TEST_SEEDS}\n")
     print(f"{'ep':>4} {'seed':>5} {'eps':>5} {'loss':>10} {'return':>10} "
-          f"{'arrived':>8} {'speed':>7}   validation")
+          f"{'flow':>8} {'speed':>7}   validation")
 
     history, best = [], {"return": float("-inf"), "episode": -1}
     for episode in range(args.episodes):
@@ -117,7 +133,7 @@ def main() -> int:
         seed = TRAIN_SEEDS[episode % len(TRAIN_SEEDS)]
         started = time.time()
         run = run_episode(model, seed, features, args.duration_s, epsilon,
-                          generator, args.step_length)
+                          generator, args.step_length, args.window_start_s)
         loss = td_loss(model, run["states"], run["actions"], run["rewards"], DISCOUNT)
         total = loss.sum(dim=1).mean()
         optimizer.zero_grad()
@@ -125,13 +141,13 @@ def main() -> int:
         optimizer.step()
 
         line = (f"{episode:>4} {seed:>5} {epsilon:>5.2f} {float(total.detach()):>10.3f} "
-                f"{run['return']:>10.2f} {run['arrived']:>8} "
+                f"{run['return']:>10.2f} {run['flow']:>8.0f} "
                 f"{run['mean_speed_kmh']:>7.2f}")
         note = ""
         if (episode + 1) % args.validate_every == 0 or episode == args.episodes - 1:
             scores = evaluate(model, VALIDATION_SEEDS, features, args.duration_s,
-                              args.step_length)
-            note = (f"   return {scores['return']:.2f}  arrived {scores['arrived']:.0f}"
+                              args.step_length, args.window_start_s)
+            note = (f"   return {scores['return']:.1f}  flow {scores['flow']:.0f}"
                     f"  speed {scores['mean_speed_kmh']:.2f}")
             if scores["return"] > best["return"]:
                 best = {"return": scores["return"], "episode": episode, **scores}
@@ -145,13 +161,16 @@ def main() -> int:
     model.load_state_dict(torch.load(out / "best.pt", weights_only=True))
 
     print("\nreading the held-out test seeds, once")
-    test = evaluate(model, TEST_SEEDS, features, args.duration_s, args.step_length)
+    test = evaluate(model, TEST_SEEDS, features, args.duration_s, args.step_length,
+                    args.window_start_s)
     baseline = evaluate_no_control(TEST_SEEDS, features, args.duration_s,
-                                   args.step_length)
-    print(f"  trained    return {test['return']:>9.2f}  arrived {test['arrived']:>7.0f}"
+                                   args.step_length, args.window_start_s)
+    print(f"  trained    flow {test['flow']:>7.0f} veh/h  return {test['return']:>8.1f}"
           f"  speed {test['mean_speed_kmh']:>6.2f} km/h")
-    print(f"  no control return {baseline['return']:>9.2f}  arrived {baseline['arrived']:>7.0f}"
+    print(f"  no control flow {baseline['flow']:>7.0f} veh/h  return {baseline['return']:>8.1f}"
           f"  speed {baseline['mean_speed_kmh']:>6.2f} km/h")
+    print(f"  difference {100*(test['flow']-baseline['flow'])/baseline['flow']:+.1f}% "
+          f"in steady-state flow")
 
     (out / "result.json").write_text(json.dumps(
         {"features": args.features, "best": best, "test": test,
@@ -159,7 +178,8 @@ def main() -> int:
     return 0
 
 
-def evaluate_no_control(seeds, features, duration_s, step_length=1.0) -> dict:
+def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
+                        window_start_s=0.0) -> dict:
     """Every vehicle left to the car-following model, on the same seeds."""
     from src.sumo.mainz import DECISION_INTERVAL_S
 
@@ -168,12 +188,15 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0) -> dict:
         env = MainzEnv(seed=seed, duration_s=duration_s, features=features,
                        step_length_s=step_length)
         total = 0.0
+        marked = window_start_s <= 0.0
         try:
             env.reset()
             while True:
                 env.release()
                 env._advance(DECISION_INTERVAL_S)
                 total += float(env.reward().mean())  # matches run_episode
+                if not marked and env.metrics()["time_s"] >= window_start_s:
+                    env.mark_window(); marked = True
                 if env.metrics()["time_s"] >= duration_s:
                     break
             metrics = env.metrics()
@@ -183,6 +206,7 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0) -> dict:
     return {
         "return": statistics.fmean(r["return"] for r in runs),
         "arrived": statistics.fmean(r["arrived"] for r in runs),
+        "flow": statistics.fmean(r["flow_veh_per_h"] for r in runs),
         "mean_speed_kmh": statistics.fmean(r["mean_speed_kmh"] for r in runs),
     }
 

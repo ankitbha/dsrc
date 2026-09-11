@@ -101,6 +101,8 @@ class MainzEnv:
         self._previous: list[set[str]] = [set() for _ in self.segments]
         self._rates: list[tuple[float, float]] = [(0.0, 0.0) for _ in self.segments]
         self.arrived_total = 0
+        self._window_start_s = 0.0
+        self._window_start_arrived = 0
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -122,6 +124,7 @@ class MainzEnv:
         self._previous = [set() for _ in self.segments]
         self._rates = [(0.0, 0.0) for _ in self.segments]
         self._advance(self.warmup_s)
+        self.mark_window()
         return self.observe()
 
     def close(self) -> None:
@@ -309,6 +312,24 @@ class MainzEnv:
 
     # ----------------------------------------------------------------- reporting
 
+    def mark_window(self) -> None:
+        """Open the measurement window here, discarding everything before it.
+
+        Cumulative arrivals over a whole episode are dominated by the ramp-up, during
+        which the network is filling and throughput says more about how far the fill
+        has got than about the network. Flow over a window after the fill is a rate
+        the controller can actually be judged on.
+        """
+        self._window_start_s = float(_sumo.simulation.getTime())
+        self._window_start_arrived = self.arrived_total
+
+    def window_flow_veh_per_h(self) -> float:
+        """Vehicles discharged per hour since `mark_window`."""
+        elapsed = float(_sumo.simulation.getTime()) - self._window_start_s
+        if elapsed <= 0.0:
+            return 0.0
+        return (self.arrived_total - self._window_start_arrived) * 3600.0 / elapsed
+
     def metrics(self) -> dict[str, Any]:
         running = int(_sumo.vehicle.getIDCount())
         waiting = len(_sumo.simulation.getPendingVehicles())
@@ -317,6 +338,7 @@ class MainzEnv:
         return {
             "time_s": float(_sumo.simulation.getTime()),
             "arrived": self.arrived_total,
+            "flow_veh_per_h": self.window_flow_veh_per_h(),
             "running": running,
             "waiting_to_enter": waiting,
             "mean_speed_kmh": speed,
