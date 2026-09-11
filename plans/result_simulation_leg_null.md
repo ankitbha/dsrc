@@ -499,6 +499,28 @@ clean test of the paper's own formulation rather than this approximation of it, 
 needs its five per-super-segment observation fields and therefore widens the deployed
 contract that the Jetson builder and the parity ledger both depend on.
 
+## THE PORTED RUN, STOPPED AT UPDATE 13 OF 20, AND ITS GATE
+
+Ankit stopped the run at update 13 on 2026-09-10. The gate was pre-registered at 20
+updates, so criteria 1 and 2 are read on a SHORTER run than they were written for.
+That cuts both ways and is recorded rather than argued: fewer updates give a trend less
+chance to appear, and the trend that did appear points the wrong way.
+
+| criterion | threshold | reading at update 13 | |
+|---|---|---|---|
+| 1. summed entropy falls | below 1.9775, of a 2.1972 maximum | lowest reached **2.1459** | fail |
+| 2. score trends up | by more than the step-to-step variation | moved **-0.4679** against a step standard deviation of 0.2625 | fail |
+
+**Criterion 2 fails in the wrong direction, which is the part worth noting.** The
+score did not stay flat; it declined, and by more than the update-to-update noise. The
+curve: -5.777, -6.567, -6.446, -6.463, -6.462, -6.121, -6.353, -6.302, -6.304, -6.318,
+-6.605, -6.731, -6.811.
+
+**Entropy never approached its gate.** It fell 0.0439 over thirteen updates, from
+2.1898 to 2.1459, against the 0.2197 fall the gate asks for, and it rose on four of
+the twelve steps. An earlier claim here that the decline was monotone was retired
+after update 5 reversed it, and updates 7 and 10 reversed it again.
+
 ## What was and was not built, stated exactly
 
 Asked directly whether this implements super-segment control or only a coarse lever,
