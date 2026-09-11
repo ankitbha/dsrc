@@ -75,6 +75,8 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
         "arrived": metrics["arrived"],
         "flow": metrics["flow_veh_per_h"],
         "mean_speed_kmh": metrics["mean_speed_kmh"],
+        "space_mean_speed_kmh": metrics["space_mean_speed_kmh"],
+        "mean_vehicles": metrics["mean_vehicles"],
         "held_at_entry": metrics["held_at_entry"],
     }
 
@@ -88,6 +90,8 @@ def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
         "arrived": statistics.fmean(r["arrived"] for r in runs),
         "flow": statistics.fmean(r["flow"] for r in runs),
         "mean_speed_kmh": statistics.fmean(r["mean_speed_kmh"] for r in runs),
+        "space_mean_speed_kmh": statistics.fmean(r["space_mean_speed_kmh"] for r in runs),
+        "mean_vehicles": statistics.fmean(r["mean_vehicles"] for r in runs),
         "held_at_entry": statistics.fmean(r["held_at_entry"] for r in runs),
     }
 
@@ -177,12 +181,12 @@ def main() -> int:
                     args.window_start_s, gate)
     baseline = evaluate_no_control(TEST_SEEDS, features, args.duration_s,
                                    args.step_length, args.window_start_s)
-    print(f"  trained    flow {test['flow']:>7.0f} veh/h  return {test['return']:>8.1f}"
-          f"  speed {test['mean_speed_kmh']:>6.2f} km/h  arrived {test['arrived']:>7.1f}"
-          f"  held at entry {test['held_at_entry']:>7.1f}")
-    print(f"  no control flow {baseline['flow']:>7.0f} veh/h  return {baseline['return']:>8.1f}"
-          f"  speed {baseline['mean_speed_kmh']:>6.2f} km/h  arrived {baseline['arrived']:>7.1f}"
-          f"  held at entry {baseline['held_at_entry']:>7.1f}")
+    for label, row in (("trained   ", test), ("no control", baseline)):
+        print(f"  {label} flow {row['flow']:>7.0f} veh/h  return {row['return']:>8.1f}"
+              f"  space-mean speed {row['space_mean_speed_kmh']:>6.2f} km/h"
+              f"  vehicles {row['mean_vehicles']:>7.0f}"
+              f"  arrived {row['arrived']:>7.1f}"
+              f"  held at entry {row['held_at_entry']:>7.1f}")
     print(f"  difference {100*(test['flow']-baseline['flow'])/baseline['flow']:+.1f}% "
           f"in steady-state flow")
 
@@ -236,6 +240,8 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
         "arrived": statistics.fmean(r["arrived"] for r in runs),
         "flow": statistics.fmean(r["flow_veh_per_h"] for r in runs),
         "mean_speed_kmh": statistics.fmean(r["mean_speed_kmh"] for r in runs),
+        "space_mean_speed_kmh": statistics.fmean(r["space_mean_speed_kmh"] for r in runs),
+        "mean_vehicles": statistics.fmean(r["mean_vehicles"] for r in runs),
         "held_at_entry": statistics.fmean(r["held_at_entry"] for r in runs),
     }
 

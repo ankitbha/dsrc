@@ -121,6 +121,11 @@ class MainzEnv:
         self.arrived_total = 0
         self._window_start_s = 0.0
         self._window_start_arrived = 0
+        # Vehicle-weighted speed and vehicle count, accumulated over the window so the
+        # reported speed is an average of the episode rather than its last instant.
+        self._speed_weight = 0.0
+        self._vehicle_weight = 0.0
+        self._samples = 0
         # Per entry link, the vehicles scheduled to start there and how many of them
         # have been let in. Empty when SUMO is doing the inserting.
         self._schedule: dict[str, list[dict[str, Any]]] = {}
@@ -268,6 +273,23 @@ class MainzEnv:
             _sumo.simulationStep()
             self.arrived_total += int(_sumo.simulation.getArrivedNumber())
         self._update_rates()
+        self._accumulate()
+
+    def _accumulate(self) -> None:
+        """Add this interval's vehicle-weighted speed and occupancy to the window.
+
+        `speeds_kmh` averages segments and then averages those, which weights a segment
+        holding three vehicles the same as one holding four hundred. That statistic is
+        what SRC's reward is written against and stays as it is, but it is not a speed
+        the network can be described by: measured on the throttled network it read
+        21.0 km/h where the vehicle-weighted speed was 11.9.
+        """
+        edges = self._per_edge()
+        present = sum(values["count"] for values in edges.values())
+        self._vehicle_weight += present
+        self._speed_weight += sum(values["count"] * values["speed_kmh"]
+                                  for values in edges.values() if values["count"])
+        self._samples += 1
 
     def _update_rates(self) -> None:
         """Vehicles that entered and left each super-segment over the last interval.
@@ -420,6 +442,9 @@ class MainzEnv:
         """
         self._window_start_s = float(_sumo.simulation.getTime())
         self._window_start_arrived = self.arrived_total
+        self._speed_weight = 0.0
+        self._vehicle_weight = 0.0
+        self._samples = 0
 
     def window_flow_veh_per_h(self) -> float:
         """Vehicles discharged per hour since `mark_window`."""
@@ -427,6 +452,16 @@ class MainzEnv:
         if elapsed <= 0.0:
             return 0.0
         return (self.arrived_total - self._window_start_arrived) * 3600.0 / elapsed
+
+    def space_mean_speed_kmh(self) -> float:
+        """Vehicle-weighted mean speed over the window: the v in `q = k v`."""
+        if not self._vehicle_weight:
+            return 0.0
+        return self._speed_weight / self._vehicle_weight
+
+    def mean_vehicles(self) -> float:
+        """Vehicles in the network, averaged over the window."""
+        return self._vehicle_weight / self._samples if self._samples else 0.0
 
     def metrics(self) -> dict[str, Any]:
         running = int(_sumo.vehicle.getIDCount())
@@ -441,7 +476,12 @@ class MainzEnv:
             "waiting_to_enter": waiting,
             "held_at_entry": self.held_at_entry(),
             "admitted": sum(self._admitted.values()) if self._schedule else -1,
+            # An unweighted mean of segment means, read at this instant. Kept because
+            # it is the quantity SRC's reward is built from; it is not a description of
+            # how fast the traffic is moving, for which use `space_mean_speed_kmh`.
             "mean_speed_kmh": speed,
+            "space_mean_speed_kmh": self.space_mean_speed_kmh(),
+            "mean_vehicles": self.mean_vehicles(),
             "segments_over_critical": int((density > DENSITY_CRITICAL).sum()),
             "max_density": float(density.max()),
         }

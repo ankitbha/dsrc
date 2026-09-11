@@ -637,3 +637,47 @@ its own exit -- but at this demand the drop is not avoidable and therefore not
 recoverable. Testing whether the controller can recover it requires a demand near the
 throttled capacity rather than three times it. That is a separate run and is not made
 here.
+
+## The exit meter is saturated, so throughput cannot respond to control
+
+Two defects, found by asking how mean speed could rise while flow did not move.
+
+**The reported speed was not a speed.** `metrics()["mean_speed_kmh"]` is an unweighted
+mean over super-segments of an unweighted mean over each segment's occupied edges, read
+at the final simulation step rather than averaged over the window. A segment holding
+three vehicles counts as much as one holding four hundred. On the throttled network with
+no control it reads 21.0 km/h where the vehicle-weighted speed is 11.9. The statistic is
+what SRC's reward is built from and stays, but it is not a description of the traffic;
+`space_mean_speed_kmh` and `mean_vehicles`, both averaged over the scored window, are.
+
+**Throughput is set by the exit meter, not by the network.** Measured over 600-2,500 s
+on seeds 16-20, with the checkpoints trained without the entry gate:
+
+| arm | vehicles in net | space-mean speed | reported speed | k occupied | veh km/h | exit queue | flow |
+|---|---|---|---|---|---|---|---|
+| no control | 2,511 | 11.85 km/h | 21.00 | 47.9 | 26,700 | 48 | 2,035 |
+| DSRC, gated entries | 2,119 | 12.99 km/h | 22.01 | 40.2 | 26,000 | 49 | 2,016 |
+
+Vehicle-kilometres per hour agree within 3%, as they must when throughput and route
+length agree, so the speed difference is a vehicle-count difference and nothing else:
+16% fewer vehicles cover the same distance per hour, so each averages more speed. No
+traffic moves faster.
+
+The flow-density pair is the part that does not belong on a fundamental diagram. Both
+arms sit far past the critical density of about 21 veh/km/lane, at 40.2 and 47.9, and
+the diagram requires the lower density to carry the higher flow. It does not: 2,016
+against 2,035. The exit-road queue explains it, at 48 and 49 vehicles in both arms. The
+meter is saturated in every arm, and a saturated signal discharges at its own rate
+whatever is upstream, so flow is clamped near 2,150 veh/h and the network only has to
+deliver at least that. Flow is not a function of network density here.
+
+**The cause is a choice made when the meter was set.** 0.85 green passes about 2,150
+veh/h and the unmetered network delivers about 2,874, so the constraint was put BELOW
+the network's own capacity. That makes the boundary the bottleneck and takes the
+network's capacity drop out of play, which is why no arm can gain throughput. It is a
+property of the scenario and not of the controller.
+
+The exit constraint has to stay finite -- a free sink lets any number of vehicles leave
+-- but it has to sit ABOVE the uncontrolled capacity, around 3,000 to 3,200 veh/h, so
+that the binding limit is the capacity drop inside the network, where density is what
+the controller acts on and where holding it near critical can recover flow.
