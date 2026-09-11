@@ -493,13 +493,22 @@ because one of its two halves has since been measured.
    that the Jetson builder and the parity ledger depend on.
 4. **Change the advantage estimator** to a counterfactual one. It is aimed exactly at
    the quantity that reads null and would probably raise the correlation.
+5. **Move the congestion threshold, or establish that moving it does not help.** This
+   is new, and it is the cheapest of the five: one sweep, not several days. The
+   objective's anticipatory half does not respond to behaviour, and rho* = 0.3 of jam
+   density fires on only 1.50 of 9 segments, so it is nearly inactive on this road.
+   Either the threshold is misplaced and a placement exists that makes the term
+   respond, or nothing the lever does moves any threshold. Those call for different
+   work and the measurement separates them.
 
-**On the order.** An estimator that learns better is worth building after something
-shows headroom to reach, and oracles are the cheap way to look for headroom, so 4 is
-last. For the same reason 3 comes before 4: it asks whether the mechanism is learnable
+**On the order.** 5 comes first on cost alone: it is one sweep and it can retire an
+option rather than open one. After that, an estimator that learns better is worth
+building only after something shows headroom to reach, and oracles are the cheap way
+to look for headroom, so 4 is last. For the same reason 3 comes before 4: it asks whether the mechanism is learnable
 at the granularity the paper used, before spending on a better learner at the
 granularity this project uses.
 
 **The decision is Ankit's and is open.** Nothing further should be built until he
 answers, because 2, 3 and 4 are each several days and they are alternatives rather
-than a sequence.
+than a sequence. 5 is running now, since it costs one sweep and its answer bears on
+whether the others are worth starting.
