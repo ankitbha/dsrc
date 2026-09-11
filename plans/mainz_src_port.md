@@ -398,3 +398,68 @@ rather than inside a transient. A controller that holds density below critical h
 nothing to recover, because flow does not fall when density crosses critical; and it
 cannot hold density down in any case, because the network already caps its own
 admission.
+
+## The fundamental diagram on a straight road, and what it says about the threshold
+
+Ankit's instruction: a straight two-lane road, default cars, sweep demand, and the
+flow-density curve must be a hill, because that shape has been measured on real roads
+many times and a simulator that cannot produce it is misconfigured. It was not the
+simulator.
+
+**Three setup errors of mine, each of which alone prevented the curve.**
+
+*Free outflow.* On a straight road that ends in free flow, demand above capacity queues
+at the entry and the road itself never passes critical density -- the self-limiting
+behaviour seen on Mainz. Every empirical diagram with a congested branch is measured
+upstream of something holding traffic back. A signal at the far end does that without
+adding a merge.
+
+*Merge turbulence.* A lane drop was tried first. A section immediately upstream of a
+bottleneck cannot exceed the BOTTLENECK's capacity, so it never shows its own, and it
+sits in the merge's influence: speed fell to 67 km/h at a density of 6.6 veh/km/lane,
+where vehicles are 150 m apart and cannot be interacting. Removed.
+
+*Density from the wrong vehicles.* An early ring variant divided the REQUESTED vehicle
+count by the ring length while measuring speed over the vehicles actually inserted,
+reporting 275 veh/km/lane against a jam density of 200 and a flow of 19,546 veh/h/lane.
+
+**With those fixed the curve is textbook**: free flow near 100 km/h up to the critical
+density, a peak, a congested branch falling toward jam, and loading and unloading legs
+showing the hysteresis real detector data shows.
+
+**The calibration is wrong, and cc1 is the knob.**
+
+| cc1 | capacity veh/h/lane | critical density veh/km/lane | congested branch reaches | fall from peak |
+|---|---|---|---|---|
+| **2.5, what `w99_calibrated` uses** | 1,057 | 13.8 | 44.5 | 31% |
+| 1.8 | 1,348 | 16.8 | 75.7 | 58% |
+| 1.4 | 1,596 | 19.3 | 86.8 | 65% |
+| **1.1** | **1,754** | **20.0** | **117.3** | **82%** |
+| Krauss, for comparison | 2,136 | 25.6 | 26.6 | 4% |
+| a real highway lane | 2,000-2,400 | 20-30 | | |
+
+`cc1 = 2.5` is the midpoint of the 2-3 s range the paper's appendix states, and it
+gives a road with half of real capacity and a critical density of 13.8 where reality is
+20 to 30. Krauss has realistic capacity and no congested branch, which is why this
+project moved off it; W99 at cc1 = 1.1 has both.
+
+## The threshold the controller defends is far past the critical density
+
+SRC's reward pays -100 for a super-segment whose density exceeds 0.3 of jam. Its
+density is `num_cars * 4.5 / lane-metres`, so jam is 222 veh/km/lane and the threshold
+is **67 veh/km/lane**.
+
+| cc1 | measured critical density | as a fraction of jam | SRC's threshold |
+|---|---|---|---|
+| 2.5 | 13.8 | 0.062 | 0.300 |
+| 1.1 | 20.0 | 0.090 | 0.300 |
+
+**The threshold sits three to five times above the density at which flow actually
+starts to fall.** A controller trained on that reward is asked to defend a line deep
+inside the congested branch, long after the flow it exists to protect has already
+collapsed. Whatever else is true of the network, the objective cannot reward preventing
+a capacity drop when its trigger fires well after the drop has happened.
+
+That is an explanation for the absent throughput gain which is independent of the
+network, the demand and the training, and it is testable directly: set the threshold at
+the measured critical density rather than at 0.3.
