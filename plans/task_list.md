@@ -2572,8 +2572,13 @@ and on what evidence.
      **The extrapolation is linear from a correlation of 1.0 and is approximate.** A
      gradient norm is the norm of a noise vector plus an aligned component, which
      grows more slowly than linearly while the aligned component is small, so the true
-     thresholds are somewhat worse than 0.05. The direction of the approximation is
-     stated rather than corrected, because nothing here turns on the third digit.
+     thresholds are somewhat worse than 0.05.
+
+     **SUPERSEDED BY TASK 137, which measured the curve instead of assuming it.** z/c
+     rises from 3.7 at c = 0.05 to 22.0 at c = 1.0 and z crosses 2 at c = 0.134 where
+     linearity predicts 0.091, a factor of 1.47. The thresholds in the table above
+     become 0.071 and 0.074. The direction was right and the size was not; the numbers
+     to quote are task 137's.
 
      Related: [[feedback_reconstructed_quantities_are_inferences]] -- a threshold
      derived by applying a formula to a statistic that was never computed is the same
