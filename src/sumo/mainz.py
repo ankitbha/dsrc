@@ -257,7 +257,8 @@ class MainzEnv:
         """
         density = np.nan_to_num(self.densities())
         speed = np.nan_to_num(self.speeds_kmh())
-        return -(density > DENSITY_CRITICAL) * CONGESTION_PENALTY + SPEED_WEIGHT * speed
+        over = (density > DENSITY_CRITICAL).astype(np.float32)
+        return -over * CONGESTION_PENALTY + SPEED_WEIGHT * speed
 
     # ----------------------------------------------------------------- reporting
 
