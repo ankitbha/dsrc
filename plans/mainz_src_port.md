@@ -232,10 +232,31 @@ in-network vehicles from 2,285 to 2,870 and cut the entry queue from 2,127 to 1,
 did not change discharge, which is itself evidence that the constraint is downstream of
 the entries.
 
-**The open question** is whether the missing capacity drop is a step-size artifact. This
-project retracted a 17.6% throughput result once because a 1 s physics step manufactured
-it. SRC's Vissim runs at `SimRes = 1`, one step per second, and this port matches that;
-SUMO's W99 at 1 s may not resolve the stop-and-go oscillation the drop comes from. If a
-drop appears at 0.1 s, the port is fixable. If it does not, SUMO's W99 is a simplified
-Wiedemann 99 that does not reproduce Vissim's capacity-drop behaviour even carrying the
-paper's own cc1 to cc9, and this port cannot demonstrate the mechanism at all.
+**The step size changes the sign and not the conclusion.** SRC's Vissim runs at
+`SimRes = 1` and this port matched it, but SUMO's W99 at 1 s may not resolve the
+stop-and-go oscillation a capacity drop comes from -- and this project retracted a 17.6%
+throughput result once because a 1 s step manufactured it. Measured both ways:
+
+| dt | offered veh/h | served veh/h | max density |
+|---|---|---|---|
+| 1.0 s | 5,400 | 2,249 | 0.065 |
+| 1.0 s | 18,000 | **2,267** (+0.8%) | 0.464 |
+| 0.1 s | 5,400 | 2,458 | 0.065 |
+| 0.1 s | 18,000 | **2,428** (-1.2%) | 0.444 |
+
+At 1 s flow RISES with density, so there is no capacity drop to speak of. At 0.1 s a
+drop does appear and the sign flips, so the step size is real and 1 s is too coarse to
+resolve the phenomenon. But the drop is **1.2%**, and the paper recovers **5%**
+throughput. The headroom a controller could reclaim on this port is an order of
+magnitude smaller than the gain being reproduced.
+
+The finer step also raises the level by about 9%, from 2,249 to 2,458 veh/h, which
+narrows the gap to the paper's 3,207 veh/h without closing it.
+
+**So the port cannot demonstrate this mechanism at the scale claimed, and more training
+will not change that.** The remaining explanation is that SUMO's W99 is a simplified
+Wiedemann 99 which does not reproduce Vissim's capacity-drop behaviour even carrying the
+paper's own cc1 to cc9. Before any further training on this network, the thing to
+establish is whether SUMO's W99 can produce a capacity drop of the right magnitude on a
+textbook single bottleneck at all. If it cannot, no amount of calibration on Mainz will
+help and the choice is between a different simulator and a different claim.
