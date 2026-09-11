@@ -47,8 +47,8 @@ measured and the third stands.**
 3. **RESOLVED DOWN TO A CORRELATION OF 0.09.** The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
    makes 7.1 decisions and leaves. That difference is confounded with every lever
    measurement. The segment-attached agent that separates it reads null at both powers
-   measured, -0.12 +/- 0.51 at an exclusion threshold of 0.15 and -0.46 +/- 0.66 at
-   0.09, against the vehicle arms' 0.03. The band between 0.09 and 0.03 is untested.
+   measured, -0.12 +/- 0.51 and -0.46 +/- 0.66. Scaled by the instrument's own
+   ceiling, both would show a correlation near 0.05, against the vehicle arms' 0.03.
 
 **The instrument was rebuilt mid-investigation.** Its original permutation floor is
 not a valid null when advantages are temporally correlated, and it made arms read
@@ -327,16 +327,18 @@ to 6.6 on a supplied correlated advantage. So neither unshared-reward arm reads 
 its null, and the reading is centred on the null rather than below it, which is what
 the void permutation-floor arms did.
 
-**This does not yet close the road-agent candidate, because of power.** At about 171
-segment-decisions the standard error of a correlation is 0.076, so the arm excludes
-correlations above roughly 0.15; the vehicle arms at n about 5,500 exclude above 0.03.
-A null at 0.15 is consistent with an effect the vehicle arms would already have seen.
-The higher-power version runs three episodes per rollout instead of one, taking n to
-about 513 and the exclusion threshold to about 0.09 -- still coarser than the vehicle
-arms, and still short of a clean test, which needs the paper's five per-super-segment
+**CORRECTED, same day.** This paragraph put the arm's threshold at 0.15 from
+2/sqrt(n), the sampling error of a correlation coefficient, which is the wrong formula
+for an arm reporting a gradient-norm z. Scaled by the instrument's own ceiling the arm
+would show a correlation of about 0.048, against the vehicle arms' 0.03. The
+higher-power version runs three episodes per rollout instead of one, taking n to about
+533 and the threshold to about 0.050 -- no better, because the cross-seed standard
+error rises with the per-seed sensitivity -- and still short of a clean test, which
+needs the paper's five per-super-segment
 observation fields and therefore a wider deployed contract. **It has now been
 measured: -0.46 +/- 0.66 over three seeds (+0.86, -1.16, -1.09) at 532 to 533
-segment-decisions.** The candidate does not survive at 0.09 either. Tasks 129 and 134.
+segment-decisions**, and it buys no sensitivity, because the cross-seed standard error
+rises along with the per-seed sensitivity. Tasks 129, 134 and 136.
 
 ## A property of the operating point that bounds every comparison here
 
@@ -424,17 +426,38 @@ only correlations five times larger than the rest of the table does.
 | the critic cannot centre the advantage | **ruled out** | privileged neighbourhood features raise out-of-sample R2 from 0.808 to 0.886 and leave the gradient unchanged |
 | penetration is too low | **ruled out** | 100% penetration, commanding the entire fleet, reads the same |
 | the operating point has no headroom | **partly** | the metering oracle gains nothing, but it is one heuristic and a lower bound |
-| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **ruled out, at a third of the power** | a segment paid its own reward reads -0.12 +/- 0.51 at 171 segment-decisions and **-0.46 +/- 0.66 at 533**, where the exclusion threshold falls from 0.15 to 0.09; the vehicle arms exclude above 0.03 |
+| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **ruled out** | a segment paid its own reward reads -0.12 +/- 0.51 at 171 segment-decisions and -0.46 +/- 0.66 at 533; scaled by the instrument's own ceiling both detect a correlation near **0.05** at two standard errors, against the vehicle arms' 0.03 |
 
 **Every candidate now has a measurement against it, and the last one has two.** The
 road-attached agent paid its own reward reads -0.12 +/- 0.51 at 171 segment-decisions
-and -0.46 +/- 0.66 at 533, where three episodes per rollout take the exclusion
-threshold from 0.15 to 0.09. Both are centred on zero and neither is a large effect
-ruled out by a coarse instrument only. What remains untested is the band between 0.09
-and the vehicle arms' 0.03, and a clean test of the paper's own formulation rather
-than this approximation of it, which needs its five per-super-segment observation
-fields and therefore widens the deployed contract that the Jetson builder and the
-parity ledger both depend on.
+and -0.46 +/- 0.66 at 533. Both are centred on zero.
+
+**How sensitive those arms are, corrected.** Earlier text here put their thresholds at
+0.15 and 0.09, taken from 2/sqrt(n), the sampling error of a correlation coefficient.
+That is the wrong formula: these arms report a gradient-norm z, not a correlation. The
+instrument carries its own scale instead. Its ceiling advantage is an affine function
+of the indicator of `slow`, so it has a correlation of exactly 1.0 with the action,
+and the z it produces is what a correlation of 1.0 looks like on that batch: 20.8,
+22.7 and 20.4 at the lower power and 30.6, 44.8 and 3.3 at the higher. Against the
+observed cross-seed standard errors, a correlation of **0.048** and **0.050**
+respectively would show at two standard errors.
+
+So the arms are three times more sensitive than the retracted figures said, and **the
+extra episodes bought no sensitivity**: per-seed sensitivity rose and the cross-seed
+standard error rose with it, from 0.52 to 0.66. The third seed of the higher-power arm
+is also badly conditioned, reading 3.3 where the others read 30.6 and 44.8, a
+tenfold spread in instrument sensitivity across seeds of the same arm.
+
+This extrapolates linearly from a correlation of 1.0, which is approximate: a gradient
+norm is the norm of a noise vector plus an aligned component, and that grows more
+slowly than linearly when the aligned component is small. The true thresholds are
+therefore somewhat worse than 0.05, and the direction of the approximation is stated
+rather than corrected because nothing here turns on the third digit.
+
+What remains untested is the band between about 0.05 and the vehicle arms' 0.03, and a
+clean test of the paper's own formulation rather than this approximation of it, which
+needs its five per-super-segment observation fields and therefore widens the deployed
+contract that the Jetson builder and the parity ledger both depend on.
 
 ## What this leaves
 

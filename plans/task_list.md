@@ -2487,6 +2487,43 @@ and on what evidence.
      against the same checkpoint directory. Recorded as a memory: identify a job by
      PID or by a sentinel file it writes, never by a pattern.
 
+136. **CORRECTION: the segment arms' sensitivity was quoted from the wrong formula,
+     and the extra episodes bought none.** 2026-09-10.
+
+     Tasks 129 and 134 put the arms' exclusion thresholds at 0.15 and 0.09, taken from
+     2/sqrt(n), the sampling error of a correlation coefficient. **These arms do not
+     measure a correlation.** They measure a gradient-norm z, and the sampling error
+     of a statistic they do not compute says nothing about what they can see.
+
+     **The instrument carries its own scale.** Its ceiling advantage is
+     `(action == slow) * 2 - 1`, standardised -- an affine function of the indicator
+     of `slow`, so its correlation with the action is exactly 1.0. The z it produces
+     is therefore what a correlation of 1.0 looks like on that batch:
+
+     | arm | per-seed z at correlation 1.0 | cross-seed SE | correlation at two SE |
+     |---|---|---|---|
+     | 171 segment-decisions | 20.8, 22.7, 20.4 | 0.52 | **0.048** |
+     | 533 segment-decisions | 30.6, 44.8, 3.3 | 0.66 | **0.050** |
+
+     **Two things change.** The arms are about three times MORE sensitive than the
+     retracted figures said, close to the vehicle arms' 0.03, so the road-agent
+     candidate is closed more firmly than task 134 claimed. And **the extra episodes
+     bought no sensitivity at all**: per-seed sensitivity rose and the cross-seed
+     standard error rose with it, 0.52 to 0.66. The third seed of the higher-power arm
+     is badly conditioned, reading 3.3 where the others read 30.6 and 44.8 -- a
+     tenfold spread in instrument sensitivity across seeds of one arm, which is worth
+     knowing before any future arm is sized by episode count.
+
+     **The extrapolation is linear from a correlation of 1.0 and is approximate.** A
+     gradient norm is the norm of a noise vector plus an aligned component, which
+     grows more slowly than linearly while the aligned component is small, so the true
+     thresholds are somewhat worse than 0.05. The direction of the approximation is
+     stated rather than corrected, because nothing here turns on the third digit.
+
+     Related: [[feedback_reconstructed_quantities_are_inferences]] -- a threshold
+     derived by applying a formula to a statistic that was never computed is the same
+     failure as a quantity backed out of an aggregate.
+
 135. **The objective tracks throughput in the MEAN and not per application.**
      2026-09-10. Computed on task 133's own 25 cells, so it costs nothing extra.
 
