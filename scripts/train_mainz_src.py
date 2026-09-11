@@ -39,14 +39,14 @@ TEST_SEEDS = tuple(range(16, 21))
 def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
                 duration_s: float, epsilon: float,
                 generator: torch.Generator | None, step_length: float = 1.0,
-                window_start_s: float = 0.0) -> dict:
+                window_start_s: float = 0.0, gate_entries: bool = True) -> dict:
     """One episode. Returns the trajectory and the outcome metrics.
 
     The controller acts from t=0 so it can prevent a jam rather than inherit one, but
     throughput is counted only from `window_start_s`, after the network has filled.
     """
     env = MainzEnv(seed=seed, duration_s=duration_s, features=features,
-                   step_length_s=step_length)
+                   step_length_s=step_length, gate_entries=gate_entries)
     states, actions, rewards = [], [], []
     marked = window_start_s <= 0.0
     try:
@@ -75,18 +75,20 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
         "arrived": metrics["arrived"],
         "flow": metrics["flow_veh_per_h"],
         "mean_speed_kmh": metrics["mean_speed_kmh"],
+        "held_at_entry": metrics["held_at_entry"],
     }
 
 
 def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
-             window_start_s=0.0) -> dict:
+             window_start_s=0.0, gate_entries=True) -> dict:
     runs = [run_episode(model, s, features, duration_s, 0.0, None, step_length,
-                        window_start_s) for s in seeds]
+                        window_start_s, gate_entries) for s in seeds]
     return {
         "return": statistics.fmean(r["return"] for r in runs),
         "arrived": statistics.fmean(r["arrived"] for r in runs),
         "flow": statistics.fmean(r["flow"] for r in runs),
         "mean_speed_kmh": statistics.fmean(r["mean_speed_kmh"] for r in runs),
+        "held_at_entry": statistics.fmean(r["held_at_entry"] for r in runs),
     }
 
 
@@ -105,6 +107,12 @@ def main() -> int:
     parser.add_argument("--step-length", type=float, default=1.0,
                         help="0.1 to resolve the capacity drop; at 1.0 served flow "
                              "RISES with density and there is nothing to recover")
+    parser.add_argument("--no-gate-entries", action="store_true",
+                        help="let SUMO insert on its own terms instead of holding a "
+                             "vehicle back while its entry link is at or above the "
+                             "critical density. The gate applies to every arm "
+                             "including no control, so it is a property of the network "
+                             "rather than something a policy does")
     parser.add_argument("--validate-every", type=int, default=5)
     parser.add_argument("--out", default="outputs/mainz_src")
     args = parser.parse_args()
@@ -113,7 +121,9 @@ def main() -> int:
     out = REPO_ROOT / args.out / args.features
     out.mkdir(parents=True, exist_ok=True)
 
-    probe = MainzEnv(seed=1, duration_s=1.0, warmup_s=0.0, features=features)
+    gate = not args.no_gate_entries
+    probe = MainzEnv(seed=1, duration_s=1.0, warmup_s=0.0, features=features,
+                     gate_entries=gate)
     num_segments = len(probe.segments)
     model = SrcQNetwork(num_segments, len(features), 3)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -122,6 +132,7 @@ def main() -> int:
 
     print(f"features {args.features}: {features}")
     print(f"{num_segments} super-segments, {sum(p.numel() for p in model.parameters())} parameters")
+    print(f"entry gate {'on' if gate else 'off'}")
     print(f"train {TRAIN_SEEDS}  validate {VALIDATION_SEEDS}  test {TEST_SEEDS}\n")
     print(f"{'ep':>4} {'seed':>5} {'eps':>5} {'loss':>10} {'return':>10} "
           f"{'flow':>8} {'speed':>7}   validation")
@@ -133,7 +144,7 @@ def main() -> int:
         seed = TRAIN_SEEDS[episode % len(TRAIN_SEEDS)]
         started = time.time()
         run = run_episode(model, seed, features, args.duration_s, epsilon,
-                          generator, args.step_length, args.window_start_s)
+                          generator, args.step_length, args.window_start_s, gate)
         loss = td_loss(model, run["states"], run["actions"], run["rewards"], DISCOUNT)
         total = loss.sum(dim=1).mean()
         optimizer.zero_grad()
@@ -146,7 +157,7 @@ def main() -> int:
         note = ""
         if (episode + 1) % args.validate_every == 0 or episode == args.episodes - 1:
             scores = evaluate(model, VALIDATION_SEEDS, features, args.duration_s,
-                              args.step_length, args.window_start_s)
+                              args.step_length, args.window_start_s, gate)
             note = (f"   return {scores['return']:.1f}  flow {scores['flow']:.0f}"
                     f"  speed {scores['mean_speed_kmh']:.2f}")
             if scores["return"] > best["return"]:
@@ -162,13 +173,15 @@ def main() -> int:
 
     print("\nreading the held-out test seeds, once")
     test = evaluate(model, TEST_SEEDS, features, args.duration_s, args.step_length,
-                    args.window_start_s)
+                    args.window_start_s, gate)
     baseline = evaluate_no_control(TEST_SEEDS, features, args.duration_s,
-                                   args.step_length, args.window_start_s)
+                                   args.step_length, args.window_start_s, gate)
     print(f"  trained    flow {test['flow']:>7.0f} veh/h  return {test['return']:>8.1f}"
-          f"  speed {test['mean_speed_kmh']:>6.2f} km/h")
+          f"  speed {test['mean_speed_kmh']:>6.2f} km/h  arrived {test['arrived']:>7.1f}"
+          f"  held at entry {test['held_at_entry']:>7.1f}")
     print(f"  no control flow {baseline['flow']:>7.0f} veh/h  return {baseline['return']:>8.1f}"
-          f"  speed {baseline['mean_speed_kmh']:>6.2f} km/h")
+          f"  speed {baseline['mean_speed_kmh']:>6.2f} km/h  arrived {baseline['arrived']:>7.1f}"
+          f"  held at entry {baseline['held_at_entry']:>7.1f}")
     print(f"  difference {100*(test['flow']-baseline['flow'])/baseline['flow']:+.1f}% "
           f"in steady-state flow")
 
@@ -179,14 +192,14 @@ def main() -> int:
 
 
 def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
-                        window_start_s=0.0) -> dict:
+                        window_start_s=0.0, gate_entries=True) -> dict:
     """Every vehicle left to the car-following model, on the same seeds."""
     from src.sumo.mainz import DECISION_INTERVAL_S
 
     runs = []
     for seed in seeds:
         env = MainzEnv(seed=seed, duration_s=duration_s, features=features,
-                       step_length_s=step_length)
+                       step_length_s=step_length, gate_entries=gate_entries)
         total = 0.0
         marked = window_start_s <= 0.0
         try:
@@ -208,6 +221,7 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
         "arrived": statistics.fmean(r["arrived"] for r in runs),
         "flow": statistics.fmean(r["flow_veh_per_h"] for r in runs),
         "mean_speed_kmh": statistics.fmean(r["mean_speed_kmh"] for r in runs),
+        "held_at_entry": statistics.fmean(r["held_at_entry"] for r in runs),
     }
 
 

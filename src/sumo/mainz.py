@@ -94,6 +94,7 @@ class MainzEnv:
         warmup_s: float = 300.0,
         step_length_s: float = 1.0,
         features: tuple[str, ...] = HERE_FEATURES,
+        gate_entries: bool = True,
         net_file: Path | None = None,
         route_file: Path | None = None,
         segment_file: Path | None = None,
@@ -103,8 +104,10 @@ class MainzEnv:
         self.warmup_s = warmup_s
         self.step_length_s = step_length_s
         self.features = features
+        self.gate_entries = gate_entries
         self.net_file = net_file or DATA / "mainz.net.xml"
-        self.route_file = route_file or DATA / "mainz.rou.xml"
+        default_routes = "mainz_routes.rou.xml" if gate_entries else "mainz.rou.xml"
+        self.route_file = route_file or DATA / default_routes
         self.segment_file = segment_file or DATA / "mainz_segments.json"
         self.segments: list[list[str]] = json.loads(self.segment_file.read_text())
         self._running = False
@@ -114,6 +117,10 @@ class MainzEnv:
         self.arrived_total = 0
         self._window_start_s = 0.0
         self._window_start_arrived = 0
+        # Per entry link, the vehicles scheduled to start there and how many of them
+        # have been let in. Empty when SUMO is doing the inserting.
+        self._schedule: dict[str, list[dict[str, Any]]] = {}
+        self._admitted: dict[str, int] = {}
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -131,6 +138,7 @@ class MainzEnv:
         ])
         self._running = True
         self.arrived_total = 0
+        self._load_schedule()
         self._load_static()
         self._previous = [set() for _ in self.segments]
         self._rates = [(0.0, 0.0) for _ in self.segments]
@@ -151,10 +159,79 @@ class MainzEnv:
 
         return checkBinary("sumo")
 
+    def _load_schedule(self) -> None:
+        """Read the vehicles the route file omits, grouped by the entry they start at."""
+        self._schedule, self._admitted = {}, {}
+        if not self.gate_entries:
+            return
+        rows = json.loads((DATA / "mainz_schedule.json").read_text())
+        for row in rows:
+            self._schedule.setdefault(row["entry"], []).append(row)
+        for entry, queued in self._schedule.items():
+            queued.sort(key=lambda row: row["depart"])
+            self._admitted[entry] = 0
+
+    def _entry_open(self, entry: str) -> bool:
+        """Whether the entry link is under the density past which its flow falls."""
+        static = self._static[entry]
+        lane_metres = static["length_m"] * static["lanes"]
+        if not lane_metres:
+            return True
+        count = int(_sumo.edge.getLastStepVehicleNumber(entry))
+        # AN EMPTY ENTRY LINK IS OPEN, and its density is zero rather than undefined.
+        # `_per_edge` reports nan for an empty edge so that it does not drag a
+        # super-segment's mean down; nan fails every comparison, so reusing it here
+        # would shut the gate permanently on exactly the links that are clearest.
+        return count * VEHICLE_LENGTH_M / lane_metres < DENSITY_CRITICAL
+
+    def _admit(self) -> None:
+        """Grant entry only while the entry link is under the critical density.
+
+        SUMO refuses an insertion when no safe gap remains on the lane, which is a
+        harder and much later condition than the one the network is controlled
+        against: by the time there is no gap, the entry link is far past the density at
+        which its flow peaks, and the capacity drop the controller exists to prevent
+        has already happened at the boundary. This holds a vehicle back as soon as its
+        entry link reaches the critical density.
+
+        It is the same rule the reward is written against, and it does at the boundary
+        what the policy does inside the network. An interior link is protected by
+        slowing the link above it, which is a link the policy can act on; an entry link
+        has no link above it, so the only way to hold its density down is to admit
+        fewer vehicles.
+
+        A vehicle held here has not entered the simulation at all. It is latent demand,
+        counted by `metrics` and never discarded. At most one vehicle per entry per
+        step is released, so a backlog leaves as a stream rather than as a block.
+        """
+        if not self._schedule:
+            return
+        now = float(_sumo.simulation.getTime())
+        for entry, queued in self._schedule.items():
+            index = self._admitted[entry]
+            if index >= len(queued) or queued[index]["depart"] > now:
+                continue
+            if not self._entry_open(entry):
+                continue
+            vehicle = queued[index]
+            _sumo.vehicle.add(vehicle["id"], vehicle["route"], typeID=vehicle["type"],
+                              depart="now", departLane="best", departSpeed="max")
+            self._admitted[entry] = index + 1
+
+    def held_at_entry(self) -> int:
+        """Vehicles whose departure time has passed but which the gate has not let in."""
+        if not self._schedule:
+            return 0
+        now = float(_sumo.simulation.getTime())
+        return sum(
+            sum(1 for row in queued[self._admitted[entry]:] if row["depart"] <= now)
+            for entry, queued in self._schedule.items()
+        )
+
     def _load_static(self) -> None:
         """Lane count, length and free-flow speed per edge, read once from the map."""
         self._static = {}
-        for segment in self.segments:
+        for segment in list(self.segments) + [list(self._schedule)]:
             for edge in segment:
                 lanes = int(_sumo.edge.getLaneNumber(edge))
                 length = float(_sumo.lane.getLength(f"{edge}_0"))
@@ -178,6 +255,7 @@ class MainzEnv:
 
     def _advance(self, seconds: float) -> None:
         for _ in range(int(round(seconds / self.step_length_s))):
+            self._admit()
             _sumo.simulationStep()
             self.arrived_total += int(_sumo.simulation.getArrivedNumber())
         self._update_rates()
@@ -352,6 +430,8 @@ class MainzEnv:
             "flow_veh_per_h": self.window_flow_veh_per_h(),
             "running": running,
             "waiting_to_enter": waiting,
+            "held_at_entry": self.held_at_entry(),
+            "admitted": sum(self._admitted.values()) if self._schedule else -1,
             "mean_speed_kmh": speed,
             "segments_over_critical": int((density > DENSITY_CRITICAL).sum()),
             "max_density": float(density.max()),

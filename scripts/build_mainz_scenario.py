@@ -337,10 +337,19 @@ def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str,
     Explicit vehicles rather than `<flow>` so a vehicle's id encodes whether it is an
     AV: SRC selects its controlled subset by vehicle number, and reproducing that here
     keeps the penetration deterministic and inspectable instead of resting on a draw.
+
+    Three files are written from the one schedule, so the two admission policies are
+    the same demand rather than two demands that happen to match:
+
+    * `mainz.rou.xml`, routes and every vehicle, which SUMO inserts on its own terms.
+    * `mainz_routes.rou.xml`, the same routes and vehicle types with no vehicles, for
+      runs where `MainzEnv` grants entry itself.
+    * `mainz_schedule.json`, the vehicles that file omits, with the entry link each one
+      is waiting at so the gate can be applied per entry.
     """
-    lines = ["<routes>"] + vtype_lines()
+    header = ["<routes>"] + vtype_lines()
     for entry, edges in sorted(built.items(), key=lambda kv: int(kv[0])):
-        lines.append(f'  <route id="r{entry}" edges="{" ".join(edges)}"/>')
+        header.append(f'  <route id="r{entry}" edges="{" ".join(edges)}"/>')
     departures: list[tuple[float, str, str]] = []
     for entry, intervals in sorted(volumes.items(), key=lambda kv: int(kv[0])):
         if entry not in built:
@@ -353,14 +362,21 @@ def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str,
                 departures.append((time, entry, f"v{entry}_{len(departures)}"))
                 time += headway
     departures.sort()
+    schedule = []
+    lines = list(header)
     for index, (time, entry, vehicle_id) in enumerate(departures):
         kind = "av" if (index % round(1.0 / av_fraction) == 0) else "human"
         lines.append(
             f'  <vehicle id="{vehicle_id}" type="{kind}" route="r{entry}" '
             f'depart="{time:.2f}" departSpeed="max" departLane="best"/>'
         )
+        schedule.append({"id": vehicle_id, "route": f"r{entry}", "type": kind,
+                         "depart": round(time, 2), "entry": entry})
     lines.append("</routes>")
     out_path.write_text("\n".join(lines) + "\n")
+    out_path.with_name("mainz_routes.rou.xml").write_text(
+        "\n".join(header + ["</routes>"]) + "\n")
+    out_path.with_name("mainz_schedule.json").write_text(json.dumps(schedule))
     return len(departures)
 
 
