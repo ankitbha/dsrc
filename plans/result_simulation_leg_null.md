@@ -499,6 +499,39 @@ clean test of the paper's own formulation rather than this approximation of it, 
 needs its five per-super-segment observation fields and therefore widens the deployed
 contract that the Jetson builder and the parity ledger both depend on.
 
+## What was and was not built, stated exactly
+
+Asked directly whether this implements super-segment control or only a coarse lever,
+the answer is that the lever is coarse in time everywhere, coarse in space only in
+arms that were never trained, and the STATE the controller acts on is a single
+vehicle's kinematics throughout. Precisely:
+
+| the paper | what was built | where |
+|---|---|---|
+| one decision per 60 s | one decision per 60 s | `mappo_src`, `decision_interval_s: 60.0` |
+| one action per super-segment, applied to all vehicles on it | same, in the measurement arms only | `measure_segment_as_agent.py`, `segown_highpower.py` -- gradient measurements, never trained |
+| | one action PER VEHICLE in the trained run | `mappo_src` is vehicle-attached; each AV samples from its own observation |
+| super-segments of 2 to 3 km | links of 500 m (leaves), 600 m (middles and trunk), 300 m (bottleneck), nine of them | `configs/topology/inverted_tree.yaml` |
+| state is per-super-segment density, speed, gap, inflow, outflow | state is one representative vehicle's 33-field local vector: `ego_speed`, `ego_headway_s`, `leader_gap`, `follower_gap`, lane gaps and so on | `LOCAL_OBS_FIELDS` in `src/rl/encoders.py` |
+
+Of those 33 fields about five are link-level -- `downstream_congestion_estimate`,
+`segment_target_speed`, `local_density_bin`, `local_mean_speed_bin`,
+`local_queue_estimate`. The rest are per-vehicle kinematics.
+
+**The paper's five fields already exist in this codebase.** `SEGMENT_FIELDS` carries
+`density`, `mean_speed`, `queue_length`, `inflow` and `outflow` per segment, and the
+CENTRALIZED CRITIC already consumes them. They are not routed to the actor. That is a
+deliberate boundary rather than an oversight: the actor's input width is
+`local_obs_dim()`, and the same width is pinned in the deployed contract that
+`src/analysis/observation_parity.py` and the Jetson builder both check against. The
+privileged-critic work was built specifically to add features without touching it.
+
+**So the honest label for what was measured is "super-segment ACTION driven by a
+single vehicle's OBSERVATION, on 500-to-600 m links".** That is not the paper's
+controller, and no result here bounds the paper's controller. Widening the actor's
+observation to the five per-segment fields is the one untested direction whose cost is
+known: it breaks the deployed observation contract on both the Jetson and the phone.
+
 ## What this leaves
 
 Four directions, of which the second has changed since it was first written here,
