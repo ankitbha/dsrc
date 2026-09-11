@@ -535,6 +535,45 @@ curve: -5.777, -6.567, -6.446, -6.463, -6.462, -6.121, -6.353, -6.302, -6.304, -
 the twelve steps. An earlier claim here that the decline was monotone was retired
 after update 5 reversed it, and updates 7 and 10 reversed it again.
 
+## A defect in the credit assignment, found by reading rather than measuring
+
+Recorded prominently because of how it was found. Twenty measurements did not surface
+it; auditing the algorithm surfaced it in minutes, after Ankit said the problem was
+likely in the algorithm and the implementation rather than in what was being measured.
+
+**Credit leaks across episode boundaries.** `terminated` is always False on this
+environment by construction, every episode ends by truncation, and the done flag
+written into the rollout buffer consults `terminated` and agent presence but never
+`truncated`. A vehicle still in the network at a boundary therefore records
+`done=False`; the trainer resets the environment and keeps filling the same buffer;
+vehicle ids are regenerated identically on every reset; and the advantage computation
+groups by agent id. Two different vehicles sharing an id become one trajectory, and
+GAE bootstraps backward across the reset.
+
+**What it touches.** Both training runs, the higher-power segment arm, the speed-only
+arm, the matched baseline, and both instrument calibrations all crossed a boundary.
+The three measurements the central null rests on -- `align_sumo` at +0.00 +/- 0.29,
+`align_src` at -0.47 +/- 0.51, and the own-reward segment arm at -0.12 +/- 0.51 -- ran
+inside a single episode and did not.
+
+**It does not explain the null, and that is the more important half.** The cleanest
+measurements were unaffected and still read zero. What it does invalidate is the
+sensitivity calibration every exclusion bound was derived from, on top of the
+walk-back already recorded, and both training runs.
+
+**Two design defects sit alongside it, and they are the likelier explanation. Neither
+is a bug; both were logged this session as knobs that had been swept.**
+
+- **The action is mostly inert.** The speed bins are 8.33, 12.5 and 16.67 m/s against
+  a mean AV speed near 2.5 m/s, and all three command the same behaviour on 84% of
+  AV-steps. An action that changes nothing five times in six cannot carry a gradient,
+  and that is a property of the action space rather than a finding about decentralized
+  control.
+- **The reward gives each agent the same number.** It is a network aggregate delivered
+  identically to every agent at every step, so cross-agent variation in the advantage
+  comes almost entirely from the critic. That is algebra, not an empirical question,
+  and it was tested seven ways instead of being read off.
+
 ## What was and was not built, stated exactly
 
 Asked directly whether this implements super-segment control or only a coarse lever,
