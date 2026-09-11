@@ -582,3 +582,58 @@ so its capacity is below an isolated straight road's. The threshold is not chang
 because it applies to all twelve super-segments and the straight-road measurement is the
 one made independently of any particular segment's geometry. SRC's 0.3 of jam is 67
 veh/km/lane, which on this segment is four times the density at which its flow peaks.
+
+## Training on the throttled network
+
+Both arms trained on seeds 1-10, selected by validation return on seeds 11-15, and read
+seeds 16-20 once. 80 episodes, 2,500 s, 100% penetration, 0.5 s steps, throughput
+counted from 600 s so the fill is excluded. The exit meter is at 0.85 green, and
+`DENSITY_CRITICAL` is 0.095 rather than SRC's 0.3.
+
+The reward still discriminates at the lower threshold: with no control, 5 of the 12
+super-segments are over critical at 600 s, 10 at 1,200 s and 12 by 2,100 s, so the
+congestion term carries signal for most of the episode and saturates only at the end.
+
+Held-out seeds 16-20:
+
+| arm | return | flow veh/h | arrivals | speed km/h |
+|---|---|---|---|---|
+| DSRC, the HERE observation | **-2,421.85** (+11.7%) | 2,150 (-0.3%) | 1,266 (-1.1%) | 14.32 (+9.4%) |
+| SRC, its original six features | -2,432.82 (+11.3%) | 2,146 (-0.5%) | 1,243 (-2.9%) | **14.84** (+13.4%) |
+| no control | -2,743.99 | **2,156** | **1,280** | 13.09 |
+
+Percentages are against no control. Best checkpoints were episode 59 for DSRC and 54 for
+SRC; both arms degraded after that, DSRC's flow falling from 2,150 at its best checkpoint
+to 1,737 by episode 79, so selection on the validation seeds is doing work here.
+
+**The deployable observation still costs nothing.** DSRC and SRC differ by 0.5% in
+return, 0.2% in flow and 3.6% in speed, in opposite directions on the last two. The four
+features a traffic API cannot return -- density, following gap, and the entry and exit
+counts -- carry no information this controller uses. That is the same result the
+unthrottled network gave, now with a capacity drop present in the network.
+
+**Throughput is unchanged by control, and the throttle did not change that.** All three
+arms serve between 2,146 and 2,156 veh/h, a spread of 0.5%, while their mean speeds span
+13.09 to 14.84 km/h. Both arms improve the objective they were trained on and neither
+serves more vehicles.
+
+### Why the capacity drop is present and still not recoverable
+
+The exit fundamental diagram shows the drop plainly: 826 veh/h/lane at 17.0 veh/km/lane
+against 595 at 45.3. A controller holding the exit super-segment near the critical
+density rather than letting it reach 45 would discharge about 39% more. That did not
+happen, and the reason is the demand rather than the controller.
+
+The published scenario offers 18,000 veh/h for 1,200 s, which is 6,000 vehicles. The
+throttled network discharges about 2,150 veh/h, so about 1,490 vehicles can leave during
+a 2,500 s episode. Demand exceeds capacity by roughly a factor of three from about 900 s
+onward, and every arm ends the episode with a standing queue: arrivals are 1,243 to
+1,280 against 6,000 offered. A policy that holds density below critical cannot do so when
+demand is three times capacity. It can choose where the queue stands, not whether it
+stands.
+
+So the throttle did what it was for -- the network now has a capacity drop, measured on
+its own exit -- but at this demand the drop is not avoidable and therefore not
+recoverable. Testing whether the controller can recover it requires a demand near the
+throttled capacity rather than three times it. That is a separate run and is not made
+here.
