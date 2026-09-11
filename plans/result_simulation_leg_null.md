@@ -189,6 +189,13 @@ Recorded because the retractions are part of the result.
 | joint gradient clipping starved the actor | Adam is invariant to a uniform gradient rescale; 20 steps move a parameter 0.383268 unscaled and 0.383267 scaled by 0.0063 |
 | the per-agent reward lowered the policy gradient; the horizon does not matter; privileged critic features do not help the gradient | all three were comparisons between two noise floors, taken before the floor was measured (task 105) |
 | rescaling the speed bins would produce a gradient | three rescalings raise the binding share from 6% to 29% and leave the gradient at its floor; the recommended one is the worst (task 106) |
+| the permutation floor is a valid null | two arms read systematically BELOW their own floor, which is the signature of a null not exchangeable with the data; replaced by resampling the action from the policy at the same state |
+| every z-score error bar in the investigation | `seed_everything(0)` made the actor and critic weights bit-identical across seeds, so each bar came from ONE network draw; re-measured with the draw varying per seed |
+| 7 of 9 segments run over critical density | inferred from a training score by assuming every segment ran at the vehicle-weighted network mean; measured directly at 1.5 of 9 (task 130) |
+| one branch is congested and the other free | read off density ratios, but density is flow over speed, so a free-flowing link and an empty one look alike at fixed flow; both branches carried the same demand |
+| the summed entropy declines monotonically | called from three updates; update 5 reversed it, and updates 7 and 10 reversed it again |
+| the shared-reward segment arm reads consistently negative, and here is why | it reads +0.25 +/- 0.76 under the valid null with the initialisation redrawn per seed; the negativity was the instrument |
+| the threshold objective is a noisier measure of behaviour than an arrival count | true unpaired and false paired: the ratio of each difference to its own bar is 2.79, 1.76, 1.75 and 2.63 for the reward against 2.91, 1.60, 1.29 and 0.85 for arrivals (task 133) |
 
 ## The pre-registered run
 
