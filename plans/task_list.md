@@ -2470,6 +2470,46 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+138. **WALK-BACK: the segment arms' null is WEAK, and "every candidate is closed"
+     overstated it.** 2026-09-10. This is the fourth statement of these thresholds and
+     it is the one that stops converting.
+
+     Task 137's calibration used i.i.d. synthetic advantages where the real advantage
+     is temporally autocorrelated, which showed as z = -0.59 at c = 0 instead of 0.
+     Rebuilt with the real advantage as the noise component, the c = 0 row reads
+     +0.24 and the curve moves:
+
+     | c | 0.00 | 0.02 | 0.05 | 0.10 | 0.20 | 0.35 | 0.50 | 1.00 |
+     |---|---|---|---|---|---|---|---|---|
+     | i.i.d. noise (task 137) | -0.59 | -0.34 | +0.18 | +1.23 | +3.50 | +7.01 | +10.54 | +22.02 |
+     | real advantage | +0.24 | -0.03 | -0.25 | +0.03 | +1.90 | +5.35 | +8.97 | +22.02 |
+
+     z crosses 2 at **c = 0.204**, not 0.134. More important than the crossing: below
+     c about 0.2 the readings are NON-MONOTONE -- +0.24, +0.09, -0.03, -0.25, +0.03 --
+     every one of them inside the null's own scatter. **The gradient-norm z on an arm
+     this size cannot separate a correlation of 0 from one of 0.1.**
+
+     **What this costs.** The segment arms report only a z. Their bounds were quoted
+     as 0.15, then 0.05, then 0.07; the honest figure is of order 0.1 to 0.2, which is
+     not a bound worth much. So the road-attached agent reads null on an instrument
+     too blunt to have seen a small effect, and task 134's "the last candidate is
+     closed" and the explanation table's "ruled out" overstate what was measured. The
+     vehicle arms are unaffected: they report `corr(slow, A)` directly at a
+     two-standard-error bar of 0.035, and a measured correlation needs no conversion.
+
+     **The fix is not a fifth conversion.** The segment arm is being re-run reporting
+     the correlation directly from the same batch, which is one line and removes the
+     conversion entirely. Until that lands, the road-attached agent should be
+     described as reading null at an unknown but coarse sensitivity, not as closed.
+
+     **The pattern, since it cost four attempts.** Each correction fixed the method
+     and none touched the data: a formula for a different statistic, then an
+     assumption of linearity, then a calibration whose null structure did not match.
+     The lesson is recorded as
+     [[feedback_calibrate_a_statistic_before_quoting_its_sensitivity]]: inject known
+     effect sizes, match the null's structure, and prefer a statistic that is
+     interpretable without conversion.
+
 137. **MEASURED: the gradient-norm z is strongly SUB-LINEAR in the action-advantage
      correlation, so the ceiling extrapolation of task 136 was optimistic.**
      2026-09-10. `scratchpad/calibrate_instrument.py`.
