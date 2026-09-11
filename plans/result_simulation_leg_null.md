@@ -243,7 +243,11 @@ agent makes 7.1 decisions in its lifetime instead of 90.5, a thirteenfold loss o
 temporal structure, because the agent is a vehicle that leaves rather than a road that
 persists. A larger per-decision effect and a much shorter trajectory pull opposite
 ways and this measurement cannot separate them. The segment-as-agent arms, where the
-agent persists for the whole episode, are what can.
+agent persists for the whole episode, are what can, and they have now reported: paid
+its own per-segment reward, the road-attached agent reads -0.12 +/- 0.51 at 171
+segment-decisions and -0.46 +/- 0.66 at 533. Neither separates from zero, so the
+confound resolves in favour of neither side -- restoring the agent's temporal
+structure does not recover a signal that the shorter trajectory was hiding.
 
 `configs/training/mappo_src.yaml` ports the formulation. What it
 changes and what was measured about each is task 113; the honest accounting of which
