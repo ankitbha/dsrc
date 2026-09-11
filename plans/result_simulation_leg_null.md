@@ -44,7 +44,7 @@ measured and the third stands.**
    correlation of +0.0016 against the shared arm's -0.0042 at a standard error of
    0.0135, and a segment paid its own threshold term reads z -0.12 +/- 0.51. Neither
    separation appears, so the shared reward is not the reason.
-3. **RESOLVED DOWN TO A CORRELATION OF 0.09.** The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
+3. **RESOLVED DOWN TO A CORRELATION OF ABOUT 0.05.** The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
    makes 7.1 decisions and leaves. That difference is confounded with every lever
    measurement. The segment-attached agent that separates it reads null at both powers
    measured, -0.12 +/- 0.51 and -0.46 +/- 0.66. Scaled by the instrument's own
