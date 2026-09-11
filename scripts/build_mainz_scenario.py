@@ -100,21 +100,30 @@ def outgoing(net_file: Path) -> dict[str, set[str]]:
     return links
 
 
-def demand(inpx_root: ET.Element) -> dict[str, float]:
-    """Entry link to vehicles per hour, from the first nonzero time interval.
+def demand(inpx_root: ET.Element) -> dict[str, list[tuple[float, float, float]]]:
+    """Entry link to its `(start_s, end_s, veh/h)` intervals.
 
-    The published network holds the same volume across every interval, so the demand
-    is constant and one interval describes it.
+    The demand is NOT constant and reading only its first interval more than doubles
+    it: every entry runs at its stated volume for the first 1,200 s and at zero
+    afterwards, so the episode is a twenty-minute surge followed by a drain. Holding
+    the opening volume for the whole 2,500 s offers 12,500 vehicles where the scenario
+    offers 6,000.
     """
-    volumes: dict[str, float] = {}
+    schedule: dict[str, list[tuple[float, float, float]]] = {}
     for vehicle_input in inpx_root.find("vehicleInputs").findall("vehicleInput"):
-        entries = vehicle_input.find("timeIntVehVols")
-        for entry in entries.findall("timeIntervalVehVolume"):
-            volume = float(entry.get("volume"))
+        points = sorted(
+            (float(entry.get("timeInt").split()[1]) / 1000.0, float(entry.get("volume")))
+            for entry in vehicle_input.find("timeIntVehVols").findall("timeIntervalVehVolume")
+        )
+        if not any(volume > 0.0 for _, volume in points):
+            continue
+        intervals = []
+        for index, (start, volume) in enumerate(points):
+            end = points[index + 1][0] if index + 1 < len(points) else float("inf")
             if volume > 0.0:
-                volumes[vehicle_input.get("link")] = volume
-                break
-    return volumes
+                intervals.append((start, end, volume))
+        schedule[vehicle_input.get("link")] = intervals
+    return schedule
 
 
 def routes(inpx_root: ET.Element, present: set[str], entries: set[str]) -> dict[str, list[str]]:
@@ -149,6 +158,32 @@ def check_connected(path: list[str], links: dict[str, set[str]]) -> list[tuple[s
     ]
 
 
+def vtype_lines() -> list[str]:
+    """Vehicle types carrying the paper's own Vissim calibration.
+
+    SUMO's default Krauss model computes a collision-free safe speed exactly and
+    recovers from a disturbance immediately, so it produces no capacity drop and
+    roughly twice the capacity this network should have. `w99_calibrated` transcribes
+    Appendix A of the SRC paper, which is the calibration its own Vissim runs used, so
+    using it is part of reproducing the paper rather than a tuning choice of ours.
+    """
+    import yaml
+
+    config = yaml.safe_load(
+        (REPO_ROOT / "configs" / "human_models" / "w99_calibrated.yaml").read_text())
+    sumo = config["sumo"]
+    attributes = " ".join(
+        f'{name}="{sumo[name]}"' for name in
+        ("cc1", "cc2", "cc3", "cc4", "cc5", "cc6", "cc7", "cc8", "cc9")
+    )
+    common = (f'carFollowModel="{sumo["car_following_model"]}" '
+              f'minGap="{sumo["min_gap_m"]}" {attributes} maxSpeed="16.67"')
+    return [
+        f'  <vType id="human" {common}/>',
+        f'  <vType id="av" {common} color="1,0,0"/>',
+    ]
+
+
 def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str, float],
                  duration_s: float, av_fraction: float, seed: int) -> int:
     """One explicit departure per vehicle, evenly spaced, sorted by time.
@@ -157,22 +192,20 @@ def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str,
     AV: SRC selects its controlled subset by vehicle number, and reproducing that here
     keeps the penetration deterministic and inspectable instead of resting on a draw.
     """
-    lines = [
-        "<routes>",
-        '  <vType id="human" maxSpeed="16.67" carFollowModel="Krauss"/>',
-        '  <vType id="av" maxSpeed="16.67" carFollowModel="Krauss" color="1,0,0"/>',
-    ]
+    lines = ["<routes>"] + vtype_lines()
     for entry, edges in sorted(built.items(), key=lambda kv: int(kv[0])):
         lines.append(f'  <route id="r{entry}" edges="{" ".join(edges)}"/>')
     departures: list[tuple[float, str, str]] = []
-    for entry, rate in sorted(volumes.items(), key=lambda kv: int(kv[0])):
+    for entry, intervals in sorted(volumes.items(), key=lambda kv: int(kv[0])):
         if entry not in built:
             continue
-        headway = 3600.0 / rate
-        time = headway / 2.0
-        while time < duration_s:
-            departures.append((time, entry, f"v{entry}_{len(departures)}"))
-            time += headway
+        for start, end, rate in intervals:
+            headway = 3600.0 / rate
+            time = start + headway / 2.0
+            limit = min(end, duration_s)
+            while time < limit:
+                departures.append((time, entry, f"v{entry}_{len(departures)}"))
+                time += headway
     departures.sort()
     for index, (time, entry, vehicle_id) in enumerate(departures):
         kind = "av" if (index % round(1.0 / av_fraction) == 0) else "human"
@@ -207,7 +240,10 @@ def main() -> int:
 
     root = ET.parse(inpx).getroot()
     volumes = demand(root)
-    print(f"  demand: {len(volumes)} entries, {sum(volumes.values()):g} veh/h total")
+    opening = sum(intervals[0][2] for intervals in volumes.values())
+    last_end = max(i[1] for intervals in volumes.values() for i in intervals)
+    print(f"  demand: {len(volumes)} entries, {opening:g} veh/h until {last_end:g} s, "
+          f"then zero")
 
     built = routes(root, present, set(volumes))
     for entry, path in sorted(built.items(), key=lambda kv: int(kv[0])):

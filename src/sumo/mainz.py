@@ -99,6 +99,7 @@ class MainzEnv:
         self._running = False
         self._static: dict[str, dict[str, float]] = {}
         self._previous: list[set[str]] = [set() for _ in self.segments]
+        self._rates: list[tuple[float, float]] = [(0.0, 0.0) for _ in self.segments]
         self.arrived_total = 0
 
     # ----------------------------------------------------------------- lifecycle
@@ -119,6 +120,7 @@ class MainzEnv:
         self.arrived_total = 0
         self._load_static()
         self._previous = [set() for _ in self.segments]
+        self._rates = [(0.0, 0.0) for _ in self.segments]
         self._advance(self.warmup_s)
         return self.observe()
 
@@ -164,6 +166,20 @@ class MainzEnv:
         for _ in range(int(round(seconds / self.step_length_s))):
             _sumo.simulationStep()
             self.arrived_total += int(_sumo.simulation.getArrivedNumber())
+        self._update_rates()
+
+    def _update_rates(self) -> None:
+        """Vehicles that entered and left each super-segment over the last interval.
+
+        Computed here rather than in `observe`, which must be callable twice without
+        changing its own answer.
+        """
+        present = self._segment_vehicles()
+        self._rates = [
+            (float(len(now - was)), float(len(was - now)))
+            for now, was in zip(present, self._previous, strict=True)
+        ]
+        self._previous = present
 
     def _command(self, actions: list[int] | np.ndarray) -> None:
         """Write the advisory to controlled vehicles as a desired speed.
@@ -215,6 +231,25 @@ class MainzEnv:
                 }
         return values
 
+    def _segment_vehicles(self) -> list[set[str]]:
+        return [
+            {v for edge in segment for v in _sumo.edge.getLastStepVehicleIDs(edge)}
+            for segment in self.segments
+        ]
+
+    def _mean_gap(self, vehicles: set[str]) -> float:
+        """Mean gap to the leader, SRC's `FollowDistGr` averaged over the segment.
+
+        A vehicle with no leader contributes nothing rather than a zero, for the same
+        reason an empty edge contributes no density: an open road is not a zero gap.
+        """
+        gaps = []
+        for vehicle in vehicles:
+            leader = _sumo.vehicle.getLeader(vehicle, 200.0)
+            if leader is not None and leader[0]:
+                gaps.append(float(leader[1]))
+        return float(sum(gaps) / len(gaps)) if gaps else math.nan
+
     def observe(self) -> np.ndarray:
         """The state the controller sees, one row per super-segment.
 
@@ -223,9 +258,11 @@ class MainzEnv:
         than a zero, so a segment's speed is the speed of its occupied road.
         """
         edges = self._per_edge()
+        present = self._segment_vehicles()
         rows = []
-        for segment in self.segments:
+        for index, segment in enumerate(self.segments):
             members = [edges[e] for e in segment]
+            here = present[index]
             speed = _nanmean([m["speed_kmh"] for m in members])
             free_flow = _nanmean([m["free_flow_kmh"] for m in members])
             row = {
@@ -235,9 +272,11 @@ class MainzEnv:
                 "lanes": _nanmean([m["lanes"] for m in members]),
                 "length_km": sum(m["length_m"] for m in members) / 1000.0,
                 "density": _nanmean([m["density"] for m in members]),
-                "gap": math.nan,
-                "input_rate": math.nan,
-                "exit_rate": math.nan,
+                # SRC counts a segment's arrivals and departures as the set
+                # difference of the vehicle ids present now and one decision ago.
+                "gap": self._mean_gap(here),
+                "input_rate": self._rates[index][0],
+                "exit_rate": self._rates[index][1],
             }
             rows.append([row[name] for name in self.features])
         return np.nan_to_num(np.array(rows, dtype=np.float32))
