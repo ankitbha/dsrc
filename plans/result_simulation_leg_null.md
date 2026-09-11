@@ -280,10 +280,16 @@ version -- the agent is a vehicle that makes 7.1 decisions and leaves, where the
 paper's is a road that persists -- and the segment arm that tests it resolves only
 about 0.10, so it can contribute by reading positive and not by reading null.
 
-It also explains why the shared-reward segment arm reads consistently negative:
-with a common reward its advantage is essentially a function of the untrained critic,
-and both the advantage and the action are then functions of the same observation
-through independently initialised networks. Task 123.
+**RETIRED, same day.** This section previously explained why the shared-reward
+segment arm read consistently negative -- with a common reward its advantage is
+essentially a function of the untrained critic, so the advantage and the action are
+both functions of the same observation through independently initialised networks
+(task 123). Re-measured against the resampled-action null with the network
+initialisation redrawn per seed, that arm reads **+0.25 +/- 0.76** over three seeds
+(+1.77, -0.61, -0.42), centred on zero. The -1.32 +/- 0.16 the explanation was built
+for combined a fixed initialisation with the invalid permutation floor, so the
+negativity was a property of the instrument and there is nothing left to explain. The
+argument may still be correct; it no longer has an observation supporting it.
 
 **THE SECOND HAS NOW BEEN MEASURED TOO, AND IT IS ALSO A NULL.** The segment-as-agent
 arm paid each segment its own threshold term rather than the network sum -- verified a
