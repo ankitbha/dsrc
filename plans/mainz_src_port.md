@@ -99,6 +99,59 @@ Over a 2,500 s episode with no control: vehicles waiting to enter grow from 59 t
 the running count saturates near 2,800, and mean speed falls from 49.9 to 24.3 km/h.
 They do.
 
+## Validating the port against the paper's own numbers
+
+The cheapest check on a port is its NO-CONTROL row: it needs no training, and if the
+uncontrolled network does not behave like the published uncontrolled network then
+nothing measured on it is comparable. The paper's Table gives, over 5 seeds at 2,500 s:
+
+| | No Control | SRC |
+|---|---|---|
+| VEHARR | 2,227 +/- 19 | 2,337.8 +/- 16.42 |
+| SPEEDAVG km/h | 13.16 +/- 0.42 | |
+
+That comparison found two errors that no amount of training would have surfaced.
+
+**Demand is not constant.** Every entry runs at its stated volume for the first 1,200 s
+and at zero afterwards, so the episode is a twenty-minute surge followed by a drain.
+Reading only the first interval and holding it for 2,500 s offered 12,500 vehicles where
+the scenario offers 6,000.
+
+**The car-following model was SUMO's default.** Krauss computes a collision-free safe
+speed exactly and recovers from a disturbance immediately, so it gave this network
+roughly twice its proper capacity. `w99_calibrated` is the paper's own Vissim
+calibration from its Appendix A, already transcribed in this repository, so using it is
+part of reproducing the paper rather than a tuning choice.
+
+| configuration | arrivals | speed km/h |
+|---|---|---|
+| Krauss, demand held constant | 3,455 | 24.01 |
+| Krauss, demand intervals honoured | 3,398 | 29.75 |
+| W99, demand correct | 1,610 | 20.27 |
+| **paper, no control** | **2,227** | **13.16** |
+
+A gap remains: 1,610 against 2,227, with speed high rather than low. Fewer arrivals at
+higher speed means a tighter bottleneck than the paper's -- the network admits vehicles
+and cannot discharge them, and at 2,500 s it is still filling. The likeliest cause is
+the 60 Vissim `conflictArea` definitions, which do not import and leave SUMO inferring
+right-of-way at the unsignalised junctions. Absolute comparability was judged
+unnecessary, since the paper's claim is a relative +5%, so this offset is recorded
+rather than closed.
+
+## Penetration
+
+**100%.** The published `RL.py` writes the advisory to `veh.No % 2 == 0` with
+`mix = mixed_traffic[1]`, which is 50% -- but that script produces the paper's ABLATION
+row, not its main table. The main table is at full penetration. Reading the code and
+assuming it corresponded to the headline result gave the wrong answer, which is the
+second time in this port that an assumption from the published script was wrong; the
+first was taking its feature set and reward weights as the whole story.
+
+In SRC the penetration is the fraction of vehicles a central controller writes
+`DesSpeed` to. Under decentralized execution the same fraction are vehicles running the
+policy themselves. The number and the actuation are identical; only where the policy is
+evaluated moves, which is what makes the two arms comparable.
+
 ## Results so far
 
 Seeds 1-10 train, 11-15 validate and select, 16-20 are read once.

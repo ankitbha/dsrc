@@ -222,8 +222,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration-s", type=float, default=2500.0,
                         help="SRC's episode length; End_of_simulation in its train.py")
-    parser.add_argument("--av-fraction", type=float, default=0.5,
-                        help="SRC controls every second vehicle, so 0.5")
+    # The published RL.py controls every second vehicle, but that script produces the
+    # paper's ABLATION row, not its main table. The main table is at full penetration,
+    # so matching the headline result means 1.0 and reading the code would have given
+    # the wrong answer.
+    parser.add_argument("--av-fraction", type=float, default=1.0,
+                        help="1.0 for the paper's main table; its ablation uses 0.5")
     parser.add_argument("--seed", type=int, default=1)
     args = parser.parse_args()
 
