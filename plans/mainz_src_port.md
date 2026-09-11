@@ -511,3 +511,74 @@ SRC's 0.3 is 67 veh/km/lane, **three times past the density at which flow starts
 fall**. A reward thresholded there pays for congestion long after the capacity drop it
 exists to prevent has happened, which is a reason the objective cannot reward
 prevention that is independent of the network, the demand and the training.
+
+## The exit backpressure, working
+
+The junction was the bottleneck, and the produced net says so directly. Extending the
+network past link 218 created junction `218-end`, and two things about it throttled the
+road whatever meter rate was configured:
+
+* **The movements crossed.** The connections fanned each of 218's three lanes into each
+  of the exit road's three, so the junction carried nine internal lanes and a foe matrix
+  in which movement 2 conflicts with six others. At a priority junction the conflicting
+  movements yield to one another, so vehicles crossed one at a time.
+* **Every movement was read as a turn.** The exit road ran due east while 218 arrives
+  heading about 40 degrees north of east, so netconvert capped the internal lanes at
+  7.62 to 11.95 m/s against 16.67 m/s on both sides of the junction.
+
+The exit road now takes 218's own lane count and its own final heading, and lane i
+connects only to lane i. Junction `218-end` then has three internal lanes, `foes="000"`,
+and internal speeds of 16.67 m/s. Discharge measured at 6,000 veh/h offered:
+
+| exit | discharge | segment 11 density |
+|---|---|---|
+| no meter | 2,874 veh/h | 0.075 of jam |
+| 0.95 green | 2,442 veh/h | 0.144 |
+| 0.62 green | 1,440 veh/h | 0.211 |
+
+Before the fix all three were about 1,000 veh/h. The meter is now what restricts the
+exit, and the rate is a number we choose.
+
+### The fundamental diagram at the exit super-segment
+
+`scripts/measure_fd_exit.py`. The instrument is the one that reproduced the curve on a
+straight road: an intermittent downstream restriction rather than a narrowing, so the
+section can run at its own capacity during green and fill during red; a demand rush that
+rises and falls, so the queue grows back over the section and then clears; and 20 s bins,
+which is what a loop detector reports. Density and speed are read on super-segment 11's
+occupied edges, which are 218 and 31 -- 219 and 517 are the opposite carriageway and
+hold no vehicle at any demand here, so counting their lane-metres would halve the
+density. Flow is k times v.
+
+At 0.85 green on a 90 s cycle, with a rush peaking at 4,200 veh/h over 5,400 s:
+
+| | measured |
+|---|---|
+| peak flow | 826 veh/h/lane |
+| **critical density** | **17.0 veh/km/lane** |
+| speed there | 48.6 km/h |
+| congested branch reaches | 45.3 veh/km/lane at 595 veh/h/lane |
+| fall from the peak | 28% |
+
+Flow rises linearly to a peak and falls beyond it, and speed falls monotonically from 59
+to 14 km/h. The loading and unloading halves of the rush both reach 29.3 to 42.6
+veh/km/lane and give mean flows of 693 and 685 veh/h/lane there, a gap of 1%, so the
+congested branch is a property of the road and not a transient of the loading.
+
+The shape holds across meter rates, and the peak approaches the road's own capacity as
+the meter loosens rather than being set by it:
+
+| green | peak flow | at density | fall past the peak |
+|---|---|---|---|
+| 0.60 | 735 veh/h/lane | 14.2 | 54% |
+| 0.75 | 813 | 19.1 | 38% |
+| 0.85 | 845 | 17.8 | 28% |
+| 0.95 | 855 | 22.2 | 16% |
+
+The critical density of 17.0 veh/km/lane on this super-segment is 19% below the 21.1
+measured on the straight road and now in `DENSITY_CRITICAL`, which is the direction
+expected: super-segment 11 contains a four-to-three lane drop between edges 31 and 218,
+so its capacity is below an isolated straight road's. The threshold is not changed,
+because it applies to all twelve super-segments and the straight-road measurement is the
+one made independently of any particular segment's geometry. SRC's 0.3 of jam is 67
+veh/km/lane, which on this segment is four times the density at which its flow peaks.
