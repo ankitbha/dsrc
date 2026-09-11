@@ -52,14 +52,19 @@ def main() -> int:
         # Whether the reward's congestion term can fire at all is a precondition for
         # training, not a result: SRC's reward is -100*1[rho>0.3] + 0.2*speed, and a
         # threshold never crossed leaves only the speed term.
+        import math as _math
         edges = env._per_edge()
-        values = sorted(v["density"] for v in edges.values())
-        over = [e for e, v in edges.items() if v["density"] > 0.3]
+        # An empty edge now carries no density rather than a zero, so it is absent
+        # from these statistics rather than counted as uncongested road.
+        values = sorted(v["density"] for v in edges.values()
+                        if not _math.isnan(v["density"]))
+        over = [e for e, v in edges.items()
+                if not _math.isnan(v["density"]) and v["density"] > 0.3]
         n = len(values)
-        print(f"\nper-EDGE density at t={env.metrics()['time_s']:.0f}s over {n} edges:")
+        print(f"\nper-EDGE density at t={env.metrics()['time_s']:.0f}s over {n} OCCUPIED edges:")
         print(f"  median {values[n//2]:.3f}  p90 {values[int(0.9*n)]:.3f}  "
               f"max {values[-1]:.3f}")
-        print(f"  edges over 0.3: {len(over)} of {n}")
+        print(f"  occupied edges over 0.3: {len(over)} of {n}")
         seg = env.densities()
         print(f"per-SEGMENT density: max {seg.max():.3f}, over 0.3: "
               f"{int((seg > 0.3).sum())} of {len(seg)}")

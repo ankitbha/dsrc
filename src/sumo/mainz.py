@@ -199,8 +199,16 @@ class MainzEnv:
                 lane_metres = static["length_m"] * static["lanes"]
                 values[edge] = {
                     "count": float(count),
+                    # AN EMPTY EDGE CONTRIBUTES NOTHING, not a zero. Two thirds of the
+                    # controlled edges are opposite-direction or unserved roads that
+                    # this demand never traverses, and averaging their zeros into a
+                    # super-segment put the mean density at 0.23 against a threshold of
+                    # 0.3 that then never fired, leaving SRC's reward as 0.2 * speed
+                    # with its congestion term dead. A segment's density is the density
+                    # of the road that has traffic on it.
                     "speed_kmh": speed_mps * 3.6 if count else math.nan,
-                    "density": (count * VEHICLE_LENGTH_M / lane_metres) if lane_metres else 0.0,
+                    "density": ((count * VEHICLE_LENGTH_M / lane_metres)
+                                if (lane_metres and count) else math.nan),
                     "lanes": static["lanes"],
                     "length_m": static["length_m"],
                     "free_flow_kmh": static["free_flow_kmh"],
