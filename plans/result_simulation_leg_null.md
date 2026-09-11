@@ -326,6 +326,55 @@ spread. That is where the paired standard deviation of 17 to 32 arrivals comes f
 It belongs to the road, not to any controller, and it caps a five-seed comparison at
 effects above roughly 8%. Task 114.
 
+## The objective responds to behaviour; only its speed half does
+
+The question prior to every gradient measurement is whether the objective can be moved
+by behaviour at all. If it were flat, no learner could exploit it however well credit
+were assigned, and the whole investigation would have been measuring the attribution
+of a quantity with nothing to attribute. It is not flat.
+
+Each AV independently issues the config's own `slow` command, 8.33 m/s, with
+probability p at each decision and is otherwise released to SUMO's car-following.
+Five seeds, each fixing both the traffic and the metering draw sequence, so the same
+seed at two mixes differs only in the mix. Differences are from p=0 with
+two-standard-error bars.
+
+| p | d reward | d speed term | d penalty term | d arrivals |
+|---|---|---|---|---|
+| 0.25 | **-1.51** +/- 0.54 | **-1.24** +/- 0.72 | **-0.28** +/- 0.19 | **-25.4** +/- 8.7 |
+| 0.5 | **-1.29** +/- 0.73 | **-1.47** +/- 0.82 | +0.18 +/- 0.37 | **-36.8** +/- 23.0 |
+| 0.75 | **-1.70** +/- 0.97 | **-1.74** +/- 0.93 | +0.04 +/- 0.35 | **-32.0** +/- 24.7 |
+| 1 | **-1.86** +/- 0.71 | **-1.72** +/- 0.83 | -0.14 +/- 0.50 | -27.8 +/- 32.8 |
+
+Bold means the bar excludes zero. The measurement reproduces two independent
+baselines before any comparison is drawn: its p=0 arrivals match the fleet-mix sweep's
+reference seed for seed, 198, 194, 156, 179 and 196, and its p=0 reward over three
+seeds matches the unpaired pass exactly.
+
+**The objective resolves the behaviour change at every mix level, and at least as well
+as counting arrivals does.** The ratio of each difference to its own bar is 2.79,
+1.76, 1.75 and 2.63 for the reward against 2.91, 1.60, 1.29 and 0.85 for arrivals; at
+p=1 the reward resolves the change and the arrival count does not. So no part of the
+null is attributable to the objective being unmovable or noisy. It stays with the
+mechanism and the credit assignment.
+
+**Only one of the reward's two halves responds.** `congestion_penalty` is 1.0, so the
+penalty term is exactly minus the count of segments over rho\* and the speed term is
+the remainder. The speed term is resolved and negative at every level and is
+essentially the whole difference. The penalty term resolves at one level of four and
+changes sign across them. **The half of the objective designed to pay for keeping a
+link below critical density -- the anticipatory behaviour the mechanism is supposed to
+produce -- does not respond consistently to this behaviour, and the half that does is
+the half that restates mean segment speed.**
+
+**Two limits.** The objective is maximised at p=0, by not metering at all, so within
+this cut a policy that has learned nothing and a policy that has learned to leave the
+fleet alone produce identical behaviour; improvement on this axis cannot demonstrate
+learning. And the cut is one dimension, a uniform random command at a single speed
+value, so it bounds what an unselective fleet can do to the objective rather than what
+a selective policy could. The metering oracle covers the selective case with perfect
+information and gains nothing.
+
 ## The explanations, and which survive
 
 Every candidate for why the advantage is silent about the action, with what closed it.
