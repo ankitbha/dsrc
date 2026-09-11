@@ -2470,6 +2470,76 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+140. **DEFECT, found by reading the algorithm rather than measuring its output:
+     credit leaks across episode boundaries.** 2026-09-10. Ankit's assessment was that
+     the session had spiralled into measurement while the problem lay in the algorithm
+     and the implementation. Auditing the credit-assignment path found this in
+     minutes; twenty measurements had not.
+
+     **The chain, all of it from code:**
+
+     1. `SumoTopologyEnv.step` sets `terminated = False` unconditionally (env.py:430),
+        deliberately and with a comment saying so. Every episode ends by
+        `truncated = step_count >= duration`.
+     2. `collect_rollout` records `done=bool(terminated or agent_id not in
+        next_observations)` (trainers.py:365). **`truncated` is never consulted.**
+     3. So at an episode boundary every vehicle still in the network records
+        `done=False`.
+     4. `collect_rollout` resets the env and keeps filling the SAME buffer.
+     5. Vehicle ids are `f"v{index}_{len(departures)}"`, regenerated identically on
+        every reset: the route file is rewritten deterministically and the seed
+        changes only the AV/human type draw, not the ids. **Ids repeat across
+        episodes.**
+     6. `compute_returns_and_advantages` groups by `agent_id`, so episode 1's `v0_5`
+        and episode 2's `v0_5` -- different vehicles -- become one trajectory.
+     7. With `done=False`, GAE bootstraps across the reset:
+        `delta = r + gamma * V(episode-2 state) - V(episode-1 state)`, and `last_gae`
+        propagates backward from episode 2 into episode 1.
+
+     **Blast radius, by whether a run crossed a boundary:**
+
+     | run | decisions / per episode | |
+     |---|---|---|
+     | `align_sumo`, the +0.00 +/- 0.29 null | 150 / 600 | clean |
+     | `align_src`, the -0.47 +/- 0.51 null | 20 / 20 | clean |
+     | `segown2`, the -0.12 +/- 0.51 arm | 20 / 20 | clean |
+     | `segown_highpower` | 60 / 20 | **affected** |
+     | speed-only arm | 40 / 20 | **affected** |
+     | matched baseline | 40 / 20 | **affected** |
+     | calibration v1 and v2 | 40 / 20 | **affected** |
+     | TRAINING `mappo_sumo` | 1800 / 600 | **affected** |
+     | TRAINING `mappo_src` | 40 / 20 | **affected** |
+
+     **This does NOT explain the null, and saying so matters more than the defect.**
+     The three cleanest measurements never crossed a boundary and still read zero. The
+     bug contaminates both training runs and the later arms -- including the
+     calibration every sensitivity bound was derived from -- but the central result
+     does not rest on them.
+
+     **The magnitude is bounded and modest.** At gamma 0.9 and lambda 0.95 the
+     backward decay is 0.855 per decision, so contamination reaches about six
+     decisions back from a boundary; with a mean of 7.1 decisions per agent and 20 per
+     episode, only agents departing near the boundary are touched.
+
+     **The fix is NOT the one line I first said.** Adding `truncated` to the done flag
+     stops the leak but treats a time-limit truncation as a true termination, which
+     biases value targets downward -- the standard time-limit-bootstrapping error in
+     the opposite direction. Correct handling needs three things: a per-transition
+     `truncated` flag distinct from `done`; a bootstrap value captured at each
+     boundary from the state at the END of the finishing episode, which the buffer
+     currently cannot express since it holds one bootstrap per agent for the whole
+     rollout; and a GAE recursion that bootstraps on truncation while resetting
+     `last_gae`. Making agent ids unique per episode is worth doing regardless, since
+     the grouping key silently merging two vehicles is its own hazard.
+
+     **Two design defects sit alongside it and are the likelier explanation of the
+     null, neither of which is a bug:** the speed bins are 8.33/12.5/16.67 m/s against
+     a mean AV speed near 2.5 m/s, so all three do the same thing on 84% of AV-steps
+     and the action is mostly inert; and the reward is a network aggregate delivered
+     identically to every agent, so the per-agent advantage has almost no per-agent
+     variation. Both were recorded this session as swept knobs rather than read as
+     faults.
+
 139. **CLOSED. The ported run was stopped at update 13 of 20, its gate fails on all
      three criteria, and the trained checkpoint REDUCES throughput.** 2026-09-10.
      Ankit stopped the run and then stopped all remaining work.
