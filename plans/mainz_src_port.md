@@ -260,3 +260,70 @@ paper's own cc1 to cc9. Before any further training on this network, the thing t
 establish is whether SUMO's W99 can produce a capacity drop of the right magnitude on a
 textbook single bottleneck at all. If it cannot, no amount of calibration on Mainz will
 help and the choice is between a different simulator and a different claim.
+
+## The fundamental diagram, measured properly
+
+The coarse check above averaged flow across the surge and the drain and sampled a grid
+that missed the onset, so it gave a lower bound rather than a measurement. Measured the
+way `inverted_tree` was for task 100 -- dt 0.1, a fine grid through the onset, flow
+counted only over a steady window inside the surge (600 to 1,200 s), three seeds:
+
+| offered veh/h | density | speed km/h | served veh/h | served/offered |
+|---|---|---|---|---|
+| 2,400 | 0.035 | 55.6 | 1,938 | 0.81 |
+| 3,000 | 0.044 | 53.9 | 2,294 | 0.76 |
+| 3,600 | 0.053 | 51.8 | 2,538 | 0.70 |
+| 4,200 | 0.064 | 49.0 | 2,678 | 0.64 |
+| 4,800 | 0.074 | 46.5 | 2,750 | 0.57 |
+| 5,400 | 0.087 | 43.8 | 2,834 | 0.52 |
+| 6,000 | 0.098 | 41.3 | 2,844 | 0.47 |
+| 7,200 | 0.118 | 38.3 | 2,836 | 0.39 |
+| 9,000 | 0.131 | 36.6 | 2,856 | 0.32 |
+| 12,000 | 0.142 | 35.1 | **2,858** | 0.24 |
+| 18,000 | 0.143 | 35.0 | 2,790 | 0.15 |
+
+**The capacity drop is 2.4%**, from a peak of 2,858 veh/h at 12,000 offered down to
+2,790 at 18,000. `inverted_tree` under the same W99 calibration drops **24%** (task
+100). So the drop is real but ten times smaller, and the earlier 1.2% was the same
+finding through a blunter instrument rather than a different one.
+
+**The network is insertion-limited, and that is why.** Doubling the offered demand from
+9,000 to 18,000 moves the interior density by 9%, from 0.131 to 0.143, and served flow
+by -2.3%. The entries cap admission near 2,850 veh/h and everything beyond that queues
+outside, so the interior never becomes dense.
+
+**The highest density reached anywhere in the surge is 0.143, which is 48% of the 0.300
+threshold the controller exists to defend.** SRC's reward pays -100 for a super-segment
+over critical density, and during the regime the mechanism targets that term cannot
+fire at all. The congestion that does appear comes later, in the drain after demand
+stops and vehicles already admitted accumulate -- which is not the phenomenon the
+protocol is designed around.
+
+**Throughput level, by contrast, nearly matches.** The plateau of about 2,850 veh/h is
+within 11% of the paper's no-control 3,207 veh/h. At dt 1.0 it was 2,260, so the step
+size accounts for most of the earlier level gap. It is the SHAPE of the curve, not its
+height, that does not reproduce.
+
+## What this means for the extension
+
+A controller that holds density below a critical point can, on this network, recover at
+most 2.4%. The paper reports 5%. So no training configuration, observation set or
+penetration will reproduce the published gain here, and the two trained arms behaving
+as they did is the predicted outcome rather than a failure to tune.
+
+Three things could be true and they call for different work:
+
+1. **The demand is the wrong operating point.** Every published rate is at or above
+   12,000 veh/h offered against a 2,850 veh/h network. A scenario whose demand sits at
+   the onset, around 3,600 to 5,400, would spend the episode near the critical point
+   instead of queued outside it.
+2. **SUMO's W99 is not Vissim's.** It is a simplified Wiedemann 99, and the parameters
+   that the paper's appendix says control the capacity drop -- CC4 and CC5 for braking
+   and acceleration tendencies, CC2 and CC6 for stop-and-go -- may not have the same
+   effect in SUMO's implementation. `inverted_tree` gets 24% from them, so they do
+   something; whether they do the same thing on a real network with single-lane
+   constraints is untested.
+3. **The bottleneck is the wrong kind.** `inverted_tree` is a purpose-built merge where
+   congestion forms at a zipper junction. Mainz's constraint is eight single-lane links
+   whose capacity is set by headway, and a fixed-capacity lane does not drop the way a
+   merge does.
