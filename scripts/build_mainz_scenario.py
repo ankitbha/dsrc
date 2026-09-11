@@ -142,7 +142,16 @@ def routes(inpx_root: ET.Element, present: set[str], entries: set[str]) -> dict[
         if static is None:
             continue
         for route in static.findall("vehicleRouteStatic"):
-            sequence = [ref.get("key") for ref in route.find("linkSeq").findall("intObjectRef")]
+            # THE ROUTE STARTS AT THE ENTRY LINK. A Vissim routing decision sits ON a
+            # link at some position along it and its `linkSeq` is the path onward from
+            # there, so the sequence alone omits the link the vehicles are generated
+            # on. Dropping it inserted traffic directly onto the next edge, which for
+            # three of the eight entries is a single lane where the entry link has two
+            # or three, throttling insertion and leaving thousands of vehicles queued
+            # outside a network that never filled.
+            sequence = [entry] + [
+                ref.get("key") for ref in route.find("linkSeq").findall("intObjectRef")
+            ]
             path = [edge for key in sequence for edge in expand(key, present)]
             if path:
                 built[entry] = path
@@ -229,6 +238,9 @@ def main() -> int:
     parser.add_argument("--av-fraction", type=float, default=1.0,
                         help="1.0 for the paper's main table; its ablation uses 0.5")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--demand-scale", type=float, default=1.0,
+                        help="multiply every entry volume, to place the network at a "
+                             "chosen point on its flow-density curve")
     args = parser.parse_args()
 
     inpx = DATA / "Mainz20base.inpx"
@@ -257,6 +269,9 @@ def main() -> int:
     if len(built) != len(volumes):
         raise SystemExit(f"only {len(built)} of {len(volumes)} entries have a route")
 
+    if args.demand_scale != 1.0:
+        volumes = {entry: [(a, b, v * args.demand_scale) for a, b, v in intervals]
+                   for entry, intervals in volumes.items()}
     count = write_routes(DATA / "mainz.rou.xml", built, volumes,
                          args.duration_s, args.av_fraction, args.seed)
     print(f"  {count} vehicle departures over {args.duration_s:g} s")

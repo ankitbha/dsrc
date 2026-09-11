@@ -187,3 +187,55 @@ differences are several times larger and consistent in direction across both arm
 The port's absolute offset from the paper stands: 1,597 no-control arrivals here against
 2,227 published. Absolute comparability was judged unnecessary, so the arms are compared
 against this port's own baseline rather than against the published table.
+
+## Why the throughput gain is absent: there is no capacity drop
+
+The mechanism SRC exploits is the capacity drop. Flow rises with density to a maximum
+at a critical density and FALLS beyond it, so a controller that holds density below
+critical recovers the flow that the collapse would have lost. If flow does not fall,
+there is nothing to recover and no controller can gain throughput however well trained.
+
+Measured with no control, sweeping the demand:
+
+| offered veh/h | served veh/h | max segment density |
+|---|---|---|
+| 1,800 | 864 | 0.000 |
+| 2,700 | 1,290 | 0.000 |
+| 3,600 | 1,728 | 0.000 |
+| 5,400 | 2,249 | 0.065 |
+| 9,000 | 2,258 | 0.273 |
+| 18,000 | 2,267 | 0.464 |
+
+**From 5,400 to 18,000 veh/h offered, a factor of 3.3, served flow moves +0.8% while
+the maximum density rises by a factor of 7.1.** Flow plateaus at a fixed bottleneck
+rather than falling past a critical density. There is no capacity drop on this network,
+so both trained arms raising speed and the reward while leaving arrivals unchanged is
+the expected outcome rather than a training failure.
+
+**The demand is far above the regime of interest.** 18,000 veh/h against a network that
+discharges 2,260 is eight times oversaturation, and the entry queue then meters the
+network for free: the interior never explores the density range where a drop would
+appear. 18,000 is the top of the envelope the paper's text describes (11,000 to 18,000
+summed over its four junctions), so it reads as a saturation setting rather than the
+rush-hour profile.
+
+**The bottleneck is faithful, not an artifact.** Eight single-lane links carry every
+route, and at W99 with cc1 = 2.5 s one lane caps near 1,300 veh/h, which is about half
+the observed 2,260. Lane counts were compared against the Vissim source across all 188
+named edges: zero mismatches.
+
+**A routing bug found while diagnosing this.** A Vissim routing decision sits ON a link
+and its `linkSeq` is the path onward from it, so building routes from the sequence alone
+omitted the entry link and inserted vehicles one edge downstream -- for three of the
+eight entries, directly onto a single-lane edge. Including the entry link raised
+in-network vehicles from 2,285 to 2,870 and cut the entry queue from 2,127 to 1,556. It
+did not change discharge, which is itself evidence that the constraint is downstream of
+the entries.
+
+**The open question** is whether the missing capacity drop is a step-size artifact. This
+project retracted a 17.6% throughput result once because a 1 s physics step manufactured
+it. SRC's Vissim runs at `SimRes = 1`, one step per second, and this port matches that;
+SUMO's W99 at 1 s may not resolve the stop-and-go oscillation the drop comes from. If a
+drop appears at 0.1 s, the port is fixable. If it does not, SUMO's W99 is a simplified
+Wiedemann 99 that does not reproduce Vissim's capacity-drop behaviour even carrying the
+paper's own cc1 to cc9, and this port cannot demonstrate the mechanism at all.
