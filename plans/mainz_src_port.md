@@ -355,3 +355,46 @@ Arrivals also peak here and fall beyond it -- 1,683 at 6,000, 1,675 at 7,200, 1,
 no drop to recover and the test would be vacuous whatever the demand. This is the same
 step-size sensitivity that once manufactured a 17.6% result on this project, appearing
 now as an effect the coarse step ERASES rather than creates.
+
+## The no-control case, finalised
+
+Everything before this measured inside a transient. Demand that stopped at 1,200 s left
+the episode draining; demand sustained for 2,500 s left the density still climbing at
+the end. Neither is a state a throughput number can be read from. Two 10,000 s runs with
+demand sustained throughout, flow sampled per 200 s, no control:
+
+| | 6,000 veh/h | 18,000 veh/h |
+|---|---|---|
+| mean density | 0.281 | 0.287 |
+| max density | 0.577 | 0.550 |
+| **steady-state flow** | **2,882 veh/h** | **2,858 veh/h** |
+| vehicles in network | 3,549 | 3,578 |
+| speed | 17.6 km/h | 17.0 km/h |
+| queued outside | 1,174 -> 5,353 | 17,830 -> 37,856 |
+| flow, first half vs second | 2,873 -> 2,891 | 2,850 -> 2,866 |
+
+Averaged over the equilibrated stretch, t >= 5,000 s.
+
+**The network equilibrates, and it equilibrates in a congested state.** Density settles
+near 0.28 mean and 0.55 to 0.58 maximum, with five of twelve super-segments over the
+critical 0.3, at 17 km/h. This is not a free-flowing network: it is jammed and stays
+jammed for 5,000 s.
+
+**Flow does not fall.** Within each run the second half matches the first to under 1%.
+Across the two runs, tripling the demand moves flow by -0.8%.
+
+**Higher demand does not even produce higher density.** Interior density, occupancy and
+flow are the same at 18,000 veh/h as at 6,000; the only thing that changes is the queue
+outside, which grows seven times longer. The network self-limits: admission is capped by
+the network itself, so excess demand waits at the boundary and never reaches the
+interior.
+
+**So higher density does not mean lower flow here, at any demand, at any density the
+network can reach, over 10,000 s of equilibrated congestion.** The network behaves as a
+fixed-capacity server of about 2,870 veh/h with an unbounded entry queue.
+
+That is the finding the whole port rests on, and it is now measured at equilibrium
+rather than inside a transient. A controller that holds density below critical has
+nothing to recover, because flow does not fall when density crosses critical; and it
+cannot hold density down in any case, because the network already caps its own
+admission.
