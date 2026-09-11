@@ -38,9 +38,9 @@ transfer to a vehicle-attached agent on this road.
    separation appears, so the shared reward is not the reason.
 3. The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
    makes 7.1 decisions and leaves. That difference is confounded with every lever
-   measurement, and the segment-attached agent that separates it reads null at an
-   exclusion threshold of about 0.15 -- five times coarser than the vehicle arms'
-   0.03. It rules out a large effect, not a small one.
+   measurement. The segment-attached agent that separates it reads null at both powers
+   measured, -0.12 +/- 0.51 at an exclusion threshold of 0.15 and -0.46 +/- 0.66 at
+   0.09, against the vehicle arms' 0.03. The band between 0.09 and 0.03 is untested.
 
 **The instrument was rebuilt mid-investigation.** Its original permutation floor is
 not a valid null when advantages are temporally correlated, and it made arms read
@@ -315,7 +315,9 @@ A null at 0.15 is consistent with an effect the vehicle arms would already have 
 The higher-power version runs three episodes per rollout instead of one, taking n to
 about 513 and the exclusion threshold to about 0.09 -- still coarser than the vehicle
 arms, and still short of a clean test, which needs the paper's five per-super-segment
-observation fields and therefore a wider deployed contract. Task 129.
+observation fields and therefore a wider deployed contract. **It has now been
+measured: -0.46 +/- 0.66 over three seeds (+0.86, -1.16, -1.09) at 532 to 533
+segment-decisions.** The candidate does not survive at 0.09 either. Tasks 129 and 134.
 
 ## A property of the operating point that bounds every comparison here
 
@@ -392,15 +394,17 @@ only correlations five times larger than the rest of the table does.
 | the critic cannot centre the advantage | **ruled out** | privileged neighbourhood features raise out-of-sample R2 from 0.808 to 0.886 and leave the gradient unchanged |
 | penetration is too low | **ruled out** | 100% penetration, commanding the entire fleet, reads the same |
 | the operating point has no headroom | **partly** | the metering oracle gains nothing, but it is one heuristic and a lower bound |
-| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **measured null, at a quarter of the power** | a segment paid its own reward reads -0.12 +/- 0.51 over three seeds; the arm excludes correlations above about 0.15, where the vehicle arms exclude above 0.03 |
+| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **ruled out, at a third of the power** | a segment paid its own reward reads -0.12 +/- 0.51 at 171 segment-decisions and **-0.46 +/- 0.66 at 533**, where the exclusion threshold falls from 0.15 to 0.09; the vehicle arms exclude above 0.03 |
 
-**Every candidate now has a measurement against it, and the last one's is the
-weakest.** The road-attached agent reads null, but only at an exclusion threshold of
-0.15 against the vehicle arms' 0.03, so it rules out a large effect and not a small
-one. Making it adequate needs three episodes per rollout rather than one, and a clean
-version needs the paper's five per-super-segment observation fields -- which means
-widening the deployed contract that the Jetson builder and the parity ledger both
-depend on.
+**Every candidate now has a measurement against it, and the last one has two.** The
+road-attached agent paid its own reward reads -0.12 +/- 0.51 at 171 segment-decisions
+and -0.46 +/- 0.66 at 533, where three episodes per rollout take the exclusion
+threshold from 0.15 to 0.09. Both are centred on zero and neither is a large effect
+ruled out by a coarse instrument only. What remains untested is the band between 0.09
+and the vehicle arms' 0.03, and a clean test of the paper's own formulation rather
+than this approximation of it, which needs its five per-super-segment observation
+fields and therefore widens the deployed contract that the Jetson builder and the
+parity ledger both depend on.
 
 ## What this leaves
 

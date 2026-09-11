@@ -2487,6 +2487,37 @@ and on what evidence.
      against the same checkpoint directory. Recorded as a memory: identify a job by
      PID or by a sentinel file it writes, never by a pattern.
 
+134. **RESULT: the road-attached agent is a null at three times the power too, so
+     the last candidate explanation is closed at an exclusion threshold of 0.09.**
+     2026-09-10.
+
+     Three episodes per rollout rather than one, which takes the arm from 171
+     segment-decisions to 532 or 533 and the exclusion threshold for a correlation
+     from 0.15 to 0.089. Same resampled-action null, same per-seed initialisation.
+
+     | seed | segment-decisions | measured | null | z | ceiling |
+     |---|---|---|---|---|---|
+     | 7 | 532 | 0.30147 | 0.24089 +/- 0.07005 | +0.86 | 9.9 |
+     | 17 | 533 | 0.14642 | 0.19563 +/- 0.04237 | -1.16 | 10.7 |
+     | 27 | 533 | 0.28457 | 0.77083 +/- 0.44645 | -1.09 | 2.9 |
+
+     **Mean z -0.46 +/- 0.66**, against -0.12 +/- 0.51 at the lower power. Both are
+     centred on zero, and the higher-power reading does not move toward the ceiling,
+     which at 9.9 and 10.7 on two of three seeds is well above anything measured.
+
+     **The shared-reward version of the same arm was re-measured alongside it and
+     reads +0.25 +/- 0.76** (+1.77, -0.61, -0.42), where it previously read
+     -1.32 +/- 0.16 under a fixed initialisation and the invalid permutation floor.
+     That retires task 123's structural explanation for its negativity: the negativity
+     was the instrument. The argument may still be correct and no longer has an
+     observation supporting it.
+
+     **What is left untested** is the band between this arm's 0.09 and the vehicle
+     arms' 0.03, and the paper's own formulation rather than this approximation of it,
+     whose action is drawn from one representative vehicle's observation rather than
+     from five per-super-segment fields. Widening to those fields widens the deployed
+     contract.
+
 133. **PAIRED: the objective discriminates fleet behaviour at least as well as an
      arrival count, and its entire resolved response is the speed term.** 2026-09-10.
 
