@@ -605,7 +605,7 @@ to look for headroom, so 4 is last. For the same reason 3 comes before 4: it ask
 at the granularity the paper used, before spending on a better learner at the
 granularity this project uses.
 
-**The decision is Ankit's and is open.** Nothing further should be built until he
-answers, because 2, 3 and 4 are each several days and they are alternatives rather
-than a sequence. 5 is running now, since it costs one sweep and its answer bears on
-whether the others are worth starting.
+**CLOSED, 2026-09-10.** Ankit stopped the training run at update 13 and then stopped
+all remaining work. Option 1 is what happened: the simulation leg is reported as a
+null and the deployment carries the feasibility claim. Options 2 to 5 are recorded as
+what a continuation would cost, not as work in progress. Nothing is running.
