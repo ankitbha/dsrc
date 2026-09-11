@@ -510,6 +510,20 @@ chance to appear, and the trend that did appear points the wrong way.
 |---|---|---|---|
 | 1. summed entropy falls | below 1.9775, of a 2.1972 maximum | lowest reached **2.1459** | fail |
 | 2. score trends up | by more than the step-to-step variation | moved **-0.4679** against a step standard deviation of 0.2625 | fail |
+| 3. action distribution leaves uniform | joint modal share above 0.20 | **0.1460** | fail |
+
+**All three fail.** Criterion 3 is measured on the update-13 actor over 1,503
+observations in the environment it trained in. Both heads sit near uniform: the speed
+head at 0.3176 / 0.2994 / 0.3829 and the headway head at 0.2659 / 0.3529 / 0.3812,
+summed entropy 2.1804 of a 2.1972 maximum. For scale, a randomly initialised actor
+reads a joint modal share of 0.1378 and the earlier `mappo_sumo` run reached 0.1486
+after 23 updates, so 0.1460 after 13 is initialisation drift rather than a learned
+preference.
+
+**The early stop does not rescue criterion 2, and the amount by which it does not is
+computable.** For the criterion to pass at update 20, updates 14 to 20 would have had
+to hold a score of -6.03. That is better than every update of the run except the
+first, against a whole-run range of -6.811 to -5.777.
 
 **Criterion 2 fails in the wrong direction, which is the part worth noting.** The
 score did not stay flat; it declined, and by more than the update-to-update noise. The
