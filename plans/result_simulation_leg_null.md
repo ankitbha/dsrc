@@ -402,6 +402,16 @@ treatment trend with seed bistability and is the wrong statistic: two quantities
 both fall on average correlate positively whether or not their fluctuations are
 related.
 
+**Do not read this p against the fleet-mix sweep's p.** Both sweeps draw a Bernoulli
+at each decision, at the same 1 s interval, on the same 6000-step episodes after the
+same 3000-step fill -- their p=0 arms are identical, 198, 194, 156, 179 and 196 seed
+for seed. What differs is the command. This one sets 8.33 m/s, a CEILING that SUMO's
+car-following often already dominates: the network mean speed here is 1.9 to 2.6 m/s,
+so the command frequently changes nothing. The fleet-mix sweep's `binding` scheme sets
+0.6 times the vehicle's CURRENT speed, which always binds and compounds across
+decisions. That is why the same nominal p costs 25 to 37 arrivals here and 56 to 147
+there. The two measure different interventions and their p columns are not comparable.
+
 **Two further limits.** The objective is maximised at p=0, by not metering at all, so within
 this cut a policy that has learned nothing and a policy that has learned to leave the
 fleet alone produce identical behaviour; improvement on this axis cannot demonstrate
