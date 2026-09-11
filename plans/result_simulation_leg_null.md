@@ -296,8 +296,9 @@ than a shared one**, at sensitivity to a correlation of about 0.016.
 So the shared reward is NOT the reason the advantage is silent. That was the best
 remaining explanation and it is ruled out. What is left is the third item in the short
 version -- the agent is a vehicle that makes 7.1 decisions and leaves, where the
-paper's is a road that persists -- and the segment arm that tests it resolves only
-about 0.10, so it can contribute by reading positive and not by reading null.
+paper's is a road that persists. The segment arm that tests it has since read null at
+both powers run, and scaled by the instrument's own ceiling it would show a
+correlation near 0.05 (task 136).
 
 **RETIRED, same day.** This section previously explained why the shared-reward
 segment arm read consistently negative -- with a common reward its advantage is
@@ -413,8 +414,9 @@ information and gains nothing.
 
 Every candidate for why the advantage is silent about the action, with what closed it.
 The point of the table is that the eliminations are measurements rather than
-arguments. Every row now has one; the last row's is the weakest, because it excludes
-only correlations five times larger than the rest of the table does.
+arguments. Every row now has one. The last row's is still the weakest, but by less
+than earlier text here claimed: about 0.05 against the other rows' 0.03, not five
+times coarser (task 136).
 
 | explanation | status | what closed it |
 |---|---|---|
@@ -472,12 +474,13 @@ because one of its two halves has since been measured.
    fewer and 0.8 more vehicles than no control on the two demands, against a
    seed-to-seed spread of about 16 arrivals. Platoon coordination is untested and is
    what remains of this option.
-3. **Raise the power of the road-attached agent.** It is the one candidate whose null
-   is measured only against correlations above 0.15, where every vehicle arm excludes
-   above 0.03. Three episodes per rollout takes the threshold to about 0.09. Testing
-   the paper's formulation rather than an approximation of it needs its five
-   per-super-segment observation fields, which widens the deployed contract that the
-   Jetson builder and the parity ledger depend on.
+3. **Test the paper's own formulation of the road-attached agent.** Raising the
+   episode count is NOT the way: three episodes per rollout left the threshold where
+   one episode did, near 0.05, because the cross-seed standard error rose along with
+   the per-seed sensitivity (task 136). What is untested is the formulation itself.
+   This arm draws its action from one representative vehicle's observation; the paper
+   uses five per-super-segment fields, and adding them widens the deployed contract
+   that the Jetson builder and the parity ledger depend on.
 4. **Change the advantage estimator** to a counterfactual one. It is aimed exactly at
    the quantity that reads null and would probably raise the correlation.
 
