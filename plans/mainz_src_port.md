@@ -681,3 +681,50 @@ The exit constraint has to stay finite -- a free sink lets any number of vehicle
 -- but it has to sit ABOVE the uncontrolled capacity, around 3,000 to 3,200 veh/h, so
 that the binding limit is the capacity drop inside the network, where density is what
 the controller acts on and where holding it near critical can recover flow.
+
+## The gate: served flow does not depend on density, at any exit setting
+
+The measurement that should have run before any training. No control, flat demand held
+for the whole episode -- which is what training uses -- flow counted from 900 s, dt 0.5.
+The earlier curve was traced under a rush ramping from a quarter of its peak and back,
+where the exit meter alternately binds and releases; training then ran under a flat
+demand where it is saturated throughout. A curve measured under one demand does not
+license an experiment under another.
+
+Exit unmetered, so the network's own capacity is the limit:
+
+| offered veh/h | served veh/h | density veh/km/lane | space-mean speed |
+|---|---|---|---|
+| 1,800 | 1,786 | 2.3 | 55.7 |
+| 3,000 | 2,864 | 4.5 | 48.7 |
+| 3,600 | 2,883 | 6.5 | 36.9 |
+| 6,000 | 2,883 | 15.3 | 16.1 |
+| 9,000 | 2,894 | 21.8 | 10.8 |
+| 18,000 | 2,891 | 23.3 | 9.8 |
+
+Over the five points where demand exceeds what the network serves, served flow stays
+between 2,853 and 2,894 veh/h, a range of 1.4%, while density runs 6.5 to 23.3
+veh/km/lane and space-mean speed falls from 36.9 to 9.8 km/h. Metering the exit moves
+the constant and changes nothing else: 2,403 to 2,438 at 0.98 green, 2,157 to 2,165 at
+0.85.
+
+**Served flow is a constant set by a saturated bottleneck, not a function of density.**
+There is no capacity drop for a density-holding controller to prevent, so no arm
+comparison on this port can show a throughput gain, and none of the four training runs
+made in this leg was measuring anything else.
+
+### The interior is deeply congested and it makes no difference
+
+At 9,000 veh/h offered with the exit unmetered, the twenty slowest links run at 0.8 to
+8.4 km/h against a 60 km/h limit, at densities of 43 to 125 veh/km/lane against a jam
+density of 222. Links 53, 56 and 59 sit at 120 to 125 veh/km/lane moving at 0.8 km/h.
+The network average of 23.3 hides this: it is taken over 188 edges, most of which the
+demand never reaches.
+
+So the interior does reach deep congestion, and served flow still does not fall. The
+binding bottleneck discharges at the same rate whether or not a queue stands behind it.
+The base network contains no traffic lights at all, so that bottleneck is a priority
+junction, and SUMO's junction model keeps a vehicle out of a junction it cannot clear,
+which is what prevents the blocking that costs a real network its throughput. Vissim's
+conflict areas model exactly that blocking; the base layout carries one and it is
+PASSIVE, while the four signalised variants carry 68 of which 11 are active.
