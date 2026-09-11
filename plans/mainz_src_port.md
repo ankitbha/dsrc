@@ -70,10 +70,11 @@ mapping would break all of them. Link ids are expanded to their SUMO parts every
 **Links 24 and 68 are refused** by netconvert and dropped from super-segment 8. Neither
 appears on any demand route.
 
-**Demand and routing.** 8 entries carry 18,000 veh/h in total, constant across
-intervals. Every routing decision in the network has exactly one route and all of them
-end at link 218, so eight paths are the complete assignment and no route choice has to
-be modelled. All eight resolve with zero breaks.
+**Demand and routing.** 8 entries carry 18,000 veh/h in total for the first 1,200 s and
+nothing afterwards, so 6,000 vehicles are offered and the rest of the episode drains.
+Every routing decision in the network has exactly one route and all of them end at link
+218, so eight paths are the complete assignment and no route choice has to be modelled.
+All eight resolve with zero breaks.
 
 ## A super-segment is the road that has traffic on it
 
@@ -95,9 +96,9 @@ Mainz has no signals -- `signalController` count is zero -- so its junctions are
 control, and that behaviour lives in 60 Vissim conflict areas which do not import. The
 check is whether SUMO's inferred priorities still produce a jam.
 
-Over a 2,500 s episode with no control: vehicles waiting to enter grow from 59 to 6,245,
-the running count saturates near 2,800, and mean speed falls from 49.9 to 24.3 km/h.
-They do.
+Over a 2,500 s episode with no control, under the corrected demand and the paper's W99
+calibration: the queue outside the network peaks near 3,500 as the surge arrives, the
+running count climbs to about 2,300, and mean speed falls from 48 to 20 km/h. They do.
 
 ## Validating the port against the paper's own numbers
 
