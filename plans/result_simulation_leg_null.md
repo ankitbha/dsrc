@@ -44,11 +44,12 @@ measured and the third stands.**
    correlation of +0.0016 against the shared arm's -0.0042 at a standard error of
    0.0135, and a segment paid its own threshold term reads z -0.12 +/- 0.51. Neither
    separation appears, so the shared reward is not the reason.
-3. **RESOLVED DOWN TO A CORRELATION OF ABOUT 0.07.** The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
+3. **NULL, BUT AT A COARSE SENSITIVITY.** The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
    makes 7.1 decisions and leaves. That difference is confounded with every lever
    measurement. The segment-attached agent that separates it reads null at both powers
    measured, -0.12 +/- 0.51 and -0.46 +/- 0.66. Scaled by the instrument's own
-   ceiling and the measured sub-linearity, both would show a correlation near 0.07.
+   only a z, which the calibration shows cannot separate a correlation of 0 from 0.1 on
+   an arm this size.
 
 **The instrument was rebuilt mid-investigation.** Its original permutation floor is
 not a valid null when advantages are temporally correlated, and it made arms read
@@ -300,7 +301,7 @@ remaining explanation and it is ruled out. What is left is the third item in the
 version -- the agent is a vehicle that makes 7.1 decisions and leaves, where the
 paper's is a road that persists. The segment arm that tests it has since read null at
 both powers run, and scaled by the instrument's own ceiling it would show a
-correlation near 0.07 (tasks 136 and 137).
+correlation bound no tighter than about 0.1 (task 138).
 
 **RETIRED, same day.** This section previously explained why the shared-reward
 segment arm read consistently negative -- with a common reward its advantage is
@@ -333,9 +334,10 @@ the void permutation-floor arms did.
 **CORRECTED, same day.** This paragraph put the arm's threshold at 0.15 from
 2/sqrt(n), the sampling error of a correlation coefficient, which is the wrong formula
 for an arm reporting a gradient-norm z. Scaled by the instrument's own ceiling the arm
-would show a correlation of about 0.071 once the measured sub-linearity is applied. The
+reports only a z, and the calibration in task 138 shows that z cannot separate a
+correlation of 0 from 0.1 on an arm this size. The
 higher-power version runs three episodes per rollout instead of one, taking n to about
-533 and the threshold to about 0.074 -- no better, because the cross-seed standard
+533 and buys no sensitivity, because the cross-seed standard
 error rises with the per-seed sensitivity -- and still short of a clean test, which
 needs the paper's five per-super-segment
 observation fields and therefore a wider deployed contract. **It has now been
@@ -427,8 +429,9 @@ information and gains nothing.
 Every candidate for why the advantage is silent about the action, with what closed it.
 The point of the table is that the eliminations are measurements rather than
 arguments. Every row now has one. The last row's is still the weakest, but by less
-than earlier text here claimed: about 0.07 against the other rows, not five
-times coarser (task 136).
+than earlier text here claimed, and weaker than the row itself says: that arm reports
+only a z, and a calibrated z cannot separate a correlation of 0 from 0.1 on an arm its
+size (task 138). The other rows rest on directly measured correlations.
 
 | explanation | status | what closed it |
 |---|---|---|
@@ -440,7 +443,7 @@ times coarser (task 136).
 | the critic cannot centre the advantage | **ruled out** | privileged neighbourhood features raise out-of-sample R2 from 0.808 to 0.886 and leave the gradient unchanged |
 | penetration is too low | **ruled out** | 100% penetration, commanding the entire fleet, reads the same |
 | the operating point has no headroom | **partly** | the metering oracle gains nothing, but it is one heuristic and a lower bound |
-| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **ruled out** | a segment paid its own reward reads -0.12 +/- 0.51 at 171 segment-decisions and -0.46 +/- 0.66 at 533; against the instrument's measured correlation-to-z curve both bound the correlation near **0.07** |
+| **the agent is a VEHICLE that makes 7.1 decisions and leaves, where the paper's is a ROAD that persists** | **null, at a sensitivity too coarse to call it closed** | a segment paid its own reward reads -0.12 +/- 0.51 at 171 segment-decisions and -0.46 +/- 0.66 at 533, but these arms report only a z and the calibrated z cannot separate a correlation of 0 from 0.1 on an arm this size (task 138) |
 
 **Every candidate now has a measurement against it, and the last one has two.** The
 road-attached agent paid its own reward reads -0.12 +/- 0.51 at 171 segment-decisions
@@ -462,27 +465,26 @@ standard error rose with it, from 0.52 to 0.66. The third seed of the higher-pow
 is also badly conditioned, reading 3.3 where the others read 30.6 and 44.8, a
 tenfold spread in instrument sensitivity across seeds of the same arm.
 
-**THAT EXTRAPOLATION WAS LINEAR AND THE CURVE IS NOT.** Measured directly by
-synthesising advantages at known correlations -- every target reproduced to four
-decimals -- z/c rises from 3.7 at c = 0.05 to 22.0 at c = 1.0, because a gradient norm
-is the norm of a noise vector plus an aligned component and a small aligned component
-adds almost nothing in quadrature. Linear extrapolation predicts z = 2 at c = 0.091;
-measured, it crosses at c = 0.134, a factor of 1.47. Corrected by it:
+**THAT EXTRAPOLATION WAS LINEAR, THE CURVE IS NOT, AND THE CALIBRATED ANSWER IS THAT
+THE z CANNOT DO THIS JOB.** Advantages were synthesised at known correlations, every
+target reproduced to four decimals, with the noise component taken from the REAL
+advantage so the curve passes through its own null:
 
-| arm | linear | corrected |
-|---|---|---|
-| vehicle, shared, 1 s | 0.005 | **0.007** |
-| vehicle, shared, 60 s | 0.017 | **0.025** |
-| road, own reward, 171 decisions | 0.048 | **0.071** |
-| road, own reward, 533 decisions | 0.050 | **0.074** |
+| c | 0.00 | 0.02 | 0.05 | 0.10 | 0.20 | 0.35 | 0.50 | 1.00 |
+|---|---|---|---|---|---|---|---|---|
+| z | +0.24 | -0.03 | -0.25 | +0.03 | +1.90 | +5.35 | +8.97 | +22.02 |
 
-Every arm still reads null and the bounds widen. The calibration's own limitation is
-that its synthetic advantages are i.i.d. where the real advantage is autocorrelated,
-which shows as z = -0.59 rather than 0 at c = 0; the sixfold variation in z/c is
-robust to that offset but the crossing point carries it, so 1.47 is an estimate.
-**The tightest bound on the vehicle arms does not come from z at all**: those arms
-report `corr(slow, A)` directly, at two standard errors of 0.035, and a measured
-correlation needs no conversion. Task 137.
+z crosses 2 at c = 0.204, where linear extrapolation from the ceiling says 0.091. The
+crossing is not the main point. Below c of about 0.2 the readings are non-monotone and
+every one sits inside the null's own scatter, so **on an arm this size the gradient
+norm cannot separate a correlation of 0 from one of 0.1.**
+
+**This weakens the segment arms and not the vehicle arms.** The segment arms report
+only a z, so their bound is of order 0.1 to 0.2 -- earlier text here said 0.15, then
+0.05, then 0.07, each time correcting the conversion rather than the data. The vehicle
+arms report `corr(slow, A)` directly, at two standard errors of 0.035, and a measured
+correlation needs no conversion or calibration at all. The segment arm is being re-run
+to report its correlation the same way. Tasks 137 and 138.
 
 The conversion is load-bearing enough to be a tested instrument rather than a one-off:
 `scripts/measure_alignment_calibration.py`, with `tests/test_alignment_calibration.py`
@@ -492,7 +494,7 @@ leak into the target, and that an action column with no variance raises rather t
 returning a zero correlation that would read as a measured null. Verified against a
 control: removing the orthogonalisation fails seven of the eleven.
 
-What remains untested is the band between about 0.07 and the vehicle arms, and a
+What remains untested is everything below about 0.1 on these arms, and a
 clean test of the paper's own formulation rather than this approximation of it, which
 needs its five per-super-segment observation fields and therefore widens the deployed
 contract that the Jetson builder and the parity ledger both depend on.
@@ -512,7 +514,7 @@ because one of its two halves has since been measured.
    what remains of this option.
 3. **Test the paper's own formulation of the road-attached agent.** Raising the
    episode count is NOT the way: three episodes per rollout left the threshold where
-   one episode did, near 0.07, because the cross-seed standard error rose along with
+   one episode did, because the cross-seed standard error rose along with
    the per-seed sensitivity (task 136). What is untested is the formulation itself.
    This arm draws its action from one representative vehicle's observation; the paper
    uses five per-super-segment fields, and adding them widens the deployed contract
