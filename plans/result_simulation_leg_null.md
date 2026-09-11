@@ -1,6 +1,6 @@
 # The simulation leg: what was measured, and why it is a null
 
-One account of a result spread across task-list entries 92 to 123. It states what was
+One account of a result spread across task-list entries 92 to 134. It states what was
 measured, what each measurement was controlled against, and exactly what is and is not
 established. Sections below are in the order they were written; this summary is
 current as of 2026-09-10 evening.
@@ -24,19 +24,27 @@ bins, one decision per simulated minute at gamma 0.9, and a corrected link-level
 congestion signal every co-located AV sees identically. The paper's design does not
 transfer to a vehicle-attached agent on this road.
 
-**Three things are NOT established, and each is written out below.**
+**The objective is not the problem.** Paired over five seeds, the threshold reward
+responds to fleet behaviour at every mix level and discriminates it at least as well
+as counting arrivals does, so the null is not attributable to an unmovable or noisy
+objective. Its entire resolved response is the speed term; the congestion-threshold
+half, which is what pays for keeping a link below critical density, resolves at one
+mix level of four and changes sign across them.
 
-1. The oracle is one hand-written heuristic given perfect state, so it is a LOWER
-   bound on the best controller and not an upper one. "No controller can gain on this
-   network" is not proven and cannot be proven this way.
-2. Every arm that produced a clean null pays each agent the SAME reward, so those
+**Three things were NOT established when this section was first written. Two are now
+measured and the third stands.**
+
+1. **STANDS.** The oracle is one hand-written heuristic given perfect state, so it is
+   a LOWER bound on the best controller and not an upper one. "No controller can gain
+   on this network" is not proven and cannot be proven this way.
+2. **RESOLVED.** Every arm that produced a clean null pays each agent the SAME reward, so those
    nulls cannot separate "the reward does not respond to individual actions" from
    "nothing responds to individual actions". Two arms have an unshared reward and BOTH
    HAVE NOW BEEN MEASURED: a per-agent local reward at the vehicle level reads a
    correlation of +0.0016 against the shared arm's -0.0042 at a standard error of
    0.0135, and a segment paid its own threshold term reads z -0.12 +/- 0.51. Neither
    separation appears, so the shared reward is not the reason.
-3. The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
+3. **RESOLVED DOWN TO A CORRELATION OF 0.09.** The paper's agent is a ROAD that persists for the episode; ours is a VEHICLE that
    makes 7.1 decisions and leaves. That difference is confounded with every lever
    measurement. The segment-attached agent that separates it reads null at both powers
    measured, -0.12 +/- 0.51 at an exclusion threshold of 0.15 and -0.46 +/- 0.66 at
