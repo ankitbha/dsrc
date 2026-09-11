@@ -2470,6 +2470,52 @@ and on what evidence.
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
 
+139. **CLOSED. The ported run was stopped at update 13 of 20, its gate fails on all
+     three criteria, and the trained checkpoint REDUCES throughput.** 2026-09-10.
+     Ankit stopped the run and then stopped all remaining work.
+
+     **The gate, pre-registered at 20 updates and read at 13:**
+
+     | criterion | threshold | reading | |
+     |---|---|---|---|
+     | 1. summed entropy falls | below 1.9775 of 2.1972 | lowest 2.1459 | fail |
+     | 2. score trends up | by more than step sd 0.2625 | moved **-0.4679** | fail |
+     | 3. action distribution leaves uniform | joint modal share above 0.20 | **0.1460** | fail |
+
+     Criterion 2 fails in the WRONG DIRECTION: the score declined by more than the
+     update-to-update noise rather than staying flat. Criterion 3 is measured on the
+     update-13 actor over 1,503 observations; both heads sit near uniform and a
+     randomly initialised actor reads 0.1378, so 0.1460 is initialisation drift.
+
+     **The early stop does not rescue criterion 2 and the margin is computable.** For
+     it to pass at update 20, updates 14 to 20 would have had to hold a score of
+     -6.03 -- better than every update except the first, against a whole-run range of
+     -6.811 to -5.777.
+
+     **THE CHECKPOINT WAS EVALUATED AGAINST NO CONTROL AND IS WORSE. One seed of five
+     completed before the stop, so this is a single paired observation and not a
+     five-seed result:**
+
+     | seed | no control | trained | difference | commands issued | mean speed |
+     |---|---|---|---|---|---|
+     | 7 | 198 | 178 | **-20** | 525 | 4.67 -> 4.18 m/s |
+
+     The no-control arm reproduced its value of 198 exactly, matching the fleet-mix
+     sweep and the paired threshold sweep on the same seed, so the harness is sound.
+     The 525 commands confirm the policy was live rather than inert -- the failure
+     mode where a control arm silently does nothing and reads as a null. **The trained
+     policy served 20 fewer vehicles and slowed the network.** With n=1 this is one
+     observation against a seed-to-seed spread of about 16 arrivals, so it is
+     consistent with harm and does not establish its size.
+
+     **What else stopped unfinished:** the matched `mappo_src` baseline at 40
+     decisions had one seed of three (z +0.02, corr +0.0157, against the speed-only
+     arm's +0.0153 on the same seed -- indistinguishable, which is the head-to-head
+     answer even at n=1); the segment re-run that would have reported its correlation
+     directly, repairing task 138's walk-back, never started. **So task 138 stands:
+     the road-attached agent's null rests on a z the calibration shows cannot separate
+     a correlation of 0 from 0.1, and that was not repaired.**
+
 138. **WALK-BACK: the segment arms' null is WEAK, and "every candidate is closed"
      overstated it.** 2026-09-10. This is the fourth statement of these thresholds and
      it is the one that stops converting.
