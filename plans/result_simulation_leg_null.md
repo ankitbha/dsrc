@@ -484,6 +484,14 @@ robust to that offset but the crossing point carries it, so 1.47 is an estimate.
 report `corr(slow, A)` directly, at two standard errors of 0.035, and a measured
 correlation needs no conversion. Task 137.
 
+The conversion is load-bearing enough to be a tested instrument rather than a one-off:
+`scripts/measure_alignment_calibration.py`, with `tests/test_alignment_calibration.py`
+covering the construction it rests on -- that the synthesised advantage carries the
+correlation it claims, that a noise vector already correlated with the action does not
+leak into the target, and that an action column with no variance raises rather than
+returning a zero correlation that would read as a measured null. Verified against a
+control: removing the orthogonalisation fails seven of the eleven.
+
 What remains untested is the band between about 0.07 and the vehicle arms, and a
 clean test of the paper's own formulation rather than this approximation of it, which
 needs its five per-super-segment observation fields and therefore widens the deployed
