@@ -153,20 +153,37 @@ In SRC the penetration is the fraction of vehicles a central controller writes
 policy themselves. The number and the actuation are identical; only where the policy is
 evaluated moves, which is what makes the two arms comparable.
 
-## Results so far
+## Results
 
-Seeds 1-10 train, 11-15 validate and select, 16-20 are read once.
+Seeds 1-10 train, 11-15 validate and select, 16-20 are read once. 100% penetration,
+2,500 s episodes, 80 training episodes per arm.
 
-| run | arrivals | speed km/h | return |
+| arm | return | arrivals | speed km/h |
 |---|---|---|---|
-| no control | 3,455 | 24.01 | -796.63 |
-| 30 episodes, empty edges as zeros | 3,270 | 20.47 | (different reward, not comparable) |
-| 30 episodes, occupied edges only | 3,434 | 23.19 | -999.16 |
+| DSRC, the HERE observation | **-283.54** (+13.2%) | 1,582 (-0.9%) | **21.89** (+9.2%) |
+| SRC, its original six features | -292.89 (+10.4%) | 1,559 (-2.4%) | 21.03 (+4.9%) |
+| no control | -326.83 | **1,597** | 20.05 |
 
-The first configuration trained against a reward whose penalty never fired, so its
-numbers are not comparable to the others and are kept only to show what the
-aggregation cost.
+Percentages are against no control.
 
-**The trained controller does not yet beat no control.** In the 30-episode run the best
-checkpoint was the final episode and validation was still improving, so that run is
-undertrained rather than converged. A 120-episode run is in progress.
+**Restricting the observation to what a vehicle can read costs nothing measurable.**
+DSRC is ahead of SRC on all three columns. The four features that a traffic API cannot
+return -- density, following gap, and the entry and exit counts -- carry no information
+this controller was using. That is the result the extension needs, and it is the one
+that makes decentralized execution possible at all.
+
+**Neither arm reproduces the paper's +5% throughput.** Both improve the objective they
+were trained on and both raise mean speed, but arrivals are slightly BELOW no control.
+So on this port the reward and throughput are not aligned: a policy that improves
+`-100 * 1[rho > 0.3] + 0.2 * speed` does not thereby serve more vehicles. The same
+divergence was recorded on the earlier simulation leg, where arrivals peaked at a
+different speed from the reward.
+
+**What is not established.** No seed spread was computed for these means. The paper's
+own no-control row carries +/- 19 on 2,227, which is +/-0.85%, so an arrivals difference
+of 0.9% sits at that scale and nothing here resolves it. The reward and speed
+differences are several times larger and consistent in direction across both arms.
+
+The port's absolute offset from the paper stands: 1,597 no-control arrivals here against
+2,227 published. Absolute comparability was judged unnecessary, so the arms are compared
+against this port's own baseline rather than against the published table.
