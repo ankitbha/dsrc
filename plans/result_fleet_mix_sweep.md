@@ -45,6 +45,16 @@ Reference 184.6 arrivals. The `+/-` is one standard error of the paired differen
 | | 0.75 | 37.8 | **-146.8 +/- 9.6** | real |
 | | 1.00 | 45.8 | **-138.8 +/- 11.8** | real |
 
+**A THIRD COMMAND was measured later and sits between these two.** The threshold
+sweep in `result_simulation_leg_null.md` issues the SRC config's own `slow` bin, a
+fixed 8.33 m/s, on identical episodes with the same Bernoulli draw at the same 1 s
+interval -- its p=0 arm reproduces this table's reference seed for seed, 198, 194,
+156, 179 and 196. It costs 25 to 37 arrivals where `binding` costs 56 to 147, because
+8.33 m/s is a CEILING that SUMO's car-following often already dominates at a network
+mean speed of 1.9 to 2.6 m/s, while 0.6 times the current speed always binds and
+compounds across decisions. **The three p columns are not comparable to each other**:
+the same nominal p means a different intervention in each.
+
 **J(p) is monotone decreasing.** The command that barely bites is flat within noise
 with a downward trend; the command that bites destroys throughput in proportion to how
 often it is issued. The two definitions are both present because a flat result under
