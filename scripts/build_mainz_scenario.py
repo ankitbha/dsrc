@@ -45,6 +45,80 @@ SPEED_FACTOR = 1.2
 CONNECTOR_ID_BASE = 10000
 
 
+def add_exit_constraint(net: Path, lanes: int, speed_mps: float,
+                        green_fraction: float, cycle_s: float) -> None:
+    """Continue the network past its exit into a road of finite capacity.
+
+    Vehicles reaching the end of a route leave instantly, so whatever edge they leave
+    from sets the outflow cap. Here that is link 218, three lanes at 60 km/h, which
+    caps outflow at 3,899 veh/h -- above the 2,880 the network delivers, so it never
+    binds and the exit behaves as a sink that absorbs everything offered. A road does
+    not do that: it continues into another road that can carry a finite flow.
+
+    The SRC paper describes a backpressure element at the exit, but no published
+    layout contains one -- the conflict area on link 218 is PASSIVE in the base and
+    absent from all four signalised variants -- so this is a stated modelling choice of
+    ours rather than a reproduction of theirs.
+
+    THE CONSTRAINT IS A METER, NOT A NARROWING. A two-lane exit road was tried first
+    and cut network discharge from 2,880 to about 1,000 veh/h, far below the 2,600 its
+    lane count implies: merging three lanes into two loses much more than the ratio,
+    so the restriction was an artifact of the merge rather than a chosen rate. The exit
+    road now carries the same three lanes and a signal sets the discharge, which makes
+    the backpressure a number we pick and can state.
+    """
+    import sumolib
+
+    loaded = sumolib.net.readNet(str(net))
+    end = loaded.getEdge("218").getToNode()
+    x, y = end.getCoord()
+    directory = net.parent
+    (directory / "exit.nod.xml").write_text(
+        f'<nodes><node id="exit_meter" x="{x + 300.0:.2f}" y="{y:.2f}" '
+        f'type="traffic_light"/>'
+        f'<node id="exit_sink" x="{x + 600.0:.2f}" y="{y:.2f}"/></nodes>')
+    (directory / "exit.edg.xml").write_text(
+        f'<edges><edge id="exit_road" from="{end.getID()}" to="exit_meter" '
+        f'numLanes="{lanes}" speed="{speed_mps:.3f}"/>'
+        f'<edge id="exit_tail" from="exit_meter" to="exit_sink" '
+        f'numLanes="{lanes}" speed="{speed_mps:.3f}"/></edges>')
+    # Merging an edge into an existing SUMO net does not generate the connections
+    # into it, so a route through the new edge breaks. They are given explicitly,
+    # fanning 218's lanes into the narrower exit road.
+    source_lanes = loaded.getEdge("218").getLaneNumber()
+    connections = "".join(
+        f'<connection from="218" to="exit_road" fromLane="{i}" toLane="{j}"/>'
+        for i in range(source_lanes) for j in range(lanes)
+    ) + "".join(
+        f'<connection from="exit_road" to="exit_tail" fromLane="{i}" toLane="{i}"/>'
+        for i in range(lanes))
+    (directory / "exit.con.xml").write_text(f"<connections>{connections}</connections>")
+    # The meter's program, written out rather than derived, so the green share is the
+    # number chosen and not whatever netconvert infers.
+    yellow = 3.0
+    green = max(5.0, round(green_fraction * cycle_s - yellow))
+    red = max(5.0, cycle_s - green - yellow)
+    (directory / "exit.tll.xml").write_text(
+        f'<tlLogics><tlLogic id="exit_meter" type="static" programID="0" offset="0">'
+        f'<phase duration="{green:.0f}" state="{"G" * lanes}"/>'
+        f'<phase duration="{yellow:.0f}" state="{"y" * lanes}"/>'
+        f'<phase duration="{red:.0f}" state="{"r" * lanes}"/>'
+        f'</tlLogic></tlLogics>')
+    binary = REPO_ROOT / ".venv" / "bin" / "netconvert"
+    result = subprocess.run(
+        [str(binary if binary.exists() else "netconvert"),
+         "--sumo-net-file", str(net),
+         "--node-files", str(directory / "exit.nod.xml"),
+         "--edge-files", str(directory / "exit.edg.xml"),
+         "--connection-files", str(directory / "exit.con.xml"),
+         "--tllogic-files", str(directory / "exit.tll.xml"),
+         "-o", str(net)],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        raise SystemExit("netconvert failed adding the exit constraint")
+
+
 def run_netconvert(inpx: Path, out: Path) -> None:
     binary = REPO_ROOT / ".venv" / "bin" / "netconvert"
     command = [
@@ -126,7 +200,8 @@ def demand(inpx_root: ET.Element) -> dict[str, list[tuple[float, float, float]]]
     return schedule
 
 
-def routes(inpx_root: ET.Element, present: set[str], entries: set[str]) -> dict[str, list[str]]:
+def routes(inpx_root: ET.Element, present: set[str], entries: set[str],
+           exit_road: bool = False) -> dict[str, list[str]]:
     """Entry link to its route as SUMO edges.
 
     Every route in this network ends at link 218, so one route per entry describes the
@@ -149,9 +224,15 @@ def routes(inpx_root: ET.Element, present: set[str], entries: set[str]) -> dict[
             # three of the eight entries is a single lane where the entry link has two
             # or three, throttling insertion and leaving thousands of vehicles queued
             # outside a network that never filled.
+            # THE ROUTE ALSO ENDS AT THE DESTINATION LINK. `linkSeq` is the path
+            # BETWEEN the decision point and the destination and names neither, so a
+            # route built from it alone omits both ends. The destination here is link
+            # 218, three lanes where the link feeding it has four -- a lane drop at the
+            # exit. Skipping it removed the network's own outflow constraint and let
+            # vehicles leave from a four-lane edge into nothing.
             sequence = [entry] + [
                 ref.get("key") for ref in route.find("linkSeq").findall("intObjectRef")
-            ]
+            ] + [route.get("destLink")] + (["exit_road", "exit_tail"] if exit_road else [])
             path = [edge for key in sequence for edge in expand(key, present)]
             if path:
                 built[entry] = path
@@ -239,6 +320,17 @@ def main() -> int:
     parser.add_argument("--av-fraction", type=float, default=1.0,
                         help="1.0 for the paper's main table; its ablation uses 0.5")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--exit-lanes", type=int, default=2,
+                        help="lanes on the road the network exits into; 0 leaves the "
+                             "exit unconstrained. Link 218 alone caps outflow at "
+                             "3,899 veh/h, above the 2,880 the network delivers, so "
+                             "without this the exit never binds")
+    parser.add_argument("--exit-speed-mps", type=float, default=16.67)
+    parser.add_argument("--exit-green-fraction", type=float, default=0.62,
+                        help="share of the cycle the exit meter is green; 0.62 of the "
+                             "exit road's 3,899 veh/h gives about 2,400, below the "
+                             "2,880 the network delivers, so the exit binds")
+    parser.add_argument("--exit-cycle-s", type=float, default=60.0)
     parser.add_argument("--demand-duration-s", type=float, default=None,
                         help="hold the opening volume for this long instead of using "
                              "the .inpx intervals; the published scenario surges for "
@@ -256,6 +348,13 @@ def main() -> int:
 
     print("building the network")
     run_netconvert(inpx, net_file)
+    if args.exit_lanes > 0:
+        add_exit_constraint(net_file, args.exit_lanes, args.exit_speed_mps,
+                            args.exit_green_fraction, args.exit_cycle_s)
+        per_lane = args.exit_speed_mps / (args.exit_speed_mps * 2.5 + 4.5) * 3600
+        print(f"  exit: {args.exit_lanes} lanes metered at "
+              f"{args.exit_green_fraction:.2f} green -> about "
+              f"{per_lane * args.exit_lanes * args.exit_green_fraction:.0f} veh/h")
     present = edge_ids(net_file)
     links = outgoing(net_file)
     print(f"  {len(present)} named edges")
@@ -263,7 +362,7 @@ def main() -> int:
     root = ET.parse(inpx).getroot()
     volumes = demand(root)
 
-    built = routes(root, present, set(volumes))
+    built = routes(root, present, set(volumes), args.exit_lanes > 0)
     for entry, path in sorted(built.items(), key=lambda kv: int(kv[0])):
         breaks = check_connected(path, links)
         status = "ok" if not breaks else f"BREAKS {breaks[:2]}"

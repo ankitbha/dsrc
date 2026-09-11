@@ -463,3 +463,51 @@ a capacity drop when its trigger fires well after the drop has happened.
 That is an explanation for the absent throughput gain which is independent of the
 network, the demand and the training, and it is testable directly: set the threshold at
 the measured critical density rather than at 0.3.
+
+## The exit, and the threshold
+
+**The outflow was never free, and the backpressure is not in the published artifacts.**
+Vehicles leave from whatever edge their route ends on, so that edge's capacity is the
+cap. Two porting errors hid this: routes were built from `linkSeq`, which names neither
+end of the path, so they omitted both the entry link and the destination link. With the
+destination restored the route ends on link 218, three lanes at 60 km/h, which caps
+outflow at 3,899 veh/h. That is above the 2,880 the network delivers, so it never binds
+-- the exit absorbs everything offered, which is the substance of the objection even if
+"free" overstates it.
+
+The SRC paper describes a backpressure element at the exit. It is not in any published
+layout: the conflict area on link 218 is PASSIVE in `Mainz20base`, and all four
+signalised variants carry 68 conflict areas with 11 active, none touching 218. So any
+exit constraint here is a stated choice of ours, not a reproduction.
+
+**The attempt to add one is not yet sound and is recorded as unfinished.** A two-lane
+exit road cut network discharge from 2,880 to about 1,000 veh/h, far below the 2,600 its
+lane count implies, because a three-into-two merge loses much more than the ratio.
+Replacing it with a three-lane road metered at 2,417 veh/h gave the same 1,000, so the
+restriction comes from the junction that appears when the network is extended at all,
+not from the rate chosen. Link 218 does show a bistable jump under it -- density goes
+from 7.1 to 43.5 veh/km/lane between 900 and 1,500 veh/h offered while flow stays near
+330 -- but flow never traces a peak, so this is not yet a fundamental diagram and the
+number to fix is the junction, not the meter.
+
+## The reward threshold, set to the measured critical density
+
+Critical density is the density past which flow falls. Measured on a straight two-lane
+road at Mainz's own 60 km/h limit, with the same W99 calibration and the signal method
+that reproduced the curve:
+
+| | measured |
+|---|---|
+| capacity | 1,000 veh/h/lane |
+| **critical density** | **21.1 veh/km/lane** |
+| speed there | 47 km/h |
+| congested branch reaches | 38.1 veh/km/lane at 779 veh/h/lane |
+| fall from the peak | 22% |
+
+Jam density is 1000/4.5 = 222 veh/km/lane, so the critical density is **0.095 of jam**.
+`DENSITY_CRITICAL` is now that, with SRC's 0.3 kept beside it for comparison.
+
+SRC's 0.3 is 67 veh/km/lane, **three times past the density at which flow starts to
+fall**. A reward thresholded there pays for congestion long after the capacity drop it
+exists to prevent has happened, which is a reason the objective cannot reward
+prevention that is independent of the network, the demand and the training.

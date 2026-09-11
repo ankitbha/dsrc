@@ -48,7 +48,7 @@ if str(REPO_ROOT) not in sys.path:
 from src.sumo.env import _sumo  # noqa: E402
 
 APPROACH_LANES = 2
-SPEED_LIMIT_MPS = 27.78          # 100 km/h
+SPEED_LIMIT_MPS = 27.78          # 100 km/h, overridable with --speed-mps
 FEED_M, MEASURE_M, NECK_M = 1000.0, 500.0, 600.0
 VEHICLE_LENGTH_M = 5.0
 
@@ -131,9 +131,15 @@ def main() -> int:
     parser.add_argument("--peak-veh-per-h", type=float, default=4800.0)
     parser.add_argument("--interval-s", type=float, default=20.0)
     parser.add_argument("--cycle-s", type=float, default=90.0)
+    parser.add_argument("--speed-mps", type=float, default=None,
+                        help="free-flow speed; critical density depends on it, so it "
+                             "must match the network the threshold is being set for")
     parser.add_argument("--out", default="outputs/fd_straight")
     args = parser.parse_args()
 
+    global SPEED_LIMIT_MPS
+    if args.speed_mps is not None:
+        SPEED_LIMIT_MPS = args.speed_mps
     out = REPO_ROOT / args.out
     out.mkdir(parents=True, exist_ok=True)
 

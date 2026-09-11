@@ -34,8 +34,19 @@ DATA = REPO_ROOT / "data" / "mainz"
 SPEED_ACTIONS_KMH: tuple[float, ...] = (30.0, 45.0, 60.0)
 #: SRC's `FEEDBACK_STEP`.
 DECISION_INTERVAL_S: float = 60.0
-#: SRC's `density_critical`, against a density of vehicles x 4.5 m over lane-metres.
-DENSITY_CRITICAL: float = 0.3
+#: The density past which flow falls on THIS network, measured rather than adopted.
+#:
+#: SRC uses 0.3 of jam. Measured on a straight two-lane road at Mainz's own 60 km/h
+#: limit with the same W99 calibration, flow peaks at 1,000 veh/h/lane at 21.1
+#: veh/km/lane and falls 22% beyond it, so the critical density is 21.1/222 = 0.095 of
+#: jam. SRC's 0.3 is 67 veh/km/lane, three times past the point where flow starts to
+#: fall: a reward thresholded there pays for congestion long after the capacity drop it
+#: exists to prevent has already happened.
+#:
+#: Jam density is 1000/4.5 = 222 veh/km/lane, which is what makes this a fraction.
+DENSITY_CRITICAL: float = 0.095
+#: SRC's own value, kept so the two can be compared.
+DENSITY_CRITICAL_SRC: float = 0.3
 #: The metres of road one vehicle occupies in SRC's density, which fixes the jam
 #: density at 1000/4.5 = 222 veh/km/lane.
 VEHICLE_LENGTH_M: float = 4.5
