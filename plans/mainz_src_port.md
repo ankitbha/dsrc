@@ -327,3 +327,31 @@ Three things could be true and they call for different work:
    congestion forms at a zipper junction. Mainz's constraint is eight single-lane links
    whose capacity is set by headway, and a fixed-capacity lane does not drop the way a
    merge does.
+
+## Testing hypothesis 1: the operating point
+
+The published scenario surges at 18,000 veh/h for 1,200 s and then stops, so the
+episode is half starved and half draining and the interior never sits anywhere. Holding
+a rate for the whole 2,500 s instead, with no control:
+
+| sustained veh/h | density at 600 s | at 1,500 s | at 2,500 s | segments over rho* | arrived | queued |
+|---|---|---|---|---|---|---|
+| 3,600 | 0.064 | 0.117 | 0.207 | 0 | 1,601 | 0 |
+| 4,800 | 0.094 | 0.225 | 0.290 | 0 | 1,644 | 32 |
+| **6,000** | **0.121** | **0.315** | **0.440** | **2** | **1,683** | **193** |
+| 7,200 | 0.146 | 0.308 | 0.410 | 3 | 1,675 | 585 |
+| 9,000 | 0.190 | 0.389 | 0.468 | 4 | 1,669 | 1,743 |
+
+**6,000 veh/h sustained is the operating point.** Density crosses the critical 0.3
+mid-episode rather than never or immediately, so a controller has an approach it can
+act on; inflow continues throughout, so there is something to manage; and only 193
+vehicles queue outside, so the controller's actions decide the outcome rather than the
+entry queue. Under the published scenario the interior sat at 0.143 with 1,556 queued.
+
+Arrivals also peak here and fall beyond it -- 1,683 at 6,000, 1,675 at 7,200, 1,669 at
+9,000 -- which is the capacity drop appearing in the sustained regime.
+
+**Training must run at dt 0.1.** At dt 1.0 served flow RISES with density, so there is
+no drop to recover and the test would be vacuous whatever the demand. This is the same
+step-size sensitivity that once manufactured a 17.6% result on this project, appearing
+now as an effect the coarse step ERASES rather than creates.

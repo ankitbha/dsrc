@@ -238,6 +238,11 @@ def main() -> int:
     parser.add_argument("--av-fraction", type=float, default=1.0,
                         help="1.0 for the paper's main table; its ablation uses 0.5")
     parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--demand-duration-s", type=float, default=None,
+                        help="hold the opening volume for this long instead of using "
+                             "the .inpx intervals; the published scenario surges for "
+                             "1,200 s and then stops, which leaves the rest of the "
+                             "episode draining rather than at an operating point")
     parser.add_argument("--demand-scale", type=float, default=1.0,
                         help="multiply every entry volume, to place the network at a "
                              "chosen point on its flow-density curve")
@@ -256,10 +261,6 @@ def main() -> int:
 
     root = ET.parse(inpx).getroot()
     volumes = demand(root)
-    opening = sum(intervals[0][2] for intervals in volumes.values())
-    last_end = max(i[1] for intervals in volumes.values() for i in intervals)
-    print(f"  demand: {len(volumes)} entries, {opening:g} veh/h until {last_end:g} s, "
-          f"then zero")
 
     built = routes(root, present, set(volumes))
     for entry, path in sorted(built.items(), key=lambda kv: int(kv[0])):
@@ -269,9 +270,17 @@ def main() -> int:
     if len(built) != len(volumes):
         raise SystemExit(f"only {len(built)} of {len(volumes)} entries have a route")
 
+    if args.demand_duration_s is not None:
+        volumes = {entry: [(0.0, args.demand_duration_s, intervals[0][2])]
+                   for entry, intervals in volumes.items()}
     if args.demand_scale != 1.0:
         volumes = {entry: [(a, b, v * args.demand_scale) for a, b, v in intervals]
                    for entry, intervals in volumes.items()}
+    opening = sum(intervals[0][2] for intervals in volumes.values())
+    last_end = min(max(i[1] for intervals in volumes.values() for i in intervals),
+                   args.duration_s)
+    print(f"  demand: {len(volumes)} entries, {opening:g} veh/h until {last_end:g} s, "
+          f"then zero")
     count = write_routes(DATA / "mainz.rou.xml", built, volumes,
                          args.duration_s, args.av_fraction, args.seed)
     print(f"  {count} vehicle departures over {args.duration_s:g} s")
