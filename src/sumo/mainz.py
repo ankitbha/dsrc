@@ -94,6 +94,10 @@ class MainzEnv:
         warmup_s: float = 300.0,
         step_length_s: float = 1.0,
         features: tuple[str, ...] = HERE_FEATURES,
+        #: Hold a vehicle back while its entry link is at or above the critical
+        #: density. See `_admit`: this stands in for the policy acting on a link the
+        #: scenario does not simulate, so it is on for a controlled run and off for an
+        #: uncontrolled one.
         gate_entries: bool = True,
         net_file: Path | None = None,
         route_file: Path | None = None,
@@ -194,11 +198,16 @@ class MainzEnv:
         has already happened at the boundary. This holds a vehicle back as soon as its
         entry link reaches the critical density.
 
-        It is the same rule the reward is written against, and it does at the boundary
-        what the policy does inside the network. An interior link is protected by
-        slowing the link above it, which is a link the policy can act on; an entry link
-        has no link above it, so the only way to hold its density down is to admit
-        fewer vehicles.
+        THE GATE BELONGS TO THE POLICY, NOT TO THE NETWORK, and callers must not apply
+        it to an uncontrolled run. Inside the network a link is protected by slowing the
+        link above it. An entry link's upstream neighbour is outside the map, so there
+        is no link to slow, and the gate supplies what the policy would have done there:
+        it is a boundary condition on the controlled system, not a piece of road. A run
+        with no policy has nothing acting on that upstream link either, so gating its
+        entries would credit it with a control action it is not taking.
+
+        The exit meter is the opposite case. A signal standing on a road is part of the
+        network whoever is driving, so it applies to every arm.
 
         A vehicle held here has not entered the simulation at all. It is latent demand,
         counted by `metrics` and never discarded. At most one vehicle per entry per

@@ -108,11 +108,11 @@ def main() -> int:
                         help="0.1 to resolve the capacity drop; at 1.0 served flow "
                              "RISES with density and there is nothing to recover")
     parser.add_argument("--no-gate-entries", action="store_true",
-                        help="let SUMO insert on its own terms instead of holding a "
-                             "vehicle back while its entry link is at or above the "
-                             "critical density. The gate applies to every arm "
-                             "including no control, so it is a property of the network "
-                             "rather than something a policy does")
+                        help="drop the entry gate from the TRAINED arm, leaving SUMO "
+                             "to insert on its own terms. The gate stands in for the "
+                             "policy acting on the link above each entry link, which "
+                             "this scenario does not simulate, so it belongs to the "
+                             "policy and never to the no-control baseline")
     parser.add_argument("--validate-every", type=int, default=5)
     parser.add_argument("--out", default="outputs/mainz_src")
     args = parser.parse_args()
@@ -132,7 +132,8 @@ def main() -> int:
 
     print(f"features {args.features}: {features}")
     print(f"{num_segments} super-segments, {sum(p.numel() for p in model.parameters())} parameters")
-    print(f"entry gate {'on' if gate else 'off'}")
+    print(f"entry gate {'on' if gate else 'off'} for the trained arm, "
+          f"never for no control")
     print(f"train {TRAIN_SEEDS}  validate {VALIDATION_SEEDS}  test {TEST_SEEDS}\n")
     print(f"{'ep':>4} {'seed':>5} {'eps':>5} {'loss':>10} {'return':>10} "
           f"{'flow':>8} {'speed':>7}   validation")
@@ -175,7 +176,7 @@ def main() -> int:
     test = evaluate(model, TEST_SEEDS, features, args.duration_s, args.step_length,
                     args.window_start_s, gate)
     baseline = evaluate_no_control(TEST_SEEDS, features, args.duration_s,
-                                   args.step_length, args.window_start_s, gate)
+                                   args.step_length, args.window_start_s)
     print(f"  trained    flow {test['flow']:>7.0f} veh/h  return {test['return']:>8.1f}"
           f"  speed {test['mean_speed_kmh']:>6.2f} km/h  arrived {test['arrived']:>7.1f}"
           f"  held at entry {test['held_at_entry']:>7.1f}")
@@ -192,14 +193,28 @@ def main() -> int:
 
 
 def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
-                        window_start_s=0.0, gate_entries=True) -> dict:
-    """Every vehicle left to the car-following model, on the same seeds."""
+                        window_start_s=0.0) -> dict:
+    """Every vehicle left to the car-following model, on the same seeds.
+
+    NO CONTROL RUNS WITHOUT THE ENTRY GATE, and that is deliberate rather than an
+    omission. The gate is not a piece of the network. It stands in for the policy
+    acting on the link above the entry link, which is a link this scenario does not
+    simulate: inside the network a link is protected by slowing the link above it, and
+    at the boundary that link is outside the map, so the gate supplies its effect. It
+    is a boundary condition on the controlled system.
+
+    A run with no policy has nothing acting on that upstream link either, so gating its
+    entries would credit the baseline with a control action it is not taking, and the
+    comparison would no longer be against an uncontrolled network. The exit meter is
+    the opposite case and applies to every arm, because a signal on a road is part of
+    the network whoever is driving.
+    """
     from src.sumo.mainz import DECISION_INTERVAL_S
 
     runs = []
     for seed in seeds:
         env = MainzEnv(seed=seed, duration_s=duration_s, features=features,
-                       step_length_s=step_length, gate_entries=gate_entries)
+                       step_length_s=step_length, gate_entries=False)
         total = 0.0
         marked = window_start_s <= 0.0
         try:
