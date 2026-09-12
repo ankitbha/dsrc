@@ -314,6 +314,10 @@ def test_evaluate_rules_fires_on_concrete_evidence() -> None:
     rules = evaluate_rules(action(lane_preference="prefer_left_if_safe"), inputs, SafetyState(), SafetyConstraints(min_front_gap_m=5.0))
     assert rules["target_lane_front_gap"].status == RULE_FIRED
     assert rules["target_lane_front_gap"].evidence["gap_m"] == 3.0
+    # F10 (validator round 1, Fix 10): named so the record cannot be
+    # misread as a genuine target-lane measurement -- this slot is always
+    # the CURRENT lane's leader_gap.
+    assert rules["target_lane_front_gap"].evidence["gap_source_slot"] == "leader_gap"
 
 
 def test_run_safety_gate_withholds_lane_action_when_a_guard_is_not_evaluable() -> None:

@@ -745,6 +745,13 @@ RULE_ALIASED_PROVENANCE_FIELDS: dict[str, tuple[str, str]] = {
     "target_lane_front_gap": ("target_lane_front_gap", "leader_gap"),
 }
 
+#: F10 (validator round 1, Fix 10): the `field_sources`/`obs` key
+#: target_lane_front_gap_m's value is actually aliased from -- named once
+#: here and recorded in `target_lane_front_gap`/`target_lane_front_ttc`'s
+#: own evidence (below) so a reader of the per-tick record cannot mistake
+#: an evaluable gap for a genuine target-lane measurement.
+TARGET_LANE_FRONT_GAP_SOURCE_SLOT = "leader_gap"
+
 
 @dataclass(frozen=True)
 class RuleRecord:
@@ -834,14 +841,29 @@ def _evaluate_one_rule(
         evidence = {"target_lane_exists": context.target_lane_exists}
     elif name == "target_lane_front_gap":
         fired = context.target_lane_front_gap_m < constraints.min_front_gap_m
-        evidence = {"gap_m": context.target_lane_front_gap_m, "threshold_m": constraints.min_front_gap_m}
+        evidence = {
+            "gap_m": context.target_lane_front_gap_m, "threshold_m": constraints.min_front_gap_m,
+            # F10 (plan_task144's own out-of-scope finding, still true with
+            # the gate live): perception/observation_builder.py sets this
+            # slot to the CURRENT lane's leader_gap
+            # (src["target_lane_front_gap"] = src["leader_gap"]), not a
+            # measurement of the lane being changed INTO. Named here so a
+            # reader of this rule's evidence cannot mistake "evaluable, gap
+            # 3.0 m" for a genuine target-lane reading.
+            "gap_source_slot": TARGET_LANE_FRONT_GAP_SOURCE_SLOT,
+        }
     elif name == "target_lane_rear_gap":
         fired = context.target_lane_rear_gap_m < constraints.min_rear_gap_m
         evidence = {"gap_m": context.target_lane_rear_gap_m, "threshold_m": constraints.min_rear_gap_m}
     elif name == "target_lane_front_ttc":
         ttc = _ttc_from_relative_speed(context.target_lane_front_gap_m, -context.target_lane_front_relative_speed_mps)
         fired = ttc < constraints.min_lane_change_ttc_s
-        evidence = {"ttc_s": ttc, "threshold_s": constraints.min_lane_change_ttc_s}
+        evidence = {
+            "ttc_s": ttc, "threshold_s": constraints.min_lane_change_ttc_s,
+            # Same F10 caveat as target_lane_front_gap above: the gap half
+            # of this ttc is the current lane's leader_gap.
+            "gap_source_slot": TARGET_LANE_FRONT_GAP_SOURCE_SLOT,
+        }
     elif name == "target_lane_rear_ttc":
         ttc = _ttc_from_relative_speed(context.target_lane_rear_gap_m, context.target_lane_rear_relative_speed_mps)
         fired = ttc < constraints.min_lane_change_ttc_s
