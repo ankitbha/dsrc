@@ -3005,11 +3005,21 @@ would have failed is absent rather than wrong.
      invalidation is mtime+size), silently re-scoring the previous mutant -- a failure mode
      that has produced a wrong verdict on this project twice before. `_purge_pycache()` now
      runs before every pytest subprocess in this file, and both subprocess calls set
-     `PYTHONDONTWRITEBYTECODE=1`. Stated plainly rather than left implied: no test in this
-     repository would fail if `_purge_pycache()`'s call sites were removed.
-     `scripts/remutate.py` carries no unit tests of its own; this fix is verified
-     operationally, by the two controls below and by every mutation gate run in this task
-     completing without a stale-cache false verdict, not by an automated assertion.
+     `PYTHONDONTWRITEBYTECODE=1`. Stated plainly rather than left implied, and generalised
+     by validator round 2 (2026-09-12) rather than left as one function's footnote: **no
+     test in this repository exercises `scripts/remutate.py` at all**, so every guard in
+     it -- not only `_purge_pycache()`, but `_refuse_if_tree_is_dirty()`,
+     `_COLLECTION_AFFECTING_NAMES`, and the baseline-failure refusal added in the two
+     validator rounds below -- can be removed or emptied with the suite green. Verified
+     directly, not inferred: the validator set `_COLLECTION_AFFECTING_NAMES =
+     frozenset()` and the full Jetson suite reported 2,527 passed / 28 skipped, the
+     unmutated count -- SURVIVED. `scripts/remutate.py` carries no unit tests of its own;
+     every fix made to it in this task is verified operationally -- by the two controls
+     below, by every mutation gate run in this task completing without a stale-cache
+     false verdict, and by the reproductions recorded in the validator-round sections
+     below -- not by an automated assertion, because none exists. This is the harness
+     every mutation verdict on this project rests on, and it is the one thing here with
+     no test behind it; closing that is outside this task's scope.
 
      **Two controls, because a gate that has only been seen to pass has not been seen.**
      First: `decode_speed_bin`'s `min_contextual_speed_mps` default (12.0) looked unread by
@@ -3103,13 +3113,22 @@ would have failed is absent rather than wrong.
 
      Proved, not merely argued: re-emptying the four sections in the golden file now
      fails 5 of 75 tests (the four population assertions, plus
-     `test_regeneration_leaves_every_pre_existing_case_byte_identical` -- S3's fix below
-     reaching further than S3 alone asked), where before this round it was 73 passed / 1
-     skipped. Zeroing the three generator constants now prints `REFUSING: 3
-     disagreement(s)` naming all three, where before it wrote the file and exited 0.
-     Both re-verified clean afterward (`git diff` empty on both
+     `test_regeneration_leaves_every_pre_existing_case_byte_identical` -- round-1 S3's
+     fix below reaching further than round-1 S3 alone asked), where before this round
+     it was 73 passed / 1 skipped. Zeroing the three generator constants now prints
+     `REFUSING: 3 disagreement(s)` naming all three, where before it wrote the file
+     and exited 0. Both re-verified clean afterward (`git diff` empty on both
      `specs/sim_contract_golden_vectors.json` and
      `scripts/generate_sim_contract_golden_vectors.py`).
+
+     (Disambiguation, added after the fact: "S3" names two different things in this
+     record. Round-1 S3, just above and in the paragraph below, is the validator's
+     should-fix finding about the regeneration test's 4-of-12-keys comparison. The
+     plan's own sign-off S3 (`plans/plan_task143_contract_golden_vectors.md` Section
+     12: "`EXPECTED_PYTHON_TESTCASES` equals the measured JUnit count") is a
+     different item entirely, addressed in the sign-off checklist section below,
+     round-1 S3 having nothing to do with it. Read "S3" bare in this record as
+     round-1 S3 unless a sentence says "sign-off S3.")
 
      **B2.** `_baseline_python_testcases()` accepted pytest's returncode 1 (a suite with
      a failing test) but discarded the clean run's failing names (`_, total, usable =
@@ -3195,10 +3214,12 @@ would have failed is absent rather than wrong.
      catches ordinary, single-file mutations it was not written for (M3, M6, both S4
      entries), not only the coordinated-edit case.
 
-     **S3.** `test_regeneration_leaves_every_pre_existing_case_byte_identical` compared
+     **Round-1 S3** (not the plan's sign-off S3 -- see the disambiguation note
+     above; the sign-off item is answered in the sign-off checklist section below).
+     `test_regeneration_leaves_every_pre_existing_case_byte_identical` compared
      4 of the golden document's 12 top-level keys. Now asserts `fresh == DOCUMENT` after
-     that subset check. Reaches further than S3 alone asked: re-emptying the golden
-     sections for B1's proof above also fails this test now, since the freshly
+     that subset check. Reaches further than this finding alone asked: re-emptying the
+     golden sections for B1's proof above also fails this test now, since the freshly
      regenerated document no longer matches the tampered one wholesale.
 
      **S4.** Two mutations registered: `SPEED_BIN_OFFSETS_MPS["slow"]` narrowed −10.0 →
@@ -3286,6 +3307,250 @@ would have failed is absent rather than wrong.
      `deployment/jetson/tests/test_safety_gate.py` were left exactly as task 144's
      fixer's own work throughout -- confirmed untouched by `git diff` immediately before
      each commit above, and clean (0 diff) once that fixer's own `dedd3c1` landed.
+
+     **Validator round 2 (2026-09-12): one blocking finding, prototyped by the
+     validator; four should-fix/accept items; two rulings confirmed rather than
+     changed.**
+
+     **R2-1 (blocking).** Round-1 S2's digest hand-listed five constants
+     (`HEADWAY_BIN_S`, `SPEED_BIN_OFFSETS_MPS`, `COOPERATION_FIELDS`,
+     `LANE_DISTRIBUTION_LANES`, `ACTION_VALUES`); `sim_contract.py` has eleven
+     uppercase module-level constants. `ACTION_HEADS`, `ACTION_PROFILES` and
+     `FORCED_ACTIONS` were in no digest at all -- shipped short the day round-1 S2
+     was written, not a later drift. Reproduced independently before this round, on
+     a tree without `.git`: changing `FORCED_ACTIONS["merge_mode"]` from `"normal"`
+     to `"hold_lane"` in both `sim_contract.py` and the golden file left
+     `test_sim_contract.py` at 74 passed / 1 skipped, identical to clean, while
+     `indices_to_action({})["merge_mode"]` -- the fallback the runtime applies to
+     any head the policy does not emit -- silently became `"hold_lane"`.
+
+     **R2-2 (the fix).** Adopted a self-maintaining construction:
+     `_second_pinned_digest()` now derives its payload from every uppercase,
+     non-underscore name in `vars(sim_contract)`, excluding only
+     `HASHED_BY_CONTRACT_FINGERPRINT` (`{"LOCAL_OBS_FIELDS", "FIELD_SCALES"}`,
+     what `contract_fingerprint()` itself hashes) and `PINNED_SEPARATELY`
+     (`{"SIM_COMMIT"}`, pinned by `test_the_file_is_for_this_sim_commit` instead,
+     deliberately -- the sim moves for reasons that do not touch this contract).
+     A constant added to `sim_contract.py` now moves this digest and fails the
+     pinned-literal test below it, by design -- documented in the test's own
+     docstring as a decision point the adder must resolve (put it in one of the
+     two exclusion sets, or accept that it is now covered here), not as noise to
+     silence.
+
+     Added `test_hashed_by_contract_fingerprint_matches_what_it_actually_reads`,
+     which checks `HASHED_BY_CONTRACT_FINGERPRINT` against
+     `contract_fingerprint()`'s own source text (`inspect.getsource`) rather than
+     trusting it as a hand-maintained restatement, bidirectionally: a name
+     missing from the claim that the source references fails it, and so does a
+     name in the claim the source no longer references. This closes R2-1 by a
+     third route (a hand-maintained exclusion list drifting from what the
+     fingerprint actually hashes, silently exempting a constant from both
+     digests) -- confirmed independently: the validator added `FORCED_ACTIONS` to
+     `HASHED_BY_CONTRACT_FINGERPRINT` and this test failed. One documented
+     brittleness, found by the validator and recorded in the test's own
+     docstring rather than fixed: the check is textual, so it cannot distinguish
+     a constant the function hashes from one merely *named* in its docstring.
+     `SIM_COMMIT` currently passes only because it happens to also be in
+     `PINNED_SEPARATELY` -- it appears in `contract_fingerprint()`'s own
+     docstring, in the sentence explaining why `SIM_COMMIT` is deliberately not
+     hashed. Adding a sentence naming any other constant there, for any reason,
+     would fail this test spuriously -- loud, not silent, so left as a known
+     limit rather than "fixed" into something that greps for code and skips
+     comments.
+
+     `PINNED_SECOND_FINGERPRINT` recomputed fresh from this tree at this commit
+     (`98c2e16b56ed6927`) -- explicitly not copied from the validator's own
+     reproduction (`265b73ae2c792da0` -> `3eef713f1e8300fc`) or from the
+     coordinator's independent check (`98c2e16b56ed6927` clean ->
+     `5f6426f33b7c11e0` under the `FORCED_ACTIONS` edit), even though the clean
+     value coincides with the coordinator's: both were derived by running the
+     identical construction against the identical clean source, not copied.
+     Both pinned-literal assertions (`PINNED_FINGERPRINT` and
+     `PINNED_SECOND_FINGERPRINT`) now say explicitly, in the failure message and
+     in a comment giving the exact command, to regenerate ON A CLEAN TREE and
+     never from a prototype, a colleague's run, or memory.
+
+     Re-ran the `FORCED_ACTIONS` reproduction against the fix (mutating both
+     `sim_contract.py` and the golden file, restoring both in a `finally`,
+     confirmed byte-identical afterward): 2 failed / 74 passed, where before the
+     fix it was 74 passed / 1 skipped, identical to clean.
+     `indices_to_action({})["merge_mode"]` still reads `"hold_lane"` under the
+     mutation -- the device-behaviour change is real and the test suite now
+     says so.
+
+     **R2-3 (should fix).** `bin_index`'s boundary direction had no semantic
+     pin: replacing the golden grid's 8 values with 8 non-boundary values
+     (count preserved, so round-1's `assert len(entries) == 8` still passed)
+     and then applying the `>=` -> `>` mutation left the suite unchanged -- the
+     three values that would have discriminated (0.5, 1.0, 2.0) were simply
+     absent from the grid. Added a 3-line pin in test source
+     (`test_bin_index_counts_edges_at_or_below_the_value`) that calls
+     `sim_contract.bin_index` with hardcoded edges and hardcoded expectations
+     and reads no recorded file, so no regeneration and no file edit can rewrite
+     it. Verified it fails against the mutation directly, applied by hand and
+     reverted.
+
+     **R2-4 (should fix).** Four of the round-1 generator checks compared two
+     quantities that move together by construction -- e.g.
+     `len(bin_index_grid) != len(BIN_INDEX_VALUES)`, when `bin_index_grid` is
+     built by appending exactly once per element of that same `BIN_INDEX_VALUES`
+     -- so no edit could ever make them disagree; shortening `BIN_INDEX_VALUES`
+     from 8 to 5 wrote the file and exited 0. Deleted the four (headway_bin_s,
+     speed_bin_mps, bin_index, neutral_cooperation), keeping only the five
+     emptiness checks, which do fire. Chose deletion over pinning the expected
+     sizes as literals -- a guard that can never fire reads as protection while
+     providing none, which is worse than no guard -- because the real
+     protection against a shortened grid is downstream and independent:
+     `test_sim_contract.py`'s `assert len(entries) == 8` (etc.) compares against
+     a literal that does not move with the generator's own constants. Verified
+     both halves directly: shrinking `BIN_INDEX_VALUES` to 5 still writes and
+     exits 0 at the generator, and the resulting 5-entry file still fails the
+     test-side length assertion.
+
+     **R2-5 (accept, cheap fix).** An untracked `pytest.ini` (or `conftest.py`,
+     `setup.cfg`, `tox.ini`, `pyproject.toml`, an untracked `test_*.py`) changes
+     what pytest collects without `git status --porcelain` ever calling the
+     tree dirty in the sense round-1's B2-second-route check covers, and
+     contaminates `_baseline_python_testcases()`'s self-measured baseline and
+     every mutated run identically -- a false SURVIVED, never a false CAUGHT,
+     because the two never disagree with each other. Reproduced: an untracked
+     `pytest.ini` with `addopts = --ignore=...test_sim_contract.py` measured a
+     baseline of 2470 testcases against a true 2545, and a real mutation inside
+     the ignored module then reported `*** SURVIVED ***`.
+     `_refuse_if_tree_is_dirty()` now also refuses on an untracked file matching
+     `_COLLECTION_AFFECTING_NAMES`, naming it. Verified directly: the
+     reproduction above now exits 1, naming `pytest.ini` and the reason, instead
+     of writing a false SURVIVED.
+
+     **The trade this makes explicit, stated because it was previously only
+     implied.** Round 1 replaced a hand-typed `EXPECTED_PYTHON_TESTCASES`
+     literal with a per-run, self-measured baseline to fix staleness (a
+     literal drifting behind a growing suite had silently made every Python
+     mutation report INCONCLUSIVE). That fix traded away a different piece of
+     detection: an absolute expectation notices a suite that has already
+     shrunk before either run starts; a self-measured baseline, by
+     construction, measures whatever the tree currently collects as ground
+     truth and cannot tell a legitimately smaller clean tree apart from one an
+     untracked file has already shrunk. `_COLLECTION_AFFECTING_NAMES` recovers
+     part of that detection, for the named files and the `test_*.py` shape
+     only -- not the general case the old literal covered by being a number
+     independent of the tree entirely. This is recorded as a real, partial
+     trade, not as the gap being fully closed.
+
+     **R2-6.** Moved `_refuse_if_tree_is_dirty()`'s call below the
+     `ARGV`/`WANTED` parse and scoped it to `kinds` (skipping entirely when
+     `"python"` is not among the selected kinds). A `git archive` mirror with no
+     `.git` at all previously made `git status` itself exit 128, refusing every
+     kind including Gradle-only runs that touch no Python and depend on neither
+     check the guard performs -- exactly the friction that makes someone
+     disable a guard rather than live with it. Verified three ways in a
+     dedicated worktree: (a) clean tree, kind `python` -- proceeds; (b)
+     untracked `pytest.ini` present, kind `python` -- refuses, naming it; (c)
+     the same untracked `pytest.ini`, kind `transport` -- proceeds (the
+     check is skipped entirely). Verified a fourth way against a true `git
+     archive` mirror with no `.git`: kind `transport` proceeds (`survived: 0
+     (none)`, exit 0); kind `python` still refuses, naming the `git status
+     exited 128` failure. Recorded as a real behaviour change, not undone: a
+     validator can no longer exercise this harness's Python guards inside an
+     archive mirror at all -- it can only run the Gradle kinds there now.
+
+     **Two rulings the validator confirmed rather than changed, both worth
+     recording as settled rather than re-litigated next round.** Refusing
+     (not subtracting) on a red baseline: subtraction would define the verdict
+     relative to a tree already agreed not to understand, with two failure
+     modes and nowhere to put either (a mutation caught only by an
+     already-failing test subtracts to a false SURVIVED; a mutation that
+     *fixes* a pre-existing failure produces fewer failures than baseline,
+     which subtraction cannot represent as a count at all). And this task's own
+     gate baseline of 2,529 (round 1's isolated-worktree measurement) reproduced
+     independently, in the validator's own mirror.
+
+     **The harness itself has no test coverage, stated as the general fact
+     rather than left as one function's footnote (validator round 2).** Item
+     143's original text above says "no test in this repository would fail if
+     `_purge_pycache()`'s call sites were removed" -- true, but naming only one
+     function invites the reader to assume the others (`_refuse_if_tree_is_
+     dirty()`, `_COLLECTION_AFFECTING_NAMES`, the baseline-failure refusal
+     added across both validator rounds) are covered elsewhere. They are not:
+     **no test in this repository exercises `scripts/remutate.py` at all**, so
+     every guard in it can be removed or emptied with the full suite green.
+     Confirmed directly, not inferred: the validator set
+     `_COLLECTION_AFFECTING_NAMES = frozenset()` and the full Jetson suite
+     reported 2,527 passed / 28 skipped -- the unmutated count -- SURVIVED.
+     `scripts/remutate.py` is the harness every mutation verdict on this
+     project rests on, and every fix made to it across both validator rounds is
+     verified operationally (by the reproductions recorded in this entry) and
+     not by an automated assertion, because none exists. Closing that gap is
+     outside this task's scope and is not attempted here; the sentence in the
+     original entry above is corrected to say so generally rather than naming
+     only `_purge_pycache()`.
+
+     **Sign-off checklist** (`plans/plan_task143_contract_golden_vectors.md`,
+     Section 12), the four items the validator identified as measurable and not
+     yet answered with a number or a name in this record.
+
+     - **S1** (`test_sim_contract.py` reports 0 skipped): `77 passed in 3.30s`
+       -- 0 skipped (both `git` and `torch` present on this machine).
+     - **S2** (the full Jetson suite passes, 24 skips, no non-hardware skip):
+       `2532 passed, 24 skipped, 95 warnings in 81.65s`. JUnit skip-reason
+       breakdown: 24x `"no USB device attached: no device attached (adb
+       devices -l lists none in state 'device')"`, 0 of any other reason.
+     - **Sign-off S3** (not round-1 S3 -- see the disambiguation note earlier
+       in this entry): **superseded, not answered as the item asks, with the
+       reason recorded here rather than ticked anyway.** `EXPECTED_PYTHON_
+       TESTCASES` no longer exists in `scripts/remutate.py` (`grep` finds
+       nothing); round 1 replaced it with `_BASELINE_PYTHON_TESTCASES`,
+       measured per invocation by `_baseline_python_testcases()`, precisely
+       because the hand-typed literal had gone stale (2060 against a suite
+       already at 2272, turning every Python mutation INCONCLUSIVE silently --
+       recorded earlier in this entry). The sign-off item asked for evidence
+       that a hand-maintained constant matched reality; the task concluded
+       that constant was the wrong mechanism and removed it, which answers the
+       underlying question -- does the harness know how big the suite really
+       is -- rather than the literal item. What plays its role now: the
+       per-run baseline, for a mutation that changes what gets collected
+       mid-run, and `_COLLECTION_AFFECTING_NAMES` (R2-5, above) for the one
+       detection the old literal had that a self-measured baseline alone
+       cannot recover -- a suite that had already silently shrunk before the
+       baseline is even measured, and only for the named files and the
+       `test_*.py` shape, not the fully general case an absolute literal
+       covered.
+     - **S4** (M1 CAUGHT): `test_slot_names_match_encoded_slot_names` (named in
+       this entry's original mutation table above; re-confirmed as a catcher
+       in both this task's and the validator's round-2 gate re-runs).
+     - **S5** (M2 CAUGHT): `test_field_scales_match_in_both_directions` (same).
+
+     **The gate's real verdict after both validator rounds**, from a second
+     dedicated worktree (`git worktree add --detach` at `112a29a`, `.venv`
+     symlinked in, torn down after): baseline 2555 testcases, all 9 `sim
+     contract:` mutations CAUGHT, 0 survived, 0 inconclusive, exit 0. `M3` and
+     `M4` now show a fourth/third catcher each from this round's new tests
+     (`test_the_second_pinned_digest_covers_what_the_fingerprint_does_not` for
+     `M3`; `test_bin_index_counts_edges_at_or_below_the_value` for `M4`); `M6`,
+     `M7` and both S4-registered mutations are likewise now also caught by the
+     new digest test. Full table:
+
+     | mutation | caught by (count) |
+     |---|---|
+     | M1 field order | 17 |
+     | M2 a `FIELD_SCALES` value | 17 |
+     | M3 a `HEADWAY_BIN_S` bin edge | 3 (now incl. the R2-2 digest test) |
+     | M4 `bin_index`'s boundary | 3 (now incl. the R2-3 semantic pin) |
+     | M5 the inf-clamp constant | 14 |
+     | M6 an `ACTION_VALUES` order reversed | 4 (now incl. the R2-2 digest test) |
+     | M7 `COOPERATION_FIELDS` order | 16 (now incl. the R2-2 digest test) |
+     | S4: `SPEED_BIN_OFFSETS_MPS["slow"]` narrowed | 17 (grew from 15 as task 144's fixer landed more safety_gate tests concurrently) |
+     | S4: `LANE_DISTRIBUTION_LANES` reordered | 6 (now incl. the R2-2 digest test) |
+
+     **Commits** (branch `mainz-src-port`): `112a29a` (R2-1/R2-2, R2-3, R2-4,
+     R2-5, R2-6 across `test_sim_contract.py`,
+     `generate_sim_contract_golden_vectors.py`, `remutate.py`), `c8bfc61`
+     (documented the textual-match brittleness in the R2-2 introspection test's
+     own docstring, alone). Each by explicit pathspec, never `git add -A`,
+     never a bare `git commit`. `deployment/jetson/policy/safety_gate.py` and
+     `deployment/jetson/tests/test_safety_gate.py` were left exactly as task
+     144's fixer's own work throughout this round too -- confirmed untouched by
+     `git diff` before each commit above.
 
 144. **The safety and etiquette layer runs nowhere.** Implemented 2026-09-12
      (implementer-144) against `plans/plan_task144_safety_layer_on_device.md`. The plan's
