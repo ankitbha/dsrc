@@ -4,7 +4,12 @@ A phone-plus-Jetson advisory rig that runs a centrally trained traffic-control p
 a vehicle, and the simulation that establishes what that policy is worth at scale.
 
 `plans/paper_deploying_self_regulating_cars.md` is the argument and where every result
-sits. `plans/task_list.md` is the working record.
+sits, including a map of which file to read for each section of the paper.
+`plans/implementation_records.md` is what was built and what each step found.
+
+`plans/detours.md` is everything the project did that the paper does not rest on, kept
+rather than deleted. Read its warning before reading anything in it: it describes an
+earlier formulation, and it is the easiest way to write the wrong paper.
 
 ## The deployment
 
@@ -35,4 +40,5 @@ sits. `plans/task_list.md` is the working record.
 
 The highway-env topology ladder, the non-learning baselines, the MAPPO stack and the
 `inverted_tree` networks were the project's earlier formulation. None of it is touched by
-the paper, and it was removed on 2026-09-12. It is in the git history.
+the paper. The code was removed on 2026-09-12 and is in the git history; the records of it
+are in `plans/detours.md`.

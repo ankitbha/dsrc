@@ -25,7 +25,7 @@
 
 ## The short version
 
-Task 39 (plans/task_list.md:1424) asks for a session summary generator carrying
+Task 39 (plans/implementation_records.md:1424) asks for a session summary generator carrying
 latency percentiles, achieved versus commanded rates, API calls made, trigger
 counts and failure counts.
 

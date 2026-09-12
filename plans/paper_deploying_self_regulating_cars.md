@@ -489,7 +489,7 @@ live code or a live record.
 | | |
 |---|---|
 | `README.md` | the map, and a closing note on what was removed |
-| `plans/task_list.md` | the working record. Sections D to I are the system and the evidence; K is findings. **The paper's own framing is in its "The paper" section** |
+| `plans/implementation_records.md` | the working record. Sections D to I are the system and the evidence; K is findings. **The paper's own framing is in its "The paper" section** |
 | `deployment/jetson/ARCHITECTURE.md` | dataflow, module map, the measured latency budget, contract vendoring, degraded modes |
 
 ### DESIGN
@@ -515,7 +515,7 @@ live code or a live record.
 * `deployment/jetson/policy/sensing_loop.py` (decide, mark the mode, send) and
   `deployment/jetson/policy/shadow_mode.py` (gated for real,
   or only recorded).
-* `plans/plan_task29_sensing_controller.md`; `plans/task_list.md` task 34 for the attribution
+* `plans/plan_task29_sensing_controller.md`; `plans/implementation_records.md` task 34 for the attribution
   record, which is the composition chain the code actually walks.
 
 **The transport**, two devices and one wire:
@@ -547,7 +547,7 @@ reason:
 * `deployment/jetson/logio/failure_log.py` -- "a time axis, an episode, and a reader for
   the failures this repository already had".
 * `plans/plan_task33_per_stage_timestamps.md` through `plans/plan_task39_session_summary.md`,
-  and `plans/task_list.md` tasks 33 to 39. **Task 39 carries the denominator-blindness
+  and `plans/implementation_records.md` tasks 33 to 39. **Task 39 carries the denominator-blindness
   finding**, which is the limit of the whole vocabulary.
 
 **The two clocks:**
@@ -555,24 +555,24 @@ reason:
 * `deployment/jetson/transport/timebase.py` -- "the one sanctioned way to compare the two
   devices' clocks" -- and `deployment/jetson/transport/clock.py`, which forbids the unsanctioned way.
 * `specs/transport_protocol.md`, Shared Timebase section; `scripts/run_timebase_probe.py`.
-* `plans/task_list.md` task 15 for the measurements and the degenerate validator.
+* `plans/implementation_records.md` task 15 for the measurements and the degenerate validator.
 
 **Thermal:**
 
 * `deployment/jetson/sensors/thermal.py`; phone side `ThermalReader`,
   `ThermalStatusWatcher`, `ThermalZones` under `phone/app/.../sensors/`.
-* `plans/plan_task37_thermal.md`; `plans/task_list.md` task 37 for the inert-sampler finding
+* `plans/plan_task37_thermal.md`; `plans/implementation_records.md` task 37 for the inert-sampler finding
   and task 45 for the soak that was never reached.
 
 **The install faults and the rotation:**
 
-* `plans/task_list.md` task 48 (cable, sunlight, 152.8 minutes of car power) and task 63 (the
+* `plans/implementation_records.md` task 48 (cable, sunlight, 152.8 minutes of car power) and task 63 (the
   90-degree rotation, 16 detection-bearing ticks in 22,929).
 * `deployment/jetson/calibration/auto_horizon.py`, `deployment/jetson/calibration/camera_calibration.py`.
 
 ### EXPERIMENTS
 
-**The drives:** `plans/task_list.md` section I, tasks 49 to 52. Eight runs, 2026-09-08.
+**The drives:** `plans/implementation_records.md` section I, tasks 49 to 52. Eight runs, 2026-09-08.
 
 **Latency:** ARCHITECTURE section 4 for the on-device budget;
 `plans/results_task42_43_47_usb_campaign.md` for the USB campaign -- p95 116.19 ms pooled
@@ -581,7 +581,7 @@ over 2,684 ticks against a 200 ms target, and the tailnet baseline at 215.63 ms;
 
 **Shadow against live:** `deployment/jetson/score_shadow.py` (scores candidates against
 one drive's logged decisions) and `deployment/jetson/check_shadow_commands.py` (compares through the
-real wire codec); `plans/plan_task35_shadow_decision_log.md`; `plans/task_list.md` tasks 43 and 44.
+real wire codec); `plans/plan_task35_shadow_decision_log.md`; `plans/implementation_records.md` tasks 43 and 44.
 
 **Scoring a run:** `deployment/jetson/eval_run.py` for the gated PASS/FAIL report,
 `deployment/jetson/drive_health.py` for health while a drive is happening.
@@ -618,22 +618,29 @@ changed.
 
 ## Do not read these: superseded
 
-They describe the project's earlier formulation -- a MAPPO policy on a local-sensing
-observation, trained on a ladder of synthetic topologies. **None of it is this paper**, and
-an agent that reads it without this warning will write the wrong one. The code is deleted;
-these records remain because they are how the decisions were made.
+Everything superseded is now in one file, `plans/detours.md`, with a warning at its top.
+It describes the project's earlier formulation -- a MAPPO policy over a 39-field
+local-sensing observation, trained on a ladder of synthetic topologies with
+`inverted_tree` as the road. **None of it is this paper**, and an agent that reads it
+without the warning will write the wrong one. The code is deleted; the records remain
+because they are how the current shape was arrived at.
 
-* `plans/result_simulation_leg_null.md` -- the MAPPO leg, closed as a null.
-* `plans/plan_simulations.md`, `plans/plan_task_67_merge_blind_collisions.md`,
-  `plans/plan_task_84_sumo_simulator.md`, `plans/plan_task_103_local_credit.md`.
-* `plans/result_fleet_mix_sweep.md`, `plans/replication_state.json`,
-  `plans/result_task93_burst_evaluation.json`,
-  `plans/result_task99_corrected_road.json`.
-* `plans/task_list.md` **section C**, which carries a superseded banner, and everything in
-  section K numbered 77 to 140, which is that leg's findings. Task 141 is the supersession.
-* The 39-field local-sensing observation contract. It is still live *for the safety gate*;
-  it is not the policy's input, and the `observation_parity` ledger of it (deleted; see task 47) of it was deleted
-  with the rest.
+`plans/detours.md` holds: the MAPPO replication section, findings 77 to 140, the ordering
+correction and items 72 to 76, the paused state of 2026-09-09, the original
+`plan_simulations.md` and `project_plan.md`, and that leg's own closing record and raw
+results.
+
+Two things about it are worth knowing rather than avoiding. Its index names four findings
+the current work still cites -- the unintended permanent yield that set a network's
+capacity, what a gradient-norm instrument can resolve, a throughput gain retracted as a
+step-size artefact, and the calibrated model giving up the collision-free guarantee. And
+`plans/implementation_records.md` still holds two items from that era on purpose: task 87,
+which is why the simulated gate and the deployed gate are not the same rule, and task 141,
+the supersession itself.
+
+One more, and it is live rather than superseded: the 39-field local-sensing observation
+contract. It is not the policy's input and its parity ledger was deleted, but the contract
+itself still describes what the safety gate reads.
 
 ## Open
 
@@ -646,6 +653,6 @@ these records remain because they are how the decisions were made.
   the comparison the two live runs were collected for.
 * **The gate's behaviour is unmeasured in simulation.** How often local safety clamps an
   advisory, and what it costs. Three runs would settle it: gated, ungated, no control.
-* **The critical path in `plans/task_list.md` is stale.** It names tasks 68 and 69,
+* **The critical path in `plans/implementation_records.md` is stale.** It names tasks 68 and 69,
   training and evaluating MAPPO on `inverted_tree`, as the flow-level half. That was
   superseded on 2026-09-11 by the SRC port on Mainz.

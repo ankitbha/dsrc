@@ -151,7 +151,7 @@ IEEE Trans. Automatic Control 37(12). <https://doi.org/10.1109/9.182479>
   Our AAAI merge proof-of-concept is backpressure borrowed from here. Method framing. **[support]**
 
 ### Local aggregate V2V — the communication substrate this paper should formalize
-- **Repo contract:** `specs/observation_schema.md` and `plans/plan_simulations.md` already define
+- **Repo contract:** `specs/observation_schema.md` and `plans/detours.md` already define
   `cooperation_mode = local_aggregate`. The paper should formalize this as **semantic aggregate
   exchange**: vehicles communicate compact traffic-state summaries, not commands.
 - **Allowed state:** local density, mean speed, queue estimate, downstream congestion estimate,

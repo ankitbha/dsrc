@@ -9,7 +9,7 @@
 
 ## The short version
 
-Task 37 (plans/task_list.md:1331) asks for a thermal and throttle-event log for
+Task 37 (plans/implementation_records.md:1331) asks for a thermal and throttle-event log for
 both devices. The two devices are in opposite states and the task is a different
 size on each.
 
@@ -49,7 +49,7 @@ existing telemetry frame plus a `PowerManager` thermal-status listener; and on
 both, one per-tick block, one event record type, one 1 Hz sample record type, a
 `summary["thermal"]` rollup and an `eval_run` section, because task 33's
 experiment found the measurement present and the surface absent
-(task_list.md:1110-1112) and task 36 repeated it (task_list.md:1320-1324).
+(implementation_records.md:1110-1112) and task 36 repeated it (implementation_records.md:1320-1324).
 
 **Does it change behaviour?** In exactly one place: the phone registers a
 `PowerManager.OnThermalStatusChangedListener` at come-up and unregisters it at
@@ -142,7 +142,7 @@ is 0 in both, which is exactly why `count` alone is not the record.
 
 **Task 36's eleven-member provenance vocabulary is deliberately not extended.**
 It tags the 39 encoder slots and the identity `set(field_sources) ==
-set(encoded_slot_names())` is pinned on every tick (task_list.md:1310). A
+set(encoded_slot_names())` is pinned on every tick (implementation_records.md:1310). A
 temperature is not an encoder slot; adding one would break that identity and
 move the missingness denominator, which is a number already quoted in the paper.
 Thermal reuses the *discipline* -- a closed set of named absence reasons -- and
@@ -229,7 +229,7 @@ protocol change and a new event message would be a new channel.
 
 | # | Question | Options | Taken | Why |
 |---|----------|---------|-------|-----|
-| D1 | Does the Jetson's temperature become a controller input | (a) feed it into `_thermal_scale` beside the phone's; (b) record only | **(b)** | The task list names thermal headroom as one of the three binding costs (task_list.md:38-41), so (a) is where this eventually goes -- but a multiplier needs a threshold, and no measurement of this Orin's temperature under this workload exists yet, because this task is what produces it. (a) would change `camera_hz` and `here_hz` on real hardware on the strength of a guessed constant. Task 36's lesson is one behaviour change, stated precisely; this is the one place to *not* take. Named as a follow-on, not built. |
+| D1 | Does the Jetson's temperature become a controller input | (a) feed it into `_thermal_scale` beside the phone's; (b) record only | **(b)** | The task list names thermal headroom as one of the three binding costs (implementation_records.md:38-41), so (a) is where this eventually goes -- but a multiplier needs a threshold, and no measurement of this Orin's temperature under this workload exists yet, because this task is what produces it. (a) would change `camera_hz` and `here_hz` on real hardware on the strength of a guessed constant. Task 36's lesson is one behaviour change, stated precisely; this is the one place to *not* take. Named as a follow-on, not built. |
 | D2 | Where the Jetson reads temperature | (a) `tegrastats` subprocess; (b) `jtop`; (c) `/sys/class/thermal` directly | **(c)** | (a) is a subprocess per sample and a text format that changes between JetPack versions. (b) is already present, already optional, and already silent when absent -- adopting it would make the whole task conditional on a package the device may not have. (c) is ordinary file reads, needs no service, is testable against a fixture directory with no device at all, and is the same source the phone side already uses, so the two devices' readings are the same kind of number. |
 | D3 | Sample rate and where | (a) on the tick path at up to 5 Hz; (b) beside it on its own thread at 1 Hz | **(b)** | A temperature's time constant is tens of seconds; 5 Hz buys nothing and costs one `open`/`read`/`close` per zone per tick -- roughly 60 file reads a second against roughly 12. More importantly, the tick loop `continue`s without producing a record whenever the camera yields no frame (run_demo.py:490-494), so a thermal log that only exists on ticks goes silent exactly when a hot, throttling device has stopped delivering frames. 1 Hz also matches `TelemetryReporter.PERIOD_MS`, so the two devices' series are on the same cadence. |
 | D4 | What a tick with no fresh sample records | (a) the last value, unmarked; (b) `basis: "stale"` with `age_s`; (c) `basis: "absent"` | **(b)**, with (c) for "never sampled" | This is task 33's question and gets task 33's answer: never a zero, never an unmarked carry-forward. The freshness bound is `2 x` the sampler period, **derived** from `thermal_interval_s` rather than typed, following `MAX_EVIDENCE_GAP_S`'s precedent (sensing_controller.py:117-122) -- a typed constant stops covering the rate the moment the rate changes. A stale reading is never collapsed to absent no matter how old, because this record decides nothing and `age_s` is strictly more informative than a refusal; that is a deliberate divergence from `MAX_TELEMETRY_AGE_S`, which exists because the controller *does* decide on it. |

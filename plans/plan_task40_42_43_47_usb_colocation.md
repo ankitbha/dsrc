@@ -64,7 +64,7 @@ vehicle; closing any of the sim-versus-live divergences task 47 finds; and any c
    installing it is a write this planning stage did not perform.
 2. **Where the APK is built.** Gradle project is on this laptop; the phone's only `adb`
    host is now `jetson-orin`. Recommended in D8; the user may prefer otherwise.
-3. **`specs/transport_protocol.md:21` and `task_list.md`'s section D preamble name
+3. **`specs/transport_protocol.md:21` and `implementation_records.md`'s section D preamble name
    `adb forward`.** That subcommand inverts the direction the same paragraph mandates,
    and the phone has no production `ServerSocket`. `LinkConfig.kt` and `tailnet.py:116`
    say `adb reverse` and the code agrees. Correcting the spec changes no encoding, but it
@@ -73,7 +73,7 @@ vehicle; closing any of the sim-versus-live divergences task 47 finds; and any c
    `sensors/time_sync.py:64-68` says must not be done. 6 of 1,204 samples on the tailnet
    baseline; over USB the one-way bias is comparable to the quantity being measured.
 5. **Task 47 is reinterpreted**, so what it delivers changes. Its wording in
-   `task_list.md` may want changing to match.
+   `implementation_records.md` may want changing to match.
 6. **The phone's applier counters do not cross the wire.** Task 43 reads them from
    `logcat`; a `PhoneTelemetry` field would be better and is a wire change, so it is not
    taken here.
@@ -614,7 +614,7 @@ here so none of it reads as approved.
 1. **The app is absent from the handset.** Blocks all four tasks. Recommended path is
    D8: build here, install from the Jetson. The user may prefer to install it himself,
    and the install is a write to the device that planning did not perform.
-2. **`specs/transport_protocol.md:21` and `plans/task_list.md` name `adb forward`.**
+2. **`specs/transport_protocol.md:21` and `plans/implementation_records.md` name `adb forward`.**
    The named subcommand inverts the direction the same paragraph mandates and the phone
    has no `ServerSocket` to support it. Recommended correction is one word in each,
    changing no encoding — but the spec is a frozen document and the edit is not taken
@@ -632,7 +632,7 @@ here so none of it reads as approved.
    not taken.
 5. **Task 47's brief is false as worded.** The plan reinterprets it as a parity ledger
    rather than a match assertion. That is a change to what the task delivers, taken by
-   recommendation, and the user may want the task renamed in `task_list.md`.
+   recommendation, and the user may want the task renamed in `implementation_records.md`.
 6. **Task 43's Jetson-side check is close to structural.** `command_for` is a pure
    function whose only use of the mode is one boolean expression, so the replay can
    almost only fail if `decide` stops being mode-blind — which is separately pinned by
