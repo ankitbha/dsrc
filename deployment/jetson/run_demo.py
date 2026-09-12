@@ -174,7 +174,16 @@ def _build_rest(config: dict):
         confidence_high_at=p["confidence_high_at"],
     )
 
-    pipeline = PerceptionPolicyPipeline(detector, tracker, distance, builder, actor, decoder)
+    # task 144: keyword, not positional -- the six positional arguments above
+    # are what let dsrc_runtime/dsrc_segment_builder/dsrc_advisory_decoder
+    # go unpassed here unnoticed (task 145's own gap, left as-is; this call
+    # site still does not wire the DSRC path in). Widening with a keyword
+    # rather than a seventh positional argument at least does not make that
+    # worse.
+    pipeline = PerceptionPolicyPipeline(
+        detector, tracker, distance, builder, actor, decoder,
+        withhold_lane_when_not_evaluable=config["safety"]["withhold_lane_when_not_evaluable"],
+    )
     return pipeline, actor
 
 

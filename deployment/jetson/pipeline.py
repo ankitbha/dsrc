@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -26,9 +26,22 @@ from perception.observation_builder import ObservationBuilder, ObservationResult
 from perception.segment_state import SegmentStateBuilder
 from perception.tracker import IouTracker
 from policy.actor_runtime import ActorRuntime, PolicyOutput
-from policy.advisory import Advisory, AdvisoryDecoder, SegmentAdvisory, SegmentAdvisoryDecoder
+from policy.advisory import (
+    Advisory,
+    AdvisoryDecoder,
+    GATED_LANE_TEXT,
+    SegmentAdvisory,
+    SegmentAdvisoryDecoder,
+)
 from policy.dsrc_contract import DECISION_INTERVAL_S
 from policy.dsrc_runtime import DsrcRuntime
+from policy.safety_gate import (
+    SafetyConstraints,
+    SafetyGateResult,
+    SafetyState,
+    run_safety_gate,
+    safety_inputs_from_observation,
+)
 from sensors.camera_stream import Frame
 from sensors.gps_reader import GpsFix
 from sensors.here_feed import FlowReading, HereFeed, Outcome
@@ -98,6 +111,10 @@ class Tick:
     policy: PolicyOutput
     advisory: Advisory
     gps: GpsFix
+    #: task 144. Required, not defaulted, for the same reason jetson_ms is:
+    #: a Tick built without a gate result would report a fake "everything
+    #: evaluable, nothing clamped" verdict rather than one that actually ran.
+    safety_gate: SafetyGateResult
     n_peers: int = 0
     # None for a local camera, where there is no link and nothing was converted.
     link_ms: float | None = None
@@ -164,7 +181,16 @@ class Tick:
                 "lane_text": self.advisory.lane_text,
                 "merge_text": self.advisory.merge_text,
                 "confidence_label": self.advisory.confidence_label,
+                "speed_display_withheld": self.advisory.speed_display_withheld,
             },
+            # task 144. advisory.recommended_speed_mps/lane_text above are
+            # already the BOUNDED values -- this block is the fuller account:
+            # what the policy proposed before the gate, what the gate bounded
+            # it to, and the per-rule evaluability census that decided
+            # whether the lane action was withheld. safety.bounded.speed_mps
+            # equals advisory.recommended_speed_mps by construction (asserted
+            # in tests/test_safety_gate_pipeline.py).
+            "safety": self.safety_gate.to_record(),
             "gps": {
                 "valid": self.gps.valid,
                 "lat": self.gps.lat if math.isfinite(self.gps.lat) else None,
@@ -216,6 +242,11 @@ class PipelineStats:
     fuse: RollingStats = field(default_factory=RollingStats)
     infer: RollingStats = field(default_factory=RollingStats)
     decode: RollingStats = field(default_factory=RollingStats)
+    #: task 144. Always a genuine measurement: unlike dsrc_infer, the gate
+    #: runs the full twelve-rule evaluation and apply_safety_layer on every
+    #: tick regardless of which rules turn out not_evaluable, so there is no
+    #: early-return path here that would pool a refusal in with a real run.
+    gate: RollingStats = field(default_factory=RollingStats)
 
     def snapshot(self) -> dict[str, dict[str, float]]:
         return {
@@ -232,6 +263,7 @@ class PipelineStats:
             "fuse_ms": self.fuse.summary(),
             "infer_ms": self.infer.summary(),
             "decode_ms": self.decode.summary(),
+            "gate_ms": self.gate.summary(),
         }
 
 
@@ -249,6 +281,8 @@ class PerceptionPolicyPipeline:
         dsrc_segment_builder: SegmentStateBuilder | None = None,
         dsrc_advisory_decoder: SegmentAdvisoryDecoder | None = None,
         dsrc_decision_interval_s: float = DECISION_INTERVAL_S,
+        safety_constraints: SafetyConstraints | None = None,
+        withhold_lane_when_not_evaluable: bool = True,
     ) -> None:
         self.detector = detector
         self.tracker = tracker
@@ -256,6 +290,15 @@ class PerceptionPolicyPipeline:
         self.builder = builder
         self.actor = actor
         self.advisory_decoder = advisory_decoder
+        # task 144. One SafetyState for the pipeline's life, mirroring
+        # ObservationBuilder's own _EgoState: nothing on this rig ever
+        # advances last_lane_change_time_s or lane_changes_last_km (no
+        # lane-change detector exists), so it never departs from its class
+        # defaults, but it is held rather than rebuilt so a future detector
+        # has somewhere to write.
+        self.safety_constraints = safety_constraints or SafetyConstraints()
+        self.withhold_lane_when_not_evaluable = withhold_lane_when_not_evaluable
+        self._safety_state = SafetyState()
         # All three or none: a DsrcRuntime with nowhere to put its state, or
         # a builder with no runtime to hand it to, is a half-wired feature
         # that would fail confusingly later rather than obviously now.
@@ -328,10 +371,42 @@ class PerceptionPolicyPipeline:
         t3a = time.monotonic()
         advisory: Advisory = self.advisory_decoder.decode(policy_out, obs_result.obs)
         t3b = time.monotonic()
+
+        # task 144: the safety/etiquette gate, between the raw decode above
+        # and set_target_headway below. `safety_inputs_from_observation`
+        # reconstructs decision 3's per-field input classes from this same
+        # obs_result -- no separate sensing path, so gate and policy see
+        # identical evidence for identical fields.
+        safety_inputs = safety_inputs_from_observation(
+            obs_result, self._safety_state, time_s=t3b,
+            min_contextual_speed_mps=self.advisory_decoder.min_contextual_speed_mps,
+            density_max_age_s=2.0 * self.builder.config.gps_stale_after_s,
+        )
+        gate_result: SafetyGateResult = run_safety_gate(
+            policy_out.action, safety_inputs, self._safety_state, self.safety_constraints,
+            withhold_lane_when_not_evaluable=self.withhold_lane_when_not_evaluable,
+        )
+        # advisory.recommended_speed_mps/display and lane_text are overwritten
+        # to the BOUNDED values -- decision 2: this field continues to mean
+        # "the number shown to the driver", which eval_run.py, replay_demo.py
+        # and transport/messages.py all read it as. headway_target_s is
+        # deliberately left untouched: set_target_headway below must keep
+        # feeding back the RAW decoded headway, matching what the policy was
+        # trained against, not what the gate bounded it to.
+        advisory = replace(
+            advisory,
+            recommended_speed_mps=gate_result.bounded_speed_mps,
+            recommended_speed_display=self.advisory_decoder.display(gate_result.bounded_speed_mps),
+            lane_text=GATED_LANE_TEXT[gate_result.bounded_lane_action],
+            speed_display_withheld=gate_result.emergency_override,
+        )
+        t3c = time.monotonic()
+
         self.builder.set_target_headway(advisory.headway_target_s)
         t4 = time.monotonic()
         infer_ms = (t3a - t3) * 1000.0
         decode_ms = (t3b - t3a) * 1000.0
+        gate_ms = (t3c - t3b) * 1000.0
 
         # Arrival is exact and local; capture may be converted from a peer clock.
         # With no timebase stamp the frame was captured here, so the two coincide.
@@ -361,7 +436,7 @@ class PerceptionPolicyPipeline:
         self.stats.policy.add(stage_ms["policy_advisory"])
 
         stages = self._stages(
-            frame, stage_ms=stage_ms, infer_ms=infer_ms, decode_ms=decode_ms
+            frame, stage_ms=stage_ms, infer_ms=infer_ms, decode_ms=decode_ms, gate_ms=gate_ms,
         )
         transport = stages["transport"]
         if transport.basis == "converted":
@@ -375,6 +450,7 @@ class PerceptionPolicyPipeline:
             self.stats.fuse.add(stages["fuse"].ms)
         self.stats.infer.add(infer_ms)
         self.stats.decode.add(decode_ms)
+        self.stats.gate.add(gate_ms)
 
         segment_assemble_stage, dsrc_infer_stage, dsrc_advisory = self._dsrc_step(
             here_feed_source, gps, t_now_mono=time.monotonic(),
@@ -406,6 +482,7 @@ class PerceptionPolicyPipeline:
             policy=policy_out,
             advisory=advisory,
             gps=gps,
+            safety_gate=gate_result,
             n_peers=len(peers) if peers else 0,
             stages=stages,
             dsrc=dsrc_advisory,
@@ -487,6 +564,7 @@ class PerceptionPolicyPipeline:
 
     def _stages(
         self, frame: Frame, *, stage_ms: dict[str, float], infer_ms: float, decode_ms: float,
+        gate_ms: float,
     ) -> dict[str, StageTiming]:
         """The task-33 per-tick record: what the phone's header answered
         exactly, what this device measured on its own clock, and what could
@@ -530,4 +608,9 @@ class PerceptionPolicyPipeline:
         )
         stages["infer"] = StageTiming.measured(infer_ms, clock="jetson")
         stages["decode"] = StageTiming.measured(decode_ms, clock="jetson")
+        # task 144. Always measured, never absent: the gate runs the full
+        # rule evaluation on every tick regardless of what turns out
+        # not_evaluable, so there is no early-return path whose duration
+        # would misrepresent a refusal as an inference (contrast dsrc_infer).
+        stages["gate"] = StageTiming.measured(gate_ms, clock="jetson")
         return stages

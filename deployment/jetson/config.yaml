@@ -85,6 +85,15 @@ policy:
   confidence_low_below: 0.45         # min head prob -> low / medium / high label
   confidence_high_at: 0.70
 
+safety:
+  # plan_task144 decision 3: the lane/merge advisory is withheld outright
+  # whenever any of its eight guard rules could not be evaluated this tick
+  # (no rear camera on this rig means three of them never can be). true is
+  # the new, safer behavior; false restores the PREVIOUS one -- showing
+  # lane_text for a guard that was never checked -- and is the rollback
+  # mechanism if this default is not what the user wants.
+  withhold_lane_when_not_evaluable: true
+
 v2v:
   enabled: false                     # optional UDP cooperation beacons (2+ units)
   port: 47808
