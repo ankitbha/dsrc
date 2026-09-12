@@ -7,7 +7,7 @@ this summary is the state as of the latest run.
 
 ## Result
 
-Held-out seeds 16-20, Mainz, EIDM fleet, three-into-two lane drop at the exit, demand a
+Held-out seeds 16-30, Mainz, EIDM fleet, three-into-two lane drop at the exit, demand a
 sustained 4,500 veh/h. Seeds 1-10 train, 11-15 select, 80 episodes, 100% penetration.
 
 | arm | flow veh/h | paired gain | arrivals | space-mean speed |
@@ -15,6 +15,8 @@ sustained 4,500 veh/h. Seeds 1-10 train, 11-15 select, 80 episodes, 100% penetra
 | DSRC, the HERE observation | **3,765** | **+230 +/- 44** (+6.5%) | 1,997 | 40.81 |
 | SRC, its original six features | 3,759 | +224 +/- 61 (+6.3%) | 1,991 | 40.82 |
 | no control | 3,535 | -- | 1,951 | **42.68** |
+
+**Measured and committed 2026-09-12**, and until then these figures had no generator: `results/evaluation/mainz_paired_seeds.{json,jsonl}` carries the per-seed table, produced by `scripts/evaluate_mainz_checkpoints.py` (task 142). The run reproduces every value below to the rounding at which it was published -- means within 0.26 veh/h, bars within 1% -- and adds a `zeroed_head` falsification arm at 2,846.67 veh/h, 15.7 times no-control's own bar below it.
 
 Fifteen evaluation seeds, 16 to 30, paired on seed because each arm ran the same traffic
 realisation. Both gains are resolved. The two arms differ by 0.2%, well inside both bars.

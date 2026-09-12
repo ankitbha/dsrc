@@ -21,6 +21,20 @@ drop at the exit, sustained 4,500 veh/h.
 Paired on seed over seeds 16-30: the traffic-API arm gains 230 +/- 44 veh/h and SRC's
 six features 224 +/- 61, and the two differ by 0.2%.
 
+## `evaluation/`
+
+The per-seed table those two figures are computed from, which did not exist until
+2026-09-12: `mainz_paired_seeds.jsonl` is one line per episode over seeds 16-30 and four
+arms, `mainz_paired_seeds.json` the summary, both from
+`scripts/evaluate_mainz_checkpoints.py`. Measured: here 3,764.89 (+229.93 +/- 44.36), src
+3,759.26 (+224.30 +/- 60.95), no control 3,534.96.
+
+The fourth arm is the point of the file. `zeroed_head` loads the same checkpoint as `here`
+with its output layer zeroed, and reads 2,846.67 veh/h -- 15.74 times no control's own
+two-standard-error bar below it. **A result from an instrument never seen to fail is not
+evidence**, so the falsification arm runs from the same command line and lands in the same
+artefact as the arms it exists to bound.
+
 ## `flow_density/`
 
 - `exit_supersegment.{png,json}` — the exit super-segment's flow-density curve under a

@@ -2879,10 +2879,38 @@ against the files it points at. Each is a statement the paper plan makes that th
 the artifacts contradict. None was found by a test, because in every case the thing that
 would have failed is absent rather than wrong.
 
-142. **The paper's headline simulation result has no generator and no artifact.** Open.
+142. **The paper's headline simulation result has no generator and no artifact.**
+     **RESOLVED 2026-09-12.** The figures were never wrong; nothing could stand behind them.
+     `scripts/evaluate_mainz_checkpoints.py` now produces them and
+     `results/evaluation/mainz_paired_seeds.{json,jsonl}` records the run (commit `79a4a84`).
+     Measured over seeds 16-30, 60 episodes in 403 s: here **3,764.89** (+229.93 +/- 44.36,
+     resolved at 5.18x its bar), src **3,759.26** (+224.30 +/- 60.95, 3.68x), no control
+     **3,534.96**, and a `zeroed_head` falsification arm at **2,846.67** -- 15.74 times no
+     control's own bar below it, with a paired gain negative and resolved at 15.11x. Every
+     asserted value reproduces to the rounding at which it was published: means within
+     0.26 veh/h, bars within 1%.
+
+     Two things the work settled beyond the number. The fifteen-seed figures were produced
+     under HEAD's `SPEED_ACTION_FRACTIONS` mapping, so `eb86e72`'s 0.0200% action-set shift
+     touches only the five-seed `test` blocks in `results/checkpoints/*_result.json` and not
+     these. And the run configuration, which nothing had ever recorded, was recovered by
+     arithmetic -- `mean_vehicles` 858.0370370370371 is exactly `115835/(5*27)`, pinning 27
+     accumulation samples and therefore a window opened at 900 s -- then confirmed by
+     reproducing the stored no-control block at 0.00e+00 on all seven metrics.
+
+     **One defect remains, found while the experiment ran and after two validation rounds
+     had closed.** The artefact's provenance reports `dirty: true`, caused by the run's own
+     output: `results/evaluation/` is tracked and not gitignored, so the evaluator dirties
+     the tree by writing and then samples that as its own provenance. `git status
+     --porcelain --untracked-files=no` returns nothing; the code was `578d689` unmodified.
+     The flag exists to say whether the code differed from the commit beside it, the answer
+     is no, and the artefact reads as though it were yes. Fix: exclude the evaluator's own
+     output path from the check, or record *what* is dirty rather than only that it is.
+     Two validation rounds could not see it because it appears only when the tool runs
+     against a real tree.
 
      `3,765 / 3,759 / 3,535 veh/h` with paired gains of `+230 +/- 44` and `+224 +/- 61`
-     over seeds 16-30 is asserted in four documents: this file, `mainz_src_port.md`,
+     over seeds 16-30 is asserted in five places: this file, `mainz_src_port.md`,
      `results/README.md` and the paper plan. Nothing produces it.
 
      `scripts/train_mainz_src.py` reads `TEST_SEEDS = tuple(range(16, 21))` -- five seeds.

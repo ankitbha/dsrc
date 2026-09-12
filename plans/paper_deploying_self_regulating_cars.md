@@ -595,7 +595,9 @@ real wire codec); `plans/plan_task35_shadow_decision_log.md`; `plans/implementat
 * `scripts/build_mainz_scenario.py` -- every conversion decision is in its docstrings:
   why `--flatten`, why the speed factor, why the routes need both end links, and why the
   exit is a lane drop rather than a signal.
-* `scripts/train_mainz_src.py` -- train on 1-10, select on 11-15, read 16-30 once.
+* `scripts/train_mainz_src.py` -- train on 1-10, select on 11-15, read 16-20 once. Its
+  `TEST_SEEDS` is `range(16, 21)`; the fifteen-seed figures in this document come from
+  `scripts/evaluate_mainz_checkpoints.py`, whose artefact is `results/evaluation/`.
 * `scripts/measure_mainz_fundamental_diagram.py` -- **the gate**. Served flow must fall as
   demand rises, by more than the seed spread.
 * `scripts/measure_fd_straight.py`, `scripts/measure_fd_open_road.py`, `scripts/measure_fd_exit.py`.
