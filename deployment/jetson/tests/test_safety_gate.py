@@ -405,6 +405,25 @@ def _inputs_with_overrides(**value_overrides: float) -> SafetyInputs:
     return SafetyInputs(fields=fields)
 
 
+def test_run_safety_gate_exposes_raw_diagnostics_for_the_elif_chain_attribution() -> None:
+    """score_safety.py's event attribution reads this, not the independent
+    per-rule census -- E5's own methodology attributes a clamp to the rule
+    apply_safety_layer's unchanged elif chain names, even when that rule is
+    not_evaluable in the record (decision 3's whole point: the raw decision
+    keeps using the substituted default, the record says it should not be
+    trusted)."""
+    obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": None})
+    inputs = safety_inputs_from_observation(
+        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+    )
+    result = run_safety_gate(action(desired_speed_bin="slow"), inputs, SafetyState(), SafetyConstraints())
+    assert result.raw_diagnostics["etiquette_blocked_action"][0]["reason"] == "low_speed_uncongested"
+    # The persisted record uses only decision 3's independent per-rule census,
+    # not the raw elif-chain diagnostics -- see SafetyGateResult's docstring.
+    assert "raw_diagnostics" not in result.to_record()
+    assert result.to_record()["rules"]["low_speed_uncongested"]["status"] == RULE_NOT_EVALUABLE
+
+
 def test_chain_order_invariant_first_fired_lane_guard_matches_the_decision() -> None:
     """decision 3's own check (step 9): when guards ARE evaluable, the first
     one that fires in chain order is the one apply_safety_layer's elif chain

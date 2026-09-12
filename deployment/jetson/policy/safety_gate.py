@@ -727,7 +727,18 @@ def evaluate_rules(
 @dataclass(frozen=True)
 class SafetyGateResult:
     """One tick's gate outcome: the raw (proposed) decision, the bounded one
-    actually shown to the driver, and the per-rule evaluability census."""
+    actually shown to the driver, and the per-rule evaluability census.
+
+    `raw_diagnostics` is `apply_safety_layer`'s own (unchanged) elif-chain
+    diagnostics dict -- kept on the result for a tool that wants to attribute
+    an event the way the original decision does (plan_task144 E5's own
+    methodology: "running apply_safety_layer... [with] events" is read off
+    exactly this), but deliberately left out of `to_record()`. The persisted
+    per-tick record uses `rules` (decision 3's independent, evaluability-aware
+    census) as its one account of what each rule did; carrying both would
+    let a reader play them against each other instead of trusting the one
+    decision 3 says is the record.
+    """
 
     proposed_speed_mps: float
     proposed_headway_s: float
@@ -741,6 +752,7 @@ class SafetyGateResult:
     evaluable_count: int
     not_evaluable_count: int
     rules: dict[str, RuleRecord]
+    raw_diagnostics: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -804,4 +816,5 @@ def run_safety_gate(
         evaluable_count=evaluable,
         not_evaluable_count=len(rules) - evaluable,
         rules=rules,
+        raw_diagnostics=decision.diagnostics,
     )
