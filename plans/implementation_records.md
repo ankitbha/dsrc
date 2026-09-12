@@ -2930,28 +2930,137 @@ would have failed is absent rather than wrong.
      "Held-out seeds 16-20" nine lines above "Fifteen evaluation seeds, 16 to 30"; whichever
      way the numbers land, that heading is wrong today.
 
-143. **The vendored contract's equality check has no reference left to check against.** Open.
+143. **The vendored contract's equality check has no reference left to check against.**
+     Implemented 2026-09-12 (implementer-143) against
+     `plans/plan_task143_contract_golden_vectors.md`.
 
      `policy/sim_contract.py` vendors the encoder, the scales and the action heads from sim
      commit `d477dba`, and the paper plan calls this "what makes 'the device runs what was
-     trained' checkable rather than asserted". The check is
-     `deployment/jetson/tests/test_sim_contract.py`, which opens
+     trained' checkable rather than asserted". The check was
+     `deployment/jetson/tests/test_sim_contract.py`, which opened
      `pytest.importorskip("src.rl.encoders")`.
 
-     `src/rl/` now holds only `src_q.py`. `encoders.py`, `actions.py` and `models.py` were
-     deleted in `6b538f2`. Measured: the file collects one test and reports `1 skipped`.
-     `ARCHITECTURE.md` section 6 still instructs running it "on a machine where the sim
-     imports", which no longer describes any machine.
+     `src/rl/` holds only `src_q.py`. `encoders.py`, `actions.py` and `models.py` were
+     deleted in `6b538f2`. Measured before this task: the file collected one test and
+     reported `1 skipped`.
 
-     Restoring the deleted modules would undo a deliberate cleanup to serve a test. The
-     alternative is the idiom this repository already uses across two languages:
+     Restoring the deleted modules would have undone a deliberate cleanup to serve a test.
+     Built instead: the idiom this repository already uses across two languages --
      `specs/transport_golden_frames.json` freezes the wire format and both implementations
      test against the file rather than against each other.
 
-     **The task:** freeze the encoder's output and the contract fingerprint as golden
-     vectors, so the check runs everywhere with no sim import, and prove it fails against a
-     mutated contract before anything relies on it. A guard that has never been seen to fail
-     is not a guard.
+     **What was built.** `specs/sim_contract_golden_vectors.json` (122.7 KiB): 14 encoded
+     observations (the 12 `test_sim_contract.py` already used, plus two cases giving the
+     `cooperation` and `nearby_av_lane_distribution` blocks three distinct per-slot values
+     each, so a reorder inside either block changes a number and not only a name), the
+     action heads/values/forced defaults/profiles/default indices, both bin decoders,
+     `bin_index` over a grid, the neutral cooperation fallbacks, the actor state-dict layout,
+     and `contract_fingerprint()`. `scripts/generate_sim_contract_golden_vectors.py` derives
+     every one of those twice -- once from sim commit `d477dba` (`git archive`d into a
+     temporary directory, inserted at `sys.path[0]`, never the repository root, which would
+     let the working tree's own trimmed `src` package win) and once from
+     `policy/sim_contract.py` -- and refuses to write when the two disagree, in `--check` and
+     in `--write --force` alike. Proved directly: with `leader_gap`'s scale mutated to 120.0
+     (150.0 in the reference), both modes exit 1 and name `leader_gap`, and the file's
+     SHA-256 is unchanged before and after (`b77b24e5a8ef...`). `test_sim_contract.py` is
+     rewritten to read the frozen file and import no simulation module: 74 tests, 0 skipped,
+     against the file's own count of 1 skipped before.
+
+     **The mutation gate (plan section 7).** Seven entries added to `scripts/remutate.py`'s
+     `MUTATIONS`, prefixed `sim contract:`. Run from a `git worktree add --detach` mirror at
+     this task's commit, never the live tree, because two other agents were committing to
+     `deployment/jetson/` at the same time:
+
+     | Mutation | Caught by |
+     |---|---|
+     | M1 field order (`leader_gap`/`leader_relative_speed` swapped) | `test_slot_names_match_encoded_slot_names` |
+     | M2 a `FIELD_SCALES` value (`leader_gap` 150.0 -> 120.0) | `test_field_scales_match_in_both_directions` |
+     | M3 a `HEADWAY_BIN_S` bin edge (2.2 -> 2.3) | `test_decode_headway_bin_matches_the_recorded_grid` |
+     | M4 `bin_index`'s boundary direction (`>=` -> `>`) | `test_bin_index_matches_the_recorded_grid` |
+     | M5 the inf-clamp constant (200.0 -> 100.0) | `test_encoding_matches_the_recorded_vector[full_obs]` |
+     | M6 an `ACTION_VALUES` order within a head reversed | `test_action_values_and_their_order_match` |
+     | M7 `COOPERATION_FIELDS` order changed | `test_slot_names_match_encoded_slot_names` |
+
+     All seven CAUGHT, 0 SURVIVED, 0 INCONCLUSIVE, 0 "did not build/import". None of
+     M3/M5/M7 -- the three the fingerprint does not hash -- was caught only by a fingerprint
+     test; each was caught by a golden-vector test, satisfying plan section 5.4's split.
+
+     **`EXPECTED_PYTHON_TESTCASES` is not a literal.** The plan's own step 9 called for
+     setting it to a measured count; that count moved five times in one day before this task
+     even started (root suite 69 -> 88 -> 116 -> 130 -> 146, four increases;
+     `deployment/jetson` 2,243 -> 2,390, one increase) as three tasks landed tests
+     concurrently, and it moved twice more during this task's own mutation-gate runs (2,493,
+     then 2,499). Any literal typed during this task would have gone stale within the hour --
+     which is exactly the failure being fixed (the constant was 2060 against a suite that had
+     already reached 2272, silently turning every Python mutation entry
+     `INCONCLUSIVE`). Replaced with `_baseline_python_testcases()`: a full pytest run against
+     the clean, unmutated tree, measured once at the start of each `remutate.py` invocation,
+     before the first mutation is applied. It must run before, not after, any mutation: a
+     mutation's own collection failure would otherwise lower both sides of the comparison
+     together and hide the exact failure this check exists to catch.
+
+     **`__pycache__` purge and `PYTHONDONTWRITEBYTECODE=1`.** Neither `run()` nor
+     `_baseline_python_testcases()` cleared bytecode caches before invoking pytest. A
+     same-second edit of equal byte length can reuse a stale `.pyc` (Python's default
+     invalidation is mtime+size), silently re-scoring the previous mutant -- a failure mode
+     that has produced a wrong verdict on this project twice before. `_purge_pycache()` now
+     runs before every pytest subprocess in this file, and both subprocess calls set
+     `PYTHONDONTWRITEBYTECODE=1`. Stated plainly rather than left implied: no test in this
+     repository would fail if `_purge_pycache()`'s call sites were removed.
+     `scripts/remutate.py` carries no unit tests of its own; this fix is verified
+     operationally, by the two controls below and by every mutation gate run in this task
+     completing without a stale-cache false verdict, not by an automated assertion.
+
+     **Two controls, because a gate that has only been seen to pass has not been seen.**
+     First: `decode_speed_bin`'s `min_contextual_speed_mps` default (12.0) looked unread by
+     anything -- the only direct test call site (`test_sim_contract.py`) always passes it
+     explicitly from the recorded grid, and the three production call sites (`advisory.py`,
+     `safety_gate.py` x2) always pass their own context value. It was CAUGHT anyway, by
+     `test_regeneration_leaves_every_pre_existing_case_byte_identical`: this generator's own
+     `speed_bin_mps` derivation calls `decode_speed_bin` on both sides without pinning that
+     argument either, so Account A (the reference, unmutated) and Account B (the vendored
+     copy, mutated) disagreed inside the generator itself, and the regeneration test's
+     subprocess call returned non-zero. Real coverage, but indirect and fragile: it depends
+     on that one test's `torch` and `git` dependencies being satisfied. Second, registered to
+     settle the question directly: `active_heads()`'s except-branch message. Every caller in
+     the tree -- `export_policy.VendoredActor`'s default, `actor_runtime.py`, this generator,
+     and every test -- passes only profile `"full"`, which returns before the except branch
+     is ever reached. This one SURVIVED (`*** SURVIVED ***`, exit code 1, named in the
+     `survived` list) -- direct proof the harness's SURVIVED branch fires rather than the
+     seven-mutation gate's clean sweep being an unexercised code path. Removed once observed;
+     the gate was then re-run and returned to 7 CAUGHT / 0 SURVIVED, exit code 0, with the
+     same seven catching tests as the table above.
+
+     **Suite counts.** Mirror at `1a61b1b` (this task's parent commit, via `git archive`,
+     never the live tree): `deployment/jetson/tests/` 2,391 passed / 28 skipped (24
+     USB-device-gated, 3 pre-existing and unrelated in `test_run_demo_loop.py`, 1 this task's
+     own `test_sim_contract` module-level skip), 2,419 JUnit testcases. Mirror at `2692c3b`
+     (this task's first commit): 2,465 passed / 28 skipped, 2,493 testcases -- the 28 splits
+     as the same 24 USB + 3 unrelated + 1, but that 1 is
+     `test_regeneration_leaves_every_pre_existing_case_byte_identical` skipping because a
+     `git archive` mirror carries no `.git` directory at all, so the generator's own `git
+     archive d477dba` call fails structurally and the test detects that and skips with a
+     named reason -- a property of the mirror, not of the development machine. On a live
+     checkout with `.git` present (this repository, before committing): `test_sim_contract.py`
+     74 passed / 0 skipped; the full suite 2,470 passed / 24 skipped, all 24 USB-gated,
+     matching the plan's sign-off items S1 and S2 exactly. Cross-checked against the
+     coordinator's independent measurement at `d976dcc` (a later commit on the same branch):
+     `deployment/jetson/tests/` 2,465 passed / 28 skipped -- identical to this task's own
+     `2692c3b` mirror. The final mutation-gate run (after the control's removal) measured its
+     own fresh baseline at 2,499 testcases, higher again, from concurrent work landing on the
+     branch between that run and the earlier ones; this is the dynamic count doing what it
+     was built to do rather than a discrepancy.
+
+     **Not done, and outside this task's ownership list while two other agents were live in
+     the repository:** `ARCHITECTURE.md` section 6 still names a machine where the sim
+     imports, which does not exist, and the maintenance-procedure rewrite the plan's section
+     8 specifies was not made. Left for whichever task next holds that file.
+
+     **Commits** (branch `mainz-src-port`): `2692c3b` (the generator, the golden file, the
+     rewritten test file, the seven `MUTATIONS` entries, `EXPECTED_PYTHON_TESTCASES` made
+     dynamic), `972ded9` (`__pycache__`/bytecode fix, first control registered), `939bee2`
+     (control replaced), `8a321fd` (control removed). Each by explicit pathspec, never `git
+     add -A`, never a bare `git commit`.
 
 144. **The safety and etiquette layer runs nowhere.** Implemented 2026-09-12
      (implementer-144) against `plans/plan_task144_safety_layer_on_device.md`. The plan's
