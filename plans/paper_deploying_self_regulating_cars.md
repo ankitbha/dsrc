@@ -83,6 +83,106 @@ separately -- a 90-degree frame rotation that explains every zero-detection driv
 project, frames being discarded so the drive could not explain itself, and the `severe`
 thermal tier ending a session rather than lowering rates.
 
+## What deployment cost, which is most of what there is to say
+
+Ankit: this is extremely important to talk about. The failures below are not incidental
+to the contribution; they are the part of it that cannot be obtained any other way.
+
+### The car is a hostile environment and the faults are physical
+
+Eight runs, **152.8 minutes of both devices powered from the car with no power
+interruption**. The phone is USB-attached to the Jetson, which is both the sensor link and
+the phone's charge source, and the Jetson reaches the network through the phone. Two
+install faults, each of which cost drive time:
+
+* **Cable type is not interchangeable.** The Moto's cable failed in the car and the app
+  was moved to the OnePlus Nord N10 mid-session, with the swap recorded automatically in
+  `installed_apk.json`.
+* **Direct sunlight on the dashboard ended a drive.** It heated the phone enough that the
+  tethering handset's hotspot shut off. The mount needs shade, not just a clamp.
+
+### Thermal is the binding constraint, and it is not solved
+
+**The backoff works, on hardware.** Two 900 s live runs: the thermal rule fired on 1,504
+of 3,486 ticks and 1,561 of 3,451, cause `skin_warm`, and the phone applied the result --
+delivered frame rate **3.000 and 2.998 Hz against a commanded 3.0**. The decision reads
+device temperature and never ambient, so this clause does not depend on the environment.
+
+**Steady state was never reached, and the extrapolation is the finding.** Both runs ended
+because the clock expired, not because the handset equilibrated. Skin temperature slope
+over the last two minutes was **+0.368 and +0.367 C/min**, still climbing close to
+linearly after fifteen minutes. `SKIN_HOT_C` at 45 C is about **six minutes past where
+both runs stopped**.
+
+**And the soak has still not been run at load.** The camera held 5.0 Hz for roughly the
+first 380 s before the loop cut it to 3.0 Hz, so maximum rate and an engaged backoff
+cannot both hold -- the task's own wording is in tension. `gps_hz` and `here_hz` were 0.0
+throughout, so two of the four modalities carried no load at all, and those two are
+exactly the thermally scaled ones. "Stays within limits" currently holds only as a
+statement about a desk.
+
+### The instruments lied, repeatedly, and catching that was the work
+
+**The two devices were in opposite states and finding that out was the first job.** The
+phone's thermal chain was live end to end. The Jetson had **no thermal reading at all**,
+and the one sampler adjacent to it degraded to a silent no-op when an optional import
+failed, wrote records nothing collected, and had no test.
+
+**The feature was inert on the one Jetson it was written for.** 150 s on the real Orin at
+the deployed commit: **751 ticks, 0 sample records, 0 event records**, every tick reading
+`absent`, reason `sampler_stopped`. Three of that machine's nine thermal zones answer
+`EAGAIN`, which surfaces through the buffered text layer as a `TypeError` that the
+reader's `except OSError` did not catch, so the sampler thread died on its first pass.
+**The fixtures could not have caught it**: they make a zone unreadable by deleting the
+file or denying permission, and both raise `OSError`. One sysfs quirk took the *phone's*
+thermal record down with the Jetson's, on a drive where the phone was connected and
+delivering telemetry throughout.
+
+**What saved it was the reporting vocabulary.** Nothing read `quiet`, nothing read as a
+zero, and the report said outright that the drive answered nothing. **The failure was
+recorded as a failure.** After the fix, a confirmation drive on the same Orin: 1,200
+ticks, 241 samples, `measured 241, absent 0`, and the `quiet` line now carries the
+evidence for its own claim -- `241 of 241 passes fully readable` -- where before it
+asserted "readable throughout" and printed the counters only on the branch where the
+claim was not being made.
+
+**Other things the field disagreed with the plan about.** Nine thermal zones, six usable,
+and **13 cooling devices where the estimate assumed 3** -- the entire 39% overrun in
+record size, against per-item figures that were right to a tenth of a byte. Thermal
+headroom turned out to be **not a number on 456 of 456 and 297 of 297 reports**, on a
+handset whose thermal HAL is connected and answering. A phone redial erased a drive's
+throttle count and wrote a phantom event, because the sampler copied the phone's counter
+instead of accumulating.
+
+**Two method lessons, stated as such.** A fixture's failure mode has to be the field's:
+a deleted file and a denied permission both raise one exception, the real device raised a
+different one, and every test passed while the feature did nothing. And **five distinct
+false readings were produced by measurement harnesses on that task alone**.
+
+### One bug hid every perception result in the project
+
+**The camera frames arrive rotated 90 degrees, and that is why no drive had ever seen a
+vehicle.** Measured over a full day: **16 detection-bearing ticks out of 22,929**, or
+0.070%, and the `vehicles` array was empty even on those 16, so **zero distance estimates
+were recorded on the entire day**. Zero vehicle sightings across 4,151 ticks on the Moto
+and 1,632 on the Nord, on two handsets.
+
+Same frame, same detector, one rotation:
+
+| frame | as delivered | rotated 90 clockwise |
+|---|---|---|
+| mid-drive | 0 | **2 vehicles, conf 0.90** |
+| later | 0 | **5 vehicles, conf 0.87** |
+
+Only clockwise; anticlockwise and 180 both give zero. The frame shows a van filling much
+of the picture with a legible plate, so it was not a marginal detection. The fix moved the
+intrinsics with the rotation -- `cx_px` 640 to 360, `cy_px` 360 to 640 -- and re-measured
+the horizon at 717 px against the old landscape centre of 360.
+
+**It was one bug, not the several structural limits it had been recorded as.** That is
+the part worth writing down: the project had accumulated explanations for an absence that
+had a single cause.
+
 ## What the drives are, and are not, asked to establish
 
 Ankit's boundary, and it is written into the task list rather than argued here:
