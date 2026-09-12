@@ -36,7 +36,7 @@ happened is the defect this task exists to avoid.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclasses_replace
 from typing import Any, Mapping
 
 from perception import provenance
@@ -360,10 +360,12 @@ INPUT_CLASS_EVIDENCE_REQUIRED = "evidence_required"
 #: unconditionally, regardless of what a tag would otherwise say.
 INPUT_CLASS_STRUCTURAL = "structural"
 
-#: decision 3's 3 + 6 + 14 = 23 SafetyContext fields, plus the 3 SafetyState
+#: decision 3's 3 + 6 + 14 = 23 SafetyContext fields, plus the 4 SafetyState
 #: names the rules that read lane-change history need (last_lane_change_time_s,
-#: lane_changes_last_km, lane_change_distances_m -- the device cannot advance
-#: any of the three, so they are class (C) unconditionally).
+#: lane_changes_last_km, lane_change_distances_m, and -- added validator round
+#: 1, F1 follow-up -- absolute_distance_m, read by lane_changes_per_km's own
+#: window branch. The device cannot advance any of the four, so they are
+#: class (C) unconditionally.
 CONFIGURED_FIELDS: tuple[str, ...] = ("time_s", "free_flow_speed_mps", "min_contextual_speed_mps")
 EVIDENCE_REQUIRED_FIELDS: tuple[str, ...] = (
     "ego_speed_mps",
@@ -391,6 +393,7 @@ STRUCTURAL_FIELDS: tuple[str, ...] = (
     "last_lane_change_time_s",
     "lane_changes_last_km",
     "lane_change_distances_m",
+    "absolute_distance_m",
 )
 
 
@@ -427,7 +430,7 @@ class SafetyInputs:
 
     def context(self) -> SafetyContext:
         values = {name: f.value for name, f in self.fields.items() if name not in (
-            "last_lane_change_time_s", "lane_changes_last_km", "lane_change_distances_m",
+            "last_lane_change_time_s", "lane_changes_last_km", "lane_change_distances_m", "absolute_distance_m",
         )}
         return SafetyContext(**values)
 
@@ -448,18 +451,58 @@ class SafetyInputs:
         of evidence -- there is no comparison to make inert.
         """
         values = {name: f.value for name, f in self.fields.items() if name not in (
-            "last_lane_change_time_s", "lane_changes_last_km", "lane_change_distances_m",
+            "last_lane_change_time_s", "lane_changes_last_km", "lane_change_distances_m", "absolute_distance_m",
         )}
         for name, inert_value in INERT_CONTEXT_VALUES.items():
             if not self.fields[name].evidence:
                 values[name] = inert_value
         return SafetyContext(**values)
 
-    def state(self) -> SafetyState:
-        return SafetyState(
-            last_lane_change_time_s=self.fields["last_lane_change_time_s"].value,
-            lane_changes_last_km=self.fields["lane_changes_last_km"].value,
-            lane_change_distances_m=list(self.fields["lane_change_distances_m"].value),
+    def inert_state(self, state: SafetyState) -> SafetyState:
+        """The state `apply_safety_layer` reads (validator round 1, F1
+        follow-up, found by the coordinator): mirrors `inert_context()`
+        for the four `SafetyState` fields that method cannot reach (it
+        only builds a `SafetyContext`) and that decision 3's evidence
+        machinery covers: `last_lane_change_time_s`, `lane_changes_last_km`,
+        `lane_change_distances_m` and `absolute_distance_m`. All four are
+        always class (C) -- never evidence -- and were being passed to
+        `apply_safety_layer` RAW, unneutralised.
+
+        The other two `SafetyState` fields (`distance_since_window_start_m`,
+        `last_lane_index`) are read by no function `apply_safety_layer`
+        reaches at all -- not merely ungated, genuinely dead as far as the
+        twelve rules are concerned -- and are copied through unchanged,
+        from `state` itself, not from `self.fields`, which never carries
+        them.
+
+        This method has no sibling named `state()`: an earlier one existed,
+        had zero callers (`run_safety_gate` always uses its own `state`
+        argument, never a reconstruction from `SafetyInputs`), and was
+        removed rather than left beside this one for a later reader to
+        wire to by mistake.
+        """
+        return dataclasses_replace(
+            state,
+            last_lane_change_time_s=(
+                self.fields["last_lane_change_time_s"].value
+                if self.is_evidence("last_lane_change_time_s")
+                else INERT_STATE_VALUES["last_lane_change_time_s"]
+            ),
+            lane_changes_last_km=(
+                self.fields["lane_changes_last_km"].value
+                if self.is_evidence("lane_changes_last_km")
+                else INERT_STATE_VALUES["lane_changes_last_km"]
+            ),
+            lane_change_distances_m=(
+                list(self.fields["lane_change_distances_m"].value)
+                if self.is_evidence("lane_change_distances_m")
+                else list(INERT_STATE_VALUES["lane_change_distances_m"])
+            ),
+            absolute_distance_m=(
+                self.fields["absolute_distance_m"].value
+                if self.is_evidence("absolute_distance_m")
+                else INERT_STATE_VALUES["absolute_distance_m"]
+            ),
         )
 
     def is_evidence(self, name: str) -> bool:
@@ -564,6 +607,11 @@ def safety_inputs_from_observation(
         "last_lane_change_time_s": structural(state.last_lane_change_time_s),
         "lane_changes_last_km": structural(state.lane_changes_last_km),
         "lane_change_distances_m": structural(list(state.lane_change_distances_m)),
+        # validator round 1, F1 follow-up: read by _lane_change_count_exceeded
+        # inside the window branch, alongside lane_change_distances_m, and by
+        # no other function -- structurally absent for the same reason as the
+        # three above (no odometry sensor exists on this rig at all).
+        "absolute_distance_m": structural(state.absolute_distance_m),
     }
     return SafetyInputs(fields=fields, density_max_age_s=density_max_age_s)
 
@@ -607,7 +655,14 @@ RULE_READS: dict[str, tuple[str, ...]] = {
     "all_lane_low_speed_occupancy": ("all_lanes_av_occupied", "av_mean_speed_mps", "downstream_congested"),
     "passing_lane_slow_hold": ("in_passing_lane", "local_mean_speed_mps"),
     "lane_change_dwell": ("last_lane_change_time_s",),
-    "lane_changes_per_km": ("lane_changes_last_km", "lane_change_distances_m"),
+    # absolute_distance_m added (validator round 1, F1 follow-up): read by
+    # _lane_change_count_exceeded's window branch alongside
+    # lane_change_distances_m, and previously in no rule's RULE_READS at
+    # all. Evaluability is NOT the generic "every field here must be
+    # evidence" rule for this entry -- see _lane_changes_per_km_missing,
+    # which computes it by which branch the tick's own
+    # lane_change_distances_m value actually selects.
+    "lane_changes_per_km": ("lane_changes_last_km", "lane_change_distances_m", "absolute_distance_m"),
     "target_lane_missing": ("target_lane_exists",),
     "target_lane_front_gap": ("target_lane_front_gap_m",),
     "target_lane_rear_gap": ("target_lane_rear_gap_m",),
@@ -752,6 +807,65 @@ RULE_ALIASED_PROVENANCE_FIELDS: dict[str, tuple[str, str]] = {
 #: an evaluable gap for a genuine target-lane measurement.
 TARGET_LANE_FRONT_GAP_SOURCE_SLOT = "leader_gap"
 
+#: validator round 1, F1 follow-up (found by the coordinator, 2026-09-12):
+#: `SafetyContext` and `SafetyState` are the complete set of containers
+#: `apply_safety_layer` reads sensed data from -- derived, not assumed, by
+#: the transitive closure of every function it calls: the only
+#: module-level data touched anywhere in that closure is
+#: `sim_contract.decode_speed_bin`/`decode_headway_bin`, contract constants
+#: rather than sensed values. `inert_context()` neutralises the first
+#: container; this table and `SafetyInputs.inert_state()` neutralise the
+#: second, which `run_safety_gate` was passing to `apply_safety_layer` RAW.
+#: Latent only because nothing on this rig ever advances these past their
+#: class defaults (`None`, `0`, `()`, and -- for `absolute_distance_m`, see
+#: below -- `0.0`), which happen to already be inert -- the same shape F1
+#: itself had before a policy emitted `slow`. `SafetyConstraints` needs no
+#: inert treatment: it is operator configuration, not sensing, so it was
+#: never a candidate for substitution in the first place, not an oversight.
+#:
+#: One uniform neutralisation policy cannot serve every rule this table
+#: feeds, and `lane_changes_per_km` is why: `_lane_change_count_exceeded`
+#: consults `lane_change_distances_m` (and `absolute_distance_m` alongside
+#: it) OR `lane_changes_last_km`, never both -- an alternative, not a
+#: conjunction -- so evaluability must be computed by WHICH BRANCH the
+#: inert-or-real `lane_change_distances_m` value actually selects, not by
+#: requiring every field in this table as evidence unconditionally (see
+#: `_lane_changes_per_km_missing`). The values below stay a single fixed
+#: substitution each; only which of them EVALUABILITY depends on, per
+#: tick, is rule-specific.
+#:
+#: Each entry derived from the one comparison the reading rule makes, the
+#: same way as `INERT_CONTEXT_VALUES`:
+INERT_STATE_VALUES: dict[str, Any] = {
+    # lane_change_dwell masks when `time_s - last < lane_change_dwell_s`;
+    # `_dwell_s` already special-cases `None` to mean "no lane change yet"
+    # (dwell = inf), so `None` is the value the code already treats as
+    # inert, not a new convention introduced here.
+    "last_lane_change_time_s": None,
+    # lane_changes_per_km's `_lane_change_count_exceeded` takes the
+    # window-based branch whenever `lane_change_distances_m` is non-empty
+    # and does not read `lane_changes_last_km` at all in that case; else it
+    # falls back to `lane_changes_last_km` directly. `()` is falsy, so it
+    # sends the function to the `lane_changes_last_km` branch; `0` there is
+    # below `max_lane_changes_per_km` for any positive threshold.
+    "lane_change_distances_m": (),
+    "lane_changes_last_km": 0,
+    # Read only inside the window branch, alongside `lane_change_distances_m`
+    # (`window_start = max(0.0, absolute_distance_m - 1000.0)`), and in NO
+    # rule's `RULE_READS` before this fix. `+inf` pushes `window_start` to
+    # `+inf`, so no real (finite) recorded distance can ever read as
+    # "recent" -- the same gap-inertness derivation as `leader_gap_m`,
+    # applied to a distance-since-start counter instead of a distance-ahead
+    # one. This field can never itself be evidence (no odometry sensor
+    # exists on this rig at all), so whenever the window branch is the one
+    # a tick's `lane_change_distances_m` selects, `lane_changes_per_km` is
+    # not_evaluable regardless of `lane_change_distances_m`'s own evidence
+    # -- a second sensor this rule needs that this rig will never have,
+    # the same shape as `forward_ttc`'s permanently-absent merge-conflict
+    # pair.
+    "absolute_distance_m": float("inf"),
+}
+
 
 @dataclass(frozen=True)
 class RuleRecord:
@@ -782,6 +896,102 @@ def _target_speed(action: Mapping[str, str], context: SafetyContext) -> float:
     )
 
 
+def _forward_ttc_missing(inputs: SafetyInputs, constraints: SafetyConstraints) -> tuple[str, ...]:
+    """`forward_ttc`'s evaluability, computed over the inputs the tick's
+    OWN firing condition actually consulted, not the static list of
+    inputs it might consult (validator round 1, corrected ruling --
+    the first version of this function, which required only a pair's
+    gap and relative speed together as a unit, was itself wrong: it
+    suppressed a real emergency brake on a genuinely measured 3 m gap
+    whenever that gap's relative speed was substituted, which is the
+    NORMAL state while a track is newly acquired --
+    `perception/observation_builder.py` sets a leader's gap to MEASURED
+    as soon as a leader exists, but its relative speed only once
+    `rel_speed_valid`, which lags by design).
+
+    `physical_control_command` fires forward_ttc's emergency override on
+    `ttc < min_forward_ttc_s OR hazard_gap < min_front_gap_m` -- two
+    disjuncts over the SAME operative pair (whichever of leader /
+    merge-conflict supplies the smaller gap, decided the same way as
+    before: a pair without gap evidence sits at its inert +inf, which can
+    never be the minimum). The two disjuncts do not need the same
+    evidence:
+
+    - the gap disjunct (`hazard_gap < min_front_gap_m`) reads only the
+      operative gap;
+    - the ttc disjunct reads the operative gap AND its relative speed.
+
+    So: if the operative gap itself lacks evidence, neither disjunct can
+    be evaluated at all. If it has evidence and is already close enough
+    to fire the gap disjunct, the OR is true regardless of the relative
+    speed's evidence -- the ttc disjunct's own answer cannot change the
+    result. Only when the gap disjunct reads false (on real evidence)
+    does the relative speed become necessary, because only then does the
+    ttc disjunct decide the outcome.
+    """
+    leader_gap_effective = (
+        inputs.fields["leader_gap_m"].value if inputs.is_evidence("leader_gap_m")
+        else INERT_CONTEXT_VALUES["leader_gap_m"]
+    )
+    merge_gap_effective = (
+        inputs.fields["merge_conflict_gap_m"].value if inputs.is_evidence("merge_conflict_gap_m")
+        else INERT_CONTEXT_VALUES["merge_conflict_gap_m"]
+    )
+    if merge_gap_effective < leader_gap_effective:
+        gap_field, relspeed_field = "merge_conflict_gap_m", "merge_conflict_relative_speed_mps"
+    else:
+        gap_field, relspeed_field = "leader_gap_m", "leader_relative_speed_mps"
+
+    if not inputs.is_evidence(gap_field):
+        # Neither disjunct can be evaluated without the operative gap.
+        return (
+            (gap_field,) if inputs.is_evidence(relspeed_field)
+            else (gap_field, relspeed_field)
+        )
+    if inputs.fields[gap_field].value < constraints.min_front_gap_m:
+        # The gap disjunct alone already makes the OR true; the ttc
+        # disjunct's relative-speed requirement never has to be asked.
+        return ()
+    # The gap disjunct read false on real evidence; only the ttc disjunct
+    # can still decide "fired", and it needs the relative speed too.
+    return () if inputs.is_evidence(relspeed_field) else (relspeed_field,)
+
+
+def _lane_changes_per_km_missing(inputs: SafetyInputs) -> tuple[str, ...]:
+    """`lane_changes_per_km`'s evaluability, computed over the inputs the
+    tick's own branch actually consulted (the same principle as
+    `_forward_ttc_missing`, validator round 1's correction: the first
+    version of this fix required both `lane_change_distances_m` and
+    `lane_changes_last_km` as evidence together, which was also wrong --
+    `_lane_change_count_exceeded` consults them as ALTERNATIVES, never
+    both, so requiring both would report `not_evaluable` on a tick whose
+    `lane_changes_last_km` is real evidence and decisive, only because an
+    unconsulted `lane_change_distances_m` happened to also lack it).
+
+    `_lane_change_count_exceeded` takes the window-based branch whenever
+    `lane_change_distances_m` -- after inert substitution, mirroring
+    `_forward_ttc_missing`'s gap comparison -- is non-empty, and reads
+    `lane_changes_last_km` only in the else branch. Whichever branch is
+    selected is the one whose fields must have evidence.
+
+    The window branch also reads `absolute_distance_m`, in no rule's
+    `RULE_READS` before this fix and never itself evidence (no odometry
+    sensor exists on this rig at all) -- so whenever the window branch is
+    the one selected, this rule is not_evaluable regardless of
+    `lane_change_distances_m`'s own evidence, the same shape as
+    `forward_ttc`'s permanently-absent merge-conflict pair: a second
+    sensor this rule needs that this rig will never have.
+    """
+    distances_effective = (
+        inputs.fields["lane_change_distances_m"].value if inputs.is_evidence("lane_change_distances_m")
+        else INERT_STATE_VALUES["lane_change_distances_m"]
+    )
+    if distances_effective:
+        window_fields = ("lane_change_distances_m", "absolute_distance_m")
+        return tuple(f for f in window_fields if not inputs.is_evidence(f))
+    return () if inputs.is_evidence("lane_changes_last_km") else ("lane_changes_last_km",)
+
+
 def _evaluate_one_rule(
     name: str,
     *,
@@ -791,7 +1001,12 @@ def _evaluate_one_rule(
     state: SafetyState,
     constraints: SafetyConstraints,
 ) -> RuleRecord:
-    missing = tuple(f for f in RULE_READS[name] if not inputs.is_evidence(f))
+    if name == "forward_ttc":
+        missing = _forward_ttc_missing(inputs, constraints)
+    elif name == "lane_changes_per_km":
+        missing = _lane_changes_per_km_missing(inputs)
+    else:
+        missing = tuple(f for f in RULE_READS[name] if not inputs.is_evidence(f))
     if missing:
         evidence = {f"{f}_source": inputs.fields[f].source for f in missing}
         return RuleRecord(status=RULE_NOT_EVALUABLE, missing=missing, evidence=evidence)
@@ -1000,16 +1215,26 @@ def run_safety_gate(
     when any of its guards could not be evaluated (open item 1), rather than
     letting an unevaluated guard's "safe" default speak for it.
 
-    `apply_safety_layer` is run against `inputs.inert_context()`, not the raw
-    `inputs.context()` (validator round 1, F1) -- every field this tick
-    lacks evidence for is replaced by its `INERT_CONTEXT_VALUES` entry before
-    it reaches the decision, so a not_evaluable rule cannot move the number
+    `apply_safety_layer` is run against `inputs.inert_context()` and
+    `inputs.inert_state(state)`, not the raw `context`/`state` (validator
+    round 1, F1, and its follow-up: `SafetyContext` and `SafetyState` are
+    the complete set of containers the decision reads sensed data from --
+    derived from `apply_safety_layer`'s own transitive call closure, not
+    assumed). Every field either container lacks evidence for is replaced
+    by its `INERT_CONTEXT_VALUES`/`INERT_STATE_VALUES` entry before it
+    reaches the decision, so a not_evaluable rule cannot move the number
     the driver is shown even when the observation's own substituted value
     for that field is not itself inert (`local_density_veh_per_km`'s 0.0
     default was the reproduced case: 0.0 is BELOW the uncongested threshold,
     the opposite of inert). `evaluate_rules`'s census, below, keeps reading
-    the unmodified `context()` -- the record must still say what was
+    the unmodified `context`/`state` -- the record must still say what was
     actually observed, not what the decision was neutralised against.
+
+    This closes the invariant along one axis only (which containers the
+    decision reads are neutralised); `forward_ttc`'s own evaluability
+    computation (`_forward_ttc_missing`) closes a second, different axis --
+    an evidence requirement wider than the comparison that actually
+    determines the rule's result.
 
     `enabled=False` (validator round 1, F2/F3 -- `safety.enabled`) is the
     actual rollback mechanism `config.yaml`/`ARCHITECTURE.md` had wrongly
@@ -1033,7 +1258,8 @@ def run_safety_gate(
 
     if enabled:
         inert_context = inputs.inert_context()
-        decision = apply_safety_layer(action, state, inert_context, constraints)
+        inert_state = inputs.inert_state(state)
+        decision = apply_safety_layer(action, inert_state, inert_context, constraints)
         bounded_speed = decision.target_speed_mps
         bounded_headway = decision.target_headway_s
         bounded_lane_action = decision.lane_action

@@ -3266,20 +3266,130 @@ would have failed is absent rather than wrong.
      contrapositive (all twelve rules `not_evaluable`: `bounded_speed_mps ==
      proposed_speed_mps`, the lane action is `None` by withholding rather than by masking,
      `emergency_override is False`), plus the headway carve-out (`create_gap`'s merge bonus is
-     the one unconditional transformation `apply_safety_layer` makes -- verified by reading the
-     function end to end: every other returned value is either a plain decode with no rule
-     involved, or moves only inside one of the twelve rules' own `if`/`elif` body). Every new
-     assertion was checked by neutering the mechanism it pins (`inert_context` monkeypatched
-     back to the raw context) and confirming the reproduction's own assertion then failed.
+     the only unconditional transformation of a value the gate REPORTS -- see the R2-2
+     correction below; the first draft of this claim omitted that qualifier and was wrong).
+     Every new assertion was checked by neutering the mechanism it pins (`inert_context`
+     monkeypatched back to the raw context) and confirming the reproduction's own assertion
+     then failed.
 
-     One exception found while writing this, not fixed: `forward_ttc`'s `RULE_READS` requires
-     the merge-conflict pair as evidence (`merge_conflict_gap_m`,
-     `merge_conflict_relative_speed_mps`), always class (C) on this rig, so its census reads
-     `not_evaluable` even on a tick where the leader pair alone (real evidence: `leader_gap_m`
-     3.0 m, `leader_relative_speed_mps` -5.0 m/s, closing) correctly drives
-     `emergency_override`. The decision is correct here; only the census label undersells it.
-     Narrowing `forward_ttc`'s evaluability criterion to the operative (smaller) pair alone is
-     a decision-3-level call, left to the plan owner rather than made in this pass.
+     **`forward_ttc` and `lane_changes_per_km`: found not evaluable while genuinely fired,
+     fixed, corrected twice more, and the corrections are the more important record than the
+     first fix.** Round 1 first reported this as a exception left for the plan owner
+     (`forward_ttc`'s `RULE_READS` requires the always-class-(C) merge-conflict pair, so its
+     census read `not_evaluable` even while a real leader correctly drove
+     `emergency_override`). The coordinator overruled that: it is derivable, not a preference,
+     and shipping it was task 144's own headline defect on one of its twelve rules. Three
+     rulings followed, each correcting the previous one after the coordinator reproduced a
+     counter-example against the fix just made:
+
+     1. First ruling: evaluability is the pair (gap + relative speed together) that
+        `_forward_hazard`'s `min()` selects, mirroring `INERT_CONTEXT_VALUES`. Reproduced as
+        broken by the coordinator: `leader_gap` measured (3.0 m) with `leader_relative_speed`
+        substituted still fires `emergency_override` via the GAP alone
+        (`hazard_gap < min_front_gap_m`, one of `physical_control_command`'s two disjuncts),
+        so requiring the pair as a unit suppresses a real emergency brake on a genuinely
+        measured close gap -- and gap-measured/relative-substituted is the NORMAL state while
+        a track is newly acquired (`observation_builder` tags gap `MEASURED` as soon as a
+        leader exists, relative speed only once `rel_speed_valid`).
+     2. Corrected principle: **evaluability must be computed over the inputs the predicate
+        actually consulted on this tick, not the static list it might consult.** For
+        `forward_ttc`, per disjunct: the gap disjunct consults only the operative gap; the ttc
+        disjunct consults the gap and its relative speed, and only needs to be asked when the
+        gap disjunct itself reads false on real evidence. `_forward_ttc_missing`
+        (`policy/safety_gate.py`) implements exactly this.
+     3. The same principle, applied to the state pair the coordinator found in parallel (see
+        below), needed its own correction too: an inert value derived correctly (`0`/`()` for
+        `lane_changes_last_km`/`lane_change_distances_m`) is not the same claim as "both
+        fields are needed together" -- `_lane_change_count_exceeded` consults them as
+        ALTERNATIVES (whichever branch `lane_change_distances_m`, after substitution, selects),
+        never both.
+
+     **The state pair: `inert_state()`, found missing entirely, not narrowed.** The coordinator
+     derived, from the transitive closure of every function `apply_safety_layer` calls, that
+     `SafetyContext` and `SafetyState` are the complete set of containers the decision reads
+     sensed data from (the only module-level data touched anywhere in that closure is
+     `sim_contract`'s two decoders, contract constants rather than sensed values).
+     `inert_context()` neutralised the first; `run_safety_gate` was passing the second to
+     `apply_safety_layer` RAW. Reproduced: a `SafetyState` with `last_lane_change_time_s=995.0`
+     (`time_s=1000.0`, 5 s dwell against the 15 s default) masks a lane action while
+     `lane_change_dwell`'s own census reads `not_evaluable` regardless of the real state's
+     value; the same shape for `lane_changes_last_km`. Latent only because nothing on this rig
+     ever advances these past their class defaults (`None`/`0`/`()`), which happen to already
+     be inert -- the exact shape F1 itself had before a policy emitted `slow`, and it would not
+     have stayed latent: `pipeline.py`'s own comment holds the `SafetyState` rather than
+     rebuilding it "so a future detector has somewhere to write." Fixed:
+     `SafetyInputs.inert_state(state)`, called by `run_safety_gate` alongside
+     `inert_context()`.
+
+     **`absolute_distance_m`: a fourth field, read by one rule, in no `RULE_READS` entry before
+     this fix.** `_lane_change_count_exceeded`'s window branch reads it alongside
+     `lane_change_distances_m`
+     (`window_start = max(0.0, absolute_distance_m - 1000.0)`), and it can never itself be
+     evidence -- no odometry sensor exists on this rig at all. Consequence, found by applying
+     the per-tick-consulted-inputs principle rather than assumed: whenever a tick's
+     `lane_change_distances_m` selects the window branch, `lane_changes_per_km` is
+     `not_evaluable` regardless of `lane_change_distances_m`'s own evidence -- a second sensor
+     this rule needs that this rig will never have, the same shape as `forward_ttc`'s
+     permanently-absent merge-conflict pair. `SafetyState` has six fields; three were already
+     covered (`last_lane_change_time_s`, `lane_changes_last_km`, `lane_change_distances_m`);
+     `absolute_distance_m` is now a fourth. The remaining two
+     (`distance_since_window_start_m`, `last_lane_index`) are read by no function
+     `apply_safety_layer` reaches at all and need no evidence gating.
+
+     **One uniform neutralisation policy cannot serve all twelve rules, and the record should
+     say why rather than let a later reader re-derive it or get it wrong the way this task
+     did, twice.** Rule-granularity (does the WHOLE rule have evidence) is provably sufficient
+     for ten of the twelve. It is provably insufficient for `forward_ttc` (per-disjunct
+     evidence; the pair-granularity attempt suppressed a real emergency brake) and for
+     `lane_changes_per_km` (per-branch evidence; requiring both fields together would report
+     `not_evaluable` on a tick whose `lane_changes_last_km` is real evidence and decisive, only
+     because the unconsulted `lane_change_distances_m` also lacked it). The
+     per-tick-consulted-inputs principle is what reconciles all twelve without a rule-by-rule
+     special case for its own sake.
+
+     **`SafetyInputs.state()` deleted.** Had zero callers (`run_safety_gate` always used its
+     own `state` argument); left beside the new `inert_state()` it was exactly the trap a later
+     reader would have wired to by mistake.
+
+     **The grid test needed a third axis.** Twelve rules times evidence/no-evidence cannot
+     express `leader_gap` measured with `leader_relative_speed` substituted -- the case that
+     defeated the first `forward_ttc` ruling. `tests/test_safety_gate.py`'s grid now has three
+     axes: default vs non-default `SafetyState`, full evidence per rule, and PARTIAL evidence
+     within one rule's own reads (the axis `forward_ttc` needed). Fifteen cases across the
+     twelve rules (`forward_ttc` and `lane_change_dwell`/`lane_changes_per_km` each get more
+     than one, since a single case cannot exercise both a rule's correctness-when-evidenced and
+     its behaviour under the specific non-default/partial-evidence shape that broke it). Run
+     against a version with both follow-up fixes neutered (`inert_state` reverted to a raw
+     passthrough, `_forward_ttc_missing` reverted to the generic rule): finds exactly the four
+     cases the corrections above named (`forward_ttc` x2, the two state-based
+     `lane_change_dwell`/`lane_changes_per_km` cases) and no others -- the nine cases
+     unaffected by either follow-up fix still hold under that neutering, confirming the grid
+     discriminates rather than failing wholesale.
+
+     **`emergency_override` re-confirmed 0 of 3,913 on the real corpus after all of the
+     above.** Expected: no tick in `outputs/task42_usb/` has a measured leader (`leader_gap` is
+     `fallback_neutral` on all 3,913 per the F5 provenance finding), so neither the corrected
+     `forward_ttc` nor `inert_state()` had anything real to act on here. Measured directly,
+     matching the expectation exactly.
+
+     **R2-2: the merge bonus is NOT the only unconditional transformation `apply_safety_layer`
+     makes, and the test that claimed it was has been corrected.** Reproduced by the
+     coordinator: on a `SafetyContext` at its defaults (every rule `not_evaluable`), varying
+     only `ego_speed_mps` moves `physical_control_command`'s `acceleration_mps2` --
+     `ego_speed_mps 0.0` gives one acceleration, `ego_speed_mps 25.0` gives another (clamped at
+     `max_decel_mps2`; the specific numbers are not the claim under test and are not pinned by
+     either measurement taken of them). `ego_speed_mps` is deliberately absent from
+     `INERT_CONTEXT_VALUES` because it gates none of the twelve rules, so this is a second
+     unconditional transformation, of an unevidenced field, that the first version of this
+     test's docstring said did not exist. It is harmless today for a narrower reason than "no
+     other unconditional transformation exists": `SafetyGateResult` has no `acceleration_mps2`
+     field at all -- `run_safety_gate` discards `SafetyDecision.acceleration_mps2` outright.
+     That is the actual reason, and it is now the one the test states and asserts (checking
+     `SafetyGateResult`'s own dataclass fields), because it is what tells a later agent
+     plumbing an acceleration advisory into the record that there is something else to gate,
+     where the old text said there was nothing left. Renamed to
+     `test_the_merge_bonus_is_the_only_unconditional_transformation_of_a_value_the_gate_reports`;
+     the headway assertions themselves are unchanged.
 
      **F2 (blocking), fixed.** `withhold_lane_when_not_evaluable` never controlled the speed
      or headway; `config.yaml`, `ARCHITECTURE.md` and the plan's decision 3 all documented it
@@ -3348,17 +3458,34 @@ would have failed is absent rather than wrong.
      convention), rendered in words: "recommended speed raised on N of M ticks ...; lowered on
      N of M ticks ...".
 
-     **F7, fixed for the one surface it was safe to touch.**
-     `Advisory.speed_display_withheld` was read by nothing. `ui/dashboard.py`'s
-     recommended-speed line (pulled into `_recommended_speed_line`, unit-testable without
-     `cv2`) now shows "WITHHELD (override)" in red instead of a number.
-     `advisory_message_from_advisory`/`AdvisoryMessage` (`transport/messages.py`) deliberately
-     NOT extended with this field: doing so would change the bytes
-     `specs/transport_golden_frames.json` pins for its `message_advisory` case (a "protocol
-     change" per that test file's own docstring), and regenerating it runs
-     `scripts/generate_transport_golden_frames.py` -- `scripts/` was another agent's active
-     file this round. Left undone and reported here rather than silently done or silently
-     skipped.
+     **F7: the dashboard honours the flag; the phone frame does not, and does not yet.**
+     `Advisory.speed_display_withheld` was read by nothing before this round.
+     `ui/dashboard.py`'s recommended-speed line (pulled into `_recommended_speed_line`,
+     unit-testable without `cv2`) now shows "WITHHELD (override)" in red instead of a number.
+     Stated plainly, because "F7 fixed" must not be misread as "the driver cannot see the
+     withheld number": **on an override, the on-device dashboard withholds the speed; the
+     phone frame still carries and shows it.** `speed_display_withheld` appears in
+     `pipeline.py`, `ui/dashboard.py`, `policy/advisory.py` and `tests/test_dashboard.py`, and
+     nowhere under `transport/`.
+
+     `advisory_message_from_advisory`/`AdvisoryMessage` deliberately NOT extended with this
+     field, and the reason is narrower than "the function was off limits": **changing a wire
+     field's VALUE does not move `AdvisoryMessage`'s frame layout; ADDING a field does, and
+     only the second invalidates `specs/transport_golden_frames.json`'s pinned bytes for the
+     `message_advisory` case.** `advisory_message_from_advisory` WAS edited in this same round
+     -- F8/Fix 9 changed which `Advisory` attribute populates the existing `headway_target_s`
+     wire field (`headway_display_s` instead of `headway_target_s`), and that edit is safe for
+     exactly this reason: the field set and its encoding are unchanged, so the golden bytes for
+     any message that does not exercise the specific value that changed are unaffected, and the
+     golden test itself never calls this function at all (it constructs `AdvisoryMessage`
+     directly with hand-written field values). Adding `speed_display_withheld` as a NEW field
+     is the different, "protocol change" case that function's own docstring means (per
+     `tests/test_transport_golden.py`): it would change the encoded byte set for every
+     `message_advisory` case, and regenerating the golden file runs
+     `scripts/generate_transport_golden_frames.py`, in another agent's active directory this
+     round (`scripts/`). If adding the field turns out to be cheap once that script is free,
+     it is a follow-up, not something to do now with two agents in the transport specs at
+     once.
 
      **F9/Fix 8, fixed.** `merge_text` is decoded from the policy's raw `merge_mode` and is not
      one of the twelve rules, so it survived lane withholding untouched -- "Creating merge gap"
