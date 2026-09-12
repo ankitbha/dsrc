@@ -17,6 +17,14 @@ Per his standing instruction the earlier workshop paper is referred to but not d
 Not the simulation, and not the observation result. A system was built and driven in a
 car, and that is the paper.
 
+**One boundary belongs here rather than in a later section, because every claim below
+inherits it: the advisory never influenced driving.** The human drove; the app did not
+interfere. An experiment in which an advisory moves a driver would need IRB approval this
+project does not have, and on one vehicle it would establish nothing about flow even with
+it. So "deployed" here means the system ran on a road and computed its outputs there, not
+that anything acted on them. The full statement, with what the drives do therefore test, is
+under "The advisory never influenced driving, and that is a boundary, not an omission".
+
 ## What was built --- DESIGN
 
 ```text
@@ -46,8 +54,9 @@ since both devices are powered from the car.
 
 **The safety and etiquette filters.** `deployment/jetson/policy/safety_gate.py`, vendored from
 `src/safety/safety_layer.py`, `etiquette.py` and `constraints.py`. The advisory passes the filter
-before it reaches the driver, and the filter's twelve rules each record whether they could be
-evaluated at all.
+before it is displayed, and the filter's twelve rules each record whether they could be
+evaluated at all. Displayed, not actuated: nothing acts on the advisory and nobody was asked
+to --- see "The advisory never influenced driving" below.
 
 Stated carefully, because the obvious shorter sentence is false. When this was first written the
 vendored filter had no caller outside its own test: nothing under `deployment/` imported it, and
@@ -135,7 +144,9 @@ failed and the app was installed on the Nord in the car, with the swap recorded
 automatically in `installed_apk.json`.
 
 * **Six shadow runs**, 17,948 ticks, 45.9 to 47.7 km.
-* **Two live runs**, 4,981 ticks, 40.7 to 42.4 km, the controller gating for real.
+* **Two live runs**, 4,981 ticks, 40.7 to 42.4 km, the **sampling** controller gating
+  for real -- the phone applying sensor rate changes rather than the vehicle acting on an
+  advisory. No advisory was ever acted on; see the scope boundary above.
 * **First working GPS and first working HERE in the project.** Every bench run before had
   `gps_hz 0.0` and `here=false`.
 * On the shakedown: 1,632 ticks, 279.5 s, 6.24 km, mean 22.9 m/s, GPS valid on 1,299 of
@@ -320,6 +331,39 @@ Ankit's boundary, and it is written into the task list rather than argued here:
 
 Explicitly out of scope for the drives: any traffic-flow effect, human compliance with the
 advisory, and anything fleet-level.
+
+### The advisory never influenced driving, and that is a boundary, not an omission
+
+**No advisory this project computed has ever been acted on.** On every drive the human
+drove and the app did not interfere. The Jetson rendered a recommended speed on its own
+dashboard (`ui/dashboard.py`, drawn by `run_demo.py` on the main thread); nothing actuated
+it, nobody was asked to follow it, and no measurement in this project depends on anyone
+having followed it.
+
+Two independent reasons, either sufficient on its own, and the paper should give both
+rather than leave a reader to supply one:
+
+1. **An experiment in which an advisory influences a human driver requires IRB approval.**
+   This project has none, and the study that approval would authorise is not the study
+   that was run.
+2. **One instrumented vehicle cannot produce a flow effect.** Even with approval, a
+   compliance experiment on a single car would establish nothing about throughput or
+   delay. The configuration that makes the deployment tractable is the same configuration
+   that makes the compliance question uninformative, so this is not a limitation waiting
+   on resources.
+
+What the drives therefore test is the system and not driving behaviour: the advisory
+calculation runs on real road inputs, the perception stack produces those inputs on a
+road, and the pipeline holds together at rate for the length of a drive. That is the
+deployment claim, and it is the whole of it.
+
+**One distinction to hold, because the word "live" appears on both sides of it.** The
+*sampling controller* does act for real: `RateCommand` carries sensor sampling rates
+(`rates`) and a `shadow` flag, and live mode is the phone applying a rate change the
+Jetson sent. The *driving advisory* acts in neither mode. "Live" has only ever described
+what the sensing configuration did; it has never described what the vehicle did. Whether
+a given run's phone applied its rate commands is recorded in that run's own applier
+counters rather than asserted here.
 
 **What the drives do establish is that both layers of the proposed deployment ran on a
 road at once.** The HERE query returned the advisory layer's actual inputs at one query
@@ -695,9 +739,15 @@ it is the one that has not driven.
 
 ## Open
 
-* **The HERE-observation policy has not yet been run on the device.** "What remains is
-  loading that policy onto the rig" was wrong, and is restated as task 145 in the
-  implementation records. After 145 the device-side runtime exists: it executes a DSRC
+* **The paper's controller has not yet computed an advisory from live road inputs.**
+  Read this as a gap in the *computation*, not in the deployment: no advisory this project
+  computes is ever acted on, by design and for the two reasons given under "The advisory
+  never influenced driving" above. What is missing is that the paper's controller has not
+  yet produced its advisory from a road's own HERE data, not that a produced advisory went
+  unused --- every advisory goes unused, deliberately.
+
+  "What remains is loading that policy onto the rig" was wrong, and is restated as task 145
+  in the implementation records. After 145 the device-side runtime exists: it executes a DSRC
   checkpoint from super-segment features, refuses a bundle whose network identity does not
   match its own, and reproduces `src.rl.src_q.greedy_actions` exactly on the 185 recorded
   decisions across the checkpoint's five held-out test seeds. What remains is three named
