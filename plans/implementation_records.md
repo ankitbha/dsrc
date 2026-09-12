@@ -3062,6 +3062,231 @@ would have failed is absent rather than wrong.
      (control replaced), `8a321fd` (control removed). Each by explicit pathspec, never `git
      add -A`, never a bare `git commit`.
 
+     **Validator round 1 (2026-09-12): two blocking findings, both confirmed by
+     independent reproduction before this round started, both fixed here.**
+
+     **B1.** Six tests looped over a recorded array with no length check:
+     `test_decode_headway_bin_matches_the_recorded_grid`,
+     `test_decode_speed_bin_matches_the_recorded_grid`,
+     `test_bin_index_matches_the_recorded_grid`,
+     `test_neutral_cooperation_matches_the_recorded_values`,
+     `test_action_values_and_their_order_match`, `test_action_profiles_match`. `derive()`
+     accumulates mismatches inside `for` loops; a loop that iterates zero times
+     contributes zero mismatches and an empty list, so emptying `decoders.headway_bin_s`
+     (3 entries), `decoders.speed_bin_mps` (15), `decoders.bin_index` (8) and
+     `neutral_cooperation` (2) in the committed golden file left the suite at 73 passed /
+     1 skipped, byte-identical to clean -- reproduced independently before this round.
+     The write side had the matching hole: setting `SPEED_BIN_FREE_FLOWS`,
+     `BIN_INDEX_VALUES` and `NEUTRAL_FREE_FLOWS` to `()` in the generator made it print
+     "the reference and the vendored contract agree on every recorded quantity" and exit
+     0, and mutation M4 (`bin_index`'s `>=` flipped to `>`) survived the full suite with
+     the collected count unchanged.
+
+     Fixed by adding the population check each test was missing: the four grid tests
+     now assert their recorded length explicitly (`headway_bin_s` 3, `speed_bin_mps` 15,
+     `bin_index` 8, `neutral_cooperation` 2), and the two action tests assert
+     set-equality of the recorded head/profile names against
+     `sim_contract.ACTION_HEADS`/`ACTION_PROFILES`. The generator now refuses to write
+     when a grid constant (`SPEED_BIN_FREE_FLOWS`, `BIN_INDEX_VALUES`,
+     `NEUTRAL_FREE_FLOWS`, or `sim_contract`'s own `HEADWAY_BIN_S`/
+     `SPEED_BIN_OFFSETS_MPS`) is empty, or when an emitted section's length disagrees
+     with what its source implies.
+
+     Considered and not used: converting the six tests to `@pytest.mark.parametrize`
+     over the recorded arrays, the form the finding suggested first. Checked directly
+     (a throwaway `@pytest.mark.parametrize("x", [])` test, this pytest version, 9.1.1):
+     an empty parametrized list produces one *skipped* test, not a failure -- the run's
+     exit code stays 0. That does not "confirm the suite fails," the validation step the
+     finding itself asks for, so the explicit length/set-equality assertion (the
+     finding's own named fallback for where parametrize is awkward) was used for all six
+     instead, uniformly, rather than mixing the two.
+
+     Proved, not merely argued: re-emptying the four sections in the golden file now
+     fails 5 of 75 tests (the four population assertions, plus
+     `test_regeneration_leaves_every_pre_existing_case_byte_identical` -- S3's fix below
+     reaching further than S3 alone asked), where before this round it was 73 passed / 1
+     skipped. Zeroing the three generator constants now prints `REFUSING: 3
+     disagreement(s)` naming all three, where before it wrote the file and exited 0.
+     Both re-verified clean afterward (`git diff` empty on both
+     `specs/sim_contract_golden_vectors.json` and
+     `scripts/generate_sim_contract_golden_vectors.py`).
+
+     **B2.** `_baseline_python_testcases()` accepted pytest's returncode 1 (a suite with
+     a failing test) but discarded the clean run's failing names (`_, total, usable =
+     failing_tests_in(baseline_dir)`), keeping only the count. `run()` then returned the
+     mutated run's failing names with no subtraction against that baseline, so any
+     pre-existing failure in the clean tree scored every mutation CAUGHT by it and
+     `survived` stayed empty -- confirmed with a planted `assert 1 == 2` test
+     (`test_zz_preexisting_failure`, added and removed for the check, never committed):
+     mutation M4 reported `CAUGHT (1) ... by test_zz_preexisting_failure`, `survived:
+     0`, exit 0.
+
+     Fixed: `_baseline_python_testcases()` now reads the failing names (still accepting
+     returncode 1 long enough to do so) and refuses, naming them, the moment there are
+     any -- never subtracting. The CAUGHT print used to show only `failed[0]`; it now
+     shows every failing name, since with several tests failing the first name alone
+     cannot say whether a mutation was caught by the test built for it or only by an
+     unrelated one also failing.
+
+     Proved: with the planted test present, `python3 scripts/remutate.py python
+     --name="bin_index's boundary"` printed `refusing: the clean Python tree already has
+     1 failing test(s) ... ['test_sim_contract.test_zz_preexisting_failure']` and
+     exited 1, instead of scoring CAUGHT. With the plant removed, the same command
+     reported `CAUGHT (2) ... by test_sim_contract.test_bin_index_matches_the_recorded_
+     grid, test_sim_contract.test_regeneration_leaves_every_pre_existing_case_byte_
+     identical` and exited 0 -- both names now visible, where the unfixed harness would
+     have printed only the first.
+
+     **A second route to the same failure, found while proving the first fix, not in
+     the original finding.** This branch had two other agents committing to it
+     throughout this round (144's fixer holding several files, including
+     `safety_gate.py` and `test_safety_gate.py`, mid-edit). Running the fixed gate
+     against the *live* worktree measured a momentarily clean baseline (no failing test
+     at that instant, 2530 testcases) and began applying mutations against it. A `git
+     status --porcelain` check at that same moment would have shown two modified
+     tracked files; nothing in the gate checked it. Confirmed concretely, not
+     hypothetically: a plain `pytest -q deployment/jetson/tests/` run against the live
+     tree minutes later, with that same edit still in progress, reported 2 failed /
+     2517 passed / 24 skipped in `test_safety_gate.py` -- exactly the shape of failure
+     B2 exists to refuse against, reached by a second door. The live-tree gate run in
+     progress at the time was interrupted by hand (SIGINT) rather than trusted;
+     confirmed afterward that its `finally` restored `sim_contract.py` (`git diff`
+     empty) and left no `.remutate-restore` sidecar. None of that run's printed numbers
+     are quoted anywhere in this record.
+
+     Fixed: `_refuse_if_tree_is_dirty()` now runs before any mutation is applied and
+     refuses whenever `git status --porcelain` shows a modified tracked file (untracked
+     files excepted), naming what is dirty. This gate must be run from its own `git
+     worktree add --detach`, never a tree another agent is also committing to -- stated
+     here because nothing in the tooling enforces it; the guard only refuses a live,
+     already-dirty tree, it does not create an isolated one.
+
+     **The gate's real verdict, re-run from a dedicated worktree** (`git worktree add
+     --detach <scratchpad>/gate_worktree_143_round1 2936427`, `.venv` symlinked in, torn
+     down after): baseline 2529 testcases, all 9 `sim contract:` mutations CAUGHT, 0
+     survived, 0 inconclusive, 0 did-not-build, exit 0. `M6` (an `ACTION_VALUES` order
+     reversed) and the two S4 additions below are now caught by
+     `test_the_second_pinned_digest_covers_what_the_fingerprint_does_not` in addition to
+     their original catchers -- S2 closing real ground, not only the coordinated-edit
+     case it was written for. `M3` (the `HEADWAY_BIN_S` edge S2 was written against)
+     is caught by that same new test plus its original two. Full table:
+
+     | mutation | caught by (count) |
+     |---|---|
+     | M1 field order | 17 |
+     | M2 a `FIELD_SCALES` value | 17 |
+     | M3 a `HEADWAY_BIN_S` bin edge | 3 (incl. the new S2 test) |
+     | M4 `bin_index`'s boundary | 2 |
+     | M5 the inf-clamp constant | 14 |
+     | M6 an `ACTION_VALUES` order reversed | 4 (incl. the new S2 test) |
+     | M7 `COOPERATION_FIELDS` order | 16 |
+     | S4: `SPEED_BIN_OFFSETS_MPS["slow"]` narrowed | 15 (spans `test_safety_gate.py`, `test_safety_gate_pipeline.py`, `test_score_safety.py` -- this value reaches real decisions, not only the golden file) |
+     | S4: `LANE_DISTRIBUTION_LANES` reordered | 6 (incl. the D13 case added for exactly this) |
+
+     **S2.** Added `PINNED_SECOND_FINGERPRINT` (`6ac1218184e2c3fa`), a digest over
+     `HEADWAY_BIN_S`, `SPEED_BIN_OFFSETS_MPS`, `COOPERATION_FIELDS`,
+     `LANE_DISTRIBUTION_LANES`, `ACTION_VALUES` and the `_number` inf-clamp's `200.0`
+     (typed by hand; it has no module-level name to read) -- same idiom as
+     `PINNED_FINGERPRINT`. Closes the coordinated-edit hole: `contract_fingerprint()`
+     hashes only `LOCAL_OBS_FIELDS` and `FIELD_SCALES`, so changing e.g.
+     `HEADWAY_BIN_S["larger"]` from 2.2 to 2.3 in both `sim_contract.py` and the golden
+     file at once moved neither it nor any golden-vector comparison test -- reproduced
+     independently before this round. The mutation table above shows this test also
+     catches ordinary, single-file mutations it was not written for (M3, M6, both S4
+     entries), not only the coordinated-edit case.
+
+     **S3.** `test_regeneration_leaves_every_pre_existing_case_byte_identical` compared
+     4 of the golden document's 12 top-level keys. Now asserts `fresh == DOCUMENT` after
+     that subset check. Reaches further than S3 alone asked: re-emptying the golden
+     sections for B1's proof above also fails this test now, since the freshly
+     regenerated document no longer matches the tampered one wholesale.
+
+     **S4.** Two mutations registered: `SPEED_BIN_OFFSETS_MPS["slow"]` narrowed −10.0 →
+     −8.0 (caught by 15 tests, reaching well beyond the golden file into
+     `test_safety_gate.py`/`test_safety_gate_pipeline.py`/`test_score_safety.py`) and
+     `LANE_DISTRIBUTION_LANES` reordered (caught by 6 tests, including the D13 case
+     added for exactly this -- without this entry nothing in the gate ever showed that
+     case catches anything). Not registered: removing `_number`'s `if
+     isinstance(value, bool): return float(value)` branch. It survives, but it is
+     inert: both bool-valued fields (`is_active`, `uncongested_low_speed_flag`) have
+     `FIELD_SCALES` of 1.0, so the branch removed and the `plain` branch it falls
+     through to compute the same thing (`float(True)/1.0 == float(True)`). It would
+     become separable only if a bool field were ever given a non-1.0 scale.
+     Registering a mutation that can never be caught for the wrong reason is worse than
+     not registering it.
+
+     **Recorded, not fixed (validator round 1's should-record items).**
+
+     `min_contextual_mps` is a hand-typed literal at
+     `scripts/generate_sim_contract_golden_vectors.py:442` that
+     `test_decode_speed_bin_matches_the_recorded_grid` feeds back in as an input rather
+     than deriving independently; changing `decode_speed_bin`'s own default from 12.0
+     to 8.0 leaves the suite unchanged, since every call site -- this test, the
+     generator's own derivation, and all three production call sites (`advisory.py`,
+     `safety_gate.py` x2) -- passes the value explicitly. It changes no device number
+     today. `neutral_cooperation`'s expected values are likewise hand-typed in the
+     generator, defensibly, since their source is `specs/observation_schema.md`, a spec
+     document rather than executable code. The generator's own docstring ("every
+     recorded quantity is derived twice") overstates the case by these two.
+
+     A residual risk the validator found and this task is not the place to close:
+     `local_density_bin` and `local_mean_speed_bin` come from `bin_index(value, edges)`
+     where the edges are configuration on both sides -- `config.yaml:74-75`
+     (`density_bin_edges_veh_per_km: [12.0, 30.0]`, `mean_speed_bin_edges_mps: [8.0,
+     18.0]`) on the device, `SensingConfig` plus the experiment YAML in the simulation.
+     They agree today and nothing checks it. Retrain under different edges and
+     `LOCAL_OBS_FIELDS`, `FIELD_SCALES`, `sim_contract.py` and `SIM_COMMIT` are all
+     untouched, every golden test still passes, the bundle still loads -- and
+     `local_density_bin = 1` means a different density than it did in training.
+     `sensing.range_m` is the same shape of risk. This belongs to the bundle manifest
+     task 145 owns, not to this task's contract. Also worth recording:
+     `actor_runtime.py:95` (`exported = self.manifest.get("contract_fingerprint")`)
+     accepts a manifest carrying no `contract_fingerprint` key at all without complaint
+     (`exported is None` short-circuits the check), so the device-side half of this
+     pair's coverage is conditional on the loaded bundle actually carrying one.
+
+     19 of the 74 tests measured before this round cannot be reached by any mutation of
+     `sim_contract.py`: the 14 `test_vector_sha256_matches_the_recorded_values`
+     parametrizations compare the golden file against itself; four more
+     (`test_the_file_declares_itself_frozen`, `test_case_names_are_unique`,
+     `test_the_note_carries_the_freeze_rule`,
+     `test_the_raw_json_contains_no_bare_nan_or_infinity_token`) check only properties
+     of the file itself; and `test_the_fingerprint_is_stable_across_calls` compares
+     `contract_fingerprint()` to itself, a tautology. All 19 are legitimate integrity
+     checks and stay; "74 passed" (75 after this round's own new test) overstates this
+     file's coverage of the vendored contract by 19, not by an error.
+
+     **L3, closed this round.** `ARCHITECTURE.md` was held by task 144's fixer for most
+     of this round; released mid-task (144's fixer's own edits to the file had landed at
+     `da764ca`) and addressed immediately. Section 6 no longer tells a reader to run the
+     test "on a machine where the sim imports" (no such machine exists) or names
+     `test_actor_state_dict_layout_matches_sim` (`2692c3b` deleted it, before
+     `test_actor_state_dict_layout_matches_the_recorded_layout` existed). Rewritten to
+     say what is true now: the golden file is the reference, `test_sim_contract.py`
+     imports no simulation module and runs on every machine, and regeneration against
+     `d477dba` is the separate step needing `git` and `torch` -- and skips where either
+     is absent, which includes the device (S2's own limit as recorded above, named so
+     this section cannot be read as claiming the live comparison also runs on the
+     Jetson). Committed alone at `5788aa1`.
+
+     **Suite counts.** Isolated worktree at this round's commit (`2936427`, via `git
+     worktree add --detach`, not the live tree): baseline 2529 testcases for the
+     mutation gate (above). Live tree, read after task 144's fixer's concurrent commit
+     landed (`dedd3c1`): `deployment/jetson/tests/` 2522 passed / 24 skipped / 0 failed
+     in 81.3s; `deployment/jetson/tests/test_sim_contract.py` alone, 75 passed / 0
+     skipped (74 before this round, +1 from S2's new test). The 24 skips are the same
+     USB-gated set as every prior measurement in this file; `test_sim_contract.py` has 0
+     skips on this machine (both `git` and `torch` are present).
+
+     **Commits** (branch `mainz-src-port`): `5788aa1` (`ARCHITECTURE.md`, alone, L3),
+     `2936427` (B1/B2/S2/S3/S4 fixes across `test_sim_contract.py`,
+     `generate_sim_contract_golden_vectors.py`, `remutate.py`, including the dirty-tree
+     guard). Each by explicit pathspec, never `git add -A`, never a bare `git commit`.
+     `deployment/jetson/policy/safety_gate.py` and
+     `deployment/jetson/tests/test_safety_gate.py` were left exactly as task 144's
+     fixer's own work throughout -- confirmed untouched by `git diff` immediately before
+     each commit above, and clean (0 diff) once that fixer's own `dedd3c1` landed.
+
 144. **The safety and etiquette layer runs nowhere.** Implemented 2026-09-12
      (implementer-144) against `plans/plan_task144_safety_layer_on_device.md`. The plan's
      sign-off checklist (its own last section) is unaddressed, by the plan's own statement,
