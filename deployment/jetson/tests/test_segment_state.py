@@ -97,6 +97,46 @@ def write_swapped_definition(tmp_path) -> str:
     return str(path)
 
 
+def write_adjacent_definition(tmp_path) -> str:
+    """Two segments 40 m apart -- both within the 60 m match tolerance of
+    a link that sits close to one of them, at a scale a unit test can
+    check exactly. Reproduces the validator's finding on the real Mainz
+    network (11 of 66 segment pairs have polylines within 60 m of each
+    other, and 3 of 12 links in the tests'/bench's synthetic feed were
+    claimed by two segments each)."""
+    definition = {
+        "network_id": "test_net",
+        "feature_names": ["speed", "free_flow", "jam_factor", "lanes", "length_km"],
+        "action_fractions": [0.5, 0.75, 1.0],
+        "segments": [
+            {
+                "segment_id": "0", "edge_ids": ["e0"], "lanes": 2.0,
+                "speed_limit_kmh": 60.0, "length_km": 1.0,
+                "edges": [{
+                    "edge_id": "e0", "lanes": 2.0, "length_m": 1000.0,
+                    "speed_limit_kmh": 60.0,
+                    "polyline": straight_polyline(SEG0_LAT, SEG0_LON, 1000.0),
+                }],
+            },
+            {
+                "segment_id": "1", "edge_ids": ["e1"], "lanes": 2.0,
+                "speed_limit_kmh": 60.0, "length_km": 1.0,
+                "edges": [{
+                    "edge_id": "e1", "lanes": 2.0, "length_m": 1000.0,
+                    "speed_limit_kmh": 60.0,
+                    "polyline": [
+                        list(offset(SEG0_LAT, SEG0_LON, north_m=40.0, east_m=e))
+                        for e in (0.0, 500.0, 1000.0)
+                    ],
+                }],
+            },
+        ],
+    }
+    path = tmp_path / "network_adjacent.json"
+    path.write_text(json.dumps(definition))
+    return str(path)
+
+
 def link_on(lat: float, lon: float, east_m: float, *, speed_mps: float,
            free_flow_mps: float = 30.0, jam_factor: float | None = 2.0) -> FlowLink:
     points = tuple(tuple(p) for p in straight_polyline(lat, lon, east_m))
@@ -252,6 +292,29 @@ class TestMatchTolerance:
         result = builder.build((link, link_on(SEG1_LAT, SEG1_LON, 1000.0, speed_mps=25.0)),
                                ok_reading(), t_mono=0.0)
         assert result.segment_basis[0] == SEGMENT_BASIS_SUBSTITUTED
+
+
+class TestLinkToSegmentPartition:
+    """Validator round 1, fix 3: `build` used to test every segment
+    independently with no exclusivity and no `break` -- a link within
+    tolerance of two segments' polylines was credited to both. Only the
+    single nearest segment (argmin over segments of the min vertex
+    distance) is credited now, reproducing the simulator's own exclusive
+    partition of the road network."""
+
+    def test_a_link_between_two_close_segments_matches_only_the_nearer_one(self, tmp_path):
+        builder = SegmentStateBuilder(write_adjacent_definition(tmp_path), match_tolerance_m=60.0)
+        # 5 m north of segment 0's polyline and (40 - 5) = 35 m south of
+        # segment 1's -- both inside the 60 m tolerance under the old
+        # any-within-tolerance rule, so the old code would have credited
+        # this one link to both segments.
+        near_lat, near_lon = offset(SEG0_LAT, SEG0_LON, north_m=5.0, east_m=500.0)
+        link = link_on(near_lat, near_lon, 200.0, speed_mps=20.0)
+
+        result = builder.build((link,), ok_reading(), t_mono=0.0)
+
+        assert result.matched_links == (1, 0)
+        assert result.segment_basis == (SEGMENT_BASIS_MEASURED, SEGMENT_BASIS_SUBSTITUTED)
 
 
 class TestBuilderProperties:

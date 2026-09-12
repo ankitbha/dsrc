@@ -207,9 +207,23 @@ class SegmentStateBuilder:
         for link in links:
             if link.speed_mps is None:
                 continue
+            # The single nearest segment, not every segment within
+            # tolerance: with no exclusivity and no argmin, a link near two
+            # segments' polylines (11 of 66 segment pairs in the Mainz
+            # network are within 60 m of each other) was credited to both,
+            # so a segment could read "measured" on a link that actually
+            # describes its neighbour. The simulator's own super-segments
+            # are an exclusive partition of the road network, so this
+            # reproduces that partition rather than approximating it.
+            best_index, best_distance = None, None
             for index, points in enumerate(self._segment_points):
-                if any(link.distance_m(lat, lon) <= self.match_tolerance_m for lat, lon in points):
-                    matched_speeds_kmh[index].append(link.speed_mps * 3.6)
+                if not points:
+                    continue
+                distance = min(link.distance_m(lat, lon) for lat, lon in points)
+                if best_distance is None or distance < best_distance:
+                    best_distance, best_index = distance, index
+            if best_index is not None and best_distance <= self.match_tolerance_m:
+                matched_speeds_kmh[best_index].append(link.speed_mps * 3.6)
 
         matched_counts = tuple(len(values) for values in matched_speeds_kmh)
         basis = tuple(
