@@ -434,8 +434,16 @@ etiquette layer, `src/safety/safety_layer.py` with `etiquette.py` and `constrain
 heads are inert -- `lane_preference` and `merge_mode` are discarded, and
 `desired_headway_bin` feeds back only into the agent's own observation because SUMO's
 `tau` is never set -- so of four heads one acts on the world, one acts on the observation
-and two act on nothing, and the safety layer never runs. The gate is real on the device
-and implicit in the simulation, and the paper cannot claim the two are the same rule.
+and two act on nothing, and the safety layer never runs.
+
+**The gate is wired on the device and implicit in the simulation, and the paper cannot claim
+the two are the same rule.** Two qualifications, because "real on the device" was the original
+wording and it claimed more than the repository supported. First, it was not wired at all until
+task 144: the vendored filter's only caller was its own test. Second, now that it is wired, it
+is *present and recorded* rather than *observed to act* -- only three of its twelve rules can
+ever be evaluable on this rig, each needing a tracked leader, and no recorded tick has one. So
+the asymmetry the paper describes is real and larger than first stated: in simulation the layer
+cannot run, and on the device it runs and has never had the evidence to bind.
 
 ## Where this sits
 
