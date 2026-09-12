@@ -3211,6 +3211,30 @@ would have failed is absent rather than wrong.
      harness (`deployment/jetson/bench_dsrc_latency.py`) is built and runs, so measuring it
      is a rerun rather than new code.
 
+     **experiment_dsrc, 2026-09-12: the latency figures are now a committed artefact rather
+     than prose.** `results/latency/dsrc_stages_devmachine.json` and its `.log`, committed at
+     `f3d27ae`. Four repeats of `bench_dsrc_latency.py --ticks 300`, every one at full
+     coverage (300 of 300 ticks matched), run in a detached worktree at `d976dcc` rather
+     than the live tree, whose HEAD was a different commit carrying another agent's
+     uncommitted work. `segment_assemble` p50 29.91 to 30.16 ms across the four; `dsrc_infer`
+     p50 0.0274 ms on the one idle repeat and 0.0417 to 0.0539 ms on the three that ran while
+     task 143's mutation gate drove the full Jetson suite in another worktree.
+
+     That contention is recorded rather than averaged away, because it reconciles the three
+     different `dsrc_infer` figures this record now carries -- 0.029 ms above, the
+     validator-round-2 note's 0.027 ms, and 0.042 to 0.054 ms here -- which would otherwise
+     read as a regression. It moved one stage and not the other: `segment_assemble`'s p50
+     spread across all four repeats is 0.25 ms on a roughly 30 ms quantity, while
+     `dsrc_infer`'s contended p50 is about 1.5 to 2 times its idle one. Neither changes a
+     conclusion, since both stages sit more than three orders of magnitude inside the 60 s
+     decision interval.
+
+     Three things the artefact does not establish, stated in the file itself: the Orin
+     number, which still needs the device; behaviour on a recorded drive, since `--here-log`
+     was not given and the synthetic input is the favourable case -- every segment matches,
+     so both stages do their full work every tick; and anything at all about whether the
+     advisory is correct.
+
      **Two things the plan got wrong, found while implementing it, corrected rather than
      followed literally.**
 
