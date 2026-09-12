@@ -111,6 +111,12 @@ def export(
 
     segment_ids = [list(segment["edge_ids"]) for segment in definition["segments"]]
     speed_limits = [float(segment["speed_limit_kmh"]) for segment in definition["segments"]]
+    lanes = [float(segment["lanes"]) for segment in definition["segments"]]
+    length_kms = [float(segment["length_km"]) for segment in definition["segments"]]
+    polylines = [
+        [(float(lat), float(lon)) for edge in segment["edges"] for lat, lon in edge["polyline"]]
+        for segment in definition["segments"]
+    ]
     feature_names = list(definition["feature_names"])
     network_id = definition["network_id"]
 
@@ -124,16 +130,22 @@ def export(
         "feature_names": feature_names,
         "segment_ids": segment_ids,
         "segment_speed_limits_kmh": speed_limits,
+        "segment_lanes": lanes,
+        "segment_length_km": length_kms,
         "action_fractions": list(SPEED_ACTION_FRACTIONS),
-        # Everything above this line, in one hash. DsrcRuntime recomputes
-        # this from its OWN network definition and refuses on any
-        # difference -- the individual fields above are carried for
-        # audit, not re-checked field by field at load time.
+        # Everything above this line, plus a hash of the polylines (not
+        # carried here directly -- segment 5 alone is 490 vertices), in one
+        # hash. DsrcRuntime recomputes this from its OWN network definition
+        # and refuses on any difference -- the individual fields above are
+        # carried for audit, not re-checked field by field at load time.
         "network_fingerprint": network_fingerprint(
             network_id=network_id,
             feature_names=feature_names,
             segment_ids=segment_ids,
             segment_speed_limits_kmh=speed_limits,
+            segment_lanes=lanes,
+            segment_length_km=length_kms,
+            segment_polylines=polylines,
         ),
         # Risk 1 in plan_task145: nothing in best.pt records which network it
         # was trained on. This does not prove the pairing, only makes it

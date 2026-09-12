@@ -106,16 +106,39 @@ class DsrcRuntime:
         self.segment_speed_limits_kmh: tuple[float, ...] = tuple(
             float(segment["speed_limit_kmh"]) for segment in definition["segments"]
         )
+        self.segment_lanes: tuple[float, ...] = tuple(
+            float(segment["lanes"]) for segment in definition["segments"]
+        )
+        self.segment_length_km: tuple[float, ...] = tuple(
+            float(segment["length_km"]) for segment in definition["segments"]
+        )
+        self.segment_polylines: tuple[tuple[tuple[float, float], ...], ...] = tuple(
+            tuple(
+                (float(lat), float(lon))
+                for edge in segment["edges"]
+                for lat, lon in edge["polyline"]
+            )
+            for segment in definition["segments"]
+        )
         self.num_segments = len(self.segment_ids)
         self.num_features = len(self.feature_names)
         self.num_actions = len(SPEED_ACTION_FRACTIONS)
 
-        device_fingerprint = network_fingerprint(
+        # Exposed publicly (not just used locally below) so a paired
+        # SegmentStateBuilder/SegmentAdvisoryDecoder -- constructed
+        # independently, from their own copy of the network definition --
+        # can be handed this value and refuse a mismatch the same way this
+        # constructor refuses a bundle whose fingerprint disagrees.
+        self.network_fingerprint = network_fingerprint(
             network_id=self.network_id,
             feature_names=self.feature_names,
             segment_ids=self.segment_ids,
             segment_speed_limits_kmh=self.segment_speed_limits_kmh,
+            segment_lanes=self.segment_lanes,
+            segment_length_km=self.segment_length_km,
+            segment_polylines=self.segment_polylines,
         )
+        device_fingerprint = self.network_fingerprint
         bundle_fingerprint = self.manifest.get("network_fingerprint")
         if bundle_fingerprint is None:
             raise RuntimeError(

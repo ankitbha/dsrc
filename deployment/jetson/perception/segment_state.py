@@ -39,7 +39,7 @@ from pathlib import Path
 
 import numpy as np
 
-from policy.dsrc_contract import jam_factor
+from policy.dsrc_contract import jam_factor, network_fingerprint
 from sensors.here_feed import FlowLink, FlowReading, Outcome
 
 JETSON_DIR = Path(__file__).resolve().parents[1]
@@ -113,6 +113,7 @@ class SegmentStateBuilder:
         network_definition_path: Path | str = DEFAULT_NETWORK_DEFINITION_PATH,
         *,
         match_tolerance_m: float = SEGMENT_MATCH_TOLERANCE_M,
+        expected_network_fingerprint: str | None = None,
     ) -> None:
         definition = json.loads(Path(network_definition_path).read_text())
         self.network_id: str = definition["network_id"]
@@ -143,6 +144,40 @@ class SegmentStateBuilder:
             )
             for segment in definition["segments"]
         )
+
+        # This builder loads its network definition independently of
+        # whichever DsrcRuntime it is paired with -- nothing enforced the
+        # two agreed. A builder built on a definition with two segments
+        # swapped and a runtime built on the correct one produced no
+        # refusal and changed the emitted action vector in 536 of 2,000
+        # random draws (26.8%). `network_fingerprint` covers exactly the
+        # fields above (network_id, feature_names, segment edge ids, speed
+        # limits, lanes, length_km and the polylines), so a caller that
+        # already has the paired runtime's own `DsrcRuntime.network_fingerprint`
+        # can hand it in here and have a mismatch refused at construction,
+        # the same way `DsrcRuntime.__init__` refuses a bundle whose
+        # fingerprint disagrees with its own network definition.
+        self.network_fingerprint = network_fingerprint(
+            network_id=self.network_id,
+            feature_names=self.feature_names,
+            segment_ids=self.segment_edge_ids,
+            segment_speed_limits_kmh=self.segment_speed_limits_kmh,
+            segment_lanes=self._static_lanes,
+            segment_length_km=self._static_length_km,
+            segment_polylines=self._segment_points,
+        )
+        if (
+            expected_network_fingerprint is not None
+            and expected_network_fingerprint != self.network_fingerprint
+        ):
+            raise RuntimeError(
+                f"SegmentStateBuilder loaded network_fingerprint "
+                f"{self.network_fingerprint} from {network_definition_path}, but "
+                f"the paired runtime expects {expected_network_fingerprint} -- "
+                "same segment count and feature names, different segment "
+                "order, ids, lanes, length or polylines; builder and runtime "
+                "must be constructed from the same network definition."
+            )
 
     @property
     def num_segments(self) -> int:

@@ -290,15 +290,45 @@ So the manifest carries, and `DsrcRuntime.__init__` checks:
 | `network_fingerprint` | everything below, in one hash |
 | `segment_ids` (ordered list of ordered edge-id lists) | a reordered or edited segment definition |
 | `segment_speed_limits_kmh` (ordered) | a network whose limits moved under the same ids |
+| `segment_lanes` (ordered) | a network whose lane counts moved under the same ids |
+| `segment_length_km` (ordered) | a network whose lengths moved under the same ids |
 | `action_fractions` | a changed action set |
 | `trained` | an untrained bundle, shown as a banner rather than refused |
 | `source`, `created_utc` | provenance, not a check |
 
 `network_fingerprint()` is a sha256 over a canonical JSON of `network_id`,
-`feature_names`, `segment_ids` and `segment_speed_limits_kmh`, truncated to 16 hex
+`feature_names`, `segment_ids`, `segment_speed_limits_kmh`, `segment_lanes`,
+`segment_length_km` and a sub-hash of every segment's polyline, truncated to 16 hex
 characters, matching `contract_fingerprint`'s form. `DsrcRuntime` computes it from the
 loaded network definition and refuses on inequality, with the bundle's value and the
 device's value both in the message.
+
+> **Amended 2026-09-12 (validator round 1, fix 2).** This table's original version named
+> only `segment_ids` and `segment_speed_limits_kmh` alongside `feature_names` in the
+> fingerprint, and left `lanes` and `length_km` -- two of the five features
+> `HERE_FEATURES` reads -- and the polylines uncovered. The validator set one segment's
+> `lanes` to 99.0 and found the fingerprint unchanged: `DsrcRuntime` loaded the mismatched
+> bundle without complaint and the emitted action vector changed on two segments, neither
+> of them the edited one (the state is flattened through one dense layer, so a wrong row
+> is not confined to its own output -- the same failure mode section 1.7 measured for a
+> zero-filled row). The code matched this table exactly; the table was the part that was
+> incomplete. `network_fingerprint()` now also takes `segment_lanes`, `segment_length_km`
+> and `segment_polylines` (hashed separately rather than folded in raw, since one segment
+> alone carries 490 polyline vertices), and `export_dsrc_policy.py`,
+> `scripts/export_dsrc_golden.py` and the committed `specs/dsrc_golden_actions.json` were
+> updated and regenerated to match. No grandfather clause was added for a manifest missing
+> the new fields -- the same policy this section already states for a missing
+> `network_fingerprint` altogether.
+>
+> Separately (fix 2b): `SegmentStateBuilder` and `SegmentAdvisoryDecoder` each load the
+> network definition independently of the `DsrcRuntime` they are paired with, and nothing
+> previously checked the three agreed. The validator built a `SegmentStateBuilder` on a
+> definition with two segments swapped and a `DsrcRuntime` on the correct one: no
+> refusal, and the emitted action vector changed in 536 of 2,000 random draws (26.8%).
+> Both constructors now take an optional `expected_network_fingerprint` (and
+> `SegmentAdvisoryDecoder.from_network_definition` computes and exposes its own, since its
+> raw constructor is not handed enough of the definition to do so itself) and refuse a
+> mismatch the same way `DsrcRuntime.__init__` refuses a bad bundle.
 
 **Unlike `contract_fingerprint`, this check has no grandfather clause.** `actor_runtime.py`
 accepts a bundle exported before the fingerprint existed, because refusing every older

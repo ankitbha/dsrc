@@ -86,23 +86,49 @@ class SrcQNetwork(nn.Module):
         return logits.view((self.num_segments, self.num_actions))
 
 
+def _polyline_hash(segment_polylines: Sequence[Sequence[Sequence[float]]]) -> str:
+    """One hash over every segment's ordered (lat, lon) polyline points.
+
+    A separate sub-hash rather than folding the raw points into
+    `network_fingerprint`'s own payload: segment 5 alone carries 490
+    vertices, and re-serialising every point of every segment on every
+    fingerprint computation (device boot included) is wasted work when a
+    single upfront hash says exactly as much about whether two definitions
+    agree.
+    """
+    payload = json.dumps(
+        [
+            [[round(float(lat), 6), round(float(lon), 6)] for lat, lon in segment]
+            for segment in segment_polylines
+        ],
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def network_fingerprint(
     *,
     network_id: str,
     feature_names: Sequence[str],
     segment_ids: Sequence[Sequence[str]],
     segment_speed_limits_kmh: Sequence[float],
+    segment_lanes: Sequence[float],
+    segment_length_km: Sequence[float],
+    segment_polylines: Sequence[Sequence[Sequence[float]]],
 ) -> str:
     """A short hash over everything a DSRC bundle's network identity depends on.
 
     Mirrors `sim_contract.contract_fingerprint`'s form: the shapes torch
     checks are not enough to catch a reordered or edited network
     definition -- two 12-segment, 5-feature networks are shape-identical --
-    so the fingerprint covers the field NAMES, the ordered segment/edge ids
-    and the per-segment speed limits, everything the manifest table in
-    plan section 3 names. `segment_ids` here is the ordered list of ordered
-    edge-id lists (what `data/mainz/mainz_segments.json` holds), not a
-    separate id per segment.
+    so the fingerprint covers the field NAMES, the ordered segment/edge ids,
+    the per-segment speed limits, lane counts, lengths and polylines,
+    everything the manifest table in plan section 3 names (amended: the
+    table originally named only speed limits alongside feature names and
+    segment ids, and left lanes and length_km -- two of the five features
+    `HERE_FEATURES` reads -- and the polylines out; see the dated note in
+    plans/plan_task145_dsrc_policy_runtime.md section 3). `segment_ids`
+    here is the ordered list of ordered edge-id lists (what
+    `data/mainz/mainz_segments.json` holds), not a separate id per segment.
 
     `json.dumps(..., sort_keys=True)` only reorders dict keys, never list
     contents, so swapping two entries of an ordered list changes the
@@ -116,6 +142,9 @@ def network_fingerprint(
             "feature_names": list(feature_names),
             "segment_ids": [list(ids) for ids in segment_ids],
             "segment_speed_limits_kmh": [round(float(v), 6) for v in segment_speed_limits_kmh],
+            "segment_lanes": [round(float(v), 6) for v in segment_lanes],
+            "segment_length_km": [round(float(v), 6) for v in segment_length_km],
+            "segment_polyline_hash": _polyline_hash(segment_polylines),
         },
         sort_keys=True,
     )

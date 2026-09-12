@@ -99,6 +99,11 @@ def dsrc_bundle(tmp_path_factory) -> str:
 
 @pytest.fixture
 def dsrc_pipeline(actor_bundle: str, dsrc_bundle: str) -> PerceptionPolicyPipeline:
+    # Constructed in this order, and the builder/decoder are handed the
+    # runtime's own network_fingerprint, so a definition mismatch between
+    # the three is refused here rather than silently producing a wrong
+    # action vector (validator round 1, fix 2b).
+    dsrc_runtime = DsrcRuntime(dsrc_bundle)
     return PerceptionPolicyPipeline(
         detector=FakeDetector(),
         tracker=IouTracker(min_hits=2),
@@ -108,9 +113,13 @@ def dsrc_pipeline(actor_bundle: str, dsrc_bundle: str) -> PerceptionPolicyPipeli
         builder=ObservationBuilder(BuilderConfig()),
         actor=ActorRuntime(actor_bundle),
         advisory_decoder=AdvisoryDecoder(units="mph"),
-        dsrc_runtime=DsrcRuntime(dsrc_bundle),
-        dsrc_segment_builder=SegmentStateBuilder(),
-        dsrc_advisory_decoder=SegmentAdvisoryDecoder.from_network_definition(),
+        dsrc_runtime=dsrc_runtime,
+        dsrc_segment_builder=SegmentStateBuilder(
+            expected_network_fingerprint=dsrc_runtime.network_fingerprint,
+        ),
+        dsrc_advisory_decoder=SegmentAdvisoryDecoder.from_network_definition(
+            expected_network_fingerprint=dsrc_runtime.network_fingerprint,
+        ),
         dsrc_decision_interval_s=60.0,
     )
 

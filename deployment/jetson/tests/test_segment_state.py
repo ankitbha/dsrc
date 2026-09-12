@@ -41,8 +41,8 @@ def straight_polyline(lat: float, lon: float, east_m: float, points: int = 3) ->
     return [list(offset(lat, lon, 0.0, step * i)) for i in range(points)]
 
 
-def write_definition(tmp_path) -> str:
-    definition = {
+def _definition_dict() -> dict:
+    return {
         "network_id": "test_net",
         "feature_names": ["speed", "free_flow", "jam_factor", "lanes", "length_km"],
         "action_fractions": [0.5, 0.75, 1.0],
@@ -73,7 +73,26 @@ def write_definition(tmp_path) -> str:
             },
         ],
     }
+
+
+def write_definition(tmp_path) -> str:
     path = tmp_path / "network.json"
+    path.write_text(json.dumps(_definition_dict()))
+    return str(path)
+
+
+def write_swapped_definition(tmp_path) -> str:
+    """The same two segments, in the opposite order.
+
+    Reproduces the validator's round-1 repro for fix 2b: a builder loaded
+    from this file and a runtime (or another builder) loaded from
+    `write_definition`'s file describe the same two segments but disagree
+    on which is "segment 0" -- same shapes throughout, so nothing before
+    the fingerprint check would catch it.
+    """
+    definition = _definition_dict()
+    definition["segments"] = list(reversed(definition["segments"]))
+    path = tmp_path / "network_swapped.json"
     path.write_text(json.dumps(definition))
     return str(path)
 
@@ -252,3 +271,32 @@ class TestBuilderProperties:
                                ok_reading(), t_mono=0.0)
         assert result.segment_basis[0] == SEGMENT_BASIS_SUBSTITUTED
         assert result.matched_links[0] == 0
+
+
+class TestNetworkFingerprintGuard:
+    """Validator round 1, fix 2b: a builder loaded from one network
+    definition and a runtime (or another builder) loaded from a
+    differently-ordered one produced no refusal and a silently wrong
+    action vector in 26.8% of a 2,000-state sample. `SegmentStateBuilder`
+    now takes the paired runtime's own `network_fingerprint` and refuses a
+    mismatch at construction."""
+
+    def test_no_expected_fingerprint_does_not_raise(self, tmp_path):
+        """Backward compatible: existing callers that pass nothing get no
+        check at all, the same as before this guard existed."""
+        SegmentStateBuilder(write_definition(tmp_path))
+
+    def test_matching_fingerprint_does_not_raise(self, tmp_path):
+        reference = SegmentStateBuilder(write_definition(tmp_path))
+        SegmentStateBuilder(
+            write_definition(tmp_path),
+            expected_network_fingerprint=reference.network_fingerprint,
+        )
+
+    def test_two_segments_swapped_is_refused(self, tmp_path):
+        reference = SegmentStateBuilder(write_definition(tmp_path))
+        with pytest.raises(RuntimeError, match="network_fingerprint"):
+            SegmentStateBuilder(
+                write_swapped_definition(tmp_path),
+                expected_network_fingerprint=reference.network_fingerprint,
+            )

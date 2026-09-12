@@ -183,3 +183,32 @@ class TestFromNetworkDefinition:
         assert decoder.segment_ids == tuple(str(i) for i in range(12))
         assert all(limit == pytest.approx(60.0 / 3.6, abs=0.01)
                   for limit in decoder.segment_speed_limits_mps)
+
+
+class TestNetworkFingerprintGuard:
+    """Validator round 1, fix 2b: `SegmentAdvisoryDecoder.__init__` now takes
+    the paired runtime's own `network_fingerprint` and refuses a mismatch,
+    guarding the runtime/decoder pair the same way
+    `SegmentStateBuilder.__init__` guards the runtime/builder pair."""
+
+    def test_raw_construction_with_no_fingerprint_does_not_raise(self):
+        """Backward compatible: `make_decoder` above passes neither
+        fingerprint argument at all, the same as every existing caller."""
+        make_decoder()
+
+    def test_from_network_definition_exposes_its_own_fingerprint(self):
+        decoder = SegmentAdvisoryDecoder.from_network_definition()
+        assert decoder.network_fingerprint is not None
+        assert len(decoder.network_fingerprint) == 16
+
+    def test_matching_expected_fingerprint_does_not_raise(self):
+        reference = SegmentAdvisoryDecoder.from_network_definition()
+        SegmentAdvisoryDecoder.from_network_definition(
+            expected_network_fingerprint=reference.network_fingerprint,
+        )
+
+    def test_wrong_expected_fingerprint_is_refused(self):
+        with pytest.raises(RuntimeError, match="network_fingerprint"):
+            SegmentAdvisoryDecoder.from_network_definition(
+                expected_network_fingerprint="0" * 16,
+            )

@@ -105,7 +105,9 @@ def main() -> None:
     out_prefix = str(Path(tempfile.mkdtemp()) / "dsrc_policy")
     export_dsrc_policy.export(model, info, definition, out_prefix, checkpoint_path=str(args.checkpoint))
     runtime = DsrcRuntime(out_prefix, network_definition_path=str(args.network_definition))
-    builder = SegmentStateBuilder(args.network_definition)
+    builder = SegmentStateBuilder(
+        args.network_definition, expected_network_fingerprint=runtime.network_fingerprint,
+    )
 
     t_mono = time.monotonic()
     feed = (

@@ -23,7 +23,7 @@ from geo import haversine_m, point_to_segment_m
 from perception.segment_state import DEFAULT_NETWORK_DEFINITION_PATH, SEGMENT_MATCH_TOLERANCE_M
 from policy import sim_contract
 from policy.actor_runtime import PolicyOutput
-from policy.dsrc_contract import SPEED_ACTION_FRACTIONS
+from policy.dsrc_contract import SPEED_ACTION_FRACTIONS, network_fingerprint
 from policy.dsrc_runtime import DsrcDecision
 
 MPS_TO_MPH = 2.236936
@@ -211,6 +211,8 @@ class SegmentAdvisoryDecoder:
         *,
         units: str = "mph",
         ego_match_tolerance_m: float = SEGMENT_MATCH_TOLERANCE_M,
+        network_fingerprint: str | None = None,
+        expected_network_fingerprint: str | None = None,
     ) -> None:
         if units not in ("mph", "kmh", "mps"):
             raise ValueError(f"unknown units '{units}'")
@@ -222,16 +224,46 @@ class SegmentAdvisoryDecoder:
         self.segment_speed_limits_mps = tuple(v / MPS_TO_KMH for v in segment_speed_limits_kmh)
         self.segment_points = tuple(segment_points)
         self.ego_match_tolerance_m = ego_match_tolerance_m
+        # Unlike SegmentStateBuilder, this constructor is not handed enough
+        # of the network definition to compute its own network_fingerprint
+        # (segment_ids here are the display ids, not the edge-id lists the
+        # hash covers, and neither feature_names nor lanes/length_km are
+        # given at all) -- `from_network_definition` below computes it from
+        # the full definition and passes both this and the value to check
+        # it against through. Guards the runtime/decoder pair the same way
+        # `SegmentStateBuilder.__init__` guards the runtime/builder pair
+        # (validator round 1, fix 2b).
+        self.network_fingerprint = network_fingerprint
+        if (
+            expected_network_fingerprint is not None
+            and self.network_fingerprint is not None
+            and expected_network_fingerprint != self.network_fingerprint
+        ):
+            raise RuntimeError(
+                f"SegmentAdvisoryDecoder loaded network_fingerprint "
+                f"{self.network_fingerprint}, but the paired runtime expects "
+                f"{expected_network_fingerprint} -- same segment count, "
+                "different segment order, ids, lanes, length or polylines; "
+                "decoder and runtime must be constructed from the same "
+                "network definition."
+            )
 
     @classmethod
     def from_network_definition(
-        cls, path: Path | str = DEFAULT_NETWORK_DEFINITION_PATH, *, units: str = "mph",
+        cls,
+        path: Path | str = DEFAULT_NETWORK_DEFINITION_PATH,
+        *,
+        units: str = "mph",
+        expected_network_fingerprint: str | None = None,
     ) -> "SegmentAdvisoryDecoder":
         definition = json.loads(Path(path).read_text())
         segment_ids = tuple(segment["segment_id"] for segment in definition["segments"])
+        edge_ids = tuple(tuple(segment["edge_ids"]) for segment in definition["segments"])
         speed_limits = tuple(
             float(segment["speed_limit_kmh"]) for segment in definition["segments"]
         )
+        lanes = tuple(float(segment["lanes"]) for segment in definition["segments"])
+        length_kms = tuple(float(segment["length_km"]) for segment in definition["segments"])
         points = tuple(
             tuple(
                 (float(lat), float(lon))
@@ -240,7 +272,20 @@ class SegmentAdvisoryDecoder:
             )
             for segment in definition["segments"]
         )
-        return cls(segment_ids, speed_limits, points, units=units)
+        definition_fingerprint = network_fingerprint(
+            network_id=definition["network_id"],
+            feature_names=tuple(definition["feature_names"]),
+            segment_ids=edge_ids,
+            segment_speed_limits_kmh=speed_limits,
+            segment_lanes=lanes,
+            segment_length_km=length_kms,
+            segment_polylines=points,
+        )
+        return cls(
+            segment_ids, speed_limits, points, units=units,
+            network_fingerprint=definition_fingerprint,
+            expected_network_fingerprint=expected_network_fingerprint,
+        )
 
     def _display(self, mps: float) -> float:
         if self.units == "mph":

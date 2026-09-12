@@ -96,6 +96,12 @@ class TestNetworkFingerprint:
         feature_names=("speed", "free_flow", "jam_factor", "lanes", "length_km"),
         segment_ids=(("a", "b"), ("c",)),
         segment_speed_limits_kmh=(60.0, 60.0),
+        segment_lanes=(2.0, 3.0),
+        segment_length_km=(1.0, 2.0),
+        segment_polylines=(
+            ((0.0, 0.0), (0.0, 0.001)),
+            ((1.0, 1.0), (1.0, 1.001)),
+        ),
     )
 
     def test_stable_across_calls(self):
@@ -117,6 +123,32 @@ class TestNetworkFingerprint:
     def test_moves_when_a_speed_limit_changes(self):
         before = dsrc_contract.network_fingerprint(**self.BASE)
         changed = dict(self.BASE, segment_speed_limits_kmh=(60.0, 45.0))
+        assert dsrc_contract.network_fingerprint(**changed) != before
+
+    def test_moves_when_lanes_change(self):
+        """Validator round 1, fix 2: `lanes` used to be absent from the
+        payload entirely -- setting one segment's `lanes` to 99.0 left the
+        fingerprint unchanged even though it is one of the five features
+        `HERE_FEATURES` reads."""
+        before = dsrc_contract.network_fingerprint(**self.BASE)
+        changed = dict(self.BASE, segment_lanes=(99.0, 3.0))
+        assert dsrc_contract.network_fingerprint(**changed) != before
+
+    def test_moves_when_length_km_changes(self):
+        """Same defect as `lanes` above, for the other omitted feature."""
+        before = dsrc_contract.network_fingerprint(**self.BASE)
+        changed = dict(self.BASE, segment_length_km=(99.0, 2.0))
+        assert dsrc_contract.network_fingerprint(**changed) != before
+
+    def test_moves_when_a_polyline_point_changes(self):
+        before = dsrc_contract.network_fingerprint(**self.BASE)
+        changed = dict(
+            self.BASE,
+            segment_polylines=(
+                ((0.0, 0.0), (5.0, 5.0)),
+                ((1.0, 1.0), (1.0, 1.001)),
+            ),
+        )
         assert dsrc_contract.network_fingerprint(**changed) != before
 
     def test_moves_when_feature_names_are_reordered(self):

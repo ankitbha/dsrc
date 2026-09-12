@@ -185,9 +185,16 @@ def main() -> None:
 
     segment_ids = [list(s["edge_ids"]) for s in definition["segments"]]
     speed_limits = [float(s["speed_limit_kmh"]) for s in definition["segments"]]
+    lanes = [float(s["lanes"]) for s in definition["segments"]]
+    length_kms = [float(s["length_km"]) for s in definition["segments"]]
+    polylines = [
+        [(float(lat), float(lon)) for edge in s["edges"] for lat, lon in edge["polyline"]]
+        for s in definition["segments"]
+    ]
     fingerprint = network_fingerprint(
         network_id=definition["network_id"], feature_names=definition["feature_names"],
         segment_ids=segment_ids, segment_speed_limits_kmh=speed_limits,
+        segment_lanes=lanes, segment_length_km=length_kms, segment_polylines=polylines,
     )
     checkpoint_sha256 = hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()
 
