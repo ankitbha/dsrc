@@ -442,6 +442,45 @@ class HereFeed:
         self._last_query = reading.outcome
         return reading
 
+    def snapshot_links(self, t_mono: float) -> tuple[tuple[FlowLink, ...], FlowReading]:
+        """Every usable link of the current snapshot, for a whole-network question.
+
+        `at()` answers "what is ahead of THIS VEHICLE": an association radius, a
+        heading cone and a fix-age check, all scoped to one position and one
+        heading. A whole-network state (`perception.segment_state.
+        SegmentStateBuilder`) asks a different question -- which links, anywhere
+        in the snapshot, fall near a super-segment's own polyline -- and a
+        segment the vehicle is nowhere near is exactly the case this must not
+        refuse. So this applies only the checks that describe the RESPONSE
+        rather than the vehicle: whether one has arrived at all, and how stale
+        it is. It does not require a GPS fix and does not touch `_last_query`,
+        which is `at()`'s own field reporting what the per-vehicle question
+        answered.
+
+        Returns every link `FlowLink.usable` (a shape with no congestion
+        information at all is not a link a segment feature can be built from)
+        and a `FlowReading` carrying the outcome and age provenance, `link`
+        always `None` since no single link is "the" answer here.
+        """
+        snapshot = self._current
+        if snapshot is None:
+            return (), FlowReading(
+                outcome=self._last_refusal, detail="nothing usable has arrived"
+            )
+        age_s = t_mono - snapshot.received_t_mono
+        provenance = {
+            "response_age_s": age_s,
+            "response_age_bound_s": snapshot.bound_s,
+            "response_age_is_proxy": snapshot.proxy,
+        }
+        # Symmetric, matching `_at`'s own staleness check on the same clock.
+        if abs(age_s) > self._max_age_s:
+            return (), FlowReading(
+                outcome=Outcome.STALE, **provenance, detail=f"{age_s:.1f}s since the response"
+            )
+        usable = tuple(link for link in snapshot.links if link.usable)
+        return usable, FlowReading(outcome=Outcome.OK, **provenance)
+
     def _at(self, gps: GpsFix, t_mono: float, snapshot: "_Snapshot | None") -> FlowReading:
         if snapshot is None:
             return FlowReading(outcome=self._last_refusal, detail="nothing usable has arrived")
