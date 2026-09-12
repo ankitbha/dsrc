@@ -57,6 +57,8 @@ import math
 import statistics
 import sys
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -150,14 +152,42 @@ def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load_arm_model(name: str, checkpoint_dir: Path,
-                   num_segments: int) -> tuple[SrcQNetwork, tuple[str, ...]]:
-    """Bind a trained arm's checkpoint and feature tuple, and load it.
+@dataclass(frozen=True)
+class LoadedArm:
+    """One arm's loaded model, bound to the arm name, feature tuple, checkpoint path,
+    digest and any post-load modification it was loaded under.
+
+    Everything `run()` needs about a loaded arm comes from this one object instead of
+    four separate dicts keyed on the arm name (`models`, `features_by_arm`, a
+    checkpoint-path lookup and a sha256 lookup). Four independent dicts is four
+    places a wrong key can be read from -- a bug that reads `models["here"]` for an
+    arm named `"src"` leaves `features_by_arm["src"]`, the recorded checkpoint path
+    and its sha256 all still correct, so nothing downstream disagrees with anything
+    else and the mismatch has nowhere to surface. Binding all of it to `name` in one
+    object at load time means `run()` has only one lookup (`loaded_arms[name]`) and
+    one place to assert that what came back really was loaded for `name`.
+    """
+
+    name: str
+    model: SrcQNetwork
+    features: tuple[str, ...]
+    checkpoint_path: Path
+    sha256: str
+    modification: str | None = None
+
+
+def load_arm_model(name: str, checkpoint_dir: Path, num_segments: int) -> LoadedArm:
+    """Bind a trained arm's checkpoint, feature tuple, path and digest, and load it.
 
     `zeroed_head` loads `ZEROED_HEAD_BASE_ARM`'s checkpoint and then zeros its
     output layer (`_zero_output_head`): plan section 8's falsification arm must run
     the same checkpoint file the arm it falsifies runs, or it is not testing that
-    that arm's own result is distinguishable from an obviously wrong policy.
+    that arm's own result is distinguishable from an obviously wrong policy. The
+    returned `LoadedArm.name` is `name` itself (`"zeroed_head"`, not `"here"`) so a
+    caller can confirm what it asked for is what it got back; `modification` records
+    that this arm's weights were changed after loading, which the checkpoint path and
+    its sha256 alone do not say -- both still name `mainz_here_best.pt` and that
+    file's own true digest, the same as the unmodified `here` arm reads.
     """
     checkpoint_name = _checkpoint_name_for_arm(name)
     if checkpoint_name not in CHECKPOINT_FEATURES:
@@ -165,9 +195,14 @@ def load_arm_model(name: str, checkpoint_dir: Path,
     features = CHECKPOINT_FEATURES[checkpoint_name]
     checkpoint_path = checkpoint_path_for_arm(name, checkpoint_dir)
     model = _build_and_load(checkpoint_path, features, num_segments)
+    modification = None
     if name == "zeroed_head":
         _zero_output_head(model)
-    return model, features
+        modification = ("stack[2] weight and bias zeroed after loading (plan section "
+                        "8 falsification arm)")
+    return LoadedArm(name=name, model=model, features=features,
+                     checkpoint_path=checkpoint_path,
+                     sha256=_file_sha256(checkpoint_path), modification=modification)
 
 
 def gate_for_arm(name: str) -> bool:
@@ -248,20 +283,87 @@ def per_arm_two_se(values: list[float]) -> float:
 # ------------------------------------------------------------------------- the run
 
 
-def _demand_veh_per_h(paths: dict, duration_s: float) -> float:
-    """The schedule's own arrival rate, informational only: it is fixed by the
-    schedule file and does not change with how the episode is configured to read it.
+def _schedule_rows(paths: dict) -> list[dict]:
+    return json.loads((REPO_ROOT / paths["schedule"]).read_text())
 
-    `duration_s` is accepted only for call-site symmetry with the rest of this
-    module's per-run configuration; it is never used below. Dividing by it instead
-    of the schedule's own departure span reports a rate that swings with an
-    unrelated setting -- at `duration_s=1250.0` that gave 8997.12 veh/h for a
-    schedule whose own span puts the rate at about 4506.
+
+def _entry_headways(paths: dict) -> dict[str, float | None]:
+    """Each entry link's own constant inter-departure headway, in seconds -- or
+    `None` for an entry link whose departures are not spaced at one constant gap.
+
+    The committed schedule departs each entry link at one fixed headway throughout
+    (140/182 every 4.8s, 277/289 every 5.76s, 293/295 every 7.2s, 231/255 every
+    9.6s), so reading two consecutive departures off one entry link recovers the
+    generator's own parameter losslessly, rather than backing a rate out of an
+    aggregate (`count / span`, `count / duration_s`) that carries the aggregation's
+    own assumption. This is not assumed to hold generally: `build_mainz_scenario.py
+    --demand-rush-s` instead ramps each entry through several fixed rates over the
+    run (piecewise-constant, not constant), so an entry link built that way has more
+    than one distinct gap and reports `None` here instead of a rate silently averaged
+    across regimes that were never meant to be pooled.
     """
-    rows = json.loads((REPO_ROOT / paths["schedule"]).read_text())
-    departures = [row["depart"] for row in rows]
-    span_s = max(departures) - min(departures)
-    return len(rows) / span_s * 3600.0
+    by_entry: dict[str, list[float]] = {}
+    for row in _schedule_rows(paths):
+        by_entry.setdefault(row["entry"], []).append(row["depart"])
+    headways: dict[str, float | None] = {}
+    for entry, departures in by_entry.items():
+        departures.sort()
+        gaps = {round(later - earlier, 6)
+               for earlier, later in zip(departures, departures[1:])}
+        headways[entry] = gaps.pop() if len(gaps) == 1 else None
+    return headways
+
+
+def _demand_veh_per_h(paths: dict) -> float | None:
+    """The schedule's own arrival rate, summed one entry link at a time.
+
+    `3600 / headway` is one entry link's own rate; the schedule's total rate is the
+    SUM of all eight, not their average or a pooled `count / span` -- eight entry
+    links each departing every `headway` seconds put `sum(3600 / headway_e)`
+    vehicles onto the road per hour, which is what a solver reading this schedule as
+    demand actually sees, and it does not move with how long an episode is
+    configured to run (`duration_s` is not a parameter here at all). `None` when any
+    entry link's own headway is not the single constant `_entry_headways` needs to
+    trust it -- see `_demand_unavailable_reason` for which link and why.
+    """
+    headways = _entry_headways(paths)
+    if any(headway is None for headway in headways.values()):
+        return None
+    return sum(3600.0 / headway for headway in headways.values())
+
+
+def _demand_unavailable_reason(paths: dict) -> str | None:
+    """Why `_demand_veh_per_h` returned `None`, naming the entry link(s) at fault --
+    `None` itself when every entry link's headway was recovered cleanly.
+    """
+    uneven = sorted(entry for entry, headway in _entry_headways(paths).items()
+                    if headway is None)
+    if not uneven:
+        return None
+    return (f"entry link(s) {', '.join(uneven)} do not depart at one constant "
+            f"headway -- the schedule's own rate is not recoverable losslessly from "
+            f"them (a --demand-rush-s schedule departs at a piecewise-constant rate "
+            f"and would trip this)")
+
+
+def _scheduled_departures(paths: dict) -> int:
+    """The schedule's own total row count -- fixed by the file, independent of how
+    long an episode is configured to run.
+    """
+    return len(_schedule_rows(paths))
+
+
+def _departures_within_episode(paths: dict, duration_s: float) -> int:
+    """How many of the schedule's own departures fall inside `[0, duration_s]`.
+
+    This is the quantity that actually varies with `duration_s` -- the schedule's
+    own rate does not (`_demand_veh_per_h` no longer takes `duration_s` at all). A
+    shorter episode simply sees fewer of the schedule's departures, which is the
+    original defect's real content: `duration_s` was wired into a RATE calculation
+    it should never have touched, when the COUNT was the thing that was ever going
+    to move with it.
+    """
+    return sum(1 for row in _schedule_rows(paths) if row["depart"] <= duration_s)
 
 
 def _validate_no_duplicates(*, arms: tuple[str, ...], seeds: tuple[int, ...]) -> None:
@@ -289,7 +391,7 @@ def _validate_seed_count(seeds: tuple[int, ...]) -> None:
 
 
 def _provenance() -> dict:
-    """Git commit and dirty state, read once before the first episode runs.
+    """Git commit and dirty state, at whatever moment this is called.
 
     Reuses `record_deployed_commit.py`'s `_git_commit`/`_git_is_dirty` (return-code
     checked, a bounded subprocess timeout, `OSError`/`SubprocessError` both caught)
@@ -299,6 +401,17 @@ def _provenance() -> dict:
     copy, a `git archive` extraction) raised `CalledProcessError` only once every
     episode had already run, and the run was unrecoverable because `--resume` does
     not exist (plan decision 10). Absence is now a recorded fact instead of a crash.
+
+    `run()` calls this twice: once before the first episode (so a tree with no
+    `.git` cannot discard a completed run) and once after the last one. A run of 45
+    episodes takes minutes, long enough to span a commit made by someone else working
+    in the same tree, and `MainzEnv.reset()`/`_sumo.start()` both re-read the schedule
+    and network files from disk every episode -- so the two samples are compared
+    (`tree_unchanged_during_run`) rather than either one being trusted alone, and
+    disagreement is recorded, never raised: the whole reason F1 stopped raising on an
+    unreadable commit was so an unrelated provenance question could not discard a
+    completed run, and a changed-mid-run tree is exactly that kind of question, not a
+    reason to throw the run away.
     """
     commit = _git_commit(REPO_ROOT)
     if commit is None:
@@ -312,13 +425,14 @@ def _provenance() -> dict:
     return {"commit": commit, "dirty": _git_is_dirty(REPO_ROOT), "commit_unavailable_reason": None}
 
 
-def _header_record(config: dict, provenance: dict) -> dict:
-    """The JSONL's own first line: this run's config and provenance, so a reader
-    holding only the `.jsonl` file -- the summary not yet written, or lost
+def _header_record(run_id: str, config: dict, provenance: dict) -> dict:
+    """The JSONL's own first line: this run's id, config and starting provenance, so
+    a reader holding only the `.jsonl` file -- the summary not yet written, or lost
     separately -- can still tell which run produced it, under what configuration,
-    and at what commit.
+    and at what commit. `run_id` is what lets a reader holding BOTH files confirm
+    they actually belong to the same run (`run()`'s post-rename check).
     """
-    return {"type": "header", "config": config, **provenance}
+    return {"type": "header", "run_id": run_id, "config": config, **provenance}
 
 
 def _compact_metrics(metrics: dict) -> dict:
@@ -359,8 +473,9 @@ def _check_gate_asymmetry(per_seed: dict[str, dict[int, dict]]) -> None:
             "not appear to be active")
 
 
-def _build_summary(*, commit: str | None, dirty: bool | None,
-                   commit_unavailable_reason: str | None, config: dict,
+def _build_summary(*, run_id: str, commit: str | None, dirty: bool | None,
+                   commit_unavailable_reason: str | None, provenance_end: dict,
+                   tree_unchanged_during_run: bool, config: dict,
                    per_seed: dict[str, dict[int, dict]]) -> dict:
     arms_summary = {}
     for name, seed_metrics in per_seed.items():
@@ -391,8 +506,10 @@ def _build_summary(*, commit: str | None, dirty: bool | None,
             baseline_flows = [baseline_seed_metrics[seed]["flow"] for seed in common_seeds]
             paired[name] = paired_statistics(arm_flows, baseline_flows)
 
-    return {"commit": commit, "dirty": dirty,
+    return {"run_id": run_id, "commit": commit, "dirty": dirty,
             "commit_unavailable_reason": commit_unavailable_reason,
+            "provenance_end": provenance_end,
+            "tree_unchanged_during_run": tree_unchanged_during_run,
             "config": config, "per_seed": per_seed,
             "arms": arms_summary, "paired": paired}
 
@@ -401,13 +518,21 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
         step_length: float = DEFAULT_STEP_LENGTH_S,
         duration_s: float = DEFAULT_DURATION_S,
         window_start_s: float = DEFAULT_WINDOW_START_S,
-        checkpoint_dir: Path, out_dir: Path, scenario: str = "mainz") -> dict:
+        checkpoint_dir: Path, out_dir: Path, scenario: str = "mainz",
+        provenance_start: dict | None = None) -> dict:
     """Run every (arm, seed) episode once, sequentially, and write both artifacts.
 
     Sequential and strictly one environment at a time: `libsumo` is process-global
     (`src/sumo/binding.py`), so a second episode may only start after the first has
     closed its own, which `run_episode` and `evaluate_no_control` each guarantee with
     a `finally`.
+
+    `provenance_start`, if given, is used as-is instead of calling `_provenance()`
+    again -- `main()` already reads it once to print the commit banner before this is
+    called, and a second, independent read moments later is not guaranteed to agree
+    (a commit landing in that gap would make the banner and the header lie to each
+    other about the same run). Left `None` when `run()` is called directly, as every
+    test in this module does.
     """
     _validate_no_duplicates(arms=arms, seeds=seeds)
     _validate_seed_count(seeds)
@@ -415,30 +540,36 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
     paths = SCENARIOS[scenario]
     num_segments = _num_segments(paths)
 
-    models: dict[str, SrcQNetwork] = {}
-    features_by_arm: dict[str, tuple[str, ...]] = {}
+    loaded_arms: dict[str, LoadedArm] = {}
     checkpoints_used: dict[str, dict] = {}
     for name in arms:
         if name == "no_control":
             continue
-        model, features = load_arm_model(name, checkpoint_dir, num_segments)
-        models[name] = model
-        features_by_arm[name] = features
-        checkpoint_path = checkpoint_path_for_arm(name, checkpoint_dir)
-        checkpoints_used[name] = {"path": str(checkpoint_path),
-                                  "sha256": _file_sha256(checkpoint_path)}
+        loaded = load_arm_model(name, checkpoint_dir, num_segments)
+        assert loaded.name == name, (
+            f"load_arm_model({name!r}, ...) returned a LoadedArm bound to "
+            f"{loaded.name!r}; its model, features, checkpoint path and sha256 all "
+            f"travel together precisely so this cannot happen without this failing")
+        loaded_arms[name] = loaded
+        checkpoints_used[name] = {"path": str(loaded.checkpoint_path),
+                                  "sha256": loaded.sha256,
+                                  "modification": loaded.modification}
 
     # Read before the first episode runs, not after the loop: a tree with no `.git`
     # must not be able to discard a completed run just because its provenance is
     # unreadable (F1).
-    provenance = _provenance()
+    provenance_start = provenance_start if provenance_start is not None else _provenance()
+    run_id = uuid.uuid4().hex
     config = {
         "seeds": list(seeds),
         "duration_s": duration_s,
         "step_length_s": step_length,
         "window_start_s": window_start_s,
         "warmup_s": WARMUP_S,
-        "demand_veh_per_h": _demand_veh_per_h(paths, duration_s),
+        "demand_veh_per_h": _demand_veh_per_h(paths),
+        "demand_unavailable_reason": _demand_unavailable_reason(paths),
+        "scheduled_departures": _scheduled_departures(paths),
+        "departures_within_episode": _departures_within_episode(paths, duration_s),
         "scenario": scenario,
         "action_set": "SPEED_ACTION_FRACTIONS",
         "checkpoints": checkpoints_used,
@@ -451,7 +582,7 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
     per_seed: dict[str, dict[int, dict]] = {name: {} for name in arms}
 
     with partial_jsonl_path.open("w") as handle:
-        handle.write(json.dumps(_header_record(config, provenance)) + "\n")
+        handle.write(json.dumps(_header_record(run_id, config, provenance_start)) + "\n")
         handle.flush()
         for name in arms:
             for seed in seeds:
@@ -464,7 +595,8 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
                     metrics = evaluate_no_control((seed,), HERE_FEATURES, duration_s,
                                                  step_length, window_start_s, paths)
                 else:
-                    metrics = run_episode(models[name], seed, features_by_arm[name],
+                    loaded = loaded_arms[name]
+                    metrics = run_episode(loaded.model, seed, loaded.features,
                                           duration_s, 0.0, None, step_length,
                                           window_start_s, gate_for_arm(name), paths)
                 record = _episode_record(name, seed, metrics)
@@ -474,22 +606,51 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
 
     _check_gate_asymmetry(per_seed)
 
-    summary = _build_summary(commit=provenance["commit"], dirty=provenance["dirty"],
-                             commit_unavailable_reason=provenance["commit_unavailable_reason"],
-                             config=config, per_seed=per_seed)
+    # Sampled again now that every episode has actually run: `MainzEnv.reset()` and
+    # `_sumo.start()` both re-read the schedule and network files from disk every
+    # episode, so a run of 45 episodes can genuinely span a commit that changes that
+    # data mid-run -- the header's own provenance, read before the loop, would not
+    # say so. Compared, never raised on: see `_provenance`'s own docstring for why.
+    provenance_end = _provenance()
+    tree_unchanged_during_run = (
+        provenance_start["commit"] == provenance_end["commit"]
+        and provenance_start["dirty"] == provenance_end["dirty"])
 
-    # Whole-then-rename: a reader never sees a partially written summary. The JSONL
-    # is renamed from its `.partial` name into place right beside it, at the same
-    # point, so a re-run that dies before this line (the gate-asymmetry check above
-    # included) leaves only the `.partial` file behind rather than a `mainz_paired_
-    # seeds.jsonl` that looks complete -- a narrower re-run must not be able to make
-    # a wider previous run's JSONL disappear until its own replacement is actually
-    # done (F4).
+    summary = _build_summary(
+        run_id=run_id, commit=provenance_start["commit"], dirty=provenance_start["dirty"],
+        commit_unavailable_reason=provenance_start["commit_unavailable_reason"],
+        provenance_end=provenance_end, tree_unchanged_during_run=tree_unchanged_during_run,
+        config=config, per_seed=per_seed)
+
+    # Whole-then-rename: a reader never sees a partially written summary. The summary
+    # is renamed into place BEFORE the JSONL: if this rename fails (disk full, a
+    # permissions change, a concurrent writer to the same `out_dir`), the JSONL's own
+    # rename below must never run, so a previous run's `mainz_paired_seeds.jsonl` is
+    # left completely untouched rather than paired with this run's summary, or with
+    # no summary at all -- a narrower re-run must not be able to make a wider
+    # previous run's JSONL disappear until its own replacement is actually done (F4).
     summary_path = out_dir / "mainz_paired_seeds.json"
     tmp_path = out_dir / "mainz_paired_seeds.json.tmp"
     tmp_path.write_text(json.dumps(summary, indent=1))
-    partial_jsonl_path.rename(jsonl_path)
     tmp_path.rename(summary_path)
+    partial_jsonl_path.rename(jsonl_path)
+
+    # Neither rename can be made atomic with the other on a POSIX filesystem, so a
+    # second process writing into this same `out_dir` at exactly the wrong moment
+    # could still race between them. `run_id` exists so that race is at least
+    # detectable rather than silent: re-read both files' own `run_id` back off disk
+    # -- not the in-memory `summary` and `run_id` above, which would not see a
+    # concurrent writer's overwrite -- and refuse to return a summary that does not
+    # match the JSONL now sitting beside it. This is detection, not prevention; a
+    # per-run directory would close the residual race, which is not worth the
+    # restructuring here.
+    written_jsonl_run_id = json.loads(jsonl_path.read_text().splitlines()[0])["run_id"]
+    written_summary_run_id = json.loads(summary_path.read_text())["run_id"]
+    if written_jsonl_run_id != written_summary_run_id:
+        raise RuntimeError(
+            f"{jsonl_path} now reads run_id {written_jsonl_run_id!r} but "
+            f"{summary_path} reads {written_summary_run_id!r}; another writer "
+            f"touched {out_dir} between this run's own two renames")
 
     return summary
 
@@ -530,22 +691,27 @@ def main(argv: list[str] | None = None) -> int:
     _validate_no_duplicates(arms=tuple(args.arms), seeds=tuple(args.seeds))
     _validate_seed_count(tuple(args.seeds))
 
-    provenance = _provenance()
+    # Sampled once and passed into `run()` below, rather than each calling
+    # `_provenance()` independently: two reads moments apart are not guaranteed to
+    # agree, and this banner and the run's own header should never disagree about
+    # what they are both describing as "this run".
+    provenance_start = _provenance()
     print(f"scenario {args.scenario}  arms {args.arms}  "
           f"seeds {args.seeds[0]}-{args.seeds[-1]} ({len(args.seeds)} total)")
     print(f"step-length {args.step_length}s  duration {args.duration_s}s  "
           f"window-start {args.window_start_s}s  warmup {WARMUP_S}s")
-    if provenance["commit"] is None:
-        print(f"commit unavailable: {provenance['commit_unavailable_reason']}")
+    if provenance_start["commit"] is None:
+        print(f"commit unavailable: {provenance_start['commit_unavailable_reason']}")
     else:
-        dirty = provenance["dirty"]
+        dirty = provenance_start["dirty"]
         dirty_label = "dirty" if dirty else ("clean" if dirty is False else "dirty unknown")
-        print(f"commit {provenance['commit'][:12]} ({dirty_label})")
+        print(f"commit {provenance_start['commit'][:12]} ({dirty_label})")
 
     started = time.time()
     summary = run(arms=tuple(args.arms), seeds=tuple(args.seeds),
                   step_length=args.step_length, duration_s=args.duration_s,
                   window_start_s=args.window_start_s, checkpoint_dir=checkpoint_dir,
+                  provenance_start=provenance_start,
                   out_dir=out_dir, scenario=args.scenario)
     elapsed = time.time() - started
 

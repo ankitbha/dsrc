@@ -300,8 +300,9 @@ s/ep measured here at the same configuration; the extra second is the TD backwar
 ### 1.9 Seeds 21-30 run, and point the right way
 
 The scenario carries no per-seed data: `data/mainz/mainz_schedule.json` is one fixed list
-of 3,124 departures over 2,498.4 s across 8 entry links (4,499 veh/h), and the seed is
-passed to SUMO only. Seeds 21-30 therefore need no rebuild.
+of 3,124 departures over 2,498.4 s across 8 entry links, each at its own constant
+headway; summing `3600 / headway` over all eight gives exactly 4,500.0 veh/h (R2-6),
+and the seed is passed to SUMO only. Seeds 21-30 therefore need no rebuild.
 
 Smoke-measured: seeds 25 and 30 under no control give a mean of **3450.00 veh/h**, below
 the 3568.00 of seeds 16-20. The asserted fifteen-seed baseline of 3,535 requires the mean
@@ -352,7 +353,7 @@ at the end. Structure:
 {
   "commit": "<git rev-parse HEAD>",
   "config": {"seeds": [16..30], "duration_s": 2500.0, "step_length_s": 0.5,
-             "window_start_s": 900.0, "warmup_s": 300.0, "demand_veh_per_h": 4499,
+             "window_start_s": 900.0, "warmup_s": 300.0, "demand_veh_per_h": 4500.0,
              "scenario": "mainz", "action_set": "SPEED_ACTION_FRACTIONS",
              "checkpoints": {"here": "...", "src": "..."},
              "gate_entries": {"here": true, "src": true, "no_control": false}},
