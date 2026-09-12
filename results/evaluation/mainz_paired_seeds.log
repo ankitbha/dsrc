@@ -1,0 +1,13 @@
+scenario mainz  arms ['no_control', 'here', 'src', 'zeroed_head']  seeds 16-30 (15 total)
+step-length 0.5s  duration 2500.0s  window-start 900.0s  warmup 300.0s
+commit 578d689bb264 (dirty)
+
+  no_control flow  3534.96 veh/h +/- 43.7
+  here       flow  3764.89 veh/h +/- 12.9
+  src        flow  3759.26 veh/h +/- 40.6
+  zeroed_head flow  2846.67 veh/h +/- 8.8
+  here vs no_control: paired gain +229.93 +/- 44.4 veh/h (+6.5%) -- resolved
+  src vs no_control: paired gain +224.30 +/- 61.0 veh/h (+6.3%) -- resolved
+  zeroed_head vs no_control: paired gain -688.30 +/- 45.6 veh/h (-19.5%) -- resolved
+
+wrote /private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/74a3b6a3-b76c-4322-9224-4a3f73d81187/scratchpad/exp142/results/evaluation/mainz_paired_seeds.json and /private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/74a3b6a3-b76c-4322-9224-4a3f73d81187/scratchpad/exp142/results/evaluation/mainz_paired_seeds.jsonl in 403s, at commit 578d689bb264
