@@ -1,9 +1,9 @@
 # Deploying self-regulating cars: the paper as Ankit has described it
 
 Ankit's positions, recorded as stated, with the measurements that bear on each attached
-underneath. Written so the argument can be picked up cold: the reasoning is his, the
-numbers are this repository's, and where the two disagree that is said rather than
-smoothed over.
+underneath. Written so the argument can be picked up cold. The reasoning is his and the
+numbers are this repository's; the document carries no recommendations or judgements of
+mine. Open items are listed at the end as gaps in what has been measured, not as advice.
 
 Per his standing instruction the earlier workshop paper is referred to but not drawn on;
 nothing of its content is reproduced here.
@@ -114,19 +114,9 @@ paper join at the gate**, in the same place, with the same rule.
 4. How the system was built, and our run of it.
 5. The simulation result.
 
-**One change recommended to this order.** Put the simulation before the deployment. It is
-the evidence that the restricted observation suffices, so it is what licenses the
-deployment; placed last, the reader spends the whole system section not knowing why two
-thirds of the policy's inputs were discarded.
-
 ## Target venue
 
-ICRA, as stated. My read, recorded because it is a judgement and not a fact: the safety
-gate is what makes this ICRA-shaped rather than ITS-shaped, because a perception stack
-that can override a network-derived advisory is an autonomy-stack component and gives the
-paper a claim about what happens when the remote signal is stale, wrong or absent. Without
-a recorded drive it is a design rather than a deployment, and ITSC or IV would be the
-safer home.
+ICRA.
 
 ## What the simulation contributes
 
@@ -158,16 +148,13 @@ same vehicles on the same network under the same demand, so the fleet cancels be
 them entirely. The fleet only enters the supporting claim, that either arm beats no
 control, and there it is doing the opposite of weakening it.
 
-**The one thing a reviewer will reach for, and the answer.** EIDM was chosen BECAUSE it
-has a capacity drop, which can be read as selecting the conditions that produce the
-result. The answer is that the capacity drop is not a free parameter: real queue
-discharge is 5 to 20% below free-flow capacity, and that is a documented property of
-traffic, not of a model. Measured here, W99 discharges **4.3% faster** than free flow --
-the wrong sign -- and EIDM with a one-second reaction time **21% slower**, the right sign
-and slightly steep. Choosing the fleet that reproduces a known property of real traffic
-is calibration. In Ankit's own words: the simulator must be consistent with reality, and
-a simulation failing to replicate a measured phenomenon is a setting problem rather than
-evidence that the simulation is the reference.
+**On what the fleet was chosen for.** EIDM was chosen because it has a capacity drop. The
+capacity drop is not a free parameter: real queue discharge is 5 to 20% below free-flow
+capacity, which is a property of traffic rather than of a model. Measured here, W99
+discharges **4.3% faster** than free flow -- the wrong sign -- and EIDM with a one-second
+reaction time **21% slower**. In Ankit's words: the simulator must be consistent with
+reality, and a simulation failing to replicate a measured phenomenon is a setting problem
+rather than evidence that the simulation is the reference.
 
 The same reasoning covers the exit lane drop and the dropped right-of-way. The port
 carries 2 junctions with conflicting movements against 10 active conflict areas in the
