@@ -3101,6 +3101,48 @@ MUTATIONS = [
      '            "reference_absent_iff_fields_null", "unavailable",\n            HERE_CALLS_PREDATES_TASK_39,',
      '            "reference_absent_iff_fields_null", "failed",\n            HERE_CALLS_PREDATES_TASK_39,',
      "python"),
+
+    # Task 143: specs/sim_contract_golden_vectors.json exists to catch these
+    # seven, and M3, M5 and M7 exist specifically because contract_fingerprint()
+    # (sim_contract.py) does not move on any of them -- a fingerprint test
+    # "catching" one of those three is this gate failing, not passing, because
+    # it would mean the two mechanisms are masking each other rather than
+    # covering different ground.
+    ("sim contract: field order -- two LOCAL_OBS_FIELDS entries swapped, dimension unchanged",
+     "deployment/jetson/policy/sim_contract.py",
+     '    "leader_gap",\n    "leader_relative_speed",',
+     '    "leader_relative_speed",\n    "leader_gap",',
+     "python"),
+    ("sim contract: a FIELD_SCALES value changed",
+     "deployment/jetson/policy/sim_contract.py",
+     '    "leader_gap": 150.0,',
+     '    "leader_gap": 120.0,',
+     "python"),
+    ("sim contract: a HEADWAY_BIN_S bin edge changed (fingerprint does not hash this)",
+     "deployment/jetson/policy/sim_contract.py",
+     'HEADWAY_BIN_S: dict[str, float] = {"normal": 1.6, "larger": 2.2, "largest": 3.0}',
+     'HEADWAY_BIN_S: dict[str, float] = {"normal": 1.6, "larger": 2.3, "largest": 3.0}',
+     "python"),
+    ("sim contract: bin_index's boundary direction, >= flipped to >",
+     "deployment/jetson/policy/sim_contract.py",
+     "return int(sum(float(value) >= edge for edge in edges))",
+     "return int(sum(float(value) > edge for edge in edges))",
+     "python"),
+    ("sim contract: the inf clamp constant, 200.0 changed to 100.0",
+     "deployment/jetson/policy/sim_contract.py",
+     "result = 200.0 if result > 0 else -200.0",
+     "result = 100.0 if result > 0 else -100.0",
+     "python"),
+    ("sim contract: an ACTION_VALUES order within a head reversed",
+     "deployment/jetson/policy/sim_contract.py",
+     '"desired_speed_bin": ("slow", "nominal", "fast"),',
+     '"desired_speed_bin": ("fast", "nominal", "slow"),',
+     "python"),
+    ("sim contract: COOPERATION_FIELDS order changed",
+     "deployment/jetson/policy/sim_contract.py",
+     '    "segment_target_speed",\n    "merge_pressure",',
+     '    "merge_pressure",\n    "segment_target_speed",',
+     "python"),
 ]
 
 RESULTS = {
@@ -3110,9 +3152,9 @@ RESULTS = {
 }
 
 
-def failing_tests(kind):
+def _scan_junit_dirs(bases):
     """Names of the tests that failed, the total testcases seen, and whether
-    every JUnit XML file found parsed cleanly.
+    every JUnit XML file found parsed cleanly, across a list of directories.
 
     Parsed as XML, not by regex over the attributes. Gradle writes `name` first and
     pytest writes `classname` first, so a pattern that fixes the order silently matches
@@ -3131,7 +3173,7 @@ def failing_tests(kind):
     total = 0
     found_xml = False
     parse_failed = False
-    for base in RESULTS[kind]:
+    for base in bases:
         for report in base.rglob("*.xml"):
             found_xml = True
             try:
@@ -3146,6 +3188,14 @@ def failing_tests(kind):
                 cls = (case.get("classname") or "").rsplit(".", 1)[-1]
                 names.append(f"{cls}.{case.get('name')}" if cls else str(case.get("name")))
     return names, total, found_xml and not parse_failed
+
+
+def failing_tests(kind):
+    return _scan_junit_dirs(RESULTS[kind])
+
+
+def failing_tests_in(base):
+    return _scan_junit_dirs([base])
 
 
 BUILD_ERROR = ["<the mutation did not compile>"]
@@ -3167,15 +3217,44 @@ INCONCLUSIVE = ["<inconclusive: the run did not produce a trustworthy result>"]
 #: run.
 PYTEST_VERDICT_RETURNCODES = frozenset({0, 1})
 
-#: Testcases a clean, unmutated Python suite collects today. A mutated run
-#: collecting a different count did not exercise the same suite it is being
-#: scored against -- a partial file copy or a conftest import that silently
-#: drops a whole module both trivially report zero failures, because most
-#: of the suite never ran at all. Update this when the suite's own test
-#: count changes; a run reporting a different count is not proof of drift,
-#: only that it needs checking against `pytest --collect-only` before being
-#: trusted either way.
-EXPECTED_PYTHON_TESTCASES = 2060
+#: Testcases a clean, unmutated Python suite collects -- measured fresh, once
+#: per invocation of this script, rather than typed as a literal.
+#:
+#: A mutated run collecting a different count did not exercise the same suite
+#: it is being scored against -- a partial file copy or a conftest import that
+#: silently drops a whole module both trivially report zero failures, because
+#: most of the suite never ran at all. A literal here goes stale the moment
+#: the suite grows, which happens on every commit landing a test anywhere in
+#: the repository, including work in flight at the same time as a mutation
+#: run: this constant was 2060 against a suite that had already reached 2272,
+#: which made `run()` return INCONCLUSIVE for every Python mutation below,
+#: silently, since the day it drifted. `_baseline_python_testcases()` measures
+#: the count fresh, against the unmutated tree, before this script applies its
+#: first mutation -- see the call at module scope, below `MUTATIONS`. It must
+#: run before any mutation is applied: measuring it *after* would let a
+#: mutation's own collection failure lower both sides of the comparison
+#: together, hiding exactly the failure mode this check exists to catch.
+_BASELINE_PYTHON_TESTCASES: int | None = None
+
+
+def _baseline_python_testcases() -> int:
+    baseline_dir = ROOT / "build" / "pytest-results-baseline"
+    if baseline_dir.exists():
+        shutil.rmtree(baseline_dir)
+    result = subprocess.run(
+        [".venv/bin/python3", "-m", "pytest", "-q", "deployment/jetson/tests/",
+         "-p", "no:cacheprovider", f"--junit-xml={baseline_dir}/results.xml"],
+        capture_output=True, text=True,
+    )
+    if result.returncode not in PYTEST_VERDICT_RETURNCODES:
+        sys.exit(
+            "could not measure a baseline Python testcase count: pytest exited "
+            f"{result.returncode}\n{result.stdout}\n{result.stderr}"
+        )
+    _, total, usable = failing_tests_in(baseline_dir)
+    if not usable or total == 0:
+        sys.exit("could not measure a baseline Python testcase count: no usable JUnit XML")
+    return total
 
 
 def is_collection_error(names):
@@ -3230,7 +3309,7 @@ def run(kind):
     names, total, usable = failing_tests(kind)
     if not usable:
         return INCONCLUSIVE
-    if kind == "python" and total != EXPECTED_PYTHON_TESTCASES:
+    if kind == "python" and total != _BASELINE_PYTHON_TESTCASES:
         return INCONCLUSIVE
     return names
 
@@ -3266,6 +3345,19 @@ if WANTED:
     unknown = [k for k in WANTED if k not in RESULTS]
     if unknown:
         sys.exit(f"unknown kind(s) {unknown}; known: {sorted(RESULTS)}")
+
+# Measured once, here, before the loop below applies its first mutation --
+# see `_baseline_python_testcases`'s docstring for why it must be measured
+# against the clean tree and not recomputed per mutation.
+if any(
+    kind == "python"
+    and (WANTED is None or "python" in WANTED)
+    and (not NAME_FILTERS or any(f in name for f in NAME_FILTERS))
+    for name, rel, old, new, kind in MUTATIONS
+):
+    print("measuring the current Python suite's testcase count against the clean tree ...")
+    _BASELINE_PYTHON_TESTCASES = _baseline_python_testcases()
+    print(f"  {_BASELINE_PYTHON_TESTCASES} testcases")
 
 survived = []
 for name, rel, old, new, kind in MUTATIONS:

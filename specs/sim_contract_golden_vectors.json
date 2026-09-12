@@ -1,0 +1,5078 @@
+{
+  "sim_commit": "d477dba",
+  "frozen": true,
+  "generated_from": "git archive d477dba src",
+  "contract_fingerprint": "918ec57cf2f2e1db",
+  "local_obs_dim": 39,
+  "note": "Frozen contract vectors: every value here was derived twice when this file was generated -- once from the simulation at sim_commit (extracted with git archive), once from policy/sim_contract.py -- and the generator refused to write if the two disagreed. Changing a recorded value is a contract change and requires SIM_COMMIT to move to a commit whose reference actually produces the new value. ADDING A CASE IS NOT A CONTRACT CHANGE, since it constrains nothing already agreed -- but because regeneration rewrites the whole file, a test checks every pre-existing case is byte-identical.",
+  "slot_names": [
+    "is_active",
+    "ego_speed",
+    "ego_acceleration",
+    "ego_lane",
+    "ego_headway_s",
+    "target_headway_s",
+    "time_since_last_lane_change",
+    "lane_changes_last_km",
+    "distance_to_next_merge",
+    "distance_to_downstream_bottleneck",
+    "leader_gap",
+    "leader_relative_speed",
+    "follower_gap",
+    "follower_relative_speed",
+    "left_lane_front_gap",
+    "left_lane_rear_gap",
+    "right_lane_front_gap",
+    "right_lane_rear_gap",
+    "target_lane_front_gap",
+    "target_lane_rear_gap",
+    "target_lane_rear_required_decel",
+    "downstream_congestion_estimate",
+    "merge_pressure",
+    "segment_target_speed",
+    "uncongested_low_speed_flag",
+    "local_density_bin",
+    "local_mean_speed_bin",
+    "local_queue_estimate",
+    "active_vehicle_count_local",
+    "active_av_count_local",
+    "nearby_av_count",
+    "nearby_av_density",
+    "nearby_av_mean_speed",
+    "cooperation.segment_target_speed",
+    "cooperation.merge_pressure",
+    "cooperation.downstream_congestion_estimate",
+    "nearby_av_lane_distribution.0",
+    "nearby_av_lane_distribution.1",
+    "nearby_av_lane_distribution.2"
+  ],
+  "field_scales": [
+    {
+      "field": "ego_speed",
+      "scale": 40.0
+    },
+    {
+      "field": "ego_acceleration",
+      "scale": 8.0
+    },
+    {
+      "field": "ego_lane",
+      "scale": 3.0
+    },
+    {
+      "field": "ego_headway_s",
+      "scale": 10.0
+    },
+    {
+      "field": "target_headway_s",
+      "scale": 10.0
+    },
+    {
+      "field": "time_since_last_lane_change",
+      "scale": 120.0
+    },
+    {
+      "field": "lane_changes_last_km",
+      "scale": 5.0
+    },
+    {
+      "field": "distance_to_next_merge",
+      "scale": 500.0
+    },
+    {
+      "field": "distance_to_downstream_bottleneck",
+      "scale": 500.0
+    },
+    {
+      "field": "leader_gap",
+      "scale": 150.0
+    },
+    {
+      "field": "leader_relative_speed",
+      "scale": 40.0
+    },
+    {
+      "field": "follower_gap",
+      "scale": 150.0
+    },
+    {
+      "field": "follower_relative_speed",
+      "scale": 40.0
+    },
+    {
+      "field": "left_lane_front_gap",
+      "scale": 150.0
+    },
+    {
+      "field": "left_lane_rear_gap",
+      "scale": 150.0
+    },
+    {
+      "field": "right_lane_front_gap",
+      "scale": 150.0
+    },
+    {
+      "field": "right_lane_rear_gap",
+      "scale": 150.0
+    },
+    {
+      "field": "target_lane_front_gap",
+      "scale": 150.0
+    },
+    {
+      "field": "target_lane_rear_gap",
+      "scale": 150.0
+    },
+    {
+      "field": "target_lane_rear_required_decel",
+      "scale": 8.0
+    },
+    {
+      "field": "downstream_congestion_estimate",
+      "scale": 1.0
+    },
+    {
+      "field": "merge_pressure",
+      "scale": 1.0
+    },
+    {
+      "field": "segment_target_speed",
+      "scale": 40.0
+    },
+    {
+      "field": "uncongested_low_speed_flag",
+      "scale": 1.0
+    },
+    {
+      "field": "local_density_bin",
+      "scale": 2.0
+    },
+    {
+      "field": "local_mean_speed_bin",
+      "scale": 2.0
+    },
+    {
+      "field": "local_queue_estimate",
+      "scale": 20.0
+    },
+    {
+      "field": "active_vehicle_count_local",
+      "scale": 50.0
+    },
+    {
+      "field": "active_av_count_local",
+      "scale": 50.0
+    },
+    {
+      "field": "nearby_av_count",
+      "scale": 50.0
+    },
+    {
+      "field": "nearby_av_density",
+      "scale": 100.0
+    },
+    {
+      "field": "nearby_av_mean_speed",
+      "scale": 40.0
+    }
+  ],
+  "cases": [
+    {
+      "name": "empty",
+      "why": "everything missing",
+      "obs": {},
+      "vector_sha256": "8a1206413d179730",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": null,
+          "scale": 8.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_lane",
+          "raw": null,
+          "scale": 3.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": null,
+          "scale": 10.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": null,
+          "scale": 10.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": null,
+          "scale": 120.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": null,
+          "scale": 5.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": null,
+          "scale": 500.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": null,
+          "scale": 500.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "leader_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "follower_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": null,
+          "scale": 8.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": null,
+          "scale": 2.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": null,
+          "scale": 2.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": null,
+          "scale": 20.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": null,
+          "scale": 50.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": null,
+          "scale": 50.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": null,
+          "scale": 50.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": null,
+          "scale": 100.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        }
+      ]
+    },
+    {
+      "name": "all_none",
+      "why": "every LOCAL_OBS_FIELDS key present and explicitly None",
+      "obs": {
+        "is_active": null,
+        "ego_speed": null,
+        "ego_acceleration": null,
+        "ego_lane": null,
+        "ego_headway_s": null,
+        "target_headway_s": null,
+        "time_since_last_lane_change": null,
+        "lane_changes_last_km": null,
+        "distance_to_next_merge": null,
+        "distance_to_downstream_bottleneck": null,
+        "leader_gap": null,
+        "leader_relative_speed": null,
+        "follower_gap": null,
+        "follower_relative_speed": null,
+        "left_lane_front_gap": null,
+        "left_lane_rear_gap": null,
+        "right_lane_front_gap": null,
+        "right_lane_rear_gap": null,
+        "target_lane_front_gap": null,
+        "target_lane_rear_gap": null,
+        "target_lane_rear_required_decel": null,
+        "downstream_congestion_estimate": null,
+        "merge_pressure": null,
+        "segment_target_speed": null,
+        "uncongested_low_speed_flag": null,
+        "local_density_bin": null,
+        "local_mean_speed_bin": null,
+        "local_queue_estimate": null,
+        "active_vehicle_count_local": null,
+        "active_av_count_local": null,
+        "nearby_av_count": null,
+        "nearby_av_density": null,
+        "nearby_av_mean_speed": null
+      },
+      "vector_sha256": "8a1206413d179730",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": null,
+          "scale": 8.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_lane",
+          "raw": null,
+          "scale": 3.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": null,
+          "scale": 10.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": null,
+          "scale": 10.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": null,
+          "scale": 120.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": null,
+          "scale": 5.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": null,
+          "scale": 500.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": null,
+          "scale": 500.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "leader_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "follower_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": null,
+          "scale": 150.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": null,
+          "scale": 8.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": null,
+          "scale": 2.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": null,
+          "scale": 2.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": null,
+          "scale": 20.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": null,
+          "scale": 50.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": null,
+          "scale": 50.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": null,
+          "scale": 50.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": null,
+          "scale": 100.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        }
+      ]
+    },
+    {
+      "name": "full_obs",
+      "why": "the ordinary case: every field present and numeric",
+      "obs": {
+        "is_active": true,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "e9c6ec4ae571a151",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "inf_leader_gap_and_headway",
+      "why": "two independent inf-clamped fields with different scales in one obs",
+      "obs": {
+        "is_active": true,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": "Infinity",
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": "Infinity",
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "b017b0dbf67ac9fd",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": "Infinity",
+          "scale": 10.0,
+          "rule": "inf_clamp",
+          "value": 5.0
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "neg_inf_relative_speed",
+      "why": "the negative branch of the inf clamp",
+      "obs": {
+        "is_active": true,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": "-Infinity",
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "4ffc9109db4b636c",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": "-Infinity",
+          "scale": 40.0,
+          "rule": "inf_clamp",
+          "value": -5.0
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "nan_ego_speed",
+      "why": "NaN takes the negative clamp branch (NaN > 0 is False), not +inf's",
+      "obs": {
+        "is_active": true,
+        "ego_speed": "NaN",
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "3f23de03e24d2af6",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": "NaN",
+          "scale": 40.0,
+          "rule": "inf_clamp",
+          "value": -5.0
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "bools_flipped",
+      "why": "bools bypass scaling entirely, both values",
+      "obs": {
+        "is_active": false,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": true,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "009dcb0c114cc40b",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "numeric_string",
+      "why": "a numeric string parses through float()",
+      "obs": {
+        "is_active": true,
+        "ego_speed": "18.5",
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "630f6503e0927f44",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": "18.5",
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.4625000059604645
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "junk_string",
+      "why": "a non-numeric string takes the parse_fail branch -> 0.0",
+      "obs": {
+        "is_active": true,
+        "ego_speed": "not-a-number",
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "632734c741e578af",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": "not-a-number",
+          "scale": 40.0,
+          "rule": "parse_fail",
+          "value": 0.0
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "cooperation_not_a_mapping",
+      "why": "a non-mapping cooperation block is ignored; every cooperation.* slot is none",
+      "obs": {
+        "is_active": true,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": "garbage"
+      },
+      "vector_sha256": "8e1861214168d4be",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": null,
+          "scale": 40.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "lane_distribution_not_a_mapping",
+      "why": "a non-mapping lane distribution is ignored; every lane slot is none",
+      "obs": {
+        "is_active": true,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": 7,
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "1009cfb05a9dfb46",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": null,
+          "scale": 1.0,
+          "rule": "none",
+          "value": 0.0
+        }
+      ]
+    },
+    {
+      "name": "inf_time_since_lane_change",
+      "why": "inf clamp on a field whose neutral fallback is also inf",
+      "obs": {
+        "is_active": true,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": "Infinity",
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "ce2bbee2a3e1130c",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": "Infinity",
+          "scale": 120.0,
+          "rule": "inf_clamp",
+          "value": 1.6666666269302368
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "cooperation_distinct_values",
+      "why": "three distinct, differently-scaled cooperation values (D13): a COOPERATION_FIELDS reorder changes at least one slot's number, not only its name",
+      "obs": {
+        "is_active": true,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.5,
+          "1": 0.25,
+          "2": 0.25
+        },
+        "cooperation": {
+          "segment_target_speed": 24.0,
+          "merge_pressure": 0.3,
+          "downstream_congestion_estimate": 0.9
+        }
+      },
+      "vector_sha256": "afcef3122f504b02",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 24.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.6000000238418579
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.3,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.30000001192092896
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.9,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.8999999761581421
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.5,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        }
+      ]
+    },
+    {
+      "name": "lane_distribution_distinct_values",
+      "why": "three distinct lane-distribution values (D13): a LANE_DISTRIBUTION_LANES reorder changes at least one slot's number, not only its name",
+      "obs": {
+        "is_active": true,
+        "ego_speed": 23.4,
+        "ego_acceleration": -1.2,
+        "ego_lane": 1,
+        "ego_headway_s": 1.9,
+        "target_headway_s": 1.6,
+        "time_since_last_lane_change": 42.0,
+        "lane_changes_last_km": 1,
+        "distance_to_next_merge": 0.0,
+        "distance_to_downstream_bottleneck": "Infinity",
+        "leader_gap": 44.5,
+        "leader_relative_speed": -2.1,
+        "follower_gap": "Infinity",
+        "follower_relative_speed": 0.0,
+        "left_lane_front_gap": 25.0,
+        "left_lane_rear_gap": "Infinity",
+        "right_lane_front_gap": "Infinity",
+        "right_lane_rear_gap": "Infinity",
+        "target_lane_front_gap": 44.5,
+        "target_lane_rear_gap": "Infinity",
+        "target_lane_rear_required_decel": 0.0,
+        "downstream_congestion_estimate": 0.0,
+        "merge_pressure": 0.0,
+        "segment_target_speed": 30.0,
+        "uncongested_low_speed_flag": false,
+        "local_density_bin": 2,
+        "local_mean_speed_bin": 1,
+        "local_queue_estimate": 0,
+        "active_vehicle_count_local": 6,
+        "active_av_count_local": 0,
+        "nearby_av_count": 0,
+        "nearby_av_density": 0.0,
+        "nearby_av_mean_speed": 30.0,
+        "nearby_av_lane_distribution": {
+          "0": 0.6,
+          "1": 0.25,
+          "2": 0.05
+        },
+        "cooperation": {
+          "segment_target_speed": 30.0,
+          "merge_pressure": 0.0,
+          "downstream_congestion_estimate": 0.0
+        }
+      },
+      "vector_sha256": "be41e6aadaaece34",
+      "slots": [
+        {
+          "slot": "is_active",
+          "raw": true,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 1.0
+        },
+        {
+          "slot": "ego_speed",
+          "raw": 23.4,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.5849999785423279
+        },
+        {
+          "slot": "ego_acceleration",
+          "raw": -1.2,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": -0.15000000596046448
+        },
+        {
+          "slot": "ego_lane",
+          "raw": 1,
+          "scale": 3.0,
+          "rule": "plain",
+          "value": 0.3333333432674408
+        },
+        {
+          "slot": "ego_headway_s",
+          "raw": 1.9,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1899999976158142
+        },
+        {
+          "slot": "target_headway_s",
+          "raw": 1.6,
+          "scale": 10.0,
+          "rule": "plain",
+          "value": 0.1599999964237213
+        },
+        {
+          "slot": "time_since_last_lane_change",
+          "raw": 42.0,
+          "scale": 120.0,
+          "rule": "plain",
+          "value": 0.3499999940395355
+        },
+        {
+          "slot": "lane_changes_last_km",
+          "raw": 1,
+          "scale": 5.0,
+          "rule": "plain",
+          "value": 0.20000000298023224
+        },
+        {
+          "slot": "distance_to_next_merge",
+          "raw": 0.0,
+          "scale": 500.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "distance_to_downstream_bottleneck",
+          "raw": "Infinity",
+          "scale": 500.0,
+          "rule": "inf_clamp",
+          "value": 0.4000000059604645
+        },
+        {
+          "slot": "leader_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "leader_relative_speed",
+          "raw": -2.1,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": -0.05249999836087227
+        },
+        {
+          "slot": "follower_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "follower_relative_speed",
+          "raw": 0.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "left_lane_front_gap",
+          "raw": 25.0,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.1666666716337204
+        },
+        {
+          "slot": "left_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_front_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "right_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_front_gap",
+          "raw": 44.5,
+          "scale": 150.0,
+          "rule": "plain",
+          "value": 0.2966666519641876
+        },
+        {
+          "slot": "target_lane_rear_gap",
+          "raw": "Infinity",
+          "scale": 150.0,
+          "rule": "inf_clamp",
+          "value": 1.3333333730697632
+        },
+        {
+          "slot": "target_lane_rear_required_decel",
+          "raw": 0.0,
+          "scale": 8.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "uncongested_low_speed_flag",
+          "raw": false,
+          "scale": 1.0,
+          "rule": "bool",
+          "value": 0.0
+        },
+        {
+          "slot": "local_density_bin",
+          "raw": 2,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 1.0
+        },
+        {
+          "slot": "local_mean_speed_bin",
+          "raw": 1,
+          "scale": 2.0,
+          "rule": "plain",
+          "value": 0.5
+        },
+        {
+          "slot": "local_queue_estimate",
+          "raw": 0,
+          "scale": 20.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "active_vehicle_count_local",
+          "raw": 6,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.11999999731779099
+        },
+        {
+          "slot": "active_av_count_local",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_count",
+          "raw": 0,
+          "scale": 50.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_density",
+          "raw": 0.0,
+          "scale": 100.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_mean_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.segment_target_speed",
+          "raw": 30.0,
+          "scale": 40.0,
+          "rule": "plain",
+          "value": 0.75
+        },
+        {
+          "slot": "cooperation.merge_pressure",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "cooperation.downstream_congestion_estimate",
+          "raw": 0.0,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.0
+        },
+        {
+          "slot": "nearby_av_lane_distribution.0",
+          "raw": 0.6,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.6000000238418579
+        },
+        {
+          "slot": "nearby_av_lane_distribution.1",
+          "raw": 0.25,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.25
+        },
+        {
+          "slot": "nearby_av_lane_distribution.2",
+          "raw": 0.05,
+          "scale": 1.0,
+          "rule": "plain",
+          "value": 0.05000000074505806
+        }
+      ]
+    }
+  ],
+  "actions": {
+    "heads": [
+      "desired_speed_bin",
+      "desired_headway_bin",
+      "lane_preference",
+      "merge_mode"
+    ],
+    "values": [
+      {
+        "head": "desired_speed_bin",
+        "values": [
+          "slow",
+          "nominal",
+          "fast"
+        ]
+      },
+      {
+        "head": "desired_headway_bin",
+        "values": [
+          "normal",
+          "larger",
+          "largest"
+        ]
+      },
+      {
+        "head": "lane_preference",
+        "values": [
+          "keep",
+          "prefer_left_if_safe",
+          "prefer_right_if_safe"
+        ]
+      },
+      {
+        "head": "merge_mode",
+        "values": [
+          "normal",
+          "create_gap",
+          "hold_lane"
+        ]
+      }
+    ],
+    "forced": [
+      {
+        "head": "desired_headway_bin",
+        "value": "normal"
+      },
+      {
+        "head": "lane_preference",
+        "value": "keep"
+      },
+      {
+        "head": "merge_mode",
+        "value": "normal"
+      }
+    ],
+    "profiles": [
+      {
+        "profile": "speed_only",
+        "heads": [
+          "desired_speed_bin"
+        ]
+      },
+      {
+        "profile": "speed_headway",
+        "heads": [
+          "desired_speed_bin",
+          "desired_headway_bin"
+        ]
+      },
+      {
+        "profile": "full",
+        "heads": [
+          "desired_speed_bin",
+          "desired_headway_bin",
+          "lane_preference",
+          "merge_mode"
+        ]
+      }
+    ],
+    "default_indices": [
+      {
+        "head": "desired_speed_bin",
+        "index": 0
+      },
+      {
+        "head": "desired_headway_bin",
+        "index": 0
+      },
+      {
+        "head": "lane_preference",
+        "index": 0
+      },
+      {
+        "head": "merge_mode",
+        "index": 0
+      }
+    ]
+  },
+  "decoders": {
+    "headway_bin_s": [
+      {
+        "bin": "normal",
+        "seconds": 1.6
+      },
+      {
+        "bin": "larger",
+        "seconds": 2.2
+      },
+      {
+        "bin": "largest",
+        "seconds": 3.0
+      }
+    ],
+    "speed_bin_mps": [
+      {
+        "bin": "slow",
+        "free_flow_mps": 13.0,
+        "min_contextual_mps": 12.0,
+        "value": 12.0
+      },
+      {
+        "bin": "slow",
+        "free_flow_mps": 20.0,
+        "min_contextual_mps": 12.0,
+        "value": 12.0
+      },
+      {
+        "bin": "slow",
+        "free_flow_mps": 22.0,
+        "min_contextual_mps": 12.0,
+        "value": 12.0
+      },
+      {
+        "bin": "slow",
+        "free_flow_mps": 30.0,
+        "min_contextual_mps": 12.0,
+        "value": 20.0
+      },
+      {
+        "bin": "slow",
+        "free_flow_mps": 40.0,
+        "min_contextual_mps": 12.0,
+        "value": 30.0
+      },
+      {
+        "bin": "nominal",
+        "free_flow_mps": 13.0,
+        "min_contextual_mps": 12.0,
+        "value": 12.0
+      },
+      {
+        "bin": "nominal",
+        "free_flow_mps": 20.0,
+        "min_contextual_mps": 12.0,
+        "value": 17.0
+      },
+      {
+        "bin": "nominal",
+        "free_flow_mps": 22.0,
+        "min_contextual_mps": 12.0,
+        "value": 19.0
+      },
+      {
+        "bin": "nominal",
+        "free_flow_mps": 30.0,
+        "min_contextual_mps": 12.0,
+        "value": 27.0
+      },
+      {
+        "bin": "nominal",
+        "free_flow_mps": 40.0,
+        "min_contextual_mps": 12.0,
+        "value": 37.0
+      },
+      {
+        "bin": "fast",
+        "free_flow_mps": 13.0,
+        "min_contextual_mps": 12.0,
+        "value": 13.0
+      },
+      {
+        "bin": "fast",
+        "free_flow_mps": 20.0,
+        "min_contextual_mps": 12.0,
+        "value": 20.0
+      },
+      {
+        "bin": "fast",
+        "free_flow_mps": 22.0,
+        "min_contextual_mps": 12.0,
+        "value": 22.0
+      },
+      {
+        "bin": "fast",
+        "free_flow_mps": 30.0,
+        "min_contextual_mps": 12.0,
+        "value": 30.0
+      },
+      {
+        "bin": "fast",
+        "free_flow_mps": 40.0,
+        "min_contextual_mps": 12.0,
+        "value": 40.0
+      }
+    ],
+    "bin_index": [
+      {
+        "value": 0.0,
+        "edges": [
+          0.5,
+          1.0,
+          2.0
+        ],
+        "index": 0
+      },
+      {
+        "value": 0.4999,
+        "edges": [
+          0.5,
+          1.0,
+          2.0
+        ],
+        "index": 0
+      },
+      {
+        "value": 0.5,
+        "edges": [
+          0.5,
+          1.0,
+          2.0
+        ],
+        "index": 1
+      },
+      {
+        "value": 0.9999,
+        "edges": [
+          0.5,
+          1.0,
+          2.0
+        ],
+        "index": 1
+      },
+      {
+        "value": 1.0,
+        "edges": [
+          0.5,
+          1.0,
+          2.0
+        ],
+        "index": 2
+      },
+      {
+        "value": 1.5,
+        "edges": [
+          0.5,
+          1.0,
+          2.0
+        ],
+        "index": 2
+      },
+      {
+        "value": 2.0,
+        "edges": [
+          0.5,
+          1.0,
+          2.0
+        ],
+        "index": 3
+      },
+      {
+        "value": 2.5,
+        "edges": [
+          0.5,
+          1.0,
+          2.0
+        ],
+        "index": 3
+      }
+    ]
+  },
+  "neutral_cooperation": [
+    {
+      "free_flow_mps": 13.0,
+      "values": [
+        {
+          "field": "segment_target_speed",
+          "value": 13.0
+        },
+        {
+          "field": "merge_pressure",
+          "value": 0.0
+        },
+        {
+          "field": "downstream_congestion_estimate",
+          "value": 0.0
+        }
+      ]
+    },
+    {
+      "free_flow_mps": 30.0,
+      "values": [
+        {
+          "field": "segment_target_speed",
+          "value": 30.0
+        },
+        {
+          "field": "merge_pressure",
+          "value": 0.0
+        },
+        {
+          "field": "downstream_congestion_estimate",
+          "value": 0.0
+        }
+      ]
+    }
+  ],
+  "actor_state_dict_layout": [
+    {
+      "key": "backbone.0.weight",
+      "shape": [
+        128,
+        39
+      ]
+    },
+    {
+      "key": "backbone.0.bias",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "key": "backbone.2.weight",
+      "shape": [
+        128,
+        128
+      ]
+    },
+    {
+      "key": "backbone.2.bias",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "key": "backbone.4.weight",
+      "shape": [
+        128,
+        128
+      ]
+    },
+    {
+      "key": "backbone.4.bias",
+      "shape": [
+        128
+      ]
+    },
+    {
+      "key": "heads.desired_speed_bin.weight",
+      "shape": [
+        3,
+        128
+      ]
+    },
+    {
+      "key": "heads.desired_speed_bin.bias",
+      "shape": [
+        3
+      ]
+    },
+    {
+      "key": "heads.desired_headway_bin.weight",
+      "shape": [
+        3,
+        128
+      ]
+    },
+    {
+      "key": "heads.desired_headway_bin.bias",
+      "shape": [
+        3
+      ]
+    },
+    {
+      "key": "heads.lane_preference.weight",
+      "shape": [
+        3,
+        128
+      ]
+    },
+    {
+      "key": "heads.lane_preference.bias",
+      "shape": [
+        3
+      ]
+    },
+    {
+      "key": "heads.merge_mode.weight",
+      "shape": [
+        3,
+        128
+      ]
+    },
+    {
+      "key": "heads.merge_mode.bias",
+      "shape": [
+        3
+      ]
+    }
+  ]
+}
