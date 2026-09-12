@@ -170,7 +170,10 @@ class DsrcRuntime:
         this.
         """
         t0 = time.monotonic()
-        tensor = torch.from_numpy(np.ascontiguousarray(state, dtype=np.float32))
+        # copy=True: a read-only source (e.g. a view into a base64-decoded
+        # buffer, as tests/test_dsrc_runtime.py's random-state block hands
+        # in) would otherwise reach torch as a non-writable tensor.
+        tensor = torch.from_numpy(np.array(state, dtype=np.float32, copy=True))
         with torch.inference_mode():
             logits = self.module(tensor)
             # SRC applies a softmax before the argmax (`src.rl.src_q.

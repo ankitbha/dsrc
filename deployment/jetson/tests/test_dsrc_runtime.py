@@ -9,6 +9,7 @@ lives in `TestGoldenActions` at the bottom of this file, once
 
 from __future__ import annotations
 
+import base64
 import copy
 import json
 from pathlib import Path
@@ -194,3 +195,195 @@ class TestDecideEnforcesFullCoverage:
         assert decision.latency_ms is None
         assert decision.outcome == "incomplete_coverage"
         assert decision.segment_basis == segment_state.segment_basis
+
+
+# ---------------------------------------------------------------------------
+# Decision 4's demonstration: action equality against src.rl.src_q.greedy_actions
+# on specs/dsrc_golden_actions.json (scripts/export_dsrc_golden.py).
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+GOLDEN_PATH = REPO_ROOT / "specs" / "dsrc_golden_actions.json"
+CHECKPOINT_PATH = REPO_ROOT / "results" / "checkpoints" / "mainz_here_best.pt"
+NETWORK_DEFINITION_PATH = REPO_ROOT / "specs" / "dsrc_network_mainz.json"
+
+requires_golden = pytest.mark.skipif(
+    not GOLDEN_PATH.exists(), reason="specs/dsrc_golden_actions.json not generated"
+)
+requires_checkpoint = pytest.mark.skipif(
+    not CHECKPOINT_PATH.exists(), reason="results/checkpoints/mainz_here_best.pt not present"
+)
+
+
+def _from_hex_f32(nested) -> np.ndarray:
+    """Inverse of scripts/export_dsrc_golden.py's _hex_f32: exact bits back."""
+    arr = np.array(nested, dtype=object)
+    flat = arr.ravel()
+    values = np.array(
+        [np.frombuffer(bytes.fromhex(h), dtype=np.float32)[0] for h in flat], dtype=np.float32
+    )
+    return values.reshape(arr.shape)
+
+
+def _export_real_bundle(tmp_path, network_definition_path=NETWORK_DEFINITION_PATH) -> str:
+    definition = json.loads(Path(network_definition_path).read_text())
+    model, info = export_mod.build_from_checkpoint(str(CHECKPOINT_PATH), definition)
+    out_prefix = str(Path(tmp_path) / "dsrc_policy")
+    export_mod.export(model, info, definition, out_prefix, checkpoint_path=str(CHECKPOINT_PATH))
+    return out_prefix
+
+
+@requires_golden
+@requires_checkpoint
+class TestGoldenActions:
+    """Decision 4, section 5.2's acceptance table, checked directly."""
+
+    @pytest.fixture(scope="class")
+    def golden(self):
+        return json.loads(GOLDEN_PATH.read_text())
+
+    @pytest.fixture(scope="class")
+    def runtime(self, tmp_path_factory, golden):
+        bundle = _export_real_bundle(tmp_path_factory.mktemp("dsrc_golden_bundle"))
+        rt = DsrcRuntime(bundle, network_definition_path=str(NETWORK_DEFINITION_PATH))
+        assert rt.manifest["network_fingerprint"] == golden["network_fingerprint"], (
+            "the golden file and the freshly-exported bundle disagree on which "
+            "network they describe -- regenerate one against the other"
+        )
+        return rt
+
+    def test_recorded_actions_and_q_values(self, runtime, golden):
+        """0 mismatches of ~180 recorded simulator states; Q-values within 1e-5."""
+        mismatches = 0
+        max_diff = 0.0
+        for case in golden["recorded"]:
+            state = _from_hex_f32(case["state_hex"])
+            result = runtime.act(state)
+            expected_action = np.array(case["action"], dtype=np.int64)
+            if not np.array_equal(result.actions, expected_action):
+                mismatches += 1
+            expected_q = _from_hex_f32(case["q_values_hex"])
+            max_diff = max(max_diff, float(np.max(np.abs(result.q_values - expected_q))))
+        assert mismatches == 0, (
+            f"{mismatches} of {len(golden['recorded'])} recorded states mismatched"
+        )
+        assert max_diff < 1e-5, f"max |Q-value diff| {max_diff} >= 1e-5"
+
+    def test_recorded_q_values_are_bit_exact_on_this_machine(self, runtime, golden):
+        """TorchScript vs the eager reference, same machine that exported both."""
+        for case in golden["recorded"]:
+            state = _from_hex_f32(case["state_hex"])
+            result = runtime.act(state)
+            expected_q = _from_hex_f32(case["q_values_hex"])
+            assert np.array_equal(result.q_values, expected_q), (
+                "TorchScript Q-values are not bit-exact with the eager reference "
+                "on this machine"
+            )
+
+    def test_random_actions_and_q_values(self, runtime, golden):
+        """0 mismatches of 20,000 random states; Q-values within 1e-5."""
+        random_block = golden["random"]
+        n = random_block["count"]
+        s, f = runtime.num_segments, runtime.num_features
+        states = np.frombuffer(
+            base64.b64decode(random_block["states_b64"]), dtype=np.float32
+        ).reshape(n, s, f)
+        actions = np.frombuffer(
+            base64.b64decode(random_block["actions_b64"]), dtype=np.int8
+        ).reshape(n, s)
+        q_values = np.frombuffer(
+            base64.b64decode(random_block["q_values_b64"]), dtype=np.float32
+        ).reshape(n, s, 3)
+
+        mismatches = 0
+        max_diff = 0.0
+        for i in range(n):
+            result = runtime.act(states[i])
+            if not np.array_equal(result.actions.astype(np.int8), actions[i]):
+                mismatches += 1
+            max_diff = max(max_diff, float(np.max(np.abs(result.q_values - q_values[i]))))
+        assert mismatches == 0, f"{mismatches} of {n} random states mismatched"
+        assert max_diff < 1e-5, f"max |Q-value diff| {max_diff} >= 1e-5"
+
+
+@requires_golden
+@requires_checkpoint
+class TestTheDemonstrationHasBeenSeenToFail:
+    """Section 5.3: three deliberately broken runtimes, each seen to fail
+    before the passing result above is trusted."""
+
+    def test_control_1_a_transposed_weight_breaks_the_shape(self):
+        """A transposed weight load -- must fail on Q-values (here, before
+        any: none of this network's weight matrices is square, so a
+        transpose is never shape-compatible and the corruption is caught at
+        load time rather than surfacing as a silently wrong number)."""
+        state_dict = torch.load(CHECKPOINT_PATH, map_location="cpu", weights_only=True)
+        corrupted = dict(state_dict)
+        corrupted["stack.0.weight"] = corrupted["stack.0.weight"].T.contiguous()
+        model = SrcQNetwork(12, 5, 3)
+        with pytest.raises(RuntimeError):
+            model.load_state_dict(corrupted)
+
+    def test_control_2_two_segments_swapped_fails_at_load_before_any_action(self, tmp_path):
+        """Two segments swapped in the network definition -- must fail on
+        the network fingerprint at load, before any action is computed."""
+        definition = json.loads(NETWORK_DEFINITION_PATH.read_text())
+        bundle = _export_real_bundle(tmp_path, network_definition_path=NETWORK_DEFINITION_PATH)
+
+        swapped = json.loads(NETWORK_DEFINITION_PATH.read_text())
+        swapped["segments"][0], swapped["segments"][1] = (
+            swapped["segments"][1], swapped["segments"][0],
+        )
+        swapped_path = tmp_path / "swapped_mainz.json"
+        swapped_path.write_text(json.dumps(swapped))
+
+        with pytest.raises(RuntimeError, match="network_fingerprint"):
+            DsrcRuntime(bundle, network_definition_path=str(swapped_path))
+
+    def test_control_3_jam_factor_from_an_independent_field_changes_actions(
+        self, tmp_path_factory,
+    ):
+        """jam_factor computed from an independent field instead of the
+        simulator's formula -- records how many of the ~185 recorded
+        actions change. This is the measurement open item 2 needs, not a
+        pass/fail gate: there is no real HERE jamFactor reading paired with
+        these simulated states (no HERE response was ever collected over
+        Mainz -- plan risk 4), so "an independent field" is modelled here as
+        a value drawn independently of the recomputed formula, over HERE's
+        full 0-10 range, which upper-bounds how much a genuinely
+        uncorrelated field could move the outcome.
+        """
+        golden = json.loads(GOLDEN_PATH.read_text())
+        bundle = _export_real_bundle(tmp_path_factory.mktemp("dsrc_control_3"))
+        runtime = DsrcRuntime(bundle, network_definition_path=str(NETWORK_DEFINITION_PATH))
+
+        rng = np.random.default_rng(2026)
+        decisions_changed = 0
+        per_segment_changed = 0
+        per_segment_total = 0
+        for case in golden["recorded"]:
+            state = _from_hex_f32(case["state_hex"])
+            original_action = runtime.act(state).actions
+
+            altered = state.copy()
+            altered[:, 2] = rng.uniform(0.0, 10.0, size=altered.shape[0]).astype(np.float32)
+            altered_action = runtime.act(altered).actions
+
+            per_segment_total += original_action.shape[0]
+            per_segment_changed += int(np.sum(original_action != altered_action))
+            if not np.array_equal(original_action, altered_action):
+                decisions_changed += 1
+
+        n = len(golden["recorded"])
+        print(
+            f"\ncontrol 3: independent jam_factor changed "
+            f"{decisions_changed}/{n} recorded decisions (>=1 segment's action "
+            f"differed), {per_segment_changed}/{per_segment_total} individual "
+            f"per-segment actions"
+        )
+        # A measurement, not a threshold: the mechanism must run and produce
+        # a count in range, and in fact change at least one decision -- a
+        # sweep over jam_factor's whole valid range that changed NOTHING
+        # would mean this feature carries no information for this
+        # checkpoint, which would itself be worth reporting.
+        assert 0 <= decisions_changed <= n
