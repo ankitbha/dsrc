@@ -3290,5 +3290,44 @@ would have failed is absent rather than wrong.
      from them, would separate that cause from an actual `DsrcRuntime` divergence the next
      time `test_random_states_hash_to_the_frozen_digest` fails.
 
+     **Validator round 2 (2026-09-12): the latency paragraph above quotes pre-fix-3
+     numbers.** Fix 3 (validator round 1) removed the `any(...)` short-circuit in
+     `_distance_to_polyline`/`SegmentStateBuilder.build`'s matching loop that let a
+     distance check stop at the first vertex within tolerance; every vertex of every
+     matched segment is now visited on every call. Re-measured on this machine with the
+     same synthetic feed (`bench_dsrc_latency.py --ticks 300`, no `--here-log`): at
+     `4ba6b7f` (before fix 3) `segment_assemble` was p50 26.1 ms / p95 26.6 ms, close to
+     the 25.9/26.2 the paragraph above states; at the current commit it is p50 29.6 ms /
+     p95 30.1 ms, about 14% higher -- the paragraph above was written before fix 3 landed
+     and was never re-measured against it. Separately, `dsrc_infer` p50 0.029 ms above was
+     wall-clock time measured around `decide()`; round-1 fix 1 changed the instrument to
+     `DsrcActResult.latency_ms`, timed inside `act()` around the network call alone. A
+     fresh run gives p50 0.027 ms / p95 0.057 ms, within 0.002 ms of the number above but
+     produced by the changed instrument, not the one the paragraph describes.
+
+     **`segment_assemble` cost is linear in link count and can reach the per-tick budget
+     -- recorded here as a real number without a real input yet, not fixed.**
+     `eval_run.py` budgets 200 ms p95 per tick on the Jetson, and
+     `PerceptionPolicyPipeline._dsrc_step` runs `segment_assemble` and `dsrc_infer`
+     synchronously inside `step()`, so whichever tick lands on the 60 s decision boundary
+     pays the full assembly cost against that single tick's budget, not against the 60 s
+     interval the reasoning above is about. Measured cost is linear at about 2.5 ms per
+     link: 12 links (Mainz's own network, the only one deployed against this runtime)
+     costs 30.2 ms; 192 links costs 476.3 ms. On this machine the 200 ms budget is crossed
+     at roughly 90 links; the Orin, being slower, crosses it sooner. Fix 3 added 11-14% to
+     this cost; the cost itself predates fix 3 and is a property of the per-vertex
+     polyline-distance search run for every matched segment on every link, not of that
+     fix. Mainz has 12 segments, so this does not bite today; if a larger network is ever
+     deployed against this runtime, the cheap remedy is a per-segment bounding-box check
+     before the vertex loop, tried before replacing the vertex loop itself.
+
+     **`bench_dsrc_latency.py --ticks 0` raises `IndexError`, recorded and not fixed.**
+     Confirmed by running it: `pctl(assemble_ms)` calls `np.percentile` on an empty list
+     unconditionally, which raises inside numpy rather than returning a sensible "no
+     ticks ran" result; the `dsrc_infer_ms` path a few lines below is correctly guarded
+     with `if infer_ms:` and prints a named message instead. This is user error (`--ticks
+     0` asks the harness to measure zero decisions) producing a crash rather than the
+     harness reporting a wrong number, so it is recorded rather than fixed.
+
 ---
 
