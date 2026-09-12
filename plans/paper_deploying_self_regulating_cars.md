@@ -418,6 +418,28 @@ identically to every arm.
 **No number here is comparable to the published table.** Every claim is against this
 port's own no-control baseline.
 
+### What the two papers cover between them
+
+The simulation half is not asked to establish generality on its own, and a topology or
+demand sweep would be re-establishing what the SRC paper already did. Across the pair:
+
+| | SRC (AAAI) | this paper |
+|---|---|---|
+| simulator | PTV Vissim | SUMO |
+| car following | Wiedemann-99 | EIDM with a 1 s reaction |
+| demand | the published surge, 18,000 veh/h for 1,200 s | a sustained 4,500 veh/h |
+| road network | Mainz | Mainz |
+
+Two simulators, two driver models, two demand profiles. The road network is nominally the
+same, but the pair is further apart than that row suggests: this port carries 2 junctions
+with conflicting movements against 10 active conflict areas in the source, a fleet whose
+capacity differs, and an exit lane drop the published layout does not have. What is
+common between the two runs is the controller and the topology's shape; almost everything
+that decides how it behaves differs.
+
+`inverted_tree` is out of scope for an unrelated reason -- one link per super-segment, so
+there is no aggregation for the observation to summarise.
+
 ## The flow of the paper as described
 
 1. The starting point: the SRC paper's controller and result.
@@ -441,8 +463,6 @@ ICRA.
   the comparison the two live runs were collected for.
 * **The gate's behaviour is unmeasured in simulation.** How often local safety clamps an
   advisory, and what it costs. Three runs would settle it: gated, ungated, no control.
-* **One topology and one demand level** in the simulation half. `inverted_tree` is out of
-  scope -- one link per super-segment, so there is no aggregation in it.
 * **The critical path in `plans/task_list.md` is stale.** It names tasks 68 and 69,
   training and evaluating MAPPO on `inverted_tree`, as the flow-level half. That was
   superseded on 2026-09-11 by the SRC port on Mainz.
