@@ -19,6 +19,7 @@ import numpy as np
 
 from perception.detector import COCO_VEHICLE_NAMES
 from pipeline import Tick
+from policy.advisory import Advisory
 
 PANEL_W = 380
 GREEN = (80, 220, 80)
@@ -67,6 +68,23 @@ def annotate_frame(
     return out
 
 
+def _recommended_speed_line(adv: Advisory) -> tuple[str, tuple[int, int, int]]:
+    """The 'Recommended' line's text and color, pulled out of
+    render_dashboard so it is unit-testable without a real frame or cv2.
+
+    validator round 1, F7: plan step 6 says to withhold the speed number on
+    an emergency override -- `Advisory.speed_display_withheld` was written
+    into the record (task 144, open item 3) and read by no surface at all
+    until this fix. Withheld, the recommended-speed number is not shown as
+    a cruising target: `physical_control_command` chose an emergency
+    deceleration this tick, and the raw decoded speed above it is not what
+    the vehicle is doing.
+    """
+    if adv.speed_display_withheld:
+        return "Recommended: WITHHELD (override)", RED
+    return f"Recommended: {adv.recommended_speed_display:5.0f} {adv.units}", GREEN
+
+
 def render_dashboard(
     image: np.ndarray,
     tick: Tick,
@@ -94,7 +112,8 @@ def render_dashboard(
     if not policy_trained:
         put("[ UNTRAINED POLICY - BRING-UP ]", RED, 0.5, 28, 2)
     y += 6
-    put(f"Recommended: {adv.recommended_speed_display:5.0f} {adv.units}", GREEN, 0.8, 36, 2)
+    speed_text, speed_color = _recommended_speed_line(adv)
+    put(speed_text, speed_color, 0.8, 36, 2)
     put(f"Current:     {adv.current_speed_display:5.0f} {adv.units}", WHITE, 0.8, 38, 2)
     put(f"Lane:    {adv.lane_text}", YELLOW, 0.55, 26)
     put(f"Merge:   {adv.merge_text}", WHITE, 0.5, 24)
