@@ -764,11 +764,42 @@ it is the one that has not driven.
   `dsrc_advisory_decoder`; `here_feed_source` is never passed either, and `config.yaml`'s
   `policy` block has no `dsrc_bundle` entry. The three stay `None` and the path never runs on
   a real drive.
-* **The shadow runs have not been scored.** `deployment/jetson/score_shadow.py` replays
-  the logged per-tick inputs and scores candidate controllers against them, gating on the
-  incumbent replaying byte-for-byte first. It has not been run against the six. Until it
-  does, whether the shadow-mode predictions held in live mode is unanswered -- and that is
-  the comparison the two live runs were collected for.
+* **The shadow runs are now scored, and the comparison they were collected for cannot be
+  made from them.** `score_shadow.py` was run against all eight drives on 2026-09-12, not
+  only the six, because the comparison needs the live pair. Artefact:
+  `results/shadow/shadow_replay_scoring.json`.
+
+  *The replay gate passes everywhere.* All eight logs reproduce their own recorded decisions
+  exactly --- **0 of 22,929 ticks mismatched, exit 0 on every run** (17,948 shadow, 4,981
+  live). That is the precondition for scoring any candidate and it holds.
+
+  *What the gate's pass is worth, stated rather than assumed.* Forcing
+  `decision_inputs.policy_margin` to 0.9 on one drive, against its own observed range of
+  0.0123 to 0.0246 and a 0.15 threshold, gives `replay_identity: failed (1632/1632)` and
+  exit 2. So the gate fires. Rounding `decision_inputs.ego_speed` on the same drive gives
+  `0/1632` and exit 0 --- reproducing, independently, the insensitivity the tool's own
+  docstring documents. The logs reproduce the decisions they recorded; that is not the same
+  claim as the logs being uncorrupted, and the paper should not make the wider one.
+
+  *Why the shadow-versus-live comparison is not available.* **Both live runs report
+  `first_live_tick_id=0`, `reference=0`, `contaminated=` every tick**, and
+  `reference_rates_hold=False`. The controller was live from the first tick of each, so
+  neither live drive contains a reference segment, and `score_shadow` can only score a
+  candidate against reference ticks --- after the controller acts, the trajectory is its
+  own. The six shadow runs are clean references (`reference=` all ticks, `contaminated=0`,
+  `first_live_tick_id=None`), but there is no paired live segment inside any run to compare
+  them with. A cross-run comparison would be between different drives on different roads at
+  different times, which is not the comparison this item asked for. Constructing it would
+  need a drive that runs shadow for a segment and then goes live, which is a new drive
+  rather than a re-analysis.
+
+  *Two findings that came out of the same run.* `source_disagreement` is reported RULE NEVER
+  EXERCISED (log-wide) on all six shadow drives, `feed_congestion` missing on 17,948 of
+  17,948 ticks --- the same shape as task 144's safety-gate census, a rule present in the
+  controller that this rig's inputs cannot evaluate. And `camera_density_bin` reads
+  `derived_empty` on 22,927 of 22,929 ticks: **the camera contributed a usable density on
+  two ticks of the entire campaign**, which is the per-tick size of the frame-rotation
+  defect already recorded under "One bug hid every perception result in the project".
 * **The gate's behaviour question, as previously posed, cannot be answered on either side.**
   It asked how often local safety clamps an advisory and what it costs, and said three runs
   would settle it: gated, ungated, no control. Both halves are now measured, and neither is a

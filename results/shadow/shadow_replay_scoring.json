@@ -1,0 +1,148 @@
+{
+  "what": "Task: score the 2026-09-08 shadow runs with deployment/jetson/score_shadow.py, which the paper plan listed as never having been run. All eight drives were scored, not only the six, because the comparison the open item names needs the live pair too.",
+  "generator": "deployment/jetson/score_shadow.py",
+  "command": "score_shadow.py <run_dir> --no-json",
+  "run_at_commit": "7625c7d4c45f3283f38b00f1e90bccd90d3d23c5",
+  "measured_at": "2026-09-12T17:35:22.994141Z",
+  "environment": {
+    "machine": "arm64 Darwin",
+    "python": "3.12.14"
+  },
+  "drive_data": "~/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/ -- outside the repository and gitignored; nothing was written into it (--no-json).",
+  "totals": {
+    "runs": 8,
+    "ticks": 22929,
+    "shadow_ticks": 17948,
+    "live_ticks": 4981,
+    "replay_mismatches": 0,
+    "runs_exiting_0": 8
+  },
+  "per_run": {
+    "run_20260908_142253": {
+      "ticks": 1632,
+      "unparseable_lines": 0,
+      "replay_identity": "ok",
+      "mismatched": 0,
+      "compared": 1632,
+      "reference_ticks": 1632,
+      "contaminated_ticks": 0,
+      "first_live_tick_id": "None",
+      "exit": 0,
+      "mode": "shadow"
+    },
+    "run_20260908_144642": {
+      "ticks": 2390,
+      "unparseable_lines": 0,
+      "replay_identity": "ok",
+      "mismatched": 0,
+      "compared": 2390,
+      "reference_ticks": 2390,
+      "contaminated_ticks": 0,
+      "first_live_tick_id": "None",
+      "exit": 0,
+      "mode": "shadow"
+    },
+    "run_20260908_155910": {
+      "ticks": 3421,
+      "unparseable_lines": 0,
+      "replay_identity": "ok",
+      "mismatched": 0,
+      "compared": 3421,
+      "reference_ticks": 3421,
+      "contaminated_ticks": 0,
+      "first_live_tick_id": "None",
+      "exit": 0,
+      "mode": "shadow"
+    },
+    "run_20260908_173809": {
+      "ticks": 2103,
+      "unparseable_lines": 0,
+      "replay_identity": "ok",
+      "mismatched": 0,
+      "compared": 2103,
+      "reference_ticks": 2103,
+      "contaminated_ticks": 0,
+      "first_live_tick_id": "None",
+      "exit": 0,
+      "mode": "shadow"
+    },
+    "run_20260908_183538": {
+      "ticks": 386,
+      "unparseable_lines": 1,
+      "replay_identity": "ok",
+      "mismatched": 0,
+      "compared": 386,
+      "reference_ticks": 386,
+      "contaminated_ticks": 0,
+      "first_live_tick_id": "None",
+      "exit": 0,
+      "mode": "shadow"
+    },
+    "run_20260908_190548": {
+      "ticks": 8016,
+      "unparseable_lines": 0,
+      "replay_identity": "ok",
+      "mismatched": 0,
+      "compared": 8016,
+      "reference_ticks": 8016,
+      "contaminated_ticks": 0,
+      "first_live_tick_id": "None",
+      "exit": 0,
+      "mode": "shadow"
+    },
+    "run_20260908_161422": {
+      "ticks": 2555,
+      "unparseable_lines": 0,
+      "replay_identity": "ok",
+      "mismatched": 0,
+      "compared": 2555,
+      "reference_ticks": 0,
+      "contaminated_ticks": 2555,
+      "first_live_tick_id": "0",
+      "exit": 0,
+      "mode": "live"
+    },
+    "run_20260908_170849": {
+      "ticks": 2426,
+      "unparseable_lines": 0,
+      "replay_identity": "ok",
+      "mismatched": 0,
+      "compared": 2426,
+      "reference_ticks": 0,
+      "contaminated_ticks": 2426,
+      "first_live_tick_id": "0",
+      "exit": 0,
+      "mode": "live"
+    }
+  },
+  "headline": "Every one of the eight logs reproduces its own recorded decisions exactly: 0 of 22,929 ticks mismatched, exit 0 on all eight. The replay gate is the precondition for scoring any candidate, and it passes.",
+  "the_control_that_makes_the_null_mean_something": {
+    "why": "A gate that has never been seen to fail is not evidence. score_shadow's own docstring states it is insensitive to corruptions the incumbent's thresholds never cross, so the pass had to be bounded rather than quoted.",
+    "control_that_FIRED": {
+      "edit": "decision_inputs.policy_margin forced to 0.9 on all 1,632 ticks of run_20260908_142253; the drive's own range is 0.0123 to 0.0246 against a 0.15 threshold, so every tick crosses it and advisory_margin_narrow must stop firing",
+      "file_sha_moved": "750a9194e9ed -> fbea90eba2d9",
+      "result": "replay_identity: failed (1632/1632 mismatched), exit 2 -- the documented refusal code"
+    },
+    "control_that_did_NOT_fire": {
+      "edit": "decision_inputs.ego_speed rounded to the nearest integer on all 1,632 ticks of the same run",
+      "file_sha_moved": "750a9194e9ed -> d4533071cbd9",
+      "result": "replay_identity: ok (0/1632 mismatched), exit 0",
+      "reading": "This reproduces, independently, the insensitivity the tool documents. It bounds what the 0-of-22,929 pass means: the logs reproduce the decisions they recorded, which is not the same claim as the logs being uncorrupted."
+    }
+  },
+  "the_finding_that_answers_the_open_item": {
+    "statement": "The within-run shadow-versus-live comparison the open item describes cannot be made from these drives, and the reason is in the data rather than in the tool.",
+    "evidence": "Both live runs report first_live_tick_id=0, reference=0, contaminated=all (2,555 and 2,426 ticks), and reference_rates_hold=False. The controller was live from the first tick of each, so neither live drive contains a reference segment. score_shadow can only score a candidate against reference ticks, because after the controller acts the trajectory is its own.",
+    "consequence": "The six shadow runs are clean references -- reference=all ticks, contaminated=0, first_live_tick_id=None on every one -- but there is no paired live segment to compare them against within any run. A cross-run comparison would be between different drives on different roads at different times, which is not the comparison the open item asks for."
+  },
+  "two_further_findings": {
+    "source_disagreement_never_exercised": "On all six shadow runs the tool reports RULE NEVER EXERCISED (log-wide) for source_disagreement, with feed_congestion missing on every tick -- 17,948 of 17,948. It also lists feed_congestion and source_disagreement under structurally_absent. This is the same shape as task 144's safety-gate census: a rule present in the controller that this rig's inputs cannot evaluate.",
+    "the_camera_contributed_a_density_on_2_ticks_of_22929": "camera_density_bin reads derived_empty on 22,927 ticks and derived on 2 (one in run_20260908_173809, one in run_20260908_190548). Consistent with the 90-degree frame rotation the paper plan already records as having hidden every perception result in the project; recorded here as the per-tick count."
+  },
+  "what_this_does_not_establish": [
+    "That any candidate controller is better or worse than the incumbent. No candidate was scored: the tool's own docstring notes a pure shadow drive never queries HERE, so Trigger.DISAGREEMENT cannot fire and no candidate can be credited or debited on one.",
+    "That the logs are uncorrupted. The ego_speed control shows the gate passing a log I corrupted.",
+    "Anything about driving behaviour. No advisory was acted on -- see the paper plan's scope boundary.",
+    "run_20260908_183538 carries 1 unparseable line and lacks log_health.json and summary.json, consistent with a run that was cut short; its 386 ticks still replayed exactly."
+  ]
+}
