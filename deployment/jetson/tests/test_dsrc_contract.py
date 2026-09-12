@@ -34,6 +34,19 @@ def test_here_features_match_mainz():
     assert dsrc_contract.HERE_FEATURES == mainz.HERE_FEATURES
 
 
+@pytest.mark.parametrize(
+    "speed_kmh,free_flow_kmh",
+    [(60.0, 60.0), (0.0, 60.0), (80.0, 60.0), (0.0, 0.0), (30.0, 60.0)],
+)
+def test_jam_factor_matches_mainz(speed_kmh, free_flow_kmh):
+    from src.sumo import mainz
+
+    assert (
+        dsrc_contract.jam_factor(speed_kmh, free_flow_kmh)
+        == mainz.jam_factor(speed_kmh, free_flow_kmh)
+    )
+
+
 def test_vendored_network_matches_sim_state_dict_keys_and_shapes():
     sim_src_q = pytest.importorskip("src.rl.src_q", reason="sim repo not importable")
 

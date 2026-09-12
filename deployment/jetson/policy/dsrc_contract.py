@@ -43,6 +43,22 @@ DECISION_INTERVAL_S: float = 60.0
 HERE_FEATURES: tuple[str, ...] = ("speed", "free_flow", "jam_factor", "lanes", "length_km")
 
 
+def jam_factor(speed_kmh: float, free_flow_kmh: float) -> float:
+    """HERE's 0-10 congestion index, as the simulator's own stated model.
+
+    Vendored from `src.sumo.mainz.jam_factor` for the same reason the network
+    is vendored above: so `perception.segment_state` needs no `src.sumo`
+    import. HERE does not publish its own formula and folds in incident data
+    this project does not have, so the policy was trained against this
+    stated ratio, not against HERE's own `jamFactor` field -- using the
+    field instead would feed the network a different quantity than the one
+    it was trained on.
+    """
+    if free_flow_kmh <= 0.0:
+        return 0.0
+    return float(min(10.0, max(0.0, 10.0 * (1.0 - speed_kmh / free_flow_kmh))))
+
+
 class SrcQNetwork(nn.Module):
     """State-dict-compatible twin of `src.rl.src_q.SrcQNetwork`.
 
