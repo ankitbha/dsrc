@@ -17,7 +17,7 @@ Per his standing instruction the earlier workshop paper is referred to but not d
 Not the simulation, and not the observation result. A system was built and driven in a
 car, and that is the paper.
 
-## What was built
+## What was built --- DESIGN
 
 ```text
   phone                    transport                  jetson
@@ -50,86 +50,6 @@ since both devices are powered from the car.
 **The cloud is observability, not control.** HERE supplies traffic state; nothing in the
 loop waits on a server.
 
-### Measured, on the device
-
-| | |
-|---|---|
-| Jetson end-to-end | p50 **19.8 ms**, p95 20.2 ms at 48.5 FPS |
-| detection | 17.7 ms, of which 3.9 ms is GPU |
-| tracking and distance | 1.1 ms |
-| observation and encode | 0.4 ms |
-| actor and advisory | 0.5 ms |
-| over USB, pooled across 2,684 ticks | p95 **116.19 ms** against a 200 ms target |
-| the same link over Tailscale | p95 215.63 ms |
-| the USB wire hop itself | about 2 ms; the run-to-run spread is phone-side queueing |
-
-## What was run
-
-**Eight drives, 2026-09-08, Westfield NJ**, on a OnePlus Nord N10 -- the Moto's cable
-failed and the app was installed on the Nord in the car, with the swap recorded
-automatically in `installed_apk.json`.
-
-* **Six shadow runs**, 17,948 ticks, 45.9 to 47.7 km.
-* **Two live runs**, 4,981 ticks, 40.7 to 42.4 km, the controller gating for real.
-* **First working GPS and first working HERE in the project.** Every bench run before had
-  `gps_hz 0.0` and `here=false`.
-* On the shakedown: 1,632 ticks, 279.5 s, 6.24 km, mean 22.9 m/s, GPS valid on 1,299 of
-  1,313 ticks, 4.69 Hz mean tick rate. Distance agrees to 0.01 km between integrating
-  reported speed and the great-circle path through the fixes, which is two independent
-  routes to one number.
-
-**The shakedown did what a shakedown is for: it broke.** Three defects, each filed
-separately -- a 90-degree frame rotation that explains every zero-detection drive in the
-project, frames being discarded so the drive could not explain itself, and the `severe`
-thermal tier ending a session rather than lowering rates.
-
-## What the system establishes beyond running
-
-Already measured, already recorded, and not yet used in the story.
-
-### The two clocks, and a guarantee that states its own error
-
-Two devices, two monotonic clocks. The discipline is that **no conversion returns a bare
-number**: a converted instant carries its error bound and the id of the estimate that
-produced it, so a cross-device timestamp cannot be mistaken for a same-device one, and
-below the gate it **raises** rather than answering with a widened bound.
-
-* **Loopback null case**, where one machine means the truth is zero: offset spread
-  **12 microseconds over 145 s**, fitted slope −0.05 ppm. The estimator invents no
-  structure where there is none.
-* **Real link, 330 s**: 357 exchanges, every one matched, **zero refused**, and all nine
-  outcome counters close against pings sent without subtracting anything. `rtt_min` p50
-  **14.8 ms**, bound p50 **8.0 ms**. Under full sensor load -- 10 Hz camera at 40 KB,
-  50 Hz IMU -- 218 exchanges with every channel on cadence.
-* **The instrument built to validate the premise was degenerate, and algebra caught it,
-  not a run.** Estimating the offset on each clock pair and differencing the slopes
-  cancels the quantity of interest: it returns `s_local − s_remote`, not the skew.
-  Confirmed rather than argued -- it reported **+12.06 ppm against an independently
-  measured slew difference of +12.00 ppm**.
-* What works needs no network: each device's own wall-minus-monotonic slew is exact.
-  **True monotonic skew −12.00 ppm against the 50 ppm assumed, a 4.2x margin.** The
-  estimator *fitted* −1.09 ppm while the truth was −12.00, so charging the fit's own
-  magnitude would have under-bounded the error by ten times.
-
-### The sim-to-real gap is quantified, and the headline is a negative
-
-Task 47 was worded "the observation vector produced live matches the simulator's sensing
-model field for field." **It is false, and that is the result.** It does not hold for 31
-of 39 slots and cannot -- six have no rear sensor on the device at all.
-
-| class | slots | meaning |
-|---|---|---|
-| identical | **8** | both sides compute the same thing the same way |
-| approximated | **18** | |
-| substituted | **7** | |
-| structurally absent | **6** | no sensor on the device |
-
-Every substituted or absent slot carries a provenance class on every scene, and across all
-three campaign drives there were **0 re-encode mismatches and 0 constant mismatches over
-2,684 ticks**. `observation_parity.py` is the first module to import both sensing models;
-before it, the test fed one hand-written dict to two encoders and compared their output,
-which could not have found this.
-
 ### A telemetry vocabulary, and the limit of it
 
 Every instrumented quantity reports in a closed three-state vocabulary rather than a
@@ -148,24 +68,6 @@ A 54.58 s link outage destroyed numerator and denominator together -- about 273 
 1,502 ticks, **18.2% of every denominator** -- and the summary reported `attempted = 1229`
 and called every axis fully answered. The vocabulary protects the numerator; nothing was
 watching the denominator.
-
-### What the failure inventory found before anything was built
-
-**186 failure conditions were already detected across the two devices. Four record when
-the failure happened. None records an episode** -- a second endpoint and an outcome.
-Several had no reader at all. Two were detected nowhere: the tick loop's no-frame branch
-counted nothing, so **a drive blind for 110 of 120 seconds wrote the artefact of one that
-was never blind**, and the worker was `try/finally` with no `except`, so an exception ran
-teardown and wrote a summary that read like a clean short run.
-
-### Shadow against live is verified through the wire, not in process
-
-Logged shadow decisions are compared against live commands **decoded through the real
-`rate_cmd` wire codec**, not through in-process objects. Three drives, 899/900/885 ticks:
-**0 command-replay mismatches**, and the phone's own applier counters read `applied == 0`
-with `shadowed == commands_sent` (37/38/38) -- the phone independently confirming it did
-not act. The check itself carried the same defect class it was built to catch: when the
-phone-side half *could not run*, it printed `ok=False` and **exited 0**.
 
 ### The device cannot drift from what was trained
 
@@ -198,10 +100,86 @@ The transport carries eight channels with per-channel sequence numbers, prioriti
 overflow policies and depths, and `specs/transport_golden_frames.json` pins the wire
 format.
 
-## What deployment cost, which is most of what there is to say
+### Measured, on the device
 
-Ankit: this is extremely important to talk about. The failures below are not incidental
-to the contribution; they are the part of it that cannot be obtained any other way.
+| | |
+|---|---|
+| Jetson end-to-end | p50 **19.8 ms**, p95 20.2 ms at 48.5 FPS |
+| detection | 17.7 ms, of which 3.9 ms is GPU |
+| tracking and distance | 1.1 ms |
+| observation and encode | 0.4 ms |
+| actor and advisory | 0.5 ms |
+| over USB, pooled across 2,684 ticks | p95 **116.19 ms** against a 200 ms target |
+| the same link over Tailscale | p95 215.63 ms |
+| the USB wire hop itself | about 2 ms; the run-to-run spread is phone-side queueing |
+
+## What was run --- EXPERIMENTS
+
+**Eight drives, 2026-09-08, Westfield NJ**, on a OnePlus Nord N10 -- the Moto's cable
+failed and the app was installed on the Nord in the car, with the swap recorded
+automatically in `installed_apk.json`.
+
+* **Six shadow runs**, 17,948 ticks, 45.9 to 47.7 km.
+* **Two live runs**, 4,981 ticks, 40.7 to 42.4 km, the controller gating for real.
+* **First working GPS and first working HERE in the project.** Every bench run before had
+  `gps_hz 0.0` and `here=false`.
+* On the shakedown: 1,632 ticks, 279.5 s, 6.24 km, mean 22.9 m/s, GPS valid on 1,299 of
+  1,313 ticks, 4.69 Hz mean tick rate. Distance agrees to 0.01 km between integrating
+  reported speed and the great-circle path through the fixes, which is two independent
+  routes to one number.
+
+**The shakedown did what a shakedown is for: it broke.** Three defects, each filed
+separately -- a 90-degree frame rotation that explains every zero-detection drive in the
+project, frames being discarded so the drive could not explain itself, and the `severe`
+thermal tier ending a session rather than lowering rates.
+
+### Shadow against live is verified through the wire, not in process
+
+Logged shadow decisions are compared against live commands **decoded through the real
+`rate_cmd` wire codec**, not through in-process objects. Three drives, 899/900/885 ticks:
+**0 command-replay mismatches**, and the phone's own applier counters read `applied == 0`
+with `shadowed == commands_sent` (37/38/38) -- the phone independently confirming it did
+not act. The check itself carried the same defect class it was built to catch: when the
+phone-side half *could not run*, it printed `ok=False` and **exited 0**.
+
+## What deployment cost --- EXPERIENCE
+
+Ankit: this is most of what there is to say, and it is extremely important to talk
+about. The failures below are not incidental to the contribution; they are the part of it
+that cannot be obtained any other way.
+
+### The two clocks, and a guarantee that states its own error
+
+Two devices, two monotonic clocks. The discipline is that **no conversion returns a bare
+number**: a converted instant carries its error bound and the id of the estimate that
+produced it, so a cross-device timestamp cannot be mistaken for a same-device one, and
+below the gate it **raises** rather than answering with a widened bound.
+
+* **Loopback null case**, where one machine means the truth is zero: offset spread
+  **12 microseconds over 145 s**, fitted slope −0.05 ppm. The estimator invents no
+  structure where there is none.
+* **Real link, 330 s**: 357 exchanges, every one matched, **zero refused**, and all nine
+  outcome counters close against pings sent without subtracting anything. `rtt_min` p50
+  **14.8 ms**, bound p50 **8.0 ms**. Under full sensor load -- 10 Hz camera at 40 KB,
+  50 Hz IMU -- 218 exchanges with every channel on cadence.
+* **The instrument built to validate the premise was degenerate, and algebra caught it,
+  not a run.** Estimating the offset on each clock pair and differencing the slopes
+  cancels the quantity of interest: it returns `s_local − s_remote`, not the skew.
+  Confirmed rather than argued -- it reported **+12.06 ppm against an independently
+  measured slew difference of +12.00 ppm**.
+* What works needs no network: each device's own wall-minus-monotonic slew is exact.
+  **True monotonic skew −12.00 ppm against the 50 ppm assumed, a 4.2x margin.** The
+  estimator *fitted* −1.09 ppm while the truth was −12.00, so charging the fit's own
+  magnitude would have under-bounded the error by ten times.
+
+### What the failure inventory found before anything was built
+
+**186 failure conditions were already detected across the two devices. Four record when
+the failure happened. None records an episode** -- a second endpoint and an outcome.
+Several had no reader at all. Two were detected nowhere: the tick loop's no-frame branch
+counted nothing, so **a drive blind for 110 of 120 seconds wrote the artefact of one that
+was never blind**, and the worker was `try/finally` with no `except`, so an exception ran
+teardown and wrote a summary that read like a clean short run.
 
 ### The car is a hostile environment and the faults are physical
 
@@ -341,6 +319,20 @@ Two things, in the order they matter for this paper:
    2% of baseline. This is what makes decentralized execution possible at all, and it is a
    supporting result rather than the paper's point.
 
+### Sim-to-real parity holds on the observation this paper uses
+
+The simulation's observation is HERE-shaped -- speed, free flow and jam factor per
+super-segment, with lane count and length from the map -- and the deployment queries HERE
+for exactly those. **The parity is by construction, not by approximation**, and the drives
+collected it: `here=true` on the road for the first time in the project, at one query per
+minute, which is `DECISION_INTERVAL_S`, the policy's own decision interval.
+
+`src/analysis/observation_parity.py` audits a different thing: a 39-field local-sensing
+contract, on which it reports 8 slots identical, 18 approximated, 7 substituted and 6
+structurally absent. **That contract is not part of this paper.** It describes an
+observation for which no data was collected, beyond the minimum viable deployment, and
+carrying it would mean claiming a sensing model the drives never exercised.
+
 ### Why the observation question arises
 
 SRC's policy reads six per-super-segment fields, four of which come from vehicle-level
@@ -440,12 +432,8 @@ ICRA.
 
 ## Open
 
-* **The deployed policy and the simulated policy are not yet the same object.** The rig's
-  actor takes the 39-field local contract, vendored and test-locked on both sides, and the
-  last recorded state of the policy bundle is random-init pending a checkpoint from the
-  simulation side. The simulation result is on a 5-field traffic-API observation per
-  super-segment. Joining them means splitting the deployed contract in two: the API
-  observation for the policy, the local vector for the gate.
+* **The HERE-observation policy has not yet been run on the device.** The observation
+  matches, the data was collected, and what remains is loading that policy onto the rig.
 * **The shadow runs have not been scored.** `deployment/jetson/score_shadow.py` replays
   the logged per-tick inputs and scores candidate controllers against them, gating on the
   incumbent replaying byte-for-byte first. It has not been run against the six. Until it
