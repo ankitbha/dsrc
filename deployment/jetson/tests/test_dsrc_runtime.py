@@ -467,12 +467,14 @@ class TestTheDemonstrationHasBeenSeenToFail:
         # this test printed 0/185 and still passed against the previous
         # `assert 0 <= decisions_changed <= n`, which no count can fail.
         assert decisions_changed > 0
-        # Same discipline for the whole-network loop's other reported count:
-        # per_segment_changed was computed and printed above but never
-        # gated, so a mechanism that stopped perturbing individual segments
-        # (while still tripping decisions_changed some other way) would
-        # print 0/2220 and still pass.
-        assert per_segment_changed > 0
+        # per_segment_changed (printed above) is NOT asserted separately:
+        # int(np.sum(a != b)) > 0 and not np.array_equal(a, b) are the same
+        # predicate over the same pair, so summed across cases
+        # per_segment_changed > 0 holds exactly when decisions_changed > 0
+        # does -- an assertion here could not fail without the one above
+        # already having failed first. It stays a reported measurement, not
+        # a second gate on the same fact.
+        #
         # Round 2 found the same gap in the single-segment loop above,
         # fifteen lines from decisions_changed's own assertion: computed
         # and printed, gated by nothing. The validator proved it by
