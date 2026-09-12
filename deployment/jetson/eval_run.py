@@ -41,6 +41,7 @@ import numpy as np  # noqa: E402
 
 from perception import provenance  # noqa: E402
 from policy import sim_contract  # noqa: E402
+from policy.safety_gate import RULE_COMPARED_VALUE_KEY  # noqa: E402
 from policy.sensing_controller import (  # noqa: E402
     MAX_TELEMETRY_AGE_S,
     RULE_FIRED,
@@ -575,10 +576,32 @@ def safety_result(ticks: list[dict[str, Any]]) -> dict[str, Any] | None:
         else:
             entry["fired_ticks"] = fired
             entry["fired_fraction_of_evaluable"] = round(fired / evaluable, 4)
+            # validator round 1, F5: a fired-fraction computed entirely over
+            # ticks whose compared value is non-finite is not a firing rate
+            # -- the threshold could never physically be crossed. Read off
+            # the persisted rule record directly (RuleRecord.to_record()
+            # flattens each evidence key, including the compared one,
+            # alongside `status` whenever the rule was evaluable).
+            compared_key = RULE_COMPARED_VALUE_KEY.get(name)
+            if compared_key is not None:
+                non_finite = 0
+                for s in safety_ticks:
+                    record = s.get("rules", {}).get(name)
+                    if record is None or record["status"] == RULE_NOT_EVALUABLE:
+                        continue
+                    value = record.get(compared_key)
+                    if value is not None and not math.isfinite(value):
+                        non_finite += 1
+                entry["non_finite_compared_ticks"] = non_finite
         rules[name] = entry
 
+    # validator round 1, F6: kept apart by direction -- a pooled delta
+    # cannot say whether the gate raised or lowered the recommended speed,
+    # and "clamped" alone reads as a reduction regardless of which one it was.
     deltas = [s["delta_speed_mps"] for s in safety_ticks]
-    clamped_deltas = [d for d in deltas if d != 0.0]
+    raised_deltas = [d for d in deltas if d > 0.0]
+    lowered_deltas = [d for d in deltas if d < 0.0]
+    clamped_deltas = raised_deltas + lowered_deltas
     clamped = len(clamped_deltas)
     lane_withheld = sum(1 for s in safety_ticks if s.get("lane_withheld") is not None)
     emergency = sum(1 for s in safety_ticks if s.get("emergency_override"))
@@ -587,7 +610,15 @@ def safety_result(ticks: list[dict[str, Any]]) -> dict[str, Any] | None:
         "rules": rules,
         "clamped_ticks": clamped,
         "clamped_fraction": round(clamped / len(safety_ticks), 4),
+        # Kept for existing consumers: the pooled distribution across BOTH
+        # directions, which is exactly what F6 says cannot state a direction
+        # on its own -- prefer raised_ticks/lowered_ticks and their own
+        # distributions below.
         "clamp_delta_mps": pctl(clamped_deltas) if clamped_deltas else None,
+        "raised_ticks": len(raised_deltas),
+        "lowered_ticks": len(lowered_deltas),
+        "raise_delta_mps": pctl(raised_deltas) if raised_deltas else None,
+        "lower_delta_mps": pctl(lowered_deltas) if lowered_deltas else None,
         "lane_withheld_ticks": lane_withheld,
         "emergency_override_ticks": emergency,
     }
@@ -1278,18 +1309,41 @@ def _safety_lines(safety: dict[str, Any] | None) -> list[str]:
         if entry["evaluable_ticks"] == 0:
             lines.append(f"- {name}: not evaluable on any tick (0 of {entry['total_ticks']})")
         else:
-            lines.append(
+            line = (
                 f"- {name}: evaluable on {entry['evaluable_ticks']} of {entry['total_ticks']}; "
                 f"fired on {entry['fired_ticks']} ({entry['fired_fraction_of_evaluable']:.1%})"
             )
-    delta = safety["clamp_delta_mps"]
-    delta_clause = (
-        f"delta p50 {delta['p50']:.2f} m/s (mean {delta['mean']:.2f})" if delta else "no ticks clamped"
+            # validator round 1, F5: name it when the fraction above cannot
+            # move -- the compared value was non-finite on some or all of
+            # the ticks the rule was otherwise evaluable on.
+            non_finite = entry.get("non_finite_compared_ticks")
+            if non_finite:
+                compared_key = RULE_COMPARED_VALUE_KEY[name]
+                if non_finite == entry["evaluable_ticks"]:
+                    line += f"; the compared value ({compared_key}) is inf on all {non_finite}"
+                else:
+                    line += (
+                        f"; the compared value ({compared_key}) is inf on "
+                        f"{non_finite} of {entry['evaluable_ticks']} evaluable"
+                    )
+            lines.append(line)
+    # validator round 1, F6: named quantity, named direction. "clamped"
+    # alone reads as a reduction; it is a speed INCREASE on this rig's only
+    # reachable path (low_speed_uncongested), and a pooled median across
+    # both directions cannot say which one moved.
+    raise_stats = safety["raise_delta_mps"]
+    raise_clause = (
+        f"recommended speed raised on {safety['raised_ticks']} of {safety['n_ticks']} ticks, "
+        f"by a median of {raise_stats['p50']:.2f} m/s (mean {raise_stats['mean']:.2f})"
+        if raise_stats else f"recommended speed raised on 0 of {safety['n_ticks']} ticks"
     )
-    lines.append(
-        f"- clamped: {safety['clamped_ticks']} of {safety['n_ticks']} "
-        f"({safety['clamped_fraction']:.1%}), {delta_clause}"
+    lower_stats = safety["lower_delta_mps"]
+    lower_clause = (
+        f"lowered on {safety['lowered_ticks']} of {safety['n_ticks']} ticks, "
+        f"by a median of {lower_stats['p50']:.2f} m/s (mean {lower_stats['mean']:.2f})"
+        if lower_stats else f"lowered on 0 of {safety['n_ticks']} ticks"
     )
+    lines.append(f"- {raise_clause}; {lower_clause}")
     lines.append(
         f"- lane action withheld on {safety['lane_withheld_ticks']} of {safety['n_ticks']} ticks; "
         f"emergency_override on {safety['emergency_override_ticks']}"

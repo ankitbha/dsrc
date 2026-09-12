@@ -93,7 +93,9 @@ def test_safety_lines_names_zero_evaluable_rules_without_a_percentage() -> None:
     assert "## Safety" in joined
     assert "forward_ttc: not evaluable on any tick (0 of 1)" in joined
     assert "forward_ttc: 0%" not in joined
-    assert "no ticks clamped" in joined
+    # validator round 1, F6: named direction, not "clamped".
+    assert "recommended speed raised on 0 of 1 ticks; lowered on 0 of 1 ticks" in joined
+    assert "clamped" not in joined
 
 
 def test_safety_lines_reports_a_rate_for_an_evaluable_rule() -> None:
@@ -104,3 +106,39 @@ def test_safety_lines_reports_a_rate_for_an_evaluable_rule() -> None:
     lines = _safety_lines(result)
     joined = "\n".join(lines)
     assert "target_lane_front_gap: evaluable on 2 of 2; fired on 1 (50.0%)" in joined
+
+
+def test_safety_lines_names_a_non_finite_compared_value() -> None:
+    """validator round 1, F5: the exact corpus shape -- evaluable (`derived`),
+    quiet, and the compared gap is inf on every tick, so a 0.0% fired rate
+    would otherwise read as a real (if low) firing rate."""
+    result = safety_result([
+        _tick(_safety_block(delta=0.0, rules={
+            "target_lane_front_gap": _rule_block("quiet", gap_m=float("inf"), threshold_m=5.0),
+        })),
+        _tick(_safety_block(delta=0.0, rules={
+            "target_lane_front_gap": _rule_block("quiet", gap_m=float("inf"), threshold_m=5.0),
+        })),
+    ])
+    lines = _safety_lines(result)
+    joined = "\n".join(lines)
+    assert (
+        "target_lane_front_gap: evaluable on 2 of 2; fired on 0 (0.0%); "
+        "the compared value (gap_m) is inf on all 2"
+    ) in joined
+
+
+def test_safety_lines_states_raise_direction_with_median_and_mean() -> None:
+    """validator round 1, F6."""
+    result = safety_result([
+        _tick(_safety_block(delta=2.0, rules={
+            "low_speed_uncongested": _rule_block("fired", local_density_veh_per_km=2.0),
+        })),
+        _tick(_safety_block(delta=2.0, rules={
+            "low_speed_uncongested": _rule_block("fired", local_density_veh_per_km=2.0),
+        })),
+    ])
+    lines = _safety_lines(result)
+    joined = "\n".join(lines)
+    assert "recommended speed raised on 2 of 2 ticks, by a median of 2.00 m/s (mean 2.00)" in joined
+    assert "lowered on 0 of 2 ticks" in joined
