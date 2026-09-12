@@ -1,0 +1,16 @@
+
+=== exit unmetered, flat demand, no control, dt 0.5 ===
+   offered   served   ratio  density   speed  vehicles    held  exit q
+      3000     3011    1.00      3.9   56.33       445       0       0
+      4500     4412    0.98      6.1   52.69       711      15       0
+      6000     5367    0.89      8.9   46.46      1026     182       0
+      7500     5723    0.76     13.0   33.37      1508     363       0
+      9000     5907    0.66     16.9   26.05      1952     781       0
+     12000     5870    0.49     21.8   19.54      2524    2276       0
+     18000     5865    0.33     20.9   20.57      2420    6655       0
+
+  peak served flow 5907 veh/h at 16.9 veh/km/lane (9000 veh/h offered)
+  lowest served flow past the peak 5865 veh/h at 20.9 veh/km/lane, a fall of 0.7%
+  FAILS: over the 5 points where demand exceeds what the network serves, served flow stays between 5367 and 5907 veh/h, a range of 9.1%, while density runs 8.9 to 21.8 veh/km/lane and speed falls from 46.5 to 19.5 km/h.
+  Served flow is a constant set by a saturated bottleneck rather than a
+  function of density. No controller can recover flow never lost.

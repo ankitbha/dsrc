@@ -1,0 +1,198 @@
+{
+  "bound": [
+    "127.0.0.1",
+    47811
+  ],
+  "started_wall": "2026-08-25T08:31:20-0400",
+  "config": {
+    "heartbeat_s": 1.0,
+    "stall_timeout_s": 5.0,
+    "handshake_timeout_s": 5.0,
+    "duration_s": 200.0
+  },
+  "events": [
+    {
+      "kind": "started",
+      "session_id": 1,
+      "device_id": "1fa93f4307b46264",
+      "role": "phone",
+      "applied_socket_options": {
+        "TCP_NODELAY": 1,
+        "SO_KEEPALIVE": 1,
+        "keepalive_idle_s": 30,
+        "keepalive_interval_s": 10,
+        "keepalive_probes": 3
+      },
+      "handshake_round_trip_ns_local_span": 7180208,
+      "remote_mono_ns": 160547104297929,
+      "remote_wall_ns": 1787661087518000000
+    },
+    {
+      "kind": "ended",
+      "session_id": 1,
+      "reason": "peer_closed"
+    }
+  ],
+  "sessions": [
+    {
+      "session_id": 1,
+      "peer": "127.0.0.1:54221",
+      "end_reason": "peer_closed",
+      "heartbeats_sent": 59,
+      "heartbeats_received": 61,
+      "channels": {
+        "control": {
+          "channel": "control",
+          "queued": 59,
+          "sent": 59,
+          "dropped_outbound": 0,
+          "abandoned_outbound": 0,
+          "bytes_sent": 6717,
+          "received": 61,
+          "delivered": 0,
+          "dropped_inbound": 0,
+          "abandoned_inbound": 0,
+          "bytes_received": 0,
+          "seq_gaps": 0,
+          "missing_seqs": 0,
+          "outbound_high_water": 1,
+          "inbound_high_water": 0
+        },
+        "rate_cmd": {
+          "channel": "rate_cmd",
+          "queued": 0,
+          "sent": 0,
+          "dropped_outbound": 0,
+          "abandoned_outbound": 0,
+          "bytes_sent": 0,
+          "received": 0,
+          "delivered": 0,
+          "dropped_inbound": 0,
+          "abandoned_inbound": 0,
+          "bytes_received": 0,
+          "seq_gaps": 0,
+          "missing_seqs": 0,
+          "outbound_high_water": 0,
+          "inbound_high_water": 0
+        },
+        "advisory": {
+          "channel": "advisory",
+          "queued": 292,
+          "sent": 292,
+          "dropped_outbound": 0,
+          "abandoned_outbound": 0,
+          "bytes_sent": 64020,
+          "received": 0,
+          "delivered": 0,
+          "dropped_inbound": 0,
+          "abandoned_inbound": 0,
+          "bytes_received": 0,
+          "seq_gaps": 0,
+          "missing_seqs": 0,
+          "outbound_high_water": 1,
+          "inbound_high_water": 0
+        },
+        "gps": {
+          "channel": "gps",
+          "queued": 0,
+          "sent": 0,
+          "dropped_outbound": 0,
+          "abandoned_outbound": 0,
+          "bytes_sent": 0,
+          "received": 57,
+          "delivered": 57,
+          "dropped_inbound": 0,
+          "abandoned_inbound": 0,
+          "bytes_received": 0,
+          "seq_gaps": 0,
+          "missing_seqs": 0,
+          "outbound_high_water": 0,
+          "inbound_high_water": 1
+        },
+        "imu": {
+          "channel": "imu",
+          "queued": 0,
+          "sent": 0,
+          "dropped_outbound": 0,
+          "abandoned_outbound": 0,
+          "bytes_sent": 0,
+          "received": 3055,
+          "delivered": 3049,
+          "dropped_inbound": 0,
+          "abandoned_inbound": 6,
+          "bytes_received": 0,
+          "seq_gaps": 0,
+          "missing_seqs": 0,
+          "outbound_high_water": 0,
+          "inbound_high_water": 13
+        },
+        "here": {
+          "channel": "here",
+          "queued": 0,
+          "sent": 0,
+          "dropped_outbound": 0,
+          "abandoned_outbound": 0,
+          "bytes_sent": 0,
+          "received": 0,
+          "delivered": 0,
+          "dropped_inbound": 0,
+          "abandoned_inbound": 0,
+          "bytes_received": 0,
+          "seq_gaps": 0,
+          "missing_seqs": 0,
+          "outbound_high_water": 0,
+          "inbound_high_water": 0
+        },
+        "telemetry": {
+          "channel": "telemetry",
+          "queued": 0,
+          "sent": 0,
+          "dropped_outbound": 0,
+          "abandoned_outbound": 0,
+          "bytes_sent": 0,
+          "received": 61,
+          "delivered": 60,
+          "dropped_inbound": 0,
+          "abandoned_inbound": 1,
+          "bytes_received": 0,
+          "seq_gaps": 0,
+          "missing_seqs": 0,
+          "outbound_high_water": 0,
+          "inbound_high_water": 1
+        },
+        "camera": {
+          "channel": "camera",
+          "queued": 0,
+          "sent": 0,
+          "dropped_outbound": 0,
+          "abandoned_outbound": 0,
+          "bytes_sent": 0,
+          "received": 292,
+          "delivered": 292,
+          "dropped_inbound": 0,
+          "abandoned_inbound": 0,
+          "bytes_received": 7568743,
+          "seq_gaps": 0,
+          "missing_seqs": 0,
+          "outbound_high_water": 0,
+          "inbound_high_water": 1
+        }
+      }
+    }
+  ],
+  "accepted": 1,
+  "refused": 0,
+  "displaced": 0,
+  "handshake_workers_leaked": 0,
+  "acceptor": {
+    "address": [
+      "127.0.0.1",
+      47811
+    ],
+    "transient_accept_errors": 0,
+    "max_consecutive_accept_errors": 0,
+    "accept_error_span_s": null,
+    "accept_errors_by_errno": {},
+    "max_consecutive_accept_errors_note": "per accept() call, so it reads as the poll interval divided by the retry pause; use transient_accept_errors and accept_error_span_s for severity"
+  }
+}

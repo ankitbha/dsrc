@@ -1,0 +1,51 @@
+
+=== exit unmetered, flat demand, no control, dt 0.5 ===
+   offered   served   ratio  density   speed  vehicles    held  exit q
+      1800     1786    0.99      2.3   55.68       272       0       0
+      2400     2373    0.99      3.2   54.20       374       0       0
+      3000     2864    0.95      4.5   48.65       519       0       0
+      3600     2883    0.80      6.5   36.94       749       0       0
+      4800     2853    0.59     11.2   22.13      1293      32       0
+      6000     2883    0.48     15.3   16.13      1765     201       0
+      9000     2894    0.32     21.8   10.80      2524    1519       0
+     18000     2891    0.16     23.3    9.82      2688    7686       0
+
+  peak served flow 2894 veh/h at 21.8 veh/km/lane (9000 veh/h offered)
+  lowest served flow past the peak 2891 veh/h at 23.3 veh/km/lane, a fall of 0.1%
+  FAILS: served flow varies by 38.3% over the whole sweep, so it
+  is a constant set by a saturated bottleneck rather than a function of
+  density. No controller can recover flow that was never lost.
+
+=== exit metered at 0.98 green, flat demand, no control, dt 0.5 ===
+   offered   served   ratio  density   speed  vehicles    held  exit q
+      1800     1786    0.99      2.3   55.55       270       0      17
+      2400     2378    0.99      3.2   54.20       373       0      36
+      3000     2430    0.81      5.0   43.13       575       0      49
+      3600     2438    0.68      7.2   32.30       837       0      55
+      4800     2435    0.51     12.0   19.78      1390      32      52
+      6000     2438    0.41     16.3   14.32      1885     202      53
+      9000     2403    0.27     23.0    9.66      2657    1545      54
+     18000     2438    0.14     24.4    8.97      2825    7683      54
+
+  peak served flow 2438 veh/h at 7.2 veh/km/lane (3600 veh/h offered)
+  lowest served flow past the peak 2403 veh/h at 23.0 veh/km/lane, a fall of 1.5%
+  FAILS: served flow varies by 26.7% over the whole sweep, so it
+  is a constant set by a saturated bottleneck rather than a function of
+  density. No controller can recover flow that was never lost.
+
+=== exit metered at 0.85 green, flat demand, no control, dt 0.5 ===
+   offered   served   ratio  density   speed  vehicles    held  exit q
+      1800     1789    0.99      2.3   55.65       271       0      17
+      2400     2165    0.90      3.4   50.63       399       0      49
+      3000     2163    0.72      5.6   37.92       642       0      48
+      3600     2157    0.60      7.9   29.00       908       0      51
+      4800     2160    0.45     12.7   18.10      1472      46      49
+      6000     2163    0.36     17.0   13.45      1962     216      48
+      9000     2160    0.24     23.5    9.02      2721    1593      46
+     18000     2157    0.12     25.2    8.26      2910    7752      51
+
+  peak served flow 2165 veh/h at 3.4 veh/km/lane (2400 veh/h offered)
+  lowest served flow past the peak 2157 veh/h at 7.9 veh/km/lane, a fall of 0.4%
+  FAILS: served flow varies by 17.4% over the whole sweep, so it
+  is a constant set by a saturated bottleneck rather than a function of
+  density. No controller can recover flow that was never lost.

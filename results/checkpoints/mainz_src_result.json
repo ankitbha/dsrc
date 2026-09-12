@@ -1,0 +1,193 @@
+{
+ "features": "src",
+ "best": {
+  "return": 182.46535034179686,
+  "episode": 44,
+  "arrived": 1980.2,
+  "flow": 3733.7777777777783,
+  "mean_speed_kmh": 40.64921112060547,
+  "space_mean_speed_kmh": 41.11957991630001,
+  "mean_vehicles": 873.4148148148148,
+  "held_at_entry": 53.8
+ },
+ "test": {
+  "return": 193.78722534179687,
+  "arrived": 1991.4,
+  "flow": 3756.4444444444443,
+  "mean_speed_kmh": 42.1009880065918,
+  "space_mean_speed_kmh": 40.82241279392359,
+  "mean_vehicles": 879.2222222222223,
+  "held_at_entry": 49.8
+ },
+ "no_control": {
+  "return": 55.06611053943634,
+  "arrived": 1950.8,
+  "flow": 3568.0,
+  "mean_speed_kmh": 45.441941833496095,
+  "space_mean_speed_kmh": 42.675740649978074,
+  "mean_vehicles": 858.0370370370371,
+  "held_at_entry": 0.0
+ },
+ "history": [
+  {
+   "episode": 4,
+   "return": -63.55395278930664,
+   "arrived": 1687.8,
+   "flow": 3300.4444444444443,
+   "mean_speed_kmh": 35.94101181030273,
+   "space_mean_speed_kmh": 32.84286071465046,
+   "mean_vehicles": 1106.1851851851852,
+   "held_at_entry": 33.0
+  },
+  {
+   "episode": 9,
+   "return": -150.6357437133789,
+   "arrived": 1821.6,
+   "flow": 3581.333333333333,
+   "mean_speed_kmh": 39.69777908325195,
+   "space_mean_speed_kmh": 37.13456982802184,
+   "mean_vehicles": 995.1851851851852,
+   "held_at_entry": 80.6
+  },
+  {
+   "episode": 14,
+   "return": -103.6595687866211,
+   "arrived": 1741.0,
+   "flow": 3340.888888888889,
+   "mean_speed_kmh": 37.255148315429686,
+   "space_mean_speed_kmh": 36.25101607339,
+   "mean_vehicles": 1000.3629629629629,
+   "held_at_entry": 71.0
+  },
+  {
+   "episode": 19,
+   "return": -177.7991729736328,
+   "arrived": 1604.6,
+   "flow": 3079.5555555555557,
+   "mean_speed_kmh": 33.96391906738281,
+   "space_mean_speed_kmh": 32.64908486995135,
+   "mean_vehicles": 1089.9851851851852,
+   "held_at_entry": 84.8
+  },
+  {
+   "episode": 24,
+   "return": 110.76841201782227,
+   "arrived": 2004.4,
+   "flow": 3803.111111111111,
+   "mean_speed_kmh": 39.878167724609376,
+   "space_mean_speed_kmh": 41.79426695721275,
+   "mean_vehicles": 867.6666666666666,
+   "held_at_entry": 65.2
+  },
+  {
+   "episode": 29,
+   "return": -3.029222583770752,
+   "arrived": 1939.6,
+   "flow": 3755.5555555555557,
+   "mean_speed_kmh": 39.9656265258789,
+   "space_mean_speed_kmh": 40.80648970175352,
+   "mean_vehicles": 914.0962962962964,
+   "held_at_entry": 64.2
+  },
+  {
+   "episode": 34,
+   "return": -68.34411354064942,
+   "arrived": 1842.0,
+   "flow": 3448.4444444444443,
+   "mean_speed_kmh": 40.698307037353516,
+   "space_mean_speed_kmh": 39.8126073315947,
+   "mean_vehicles": 918.1703703703704,
+   "held_at_entry": 51.8
+  },
+  {
+   "episode": 39,
+   "return": -52.85781707763672,
+   "arrived": 1885.2,
+   "flow": 3525.7777777777783,
+   "mean_speed_kmh": 38.54004058837891,
+   "space_mean_speed_kmh": 41.18199740204834,
+   "mean_vehicles": 883.4962962962964,
+   "held_at_entry": 38.8
+  },
+  {
+   "episode": 44,
+   "return": 182.46535034179686,
+   "arrived": 1980.2,
+   "flow": 3733.7777777777783,
+   "mean_speed_kmh": 40.64921112060547,
+   "space_mean_speed_kmh": 41.11957991630001,
+   "mean_vehicles": 873.4148148148148,
+   "held_at_entry": 53.8
+  },
+  {
+   "episode": 49,
+   "return": 42.53530578613281,
+   "arrived": 1931.8,
+   "flow": 3649.3333333333335,
+   "mean_speed_kmh": 36.83464050292969,
+   "space_mean_speed_kmh": 38.00479713727101,
+   "mean_vehicles": 945.8814814814816,
+   "held_at_entry": 41.8
+  },
+  {
+   "episode": 54,
+   "return": 49.02499771118164,
+   "arrived": 1960.8,
+   "flow": 3664.0,
+   "mean_speed_kmh": 41.46300277709961,
+   "space_mean_speed_kmh": 42.58108642523694,
+   "mean_vehicles": 874.9555555555555,
+   "held_at_entry": 39.4
+  },
+  {
+   "episode": 59,
+   "return": -24.936316680908202,
+   "arrived": 1851.2,
+   "flow": 3392.888888888889,
+   "mean_speed_kmh": 39.55246353149414,
+   "space_mean_speed_kmh": 39.55464262705798,
+   "mean_vehicles": 920.3333333333334,
+   "held_at_entry": 26.6
+  },
+  {
+   "episode": 64,
+   "return": -89.16882095336913,
+   "arrived": 1799.2,
+   "flow": 3387.5555555555557,
+   "mean_speed_kmh": 39.86363906860352,
+   "space_mean_speed_kmh": 38.27789414299037,
+   "mean_vehicles": 953.3333333333334,
+   "held_at_entry": 54.8
+  },
+  {
+   "episode": 69,
+   "return": -19.943434715270996,
+   "arrived": 1777.6,
+   "flow": 3306.6666666666665,
+   "mean_speed_kmh": 34.31751327514648,
+   "space_mean_speed_kmh": 36.62435399282809,
+   "mean_vehicles": 961.2444444444445,
+   "held_at_entry": 52.2
+  },
+  {
+   "episode": 74,
+   "return": 63.63407821655274,
+   "arrived": 2006.0,
+   "flow": 3749.3333333333335,
+   "mean_speed_kmh": 38.21186294555664,
+   "space_mean_speed_kmh": 40.14389813291753,
+   "mean_vehicles": 887.1407407407407,
+   "held_at_entry": 26.2
+  },
+  {
+   "episode": 79,
+   "return": 56.22024230957031,
+   "arrived": 1986.0,
+   "flow": 3709.3333333333335,
+   "mean_speed_kmh": 40.78699798583985,
+   "space_mean_speed_kmh": 40.18520011965856,
+   "mean_vehicles": 897.7407407407406,
+   "held_at_entry": 23.2
+  }
+ ]
+}
