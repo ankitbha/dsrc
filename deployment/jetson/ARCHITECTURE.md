@@ -156,6 +156,74 @@ The actor architecture (`backbone.{0,2,4}` + `heads.<name>` state-dict
 layout) is likewise mirrored in `export_policy.VendoredActor` and checked by
 `test_actor_state_dict_layout_matches_sim`.
 
+### 6.1 The safety and etiquette contract (task 144)
+
+`policy/safety_gate.py` vendors `src/safety/{constraints,etiquette,safety_layer}.py`
+the same way `sim_contract.py` vendors the encoder: not by importing `src/`
+(the Jetson must not import the simulation stack, and importing `src.safety`
+would additionally put a second copy of `decode_speed_bin`/`decode_headway_bin`
+on the device alongside `sim_contract`'s own -- `safety_gate.py` calls
+`sim_contract`'s decoders instead of carrying its own). `SafetyConstraints`
+and `SafetyContext` are checked against a committed reference, `specs/
+safety_contract_golden.json` (field names, defaults, and a hash over both),
+by two tests that never import each other's side:
+`deployment/jetson/tests/test_safety_contract.py` (the vendored copy,
+unconditional, no `importorskip`) and `tests/test_safety_contract_matches_
+golden.py` (`src/safety/` itself). This replaces the `test_sim_contract.py`
+idiom of comparing the vendored copy against the original: task 143 found
+that check goes vacuous the moment the original it compares against is
+deleted (`src/rl/encoders.py` etc. were, and the test now reports `1
+skipped` and says nothing). A golden file has no side that can disappear
+out from under it.
+
+**Where the gate runs, and what it does not change.** `pipeline.step` runs
+the gate between `advisory_decoder.decode` and `set_target_headway`, on
+every tick unconditionally (`gate_ms`/`stages["gate"]` are always
+`measured`, never `absent` -- there is no early-return path here the way
+`dsrc_infer`'s coverage-gate refusal has one). `AdvisoryDecoder.decode`'s
+raw output is bounded, and `advisory.recommended_speed_mps`/
+`recommended_speed_display`/`lane_text` are overwritten to the bounded
+values so that field keeps meaning "the number shown to the driver" for
+every reader that already treats it that way (`eval_run.py`, `replay_demo.py`,
+`transport/messages.py`). `advisory.headway_target_s` is deliberately left
+untouched, and `set_target_headway` keeps feeding back the RAW decoded
+headway: the observation's `target_headway_s` has to match what the policy
+was trained against, not what the gate bounded it to.
+
+**Decision 3's per-field input-class partition** is what keeps a
+`fallback_neutral` observation from either silently never firing a rule (a
+statement about the fallback, not about traffic) or firing on a substituted
+constant (worse). Every `SafetyContext` field is exactly one of: (A)
+*configured road property* (`time_s`, `free_flow_speed_mps`,
+`min_contextual_speed_mps`) -- never blocks a rule; (B) *evidence-required*
+(6 fields, incl. `local_density_veh_per_km`'s own carve-out: a
+`derived_empty` density counts as evidence only when
+`obs_diagnostics.last_detection_age_s` bounds how recently the camera saw
+anything at all) -- blocks the rules that read it whenever its
+`perception.provenance` class is in `SUBSTITUTED`; (C) *structurally
+absent* (14 fields, incl. two `SafetyState` lane-change counters this rig
+can never advance) -- blocks unconditionally, no sensor exists. Each of the
+twelve rules is evaluated as a total, independent predicate for the
+per-tick `safety` record (`Tick.to_record()`, beside `advisory`), never
+short-circuited by chain position the way `apply_safety_layer`'s own
+elif-driven lane decision is -- the two are cross-checked
+(`tests/test_safety_gate_pipeline.py`) to agree on which rule's reason a
+masked lane action actually carries.
+
+**The one behavioral change this rig cannot avoid.** Three lane guards
+(`target_lane_rear_gap`, `target_lane_rear_ttc`, `target_lane_rear_braking`)
+and four others (`lane_change_dwell`, `lane_changes_per_km`,
+`target_lane_missing`, `target_lane_front_ttc`) are `not_evaluable` on every
+tick this rig will ever produce -- no rear sensor, no lane-change detector,
+no lane index but the assumed one. `config.yaml`'s
+`safety.withhold_lane_when_not_evaluable` (default `true`) withholds the
+lane/merge advisory outright whenever any of the eight is not_evaluable,
+rather than showing "Prepare left (if safe)" backed by a guard that was
+never checked; `false` restores the previous display and is the rollback
+mechanism. `deployment/jetson/score_safety.py` measures the resulting
+per-rule evaluability census against recorded runs and refuses to print a
+firing rate for a rule evaluable on zero ticks.
+
 ## 7. Deviations from plan_deployment.md (and why)
 
 | plan | v0 implementation | rationale |
@@ -172,7 +240,14 @@ layout) is likewise mirrored in `export_policy.VendoredActor` and checked by
    instantiate a second `CameraStream` + `TrtYoloDetector` (one more ~18 ms on
    the same GPU stream budget - measure; consider 448 engine for both),
    a mirrored `DistanceEstimator`, and pass rear vehicles to the builder.
-   The observation builder already has the field slots.
+   The observation builder already has the field slots. On the safety gate
+   (§6.1), this is what makes `target_lane_rear_gap`, `target_lane_rear_ttc`
+   and `target_lane_rear_braking` evaluable for the first time -- the three
+   lane guards `safety_gate.py`'s class (C) partition marks structurally
+   absent for lack of any rear sensor at all. It does not on its own restore
+   the lane advisory: four more guards (`lane_change_dwell`,
+   `lane_changes_per_km`, `target_lane_missing`, `target_lane_front_ttc`)
+   stay not_evaluable until a lane-change detector and a lane index exist.
 2. **OBD-II speed** (`sensors/obd_reader.py`): python-obd over ELM327 BT/USB;
    prefer OBD speed over GPS when fresh; GPS-vs-OBD comparison feeds the
    plan's observation-quality metrics.
