@@ -393,6 +393,17 @@ records why. A match tolerance is a new constant and a new failure mode; step 3 
 against the New Jersey corpus before fixing a value, because that is the only real HERE
 geometry this project has.
 
+> **Amended 2026-09-12 (validator round 2, R2-4).** "The HERE links whose polylines lie
+> within a match tolerance" above describes a non-exclusive match: every link within
+> tolerance of a segment credited to that segment, even when it is also within tolerance
+> of a neighbour. Fix 3 (validator round 1) changed the built implementation to an
+> exclusive partition instead: each link is matched to its single NEAREST segment, still
+> subject to the tolerance check, because 11 of 66 Mainz super-segment pairs have
+> polylines within 60 m of each other and crediting one link to both let it reach two
+> segments' rows from one reading. This paragraph was not corrected when fix 3 landed;
+> `perception/segment_state.py`'s module docstring, its `SEGMENT_BASIS_MEASURED` comment
+> and `SegmentStateBuilder.build`'s own inline comment now state the exclusive rule.
+
 ### 4.3 Partial coverage: the runtime emits no action
 
 **The rule: `DsrcRuntime` produces an action only when every segment's basis is

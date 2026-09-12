@@ -22,6 +22,15 @@ outright -- see `policy.dsrc_contract.jam_factor`'s docstring -- and is
 always recomputed here from the two features above, never taken from a
 matched link's own `jam_factor`.
 
+**A HERE link is matched to its single nearest segment, not to every
+segment within tolerance.** 11 of 66 Mainz super-segment pairs have
+polylines within `SEGMENT_MATCH_TOLERANCE_M` of each other, so a link near
+two segments would otherwise be credited to both. `build` below assigns
+each link to its argmin segment (still subject to the tolerance check), an
+exclusive partition -- matching the simulator's own super-segments, which
+are also an exclusive partition of the road network, rather than an
+overlapping set of candidate matches.
+
 **Every segment must be feed-measured, or nothing is emitted.** Substituting
 one segment's row with a zero-fill changed at least one OTHER segment's
 action in 675 of 4,000 draws (plan_task145 section 1.7): the state is
@@ -68,7 +77,10 @@ DEFAULT_NETWORK_DEFINITION_PATH = REPO_ROOT / "specs" / "dsrc_network_mainz.json
 #: and why its curve is provisional.
 SEGMENT_MATCH_TOLERANCE_M = 60.0
 
-#: At least one HERE link matched this segment in this decision's snapshot.
+#: At least one link's nearest segment was this one, and within tolerance,
+#: in this decision's snapshot -- not "some link was within tolerance of
+#: this segment", since a link within tolerance of more than one segment is
+#: credited to only the nearest (the exclusive-partition rule above).
 SEGMENT_BASIS_MEASURED = "measured"
 #: No link matched; only the network definition's static fields are known.
 #: Not evidence about this decision -- the same discipline
