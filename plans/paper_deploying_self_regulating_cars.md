@@ -255,11 +255,20 @@ The safety gate, and nothing else:
 
 > "Adding local metrics and objectives... is going to needlessly complicate the story."
 
-This already holds in both artifacts rather than being asserted. In simulation the
-advisory is written with `setSpeed`, which SUMO bounds by the car-following safe speed, so
-a vehicle whose leader is slower follows its leader -- the same semantics as Vissim's
-`DesSpeed`. On the device the perception stack and the safety filters are the same clamp.
-**The two halves of the paper join at the gate**, in the same place, with the same rule.
+In the Mainz simulation the advisory is written with `setSpeed`, which SUMO bounds by the
+car-following safe speed, so a vehicle whose leader is slower follows its leader -- the
+same semantics as Vissim's `DesSpeed`. On the device the perception stack and the safety
+filters are the clamp.
+
+**Those are not the same mechanism, and the difference has to be stated.** What the
+simulation has is SUMO's implicit car-following bound. The project's explicit safety and
+etiquette layer, `src/safety/safety_layer.py` with `etiquette.py` and `constraints.py`, is
+**unexercised in simulation**: in the SUMO topology environment three of the four action
+heads are inert -- `lane_preference` and `merge_mode` are discarded, and
+`desired_headway_bin` feeds back only into the agent's own observation because SUMO's
+`tau` is never set -- so of four heads one acts on the world, one acts on the observation
+and two act on nothing, and the safety layer never runs. The gate is real on the device
+and implicit in the simulation, and the paper cannot claim the two are the same rule.
 
 ## Where this sits
 
