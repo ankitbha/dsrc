@@ -287,11 +287,18 @@ Ankit's boundary, and it is written into the task list rather than argued here:
 Explicitly out of scope for the drives: any traffic-flow effect, human compliance with the
 advisory, and anything fleet-level.
 
-**The drives feed the simulation back.** The sensing model's parameters were settled from
-them -- `latency_s` and `queue_speed_mps` from the drives, `range_m` from optics. The
-largest single correction: every training config carried `latency_s: 0.0` against the
-**96.7 ms median measured on the road**. A policy trained before that was trained against
-an observation model the paper would then have had to describe as wrong.
+**What the drives do establish is that both layers of the proposed deployment ran on a
+road at once.** The HERE query returned the advisory layer's actual inputs at one query
+per minute, which is the policy's own decision interval, for the first time in the
+project. The camera, GPS and IMU ran the safety layer's inputs over the same 45.9 to
+47.7 km. Neither had been exercised on a road before, and they were exercised together.
+
+A separate measurement from the drives, recorded because it is real even though the paper
+does not use it: `latency_s` and `queue_speed_mps` for the simulator's local-sensing
+model, against configs that carried `latency_s: 0.0` where the road measured a **96.7 ms
+median**. That model belongs to the earlier local-sensing formulation, which is not this
+paper's, and the SRC port models no observation latency because it queries HERE on a 60 s
+interval.
 
 ## Why there is a simulation half at all
 
@@ -361,6 +368,25 @@ same action for the same super-segment. It is an identity, not a result.
 The safety gate, and nothing else:
 
 > "Adding local metrics and objectives... is going to needlessly complicate the story."
+
+**The split is a match of sensor to job, and the audit says so.** HERE's traffic API
+reports aggregate speed, free-flow speed and jam factor **per road segment**. There are no
+individual vehicles in it, so it cannot give a leader distance, a follower gap or a lane
+distribution -- and it does not need to, because the advisory is a super-segment decision
+and those are exactly the quantities it does not read. The camera is the opposite: it
+measures the vehicle ahead and nothing about the network. So:
+
+| layer | sensor | what it produces | what it decides |
+|---|---|---|---|
+| advisory | HERE, per super-segment | aggregate speed, free flow, jam factor | the desired speed |
+| safety | camera, GPS, IMU | leader distance, closing speed, ego state | whether to allow it |
+
+Neither sensor can do the other's job, and neither is asked to. An earlier formulation put
+per-vehicle quantities into the *policy's* input and then needed HERE to restore them,
+which it cannot: 13 of 39 fields were ones the deployed vehicle either cannot sense or
+replaces with a constant, all six of the absent ones rear-facing because the vehicle list
+is forward-camera derived. That formulation is not this paper's. Here the per-vehicle
+quantities stay where they are measurable and do the one job they are good for.
 
 In the Mainz simulation the advisory is written with `setSpeed`, which SUMO bounds by the
 car-following safe speed, so a vehicle whose leader is slower follows its leader -- the
