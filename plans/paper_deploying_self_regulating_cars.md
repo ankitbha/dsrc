@@ -70,8 +70,27 @@ loop waits on a server.
 The Jetson must not import the simulator stack, so `policy/sim_contract.py` vendors the
 field lists, scales, a numpy twin of the encoder, the action heads, the decoders and the
 neutral fallbacks, pinned to a named sim commit, and `export_policy.py` refuses dimension
-mismatches. That is what makes "the device runs what was trained" checkable rather than
-asserted.
+mismatches.
+
+**"Checkable rather than asserted" has to be earned, and for a period it was not.** The check
+that made it checkable -- `test_sim_contract.py`, comparing the vendored copy against the
+simulation -- opened with `importorskip("src.rl.encoders")`, and those modules were deleted in
+`6b538f2`. From that commit until task 143 the test reported `1 skipped`: the guarantee was
+being cited while nothing enforced it. The reference itself was never lost, which is the part
+worth stating precisely -- the pinned commit is an ancestor of `main` and the dormant test passes
+against it. It was unenforced, not unrecoverable.
+
+What makes it checkable now is `specs/sim_contract_golden_vectors.json`: the encoded
+observations, the action schema, both bin decoders and the neutral fallbacks, each derived twice
+by `scripts/generate_sim_contract_golden_vectors.py` -- once from the pinned sim commit, once
+from the vendored copy -- with the generator refusing to write on any disagreement. The
+device-side test reads only the frozen file and imports no simulation module, so it runs on the
+Jetson, where the simulation cannot be imported and where the original check therefore never
+ran.
+
+The boundary is worth stating rather than leaving implied: regenerating against the simulation
+needs git and torch, so on the device that step is skipped and what runs is the comparison
+against the frozen file.
 
 ### Two design stances
 
