@@ -1,0 +1,139 @@
+{
+  "_comment": "Golden reference for src/safety/ (SafetyConstraints, SafetyContext), frozen for task 144 (deployment/jetson/policy/safety_gate.py). deployment/jetson/tests/test_safety_contract.py checks the vendored copy against this file unconditionally; tests/test_safety_contract_matches_golden.py checks src/safety/ the same way. A change on either side must edit this file, which then shows in a diff.",
+  "safety_constraints": {
+    "lane_change_dwell_s": 15.0,
+    "max_lane_changes_per_km": 2.0,
+    "max_follower_braking_mps2": 2.5,
+    "comfortable_decel_mps2": 3.0,
+    "max_accel_mps2": 2.0,
+    "max_decel_mps2": 3.0,
+    "emergency_decel_mps2": 6.0,
+    "min_front_gap_m": 5.0,
+    "min_rear_gap_m": 5.0,
+    "min_forward_ttc_s": 2.0,
+    "min_lane_change_ttc_s": 2.5,
+    "speed_control_kp": 0.6,
+    "min_uncongested_speed_mps": 12.0,
+    "uncongested_density_threshold_veh_per_km": 12.0,
+    "low_speed_free_flow_delta_mps": 8.0,
+    "merge_gap_headway_bonus_s": 0.8
+  },
+  "safety_context_fields": [
+    {
+      "name": "time_s",
+      "has_default": false,
+      "default": null
+    },
+    {
+      "name": "ego_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "free_flow_speed_mps",
+      "has_default": true,
+      "default": 30.0
+    },
+    {
+      "name": "min_contextual_speed_mps",
+      "has_default": true,
+      "default": 12.0
+    },
+    {
+      "name": "local_density_veh_per_km",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "downstream_congested",
+      "has_default": true,
+      "default": false
+    },
+    {
+      "name": "leader_gap_m",
+      "has_default": true,
+      "default": Infinity
+    },
+    {
+      "name": "leader_relative_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "follower_gap_m",
+      "has_default": true,
+      "default": Infinity
+    },
+    {
+      "name": "follower_relative_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "target_lane_exists",
+      "has_default": true,
+      "default": true
+    },
+    {
+      "name": "target_lane_front_gap_m",
+      "has_default": true,
+      "default": Infinity
+    },
+    {
+      "name": "target_lane_front_relative_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "target_lane_rear_gap_m",
+      "has_default": true,
+      "default": Infinity
+    },
+    {
+      "name": "target_lane_rear_relative_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "target_lane_rear_required_decel_mps2",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "all_lanes_av_occupied",
+      "has_default": true,
+      "default": false
+    },
+    {
+      "name": "av_mean_speed_mps",
+      "has_default": true,
+      "default": 30.0
+    },
+    {
+      "name": "in_passing_lane",
+      "has_default": true,
+      "default": false
+    },
+    {
+      "name": "local_mean_speed_mps",
+      "has_default": true,
+      "default": 30.0
+    },
+    {
+      "name": "near_merge",
+      "has_default": true,
+      "default": false
+    },
+    {
+      "name": "merge_conflict_gap_m",
+      "has_default": true,
+      "default": Infinity
+    },
+    {
+      "name": "merge_conflict_relative_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    }
+  ],
+  "hash": "c77c2dae80149d22"
+}
