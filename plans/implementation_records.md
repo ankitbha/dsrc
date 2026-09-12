@@ -3234,5 +3234,33 @@ would have failed is absent rather than wrong.
      here. Section 11's sign-off checklist, including whether points 1 and 2 above change
      any recommendation, is for the user.
 
+     **Three documented limits, from validator round 1 (2026-09-12), not fixed because
+     each is a fact about the rig or the sweep rather than a defect in this task's code.**
+
+     (a) The DSRC path is unreachable from `run_demo.py`: `_build_rest` there constructs
+     `PerceptionPolicyPipeline` with six positional arguments and never passes
+     `dsrc_runtime`, `dsrc_segment_builder`, `dsrc_advisory_decoder` or `here_feed_source`,
+     and `config.yaml` carries no `policy.dsrc_bundle` key at all, so on any real run both
+     `segment_assemble` and `dsrc_infer` are permanently absent and step 12 can currently
+     only be exercised through `bench_dsrc_latency.py`; "off by default" above is true but
+     does not say there is presently no way to turn it on.
+
+     (b) `scripts/measure_dsrc_match_tolerance.py`'s claim to "show the matcher's own
+     sensitivity to the tolerance parameter" is not supported by its own output: the curve
+     is flat (15 m -> 6/12 segments matched; 30 m through 250 m -> 8/12, unchanged across a
+     220 m range) -- a statement about the synthetic corpus's fixed offsets, not about the
+     matcher. (Re-measured after fix 3 below changed the matcher from "any segment within
+     tolerance" to "the single nearest": the pre-fix-3 curve reached 9/12 at 150-250 m, one
+     segment credited only because a link within tolerance of two segments' polylines was
+     counted for both; post-fix it stays flat at 8/12 through 250 m, which is the honest
+     number now that a link is credited to one segment.)
+
+     (c) The golden random population's reproducibility rests on `numpy.random.Generator`
+     producing the same output stream for a given seed across environments, which NEP 19
+     explicitly does not guarantee across numpy versions; a stored sha256 of the
+     regenerated *states* themselves, not only of the reference actions/Q-values computed
+     from them, would separate that cause from an actual `DsrcRuntime` divergence the next
+     time `test_random_states_hash_to_the_frozen_digest` fails.
+
 ---
 
