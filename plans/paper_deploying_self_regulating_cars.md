@@ -641,13 +641,35 @@ which is why the simulated gate and the deployed gate are not the same rule, and
 the supersession itself.
 
 One more, and it is live rather than superseded: the 39-field local-sensing observation
-contract. It is not the policy's input and its parity ledger was deleted, but the contract
-itself still describes what the safety gate reads.
+contract. Its parity ledger was deleted, and the contract itself still describes what the
+safety gate reads. Saying it "is not the policy's input" is true of the simulation and false
+of the device: `ObservationBuilder` -> `ActorRuntime.act` -> `AdvisoryDecoder` is exactly that
+39-field path, and it is the one that has driven. **The rig now carries two policies.** Task
+145 added a second runtime rather than replacing the first: the DSRC runtime, which reads the
+whole network as 12 super-segments x 5 features. The paper's controller is the second one, and
+it is the one that has not driven.
 
 ## Open
 
-* **The HERE-observation policy has not yet been run on the device.** The observation
-  matches, the data was collected, and what remains is loading that policy onto the rig.
+* **The HERE-observation policy has not yet been run on the device.** "What remains is
+  loading that policy onto the rig" was wrong, and is restated as task 145 in the
+  implementation records. After 145 the device-side runtime exists: it executes a DSRC
+  checkpoint from super-segment features, refuses a bundle whose network identity does not
+  match its own, and reproduces `src.rl.src_q.greedy_actions` exactly on the 185 recorded
+  decisions across the checkpoint's five held-out test seeds. What remains is three named
+  pieces, none of them loading: a super-segment partition of a network the vehicle can
+  actually drive on, a HERE query bounded by that network's extent, and a training run on it.
+  `SrcQNetwork`'s weights are trained for Mainz and its input is the whole network, so the
+  policy is network-specific, and the 123 HERE bodies collected on 2026-09-08 are New Jersey
+  roads -- there is no Mainz observation in the corpus and no Westfield policy, so the gap
+  cannot be closed by replaying the drives.
+
+  Separately, and it is a smaller thing said plainly: the DSRC path is **unreachable from
+  `run_demo.py` today**. `run_demo.py:183-186` constructs the pipeline with six positional
+  arguments and one keyword, and passes none of `dsrc_runtime`, `dsrc_segment_builder` or
+  `dsrc_advisory_decoder`; `here_feed_source` is never passed either, and `config.yaml`'s
+  `policy` block has no `dsrc_bundle` entry. The three stay `None` and the path never runs on
+  a real drive.
 * **The shadow runs have not been scored.** `deployment/jetson/score_shadow.py` replays
   the logged per-tick inputs and scores candidate controllers against them, gating on the
   incumbent replaying byte-for-byte first. It has not been run against the six. Until it
