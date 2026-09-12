@@ -9,9 +9,9 @@ lives in `TestGoldenActions` at the bottom of this file, once
 
 from __future__ import annotations
 
-import base64
 import copy
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +22,11 @@ from perception.segment_state import SEGMENT_BASIS_MEASURED, SEGMENT_BASIS_SUBST
 from policy import export_dsrc_policy as export_mod
 from policy.dsrc_contract import SPEED_ACTION_FRACTIONS, SrcQNetwork
 from policy.dsrc_runtime import DsrcRuntime, OUTCOME_OK
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[3] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import export_dsrc_golden as export_mod_golden  # noqa: E402
 
 
 def tiny_definition() -> dict:
@@ -280,30 +285,40 @@ class TestGoldenActions:
                 "on this machine"
             )
 
-    def test_random_actions_and_q_values(self, runtime, golden):
-        """0 mismatches of 20,000 random states; Q-values within 1e-5."""
+    def test_random_states_hash_to_the_frozen_digest(self, runtime, golden):
+        """0 mismatches of 20,000 random states, checked by hash rather than
+        by stored arrays: specs/dsrc_golden_actions.json stores only the
+        seed, the feature-box bounds and the count for this population (see
+        scripts/export_dsrc_golden.py's module docstring for why -- storing
+        the arrays put the file at 10.8 MB, a bulk dump of a deterministic
+        generator's output). The states are regenerated here from those four
+        numbers, run through DsrcRuntime, and hashed the same way the
+        generator hashed the reference's own output; a hash mismatch means
+        DsrcRuntime's actions or Q-values diverged from the checkpoint's
+        reference somewhere in the 20,000, without saying which -- the 185
+        recorded states above already give a per-state accounting, and are
+        where the "any machine, 1e-5" Q-value claim is actually checked with
+        real numbers; this hash is a same-machine, bit-exact comparison,
+        like network_fingerprint and checkpoint_sha256 elsewhere in this
+        file.
+        """
         random_block = golden["random"]
         n = random_block["count"]
         s, f = runtime.num_segments, runtime.num_features
-        states = np.frombuffer(
-            base64.b64decode(random_block["states_b64"]), dtype=np.float32
-        ).reshape(n, s, f)
-        actions = np.frombuffer(
-            base64.b64decode(random_block["actions_b64"]), dtype=np.int8
-        ).reshape(n, s)
-        q_values = np.frombuffer(
-            base64.b64decode(random_block["q_values_b64"]), dtype=np.float32
-        ).reshape(n, s, 3)
+        rng = np.random.default_rng(random_block["seed"])
+        states = rng.uniform(
+            random_block["feature_low"], random_block["feature_high"], size=(n, s, f)
+        ).astype(np.float32)
 
-        mismatches = 0
-        max_diff = 0.0
+        actions = np.zeros((n, s), dtype=np.int8)
+        q_values = np.zeros((n, s, runtime.num_actions), dtype=np.float32)
         for i in range(n):
             result = runtime.act(states[i])
-            if not np.array_equal(result.actions.astype(np.int8), actions[i]):
-                mismatches += 1
-            max_diff = max(max_diff, float(np.max(np.abs(result.q_values - q_values[i]))))
-        assert mismatches == 0, f"{mismatches} of {n} random states mismatched"
-        assert max_diff < 1e-5, f"max |Q-value diff| {max_diff} >= 1e-5"
+            actions[i] = result.actions.astype(np.int8)
+            q_values[i] = result.q_values
+
+        digest = export_mod_golden.hash_actions_q_values(actions, q_values)
+        assert digest == random_block["sha256_actions_q_values"]
 
 
 @requires_golden

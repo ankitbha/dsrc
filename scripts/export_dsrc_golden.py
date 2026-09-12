@@ -21,13 +21,37 @@ deliberate re-run of this script, not a quiet edit.
 
 **Storage.** The ~180 recorded states are small and stored as one hex
 string per float32 (`state_hex`, `q_values_hex`) -- human-legible, and
-exactly what plan section 5.1 asks for. The 20,000 random states are NOT
-stored that way: at roughly 30 hex characters per state times 20,000, the
-file would run to tens of megabytes for a "small frozen generated file"
-(the precedent this follows, `specs/transport_golden_frames.json`, is
-32 KB). Storing them instead as base64 of the raw float32 (states,
-Q-values) and int8 (actions) buffers is equally bit-exact -- no decimal
-rounding either way -- and keeps the file an order of magnitude smaller.
+exactly what plan section 5.1 asks for. This is the load-bearing evidence
+(agreement against states the simulator actually produced) and is kept
+fully expanded.
+
+The 20,000 random states are NOT stored at all, in any form -- an earlier
+version of this script stored the full states/actions/Q-values as base64
+buffers, which put the file at 10.8 MB, about three times the next-largest
+tracked file in this repository and a bulk dump of a deterministic
+generator's output, against this project's own rule that only code lives
+in the repository. Nothing about the random population needs storing to
+keep the same guarantee: `seed`, `feature_low`/`feature_high` and `count`
+are enough to regenerate the identical states from `numpy`'s own
+`default_rng` (states are a pure function of those four numbers), and
+`sha256_actions_q_values` pins what this checkpoint's reference (`src.rl
+.src_q.greedy_actions` plus the raw Q-values) produced on them, over
+`actions.astype(int8).tobytes() + q_values.astype(float32).tobytes()` in
+that order, both C-contiguous. `tests/test_dsrc_runtime.py` regenerates the
+states from the stored seed, runs the SAME bytes-in-same-order hash over
+`DsrcRuntime`'s own output, and compares -- unchanged from a stored-array
+comparison in what it can catch (any divergence in `DsrcRuntime`'s actions
+or Q-values still fails it), at about a kilobyte instead of 10.5 MB. The
+one thing lost is a per-state mismatch count on failure, since a hash
+mismatch does not say which of the 20,000 states diverged; the recorded
+185 states above already carry that level of detail.
+
+This hash is a same-machine, bit-exact comparison for Q-values (like
+`network_fingerprint` and `checkpoint_sha256` elsewhere in this file, and
+like the recorded-population bit-exact test) -- it does not carry the
+"any machine, 1e-5" claim for the random population specifically, since a
+hash has no tolerance. That claim is checked directly, with real numbers
+and a real tolerance, on the 185 recorded states instead.
 
 Usage:
   python3 scripts/export_dsrc_golden.py
@@ -36,7 +60,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import sys
@@ -82,8 +105,18 @@ def _hex_f32(x: np.ndarray) -> list:
     return np.array(flat, dtype=object).reshape(x.shape).tolist()
 
 
-def _b64(x: np.ndarray) -> str:
-    return base64.b64encode(np.ascontiguousarray(x).tobytes()).decode("ascii")
+def hash_actions_q_values(actions: np.ndarray, q_values: np.ndarray) -> str:
+    """sha256 over `actions` then `q_values`, both C-contiguous raw bytes.
+
+    The stated byte order `tests/test_dsrc_runtime.py` must reproduce
+    exactly: `actions` cast to int8 first, then `q_values` cast to float32,
+    concatenated in that order. Kept as one function so the two call sites
+    (this generator and the test) cannot drift apart on the order or the
+    dtypes.
+    """
+    actions_bytes = np.ascontiguousarray(actions, dtype=np.int8).tobytes()
+    q_values_bytes = np.ascontiguousarray(q_values, dtype=np.float32).tobytes()
+    return hashlib.sha256(actions_bytes + q_values_bytes).hexdigest()
 
 
 def _load_model(checkpoint: Path, num_segments: int, num_features: int, num_actions: int):
@@ -159,9 +192,10 @@ def main() -> None:
     checkpoint_sha256 = hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()
 
     recorded = collect_recorded(model, TEST_SEEDS)
-    random_states, random_actions, random_q = collect_random(
+    _random_states, random_actions, random_q = collect_random(
         model, args.random_states, num_segments, num_features, RANDOM_SEED
     )
+    random_hash = hash_actions_q_values(random_actions, random_q)
 
     document = {
         "network_id": definition["network_id"],
@@ -176,23 +210,22 @@ def main() -> None:
         "warmup_s": WARMUP_S,
         "recorded": recorded,
         "random": {
+            # Enough to regenerate the identical states: nothing else about
+            # them is stored. See this module's docstring.
             "seed": RANDOM_SEED,
             "count": int(args.random_states),
             "feature_low": FEATURE_LOW.tolist(),
             "feature_high": FEATURE_HIGH.tolist(),
-            "dtype_states": "float32",
             "dtype_actions": "int8",
             "dtype_q_values": "float32",
-            "states_b64": _b64(random_states),
-            "actions_b64": _b64(random_actions),
-            "q_values_b64": _b64(random_q),
+            "sha256_actions_q_values": random_hash,
         },
     }
     args.out.write_text(json.dumps(document))
     print(
         f"wrote {args.out}: {len(recorded)} recorded decisions across "
         f"{len(TEST_SEEDS)} seeds, {args.random_states} random states "
-        f"({args.out.stat().st_size / 1e6:.1f} MB)"
+        f"(hash-pinned) ({args.out.stat().st_size / 1e6:.3f} MB)"
     )
 
 

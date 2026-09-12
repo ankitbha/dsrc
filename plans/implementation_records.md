@@ -2948,7 +2948,10 @@ would have failed is absent rather than wrong.
      path, and measure how often it clamps and by how much. That measurement is also the
      paper plan's third open item, which asks for the gate's firing rate.
 
-145. **The rig cannot run the controller the paper is about.** Open.
+145. **The rig cannot run the controller the paper is about.** Implemented 2026-09-12
+     (implementer-145) against `plans/plan_task145_dsrc_policy_runtime.md`. The plan's
+     sign-off checklist (its section 11) is unaddressed: none of it carries user sign-off,
+     by the plan's own statement, and this record does not close it.
 
      The deployed actor is a 39 -> 128 -> 128 -> 4x3 MLP over the local-sensing contract:
      `ObservationBuilder.build` produces the vector, `ActorRuntime.act` runs it,
@@ -2970,6 +2973,109 @@ would have failed is absent rather than wrong.
      replayed segment state, measure its latency, and require it to reproduce the
      simulator's action for the same input. Then state plainly what still stands between
      that and a policy a vehicle could run on a road it can drive to.
+
+     **What was built.** `policy/dsrc_contract.py` (vendored `SrcQNetwork`, action
+     fractions, decision interval, feature names, `network_fingerprint`);
+     `scripts/export_dsrc_network.py` and the committed `specs/dsrc_network_mainz.json`;
+     `perception/segment_state.py` (`SegmentStateBuilder`, coverage classes
+     measured/substituted/absent); `sensors.here_feed.HereFeed.snapshot_links`;
+     `policy/dsrc_runtime.py` (`DsrcRuntime`, refusing a bundle whose network identity does
+     not match the device's own, no grandfather clause); `policy/export_dsrc_policy.py` and
+     the resulting `models/dsrc_policy.ts`/`.json` bundle (gitignored, regenerated from
+     `results/checkpoints/mainz_here_best.pt`); `scripts/export_dsrc_golden.py` and the
+     committed `specs/dsrc_golden_actions.json`; `policy.advisory.SegmentAdvisory` and
+     `SegmentAdvisoryDecoder`; `pipeline.py`'s wiring of all of it behind two new optional
+     `stages` entries, `segment_assemble` and `dsrc_infer`, off by default and backward
+     compatible with every existing call site.
+
+     **The demonstration.** `DsrcRuntime.act` reproduces `src.rl.src_q.greedy_actions`
+     exactly on both populations `specs/dsrc_golden_actions.json` carries, checked two
+     different ways. On the 185 recorded decisions across `mainz_here_best.pt`'s five
+     held-out test seeds (16-20), stored and compared directly, value by value: 0 action
+     mismatches, Q-values bit-for-bit identical between the TorchScript bundle and the
+     eager reference on this machine (the "same machine that exported" row of the plan's
+     acceptance table), and agreeing to within 1e-5 (the "any machine" row). On 20,000
+     states drawn from a fixed seed over the plausible feature box, the file stores only
+     the seed, the feature-box bounds and a sha256 over the reference's own
+     actions-then-Q-values bytes -- storing the arrays put the file at 10.8 MB, three times
+     the next-largest tracked file in the repository, for a deterministic generator's
+     output; the coordinating session flagged this and it was changed before this record was
+     written. The test regenerates the 20,000 states from the seed, runs them through
+     `DsrcRuntime`, hashes the same way, and compares: a match is 0 mismatches on that
+     population too, but as a same-machine bit-exact pin rather than a per-state count, and
+     it does not itself carry the "any machine, 1e-5" claim -- that claim is checked with
+     real numbers only on the 185 recorded states. Three deliberately broken runtimes were
+     each seen to fail before this pass was trusted: a transposed weight fails at
+     `load_state_dict` (no layer in this network is square, so a transpose is never
+     shape-compatible); two segments swapped in the network definition are refused at the
+     `network_fingerprint` check, before any action is computed; and `jam_factor` drawn
+     independently of the recomputed formula, over its full 0-10 range, changed the action
+     on 143 of 185 recorded decisions (350 of 2,220 individual per-segment actions) --
+     the measurement open item 2 asked for.
+
+     **Latency, on this development machine, not the Orin.** `dsrc_infer` p50 0.029 ms /
+     p95 0.048 ms over 200 replayed decisions, matching the order of magnitude
+     `greedy_actions` measured in the plan's own section 1.7. `segment_assemble` p50
+     25.9 ms / p95 26.2 ms: pure-Python point-to-polyline distance checks across every
+     matched segment's vertices, dominated by segments with many edges (segment 2 alone has
+     33). This runs once per 60 s decision, not once per tick, so even this number sits
+     more than three orders of magnitude inside the interval it has to complete within; it
+     is reported because the plan's own prior was stated for `dsrc_infer` alone and did not
+     anticipate `segment_assemble` being the larger of the two. The Orin number itself is
+     step 12's own deliverable and was not measured -- no device access this session; the
+     harness (`deployment/jetson/bench_dsrc_latency.py`) is built and runs, so measuring it
+     is a rerun rather than new code.
+
+     **Two things the plan got wrong, found while implementing it, corrected rather than
+     followed literally.**
+
+     1. **Mainz carries no real-world geo-reference at all.** `data/mainz/mainz.net.xml`'s
+        `<location>` tag is `projParameter="!"`, SUMO's own marker for "no projection",
+        so `sumolib.net.Net.convertXY2LonLat` refuses the network outright. The plan's
+        section 4.1 asks for "the WGS84 polyline of each edge" as though it were an
+        extraction; it is a placement.  `scripts/export_dsrc_network.py` anchors Mainz's
+        bounding-box centre at a fixed New Jersey-area point already used by this
+        deployment's own GPS test fixtures (`lat=40.0, lon=-74.0`) and documents this as
+        fabricated in the file's own `geo_reference` block, not as a measurement.
+     2. **The 123-body New Jersey HERE corpus plan step 3 names does not exist in this
+        checkout.** It was collected on 2026-09-08 (item 71 above) but written to a run
+        directory this repository's `.gitignore` excludes and never committed; it is not
+        reachable from this machine. Combined with point 1, no real correspondence exists
+        between any HERE link and any Mainz super-segment to calibrate a match tolerance
+        against. `perception.segment_state.SEGMENT_MATCH_TOLERANCE_M` reuses
+        `sensors.here_feed.ASSOCIATION_RADIUS_M` (60.0 m) on that constant's own physical
+        reasoning rather than a number read off a sweep over data this module had to
+        fabricate; `scripts/measure_dsrc_match_tolerance.py` runs that sweep on synthetic
+        data and documents why its curve is provisional.
+
+     Separately, `perception/segment_state.py` sources the `free_flow` feature from the
+     network definition's static speed limit rather than from HERE's `freeFlow` field:
+     `src.sumo.mainz.MainzEnv._per_edge` sets `free_flow_kmh` from the map on every step and
+     never from a live reading, and its own `HERE_FEATURES` docstring says so directly. The
+     plan's section 4.2 lists `free_flow` as one of the three fields read live from HERE;
+     following that literally would have fed the policy a feature that moves when the
+     training data it was fit against never did, with no test positioned to catch it (the
+     golden-action tests bypass this module entirely, feeding recorded states straight to
+     `DsrcRuntime.act`). This is a correction to the plan's own text, not a design choice
+     left open for sign-off, and is called out because the plan is supposed to be the
+     validator's reference.
+
+     **Test counts.** Baseline at `975b7a2`: `deployment/jetson/tests/` 2,247 passed / 25
+     skipped; repo-root `tests/` 69 passed. Measured on this branch after this task's
+     commits: `deployment/jetson/tests/` 2,332 passed / 25 skipped; repo-root `tests/` 116
+     passed. Task 142 committed its own paired-seed evaluator to this same branch
+     concurrently with this work (`9e154e7`), so part of both increases is its tests, not
+     this task's; this task's own additions are the ones named above by file
+     (`test_dsrc_contract.py`, `test_here_feed.py`, `test_segment_state.py`,
+     `test_dsrc_runtime.py`, `test_advisory.py`, `test_pipeline_smoke.py`,
+     `test_export_dsrc_network.py`). No test was removed or skipped to reach these numbers,
+     and the skip count is unchanged from baseline.
+
+     **What was not done.** Step 12's Orin measurement (device access). The plan's own
+     section 9 (a drivable-network definition, a network-shaped HERE query, a training run
+     on that network) was named out of scope by the plan itself and stays out of scope
+     here. Section 11's sign-off checklist, including whether points 1 and 2 above change
+     any recommendation, is for the user.
 
 ---
 
