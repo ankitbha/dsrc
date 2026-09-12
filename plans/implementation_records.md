@@ -2925,7 +2925,10 @@ would have failed is absent rather than wrong.
      mutated contract before anything relies on it. A guard that has never been seen to fail
      is not a guard.
 
-144. **The safety and etiquette layer runs nowhere.** Open.
+144. **The safety and etiquette layer runs nowhere.** Implemented 2026-09-12
+     (implementer-144) against `plans/plan_task144_safety_layer_on_device.md`. The plan's
+     sign-off checklist (its own last section) is unaddressed, by the plan's own statement,
+     and this record does not close it.
 
      The paper plan's DESIGN section names `src/safety/safety_layer.py`, `etiquette.py` and
      `constraints.py` and says "the advisory is bounded before it reaches the driver". It
@@ -2947,6 +2950,160 @@ would have failed is absent rather than wrong.
      **The task:** vendor the filter the way the encoder is vendored, call it on the advisory
      path, and measure how often it clamps and by how much. That measurement is also the
      paper plan's third open item, which asks for the gate's firing rate.
+
+     **The measurement the paper's third open item asks for cannot be obtained from what is
+     in the repository, and the plan said so before any code was written.** Measured (and
+     re-measured here, independently, with `deployment/jetson/score_safety.py`) over the four
+     recorded runs in `outputs/task42_usb/` (3,913 tick records): zero of the layer's twelve
+     rules had evidence for their inputs on any of the 3,913 ticks. Eleven rules read a field
+     whose provenance is in `provenance.SUBSTITUTED` on every tick. The twelfth,
+     `target_lane_front_gap`, is evaluable on 1,229 of the 3,913 (the whole 2026-09-02 run,
+     the only one where that slot was tagged `derived` rather than substituted) and fires on
+     0 of those 1,229 -- the recorded value is `inf` on all of them. So the deliverable is a
+     per-rule **evaluability census**, not a clamp rate, and `score_safety.py` refuses to
+     print a rate for a rule with zero evaluable ticks rather than reporting "0%".
+
+     **What a firing rate would have said, if one had been reported**, also reproduced by
+     `score_safety.py` over the same 3,913 ticks: the recorded action (`fast` on every tick)
+     and the same action with `desired_speed_bin` forced to `nominal` both clamp 0 of 3,913;
+     forcing it to `slow` clamps 3,913 of 3,913, all attributed to
+     `etiquette_blocked_action: low_speed_uncongested`, and RAISES the recommended speed
+     20.0 -> 22.0 m/s. The reason is algebraic: with the configured `free_flow_speed_mps` of
+     30.0, `decode_speed_bin` gives `{slow: 20.0, nominal: 27.0, fast: 30.0}` and the
+     etiquette threshold is `30.0 - 8.0 = 22.0`; the predicate `target < free_flow - 8`
+     reduces to `desired_speed_bin == "slow"`. `lane_withheld` is `not_evaluable` on all
+     3,913 ticks in every arm: the policy's recorded action is `prefer_left_if_safe`, and with
+     no rear camera and no lane-change detector the lane advisory is withheld on every tick
+     of every recorded run, permanently, regardless of what the policy proposes.
+
+     **What was built.** `specs/safety_contract_golden.json` freezes `SafetyConstraints` (16
+     fields) and `SafetyContext` (23 fields, in order, with defaults) from `src/safety/`, with
+     a hash over both recomputed and checked against itself by both sides'
+     tests -- `deployment/jetson/tests/test_safety_contract.py` (the vendored copy,
+     unconditional, no `importorskip`) and `tests/test_safety_contract_matches_golden.py`
+     (`src/safety/` itself), replacing the comparison-against-a-deletable-original idiom
+     task 143 found goes vacuous. `deployment/jetson/policy/safety_gate.py` vendors
+     `SafetyConstraints`/`SafetyContext`/`SafetyState`/`SafetyDecision`/`apply_safety_layer`/
+     `physical_control_command`/`safety_penalty_terms` verbatim, calling
+     `sim_contract.decode_speed_bin`/`decode_headway_bin` rather than carrying a second copy
+     of either decoder (`lane_preference_to_action` is inlined instead: a 3-entry literal used
+     nowhere else on the device, so a second copy of it carries none of the two-decoder risk).
+     It adds `SafetyInputs` (decision 3's per-field input-class partition -- configured /
+     evidence-required / structurally-absent, built from an `ObservationResult`) and
+     `evaluate_rules`/`run_safety_gate`, which have no `src/safety/` counterpart at all: all
+     twelve rules evaluated as independent total predicates for the record (never
+     short-circuited by chain position the way `apply_safety_layer`'s own lane decision is),
+     plus the withhold-the-lane-action-when-a-guard-is-not_evaluable behavior decision 3 adds
+     on top of the unchanged elif chain. `pipeline.step` runs the gate between
+     `advisory_decoder.decode` and `set_target_headway`, unconditionally, on every tick;
+     `advisory.recommended_speed_mps`/`recommended_speed_display`/`lane_text` are overwritten
+     to the bounded values (`headway_target_s` is deliberately left at the raw decoded value,
+     since `set_target_headway` must keep feeding back what the policy was trained against,
+     not what the gate bounded it to). `Tick` gained a required `safety_gate` field (no
+     default, same reasoning as `jetson_ms`) and a `"safety"` block in `to_record()` beside
+     `"advisory"`; `PipelineStats`/`stages` gained `gate_ms`/`"gate"`, always
+     `StageTiming.measured` -- the gate runs the full rule evaluation on every tick with no
+     early-return path, so there is no refusal to mistake for an inference the way an earlier
+     version of `dsrc_infer` did (found and fixed by the concurrent task-145 fixer in this
+     same file; flagged here because the hazard is the same shape). `config.yaml` gained
+     `safety.withhold_lane_when_not_evaluable` (default `true`), threaded through
+     `run_demo.py`'s `_build_rest` as a keyword argument -- the existing six-positional-argument
+     `PerceptionPolicyPipeline(...)` call and the missing `dsrc_runtime`/`dsrc_segment_builder`/
+     `dsrc_advisory_decoder`/`here_feed_source` wiring there are task 145's own separate gap,
+     left untouched. `deployment/jetson/score_safety.py` follows `score_shadow.py`'s
+     refuse-before-misleading idiom: the per-rule census before any rate; an incumbent
+     `safety` block (once one exists) must reproduce exactly from its own recorded inputs
+     before anything is reported; a log with no `safety` block at all (every run recorded
+     before this task) has every number labelled `counterfactual`.
+
+     **The golden-file gate check (plan step 4), performed before trusting it.** Mutated
+     `lane_change_dwell_s` 15.0 -> 99.0 in the vendored copy, ran
+     `test_safety_contract.py`, watched `test_vendored_safety_constraints_matches_golden`
+     fail, reverted, watched all four tests in that file pass again.
+
+     **The step-9 invariant, and a defect in its own first draft, found and corrected before
+     trusting it.** The pipeline-level test asserting `advisory.recommended_speed_mps ==
+     safety_gate.bounded_speed_mps` initially compared the two values on an unforced
+     random-actor rollout, and passed even after `pipeline.step`'s `replace()` call was
+     deliberately broken (fed the raw, ungated speed back to itself) -- because the random
+     actor rarely proposes a speed the gate actually changes, so both sides were silently
+     reading the same wrong value. Corrected by monkeypatching the actor to force
+     `desired_speed_bin="slow"`, which the gate is known to clamp; re-verified against the
+     same deliberate break (caught: 20.0 != 22.0), reverted, passes clean. A second,
+     independent mutation (offsetting `safety_gate.run_safety_gate`'s `bounded_speed_mps` by a
+     constant) was caught by `tests/test_safety_gate.py`'s existing pinned-value unit tests,
+     not by the pipeline-level one -- the two layers catch different classes of defect, and
+     only the corrected pipeline-level test catches a wiring regression specifically.
+
+     **The safety-block size estimate (E6 in the plan) was wrong, and the plan said to check.**
+     Measured over 300 replayed ticks on this laptop (a mix of ticks with and without a
+     tracked leader, so both the always-not_evaluable rules and the one evaluable one are
+     represented): the `"safety"` block is 2,330-2,696 B (mean 2,576 B, p50/p95 2,696 B)
+     against a 9,837 B mean full tick record -- **+26.2% on the mean record, not the +15.0%
+     the plan estimated from a hand-drafted example.** The plan's own acceptance band was
+     1,300-1,800 B; the measured figure is outside it by roughly 1.5-1.8x. The extra weight is
+     the twelve-rule `missing` list plus a `<field>_source` entry per missing field, which the
+     plan's own drafted example under-counted relative to a real not-evaluable-on-everything
+     tick; the plan's stated reason for choosing this fuller form over a cheaper 1,103 B
+     variant (dropping each substituted field's provenance class "is the one thing a reader of
+     this block needs") is unaffected by the estimate being wrong, so the fuller form is kept.
+     `gate_ms` itself: mean 0.035 ms, p50 0.034 ms, p95 0.038 ms on this laptop -- three orders
+     of magnitude under any latency budget this rig has, as expected for pure Python dict and
+     dataclass work with no I/O.
+
+     **One place this record's own rule-to-field mapping differs from the plan's draft E4
+     table, found while implementing decision 3 rather than the earlier evidence section.**
+     Decision 3 classifies `free_flow_speed_mps` as class (A) -- "accepted as given, never
+     makes a rule not_evaluable" -- because the gate must decode the speed bin against the
+     same base `AdvisoryDecoder` used, and that base is `obs.cooperation.segment_target_speed`,
+     regardless of its own provenance tag. The plan's E4 table nonetheless names
+     `cooperation.segment_target_speed = fallback_neutral` as the input that blocks
+     `low_speed_uncongested`. Implemented per decision 3 (the later, authoritative section):
+     `low_speed_uncongested`'s actual blocker in this implementation is
+     `local_density_veh_per_km`, via the `derived_empty` + `last_detection_age_s` carve-out
+     decision 3 also specifies (the corpus's `last_detection_age_s` is `None` on all 3,913
+     ticks, so density is never evidence either way). The bottom-line count this record and
+     `score_safety.py` both report -- 0 of 3,913 evaluable -- is unchanged either way; only the
+     named blocking field differs from the plan's draft table, and decision 3 is what this
+     implementation follows since it is the section the plan itself calls authoritative over
+     the evidence that preceded it.
+
+     **Open item 3 (what the driver sees on `emergency_override`) implemented as the plan's
+     own stated recommendation, flagged for confirmation because it is untestable against any
+     recorded tick.** `Advisory` gained `speed_display_withheld: bool` (default `False`,
+     additive), set from the gate's `emergency_override`. `advisory.recommended_speed_mps`
+     itself is left as a plain, always-defined float, per decision 2's own requirement that it
+     keep meaning "the number shown to the driver" unconditionally (four call sites read it as
+     exactly that); a display is free to withhold the number when the new flag is set rather
+     than the data model carrying an optional field four existing readers would have to be
+     taught to handle. `emergency_override` fires on 0 of 3,913 ticks in every arm measured, so
+     this path has not been exercised by anything on this rig.
+
+     **Test counts.** Baseline mirror at `b1758a7` (this task's parent commit, established
+     fresh rather than trusted from an earlier record): `deployment/jetson/tests/` 2,328
+     passed / 28 skipped; `tests/test_safety_layer.py` 18 passed. Mirror at `b1dfd09` (this
+     task's last commit, on a branch three agents committed to concurrently):
+     `deployment/jetson/tests/` 2,390 passed / 28 skipped, 0 failed;
+     `tests/test_safety_layer.py` + `tests/test_safety_contract_matches_golden.py` 21 passed.
+     This task's own new tests: 53, across
+     `deployment/jetson/tests/test_safety_contract.py` (4),
+     `deployment/jetson/tests/test_safety_gate.py` (25),
+     `deployment/jetson/tests/test_score_safety.py` (7),
+     `deployment/jetson/tests/test_safety_gate_pipeline.py` (7),
+     `deployment/jetson/tests/test_eval_run_safety.py` (7), and
+     `tests/test_safety_contract_matches_golden.py` (3). The remainder of the 62-test increase
+     in `deployment/jetson/tests/` is concurrent work by other agents on tasks 142 and 145,
+     landed on the same branch during this task's own commits; no test was removed or skipped
+     to reach these numbers, and the skip count (28) is unchanged from baseline.
+
+     **What was not done.** No drive with this gate running exists or was made -- the plan's
+     own scope excludes it ("anything that needs a new drive"), and the paper's third open
+     item stays open for the same reason the plan states: no run in the repository has a
+     leader track (predates task 63's camera-rotation fix), so no corpus exists on which a
+     real firing rate could ever be measured, gate or no gate. The plan's own sign-off
+     checklist -- confirming decision 3's fail-closed lane default, open items 1-3, the
+     zero-clamp-rate deliverable, decision 7 (Mainz is a separate task), and findings F2/F3
+     staying unfixed -- is for the user.
 
 145. **The rig cannot run the controller the paper is about.** Implemented 2026-09-12
      (implementer-145) against `plans/plan_task145_dsrc_policy_runtime.md`. The plan's
