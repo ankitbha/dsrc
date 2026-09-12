@@ -177,5 +177,21 @@ no-control baseline.
   super-segment, so there is no aggregation in it -- which means Mainz is the only
   network, as it is for the AAAI paper. The demand level was chosen just past the point
   where the network breaks down; the gain has not been swept across demand.
-* **Is there a recorded drive?** The deployment plan and per-task plans exist; a drive
-  result document does not. A gate exercised only in loopback is a design.
+* **The drives exist; their analysis does not.** Eight runs on 2026-09-08 in Westfield,
+  NJ, on a OnePlus Nord N10: six shadow runs totalling 17,948 ticks over 45.9 to 47.7 km,
+  and two live runs of 4,981 ticks over 40.7 to 42.4 km. First working GPS and first
+  working HERE in the project -- every bench run before had `gps_hz 0.0` and `here=false`.
+  Distance agrees to 0.01 km between integrating reported speed and the great-circle path
+  through the fixes, which is two independent routes to one number. Recorded in
+  `plans/task_list.md` section I, tasks 49 to 51, not in a results document.
+
+  What has NOT been run is `deployment/jetson/score_shadow.py`, which replays the logged
+  per-tick inputs and scores candidate sensing controllers against them. It gates on the
+  incumbent replaying byte-for-byte and refuses otherwise, so that replay is the first
+  step. Until it runs, whether the shadow-mode predictions held in live mode is unanswered.
+
+  Two qualifications the drives carry: HERE was set to one query per minute in shadow
+  mode, so they are not a full-rate HERE reference -- though that cadence is exactly
+  `DECISION_INTERVAL_S`, the policy's own 60 s decision interval, so it is the rate the
+  policy would query at anyway. And the shakedown found three defects, including a
+  90-degree frame rotation that explains every zero-detection drive in the project.
