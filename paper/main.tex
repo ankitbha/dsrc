@@ -35,15 +35,12 @@
 \makeatletter\let\labelindent\relax\makeatother
 \usepackage{enumitem}
 \usepackage{tikz}
-\usetikzlibrary{arrows.meta,calc,positioning}
+\usetikzlibrary{arrows.meta,calc,positioning,fit}
 
 \newcommand{\sys}{self-regulating cars}
-\newcommand{\vstate}{local-aggregate V2V}
 
-\title{\LARGE \bf The Case for Self-Regulating Cars}
+\title{\LARGE \bf Deploying Self-Regulating Cars}
 
-% TODO: author list and affiliations. Carried over from an anonymous submission, so
-% there is nothing to port here -- fill in before submitting.
 \author{Ankit Bhardwaj$^{1}$%
 \thanks{$^{1}$New York University. {\tt\small ankit@usenash.com}}%
 }
@@ -60,6 +57,8 @@
 \input{vision}
 \input{architecture}
 \input{eval}
+\input{experience}
+\input{simulation}
 \input{related}
 \input{discussion}
 

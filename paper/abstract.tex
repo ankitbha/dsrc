@@ -1,7 +1,22 @@
 \begin{abstract}
-Highway traffic jams are a congestion-control failure in a transportation system: small local disturbances push traffic past a critical density, after which stop-and-go waves persist long after their cause has disappeared. This paper makes the case for incrementally deployable {\em self-regulating cars} that utilize intelligent {\em local feedback} to smooth the traffic flow by regulating their speed to potentially avoid sustained traffic jams. 
-%Field experiments show that a handful of controlled vehicles can damp these waves, and a recent self-regulating-cars system improves throughput by 5\% and cuts average delay by 13\% on a real highway network in high-fidelity simulation, yet deployed designs still place purpose-built vehicles, roadside infrastructure, or a cloud coordinator inside the control loop. We argue the remaining obstacle is deployment, and ask two questions: how little must change in an ordinary car for it to self-regulate, and how few self-regulating cars does a road network need? 
-This paper demonstrates how any conventional vehicle could serve as a self-regulating vehicle with minimal additions (including a 
-dashcam-grade camera and low-power embedded compute) that can independently compute safety-filtered speed and headway advisories
-using locally executed reinforcement learning policies with minimal cloud assistance. On bottleneck-fed corridors like the Holland Tunnel approaches, we show that the ambient presence of minimal self-regulating vehicles can regulate the inflow to reduce the impact of  bottleneck jams. 
+A jam on a free-flow road network forms when a local disturbance pushes
+density past a critical point. Earlier work learned a controller that prevents
+this by setting a desired speed per road segment, and measured a throughput
+gain for it in simulation. That controller reads state a central observer
+collects and delivers its decisions through a cloud service. This paper
+reports what has to exist on an ordinary vehicle for the same controller to
+run on the vehicle instead, and what happened when that was built and driven.
+
+The rig is an unmodified Android phone and an NVIDIA Jetson Orin Nano. The
+phone samples a camera, GPS, an inertial unit and a traffic API at rates the
+Jetson commands. The Jetson runs perception, policy inference and a vendored
+safety and etiquette filter. Nothing is connected to the vehicle's controls,
+and no advisory was acted on by any driver. Eight drives on one day recorded
+22{,}929 ticks over 152.8 minutes on vehicle power. Measured on the bench, the
+on-Jetson path has a median of 19.8\,ms, and the phone-to-Jetson path has a
+95th percentile of 116.19\,ms against a 200\,ms target. In simulation,
+restricting the controller's observation to the fields a traffic API returns
+changes throughput by 6\,veh/h, against paired error bars of 44 and 61\,veh/h.
+This paper also reports the failures the deployment produced, because they are
+the part that cannot be obtained any other way.
 \end{abstract}

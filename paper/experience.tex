@@ -1,0 +1,133 @@
+\section{What the Deployment Cost}
+\label{sec:experience}
+
+This section reports the failures. They are not incidental to the contribution.
+They are the part of it that cannot be obtained from a simulator, and most of
+them are defects in measurement rather than in the system being measured.
+
+\noindent\textbf{A telemetry vocabulary, and the limit of it.}
+Every instrumented quantity in this system reports in a closed three-state
+vocabulary rather than as a number. A value is measured, or converted with a
+stated bound, or absent with a named reason. It is never a zero. Trigger
+attribution is reported as fired, quiet, or not evaluable with the missing
+inputs named, together with a reconstruction identity that ties the commanded
+rate back to its base and scale. Field provenance is a closed eleven-member
+vocabulary covering all 39 encoder slots, and logs recorded before that work
+existed refuse by name rather than being scored against defaults. The session
+summary reports answered and attempted as two independently counted integers.
+There is no percentage anywhere in it and no scalar health field. A scalar is
+what a dashboard plots on its own, and once it is plotted the enumeration is
+gone.
+
+That vocabulary has one limit. An axis of the form answered of attempted is
+blind by construction to any event that stops the attempting. A 54.58\,s link outage destroyed the numerator and the denominator
+together, removing about 273 of roughly 1{,}502 ticks, which is 18.2\% of every
+denominator in that report. The summary recorded 1{,}229 attempts and called
+every axis fully answered. The vocabulary protects the numerator, and nothing
+was watching the denominator.
+
+\noindent\textbf{What the failure inventory found before anything was built.}
+An audit of both devices counted 186 failure conditions that the code already
+detected. Four of them record when the failure happened. None records an
+episode, meaning a second endpoint and an outcome. Several had no reader at all.
+Two conditions were detected nowhere. The tick loop's no-frame branch counted
+nothing, so a drive that was blind for 110 of 120\,s wrote the artefact of a
+drive that was never blind. The worker used a try-finally block with no except
+clause, so an exception ran teardown and wrote a summary that read like a clean
+short run.
+
+\noindent\textbf{The feature was inert on the one device it was written for.}
+The two devices were in opposite states, and establishing that was the first
+job. The phone's thermal chain was live end to end. The Jetson had no thermal
+reading at all. The single sampler adjacent to it degraded to a silent no-op
+when an optional import failed. It also wrote records that nothing collected,
+and it had no test. Measured on the real device at the deployed commit, a 150\,s run produced
+751 ticks, 0 sample records and 0 event records, with every tick reading absent
+and the reason given as a stopped sampler. Three of that machine's nine thermal
+zones answer with a temporary-unavailable error. That error surfaces through the
+buffered text layer as a type error. The reader's handler covered operating
+system errors only, so the sampler thread died on its first pass. The
+fixtures could not have caught it. They make a zone unreadable by deleting the
+file or by denying permission, and both of those raise the exception the reader
+did catch. One sysfs quirk took the phone's thermal record down with the
+Jetson's, on a drive where the phone was connected and delivering telemetry
+throughout.
+
+What prevented a wrong number was the reporting vocabulary. Nothing read quiet,
+nothing read as a zero, and the report said outright that the drive answered
+nothing. After the fix, a confirmation run on the same device recorded 1{,}200 ticks
+and 241 samples, with 241 measured and 0 absent. The quiet line now carries the
+evidence for its own claim, as 241 of 241 passes fully readable.
+
+The field disagreed with the design estimate in three further ways. The device
+has nine thermal zones, of which six are usable. It has 13 cooling devices where
+the estimate assumed 3, which accounts for the entire 39\% overrun in record
+size against per-item figures that were correct to a tenth of a byte. Thermal
+headroom was not a number on 456 of 456 and on 297 of 297 reports, on a handset
+whose thermal interface is connected and answering. A network redial erased a
+drive's throttle count and wrote a phantom event, because the sampler copied the
+phone's counter instead of accumulating it.
+
+\noindent\textbf{An instrument that cancelled its own signal.}
+The validator built to check the clock premise was degenerate, and algebra
+caught it rather than a run. Estimating the offset on each clock pair and
+differencing the two slopes cancels the quantity of interest and returns the
+difference of the two local slews. It was confirmed rather than argued. It
+reported $+12.06$\,ppm against an independently measured slew difference of
+$+12.00$\,ppm. What works needs no network at all, because each device's own
+wall-minus-monotonic slew is exact. The fitted estimate was $-1.09$\,ppm while
+the true value was $-12.00$\,ppm, so charging the error bound to the fit's own
+magnitude would have under-bounded it by a factor of ten.
+
+\noindent\textbf{One defect hid every perception result in the project.}
+The camera frames arrive rotated by ninety degrees, and that is why no drive in
+this project had ever seen a vehicle. Measured over the full day, 16 of 22{,}929 ticks carried a detection, which is
+0.070\%. The vehicle list was empty even on those 16, so zero distance estimates
+were recorded on the entire day. There
+were zero vehicle sightings across 4{,}151 ticks on one handset and 1{,}632 on
+another. Table~\ref{tab:rotation} gives the measurement that identified it. The
+frame shows a van filling much of the picture with a legible plate, so this was
+not a marginal detection. Only the clockwise rotation recovers detections, and
+anticlockwise and 180 degrees both give zero. The fix moves the intrinsics with
+the rotation, taking the principal point from $(640, 360)$ to $(360, 640)$, and
+the horizon was re-measured at 717\,px against the old landscape centre of 360.
+
+\begin{table}[t]
+\centering
+\caption{The same two frames through the same detector, with one rotation
+applied. The detector is unchanged between the two columns.}
+\label{tab:rotation}
+\small
+\begin{tabular}{lrr}
+\toprule
+\textbf{Frame} & \textbf{As delivered} & \textbf{Rotated 90$^\circ$ clockwise} \\
+\midrule
+mid-drive & 0 vehicles & 2 vehicles, confidence 0.90 \\
+later & 0 vehicles & 5 vehicles, confidence 0.87 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This was one defect, and it had been recorded as several structural limits. An
+infinite leader gap on every tick ever recorded, empty track lists everywhere,
+and an always-empty local density are all downstream of it. The project had
+accumulated explanations for an absence that had a single cause. The fix landed
+after the collection day, so no drive in the corpus carries detections, and the
+stored frames remain available for offline re-analysis.
+
+\noindent\textbf{The vehicle is a hostile environment and the faults are
+physical.}
+Both devices ran from vehicle power for 152.8 minutes across eight runs with no
+power interruption. Two install faults each cost drive time. Cable type is not
+interchangeable, because one handset's cable failed in the vehicle, and the
+application was moved to a second handset mid-session with the swap recorded
+automatically in the run metadata. Direct sunlight on the dashboard heated the
+tethering handset enough that its hotspot shut off, which ended a drive. The
+mount needs shade and not only a clamp.
+
+\noindent\textbf{Two method conclusions.}
+The first is that a fixture's failure mode has to be the field's. A deleted file
+and a denied permission raise one exception, the real device raised a different
+one, and every test passed while the feature did nothing. The second is
+quantitative. On the thermal task alone, five distinct false readings were
+produced by measurement harnesses rather than by the code under test.

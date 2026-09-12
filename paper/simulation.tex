@@ -1,0 +1,139 @@
+\section{The Flow-Level Result}
+\label{sec:simulation}
+
+One instrumented vehicle cannot demonstrate throughput or delay. The flow-level
+claim therefore comes from simulation, and the drives are never asked to support
+it. The question the simulation answers is narrow. It is whether restricting the
+controller's observation to the fields a traffic API returns costs throughput.
+
+\noindent\textbf{The port.}
+The published controller ran on a Mainz highway network in PTV Vissim under a
+Wiedemann-99 car-following model. That network was converted to
+SUMO~\cite{lopez2018sumo} directly from the Vissim XML. The conversion produces
+410 edges over 51.5\,km. Three conversion decisions matter. Imported height
+offsets produce edge grades of up to 923\%, which SUMO applies to acceleration,
+so the network is flattened. Every edge imports at 13.9\,m/s while the action
+set tops out at 60\,km/h, so a speed factor of 1.2 is applied and all three
+actions become expressible. The exit is modelled as a three-into-two lane drop,
+because the source link ends into free outflow and the network otherwise has no
+bottleneck at that point. The conversion also does not import right-of-way: the
+port carries 2 junctions with conflicting movements against 10 active conflict
+areas in the source. All three decisions apply identically to every arm.
+
+\noindent\textbf{The fleet, and why it is not the published one.}
+The fleet is the Extended Intelligent Driver Model with a one-second reaction
+time~\cite{salles2020eidm,treiber2000idm}. It was chosen because it has a
+capacity drop. A capacity drop is not a free parameter of a simulation. Real
+queue discharge runs 5 to 20\% below free-flow capacity, which is a property of
+traffic rather than of a model~\cite{hall1991capacity}. Measured on this port,
+the Wiedemann-99 calibration discharges 4.3\% faster than free flow, which is
+the wrong sign. Its queues discharge at 1{,}980\,veh/h against 1{,}899\,veh/h
+free-flowing. The Extended Intelligent Driver Model with a one-second reaction
+drops 21\% at an isolated lane drop. A simulation that fails to reproduce a
+measured phenomenon is a settings problem, not evidence that the simulation is
+the reference. The gate applied before any arm was run is that served flow must
+fall as offered demand rises, by more than the seed spread.
+
+\noindent\textbf{Protocol.}
+Seeds 1 to 10 train, seeds 11 to 15 select the checkpoint, and seeds 16 to 30
+evaluate. Four arms across fifteen seeds is 60 episodes. Each episode runs
+2{,}500\,s at a 0.5\,s step, with the measurement window opening at 900\,s,
+under a sustained demand of 4{,}500\,veh/h and 3{,}124 scheduled departures, at
+100\% penetration.
+Arms are paired on seed, because each arm runs the same traffic realization, and
+every error bar below is two standard errors of the paired difference.
+
+\begin{table}[t]
+\centering
+\caption{Held-out seeds 16 to 30 on the Mainz port, paired on seed. The
+zeroed-head arm is the same network with its output layer zeroed, and it carries
+the entry gate that both controlled arms carry.}
+\label{tab:sim}
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Arm} & \textbf{Flow (veh/h)} & \textbf{Paired gain} & \textbf{Speed (km/h)} \\
+\midrule
+Traffic-API observation & 3{,}765 & $+230 \pm 44$ & 40.7 \\
+Published six features  & 3{,}759 & $+224 \pm 61$ & 41.0 \\
+No control              & 3{,}535 & reference     & 42.3 \\
+Zeroed output layer     & 2{,}847 & $-688 \pm 46$ & 28.8 \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+\noindent\textbf{The result.}
+Table~\ref{tab:sim} gives it. Restricting the observation to what a traffic API
+returns costs nothing that this experiment can resolve. The two controlled arms
+differ by 6\,veh/h against error bars of 44 and 61\,veh/h, which bounds the cost
+of the restriction at under about 2\% of the no-control baseline. Both gains are
+resolved against their own bars, at 5.2 and 3.7 times. This is what makes
+decentralized execution possible at all, and it is a supporting result rather
+than this paper's point.
+
+Both controlled arms run slower than no control while serving more vehicles.
+Space-mean speed falls from 42.3 to 40.7\,km/h and arrivals rise from 1{,}940 to
+1{,}995 per episode. That is the intended mechanism. Holding density below
+critical upstream of the merge lets the merge discharge near capacity instead of
+breaking down.
+
+\noindent\textbf{What the falsification arm establishes.}
+Both controlled arms hold a vehicle at an entry link while that link is at or
+above critical density. The no-control arm does not. The gate is a boundary condition on the
+controlled system rather than a piece of road. Applying it to an uncontrolled
+run would credit that run with a control action it is not taking. That asymmetry is a candidate explanation for the gain, so it
+was tested. The zeroed-head arm is the same trained network with its output
+layer zeroed after loading. It carries the entry gate, and it loses
+$688 \pm 46$\,veh/h against no control, which is 15.7 times the no-control arm's
+own bar below it. The gate alone does not produce the gain.
+
+\noindent\textbf{Five seeds were not enough, and the check is reported because
+it changed an answer.}
+On the five pre-registered test seeds the same checkpoints read $+207 \pm 92$
+and $+188 \pm 133$\,veh/h. Extending to fifteen seeds tightened the Mainz figure
+to $+230 \pm 44$. A second network did not survive the same extension. A
+five-seed reading of $+185 \pm 211$\,veh/h, or $+14.2$\%, fell to
+$+44 \pm 111$\,veh/h, or $+3.2$\%, and stopped being resolved, because those
+five seeds held three unusually poor no-control runs. Checkpoint selection was
+unchanged, and only the evaluation set was enlarged.
+
+\noindent\textbf{What this result is not comparable to.}
+No number here is comparable to the published table. Every claim is against this
+port's own no-control baseline. Table~\ref{tab:pair} states what the two papers
+cover between them. The controller and the shape of the topology are what the
+two runs have in common. Almost everything that decides how the controller
+behaves differs, which is why the pair is stronger evidence than a matched
+number in one simulator would be. A topology or demand sweep here would
+re-establish what the earlier paper already did.
+
+\begin{table}[t]
+\centering
+\caption{What the two papers cover between them. The road network is nominally
+the same, and the port differs from the source in right-of-way, fleet and exit
+geometry.}
+\label{tab:pair}
+\small
+\begin{tabular}{lll}
+\toprule
+ & \textbf{Earlier paper} & \textbf{This paper} \\
+\midrule
+simulator & PTV Vissim & SUMO \\
+car following & Wiedemann-99 & EIDM, 1\,s reaction \\
+demand & 18{,}000\,veh/h surge & 4{,}500\,veh/h sustained \\
+network & Mainz & Mainz \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent\textbf{The simulated gate and the deployed gate are not the same
+rule.}
+In simulation the advisory is written with a speed command that SUMO bounds by
+its own car-following safe speed, so a vehicle whose leader is slower follows
+its leader. That is the same semantics the published implementation has. It is
+not the same mechanism as the deployed filter. In the SUMO environment three of the four action heads are inert. Two are
+discarded, and one feeds back only into the agent's own observation. The
+explicit safety and etiquette layer therefore never runs. The asymmetry is therefore real and in both directions. In simulation the
+layer cannot run, and on the device it runs and has never had the evidence to
+bind.

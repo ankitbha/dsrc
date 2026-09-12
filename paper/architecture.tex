@@ -1,35 +1,119 @@
-\section{Architecture: Minimal Changes to the Vehicle}
+\section{The System as Built}
 \label{sec:architecture}
-
-Minimal fleets only work if converting one car is cheap and simple. So we state the architecture as a bill of changes: what we add to an existing car, and what we leave alone (Figure~\ref{fig:architecture}). We add four functions, sensing, an ego-centric digital twin, a learned advisory policy, and a safety and etiquette filter, plus a display; nothing else changes. There is no connection to the throttle, brakes, steering, or the CAN control plane. The OBD-II port, on every US car since 1996, is only read, to get the car's speed. No identity leaves the vehicle, and no server sits in the real-time loop. The kit installs like a dashcam.
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=\columnwidth,height=0.50\columnwidth,keepaspectratio]{images/system_architecture.png}
-\caption{The self-regulating retrofit. Onboard sensing feeds an ego-centric digital twin; a learned policy proposes a coarse action; a safety and etiquette filter bounds what is shown as an advisory. Peer vehicles broadcast small aggregate summaries that widen the twin's view; the cloud only trains and ships model updates offline, never in the real-time loop.}
-% \Description is acmart-only; kept as alt text for the figure.
-% \Description{Block diagram of the on-vehicle pipeline from sensing through digital twin, policy, and safety filter to a bounded advisory, with peer broadcast summaries entering the twin and an offline cloud path for training and model updates.}
+\resizebox{\columnwidth}{!}{%
+\begin{tikzpicture}[
+  font=\scriptsize,
+  box/.style={draw, rounded corners=2pt, align=center, inner sep=4pt},
+  link/.style={-{Latex[length=2mm]}, thick}
+]
+\node[box, minimum width=24mm, fill=gray!8] (phone)
+  {\textbf{phone}\\[1pt]camera\\GPS\\IMU\\traffic API};
+\node[box, minimum width=36mm, right=26mm of phone, fill=blue!6] (jetson)
+  {\textbf{Jetson Orin Nano}\\[1pt]perception (TensorRT)\\camera and feed fusion\\policy inference\\advisory decode\\safety and etiquette gate\\sampling controller};
+\node[box, below=9mm of jetson, fill=orange!8] (disp) {display: recommended speed};
+\node[below=2mm of disp, font=\tiny, align=center] (note)
+  {no connection to throttle, brakes, steering or vehicle bus};
+\draw[link] ([yshift=4mm]phone.east) -- node[above, font=\tiny, align=center]
+  {sensor frames\\eight channels} ([yshift=4mm]jetson.west);
+\draw[link] ([yshift=-4mm]jetson.west) -- node[below, font=\tiny, align=center]
+  {per-sensor\\rate commands} ([yshift=-4mm]phone.east);
+\draw[link] (jetson.south) -- (disp.north);
+\end{tikzpicture}
+}
+\caption{The rig. The phone captures or queries at the rate it is told and
+forwards raw data. Every interpretation and every control decision is on the
+Jetson. The link is a Tailscale network at the desk and USB in the vehicle. The
+advisory terminates at a display.}
 \label{fig:architecture}
 \end{figure}
-% TODO: replace images/system_architecture.pdf with the final diagram export; caption is written for the corrected version (advisory terminus, no V2V hub, dashed offline cloud edges).
 
-\noindent\textbf{Sensing and fusion.}
-Each vehicle estimates its immediate scene from its own sensors: ego speed, acceleration, lane, headway, leader and follower gaps, relative speeds, local density, a queue estimate, and distance to a merge. Aggregate summaries, when heard, add peer-derived state over a bounded radius. The combined observation is deliberately not a global state but a local one, with a few hints about what lies beyond the camera. The deployment stack mirrors the simulator's observation contract instead of inventing a separate API: in our prototype a 39-field vector copied unchanged from the training code and checked bit for bit by tests. Every field is logged with its provenance (measured, derived, fallback-neutral, static, or sim-parity). Leader gap and closing speed come from forward tracks, density from forward counts, rear-lane fields from neutral fallbacks until a rear camera is added, and nearby-vehicle fields from peer summaries when enabled. This record of where each value came from tells the policy and the safety layer how much to trust the observation.
+\noindent\textbf{The rig.}
+The vehicle side is an ordinary Android phone and a Jetson Orin Nano, with no
+purpose-built hardware (Figure~\ref{fig:architecture}). The phone holds no
+interpretation logic. It captures or queries at the rate it is told and forwards
+raw data, and every association, fusion and control decision happens on the
+Jetson. The phone is tethered through a hotspot rather than carrying its own
+subscriber module, because the alternative was a data plan for one experiment.
+Two transports are implemented for the same wire protocol. A Tailscale network
+is used for development with the phone in hand, and USB is used in the vehicle.
+Both devices are powered from the vehicle, so energy is not a binding
+constraint.
 
-\noindent\textbf{The ego-centric digital twin.}
-At runtime, each vehicle keeps a small, continuously updated model of its local road state: the ego vehicle, nearby vehicles, lane structure, merge pressure, and short-horizon congestion risk. This is the digital twin. It is a compact tracker, not a city-scale simulator running in the car, and its job is to widen what the car can act on. It lets the controller reason about density and downstream pressure it can only partly see, and it lets the safety layer test an advisory against a short-horizon prediction before it is shown. The twin also records when each aggregate was last refreshed and where it came from, so the policy can tell ``I see no cooperating vehicles'' apart from ``the radio is stale'', and the safety layer can reject advice built on shaky state.
+\noindent\textbf{The sampling controller.}
+Each sensor's sampling rate is set at run time by the Jetson and commanded to
+the phone. The four rates are camera, GPS, inertial unit and traffic feed. The
+costs this controller trades against are traffic-API quota, thermal headroom on
+the phone, and Jetson compute. It has two modes. In shadow mode the decision is
+recorded and not sent, and in live mode the phone applies it. That distinction
+is about sensing configuration only. The rate command carries sampling rates and
+a shadow flag, and it never carries driving advice. The word ``live'' in this
+paper always describes what the sensing configuration did, and never what the
+vehicle did.
 
-\noindent\textbf{Centralized training, decentralized execution.}
-Training is centralized; execution is not. During training, a simulator or a logged fleet can expose global state and what-if rollouts; at run time, the policy sees only onboard sensing and local aggregate fields, so nothing central is needed to drive. This division of labor, learning and coordination in the cloud, sensing and control at the edge, is the system's central placement decision, and the bridge from the centralized predecessor~\cite{self_regulating_cars} to a vehicle-native one. Because a deployed policy will meet merge geometries, demand patterns, and compliance levels it never trained on, we view model-based reinforcement learning, learning a model of road dynamics and adapting the policy inside it, as the most promising route to handling new road layouts without huge amounts of new driving data~\cite{sutton1991dyna,janner2019trust,hafner2020dream}.
+\noindent\textbf{The transport.}
+One wire protocol serves both links. It carries eight channels, each with its
+own sequence numbers, priority, overflow policy and queue depth, over a shared
+timebase. The specification is 854 lines, and
+\texttt{specs/transport\_golden\_frames.json} pins the frame layout. Both the
+Jetson implementation and the phone implementation test against that file rather
+than against each other, so neither side can drift by agreeing with the other.
 
-\noindent\textbf{Advisory control.}
-The outputs stay conservative: a speed bin ('slow', 'nominal', 'fast'), a headway bin, a cautious lane preference, and a merge mode, never raw throttle, braking, or aggressive lane-change commands. Prior work on self-regulating cars shows that coarse bins like these are enough for a learned policy to improve flow and reduce hard braking~\cite{self_regulating_cars}; coarse bins are also what a human driver can follow. With a human in the loop, the output is a bounded advisory in the spirit of prior advisory-autonomy work~\cite{Yan_2023,cho2023temporal,fridman2018human}; in an automated vehicle, it can feed the existing longitudinal controller. Either way, the self-regulation layer nudges the car toward network-friendly behavior without claiming authority over it.
+\noindent\textbf{The safety and etiquette gate.}
+The advisory passes a filter before it is displayed. The filter is vendored onto
+the device from the simulator's safety layer, because the original imports the
+simulation stack that the device deliberately does not carry. It holds twelve
+rules covering posted limits, minimum front and rear gaps, target-lane
+time-to-collision margins, lane-change dwell and rate caps, low-speed
+obstruction on an open road, and a bound on how much braking an advisory may
+force on a follower. Each rule records, per tick, whether it fired, stayed
+quiet, or could not be evaluated at all, with the missing inputs named.
+Section~\ref{sec:eval} reports what that census found.
 
-\noindent\textbf{Safety and etiquette filter.}
-Every advisory passes through a local filter before it is shown or executed. The filter enforces posted speed limits, acceleration and braking bounds, minimum front and rear gaps, target-lane time-to-collision margins, lane-change dwell and rate caps, and a limit on how much braking an advisory may force on followers. It also blocks low-speed behavior on an open road and synchronized all-lane slowdowns unless downstream congestion justifies them. Every blocked or changed action is reported under a stable label: safety-masked, etiquette block, follower-disruption block, or external override. This layer is what makes it safe to pursue a network goal in mixed human traffic; it also means the action to train on and measure is the one the car actually took, not the raw proposal.
+\noindent\textbf{The device cannot drift from what was trained.}
+The Jetson must not import the simulator. The contract is therefore vendored:
+the field lists, the scales, a NumPy twin of the encoder, the action heads, the
+decoders and the neutral fallbacks, pinned to a named simulator commit, with the
+export step refusing any dimension mismatch. Vendoring alone is an assertion
+rather than a check. What makes it checkable is a frozen file,
+\texttt{specs/sim\_contract\_golden\_vectors.json}, holding fourteen encoded
+observations, the action schema, both bin decoders and the neutral fallbacks.
+Every entry is derived twice, once from the pinned simulator commit and once
+from the vendored copy, and the generator refuses to write on any disagreement.
+The device-side test reads only the frozen file and imports no simulator module,
+so it runs on the Jetson, where the simulator cannot be imported. Regenerating
+against the simulator needs a checkout and a deep-learning runtime, so on the
+device that step is skipped and only the comparison against the frozen file
+runs.
 
-\noindent\textbf{Degraded operation.}
-The edge design follows one rule: stale data is worse than missing data. If GPS goes stale, the observation builder holds the last valid speed for a short window instead of reporting a stop, and if no peers are heard, cooperation fields revert to explicit neutral values, not silent zeros. These modes turn common in-car failures into explicit states instead of hidden dependencies.
+\noindent\textbf{Two design stances.}
+The first is to degrade rather than stop. Missing GPS, no camera, no display and
+no trained checkpoint each have a defined degraded mode, because debugging time
+inside a vehicle is expensive. The second is that the hot path holds no queues,
+and the latest value wins. A frame that was never processed is dropped, a slow
+display skips ticks, and a stalled card drops log records. For a real-time
+advisory, stale data is worse than missing data.
 
-\noindent\textbf{Deployment tiers.}
-The same architecture can be built three ways, and the tiers differ only in which observation fields are truly measured and which stay at neutral defaults, a difference the provenance record makes visible to the policy. \emph{Tier 0} is an app: a phone already has the GPS, inertial sensing, and compute for the observation builder and a two-layer policy, camera optional. The advisory rail for this tier runs at scale today: mobile telematics platforms such as CMT and Samsara deliver real-time driving feedback through phone apps and lightweight tags, CMT alone measuring tens of millions of drivers daily~\cite{cmt2025,samsara2025}. The predecessor argued this makes app-level integration a credible path to system-level coordination without infrastructure changes~\cite{self_regulating_cars}; our design inherits that path and removes its runtime dependency, shrinking the cloud to training, updates, and offline analytics. \emph{Tier 1} is a retrofit kit, the prototype of Section~\ref{sec:eval}: a windshield camera, a USB GPS receiver, an optional OBD-II dongle as the preferred speed source, an embedded board that retails for roughly \$250~\cite{nvidia2023jetson}, and any display. \emph{Tier 2} is native: a vehicle with automated longitudinal control takes the filtered advisory as a set-point. Deployment is minimal and incremental by construction: a fleet can mix tiers, add one car at a time, and never touch the road, making the 25-vehicle deployment of Section~\ref{sec:vision} an operational decision, not a hardware program.
+\noindent\textbf{The second runtime.}
+The system described so far runs a local-sensing policy, which reads a 39-field
+vector built from the camera, GPS and inertial unit. The controller this paper
+is about reads the whole network as twelve super-segments of five features, so
+it is a separate runtime and was added as one. It loads an exported checkpoint,
+refuses any bundle whose network identity does not match the device's own, and
+produces a per-super-segment advisory. It reproduces the simulator's own greedy
+action exactly on the 185 recorded decisions of the checkpoint's five held-out
+seeds, with zero action mismatches and identical Q-values on the exporting
+machine. Three deliberately broken runtimes were each seen to fail before that
+agreement was trusted. A transposed weight matrix fails to load, two swapped
+super-segments are refused at the network fingerprint, and a jam factor drawn
+independently of its own formula changes the action on 143 of the 185 decisions.
+
+\noindent\textbf{Scale.}
+The phone application is 10{,}501 lines of Kotlin with 17{,}497 lines of Kotlin
+tests. The Jetson runtime is 28{,}705 lines of Python with 39{,}027 lines of
+tests. The simulator side is 1{,}178 lines, because the environment is a port
+and the learner is the published one. Three specification documents total 1{,}138
+lines. The repository's test suite is 2{,}702 tests, of which 2{,}678 pass and 24
+are skipped.

@@ -1,42 +1,83 @@
 \section{Introduction}
 \label{sec:intro}
 
-Traffic jams on free-flow highways are not only a capacity problem but a distributed stability problem: when local density crosses a critical threshold, small braking events, merge bursts, or overreactions amplify into persistent stop-and-go waves even without a crash or fixed bottleneck~\cite{bhardwaj2023understanding,sugiyama2008traffic}. The classical traffic-flow view captures this with the fundamental diagram: flow grows with density until a critical operating point, then collapses as interactions dominate~\cite{greenshields1935study,lighthill1955kinematic,richards1956shock}. Keeping density below that critical point while holding speed high keeps the stream on the productive branch and maximizes throughput. Small, well-timed local speed adjustments suffice, which makes decentralized control a plausible lever on a network-level objective.
+A free-flow road network can jam without a crash and without a fixed bottleneck.
+A small burst of inflow pushes local density past a critical value, flow on the
+affected links falls, and the queue then feeds itself until the demand drains
+away~\cite{bhardwaj2023understanding,sugiyama2008traffic}. The fundamental
+diagram states the same fact as a curve: flow rises with density to a critical
+point and falls after it~\cite{greenshields1935study,lighthill1955kinematic,richards1956shock}.
+A controller that holds density below that point therefore protects
+throughput, and it does not need to know anything about the rest of the network
+to do so.
 
-Fixed highway controllers are poorly matched to this failure mode: ramp meters, variable speed limits, and traffic-management systems act from fixed infrastructure and coarse network views, valuable where deployed but expensive, unevenly available, and slow relative to local disturbances~\cite{arnold1998ramp,papageorgiou2002freeway}. The vehicle-side actuator, meanwhile, has been demonstrated twice over. In the field, one controlled vehicle among roughly twenty damps stop-and-go waves on a ring track~\cite{stern2018dissipation}, and CIRCLES placed about one hundred controlled vehicles into live interstate traffic, though with purpose-built cars and a centralized speed planner over cellular links~\cite{lee2024traffic}. In simulation, a recent self-regulating-cars system showed the policy can be learned: speed modulation on a real highway network improves throughput by 5\%, cuts average delay by 13\%, and reduces stops by 3\% versus no control, applied only at bottleneck segments during peak inflow, with metrics improving steadily as the compliant fraction grows~\cite{self_regulating_cars}. But that system observes global segment state and broadcasts recommendations through a cloud service.
+Earlier work built such a controller and measured it. Self-regulating cars
+divide a highway network into twelve super-segments of two to three kilometres,
+learn a policy that assigns each super-segment a desired speed, and apply that
+speed to the vehicles on it. On a Mainz highway network in PTV Vissim the policy
+raised throughput by 5\% and cut average delay by 13\% against no
+control~\cite{self_regulating_cars}. The result holds at partial adoption and
+improves as the controlled fraction grows. Its deployment model is centralized.
+A central observer collects the network state, a cloud service computes the
+action, and every participating vehicle receives its desired speed over an
+internet connection.
 
-The timing makes deployment worth taking seriously now. Connected and automated vehicles are moving from pilots to revenue service, so the programmable fraction of a highway stream is rising rather than hypothetical. The computation to estimate local traffic state is already widely available: robotaxis carry substantial onboard compute, smartphones can run the perception and inference, and even human-driven vehicles increasingly ship with cameras and computers. These vehicles are also already networked: tethered to fleet and telematics backends whose driver-facing advisory rail operates at scale today, and, increasingly, able to talk to one another over connected-vehicle radios~\cite{cmt2025,samsara2025}. Yet each of these vehicles optimizes only its own trip; the effect each car has on the flow around it is left untapped.
+Two properties of that model decide what a deployment costs. The first is the
+observation. The policy reads six features per super-segment, and four of them
+come from vehicle-level ground truth that a vehicle cannot obtain. The published
+implementation computes the mean gap from each vehicle's follow distance, and
+computes entry and exit rates as set differences over the vehicle identities
+present one minute apart. A vehicle has none of that. The second property is the
+cloud coordinator. It has to be built, paid for, kept available, and trusted,
+and it sits inside the control loop.
 
-We take the position that the remaining problem is deployment, not algorithms and not radios. The effective control law is coarse: discrete speed and headway bins suffice for a learned policy to improve flow~\cite{self_regulating_cars,stern2018dissipation}. The radio exists: deployed connected-vehicle standards already broadcast per-vehicle safety state at up to ten hertz~\cite{sae2020j2735,etsi2019cam,kenney2011dedicated}, and the aggregate summaries our design consumes are smaller and slower, so a low-rate exchange rides comfortably on radios the community has already standardized. We spend the paper on what sits above the substrate: \emph{(i) how little must change in an existing car for it to become self-regulating, and (ii) how few self-regulating cars must be present, and where, for the network to feel them?} Underneath both is a distributed system that networking should recognize: a partially deployed fleet of edge nodes regulating the road network through local decisions, a lossy low-rate substrate among the cars, and a cloud kept off the control path, so where computation lives, what the cars share and how often, and how much staleness the loop can absorb are networking questions we return to in Section~\ref{sec:discussion}.
+This paper is about removing both. It asks what has to exist on an ordinary
+vehicle for that controller to run on the vehicle, and it reports what happened
+when the answer was built and driven. The answer is an unmodified Android phone,
+an NVIDIA Jetson Orin Nano, a traffic API, and a filter that bounds the advisory
+before it is displayed. The phone captures and forwards. The Jetson interprets
+and decides. Nothing is wired to the throttle, the brakes, the steering or the
+vehicle bus.
 
-\begin{figure}[t]
-\centering
-\resizebox{\columnwidth}{!}{%
-\begin{tikzpicture}[
-  node distance=7mm,
-  box/.style={draw, rounded corners=2pt, align=center, inner sep=4pt, font=\scriptsize},
-  car/.style={box, minimum width=20mm, fill=gray!8},
-  twin/.style={box, minimum width=27mm, fill=blue!6},
-  link/.style={-{Latex[length=2mm]}, thick}
-]
-\node[car] (ego) {ego vehicle\\edge AI};
-\node[car, above left=of ego] (a) {peer};
-\node[car, below left=of ego] (b) {peer};
-\node[twin, right=14mm of ego] (twin) {ego-centric\\digital twin};
-\node[box, right=10mm of twin, fill=green!7] (safe) {safety /\\etiquette filter};
-\node[box, below=7mm of safe, fill=orange!8] (adv) {bounded\\advisory};
-\draw[link] (a) -- node[above, sloped, font=\tiny] {aggregate state} (ego);
-\draw[link] (b) -- node[below, sloped, font=\tiny] {aggregate state} (ego);
-\draw[link] (ego) -- node[above, font=\tiny] {sense + fuse} (twin);
-\draw[link] (twin) -- node[above, font=\tiny] {policy} (safe);
-\draw[link] (safe) -- (adv);
-\end{tikzpicture}
-}
-\caption{A self-regulating car keeps the real-time loop on board: onboard sensing feeds an ego-centric digital twin, a learned policy proposes a coarse advisory, and a safety and etiquette filter bounds what is shown or executed. Low-rate aggregate summaries from nearby participants, carried over existing radios, extend observability past the camera horizon; no roadside sensor, cloud coordinator, or command exchange is in the loop.}
-% \Description is acmart-only; kept as alt text for the figure.
-% \Description{A schematic showing peer vehicles sending aggregate state to an ego vehicle, which updates an ego-centric digital twin and safety-filters a bounded advisory.}
-\label{fig:system-vision}
-\vspace{-0.3cm}
-\end{figure}
+\noindent\textbf{Scope, stated before any result.}
+No advisory this project computed has ever been acted on. On every drive the
+human drove and the software did not interfere. The Jetson rendered a
+recommended speed on its own display, nobody was asked to follow it, and no
+measurement here depends on anyone having followed it. There are two independent
+reasons, and either one is sufficient. An experiment in which an advisory
+influences a human driver requires approval from an institutional review board,
+which this project does not hold. One instrumented vehicle also cannot produce a
+flow effect, so a compliance experiment on a single car would establish nothing
+about throughput or delay. In this paper ``deployed'' means that the system ran
+on a road and computed its outputs there. It does not mean that anything acted
+on them. The flow-level claim is made in simulation for the same reason, and the
+drives are never asked to support it.
 
-This paper argues that both answers are small, and grounds the argument in a working system. First, it recasts highway congestion control as an edge-deployment problem: ordinary vehicles keep the real-time loop on board, act only through bounded advisories, and treat communication as an observability hint, not a control dependency (Section~\ref{sec:vision}). Second, it gives the bill of changes that makes one car self-regulating: a dashcam-grade camera, an ego-speed feed from GPS or OBD-II, a digital twin and policy that fit on phone-class or \$250 compute, and a safety filter, with no connection to the vehicle's controls (Section~\ref{sec:architecture}). Third, it reports a prototype on a Jetson Orin Nano running a simulation-trained policy against real dashcam footage at a sustained 30\,Hz and 20--25\,ms end-to-end latency (Section~\ref{sec:eval}). Finally, it argues for a minimal deployment model: because congestion is manufactured at bottlenecks, roughly one vehicle per approach lane, about 25 for a corridor like the Holland Tunnel, could regulate the inflow the bottleneck receives, making a single rideshare or delivery fleet a sufficient launch vehicle (Section~\ref{sec:vision}). Section~\ref{sec:discussion} lays out the open networking questions this system raises.
+\noindent\textbf{Contributions.}
+\begin{itemize}[leftmargin=1.2em,itemsep=1pt,topsep=2pt]
+\item A vehicle-side realization of the self-regulating-cars controller, built
+from commodity parts, with the sampling rate of every sensor set at run time by
+the compute device rather than fixed at install time (Sections~\ref{sec:vision}
+and~\ref{sec:architecture}).
+\item A measured account of that system running on a road: eight drives,
+22{,}929 ticks and 152.8 minutes on vehicle power, with per-stage timing and
+field provenance recorded per tick (Section~\ref{sec:eval}).
+\item The failures the deployment produced, reported as results
+(Section~\ref{sec:experience}). On the thermal task alone, five distinct false
+readings came from measurement harnesses rather than from the code under test.
+One further defect was a ninety-degree frame rotation, which accounts for every
+zero-detection drive in the project.
+\item A flow-level measurement of the observation change. On a SUMO port of the
+same Mainz network, a policy restricted to the five fields a traffic API returns
+gains $230 \pm 44$\,veh/h over no control, and the original six-feature policy
+gains $224 \pm 61$\,veh/h (Section~\ref{sec:simulation}).
+\end{itemize}
+
+\noindent\textbf{Organization.}
+Section~\ref{sec:vision} states the minimum that has to exist on a vehicle and
+why the observation had to change. Section~\ref{sec:architecture} describes the
+system that was built. Section~\ref{sec:eval} reports the road measurements.
+Section~\ref{sec:experience} reports what the deployment cost.
+Section~\ref{sec:simulation} reports the simulation result.
+Sections~\ref{sec:related} and~\ref{sec:discussion} cover related work and what
+remains.

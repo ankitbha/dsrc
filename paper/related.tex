@@ -1,18 +1,61 @@
 \section{Related Work}
 \label{sec:related}
 
-\noindent\textbf{Sparse AVs as traffic actuators.}
-Stern et al. showed a single controlled vehicle can damp stop-and-go waves on a ring track~\cite{stern2018dissipation}, establishing the sparse-actuator premise. Flow and related mixed-autonomy RL work show that learned controllers can improve simulated traffic at low AV penetration~\cite{wu2017flow,vinitsky2018benchmarks,kreidieh2018dissipating}. CIRCLES/MegaVanderTest is the strongest field evidence that controlled vehicles can affect open-road traffic, but with purpose-built vehicles and a centralized speed planner over cellular connectivity~\cite{lee2024traffic}. The self-regulating-cars formulation learned network-level speed modulation and quantified its benefit, with a centralized observer and cloud broadcast~\cite{self_regulating_cars}. Our focus is the complement: ordinary vehicles, edge-executed control, and a runtime that needs no coordinator.
+\noindent\textbf{The controller this paper deploys.}
+Self-regulating cars learns a policy that assigns a desired speed to each
+super-segment of a highway network, and reports a 5\% throughput gain and a 13\%
+delay reduction against no control in PTV Vissim~\cite{self_regulating_cars}.
+Its observer is central and its decisions reach vehicles through a cloud
+service. The failure mode it targets is characterized
+in~\cite{bhardwaj2023understanding}, which defines a sudden traffic jam as a
+burst that pushes density past a critical threshold into a stable low-capacity
+state. This paper changes where the policy is evaluated and what it is allowed
+to read, and it leaves the reward, the training and the controller unchanged.
 
-\noindent\textbf{Connected-vehicle messaging.}
-Deployed connected-vehicle standards have each car broadcast its own position, speed, and heading for collision avoidance at up to ten hertz: the SAE J2735 Basic Safety Message over DSRC and the ETSI Cooperative Awareness Message over C-V2X~\cite{sae2020j2735,etsi2019cam,kenney2011dedicated}. Within the same family, the Collective Perception Service shares per-object detection records~\cite{etsi2023cpm}, and probe-vehicle systems compute neighborhood traffic state by uplinking per-vehicle traces to a backend that aggregates centrally~\cite{seo2017traffic,herrera2010evaluation}. The same radios carry our messages; the difference we rely on is that our unit of exchange is a fixed-size, receiver-side neighborhood aggregate, with no sender addressed, retained, or reconstructable and no backend in the loop, which keeps the privacy surface small and the message size independent of scene complexity.
+\noindent\textbf{Sparse vehicles as traffic actuators.}
+A single controlled vehicle damps stop-and-go waves on a ring
+track~\cite{stern2018dissipation}, which established the sparse-actuator
+premise. Learned controllers improve simulated traffic at low penetration in the
+mixed-autonomy literature~\cite{wu2017flow,vinitsky2018benchmarks,kreidieh2018dissipating}.
+CIRCLES placed about one hundred controlled vehicles into live interstate
+traffic and is the strongest field evidence available, using purpose-built
+vehicles and a centralized speed planner carried over cellular
+links~\cite{lee2024traffic}. The work here differs on the deployment axis rather
+than the control axis. The vehicle is unmodified, the compute is commodity, and
+no planner is contacted at run time.
 
-\noindent\textbf{Infrastructure-centric traffic control.}
-Ramp metering, variable speed limits, adaptive signal control, and freeway management systems remain the dominant deployed tools~\cite{arnold1998ramp,papageorgiou2002freeway,scats,scoot}. They are powerful where sensors and actuators exist, but they depend on fixed infrastructure and centralized operational visibility. Self-regulating cars instead treat vehicles as mobile actuators that can be introduced incrementally.
+\noindent\textbf{Infrastructure-centric control.}
+Ramp metering, variable speed limits and adaptive signal control remain the
+deployed tools~\cite{arnold1998ramp,papageorgiou2002freeway,scats,scoot}. They
+are effective where the sensors and actuators exist, and they require owning the
+roadside. The entry gate in Section~\ref{sec:simulation} is ramp metering
+performed by the policy at the network boundary, which is the one place a
+vehicle-side controller has no upstream link to slow.
 
-\noindent\textbf{Advisory systems.}
-Human-compatible advisory systems show how network objectives translate into driver-facing recommendations~\cite{Yan_2023,cho2023temporal,fridman2018human}. Early deployment will be mixed: some vehicles automated, some showing dashboard advisories, many ignoring the system. Mobile telematics platforms show that the driver-facing rail itself already operates at the scale of tens of millions of drivers~\cite{cmt2025,samsara2025}. The open systems question is therefore not only control optimality, but compliance, incentives, and fairness under partial adoption.
+\noindent\textbf{Traffic state from vehicles and from feeds.}
+Probe-vehicle systems estimate network state by uplinking per-vehicle traces to
+a backend that aggregates
+centrally~\cite{seo2017traffic,herrera2010evaluation}. Connected-vehicle
+standards broadcast per-vehicle position, speed and heading at up to ten
+hertz~\cite{sae2020j2735,etsi2019cam,kenney2011dedicated}, and the collective
+perception service extends that to per-object detections~\cite{etsi2023cpm}.
+This design uses neither. The observation it needs is already published as a
+commercial product at segment granularity~\cite{here_traffic_api}, so a query
+replaces both the radio and the aggregation backend. The trade is explicit. A
+feed is a third-party dependency with an unreported lag, and the two are
+different risks rather than one being strictly better.
 
-\noindent\textbf{Edge AI and networked sensing.}
-Embedded perception models and Jetson-class hardware make on-vehicle traffic-state estimation increasingly practical~\cite{nvidia2023jetson,redmon2016yolo,yang2024depth}. Cloud video analytics demonstrates the value of centralized visual processing but also the cost of moving raw data off the edge~\cite{kang2017noscope,kang2018blazeit}. Our communication model takes the opposite position: infer locally, exchange only semantic aggregate state, and keep safety-critical control on the vehicle.
-\vspace{-0.4cm}
+\noindent\textbf{Advisory interfaces.}
+Coarse, human-followable advisories have precedent in advisory-autonomy
+work~\cite{Yan_2023,cho2023temporal,fridman2018human}, and mobile telematics
+platforms operate the driver-facing rail at the scale of tens of millions of
+drivers~\cite{cmt2025,samsara2025}. This paper does not evaluate compliance, for
+the reasons stated in Section~\ref{sec:intro}.
+
+\noindent\textbf{Edge perception.}
+Embedded detectors and Jetson-class hardware make on-vehicle perception
+practical~\cite{redmon2016yolo,nvidia2023jetson,bewley2016sort,yang2024depth}.
+The measurements in Section~\ref{sec:eval} are consistent with that literature.
+The contribution here is not the detector. It is what the rest of the system
+around it has to do to keep the detector's output honest when it is wrong, which
+Section~\ref{sec:experience} reports.

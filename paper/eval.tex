@@ -1,54 +1,170 @@
-\section{Prototype and Measurements}
+\section{Running It on a Road}
 \label{sec:eval}
-
-The evidence for tier 1 is a system that exists. We built the full capture-to-advisory stack on a Jetson Orin Nano developer kit, trained a policy in simulation on a desktop machine, deployed it to the device, and validated the loop end to end on simulated drives: prerecorded dashcam footage and a scripted GPS profile pushed through the live pipeline in real time, not an in-vehicle road test. The numbers below show the loop is fast enough and behaves correctly on cheap hardware; they are deliberately not a traffic-flow result, and we close with what would be.
-
-\noindent\textbf{Prototype stack.}
-The board runs JetPack~6 with TensorRT~10.3. Detection is a YOLOv8n engine in TensorRT FP16 driven directly through the CUDA runtime~\cite{redmon2016yolo}, partly forced by the platform's CPU-only stock PyTorch. Tracking is a SORT-style associator; distance comes from pinhole geometry with vehicle-width priors rather than a dense depth network, chosen for speed and easy to swap if accuracy becomes the problem~\cite{yang2024depth}. Figure~\ref{fig:camera} shows the detector's forward view on a real dashcam frame. The observation builder implements the vendored 39-field contract of Section~\ref{sec:architecture}; the policy is a two-layer network mirrored in NumPy on the CPU at 0.5\,ms per decision. Ego speed comes from a u-blox USB GPS receiver with hold-on-stale handling (an OBD-II feed is planned as the primary source); a dashboard shows the advisory, and every field is logged with provenance.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=0.8\columnwidth]{images/on-vehicle-perception}
-\caption{The prototype's forward view: a real dashcam frame with the detector's vehicle detections overlaid, feeding the tracking and observation stages.}
-% \Description is acmart-only; kept as alt text for the figure.
-% \Description{A dashcam photograph of a highway scene with vehicles marked by the perception stack.}
-\label{fig:camera}
-\end{figure}
-% TODO: confirm the caption matches this frame (overlay contents and which clip); adjust the first sentence if needed.
-
-\noindent\textbf{Policy training.}
-The deployed policy was trained with PPO in a microscopic simulator: one shared policy controlling two vehicles among eight simulated human drivers with varied behavior on a ring, 3{,}000 updates of 256 steps, about ninety minutes per seed on a desktop CPU. Five seeds were trained, one under sensing noise matched to the deployment measurements (100\,m range, 1.5\,m position noise, 0.15\,m/s speed noise). One lesson from training carries over: with a dense speed reward, a one-step crash cost is invisible and the greedy policy collapses to a constant ``fast''; an explicit crash penalty restored gap-conditioned behavior. In simulation the learned policy matches, but does not beat, a hand-designed cooperative-smoothing controller (mean speeds 11.8--12.6 versus 11.1\,m/s), while an uncontrolled stream collapses into stop-and-go under the same demand. The claim is the behavior's shape and edge feasibility, not a simulation leaderboard.
 
 \begin{table}[t]
 \centering
-\caption{Measured prototype performance on a Jetson Orin Nano developer kit. Scripted drives replay real dashcam footage with a scripted GPS profile through the live detector-to-advisory stack, paced at 30\,Hz. These numbers ground edge feasibility, not traffic-control effectiveness.}
-\label{tab:jetson}
+\caption{The whole road corpus. One day, one vehicle, eight runs. There will not
+be a second collection day, which bounds what these numbers can support.}
+\label{tab:corpus}
 \small
-\resizebox{\columnwidth}{!}{%
-\begin{tabular}{p{0.31\linewidth}p{0.29\linewidth}p{0.29\linewidth}}
+\begin{tabular}{p{0.3\linewidth}p{0.6\linewidth}}
 \toprule
-\textbf{Component} & \textbf{Measured point} & \textbf{Notes} \\
-\midrule
-YOLOv8n TensorRT FP16~\cite{redmon2016yolo} & 17.7 ms p50 (3.9 ms GPU) & Forward vehicle detections \\
-Tracking + distance & 1.1 ms p50 & Leader gap, closing speed \\
-Observation + policy & 0.9 ms p50 & Advisory proposal \\
-End-to-end compute & 19.8 / 20.2 ms p50/p95 & Unpaced bench, 48.5 FPS \\
-Scripted cruise drive & 24.2 / 25.0 ms p50/p95 & 8{,}383 ticks, 29.9 Hz \\
-Scripted braking drive & 20.1 / 21.9 ms p50/p95 & Leader closes 42 m to 5 m \\
-Ego-speed error & 0.121 m/s RMSE & Includes 4 s GPS dropout \\
-Perception coverage & 100\% / 86.8\% & Cruise / braking scenario \\
-Aggregate beacon & 2 Hz, 2 s TTL, 150 m & Tens of bytes per message \\
+runs & 8: six shadow (17{,}948 ticks), two live (4{,}981 ticks) \\
+ticks & 22{,}929, GPS fix valid on 22{,}734 (99.1\%) \\
+recorded span & 152.8 min, of which 114.3 min above walking pace \\
+distance & between 86.55 and 90.06 km \\
+video & 1.676 GB, 19{,}000 indexed frames across six runs \\
+traffic feed & 123 response bodies, 3.7 MB, every one HTTP 200 \\
+inertial & 658{,}862 raw samples in 783{,}519 records \\
+archive & 187 files, 2{,}180{,}405{,}759 bytes, verified by digest against the device \\
 \bottomrule
 \end{tabular}
-}
 \end{table}
 
-\noindent\textbf{Measured performance.}
-Table~\ref{tab:jetson} summarizes the deployed loop. The compute path runs at a 19.8\,ms median unpaced and sustains 29.9\,Hz on paced drives, with p95 latencies of 21.9--25.0\,ms, ten times under our 200\,ms budget. Ego-speed error over a 280\,s drive was 0.121\,m/s RMSE, at the level of the injected noise, even through a scripted 4\,s GPS dropout that the hold-on-stale rule absorbed. The trained policy passed all five pipeline gates (latency, tick rate, GPS freshness, ego-speed error, and perception coverage) on both scenarios. Its advisory behavior, measured after the fact rather than gated, tracked the gap: with a leader within 60\,m it recommended the nominal bin on all 8{,}108 such ticks, on open road it recommended fast on 99.6\% of ticks (the few exceptions had a leader tracked just beyond 60\,m), and it held nominal through 97\% of the low-speed ticks (ego below 12\,m/s) of a hard-braking approach. Its advisory churn was 31 head switches per minute against roughly 170 for a random-weights policy, low enough for a human to follow. Offline replay reproduced all 902 decisions of the braking scenario tick for tick, which makes the safety filter auditable after the fact.
+The system was driven on 2026-09-08 in Westfield, New Jersey, on a OnePlus Nord
+N10. Table~\ref{tab:corpus} is the whole corpus. Distance is reported as a
+bracket rather than a number. Summing great-circle steps between fixes less than
+3\,s apart gives 86.55\,km and omits distance covered during gaps. Integrating
+the reported speed gives 90.06\,km and counts the gaps but trusts the speed
+field. Quoting either figure alone would overstate the precision.
 
-\noindent\textbf{Limitations.}
-The dashcam footage is borrowed, so absolute distances can be off by up to about a factor of two, because we had to assume the camera's field of view; lane assignment and the sign of closing speed do not depend on this, and a one-time calibration of the mounted camera removes it. Rear and cooperation fields are currently neutral, so on average almost half of the observation fields are placeholders (mean missingness 0.477) until a rear camera and live peers are added. Advisories still flicker briefly when a leader track first appears near a bin boundary; a small hysteresis would damp this. The driver-facing speed readout currently mirrors the raw decode rather than the filter's gap-aware cap, a display-layer gap we are closing, and an on-road run with a live camera is future work.
+One fact about this day bounds every earlier measurement in the project. It
+carried the first working GPS fix and the first working traffic query the
+project had obtained. Every bench run before it reported a GPS rate of 0.0\,Hz
+and no feed. The reason is physical rather than configuration. The application
+requests location correctly and the receiver returns no fix at a desk indoors,
+and the feed query is suppressed when no position is available.
 
-\noindent\textbf{Toward a pilot.}
-We plan to build from edge feasibility toward a traffic-flow result in stages, each adding cars and realism without touching the road: hardware-in-the-loop replay of many vehicles under swept message loss, delay, sensing range, and compliance; a simulation study that swaps the predecessor's global observation for the local-plus-aggregate contract of Section~\ref{sec:vision}, comparing local-only, aggregate-assisted, and oracle controllers under one safety layer; a closed-course study of whether human drivers can follow the advisories without uncomfortable braking; and, as the endpoint, a Holland-Tunnel-shaped corridor study seeding one instrumented fleet on the feeder lanes of Section~\ref{sec:vision}, which would also exercise the model-based training of Section~\ref{sec:architecture}.
-\vspace{-0.35cm}
+\noindent\textbf{The shakedown drive.}
+The first drive ran 1{,}632 ticks over 279.5\,s and 6.24\,km, at a mean speed of
+22.9\,m/s. The mean tick rate was 4.69\,Hz with a median spacing of 203\,ms, and
+two gaps longer than 2\,s totalled 5\,s. Distance agrees to 0.01\,km between
+integrating the reported speed and the great-circle path through the fixes,
+which is two independent routes to one number.
+
+The drive also produced three defects. The camera frames arrived rotated by
+ninety degrees. The frames were being discarded, so the drive could not explain
+itself. The severe thermal tier ended a session rather than lowering rates. The
+first of the three is reported in Section~\ref{sec:experience}.
+
+\noindent\textbf{Latency.}
+Table~\ref{tab:latency} gives the two measurements. The on-Jetson path is a
+bench measurement on pre-stamped frames, so it excludes capture wait. The
+phone-to-Jetson figure is the pooled 95th percentile over three bench runs of
+180\,s each. Over USB it is 116.19\,ms against a 200\,ms target, and over the
+Tailscale network it is 215.63\,ms. The largest and smallest of the three USB
+runs differ by 48.80\,ms at the 95th percentile, and that difference has one
+named source. The phone-side send-queue stage differs between the same pair by
+46.40\,ms, while every other stage differs by less than 2\,ms. The spread is phone-side
+queueing rather than the link.
+
+\begin{table}[t]
+\centering
+\caption{Measured latency. The upper block is the on-Jetson compute path,
+measured on the device on pre-stamped frames. The lower block is the
+phone-to-Jetson path, pooled over three 180\,s bench runs, 2{,}684 ticks.}
+\label{tab:latency}
+\small
+\begin{tabular}{p{0.45\linewidth}p{0.45\linewidth}}
+\toprule
+\textbf{Stage} & \textbf{Measured} \\
+\midrule
+detection (YOLOv8n, TensorRT FP16) & 17.7\,ms p50, of which 3.9\,ms is GPU \\
+tracking and distance & 1.1\,ms p50 \\
+observation and encode & 0.4\,ms p50 \\
+actor and advisory decode & 0.5\,ms p50 \\
+on-Jetson end to end & 19.8\,ms p50, 20.2\,ms p95, 48.5\,FPS \\
+\midrule
+phone to Jetson over USB & 116.19\,ms p95 (target 200\,ms) \\
+the same path over Tailscale & 215.63\,ms p95 \\
+the USB wire hop itself & of the order of its own 2\,ms conversion bound \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The wire hop is reported as an order rather than a duration on purpose. Its
+median is 1.97, 2.16 and 2.03\,ms across the three runs, against conversion
+bounds of 1.95, 1.86 and 2.06\,ms for the same runs. In the third run the
+measured value is 0.03\,ms below its own bound. A quantity that is smaller than
+the error bar on the clock conversion used to measure it is not separable from
+that bound.
+
+\noindent\textbf{The rate controller was verified through the wire.}
+Logged shadow decisions were compared against live commands decoded through the
+real rate-command codec, rather than through in-process objects. Across three
+bench runs of 899, 900 and 885 ticks there were zero command-replay mismatches.
+The phone's own applier counters read zero applied and a shadowed count equal to
+the number of commands sent, at 37, 38 and 38. That is the phone independently
+confirming that it did not act.
+
+\noindent\textbf{Every drive reproduces its own recorded decisions.}
+A replay tool re-runs each logged tick's inputs through the incumbent controller
+and requires the recorded decision back. All eight drives pass: 0 of 22{,}929
+ticks mismatched, with the success exit code on every run. That result was
+bounded by two controls rather than quoted on its own. Forcing one decision
+input to a value outside its observed range, against a drive whose own range is
+0.0123 to 0.0246 and whose threshold is 0.15, produces 1{,}632 mismatches of
+1{,}632 ticks and the refusal exit code. Rounding the ego speed to the nearest
+integer on the same 1{,}632 ticks produces zero mismatches and the success exit
+code. The second control reproduces an insensitivity the tool documents. The
+claim these runs support is that each log reproduces the decisions it recorded,
+and not that the logs are uncorrupted.
+
+The comparison the two live drives were collected for cannot be made from them.
+Both live runs report the first live tick at index zero, so neither contains a
+segment recorded before the controller began acting. A candidate controller can
+only be scored against such a reference segment, because after the controller
+acts the trajectory is its own. The six shadow runs are clean references and
+contain no live segment. Constructing the comparison needs a drive that runs in
+shadow mode for a segment and then goes live, which is a new drive rather than a
+re-analysis.
+
+\noindent\textbf{Thermal behaviour is the binding constraint, and it is not
+solved.}
+The backoff itself works on hardware. Across two 900\,s bench runs the thermal
+rule fired on 1{,}504 of 3{,}486 ticks and on 1{,}561 of 3{,}451 ticks. The
+recorded cause was a warm skin temperature. The phone delivered 3.000 and
+2.998\,Hz against a commanded 3.0\,Hz. Steady state was never reached. Both runs
+ended because their clock expired rather than because the handset equilibrated,
+and the skin-temperature slope over the final two minutes was $+0.368$ and
+$+0.367$\,C/min. Extrapolating that slope, the 45\,C threshold lies about six
+minutes past where both runs stopped.
+
+What ends a drive in the field is not the rate. On the first drive the handset
+reached the severe thermal tier on a windscreen mount in sunlight, with one zone
+at 51.6\,C. The backoff behaved correctly and commanded 1.5\,Hz. What ended the
+drive was the platform throttling the application. That stalled the pipeline.
+The final tick recorded a link time of 135{,}359\,ms against a median of
+52\,ms, and the application then closed the session. Nothing in this system detects or
+reports that condition, and no gate reads the link time. The failure was sharp
+rather than gradual. Every tick up to 1311 had a normal link time, so 279\,s and
+6.24\,km of that drive remain usable and only the last tick does not.
+
+\noindent\textbf{The two clocks agree, and the guarantee states its own error.}
+The two devices keep separate monotonic clocks. No conversion in this system
+returns a bare number. A converted instant carries its error bound and the
+identity of the estimate that produced it, and below the gate it raises rather
+than answering with a widened bound. On a loopback null case, where one machine
+means the true offset is zero, the offset spread is 12\,microseconds over 145\,s
+with a fitted slope of $-0.05$\,ppm. Over a real link for 330\,s there were 357
+exchanges, every one matched and none refused, with all nine outcome counters
+closing against the pings sent. The minimum round-trip time has a median of
+14.8\,ms and the bound a median of 8.0\,ms. Under full sensor load, which is a
+10\,Hz camera at 40\,KB per frame and a 50\,Hz inertial unit, 218 exchanges
+completed with every channel on cadence. The measured monotonic skew is
+$-12.00$\,ppm against the 50\,ppm the design assumes, a factor of 4.2 in hand.
+
+\noindent\textbf{The safety gate is present, wired, and has never had the
+evidence to bind.}
+Over the 3{,}913 recorded ticks of the four instrumented runs, none of the
+twelve rules had evidence for its inputs on any tick. That is a statement about
+the rig rather than about the drive. Only three of the twelve rules can ever be
+evaluable on this hardware, and each of the three requires a tracked leader
+vehicle. The other nine read at least one field for which the rig has no
+instrument: there is no rear sensor, no lane detection, no lane-change detector,
+no cooperating peers, no passing-lane index and no non-leader relative speed.
+The lane advisory is withheld on all 3{,}913 ticks for the same reason, because
+three of its eight guards read fields the rig cannot supply. The claim the
+system supports is therefore that the filter is present, wired, and reports per
+rule what it could and could not check. It is not that the filter was observed
+to bound anything.
