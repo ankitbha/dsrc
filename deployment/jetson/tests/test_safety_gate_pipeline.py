@@ -21,7 +21,7 @@ from pipeline import PerceptionPolicyPipeline
 from policy.actor_runtime import ActorRuntime, PolicyOutput
 from policy.advisory import GATED_LANE_TEXT, AdvisoryDecoder
 from policy.export_policy import build_random, export
-from policy.sensing_controller import RULE_NOT_EVALUABLE
+from policy.sensing_controller import RULE_FIRED, RULE_NOT_EVALUABLE
 from sensors.camera_stream import Frame
 from sensors.gps_reader import GpsFix
 
@@ -101,21 +101,46 @@ def run_ticks(pipeline: PerceptionPolicyPipeline, n: int, *, with_leader: bool =
     return tick
 
 
+def _force_evidenced_low_density(pipeline: PerceptionPolicyPipeline, density_veh_per_km: float) -> None:
+    """Wraps `pipeline.builder.build` so the returned `ObservationResult`
+    reports `local_density_veh_per_km` as genuine evidence (source
+    `derived`, not `derived_empty`/substituted) at the given value.
+
+    Needed because validator round 1's Fix 1 means a not_evaluable
+    low_speed_uncongested no longer moves the speed at all -- so a test
+    that wants to see the gate genuinely clamp can no longer rely on this
+    rig's ordinary not-evidence behaviour (F1's own reproduction) and must
+    force a REAL low-density reading instead, the same way `with_leader`
+    already forces a real `target_lane_front_gap_m` elsewhere in this file.
+    """
+    from perception import provenance
+
+    original_build = pipeline.builder.build
+
+    def build(*args, **kwargs):
+        result = original_build(*args, **kwargs)
+        result.field_sources["local_density_bin"] = provenance.SOURCE_DERIVED
+        result.diagnostics["density_veh_per_km"] = density_veh_per_km
+        return result
+
+    pipeline.builder.build = build
+
+
 def test_advisory_speed_equals_bounded_speed(actor_bundle: str) -> None:
     """decision 2's own identity: advisory.recommended_speed_mps continues to
     mean the number shown to the driver, and equals safety.bounded.speed_mps
     by construction -- checked on a tick where the gate actually changes the
-    speed (forced "slow"), not one where proposed and bounded happen to
-    coincide because nothing fired. A random-init actor rarely picks "slow"
-    on its own, and the two values agree trivially whenever the gate changes
-    nothing, so this pins the actor's action rather than trusting the
-    rollout to exercise the gate.
+    speed (forced "slow" against a genuinely-evidenced low density, per
+    validator round 1's Fix 1), not one where proposed and bounded happen to
+    coincide because nothing fired.
     """
     pipeline = _make_pipeline(actor_bundle)
     pipeline.actor.act = lambda encoded: PolicyOutput(
         action=dict(FORCED_SLOW_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
     )
+    _force_evidenced_low_density(pipeline, density_veh_per_km=2.0)
     tick = run_ticks(pipeline, 5)
+    assert tick.safety_gate.rules["low_speed_uncongested"].status == RULE_FIRED
     assert tick.safety_gate.proposed_speed_mps != tick.safety_gate.bounded_speed_mps  # the gate DID something
     assert tick.advisory.recommended_speed_mps == tick.safety_gate.bounded_speed_mps
     record = tick.to_record()
@@ -168,10 +193,16 @@ def test_safety_block_is_present_and_json_shaped(actor_bundle: str) -> None:
     safety = parsed["safety"]
     assert set(safety) == {
         "proposed", "bounded", "delta_speed_mps", "emergency_override",
-        "lane_withheld", "evaluable", "not_evaluable", "rules",
+        "lane_withheld", "evaluable", "not_evaluable", "rules", "config",
     }
     assert len(safety["rules"]) == 12
     assert safety["evaluable"] + safety["not_evaluable"] == 12
+    # validator round 1, Fix 4 (F3/F4): the gate's own configuration this
+    # tick ran under, so a replay tool need not assume its own defaults.
+    assert set(safety["config"]) == {
+        "enabled", "withhold_lane_when_not_evaluable", "time_s",
+        "min_contextual_speed_mps", "density_max_age_s",
+    }
 
 
 def test_gate_ms_is_always_measured_never_absent(actor_bundle: str) -> None:

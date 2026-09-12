@@ -416,11 +416,43 @@ class SafetyInputs:
     """
 
     fields: dict[str, SafetyInputField]
+    #: The `density_max_age_s` bound this tick's `local_density_veh_per_km`
+    #: evidence verdict was computed against (see `_density_is_evidence`).
+    #: Carried here, not just consumed and discarded, so `run_safety_gate`
+    #: can put it in the persisted record (validator round 1, F4) --
+    #: `safety_inputs_from_observation` always passes it explicitly (no
+    #: default there); the default here is for direct construction in tests
+    #: that do not exercise the density carve-out or the recorded config.
+    density_max_age_s: float = 4.0
 
     def context(self) -> SafetyContext:
         values = {name: f.value for name, f in self.fields.items() if name not in (
             "last_lane_change_time_s", "lane_changes_last_km", "lane_change_distances_m",
         )}
+        return SafetyContext(**values)
+
+    def inert_context(self) -> SafetyContext:
+        """The context `apply_safety_layer` reads (validator round 1, F1):
+        identical to `context()` except that every field with
+        `is_evidence(name)` False this tick is replaced by
+        `INERT_CONTEXT_VALUES[name]` rather than the observation's own
+        substituted value. `evaluate_rules`'s census keeps reading the
+        UNMODIFIED `context()` -- this method exists only for the copy that
+        reaches the driver-facing decision, so a not_evaluable rule is inert
+        in the number the driver sees, not only in the record (decision 3:
+        "nothing. It is recorded and the advisory is unchanged").
+
+        A field absent from `INERT_CONTEXT_VALUES` (`ego_speed_mps`,
+        `follower_gap_m`, `follower_relative_speed_mps`, `near_merge`) gates
+        none of the twelve rules and is passed through unchanged regardless
+        of evidence -- there is no comparison to make inert.
+        """
+        values = {name: f.value for name, f in self.fields.items() if name not in (
+            "last_lane_change_time_s", "lane_changes_last_km", "lane_change_distances_m",
+        )}
+        for name, inert_value in INERT_CONTEXT_VALUES.items():
+            if not self.fields[name].evidence:
+                values[name] = inert_value
         return SafetyContext(**values)
 
     def state(self) -> SafetyState:
@@ -533,7 +565,7 @@ def safety_inputs_from_observation(
         "lane_changes_last_km": structural(state.lane_changes_last_km),
         "lane_change_distances_m": structural(list(state.lane_change_distances_m)),
     }
-    return SafetyInputs(fields=fields)
+    return SafetyInputs(fields=fields, density_max_age_s=density_max_age_s)
 
 
 # --- decision 3 / step 9: the twelve rules as total independent predicates ---
@@ -586,6 +618,131 @@ RULE_READS: dict[str, tuple[str, ...]] = {
         "leader_gap_m", "leader_relative_speed_mps",
         "merge_conflict_gap_m", "merge_conflict_relative_speed_mps",
     ),
+}
+
+#: validator round 1, F1: the value substituted for a SafetyContext field's
+#: slot in the copy `apply_safety_layer` reads (`SafetyInputs.inert_context`),
+#: whenever `is_evidence(name)` is False for that field this tick. Each entry
+#: is derived from the one comparison RULE_READS says the field gates --
+#: never guessed -- and states which direction is inert and why. Checked: no
+#: field here is read by two rules with opposite senses (a field read by two
+#: rules -- the front and rear gap/relative-speed pairs -- is read by both
+#: with the SAME sense, "larger gap / non-closing is safer", so one value
+#: serves both; see the notes below).
+#:
+#: A field absent from this table gates none of the twelve rules and is left
+#: out on purpose: `ego_speed_mps` (evidence-required) only feeds
+#: `physical_control_command`'s unrecorded `acceleration_mps2`, never
+#: `target_speed_mps`/`lane_action`/`emergency_override`; `follower_gap_m`,
+#: `follower_relative_speed_mps` and `near_merge` (all structural) are read
+#: nowhere at all in this module. `inert_context()` passes all four through
+#: unchanged regardless of evidence, since there is no comparison to make
+#: inert.
+INERT_CONTEXT_VALUES: dict[str, Any] = {
+    # low_speed_uncongested fires on density < uncongested_density_threshold
+    # (12.0 veh/km): any value at or above the threshold is inert, and inf
+    # is the unambiguous choice.
+    "local_density_veh_per_km": float("inf"),
+    # all_lane_low_speed_occupancy is `all_lanes_av_occupied and not
+    # downstream_congested and av_mean_speed_mps < free_flow - 8`. All three
+    # reads are class (C) -- always substituted together on this rig -- so
+    # each is given its own independently-sufficient direction rather than
+    # relying on the other two:
+    "all_lanes_av_occupied": False,           # AND on False is False
+    "downstream_congested": True,             # `not True` is False
+    "av_mean_speed_mps": float("inf"),        # never below free_flow - 8
+    # passing_lane_slow_hold is `in_passing_lane and target_speed <
+    # local_mean_speed - 8`. in_passing_lane is class (C) (always
+    # substituted) and alone always neutralises the AND; local_mean_speed_mps
+    # is class (B) (not always substituted alongside it) and is given its
+    # own independent direction too.
+    "in_passing_lane": False,                 # AND on False is False
+    "local_mean_speed_mps": float("-inf"),    # target_speed can never clear threshold - 8
+    # target_lane_missing fires on `not target_lane_exists`.
+    "target_lane_exists": True,               # `not True` is False
+    # target_lane_front_gap (gap < 5.0 m) and target_lane_front_ttc (ttc =
+    # gap / closing_speed) read this field with the SAME sense -- larger gap
+    # is safer for both -- so one value serves both rules.
+    "target_lane_front_gap_m": float("inf"),
+    # target_lane_front_ttc's closing_speed is
+    # -target_lane_front_relative_speed_mps; 0.0 makes closing_speed 0,
+    # which `_ttc_from_relative_speed` already treats as infinite ttc on its
+    # own, independent of whatever the gap above is doing.
+    "target_lane_front_relative_speed_mps": 0.0,
+    # target_lane_rear_gap and target_lane_rear_ttc: the rear pair, same
+    # reasoning and same sense as the front pair for both rules.
+    "target_lane_rear_gap_m": float("inf"),
+    # target_lane_rear_ttc's closing_speed is
+    # +target_lane_rear_relative_speed_mps (no negation, unlike the front
+    # pair -- a follower closes on POSITIVE relative speed): 0.0 is inert
+    # here for the same reason as the front pair.
+    "target_lane_rear_relative_speed_mps": 0.0,
+    # target_lane_rear_braking fires on required_decel > 2.5 m/s^2; 0.0 (no
+    # braking required) is at the safe end and is also the field's own
+    # dataclass default.
+    "target_lane_rear_required_decel_mps2": 0.0,
+    # forward_ttc's hazard is min(leader_gap_m, merge_conflict_gap_m). An
+    # infinite leader gap can never be the smaller of the two and can never
+    # itself read as critical (gap < min_front_gap_m), independent of
+    # whatever the merge-conflict pair (always class (C) below) holds.
+    "leader_gap_m": float("inf"),
+    # forward_ttc's closing_speed from the leader pair is
+    # -leader_relative_speed_mps; 0.0 makes it non-positive, so
+    # `_ttc_from_relative_speed` returns infinite ttc regardless of the gap.
+    "leader_relative_speed_mps": 0.0,
+    # Always class (C) on this rig (no merge-conflict sensor exists at all);
+    # same sense and same reasoning as the leader pair.
+    "merge_conflict_gap_m": float("inf"),
+    "merge_conflict_relative_speed_mps": 0.0,
+}
+
+
+#: validator round 1, F5: which `RuleRecord.evidence`/`to_record()` key each
+#: rule's fired/quiet determination compares against its threshold -- used
+#: by `score_safety.py` and `eval_run._safety_lines` to count how many of a
+#: rule's EVALUABLE ticks carry a non-finite compared value. A firing rate
+#: computed entirely over ticks where the compared quantity is inf on every
+#: one (`target_lane_front_gap`'s own reproduction: 1,229 of 1,229 "evaluable"
+#: ticks, all tagged `derived`, gap_m == inf on all of them) is not a rate at
+#: all -- the threshold could never physically be crossed, so "0.0%" reads
+#: as a safety measurement when it is a description of the substituted
+#: geometry. Omitted for a rule whose comparand cannot be non-finite:
+#: `target_lane_missing`'s `target_lane_exists` is a bool, and
+#: `lane_changes_per_km`'s `lane_changes_last_km` is a bounded count.
+RULE_COMPARED_VALUE_KEY: dict[str, str] = {
+    "low_speed_uncongested": "local_density_veh_per_km",
+    "all_lane_low_speed_occupancy": "av_mean_speed_mps",
+    "passing_lane_slow_hold": "target_speed_mps",
+    "lane_change_dwell": "dwell_s",
+    "target_lane_front_gap": "gap_m",
+    "target_lane_rear_gap": "gap_m",
+    "target_lane_front_ttc": "ttc_s",
+    "target_lane_rear_ttc": "ttc_s",
+    "target_lane_rear_braking": "required_decel_mps2",
+    "forward_ttc": "gap_m",
+}
+
+
+#: validator round 1, F5 (provenance-consistency finding, coordinator
+#: measurement 2026-09-12): rule name -> (this field's own `field_sources`
+#: key, the `field_sources` key it is DEFINED to alias verbatim).
+#: `perception/observation_builder.py` sets `target_lane_front_gap`'s VALUE
+#: (`float(leader_gap)`) and its SOURCE (`src["leader_gap"]`) from the same
+#: `leader_gap` variable, unconditionally, in the same two dict literals --
+#: no other writer of either key exists under `perception/`. Under today's
+#: contract the two `field_sources` entries are therefore always equal; a
+#: persisted tick where they disagree (measured: every one of
+#: `outputs/task42_usb/baseline_run_20260902_183446`'s 1,229 ticks --
+#: `target_lane_front_gap` tagged `derived`, `leader_gap` tagged
+#: `fallback_neutral`, both non-finite) was written under a DIFFERENT,
+#: superseded builder, and cannot be trusted as evidence regardless of what
+#: its own recorded source claims. `score_safety.py` and `eval_run.py` use
+#: this to flag such ticks rather than silently either trusting or
+#: discarding them. Named concretely rather than built as a general
+#: alias-checking mechanism -- this is the one rule this task found it
+#: changing an evaluability verdict for.
+RULE_ALIASED_PROVENANCE_FIELDS: dict[str, tuple[str, str]] = {
+    "target_lane_front_gap": ("target_lane_front_gap", "leader_gap"),
 }
 
 
@@ -725,6 +882,35 @@ def evaluate_rules(
 
 
 @dataclass(frozen=True)
+class SafetyGateConfig:
+    """validator round 1, F3/F4: the gate configuration this tick's decision
+    and census were actually run under, persisted alongside them so a replay
+    tool (`score_safety.py`) can reproduce the SAME run rather than silently
+    assuming its own current defaults. Both F3 (`score_safety.py` always
+    replayed with `withhold_lane_when_not_evaluable=True`, so it could not
+    read a run recorded with the flag off) and F4 (it reconstructed `time_s`
+    as the tick's epoch `t_wall`, when the live pipeline passes
+    `time.monotonic()`) trace back to this information never having been
+    recorded at all.
+    """
+
+    enabled: bool
+    withhold_lane_when_not_evaluable: bool
+    time_s: float
+    min_contextual_speed_mps: float
+    density_max_age_s: float
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "withhold_lane_when_not_evaluable": self.withhold_lane_when_not_evaluable,
+            "time_s": self.time_s,
+            "min_contextual_speed_mps": self.min_contextual_speed_mps,
+            "density_max_age_s": self.density_max_age_s,
+        }
+
+
+@dataclass(frozen=True)
 class SafetyGateResult:
     """One tick's gate outcome: the raw (proposed) decision, the bounded one
     actually shown to the driver, and the per-rule evaluability census.
@@ -752,6 +938,7 @@ class SafetyGateResult:
     evaluable_count: int
     not_evaluable_count: int
     rules: dict[str, RuleRecord]
+    config: SafetyGateConfig
     raw_diagnostics: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     def to_record(self) -> dict[str, Any]:
@@ -772,6 +959,7 @@ class SafetyGateResult:
             "evaluable": self.evaluable_count,
             "not_evaluable": self.not_evaluable_count,
             "rules": {name: rule.to_record() for name, rule in self.rules.items()},
+            "config": self.config.to_record(),
         }
 
 
@@ -782,39 +970,88 @@ def run_safety_gate(
     constraints: SafetyConstraints | None = None,
     *,
     withhold_lane_when_not_evaluable: bool = True,
+    enabled: bool = True,
 ) -> SafetyGateResult:
     """Run the vendored `apply_safety_layer` (the bound the driver is shown)
     and the independent per-rule census (decision 3) from the same inputs,
     then apply decision 3's own addition: withhold the lane action outright
     when any of its guards could not be evaluated (open item 1), rather than
     letting an unevaluated guard's "safe" default speak for it.
+
+    `apply_safety_layer` is run against `inputs.inert_context()`, not the raw
+    `inputs.context()` (validator round 1, F1) -- every field this tick
+    lacks evidence for is replaced by its `INERT_CONTEXT_VALUES` entry before
+    it reaches the decision, so a not_evaluable rule cannot move the number
+    the driver is shown even when the observation's own substituted value
+    for that field is not itself inert (`local_density_veh_per_km`'s 0.0
+    default was the reproduced case: 0.0 is BELOW the uncongested threshold,
+    the opposite of inert). `evaluate_rules`'s census, below, keeps reading
+    the unmodified `context()` -- the record must still say what was
+    actually observed, not what the decision was neutralised against.
+
+    `enabled=False` (validator round 1, F2/F3 -- `safety.enabled`) is the
+    actual rollback mechanism `config.yaml`/`ARCHITECTURE.md` had wrongly
+    attributed to `withhold_lane_when_not_evaluable`: the census and the
+    full record are still produced, but `apply_safety_layer` is not run at
+    all, so `bounded_* == proposed_*` exactly (including headway -- even the
+    unconditional `create_gap` bonus does not apply, since that bonus is
+    `apply_safety_layer`'s own first step) and the lane action is never
+    withheld. `withhold_lane_when_not_evaluable` continues to cover only the
+    lane/merge action, as it always has.
     """
     constraints = constraints or SafetyConstraints()
     context = inputs.context()
-    decision = apply_safety_layer(action, state, context, constraints)
     rules = evaluate_rules(action, inputs, state, constraints)
 
-    lane_guard_not_evaluable = any(rules[name].status == RULE_NOT_EVALUABLE for name in LANE_GUARD_RULES)
-    bounded_lane_action = decision.lane_action
-    lane_withheld: str | None = None
-    if withhold_lane_when_not_evaluable and lane_guard_not_evaluable and bounded_lane_action is not None:
-        bounded_lane_action = None
-        lane_withheld = RULE_NOT_EVALUABLE
-
     proposed_speed = _target_speed(action, context)
+    proposed_headway = sim_contract.decode_headway_bin(action["desired_headway_bin"])
+    proposed_lane_action = (
+        _lane_preference_to_action(action["lane_preference"]) if action["merge_mode"] != "hold_lane" else None
+    )
+
+    if enabled:
+        inert_context = inputs.inert_context()
+        decision = apply_safety_layer(action, state, inert_context, constraints)
+        bounded_speed = decision.target_speed_mps
+        bounded_headway = decision.target_headway_s
+        bounded_lane_action = decision.lane_action
+        emergency_override = decision.emergency_override
+        raw_diagnostics = decision.diagnostics
+
+        lane_guard_not_evaluable = any(rules[name].status == RULE_NOT_EVALUABLE for name in LANE_GUARD_RULES)
+        lane_withheld: str | None = None
+        if withhold_lane_when_not_evaluable and lane_guard_not_evaluable and bounded_lane_action is not None:
+            bounded_lane_action = None
+            lane_withheld = RULE_NOT_EVALUABLE
+    else:
+        bounded_speed = proposed_speed
+        bounded_headway = proposed_headway
+        bounded_lane_action = proposed_lane_action
+        emergency_override = False
+        raw_diagnostics = empty_diagnostics()
+        lane_withheld = None
+
     evaluable = sum(1 for r in rules.values() if r.status != RULE_NOT_EVALUABLE)
+    config = SafetyGateConfig(
+        enabled=enabled,
+        withhold_lane_when_not_evaluable=withhold_lane_when_not_evaluable,
+        time_s=context.time_s,
+        min_contextual_speed_mps=context.min_contextual_speed_mps,
+        density_max_age_s=inputs.density_max_age_s,
+    )
     return SafetyGateResult(
         proposed_speed_mps=proposed_speed,
-        proposed_headway_s=sim_contract.decode_headway_bin(action["desired_headway_bin"]),
-        proposed_lane_action=_lane_preference_to_action(action["lane_preference"]) if action["merge_mode"] != "hold_lane" else None,
-        bounded_speed_mps=decision.target_speed_mps,
-        bounded_headway_s=decision.target_headway_s,
+        proposed_headway_s=proposed_headway,
+        proposed_lane_action=proposed_lane_action,
+        bounded_speed_mps=bounded_speed,
+        bounded_headway_s=bounded_headway,
         bounded_lane_action=bounded_lane_action,
-        delta_speed_mps=decision.target_speed_mps - proposed_speed,
-        emergency_override=decision.emergency_override,
+        delta_speed_mps=bounded_speed - proposed_speed,
+        emergency_override=emergency_override,
         lane_withheld=lane_withheld,
         evaluable_count=evaluable,
         not_evaluable_count=len(rules) - evaluable,
         rules=rules,
-        raw_diagnostics=decision.diagnostics,
+        config=config,
+        raw_diagnostics=raw_diagnostics,
     )
