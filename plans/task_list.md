@@ -61,11 +61,17 @@ project built and what the paper argues for. `src/safety/` holds the filters
 (`safety_layer.py`, `etiquette.py`, `constraints.py`); sections D through I hold the
 system and the evidence it runs on a road.
 
-**The road-network-level result is a replication, not a claim.** Decentralized MAPPO
-control improving throughput is established in the literature (Vinitsky et al., and
-the Flow benchmarks). The paper reproduces it once, in this simulator, on one
-topology, to show the setting behaves as published. It is not a study, and it is
-scoped in section C accordingly.
+**The paper's three sections are design, experience and experiments**, and the venue is
+ICRA. `plans/paper_deploying_self_regulating_cars.md` carries the argument and the
+placement of every result.
+
+**The road-network-level half CHANGED on 2026-09-11 and section C no longer describes
+it.** It was the MAPPO replication on `inverted_tree`; it is now the SRC controller
+ported to SUMO on Mainz, with the observation restricted to what a traffic API returns.
+Held-out seeds 16-30, paired on seed: the traffic-API arm gains 230 +/- 44 veh/h over no
+control and SRC's original six features gain 224 +/- 61, and the two differ by 0.2%,
+inside both bars. The plan is `plans/mainz_src_port.md` and the supersession is recorded
+as task 141.
 
 **One instrumented vehicle can never demonstrate throughput or delay.** That is why
 the flow-level half comes from simulation and the drives are never asked to support
@@ -89,31 +95,35 @@ outside the project.
    (`cx_px` 640→360, `cy_px` 360→640); `horizon_y_px` measured at 717, not the
    old landscape centre of 360; `hood_line_y_px` set to 1022. The offline replay
    derives its own rotation from each run's recorded config.
-3. **Task 9** — fill the five sensing-model parameters. **PARTIAL 2026-09-09.**
-   `configs/training/mappo_deploysense.yaml`. `latency_s` and `queue_speed_mps`
-   settled from the drives, `range_m` from optics. Two remain open and are marked
-   in the file: the noise terms need a citation, and `range_m` still wants the
-   replay measurement, which needs the Jetson.
-4. **Task 68** — train MAPPO on `inverted_tree`. The single missing artifact.
-5. **Task 69** — evaluate trained MAPPO against `no_av` for throughput.
-6. Write the paper: the deployed system and the safety and etiquette filters, with
-   step 5 as the replicated flow-level result.
-
-**Task 9 must precede task 68, and the reason is not bookkeeping.**
-`src/envs/topology_env.py` builds every agent observation through
-`LocalObservationBuilder(SensingConfig.from_config(...))`, so the five sensing
-parameters define the actor's entire input distribution. Training first means the
-policy learns against an observation model the paper then describes as wrong. The
-largest single mismatch is `latency_s: 0.0` in every current config against the
-96.7 ms median measured on the drives.
+3. ~~**Task 9** — fill the five sensing-model parameters.~~ **OFF THE PATH 2026-09-12.**
+   The parameters define `LocalObservationBuilder`'s input distribution for the
+   local-sensing formulation, and that formulation left the paper when the flow-level
+   half changed. Kept because the measurements behind it are real: `latency_s` and
+   `queue_speed_mps` were settled from the drives against `latency_s: 0.0` in every
+   config, a 96.7 ms median. Nothing in the paper now reads them -- the SRC port queries
+   HERE at a 60 s decision interval and models no observation latency.
+4. ~~**Task 68** — train MAPPO on `inverted_tree`.~~ **SUPERSEDED 2026-09-11**, task 141.
+5. ~~**Task 69** — evaluate trained MAPPO against `no_av` for throughput.~~
+   **SUPERSEDED 2026-09-11**, task 141. The flow-level result is the Mainz SRC port.
+6. **Score the six shadow runs.** `deployment/jetson/score_shadow.py` replays the logged
+   per-tick inputs and gates on the incumbent reproducing byte-for-byte. Until it runs,
+   whether the shadow-mode predictions held in live mode is unanswered, and that is the
+   comparison the two live drives were collected for. No new driving, no new decisions.
+7. **Run the HERE-observation policy on the rig.** The observation matches and the data
+   was collected; what remains is loading that policy.
+8. **Measure the gate's firing rate in simulation**: how often local safety clamps an
+   advisory and what it costs. Three runs -- gated, ungated, no control.
+9. Write the paper.
 
 **Tasks 67 and 63 are independent of each other**, so their relative order is free.
-Doing 63 first lets the task 9 replay pass, which reads 1.676 GB of video, run while
-task 67 is worked.
 
-**Scope boundary.** One topology (`inverted_tree`). One algorithm (MAPPO). One
-throughput comparison. The drives are finished and will not be repeated; the corpus
-is recorded in section I.
+**Scope boundary.** The drives are finished and will not be repeated; the corpus is
+recorded in section I. The simulation half is one network at one demand deliberately:
+SRC was already simulated on this topology, at a different demand, in a different
+environment, and across the two papers the coverage is PTV Vissim against SUMO,
+Wiedemann-99 against EIDM with a one-second reaction, and the published 18,000 veh/h
+surge against a sustained 4,500. A sweep here would re-establish what the SRC paper
+did.
 
 **Open decisions.** Whether the rotation fix belongs on the phone or the Jetson
 (task 63) — the camera intrinsics assume landscape, so it is not purely cosmetic
@@ -146,6 +156,14 @@ Tailscale at `ssh jetson`, so its runtime can be developed remotely.
 4. ~~Tailscale on the phone.~~ **DONE** — `moto-g-power` `100.75.142.126` under `bhardwaj.ankit275@` (same account matters: the Jetson is a *shared* node from `taila2630c`, and sharing is per-account). Phone→Jetson TCP verified with a real payload in both directions; path upgraded DERP→direct, 55 ms. Plan: `scratchpad/plan_task_04_phone_tailscale.md`.
 
 ## C. Simulation: replicate the MAPPO throughput result on `inverted_tree`
+
+> **SUPERSEDED 2026-09-11 by task 141. This section is history.** The flow-level half is
+> now the SRC controller ported to SUMO on Mainz, in `plans/mainz_src_port.md`. Two
+> reasons, both measured. `inverted_tree` has one link per super-segment against the
+> paper's 2 to 3 km, so there is no aggregation in it for a super-segment observation to
+> summarise. And under the fleet this section used there is no capacity drop to recover:
+> served flow is flat within seed error across a 9x density range. The section is kept
+> because its findings about the environment stand and are cited elsewhere.
 
 **Replication, not discovery.** The task is to reproduce a published result in this
 simulator with this project's settings, on one topology. No topology ladder, no
@@ -2469,6 +2487,63 @@ and on what evidence.
     implementable. Whether to wire them, and whether the safety and etiquette layers
     should run on a simulator that cannot crash, is the same question as the speed
     bin rescale: it changes what the deployed actor's heads mean.
+
+141. **The flow-level half is now the SRC controller on Mainz, and `inverted_tree` is
+     out of scope.** 2026-09-11 and 2026-09-12. Supersedes tasks 68 and 69 and the
+     scope of section C. Full account in `plans/mainz_src_port.md`; the paper's use of
+     it in `plans/paper_deploying_self_regulating_cars.md`.
+
+     **Why `inverted_tree` went.** Two measured reasons, either sufficient. Its
+     super-segments are **one link each**, 300 to 600 m, against Mainz's 12 segments of
+     2 to 33 edges and a median 3.78 km and the SRC paper's 2 to 3 km -- so there is no
+     aggregation in it for a super-segment observation to summarise, which is also why
+     it read null. And its recorded 24% capacity drop does not reproduce: on five seeds
+     served flow is 966 to 1,114 veh/h across a 9x density range with two-standard-error
+     bars of 61 to 152, and reproducing the recorded three-seed configuration exactly
+     gives 864 to 1,096 with bars up to 213. The 1,298 and 992 in
+     `configs/demand/sumo_saturating.yaml` were the maximum and minimum of a noisy flat
+     series measured without a spread.
+
+     **What had to change before any network could show a gain, in order.**
+
+     1. **A link's `q = k v` hill is not a capacity drop.** Krauss produces one too, at
+        15% on a straight road, and Krauss has no capacity drop. The quantity that
+        decides whether a controller has anything to recover is SERVED FLOW falling as
+        offered demand rises. `scripts/measure_mainz_fundamental_diagram.py` is now that
+        gate and refuses a fall inside the seed spread.
+     2. **The paper's W99 calibration has no capacity drop on SUMO.** Its queues
+        discharge **faster** than free-flowing traffic at capacity, 1,980 veh/h against
+        1,899, because a discharging W99 platoon is regular at the model's tightest
+        headway where free flow at capacity has spread. Real queue discharge is 5 to 20%
+        BELOW capacity. Neither `startupDelay` at 0, 1 or 2 s, nor reaction time, nor a
+        lane drop, nor a metered exit changed it.
+     3. **A bottleneck sets the LEVEL of throughput, not its dependence on density.**
+        `configs/human_models/eidm_reaction.yaml` -- EIDM with a one-second
+        `actionStepLength` -- has a 21% drop at an isolated lane drop, resolved on five
+        seeds. On Mainz it needed a merge at the exit as well, because link 218 ends into
+        free outflow; `--exit-lanes 2` gives a three-into-two drop and an 11.3% fall,
+        437 veh/h against a combined bar of 106. That is the first gate pass in the leg.
+
+     **The result.** Seeds 1-10 train, 11-15 select, 16-30 evaluate, 80 episodes, 100%
+     penetration, sustained 4,500 veh/h, paired on seed: the traffic-API observation
+     gains **+230 +/- 44 veh/h** (+6.5%) and SRC's original six features **+224 +/- 61**
+     (+6.3%), both resolved, and the two differ by 0.2%. Both arms run SLOWER than no
+     control, 40.8 against 42.7 km/h, while serving more vehicles.
+
+     **Five seeds nearly published a phantom.** On seeds 16-20 alone the tree read
+     +14.2% and +11.0%; on fifteen it reads +3.2% and +0.3%, unresolved. Mainz survived
+     the same extension and tightened, +207 +/- 92 to +230 +/- 44. Checkpoint selection
+     was unchanged in both; only the evaluation set was enlarged.
+
+     **`DENSITY_CRITICAL` is re-anchored to 0.178** in occupancy units -- EIDM capacity
+     1,877 veh/h/lane at 39.6 veh/km/lane, jam 128.5 -- which is 0.308 of the measured
+     jam density, within 3% of the 0.3 SRC publishes. Under W99 the same comparison gave
+     0.134. The published threshold was not wrong; the fleet was.
+
+     **The simulation is deliberately not a reproduction**, and that is the design: the
+     mechanism now holds in two simulators under two driver models at two demands, which
+     is stronger than matching one number in one of them. No figure here is comparable to
+     the published table; every claim is against this port's own no-control baseline.
 
 140. **DEFECT, found by reading the algorithm rather than measuring its output:
      credit leaks across episode boundaries.** 2026-09-10. Ankit's assessment was that
