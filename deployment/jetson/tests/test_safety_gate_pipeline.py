@@ -38,6 +38,25 @@ FORCED_SLOW_ACTION: dict[str, str] = {
     "merge_mode": "normal",
 }
 
+#: create_gap + a lane preference: exercises both the merge headway bonus
+#: (Fix 9) and lane withholding (Fix 8) on the same tick, on this rig where
+#: at least one lane guard is always not_evaluable.
+FORCED_CREATE_GAP_ACTION: dict[str, str] = {
+    "desired_speed_bin": "nominal",
+    "desired_headway_bin": "normal",
+    "lane_preference": "prefer_left_if_safe",
+    "merge_mode": "create_gap",
+}
+
+#: Same merge_mode, but nothing to withhold: lane_preference "keep" means
+#: proposed_lane_action is already None before the gate runs.
+FORCED_CREATE_GAP_KEEP_LANE_ACTION: dict[str, str] = {
+    "desired_speed_bin": "nominal",
+    "desired_headway_bin": "normal",
+    "lane_preference": "keep",
+    "merge_mode": "create_gap",
+}
+
 FX, CX, HORIZON, CAM_H = 800.0, 640.0, 360.0, 1.25
 
 
@@ -67,7 +86,9 @@ def actor_bundle(tmp_path_factory) -> str:
     return str(prefix)
 
 
-def _make_pipeline(actor_bundle: str, *, withhold: bool = True) -> PerceptionPolicyPipeline:
+def _make_pipeline(
+    actor_bundle: str, *, withhold: bool = True, safety_enabled: bool = True,
+) -> PerceptionPolicyPipeline:
     return PerceptionPolicyPipeline(
         detector=FakeDetector(),
         tracker=IouTracker(min_hits=1),
@@ -78,6 +99,7 @@ def _make_pipeline(actor_bundle: str, *, withhold: bool = True) -> PerceptionPol
         actor=ActorRuntime(actor_bundle),
         advisory_decoder=AdvisoryDecoder(units="mph"),
         withhold_lane_when_not_evaluable=withhold,
+        safety_enabled=safety_enabled,
     )
 
 
@@ -172,6 +194,60 @@ def test_withhold_flag_off_restores_the_raw_lane_action(actor_bundle: str) -> No
     assert tick.safety_gate.lane_withheld is None
 
 
+def test_safety_enabled_false_restores_bounded_equals_proposed(actor_bundle: str) -> None:
+    """validator round 1, Fix 3: `safety.enabled` is the actual rollback for
+    the whole gate -- `withhold_lane_when_not_evaluable` covers the
+    lane/merge action only (previous two tests). Forced "slow" against a
+    genuinely-evidenced low density is exactly the setup
+    `test_advisory_speed_equals_bounded_speed` uses to prove the gate DOES
+    clamp when enabled; with the gate disabled it must not.
+    """
+    pipeline = _make_pipeline(actor_bundle, safety_enabled=False)
+    pipeline.actor.act = lambda encoded: PolicyOutput(
+        action=dict(FORCED_SLOW_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
+    )
+    _force_evidenced_low_density(pipeline, density_veh_per_km=2.0)
+    tick = run_ticks(pipeline, 5)
+    assert tick.safety_gate.rules["low_speed_uncongested"].status == RULE_FIRED
+    assert tick.safety_gate.bounded_speed_mps == tick.safety_gate.proposed_speed_mps
+    assert tick.safety_gate.bounded_headway_s == tick.safety_gate.proposed_headway_s
+    assert tick.safety_gate.lane_withheld is None
+    assert tick.advisory.recommended_speed_mps == tick.safety_gate.proposed_speed_mps
+
+
+def test_the_safety_enabled_test_fails_against_the_unfixed_pipeline(monkeypatch) -> None:
+    """Neuters Fix 3 at the pipeline boundary -- makes `PerceptionPolicyPipeline`
+    ignore `safety_enabled` the way it did before this fix (always calling
+    `run_safety_gate` with the default `enabled=True`) -- and confirms the
+    test above would then fail. Patches `pipeline.run_safety_gate` (the
+    name `pipeline.py` binds via `from policy.safety_gate import ...
+    run_safety_gate`), not `policy.safety_gate.run_safety_gate`, since that
+    is the reference `PerceptionPolicyPipeline.step` actually calls.
+    """
+    import pipeline as pipeline_module
+    from policy.safety_gate import run_safety_gate as real_run_safety_gate
+
+    def ignores_enabled(*args, **kwargs):
+        kwargs.pop("enabled", None)
+        return real_run_safety_gate(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "run_safety_gate", ignores_enabled)
+
+    actor, info = build_random(seed=0)
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = f"{tmp}/actor_policy"
+        export(actor, info, prefix)
+        pipeline = _make_pipeline(prefix, safety_enabled=False)
+        pipeline.actor.act = lambda encoded: PolicyOutput(
+            action=dict(FORCED_SLOW_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
+        )
+        _force_evidenced_low_density(pipeline, density_veh_per_km=2.0)
+        tick = run_ticks(pipeline, 5)
+    with pytest.raises(AssertionError):
+        assert tick.safety_gate.bounded_speed_mps == tick.safety_gate.proposed_speed_mps
+
+
 def test_target_lane_front_gap_becomes_evaluable_with_a_tracked_leader(actor_bundle: str) -> None:
     """The one lane guard this rig can ever evaluate: target_lane_front_gap_m
     is fed from the leader gap, so a tracked leader makes it evidence
@@ -215,3 +291,54 @@ def test_gate_ms_is_always_measured_never_absent(actor_bundle: str) -> None:
     assert record["stages"]["gate"]["basis"] == "measured"
     assert record["stages"]["gate"]["ms"] is not None
     assert record["stages"]["gate"]["ms"] >= 0.0
+
+
+def test_merge_text_survives_the_lane_withholding(actor_bundle: str) -> None:
+    """validator round 1, F9/Fix 8: decision 3 withholds "the lane and merge
+    action" as a unit. Before this fix, only the lane half reached the
+    display -- lane_text correctly read "Keep lane" while merge_text still
+    read "Creating merge gap" beside a lane action withheld for the exact
+    same not_evaluable reason."""
+    pipeline = _make_pipeline(actor_bundle)
+    pipeline.actor.act = lambda encoded: PolicyOutput(
+        action=dict(FORCED_CREATE_GAP_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
+    )
+    tick = run_ticks(pipeline, 5)
+    assert tick.safety_gate.lane_withheld == RULE_NOT_EVALUABLE
+    assert tick.advisory.lane_text == "Keep lane"
+    assert tick.advisory.merge_text == "Normal driving"
+
+
+def test_merge_text_is_untouched_when_nothing_is_withheld(actor_bundle: str) -> None:
+    """The other half: with nothing to withhold (lane_preference "keep"
+    means proposed_lane_action was already None), merge_text is left as the
+    policy's own decode -- Fix 8 only overrides it on an actual withholding.
+    """
+    pipeline = _make_pipeline(actor_bundle)
+    pipeline.actor.act = lambda encoded: PolicyOutput(
+        action=dict(FORCED_CREATE_GAP_KEEP_LANE_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
+    )
+    tick = run_ticks(pipeline, 5)
+    assert tick.safety_gate.lane_withheld is None
+    assert tick.advisory.merge_text == "Creating merge gap"
+
+
+def test_displayed_headway_is_bounded_while_the_raw_one_is_fed_back(actor_bundle: str) -> None:
+    """validator round 1, F8/Fix 9: create_gap's merge headway bonus bounds
+    what the gate shows (headway_display_s), but headway_target_s -- what
+    set_target_headway feeds back into the next observation -- must stay
+    the raw, unbounded decode (decision 2)."""
+    pipeline = _make_pipeline(actor_bundle)
+    pipeline.actor.act = lambda encoded: PolicyOutput(
+        action=dict(FORCED_CREATE_GAP_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
+    )
+    tick = run_ticks(pipeline, 5)
+    bonus = pipeline.safety_constraints.merge_gap_headway_bonus_s
+    assert bonus > 0.0
+    assert tick.safety_gate.bounded_headway_s == pytest.approx(tick.safety_gate.proposed_headway_s + bonus)
+    assert tick.advisory.headway_display_s == pytest.approx(tick.safety_gate.bounded_headway_s)
+    assert tick.advisory.headway_target_s == pytest.approx(tick.safety_gate.proposed_headway_s)
+    assert tick.advisory.headway_target_s != tick.advisory.headway_display_s
+    record = tick.to_record()
+    assert record["advisory"]["headway_target_s"] == pytest.approx(tick.safety_gate.proposed_headway_s)
+    assert record["advisory"]["headway_display_s"] == pytest.approx(tick.safety_gate.bounded_headway_s)

@@ -60,6 +60,11 @@ class Advisory:
     recommended_speed_display: float
     current_speed_display: float
     units: str
+    #: The RAW decoded headway target. Decision 2: this must keep meaning
+    #: "what set_target_headway feeds back into the next observation", so
+    #: it always matches what the policy was trained against, never what
+    #: the safety gate bounded it to -- see `headway_display_s` below for
+    #: the number actually shown to the driver.
     headway_target_s: float
     lane_text: str
     merge_text: str
@@ -72,12 +77,27 @@ class Advisory:
     #: not a cruising target and a display should not present it as one.
     #: False by default so every existing construction site is unaffected.
     speed_display_withheld: bool = False
+    #: validator round 1, F8/Fix 9: the headway actually DISPLAYED to the
+    #: driver, which the safety gate may have bounded (`create_gap`'s merge
+    #: headway bonus, applied unconditionally in `apply_safety_layer`).
+    #: ARCHITECTURE.md sec 6.1 says "the gate bounds what the driver is
+    #: shown", already true for `recommended_speed_mps`/`lane_text`; before
+    #: this fix the displayed headway was still the raw, unbounded one.
+    #: `None` here means "not yet bounded by a gate" and `__post_init__`
+    #: defaults it to `headway_target_s`, so `AdvisoryDecoder.decode`'s raw
+    #: output (every existing construction site) is unaffected until
+    #: `pipeline.step` overwrites it with `gate_result.bounded_headway_s`.
+    headway_display_s: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.headway_display_s is None:
+            self.headway_display_s = self.headway_target_s
 
     def one_line(self) -> str:
         return (
             f"rec {self.recommended_speed_display:5.1f} {self.units} | "
             f"cur {self.current_speed_display:5.1f} {self.units} | "
-            f"{self.lane_text} | headway {self.headway_target_s:.1f}s | "
+            f"{self.lane_text} | headway {self.headway_display_s:.1f}s | "
             f"traffic {self.traffic_text} | conf {self.confidence_label}"
         )
 

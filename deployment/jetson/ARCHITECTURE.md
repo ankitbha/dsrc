@@ -207,8 +207,22 @@ twelve rules is evaluated as a total, independent predicate for the
 per-tick `safety` record (`Tick.to_record()`, beside `advisory`), never
 short-circuited by chain position the way `apply_safety_layer`'s own
 elif-driven lane decision is -- the two are cross-checked
-(`tests/test_safety_gate_pipeline.py`) to agree on which rule's reason a
+(`tests/test_safety_gate.py`) to agree on which rule's reason a
 masked lane action actually carries.
+
+**A not_evaluable rule changes nothing in the decision, not only in the
+record (validator round 1, F1).** `apply_safety_layer` runs against
+`SafetyInputs.inert_context()`, not the raw observed context: every field
+lacking evidence this tick is replaced by its `INERT_CONTEXT_VALUES` entry
+(`policy/safety_gate.py`, beside `RULE_READS`) before it reaches the
+decision, so a not_evaluable rule cannot move the recommended speed, the
+lane action or `emergency_override` by reading the observation's own
+substituted default -- `local_density_veh_per_km`'s substituted `0.0` was
+the reproduced case: below the uncongested threshold, the opposite of
+inert, and it used to raise the recommended speed 20.0 -> 22.0 with every
+one of the twelve rules not_evaluable. `evaluate_rules`'s own census
+(above) keeps reading the unmodified context, so the record still says
+what was actually observed.
 
 **The one behavioral change this rig cannot avoid.** Three lane guards
 (`target_lane_rear_gap`, `target_lane_rear_ttc`, `target_lane_rear_braking`)
@@ -219,10 +233,20 @@ no lane index but the assumed one. `config.yaml`'s
 `safety.withhold_lane_when_not_evaluable` (default `true`) withholds the
 lane/merge advisory outright whenever any of the eight is not_evaluable,
 rather than showing "Prepare left (if safe)" backed by a guard that was
-never checked; `false` restores the previous display and is the rollback
-mechanism. `deployment/jetson/score_safety.py` measures the resulting
-per-rule evaluability census against recorded runs and refuses to print a
-firing rate for a rule evaluable on zero ticks.
+never checked; `false` shows it anyway. **This flag covers the lane/merge
+action only** -- it does not touch the recommended speed or headway, and
+it is not a way to disable the gate (validator round 1, F2: it was wrongly
+documented here, in `config.yaml` and in the plan as though it were).
+`safety.enabled` (default `true`; validator round 1, Fix 3) is the actual
+rollback for the whole gate: `false` still runs the full census and writes
+the complete record, but `bounded_*` equals `proposed_*` exactly -- speed,
+headway and lane action -- and nothing is withheld.
+`deployment/jetson/score_safety.py` measures the resulting per-rule
+evaluability census against recorded runs, refuses to print a firing rate
+for a rule evaluable on zero ticks, and replays each run under its OWN
+recorded `safety.config` rather than this tool's own defaults (validator
+round 1, F3/F4) -- refusing, and naming the missing key, for a run
+recorded before that config block existed.
 
 ## 7. Deviations from plan_deployment.md (and why)
 

@@ -30,6 +30,7 @@ from policy.advisory import (
     Advisory,
     AdvisoryDecoder,
     GATED_LANE_TEXT,
+    MERGE_TEXT,
     SegmentAdvisory,
     SegmentAdvisoryDecoder,
 )
@@ -178,6 +179,11 @@ class Tick:
                 "recommended_speed_display": round(self.advisory.recommended_speed_display, 1),
                 "units": self.advisory.units,
                 "headway_target_s": self.advisory.headway_target_s,
+                # validator round 1, F8: the headway actually shown to the
+                # driver (the gate's bounded value), kept apart from
+                # headway_target_s above, which must stay the raw value fed
+                # back into set_target_headway.
+                "headway_display_s": self.advisory.headway_display_s,
                 "lane_text": self.advisory.lane_text,
                 "merge_text": self.advisory.merge_text,
                 "confidence_label": self.advisory.confidence_label,
@@ -283,6 +289,7 @@ class PerceptionPolicyPipeline:
         dsrc_decision_interval_s: float = DECISION_INTERVAL_S,
         safety_constraints: SafetyConstraints | None = None,
         withhold_lane_when_not_evaluable: bool = True,
+        safety_enabled: bool = True,
     ) -> None:
         self.detector = detector
         self.tracker = tracker
@@ -298,6 +305,12 @@ class PerceptionPolicyPipeline:
         # has somewhere to write.
         self.safety_constraints = safety_constraints or SafetyConstraints()
         self.withhold_lane_when_not_evaluable = withhold_lane_when_not_evaluable
+        #: validator round 1, F2/Fix 3: the actual rollback for the whole
+        #: gate (withhold_lane_when_not_evaluable above covers only the
+        #: lane/merge action). False and run_safety_gate skips
+        #: apply_safety_layer entirely -- bounded_* equals proposed_*
+        #: exactly -- while the census still runs and is still recorded.
+        self.safety_enabled = safety_enabled
         self._safety_state = SafetyState()
         # All three or none: a DsrcRuntime with nowhere to put its state, or
         # a builder with no runtime to hand it to, is a half-wired feature
@@ -406,6 +419,7 @@ class PerceptionPolicyPipeline:
         gate_result: SafetyGateResult = run_safety_gate(
             policy_out.action, safety_inputs, self._safety_state, self.safety_constraints,
             withhold_lane_when_not_evaluable=self.withhold_lane_when_not_evaluable,
+            enabled=self.safety_enabled,
         )
         # advisory.recommended_speed_mps/display and lane_text are overwritten
         # to the BOUNDED values -- decision 2: this field continues to mean
@@ -414,12 +428,30 @@ class PerceptionPolicyPipeline:
         # deliberately left untouched: set_target_headway below must keep
         # feeding back the RAW decoded headway, matching what the policy was
         # trained against, not what the gate bounded it to.
+        #
+        # validator round 1, Fix 8 (F9): merge_text is decoded from the
+        # policy's raw merge_mode and is not itself one of the twelve rules,
+        # so it survives lane withholding untouched unless overwritten here.
+        # Decision 3 withholds "the lane and merge action" as a unit; when
+        # the lane action is withheld for not_evaluable guards
+        # (gate_result.lane_withheld is not None), merge_text is reset to
+        # its normal value so "Creating merge gap" cannot be shown beside a
+        # lane_text that already reads "Keep lane" for the same reason.
+        #
+        # validator round 1, Fix 9 (F8): headway_display_s is the bounded
+        # headway (ARCHITECTURE.md sec 6.1: "the gate bounds what the driver
+        # is shown", already true for speed and lane) -- headway_target_s
+        # above is NOT touched, and set_target_headway below keeps feeding
+        # it back raw.
+        merge_text = MERGE_TEXT["normal"] if gate_result.lane_withheld is not None else advisory.merge_text
         advisory = replace(
             advisory,
             recommended_speed_mps=gate_result.bounded_speed_mps,
             recommended_speed_display=self.advisory_decoder.display(gate_result.bounded_speed_mps),
             lane_text=GATED_LANE_TEXT[gate_result.bounded_lane_action],
+            merge_text=merge_text,
             speed_display_withheld=gate_result.emergency_override,
+            headway_display_s=gate_result.bounded_headway_s,
         )
         t3c = time.monotonic()
 

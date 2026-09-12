@@ -117,7 +117,10 @@ def render_dashboard(
     put(f"Current:     {adv.current_speed_display:5.0f} {adv.units}", WHITE, 0.8, 38, 2)
     put(f"Lane:    {adv.lane_text}", YELLOW, 0.55, 26)
     put(f"Merge:   {adv.merge_text}", WHITE, 0.5, 24)
-    put(f"Headway: {adv.headway_target_s:.1f} s target", WHITE, 0.5, 28)
+    # validator round 1, F8: the bounded headway (what the gate actually
+    # shows the driver), not headway_target_s (the raw value fed back into
+    # set_target_headway).
+    put(f"Headway: {adv.headway_display_s:.1f} s target", WHITE, 0.5, 28)
     y += 4
     put(f"Traffic: {adv.traffic_text}   vehicles: {obs['active_vehicle_count_local']}", WHITE, 0.5, 24)
     lg = obs["leader_gap"]

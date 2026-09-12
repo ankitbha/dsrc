@@ -89,10 +89,18 @@ safety:
   # plan_task144 decision 3: the lane/merge advisory is withheld outright
   # whenever any of its eight guard rules could not be evaluated this tick
   # (no rear camera on this rig means three of them never can be). true is
-  # the new, safer behavior; false restores the PREVIOUS one -- showing
-  # lane_text for a guard that was never checked -- and is the rollback
-  # mechanism if this default is not what the user wants.
+  # the new, safer behavior; false shows lane_text for a guard that was
+  # never checked. Covers the lane/merge action ONLY -- it does not change
+  # the recommended speed or headway.
+  # validator round 1 (F2): this flag was wrongly documented here as the
+  # rollback mechanism for the whole gate. It never was -- `enabled` below
+  # is.
   withhold_lane_when_not_evaluable: true
+  # validator round 1 (F2/Fix 3): the actual rollback mechanism. false still
+  # runs the full per-rule census and writes the complete record, but
+  # bounded_* equals proposed_* exactly -- speed, headway AND lane action --
+  # and nothing is withheld.
+  enabled: true
 
 v2v:
   enabled: false                     # optional UDP cooperation beacons (2+ units)

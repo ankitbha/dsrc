@@ -1153,14 +1153,24 @@ def gps_record_from_fix(fix: Any, t_capture_mono_ns: int) -> GpsRecord:
 
 
 def advisory_message_from_advisory(advisory: Any, t_capture_mono_ns: int) -> AdvisoryMessage:
-    """An AdvisoryMessage from anything shaped like policy.advisory.Advisory."""
+    """An AdvisoryMessage from anything shaped like policy.advisory.Advisory.
+
+    Wire field `headway_target_s` carries `advisory.headway_display_s`, not
+    `advisory.headway_target_s` (validator round 1, F8/Fix 9): the wire
+    field's NAME is unchanged (a protocol change, unlike this), but its
+    MEANING already is "what the driver is shown" for `rec_speed_mps` and
+    `lane_text` above -- `headway_display_s` is the gate's bounded value,
+    the same principle applied to headway. `advisory.headway_target_s`
+    itself stays the raw value fed back into `set_target_headway` and is
+    never put on the wire.
+    """
     return AdvisoryMessage(
         t_capture_mono_ns=int(t_capture_mono_ns),
         rec_speed_mps=float(advisory.recommended_speed_mps),
         rec_speed_display=float(advisory.recommended_speed_display),
         current_speed_display=float(advisory.current_speed_display),
         units=str(advisory.units),
-        headway_target_s=float(advisory.headway_target_s),
+        headway_target_s=float(advisory.headway_display_s),
         lane_text=str(advisory.lane_text),
         merge_text=str(advisory.merge_text),
         traffic_text=str(advisory.traffic_text),
