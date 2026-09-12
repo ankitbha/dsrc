@@ -1051,6 +1051,15 @@ def test_lane_changes_per_km_missing_count_branch_ignores_unconsulted_distances_
     every one of this rule's three fields is class (C) today, so no
     observation the builder can produce carries this exact mix; built by
     hand for that reason.
+
+    A pin on the function alone is not a pin on its use (this project has
+    hit that exact shape before: an AST wiring test that passed with its
+    own call site wrapped in `if False:`) -- so this also runs the
+    fixture through `run_safety_gate` and checks the CENSUS `status`, not
+    only the private function's return value. `lane_changes_last_km=5`
+    exceeds the default `max_lane_changes_per_km` (2.0), so this also
+    doubles as confirmation that the rule can genuinely fire once
+    evidenced.
     """
     inputs = _inputs_with_overrides(lane_changes_last_km=5)
     fields = dict(inputs.fields)
@@ -1060,6 +1069,11 @@ def test_lane_changes_per_km_missing_count_branch_ignores_unconsulted_distances_
     inputs = SafetyInputs(fields=fields)
     assert _lane_changes_per_km_missing(inputs) == ()
 
+    result = run_safety_gate(
+        action(lane_preference="prefer_left_if_safe"), inputs, SafetyState(), SafetyConstraints(),
+    )
+    assert result.rules["lane_changes_per_km"].status == RULE_FIRED
+
 
 def test_lane_changes_per_km_missing_window_branch_ignores_unconsulted_count_evidence() -> None:
     """The reverse: lane_change_distances_m and absolute_distance_m both
@@ -1067,6 +1081,9 @@ def test_lane_changes_per_km_missing_window_branch_ignores_unconsulted_count_evi
     window branch never reads lane_changes_last_km, so the branch-aware
     rule reads () regardless of its evidence; the generic rule would read
     (lane_changes_last_km,) at minimum.
+
+    Also checked through `run_safety_gate`'s own census, not only the
+    private function -- see the note on the sibling test above.
     """
     inputs = _inputs_with_overrides(lane_change_distances_m=(10.0, 20.0, 30.0), absolute_distance_m=40.0)
     fields = dict(inputs.fields)
@@ -1076,6 +1093,11 @@ def test_lane_changes_per_km_missing_window_branch_ignores_unconsulted_count_evi
     inputs = SafetyInputs(fields=fields)
     assert _lane_changes_per_km_missing(inputs) == ()
 
+    result = run_safety_gate(
+        action(lane_preference="prefer_left_if_safe"), inputs, SafetyState(), SafetyConstraints(),
+    )
+    assert result.rules["lane_changes_per_km"].status == RULE_FIRED
+
 
 def test_lane_changes_per_km_missing_disagrees_with_the_generic_rule() -> None:
     """Confirms the two tests above actually discriminate: reverts
@@ -1083,8 +1105,12 @@ def test_lane_changes_per_km_missing_disagrees_with_the_generic_rule() -> None:
     (`policy.sensing_controller`-style "every RULE_READS field must be
     evidence") inline, against the exact fixtures above, and checks the
     generic rule reports each one NOT_EVALUABLE where the branch-aware
-    rule reports evaluable. A test that only checks the fixed function
-    proves nothing about whether an unfixed one would have been caught.
+    rule reports evaluable -- through `run_safety_gate`'s own census
+    status, since a pin on the private function alone is not a pin on
+    whether anything still calls it (confirmed separately: reverting the
+    call site inside `_evaluate_one_rule` back to the generic rule left
+    every earlier version of these three tests green, because none of
+    them checked past the private function's own return value).
     """
     def generic_missing(inputs: SafetyInputs) -> tuple[str, ...]:
         return tuple(f for f in RULE_READS["lane_changes_per_km"] if not inputs.is_evidence(f))
@@ -1097,6 +1123,13 @@ def test_lane_changes_per_km_missing_disagrees_with_the_generic_rule() -> None:
     count_inputs = SafetyInputs(fields=fields)
     assert _lane_changes_per_km_missing(count_inputs) == ()
     assert generic_missing(count_inputs) != ()
+    result = run_safety_gate(
+        action(lane_preference="prefer_left_if_safe"), count_inputs, SafetyState(), SafetyConstraints(),
+    )
+    assert result.rules["lane_changes_per_km"].status == RULE_FIRED, (
+        "the branch-aware rule must read this evaluable (and fired); the generic rule "
+        "would have read it not_evaluable from the same inputs"
+    )
 
     window_inputs = _inputs_with_overrides(lane_change_distances_m=(10.0, 20.0, 30.0), absolute_distance_m=40.0)
     fields2 = dict(window_inputs.fields)
@@ -1106,6 +1139,13 @@ def test_lane_changes_per_km_missing_disagrees_with_the_generic_rule() -> None:
     window_inputs = SafetyInputs(fields=fields2)
     assert _lane_changes_per_km_missing(window_inputs) == ()
     assert generic_missing(window_inputs) != ()
+    result = run_safety_gate(
+        action(lane_preference="prefer_left_if_safe"), window_inputs, SafetyState(), SafetyConstraints(),
+    )
+    assert result.rules["lane_changes_per_km"].status == RULE_FIRED, (
+        "the branch-aware rule must read this evaluable (and fired); the generic rule "
+        "would have read it not_evaluable from the same inputs"
+    )
 
 
 def test_forward_ttc_missing_leader_operative_not_critical_relative_speed_absent() -> None:

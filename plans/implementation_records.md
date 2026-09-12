@@ -3893,6 +3893,27 @@ would have failed is absent rather than wrong.
      count; the skip-count note earlier in this record explains the 24 vs. the plan's original
      28).
 
+     **`2ecff72`'s `lane_changes_per_km` pin still did not hold -- a third incomplete attempt
+     on the same refinement, and worth stating plainly rather than folding quietly into the
+     next fix.** The coordinator mutated both refinements' CALL SITES inside
+     `_evaluate_one_rule` (not the functions themselves) back to the generic rule: `forward_ttc`
+     caught it (4 tests failed by name); `lane_changes_per_km` did not (0 of the 3 tests written
+     for it failed). Cause: those three tests called `_lane_changes_per_km_missing` directly and
+     asserted only on its return value -- pinning the function's behaviour, never whether
+     anything still calls it. This project has hit exactly this shape before (an AST wiring test
+     that passed with its own call site wrapped in `if False:`), and it is the textbook form: **a
+     test that pins a function is not a test that pins its use.** `forward_ttc`'s tests did not
+     have this gap because each one also ran its fixture through `run_safety_gate` and asserted
+     on `result.rules["forward_ttc"].status` -- the census, not the private function.
+
+     Fixed by giving all three `lane_changes_per_km` tests the same second half: the hand-built
+     `SafetyInputs` already constructed is exactly what `run_safety_gate` needs, so each test now
+     also asserts `result.rules["lane_changes_per_km"].status == RULE_FIRED`. Verified the same
+     way as every other fix in this file, not assumed: temporarily renamed the `elif name ==
+     "lane_changes_per_km":` branch inside `_evaluate_one_rule` (falling through to the generic
+     `else` rule, exactly the coordinator's mutation) and confirmed all three tests now fail by
+     name; restored, confirmed all three pass again.
+
      **Commits** (branch `mainz-src-port`, each by explicit pathspec, never `git add -A`,
      never a bare `git commit`): `346fb9d` (F1 + Fix 2 + F2/Fix-3 infra, in
      `policy/safety_gate.py`), `2c660a8` (F3/F4/F5/F6, in `score_safety.py`), `e12e62c` (F5/F6,
@@ -3902,9 +3923,10 @@ would have failed is absent rather than wrong.
      `policy/safety_gate.py`), `dedd3c1` (round 2: `forward_ttc`/`lane_changes_per_km`
      evaluability corrected twice, `inert_state()`, R2-2, R2-1 record fixes), `2ecff72` (pinned
      both refinements against the surviving mutation with hand-built `SafetyInputs`, the
-     seven-unreachable-rules comment), and round 3 above (`policy/safety_gate.py`,
-     `tests/test_safety_gate.py`, this record), each committed separately so the deltas stay
-     legible.
+     seven-unreachable-rules comment -- incompletely, see above), `fce9651` (round 3:
+     `evaluate_rules` reasons about the same effective values `missing` did), and the
+     `lane_changes_per_km` pin strengthening above (`tests/test_safety_gate.py`, this record),
+     each committed separately so the deltas stay legible.
 
 145. **The rig cannot run the controller the paper is about.** Implemented 2026-09-12
      (implementer-145) against `plans/plan_task145_dsrc_policy_runtime.md`. The plan's
