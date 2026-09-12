@@ -20,14 +20,17 @@ import pytest
 from perception.detector import Detection
 from perception.distance import DistanceEstimator
 from perception.observation_builder import BuilderConfig, ObservationBuilder
+from perception.segment_state import DEFAULT_NETWORK_DEFINITION_PATH, SegmentStateBuilder
 from perception.tracker import IouTracker
 from pipeline import PerceptionPolicyPipeline
-from policy import sim_contract
+from policy import export_dsrc_policy, sim_contract
 from policy.actor_runtime import ActorRuntime
-from policy.advisory import AdvisoryDecoder
+from policy.advisory import AdvisoryDecoder, SegmentAdvisoryDecoder
+from policy.dsrc_runtime import DsrcRuntime
 from policy.export_policy import build_random, export
 from sensors.camera_stream import Frame
 from sensors.gps_reader import GpsFix
+from sensors.here_feed import HereFeed
 
 FX, CX, HORIZON, CAM_H = 800.0, 640.0, 360.0, 1.25
 
@@ -82,6 +85,33 @@ def pipeline(actor_bundle: str) -> PerceptionPolicyPipeline:
         builder=ObservationBuilder(BuilderConfig()),
         actor=ActorRuntime(actor_bundle),
         advisory_decoder=AdvisoryDecoder(units="mph"),
+    )
+
+
+@pytest.fixture(scope="module")
+def dsrc_bundle(tmp_path_factory) -> str:
+    definition = json.loads(DEFAULT_NETWORK_DEFINITION_PATH.read_text())
+    model, info = export_dsrc_policy.build_random(definition, seed=0)
+    prefix = str(tmp_path_factory.mktemp("dsrc_bundle") / "dsrc_policy")
+    export_dsrc_policy.export(model, info, definition, prefix)
+    return prefix
+
+
+@pytest.fixture
+def dsrc_pipeline(actor_bundle: str, dsrc_bundle: str) -> PerceptionPolicyPipeline:
+    return PerceptionPolicyPipeline(
+        detector=FakeDetector(),
+        tracker=IouTracker(min_hits=2),
+        distance=DistanceEstimator(
+            fx_px=FX, cx_px=CX, horizon_y_px=HORIZON, camera_height_m=CAM_H, ema_alpha=0.6
+        ),
+        builder=ObservationBuilder(BuilderConfig()),
+        actor=ActorRuntime(actor_bundle),
+        advisory_decoder=AdvisoryDecoder(units="mph"),
+        dsrc_runtime=DsrcRuntime(dsrc_bundle),
+        dsrc_segment_builder=SegmentStateBuilder(),
+        dsrc_advisory_decoder=SegmentAdvisoryDecoder.from_network_definition(),
+        dsrc_decision_interval_s=60.0,
     )
 
 
@@ -157,13 +187,113 @@ def test_stage_timings_recorded(pipeline) -> None:
 ALL_STAGE_KEYS = {
     "capture", "capture_to_encode_start", "encode", "encode_done_to_enqueue",
     "enqueue_to_wire", "transport", "jpeg_decode", "detect", "track", "fuse",
-    "infer", "decode",
+    "infer", "decode", "segment_assemble", "dsrc_infer",
 }
 
 
 def test_every_stage_key_is_present_on_a_local_camera_tick(pipeline) -> None:
     tick = run_ticks(pipeline, 3)
     assert set(tick.stages) == ALL_STAGE_KEYS
+
+
+# -- task 145: the DSRC path, wired but off by default -------------------------
+
+
+def test_a_pipeline_with_no_dsrc_runtime_reports_absent_with_a_reason(pipeline) -> None:
+    """The 39-field actor path is unaffected: no DsrcRuntime was given, so
+    both new stages are absent with a named reason and tick.dsrc is None."""
+    tick = run_ticks(pipeline, 1)
+    for key in ("segment_assemble", "dsrc_infer"):
+        assert tick.stages[key].basis == "absent"
+        assert tick.stages[key].reason == "dsrc runtime not configured"
+    assert tick.dsrc is None
+
+
+def test_dsrc_parts_must_be_given_together_or_not_at_all(actor_bundle) -> None:
+    with pytest.raises(ValueError):
+        PerceptionPolicyPipeline(
+            detector=FakeDetector(),
+            tracker=IouTracker(min_hits=2),
+            distance=DistanceEstimator(
+                fx_px=FX, cx_px=CX, horizon_y_px=HORIZON, camera_height_m=CAM_H, ema_alpha=0.6
+            ),
+            builder=ObservationBuilder(BuilderConfig()),
+            actor=ActorRuntime(actor_bundle),
+            advisory_decoder=AdvisoryDecoder(units="mph"),
+            dsrc_runtime=object(),  # the other two dsrc_* kwargs are still None
+        )
+
+
+def _dsrc_tick(dsrc_pipeline, t_mono: float, here_feed_source=None):
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    frame = Frame(image=image, frame_id=0, t_mono=t_mono, t_wall=time.time())
+    fix = GpsFix(
+        valid=True, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+        fix_quality=1, num_sats=9, hdop=0.9, altitude_m=3.0,
+        utc_epoch_s=time.time(), t_mono=t_mono, t_wall=time.time(),
+    )
+    return dsrc_pipeline.step(
+        frame, fix, detections_override=scene_detections(0.0), here_feed_source=here_feed_source,
+    )
+
+
+def test_the_first_tick_runs_a_dsrc_decision(dsrc_pipeline) -> None:
+    tick = _dsrc_tick(dsrc_pipeline, time.monotonic() - 0.01)
+    assert tick.stages["segment_assemble"].basis == "measured"
+    assert tick.stages["dsrc_infer"].basis == "measured"
+    assert tick.dsrc is not None
+    # No HereFeed source was given, so there is nothing to match against --
+    # a real, measured attempt that found no coverage, not a silent gap.
+    assert tick.dsrc.outcome == "no_response_yet"
+    assert tick.dsrc.rows == ()
+
+
+def test_a_second_tick_inside_the_decision_interval_holds_the_first(dsrc_pipeline) -> None:
+    now = time.monotonic() - 0.01
+    first = _dsrc_tick(dsrc_pipeline, now)
+    second = _dsrc_tick(dsrc_pipeline, now + 0.001)
+
+    assert second.stages["segment_assemble"].basis == "absent"
+    assert second.stages["segment_assemble"].reason == "no dsrc decision this tick"
+    assert second.stages["dsrc_infer"].basis == "absent"
+    assert second.dsrc is first.dsrc  # the exact held-over object, not a fresh copy
+
+
+def test_full_coverage_through_a_real_here_feed_produces_an_advisory(dsrc_pipeline) -> None:
+    """A HereFeed carrying one link near every Mainz segment's own synthetic
+    polyline (specs/dsrc_network_mainz.json's own anchor) drives a full
+    decision end to end: assembly, inference and decode."""
+    feed = HereFeed()
+    definition = json.loads(DEFAULT_NETWORK_DEFINITION_PATH.read_text())
+    bodies = []
+    for segment in definition["segments"]:
+        lat, lon = segment["edges"][0]["polyline"][0]
+        bodies.append({
+            "location": {
+                "length": 200.0,
+                "shape": {"links": [{"points": [
+                    {"lat": lat, "lng": lon},
+                    {"lat": lat, "lng": lon + 0.0005},
+                ]}]},
+            },
+            "currentFlow": {"speed": 15.0, "freeFlow": 16.67, "jamFactor": 3.0, "confidence": 0.9},
+        })
+    body = json.dumps({"results": bodies}).encode("utf-8")
+    t_mono = time.monotonic() - 0.01
+    feed.offer(status=200, body=body, received_t_mono=t_mono)
+
+    tick = _dsrc_tick(dsrc_pipeline, t_mono, here_feed_source=feed)
+
+    assert tick.stages["segment_assemble"].basis == "measured"
+    assert tick.stages["dsrc_infer"].basis == "measured"
+    assert tick.dsrc.outcome == "ok"
+    assert len(tick.dsrc.rows) == 12
+    # ego_segment is a separate, independent match (the fix against segment
+    # polylines) from segment coverage (links against segment polylines);
+    # this fix sits at the network's bounding-box centre, which need not be
+    # on any edge, so ego_segment being None here is not itself a defect --
+    # see test_advisory.py's TestEgoSegment for that matching logic in
+    # isolation, on geometry constructed to actually be near a segment.
 
 
 def test_a_local_camera_reports_capture_as_an_instant_on_its_own_clock(pipeline) -> None:

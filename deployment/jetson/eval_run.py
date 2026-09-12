@@ -450,7 +450,7 @@ def fmt_row(name: str, s: dict[str, float]) -> str:
 STAGE_ORDER = (
     "capture", "capture_to_encode_start", "encode", "encode_done_to_enqueue",
     "enqueue_to_wire", "transport", "jpeg_decode", "detect", "track", "fuse",
-    "infer", "decode", "return", "render",
+    "infer", "decode", "segment_assemble", "dsrc_infer", "return", "render",
 )
 
 

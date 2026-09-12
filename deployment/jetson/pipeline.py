@@ -23,17 +23,27 @@ import numpy as np
 from perception.detector import Detection
 from perception.distance import DistanceEstimator, TrackedVehicle
 from perception.observation_builder import ObservationBuilder, ObservationResult, PeerState
+from perception.segment_state import SegmentStateBuilder
 from perception.tracker import IouTracker
 from policy.actor_runtime import ActorRuntime, PolicyOutput
-from policy.advisory import Advisory, AdvisoryDecoder
+from policy.advisory import Advisory, AdvisoryDecoder, SegmentAdvisory, SegmentAdvisoryDecoder
+from policy.dsrc_contract import DECISION_INTERVAL_S
+from policy.dsrc_runtime import DsrcRuntime
 from sensors.camera_stream import Frame
 from sensors.gps_reader import GpsFix
+from sensors.here_feed import FlowReading, HereFeed, Outcome
 from sensors.time_sync import StageTiming, capture_stamp_ns
 
 #: Why a phone-side stage is absent on a tick with no phone behind it. Named
 #: once rather than restated at each of the five stages a local camera has
 #: none of, so the reason string cannot drift between them.
 NO_PHONE_STAGES_REASON = "no phone behind this frame; captured locally"
+
+#: Why segment_assemble/dsrc_infer carry no number: the two rules that gate
+#: them (task 145). Named once so the reason string cannot drift between
+#: the two call sites that use it.
+NO_DSRC_RUNTIME_REASON = "dsrc runtime not configured"
+NO_DSRC_DECISION_REASON = "no dsrc decision this tick"
 
 
 class RollingStats:
@@ -99,6 +109,12 @@ class Tick:
     #: `return` and `render` are not here: they are facts only the phone
     #: witnesses, joined in offline by `eval_run.py --phone-log`.
     stages: dict[str, StageTiming] = field(default_factory=dict)
+    #: The task-145 whole-network advisory, held over from whichever tick
+    #: last ran a DSRC decision (`segment_assemble`/`dsrc_infer` in `stages`
+    #: say whether THIS tick was the one that ran it). `None` when no
+    #: DsrcRuntime was configured for this pipeline at all, which is the
+    #: default -- this field changes nothing about the 39-field actor path.
+    dsrc: SegmentAdvisory | None = None
 
     def to_record(self) -> dict[str, Any]:
         """JSON-able log record (uses Python JSON's Infinity literal for inf)."""
@@ -163,6 +179,20 @@ class Tick:
                 "hdop": self.gps.hdop if math.isfinite(self.gps.hdop) else None,
             },
             "n_peers": self.n_peers,
+            "dsrc": None if self.dsrc is None else {
+                "units": self.dsrc.units,
+                "outcome": self.dsrc.outcome,
+                "ego_segment": self.dsrc.ego_segment,
+                "rows": [
+                    {
+                        "segment_id": row.segment_id,
+                        "action_index": row.action_index,
+                        "fraction": row.fraction,
+                        "recommended_speed_display": round(row.recommended_speed_display, 1),
+                    }
+                    for row in self.dsrc.rows
+                ],
+            },
         }
 
 
@@ -214,6 +244,11 @@ class PerceptionPolicyPipeline:
         builder: ObservationBuilder,
         actor: ActorRuntime,
         advisory_decoder: AdvisoryDecoder,
+        *,
+        dsrc_runtime: DsrcRuntime | None = None,
+        dsrc_segment_builder: SegmentStateBuilder | None = None,
+        dsrc_advisory_decoder: SegmentAdvisoryDecoder | None = None,
+        dsrc_decision_interval_s: float = DECISION_INTERVAL_S,
     ) -> None:
         self.detector = detector
         self.tracker = tracker
@@ -221,6 +256,21 @@ class PerceptionPolicyPipeline:
         self.builder = builder
         self.actor = actor
         self.advisory_decoder = advisory_decoder
+        # All three or none: a DsrcRuntime with nowhere to put its state, or
+        # a builder with no runtime to hand it to, is a half-wired feature
+        # that would fail confusingly later rather than obviously now.
+        dsrc_parts = (dsrc_runtime, dsrc_segment_builder, dsrc_advisory_decoder)
+        if any(p is not None for p in dsrc_parts) and any(p is None for p in dsrc_parts):
+            raise ValueError(
+                "dsrc_runtime, dsrc_segment_builder and dsrc_advisory_decoder must be "
+                "given together or not at all"
+            )
+        self.dsrc_runtime = dsrc_runtime
+        self.dsrc_segment_builder = dsrc_segment_builder
+        self.dsrc_advisory_decoder = dsrc_advisory_decoder
+        self.dsrc_decision_interval_s = dsrc_decision_interval_s
+        self._dsrc_last_decision_mono: float | None = None
+        self._dsrc_last_advisory: SegmentAdvisory | None = None
         self.stats = PipelineStats()
         self._tick_counter = 0
         self._last_step_mono: float | None = None
@@ -234,6 +284,7 @@ class PerceptionPolicyPipeline:
         detections_override: list[Detection] | None = None,
         run_detector_with_override: bool = False,
         feed: Any = None,
+        here_feed_source: HereFeed | None = None,
     ) -> Tick:
         """One tick. `feed` is the traffic reading this tick asked for, or None.
 
@@ -245,6 +296,13 @@ class PerceptionPolicyPipeline:
         ingestion path -- parse, associate, age, publish -- terminated in a log
         record. `Trigger.DISAGREEMENT`, one of the controller's three raise rules,
         could not fire on any drive.
+
+        `here_feed_source` is a SEPARATE, whole-snapshot question from `feed`:
+        `feed` is one link, ahead of THIS vehicle, for the 39-field actor's
+        cooperation block; `here_feed_source` (when given) is the `HereFeed`
+        object itself, so the DSRC path can ask its own question -- every
+        usable link in the network, on its own 60 s cadence -- through
+        `HereFeed.snapshot_links` rather than through `at()`.
         """
         t0 = time.monotonic()
         if detections_override is None:
@@ -318,6 +376,12 @@ class PerceptionPolicyPipeline:
         self.stats.infer.add(infer_ms)
         self.stats.decode.add(decode_ms)
 
+        segment_assemble_stage, dsrc_infer_stage, dsrc_advisory = self._dsrc_step(
+            here_feed_source, gps, t_now_mono=time.monotonic(),
+        )
+        stages["segment_assemble"] = segment_assemble_stage
+        stages["dsrc_infer"] = dsrc_infer_stage
+
         if self._last_step_mono is not None:
             dt = t4 - self._last_step_mono
             if dt > 0:
@@ -344,9 +408,71 @@ class PerceptionPolicyPipeline:
             gps=gps,
             n_peers=len(peers) if peers else 0,
             stages=stages,
+            dsrc=dsrc_advisory,
         )
         self._tick_counter += 1
         return tick
+
+    def _dsrc_step(
+        self, here_feed_source: HereFeed | None, gps: GpsFix, *, t_now_mono: float,
+    ) -> tuple[StageTiming, StageTiming, SegmentAdvisory | None]:
+        """The task-145 whole-network decision, on its own cadence.
+
+        Runs `SegmentStateBuilder.build` and `DsrcRuntime.decide` only once
+        every `dsrc_decision_interval_s` (60 s by default -- the interval
+        the checkpoint was trained against, not the tick rate), and holds
+        the LAST decision's advisory in between (plan_task145 open item 1).
+        The two stage entries are `absent` with a named reason on every tick
+        that did not run the decision, rather than a suspiciously-fast
+        `measured` value for work that did not happen -- the same
+        discipline `StageTiming.absent` already applies to `fuse` and the
+        phone-side stages above.
+        """
+        if self.dsrc_runtime is None:
+            reason = NO_DSRC_RUNTIME_REASON
+            return (
+                StageTiming.absent(clock="jetson", reason=reason),
+                StageTiming.absent(clock="jetson", reason=reason),
+                None,
+            )
+
+        due = (
+            self._dsrc_last_decision_mono is None
+            or (t_now_mono - self._dsrc_last_decision_mono) >= self.dsrc_decision_interval_s
+        )
+        if not due:
+            return (
+                StageTiming.absent(clock="jetson", reason=NO_DSRC_DECISION_REASON),
+                StageTiming.absent(clock="jetson", reason=NO_DSRC_DECISION_REASON),
+                self._dsrc_last_advisory,
+            )
+
+        self._dsrc_last_decision_mono = t_now_mono
+        if here_feed_source is None:
+            links: tuple = ()
+            reading = FlowReading(
+                outcome=Outcome.NO_RESPONSE_YET, detail="no traffic feed source this tick",
+            )
+        else:
+            links, reading = here_feed_source.snapshot_links(t_now_mono)
+
+        t0 = time.monotonic()
+        segment_state = self.dsrc_segment_builder.build(links, reading, t_now_mono)
+        t1 = time.monotonic()
+        decision = self.dsrc_runtime.decide(segment_state)
+        t2 = time.monotonic()
+        advisory = self.dsrc_advisory_decoder.decode(
+            decision,
+            ego_lat=gps.lat if gps.valid else None,
+            ego_lon=gps.lon if gps.valid else None,
+        )
+        self._dsrc_last_advisory = advisory
+
+        return (
+            StageTiming.measured((t1 - t0) * 1000.0, clock="jetson"),
+            StageTiming.measured((t2 - t1) * 1000.0, clock="jetson"),
+            advisory,
+        )
 
     def _stages(
         self, frame: Frame, *, stage_ms: dict[str, float], infer_ms: float, decode_ms: float,
