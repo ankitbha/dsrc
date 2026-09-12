@@ -83,6 +83,121 @@ separately -- a 90-degree frame rotation that explains every zero-detection driv
 project, frames being discarded so the drive could not explain itself, and the `severe`
 thermal tier ending a session rather than lowering rates.
 
+## What the system establishes beyond running
+
+Already measured, already recorded, and not yet used in the story.
+
+### The two clocks, and a guarantee that states its own error
+
+Two devices, two monotonic clocks. The discipline is that **no conversion returns a bare
+number**: a converted instant carries its error bound and the id of the estimate that
+produced it, so a cross-device timestamp cannot be mistaken for a same-device one, and
+below the gate it **raises** rather than answering with a widened bound.
+
+* **Loopback null case**, where one machine means the truth is zero: offset spread
+  **12 microseconds over 145 s**, fitted slope −0.05 ppm. The estimator invents no
+  structure where there is none.
+* **Real link, 330 s**: 357 exchanges, every one matched, **zero refused**, and all nine
+  outcome counters close against pings sent without subtracting anything. `rtt_min` p50
+  **14.8 ms**, bound p50 **8.0 ms**. Under full sensor load -- 10 Hz camera at 40 KB,
+  50 Hz IMU -- 218 exchanges with every channel on cadence.
+* **The instrument built to validate the premise was degenerate, and algebra caught it,
+  not a run.** Estimating the offset on each clock pair and differencing the slopes
+  cancels the quantity of interest: it returns `s_local − s_remote`, not the skew.
+  Confirmed rather than argued -- it reported **+12.06 ppm against an independently
+  measured slew difference of +12.00 ppm**.
+* What works needs no network: each device's own wall-minus-monotonic slew is exact.
+  **True monotonic skew −12.00 ppm against the 50 ppm assumed, a 4.2x margin.** The
+  estimator *fitted* −1.09 ppm while the truth was −12.00, so charging the fit's own
+  magnitude would have under-bounded the error by ten times.
+
+### The sim-to-real gap is quantified, and the headline is a negative
+
+Task 47 was worded "the observation vector produced live matches the simulator's sensing
+model field for field." **It is false, and that is the result.** It does not hold for 31
+of 39 slots and cannot -- six have no rear sensor on the device at all.
+
+| class | slots | meaning |
+|---|---|---|
+| identical | **8** | both sides compute the same thing the same way |
+| approximated | **18** | |
+| substituted | **7** | |
+| structurally absent | **6** | no sensor on the device |
+
+Every substituted or absent slot carries a provenance class on every scene, and across all
+three campaign drives there were **0 re-encode mismatches and 0 constant mismatches over
+2,684 ticks**. `observation_parity.py` is the first module to import both sensing models;
+before it, the test fed one hand-written dict to two encoders and compared their output,
+which could not have found this.
+
+### A telemetry vocabulary, and the limit of it
+
+Every instrumented quantity reports in a closed three-state vocabulary rather than a
+number: **measured, or converted with a stated bound, or absent with a named reason --
+never a zero.** Trigger attribution is **fired, quiet, or not evaluable with the missing
+inputs named**, with a reconstruction identity `_clamp(base x scale) == rates[k]`. Field
+provenance is a closed eleven-member vocabulary over all 39 encoder slots, and logs
+recorded before that work **refuse by name** rather than being scored against defaults.
+The session summary reports `answered of attempted` as two independently counted integers,
+with **no percentage anywhere and no scalar health field** -- a scalar is what a dashboard
+plots on its own, and once plotted the enumeration is gone.
+
+**And then the limit, which is the part worth writing.** An axis of the form
+`answered of attempted` is **blind by construction to an event that stops the attempting**.
+A 54.58 s link outage destroyed numerator and denominator together -- about 273 of roughly
+1,502 ticks, **18.2% of every denominator** -- and the summary reported `attempted = 1229`
+and called every axis fully answered. The vocabulary protects the numerator; nothing was
+watching the denominator.
+
+### What the failure inventory found before anything was built
+
+**186 failure conditions were already detected across the two devices. Four record when
+the failure happened. None records an episode** -- a second endpoint and an outcome.
+Several had no reader at all. Two were detected nowhere: the tick loop's no-frame branch
+counted nothing, so **a drive blind for 110 of 120 seconds wrote the artefact of one that
+was never blind**, and the worker was `try/finally` with no `except`, so an exception ran
+teardown and wrote a summary that read like a clean short run.
+
+### Shadow against live is verified through the wire, not in process
+
+Logged shadow decisions are compared against live commands **decoded through the real
+`rate_cmd` wire codec**, not through in-process objects. Three drives, 899/900/885 ticks:
+**0 command-replay mismatches**, and the phone's own applier counters read `applied == 0`
+with `shadowed == commands_sent` (37/38/38) -- the phone independently confirming it did
+not act. The check itself carried the same defect class it was built to catch: when the
+phone-side half *could not run*, it printed `ok=False` and **exited 0**.
+
+### The device cannot drift from what was trained
+
+The Jetson must not import the simulator stack, so `policy/sim_contract.py` vendors the
+field lists, scales, a numpy twin of the encoder, the action heads, the decoders and the
+neutral fallbacks, pinned to a named sim commit, and `export_policy.py` refuses dimension
+mismatches. That is what makes "the device runs what was trained" checkable rather than
+asserted.
+
+### Two design stances
+
+**Degrade, never die.** Missing GPS, no camera, no display and no trained checkpoint each
+have a defined degraded mode, because in-car debugging time is expensive.
+
+**Latest-value-wins on the hot path, no queues.** A frame never processed is dropped, a
+slow dashboard skips ticks, a stalled SD card drops log records: stale data is worse than
+missing data for a real-time advisory.
+
+### Scale
+
+| | |
+|---|---|
+| phone app | 17,837 lines of Kotlin |
+| Jetson runtime | 25,100 lines of Python, with **34,798 lines of tests** |
+| simulator | 11,012 lines, with 9,802 lines of tests |
+| specifications | 8 documents, 1,548 lines, including an **854-line wire protocol** |
+| suites | simulator 337 passing; Jetson 2,319 passing, 24 skipped |
+
+The transport carries eight channels with per-channel sequence numbers, priorities,
+overflow policies and depths, and `specs/transport_golden_frames.json` pins the wire
+format.
+
 ## What deployment cost, which is most of what there is to say
 
 Ankit: this is extremely important to talk about. The failures below are not incidental
