@@ -10,6 +10,7 @@ lives in `TestGoldenActions` at the bottom of this file, once
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -245,7 +246,21 @@ class TestGoldenActions:
 
     @pytest.fixture(scope="class")
     def golden(self):
-        return json.loads(GOLDEN_PATH.read_text())
+        golden = json.loads(GOLDEN_PATH.read_text())
+        # Neither population size was checked before: a regeneration with
+        # e.g. --random-states 100 would pass every test below while the
+        # file's own "random" block claims 20,000, and TEST_SEEDS producing
+        # a different episode count would do the same for "recorded".
+        assert len(golden["recorded"]) == 185, (
+            f"{GOLDEN_PATH} claims {len(golden['recorded'])} recorded "
+            "decisions, not 185 -- regenerated against different seeds?"
+        )
+        assert golden["random"]["count"] == 20_000, (
+            f"{GOLDEN_PATH} claims {golden['random']['count']} random "
+            "states, not 20,000 -- regenerated with a different "
+            "--random-states?"
+        )
+        return golden
 
     @pytest.fixture(scope="class")
     def runtime(self, tmp_path_factory, golden):
@@ -254,6 +269,18 @@ class TestGoldenActions:
         assert rt.manifest["network_fingerprint"] == golden["network_fingerprint"], (
             "the golden file and the freshly-exported bundle disagree on which "
             "network they describe -- regenerate one against the other"
+        )
+        # golden["checkpoint_sha256"] was stored and never checked: a
+        # divergence caused by a changed checkpoint would otherwise fail
+        # test_recorded_actions_and_q_values as "the runtime diverged",
+        # which names the wrong cause.
+        checkpoint_sha256 = hashlib.sha256(CHECKPOINT_PATH.read_bytes()).hexdigest()
+        assert golden["checkpoint_sha256"] == checkpoint_sha256, (
+            f"{GOLDEN_PATH}'s checkpoint_sha256 does not match "
+            f"{CHECKPOINT_PATH} -- the checkpoint changed since the golden "
+            "file was generated; regenerate it against the current one "
+            "before trusting a Q-value or action mismatch below as a "
+            "DsrcRuntime defect"
         )
         return rt
 
@@ -365,8 +392,28 @@ class TestTheDemonstrationHasBeenSeenToFail:
         these simulated states (no HERE response was ever collected over
         Mainz -- plan risk 4), so "an independent field" is modelled here as
         a value drawn independently of the recomputed formula, over HERE's
-        full 0-10 range, which upper-bounds how much a genuinely
-        uncorrelated field could move the outcome.
+        full 0-10 range.
+
+        This does NOT upper-bound how much a genuinely uncorrelated field
+        could move the outcome (an earlier version of this docstring
+        claimed that): a constant-0 substitution is equally uncorrelated
+        with the recomputed formula and moves 174/185, more than the
+        143/185 a uniform draw moves. What is reported below is the effect
+        of this one particular substitution -- U(0, 10) -- on this
+        checkpoint and these 185 states, nothing more general. Part of the
+        143/185 is not decorrelation at all: the substitute also displaces
+        the column's own location (the recorded jam_factor spans
+        [0.000, 7.540] with mean 2.128; the draw is U(0, 10) with mean
+        5.0), so this number conflates decorrelation with a location
+        shift.
+
+        The whole-network reading also redraws all 12 segments' jam_factor
+        at once, so "at least one of 12 segments' action differed" is a
+        much easier question to trigger than open item 2's own "how
+        sensitive is one segment's own reading" -- redrawing only segment
+        0's jam_factor and leaving the other 11 at their recorded values
+        (the single-segment reading below) is what a per-segment answer
+        to that item actually needs.
         """
         golden = json.loads(GOLDEN_PATH.read_text())
         bundle = _export_real_bundle(tmp_path_factory.mktemp("dsrc_control_3"))
@@ -389,16 +436,30 @@ class TestTheDemonstrationHasBeenSeenToFail:
             if not np.array_equal(original_action, altered_action):
                 decisions_changed += 1
 
+        rng_single = np.random.default_rng(2026)
+        single_segment_changed = 0
+        for case in golden["recorded"]:
+            state = _from_hex_f32(case["state_hex"])
+            original_action = runtime.act(state).actions
+
+            altered = state.copy()
+            altered[0, 2] = rng_single.uniform(0.0, 10.0)
+            altered_action = runtime.act(altered).actions
+
+            if not np.array_equal(original_action, altered_action):
+                single_segment_changed += 1
+
         n = len(golden["recorded"])
         print(
             f"\ncontrol 3: independent jam_factor changed "
-            f"{decisions_changed}/{n} recorded decisions (>=1 segment's action "
-            f"differed), {per_segment_changed}/{per_segment_total} individual "
-            f"per-segment actions"
+            f"{decisions_changed}/{n} recorded decisions when redrawn for the "
+            f"whole network at once (>=1 segment's action differed), "
+            f"{per_segment_changed}/{per_segment_total} individual per-segment "
+            f"actions, {single_segment_changed}/{n} decisions when redrawn for "
+            f"segment 0 alone"
         )
-        # A measurement, not a threshold: the mechanism must run and produce
-        # a count in range, and in fact change at least one decision -- a
-        # sweep over jam_factor's whole valid range that changed NOTHING
-        # would mean this feature carries no information for this
-        # checkpoint, which would itself be worth reporting.
-        assert 0 <= decisions_changed <= n
+        # A measurement, not a threshold, but the mechanism must actually
+        # run: the validator replaced the perturbation with a no-op and
+        # this test printed 0/185 and still passed against the previous
+        # `assert 0 <= decisions_changed <= n`, which no count can fail.
+        assert decisions_changed > 0
