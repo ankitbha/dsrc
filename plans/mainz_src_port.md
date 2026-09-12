@@ -805,3 +805,55 @@ So the exit backpressure did what was asked of it -- the exit super-segment trac
 proper hill, peak 826 veh/h/lane at 17.0, falling 28%, loading and unloading agreeing to
 1% -- and that result is sound. It was the inference from it that was wrong: a link that
 traces a hill does not imply a network whose throughput can be recovered.
+
+## The fleet has no capacity drop, and that is the whole cause
+
+Measured directly rather than inferred. Served flow through a two-into-one lane drop,
+the restriction in place throughout, demand swept from below capacity to four times it:
+
+| offered veh/h | 900 | 1,100 | 1,300 | 1,600 | 2,000 | 2,800 | 3,600 |
+|---|---|---|---|---|---|---|---|
+| W99, the paper's calibration | 892 | 960 | 932 | 956 | 976 | 956 | 952 |
+| EIDM | 900 | 1,116 | 1,260 | 1,596 | 2,012 | 1,792 | 1,900 |
+| **EIDM, 1 s reaction** | 896 | 1,116 | 1,252 | 1,600 | **2,064** | **1,536** | 1,560 |
+| IDM | 896 | 1,108 | 1,268 | 1,596 | 1,928 | 1,764 | 1,788 |
+| Krauss, sigma 0.9 | 892 | 1,104 | 1,288 | 1,596 | 1,596 | 1,608 | 1,600 |
+
+Under the paper's W99 the bottleneck serves a flat 930 to 976 veh/h whatever is offered.
+Adding start-up lost time does not change it: at `startupDelay` 0, 1 and 2 s the queued
+range is 936-957, 927-960 and 933-948 veh/h. Nor does reaction time on its own under
+W99, nor removing the restriction and releasing the queue.
+
+W99'S QUEUES DISCHARGE FASTER THAN FREE FLOW, which is the opposite of reality. A
+released W99 queue discharges at 1,980 veh/h against a free-flow capacity of 1,899, and
+the gap widens with reaction time: at a 2 s action step, free-flow capacity falls to
+1,604 while queue discharge stays at 1,920, so the queue is 19.7% FASTER. A discharging
+W99 platoon is perfectly regular at the model's tightest headway, where free-flowing
+traffic at capacity has spread in speeds and gaps. Real queue discharge is 5 to 20%
+BELOW free-flow capacity, from start-up lost time and bounded acceleration.
+
+That single fact explains every null in this leg. A bottleneck sets the LEVEL of
+throughput; it does not make throughput fall with density. So Mainz's three-lane exit
+link, `inverted_tree`'s merges, a lane drop on a straight road and a metered exit all
+behave identically: served flow is a constant, and no density-holding controller can
+recover a constant.
+
+### EIDM with a reaction time has one, and it is resolved
+
+Five seeds, two-standard-error bars, same lane drop:
+
+| offered veh/h | 1,600 | 1,800 | 2,000 | 2,200 | 2,600 | 3,000 | 3,600 |
+|---|---|---|---|---|---|---|---|
+| served | 1,603 | 1,798 | **2,018** | 1,668 | 1,602 | 1,619 | 1,595 |
+| +/- 2se | 10 | 29 | 26 | 161 | 42 | 98 | 91 |
+
+Free-flow capacity 2,018 veh/h/lane, queue discharge about 1,600, a fall of 423 veh/h or
+**21.0% against a combined bar of 95** -- resolved, not noise. Both numbers are also
+closer to reality than W99's: real single-lane capacity is 2,000 to 2,400 veh/h and real
+queue discharge 1,700 to 2,000, where W99 at CC1 = 2.5 gives 950.
+
+The cost is the paper's Appendix A calibration, which is its own transcription of what
+its Vissim runs used. Keeping it means keeping a fleet in which the mechanism the paper
+depends on does not exist. `carFollowModel="EIDM"` with `actionStepLength="1.0"` is
+SUMO's model for driver imperfection and reaction time, and its parameters here are
+defaults rather than anything calibrated, which is a provenance question of its own.
