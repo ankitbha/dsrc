@@ -1,110 +1,206 @@
 # Deploying self-regulating cars: the paper as Ankit has described it
 
 Ankit's positions, recorded as stated, with the measurements that bear on each attached
-underneath. Written so the argument can be picked up cold. The reasoning is his and the
-numbers are this repository's; the document carries no recommendations or judgements of
-mine. Open items are listed at the end as gaps in what has been measured, not as advice.
+underneath. The reasoning is his and the numbers are this repository's; the document
+carries no recommendations or judgements of mine.
 
-Per his standing instruction the earlier workshop paper is referred to but not drawn on;
-nothing of its content is reproduced here.
+Per his standing instruction the earlier workshop paper is referred to but not drawn on.
 
-## The one-line claim
+## The contribution
 
-A policy that is trained centrally can be executed by each vehicle independently, from
-what a traffic API already returns, and it loses nothing by it.
+**The deployed system.** In the task list's own words:
+
+> The contribution is the deployed system: the phone-plus-Jetson advisory rig, the
+> sampling controller, and the safety and etiquette filters. Those are what this project
+> built and what the paper argues for.
+
+Not the simulation, and not the observation result. A system was built and driven in a
+car, and that is the paper.
+
+## What was built
+
+```text
+  phone                    transport                  jetson
+  -----                    ---------                  ------
+  camera --+          network (dev) / USB (car)   +-- perception (TensorRT)
+  GPS -----+-- sensor frames ------------------>  +-- fusion (camera + HERE)
+  IMU -----+   (each at its own commanded rate)   +-- policy inference
+  HERE ----+                                      +-- advisory decode
+                                                  |
+  display <---- advisory --------------------------+
+  rate ctl <--- per-sensor rate commands ----------+-- sampling controller
+```
+
+Three pieces, and each is a claim:
+
+**The rig.** An ordinary Android phone and a Jetson Orin Nano, nothing purpose-built.
+The phone stays dumb -- it captures or queries at the rate it is told and forwards raw
+data -- and every interpretation, association and control decision is on the Jetson. The
+phone is tethered through a hotspot rather than carrying its own SIM, because the
+alternative was buying a plan for one experiment. Two backends for the link: Tailscale
+for development with the phone in hand, USB in the car.
+
+**The sampling controller.** Each sensor's rate is set in real time by the Jetson. Its
+binding costs are HERE API quota, thermal headroom and Jetson compute -- not energy,
+since both devices are powered from the car.
+
+**The safety and etiquette filters.** `src/safety/safety_layer.py`, `etiquette.py`,
+`constraints.py`. The advisory is bounded before it reaches the driver.
+
+**The cloud is observability, not control.** HERE supplies traffic state; nothing in the
+loop waits on a server.
+
+### Measured, on the device
+
+| | |
+|---|---|
+| Jetson end-to-end | p50 **19.8 ms**, p95 20.2 ms at 48.5 FPS |
+| detection | 17.7 ms, of which 3.9 ms is GPU |
+| tracking and distance | 1.1 ms |
+| observation and encode | 0.4 ms |
+| actor and advisory | 0.5 ms |
+| over USB, pooled across 2,684 ticks | p95 **116.19 ms** against a 200 ms target |
+| the same link over Tailscale | p95 215.63 ms |
+| the USB wire hop itself | about 2 ms; the run-to-run spread is phone-side queueing |
+
+## What was run
+
+**Eight drives, 2026-09-08, Westfield NJ**, on a OnePlus Nord N10 -- the Moto's cable
+failed and the app was installed on the Nord in the car, with the swap recorded
+automatically in `installed_apk.json`.
+
+* **Six shadow runs**, 17,948 ticks, 45.9 to 47.7 km.
+* **Two live runs**, 4,981 ticks, 40.7 to 42.4 km, the controller gating for real.
+* **First working GPS and first working HERE in the project.** Every bench run before had
+  `gps_hz 0.0` and `here=false`.
+* On the shakedown: 1,632 ticks, 279.5 s, 6.24 km, mean 22.9 m/s, GPS valid on 1,299 of
+  1,313 ticks, 4.69 Hz mean tick rate. Distance agrees to 0.01 km between integrating
+  reported speed and the great-circle path through the fixes, which is two independent
+  routes to one number.
+
+**The shakedown did what a shakedown is for: it broke.** Three defects, each filed
+separately -- a 90-degree frame rotation that explains every zero-detection drive in the
+project, frames being discarded so the drive could not explain itself, and the `severe`
+thermal tier ending a session rather than lowering rates.
+
+## What the drives are, and are not, asked to establish
+
+Ankit's boundary, and it is written into the task list rather than argued here:
+
+> One instrumented vehicle can never demonstrate throughput or delay. That is why the
+> flow-level half comes from simulation and the drives are never asked to support it. The
+> drives support the deployment claims and calibrate the sensing model.
+
+Explicitly out of scope for the drives: any traffic-flow effect, human compliance with the
+advisory, and anything fleet-level.
+
+**The drives feed the simulation back.** The sensing model's parameters were settled from
+them -- `latency_s` and `queue_speed_mps` from the drives, `range_m` from optics. The
+largest single correction: every training config carried `latency_s: 0.0` against the
+**96.7 ms median measured on the road**. A policy trained before that was trained against
+an observation model the paper would then have had to describe as wrong.
+
+## Why there is a simulation half at all
+
+Because one vehicle cannot show a flow effect, and the flow effect is the reason anyone
+would deploy this. The simulation carries the scale claim; the deployment carries
+feasibility.
+
+## What the simulation shows
+
+Mainz, EIDM fleet, three-into-two lane drop at the exit, sustained 4,500 veh/h. Seeds
+1-10 train, 11-15 select, 16-30 evaluate. 80 episodes, 100% penetration, paired on seed.
+
+| arm | flow veh/h | paired gain |
+|---|---|---|
+| the traffic-API observation | 3,765 | **+230 +/- 44** (+6.5%) |
+| SRC's original six features | 3,759 | +224 +/- 61 (+6.3%) |
+| no control | 3,535 | -- |
+
+Two things, in the order they matter for this paper:
+
+1. **SRC's controller reproduces in a second simulator.** It was shown in Vissim under
+   Wiedemann-99; here it is shown again in SUMO under EIDM, on the same network.
+2. **Restricting the observation to what a traffic API returns costs nothing.** The two
+   arms differ by 6 veh/h against bars of 44 and 61, which bounds the cost at under about
+   2% of baseline. This is what makes decentralized execution possible at all, and it is a
+   supporting result rather than the paper's point.
+
+### Why the observation question arises
+
+SRC's policy reads six per-super-segment fields, four of which come from vehicle-level
+ground truth no vehicle can obtain -- its `RL.py` computes the gap from each vehicle's
+`FollowDistGr` and the rates from set differences over vehicle ids a minute apart. A
+traffic API returns speed, free flow, jam factor, confidence and traversability. So a
+vehicle **cannot evaluate the published policy**, and that is a fact about the input.
+
+Aggregating from local sensing instead was ruled out: it needs either vehicle-to-vehicle
+communication, untested in this deployment, or a server to aggregate at --
+
+> "If we use a central server for aggregation, why not just deploy a central policy?"
+
+> "Having each AV run a HERE api is much much simpler than having them talk to each other."
+
+### Why decentralized execution needs no separate experiment
+
+> "The shared model with shared map and shared clock ensures that the decentralized
+> execution still implements the centrally trained policy."
+
+Every vehicle holding the same weights, map and clock, querying the same API, computes the
+same action for the same super-segment. It is an identity, not a result.
+
+### What the local sensors are for
+
+The safety gate, and nothing else:
+
+> "Adding local metrics and objectives... is going to needlessly complicate the story."
+
+This already holds in both artifacts rather than being asserted. In simulation the
+advisory is written with `setSpeed`, which SUMO bounds by the car-following safe speed, so
+a vehicle whose leader is slower follows its leader -- the same semantics as Vissim's
+`DesSpeed`. On the device the perception stack and the safety filters are the same clamp.
+**The two halves of the paper join at the gate**, in the same place, with the same rule.
 
 ## Where this sits
 
 > "This paper is supposed to be the last chapter in the traffic story -- sudden traffic
 > jams, self regulating cars, deploying self regulating cars."
 
-Three chapters: the phenomenon, the controller, the deployment. The starting point is
-the SRC paper (arXiv:2506.11973, AAAI 2026), which is chapter two. This is chapter three
-and it is a deployment paper, not a control paper.
-
-## What is not being changed, and why that is the point
+Three chapters: the phenomenon, the controller, the deployment. The controller is the SRC
+paper (arXiv:2506.11973, AAAI 2026), and it is not being changed:
 
 > "There is no reason to specifically learn a new type of policy. We know a policy that
 > works -- the SRC policy."
 
-The controller is SRC's. The reward is SRC's, unchanged, on ground-truth density:
-`-100 * 1[rho > rho*] + 0.2 * speed`. Training is as centralized as SRC's, in a
-simulator, and may use privileged information because it happens offline.
-
-> "Instead of a central system giving directions, we are doing decentralized execution.
-> The training can be as centralized as the SRC paper."
-
-**Only where the policy is evaluated moves.** That is the whole delta, and stating it
-that narrowly is what keeps the paper a deployment paper.
-
-## Why decentralized execution at all
-
-Not for autonomy or robustness in the abstract:
+The reward, the training and the controller are SRC's. Only where the policy is evaluated
+moves -- and the reason that is worth a paper is deployment, not control:
 
 > "The only reason decentralization is attractive is because it eases the deployment...
 > It is a shortest path to deployment story."
 
-A central controller needs a traffic authority to run it, a channel to every vehicle, and
-the authority to command them. Decentralized execution needs a model file and a network
-request. That is the argument, and it is an argument about what can actually be fielded.
+## Why the simulation is not a reproduction, and why that is the design
 
-## Why the observation had to change, and why nothing else did
+The result has been shown in two simulators with different car-following models, which is
+stronger than matching one number in one of them. The comparison that carries the
+observation claim is unaffected either way: both arms run the same vehicles on the same
+network under the same demand, so the fleet cancels between them.
 
-SRC's policy reads six per-super-segment fields: density, lane count, mean speed, mean
-gap, inflow, outflow. Four of the six come from vehicle-level ground truth that no
-vehicle can obtain -- its `RL.py` computes the gap from each vehicle's `FollowDistGr` and
-the rates from set differences over vehicle ids a minute apart. A traffic API returns
-speed, free flow, jam factor, confidence and traversability, and nothing else.
+**On what the fleet was chosen for.** EIDM was chosen because it has a capacity drop. The
+capacity drop is not a free parameter: real queue discharge is 5 to 20% below free-flow
+capacity, which is a property of traffic rather than of a model. Measured here, W99
+discharges **4.3% faster** than free flow -- the wrong sign -- and EIDM with a one-second
+reaction time **21% slower**. In Ankit's words: the simulator must be consistent with
+reality, and a simulation failing to replicate a measured phenomenon is a setting problem
+rather than evidence that the simulation is the reference.
 
-So a vehicle **cannot evaluate the published policy**. That is the reason for retraining,
-and it is a fact about the input, not a modelling preference.
+The same covers the exit lane drop and the right-of-way `netconvert --vissim-file` does
+not import -- 2 junctions with conflicting movements against 10 active conflict areas in
+the source `.inpx`, so the ported network has less constraint than the one the paper ran,
+and the lane drop restores a bottleneck of the kind it is supposed to have. Both apply
+identically to every arm.
 
-### Why not aggregate from local sensing instead
-
-Ankit ruled this out, and the reason is the deployment argument again. Aggregating local
-observations into a super-segment state needs either vehicle-to-vehicle communication,
-which is untested in the deployment, or a server to aggregate at:
-
-> "If we use a central server for aggregation, why not just deploy a central policy?"
-
-> "Having each AV run a HERE api is much much simpler than having them talk to each
-> other."
-
-A server would concede the thing the paper is arguing for.
-
-## Why decentralized execution needs no separate experiment
-
-> "The shared model with shared map and shared clock ensures that the decentralized
-> execution still implements the centrally trained policy."
-
-The policy is a deterministic function of the network's aggregate state. Every vehicle
-holding the same weights, the same map and the same clock, and querying the same API,
-computes the same action for the same super-segment. There is no consensus problem to
-solve and therefore no consensus experiment to run. The claim is an identity, not a
-result.
-
-## What the local sensors are for
-
-Not for the policy's input, and not for a second objective:
-
-> "Adding local metrics and objectives... is going to needlessly complicate the story."
-
-They are the **safety gate**. The aggregate advisory is a desired speed; local sensing
-can only ever reduce it. The camera, IMU, GPS and fusion stack on the Jetson serves that
-layer.
-
-This already holds in both artifacts rather than being asserted. In simulation the
-advisory is written with `setSpeed`, which SUMO bounds by the car-following safe speed,
-so a vehicle whose leader is slower follows its leader -- the same semantics as Vissim's
-`DesSpeed`. On the device the perception stack is the same clamp. **The two halves of the
-paper join at the gate**, in the same place, with the same rule.
-
-## The architecture, in three lines
-
-1. A policy trained centrally in simulation, on SRC's reward, from privileged state.
-2. Executed independently by each vehicle from a traffic API, a shared map and a shared
-   clock -- five fields per super-segment, no vehicle-to-vehicle link, no server.
-3. Clamped locally by on-board perception, which may slow the advisory and never raise it.
+**No number here is comparable to the published table.** Every claim is against this
+port's own no-control baseline.
 
 ## The flow of the paper as described
 
@@ -118,80 +214,23 @@ paper join at the gate**, in the same place, with the same rule.
 
 ICRA.
 
-## What the simulation contributes
+## Open
 
-Mainz, EIDM fleet, three-into-two lane drop at the exit, sustained 4,500 veh/h. Seeds
-1-10 train, 11-15 select, 16-30 evaluate. 80 episodes, 100% penetration, paired on seed.
-
-| arm | flow veh/h | paired gain |
-|---|---|---|
-| DSRC, the traffic-API observation | 3,765 | **+230 +/- 44** (+6.5%) |
-| SRC, its original six features | 3,759 | +224 +/- 61 (+6.3%) |
-| no control | 3,535 | -- |
-
-**The headline is the equivalence, not the gain.** The two arms differ by 6 veh/h with
-bars of 44 and 61, which bounds the cost of restricting the observation at under about 2%
-of baseline. That is the enabling claim for decentralized execution. Both arms beating no
-control by about 6.4% is the supporting claim.
-
-## Why this is not a reproduction, and why that is the design
-
-Ankit's position, and it is a claim the paper should make rather than a limitation it
-should concede: **the result has now been shown in two simulators with different
-car-following models, which is stronger than matching one number in one of them.** SRC
-showed the mechanism in Vissim under Wiedemann-99; this shows it again in SUMO under
-EIDM. A mechanism that survives a change of driver model is robust to it; one that
-appears only under a single calibration is fragile.
-
-The comparison that carries the headline is unaffected either way. DSRC and SRC run the
-same vehicles on the same network under the same demand, so the fleet cancels between
-them entirely. The fleet only enters the supporting claim, that either arm beats no
-control, and there it is doing the opposite of weakening it.
-
-**On what the fleet was chosen for.** EIDM was chosen because it has a capacity drop. The
-capacity drop is not a free parameter: real queue discharge is 5 to 20% below free-flow
-capacity, which is a property of traffic rather than of a model. Measured here, W99
-discharges **4.3% faster** than free flow -- the wrong sign -- and EIDM with a one-second
-reaction time **21% slower**. In Ankit's words: the simulator must be consistent with
-reality, and a simulation failing to replicate a measured phenomenon is a setting problem
-rather than evidence that the simulation is the reference.
-
-The same reasoning covers the exit lane drop and the dropped right-of-way. The port
-carries 2 junctions with conflicting movements against 10 active conflict areas in the
-source `.inpx`, because `netconvert --vissim-file` does not import them, so the ported
-network has LESS constraint than the one the paper ran. The three-into-two lane drop at
-the exit restores a bottleneck of the kind the network is supposed to have. Both are
-stated modelling choices and both apply identically to every arm.
-
-What follows from this, and should be written into the paper rather than left implicit:
-**no number here is comparable to the published table.** Throughput, capacity and critical
-density all belong to this network and this fleet. Every claim is against this port's own
-no-control baseline.
-
-## What is not established, stated flatly
-
-* **The gate's behaviour is unmeasured.** How often local sensing clamps a DSRC advisory,
-  and what it costs, is not known in this configuration. Three runs would settle it:
-  advisory gated, advisory ungated, no control.
-* **One topology and one demand level.** `inverted_tree` is out of scope -- one link per
-  super-segment, so there is no aggregation in it -- which means Mainz is the only
-  network, as it is for the AAAI paper. The demand level was chosen just past the point
-  where the network breaks down; the gain has not been swept across demand.
-* **The drives exist; their analysis does not.** Eight runs on 2026-09-08 in Westfield,
-  NJ, on a OnePlus Nord N10: six shadow runs totalling 17,948 ticks over 45.9 to 47.7 km,
-  and two live runs of 4,981 ticks over 40.7 to 42.4 km. First working GPS and first
-  working HERE in the project -- every bench run before had `gps_hz 0.0` and `here=false`.
-  Distance agrees to 0.01 km between integrating reported speed and the great-circle path
-  through the fixes, which is two independent routes to one number. Recorded in
-  `plans/task_list.md` section I, tasks 49 to 51, not in a results document.
-
-  What has NOT been run is `deployment/jetson/score_shadow.py`, which replays the logged
-  per-tick inputs and scores candidate sensing controllers against them. It gates on the
-  incumbent replaying byte-for-byte and refuses otherwise, so that replay is the first
-  step. Until it runs, whether the shadow-mode predictions held in live mode is unanswered.
-
-  Two qualifications the drives carry: HERE was set to one query per minute in shadow
-  mode, so they are not a full-rate HERE reference -- though that cadence is exactly
-  `DECISION_INTERVAL_S`, the policy's own 60 s decision interval, so it is the rate the
-  policy would query at anyway. And the shakedown found three defects, including a
-  90-degree frame rotation that explains every zero-detection drive in the project.
+* **The deployed policy and the simulated policy are not yet the same object.** The rig's
+  actor takes the 39-field local contract, vendored and test-locked on both sides, and the
+  last recorded state of the policy bundle is random-init pending a checkpoint from the
+  simulation side. The simulation result is on a 5-field traffic-API observation per
+  super-segment. Joining them means splitting the deployed contract in two: the API
+  observation for the policy, the local vector for the gate.
+* **The shadow runs have not been scored.** `deployment/jetson/score_shadow.py` replays
+  the logged per-tick inputs and scores candidate controllers against them, gating on the
+  incumbent replaying byte-for-byte first. It has not been run against the six. Until it
+  does, whether the shadow-mode predictions held in live mode is unanswered -- and that is
+  the comparison the two live runs were collected for.
+* **The gate's behaviour is unmeasured in simulation.** How often local safety clamps an
+  advisory, and what it costs. Three runs would settle it: gated, ungated, no control.
+* **One topology and one demand level** in the simulation half. `inverted_tree` is out of
+  scope -- one link per super-segment, so there is no aggregation in it.
+* **The critical path in `plans/task_list.md` is stale.** It names tasks 68 and 69,
+  training and evaluating MAPPO on `inverted_tree`, as the flow-level half. That was
+  superseded on 2026-09-11 by the SRC port on Mainz.
