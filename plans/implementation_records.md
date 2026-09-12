@@ -4306,10 +4306,23 @@ would have failed is absent rather than wrong.
         bounding-box centre at a fixed New Jersey-area point already used by this
         deployment's own GPS test fixtures (`lat=40.0, lon=-74.0`) and documents this as
         fabricated in the file's own `geo_reference` block, not as a measurement.
-     2. **The 123-body New Jersey HERE corpus plan step 3 names does not exist in this
-        checkout.** It was collected on 2026-09-08 (item 71 above) but written to a run
-        directory this repository's `.gitignore` excludes and never committed; it is not
-        reachable from this machine. Combined with point 1, no real correspondence exists
+     2. **The 123-body New Jersey HERE corpus plan step 3 names is not in this checkout.**
+        It was collected on 2026-09-08 (item 71 above) but written to a run directory this
+        repository's `.gitignore` excludes and never committed.
+
+        **CORRECTION, 2026-09-12: the sentence that followed said "it is not reachable from
+        this machine", and that is false.** The corpus is on this machine at
+        `~/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_*/here/` --- counted
+        directly: 93 bodies in `run_20260908_170849`, 28 in `run_20260908_190548`, 2 in
+        `run_20260908_183538`, exactly the 123 the record claims. "Not in the checkout" and
+        "not reachable" are different statements and only the first is true.
+
+        What that does and does not change. It does not rescue the Mainz correspondence:
+        point 1 above stands, Mainz carries no projection, so there is still no real pairing
+        between any HERE link and any Mainz super-segment and the tolerance sweep still has
+        no ground truth to calibrate against. What it does change is that the sweep's *link*
+        side need not be synthetic --- real segment geometry, 915 segments across 68 named
+        roads, is available offline and was described as unavailable. Combined with point 1, no real correspondence exists
         between any HERE link and any Mainz super-segment to calibrate a match tolerance
         against. `perception.segment_state.SEGMENT_MATCH_TOLERANCE_M` reuses
         `sensors.here_feed.ASSOCIATION_RADIUS_M` (60.0 m) on that constant's own physical
