@@ -41,6 +41,18 @@ MERGE_TEXT = {
 }
 TRAFFIC_TEXT = {0: "Light", 1: "Moderate", 2: "Heavy"}
 
+#: task 144: the safety gate's lane/merge-action vocabulary
+#: (policy.safety_gate.SafetyDecision.lane_action -- "LANE_LEFT" / "LANE_RIGHT"
+#: / None), separate from LANE_TEXT above because that dict is keyed on the
+#: POLICY's raw lane_preference string, not on what the gate decided to show
+#: after withholding. pipeline.step uses this to redisplay lane_text once the
+#: gate has bounded (and possibly withheld) the action.
+GATED_LANE_TEXT = {
+    None: "Keep lane",
+    "LANE_LEFT": "Prepare left (if safe)",
+    "LANE_RIGHT": "Prepare right (if safe)",
+}
+
 
 @dataclass
 class Advisory:
@@ -55,6 +67,11 @@ class Advisory:
     confidence_label: str
     confidence: float
     action: dict[str, str]
+    #: task 144, open item 3: whether the safety gate's emergency_override
+    #: fired this tick, in which case the recommended speed number above is
+    #: not a cruising target and a display should not present it as one.
+    #: False by default so every existing construction site is unaffected.
+    speed_display_withheld: bool = False
 
     def one_line(self) -> str:
         return (
@@ -80,7 +97,7 @@ class AdvisoryDecoder:
         self.confidence_low_below = confidence_low_below
         self.confidence_high_at = confidence_high_at
 
-    def _display(self, mps: float) -> float:
+    def display(self, mps: float) -> float:
         if self.units == "mph":
             return mps * MPS_TO_MPH
         if self.units == "kmh":
@@ -102,8 +119,8 @@ class AdvisoryDecoder:
             confidence_label = "medium"
         return Advisory(
             recommended_speed_mps=recommended,
-            recommended_speed_display=self._display(recommended),
-            current_speed_display=self._display(float(obs.get("ego_speed", 0.0))),
+            recommended_speed_display=self.display(recommended),
+            current_speed_display=self.display(float(obs.get("ego_speed", 0.0))),
             units=self.units,
             headway_target_s=headway,
             lane_text=LANE_TEXT[action["lane_preference"]],
