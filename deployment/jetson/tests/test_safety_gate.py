@@ -35,6 +35,8 @@ from policy.safety_gate import (
     evaluate_rules,
     run_safety_gate,
     safety_inputs_from_observation,
+    _forward_ttc_missing,
+    _lane_changes_per_km_missing,
 )
 from policy.sim_contract import decode_headway_bin
 
@@ -1015,6 +1017,199 @@ def test_the_grid_fails_without_this_rounds_follow_up_fixes(monkeypatch) -> None
         "forward_ttc_full_evidence",
         "forward_ttc_gap_only_critical",
     }
+
+
+# ---------------------------------------------------------------------------
+# White-box pins for the two branch-aware evaluability functions, at the
+# exact axis a mutation test found unpinned: `lane_changes_per_km`'s three
+# RULE_READS fields (lane_changes_last_km, lane_change_distances_m,
+# absolute_distance_m) are ALL class (C) -- evidence=False on every tick
+# `safety_inputs_from_observation` can ever produce -- so the branch-aware
+# rule and the generic "every RULE_READS field must be evidence" rule return
+# the IDENTICAL answer ("all missing") for anything the builder can
+# construct, and the grid's own case for this rule (built through the
+# builder) cannot tell the two apart. Confirmed by the coordinator: reverting
+# `_lane_changes_per_km_missing` to the generic rule at commit dedd3c1 left
+# all 52 tests in this file passing.
+#
+# These tests construct `SafetyInputs` directly, mixing evidence within one
+# rule's own reads by hand, to reach the state the rig cannot produce today
+# -- pinning behaviour that becomes reachable the day a lane-change detector
+# exists, not behaviour exercised by anything on this rig now. Each is
+# checked against the generic rule and confirmed to disagree (see the
+# manual-neuter note in each docstring; verified by hand before this commit,
+# the same way every other fix in this file was).
+# ---------------------------------------------------------------------------
+
+
+def test_lane_changes_per_km_missing_count_branch_ignores_unconsulted_distances_evidence() -> None:
+    """Count branch: lane_changes_last_km evidenced and decisive,
+    lane_change_distances_m NOT evidenced. The branch-aware rule reads
+    () (evaluable) because the empty (inert) distances list sends the
+    function to the count branch, which never reads distances at all. The
+    generic rule would read (lane_change_distances_m,) at minimum --
+    every one of this rule's three fields is class (C) today, so no
+    observation the builder can produce carries this exact mix; built by
+    hand for that reason.
+    """
+    inputs = _inputs_with_overrides(lane_changes_last_km=5)
+    fields = dict(inputs.fields)
+    fields["lane_change_distances_m"] = SafetyInputField(
+        value=(), input_class="structural", source=None, evidence=False,
+    )
+    inputs = SafetyInputs(fields=fields)
+    assert _lane_changes_per_km_missing(inputs) == ()
+
+
+def test_lane_changes_per_km_missing_window_branch_ignores_unconsulted_count_evidence() -> None:
+    """The reverse: lane_change_distances_m and absolute_distance_m both
+    evidenced (real, non-empty), lane_changes_last_km NOT evidenced. The
+    window branch never reads lane_changes_last_km, so the branch-aware
+    rule reads () regardless of its evidence; the generic rule would read
+    (lane_changes_last_km,) at minimum.
+    """
+    inputs = _inputs_with_overrides(lane_change_distances_m=(10.0, 20.0, 30.0), absolute_distance_m=40.0)
+    fields = dict(inputs.fields)
+    fields["lane_changes_last_km"] = SafetyInputField(
+        value=0, input_class="structural", source=None, evidence=False,
+    )
+    inputs = SafetyInputs(fields=fields)
+    assert _lane_changes_per_km_missing(inputs) == ()
+
+
+def test_lane_changes_per_km_missing_disagrees_with_the_generic_rule() -> None:
+    """Confirms the two tests above actually discriminate: reverts
+    `_lane_changes_per_km_missing`'s call site to the generic rule
+    (`policy.sensing_controller`-style "every RULE_READS field must be
+    evidence") inline, against the exact fixtures above, and checks the
+    generic rule reports each one NOT_EVALUABLE where the branch-aware
+    rule reports evaluable. A test that only checks the fixed function
+    proves nothing about whether an unfixed one would have been caught.
+    """
+    def generic_missing(inputs: SafetyInputs) -> tuple[str, ...]:
+        return tuple(f for f in RULE_READS["lane_changes_per_km"] if not inputs.is_evidence(f))
+
+    count_inputs = _inputs_with_overrides(lane_changes_last_km=5)
+    fields = dict(count_inputs.fields)
+    fields["lane_change_distances_m"] = SafetyInputField(
+        value=(), input_class="structural", source=None, evidence=False,
+    )
+    count_inputs = SafetyInputs(fields=fields)
+    assert _lane_changes_per_km_missing(count_inputs) == ()
+    assert generic_missing(count_inputs) != ()
+
+    window_inputs = _inputs_with_overrides(lane_change_distances_m=(10.0, 20.0, 30.0), absolute_distance_m=40.0)
+    fields2 = dict(window_inputs.fields)
+    fields2["lane_changes_last_km"] = SafetyInputField(
+        value=0, input_class="structural", source=None, evidence=False,
+    )
+    window_inputs = SafetyInputs(fields=fields2)
+    assert _lane_changes_per_km_missing(window_inputs) == ()
+    assert generic_missing(window_inputs) != ()
+
+
+def test_forward_ttc_missing_leader_operative_not_critical_relative_speed_absent() -> None:
+    """The one leader-side branch round 2's cases did not cover, and the
+    ONE that is genuinely reachable on this rig: leader_gap_m MEASURED and
+    NOT critical (10.0 m, above the 5.0 m default), leader_relative_speed_mps
+    left substituted. Neither disjunct can be decided without it (the gap
+    disjunct already read false on real evidence, so only the ttc disjunct
+    is left, and it needs the relative speed) -- not_evaluable, naming
+    exactly the one missing field.
+    """
+    obs = _base_obs()
+    obs["leader_gap"] = 10.0
+    src = _base_field_sources()
+    src["leader_gap"] = provenance.SOURCE_MEASURED
+    obs_result = _obs_result(obs, src, {"density_veh_per_km": 0.0, "last_detection_age_s": None})
+    inputs = safety_inputs_from_observation(
+        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+    )
+    assert _forward_ttc_missing(inputs, SafetyConstraints(min_front_gap_m=5.0)) == ("leader_relative_speed_mps",)
+    result = run_safety_gate(action(), inputs, SafetyState(), SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0))
+    assert result.rules["forward_ttc"].status == RULE_NOT_EVALUABLE
+    assert result.emergency_override is False
+
+
+def _merge_operative_inputs(*, merge_conflict_gap_m: float, merge_conflict_relative_speed_evidence: bool) -> SafetyInputs:
+    """A fixture for the merge-conflict axis with the LEADER pair built
+    WITHOUT evidence in every case -- not merely unset, but explicitly
+    marked `evidence=False`. This is what makes the fixture actually
+    discriminate a branch-aware rule from the generic one: `_inputs_with_
+    overrides` grants blanket evidence to every field, so a fixture built
+    from it alone would give the generic rule the same "leader pair fine"
+    answer the branch-aware rule gives, for the wrong reason (both fields
+    happen to be evidenced) rather than the right one (the rule correctly
+    never consulted them once merge is operative). Confirmed by hand: an
+    earlier version of this fixture did exactly that and did not fail
+    when `_forward_ttc_missing` was reverted to the generic rule.
+    """
+    inputs = _inputs_with_overrides(
+        merge_conflict_gap_m=merge_conflict_gap_m, merge_conflict_relative_speed_mps=0.0,
+    )
+    fields = dict(inputs.fields)
+    fields["leader_gap_m"] = SafetyInputField(value=50.0, input_class="evidence_required", source=None, evidence=False)
+    fields["leader_relative_speed_mps"] = SafetyInputField(value=0.0, input_class="evidence_required", source=None, evidence=False)
+    if not merge_conflict_relative_speed_evidence:
+        fields["merge_conflict_relative_speed_mps"] = SafetyInputField(
+            value=0.0, input_class="structural", source=None, evidence=False,
+        )
+    return SafetyInputs(fields=fields)
+
+
+def test_forward_ttc_missing_is_branch_aware_for_the_merge_conflict_pair_a_state_the_rig_cannot_produce_yet() -> None:
+    """The merge-conflict axis: `merge_conflict_gap_m`/`_relative_speed_mps`
+    are always class (C) on this rig -- `safety_inputs_from_observation`
+    can never grant them evidence, so no real observation reaches the
+    `if merge_gap_effective < leader_gap_effective` branch at all (a
+    structurally-inert +inf can never be strictly less than another value
+    that is at most +inf). This pins the behaviour that becomes reachable
+    the day a merge-conflict sensor exists, built by hand for that reason,
+    not exercised by anything on this rig today -- the same shape as
+    lane_changes_per_km's window branch above.
+
+    The leader pair is built WITHOUT evidence in both cases below (see
+    `_merge_operative_inputs`) -- this is what proves the branch-aware
+    rule genuinely ignores the leader pair once merge is operative, rather
+    than merely agreeing with what a generic rule would also have
+    accepted from a fully-evidenced leader pair.
+    """
+    # Merge pair supplies a smaller, real, critical gap: merge is
+    # operative, and its gap alone decides "fired" -- the leader pair's
+    # OWN ABSENCE of evidence is correctly irrelevant once merge wins.
+    inputs_critical = _merge_operative_inputs(merge_conflict_gap_m=3.0, merge_conflict_relative_speed_evidence=True)
+    assert _forward_ttc_missing(inputs_critical, SafetyConstraints(min_front_gap_m=5.0)) == ()
+    result = run_safety_gate(action(), inputs_critical, SafetyState(), SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0))
+    assert result.rules["forward_ttc"].status == RULE_FIRED
+    assert result.emergency_override is True
+
+    # Merge operative, gap evidenced and NOT critical, its own relative
+    # speed absent: not_evaluable, naming the merge pair's field, not the
+    # leader's (which is not consulted once merge is the smaller gap).
+    inputs_missing_relspeed = _merge_operative_inputs(merge_conflict_gap_m=10.0, merge_conflict_relative_speed_evidence=False)
+    assert _forward_ttc_missing(inputs_missing_relspeed, SafetyConstraints(min_front_gap_m=5.0)) == (
+        "merge_conflict_relative_speed_mps",
+    )
+
+
+def test_forward_ttc_missing_disagrees_with_the_generic_rule_on_the_merge_conflict_axis() -> None:
+    """Same discrimination check as lane_changes_per_km's, for the
+    merge-conflict axis: the generic "every RULE_READS field must be
+    evidence" rule reports the fixture above not_evaluable over the
+    LEADER pair too (it is never granted evidence, by construction --
+    see `_merge_operative_inputs`), where the branch-aware rule correctly
+    ignores the leader pair once merge is operative.
+    """
+    def generic_missing(inputs: SafetyInputs) -> tuple[str, ...]:
+        return tuple(f for f in RULE_READS["forward_ttc"] if not inputs.is_evidence(f))
+
+    inputs = _merge_operative_inputs(merge_conflict_gap_m=3.0, merge_conflict_relative_speed_evidence=True)
+    assert _forward_ttc_missing(inputs, SafetyConstraints(min_front_gap_m=5.0)) == (), (
+        "merge is operative here; the leader pair's own (lack of) evidence must not matter"
+    )
+    assert generic_missing(inputs) != (), (
+        "the generic rule wrongly still requires the leader pair even though it is not consulted"
+    )
 
 
 def test_safety_gate_config_is_recorded() -> None:

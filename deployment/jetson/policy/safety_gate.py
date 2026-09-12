@@ -675,6 +675,30 @@ RULE_READS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: validator round 2 (coordinator sweep, 2026-09-12): built the most
+#: favourable observation `safety_inputs_from_observation` can produce --
+#: every source `measured`, a fresh `last_detection_age_s` -- and checked
+#: which rules still have no field able to carry evidence. Seven of twelve
+#: are unreachable on this rig BY CONSTRUCTION, not by chance of what a
+#: drive happened to record, because the fields they read are class (C)
+#: unconditionally, regardless of any observation:
+#: `all_lane_low_speed_occupancy` (no cooperating peers -- reads
+#: `all_lanes_av_occupied`/`av_mean_speed_mps`/`downstream_congested`, all
+#: V2V-only), `lane_change_dwell` and `lane_changes_per_km` (no
+#: lane-change detector), `target_lane_missing` (no lane detection),
+#: `target_lane_rear_gap`/`target_lane_rear_ttc`/`target_lane_rear_braking`
+#: (no rear sensor). The remaining five are reachable, wholly
+#: (`low_speed_uncongested`, `target_lane_front_gap`) or partly --
+#: `passing_lane_slow_hold` (`local_mean_speed_mps` yes, `in_passing_lane`
+#: no), `target_lane_front_ttc` (gap yes, relative speed no), `forward_ttc`
+#: (leader pair yes, merge-conflict pair no). This is why a per-rule
+#: evaluability refinement (`_forward_ttc_missing`,
+#: `_lane_changes_per_km_missing`) can only ever be pinned by a hand-built
+#: `SafetyInputs` for `lane_changes_per_km` (wholly unreachable) and, on
+#: its unreachable merge-conflict axis only, for `forward_ttc` -- see the
+#: docstrings on both functions and on their tests in
+#: `tests/test_safety_gate.py`.
+
 #: validator round 1, F1: the value substituted for a SafetyContext field's
 #: slot in the copy `apply_safety_layer` reads (`SafetyInputs.inert_context`),
 #: whenever `is_evidence(name)` is False for that field this tick. Each entry

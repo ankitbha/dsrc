@@ -3760,13 +3760,76 @@ would have failed is absent rather than wrong.
      `test_score_safety.py` (9), `test_safety_gate_pipeline.py` (5), `test_dashboard.py` (3, a
      new file -- `ui/dashboard.py` had none before), `test_eval_run_safety.py` (2).
 
+     **Which of the twelve rules can ever be evaluable on this rig is structural, not
+     empirical, and is now stated as such rather than left as "3,913 ticks happened to show
+     none of them."** Measured by the coordinator: built the single most favourable
+     observation `safety_inputs_from_observation` can produce (every source `measured`, a
+     fresh `last_detection_age_s`) and checked which rules still have no field able to carry
+     evidence at all.
+
+     | rule | can ever carry evidence on this rig | reason if not |
+     |---|---|---|
+     | `low_speed_uncongested` | yes | -- |
+     | `target_lane_front_gap` | yes | -- |
+     | `passing_lane_slow_hold` | partly (`local_mean_speed_mps` yes, `in_passing_lane` no) | no lane detection |
+     | `target_lane_front_ttc` | partly (gap yes, relative speed no) | -- |
+     | `forward_ttc` | partly (leader pair yes, merge-conflict pair no) | no merge-conflict sensor |
+     | `all_lane_low_speed_occupancy` | no | no cooperating peers (V2V-only fields) |
+     | `lane_change_dwell` | no | no lane-change detector |
+     | `lane_changes_per_km` | no | no lane-change detector |
+     | `target_lane_missing` | no | no lane detection |
+     | `target_lane_rear_gap` | no | no rear sensor |
+     | `target_lane_rear_ttc` | no | no rear sensor |
+     | `target_lane_rear_braking` | no | no rear sensor |
+
+     Seven of twelve are unreachable through the builder BY CONSTRUCTION -- the fields they
+     read are class (C) unconditionally, regardless of what any observation records -- not by
+     chance of what four drives happened to capture. Named in a comment beside `RULE_READS`
+     (`policy/safety_gate.py`) so this does not have to be rediscovered. The lane-withholding
+     consequence is sharper for the same reason: the lane advisory is withheld on every tick
+     not because the drives were unlucky, but because three of its eight guards
+     (`target_lane_rear_gap`, `target_lane_rear_ttc`, `target_lane_rear_braking`) read fields
+     the rig has no instrument for at all, and a fourth (`target_lane_missing`) needs lane
+     detection this rig also does not have.
+
+     **A mutation run against `dedd3c1` found one of round 2's own fixes unpinned.** Reverting
+     `_lane_changes_per_km_missing` to the generic "every `RULE_READS` field must be evidence"
+     rule left all 52 tests in `tests/test_safety_gate.py` passing -- 0 failed. Cause, per the
+     table above: `lane_changes_per_km`'s three fields are ALL class (C), so no observation the
+     builder can produce distinguishes the branch-aware rule from the generic one; every test
+     built through `safety_inputs_from_observation` gets "all three missing" from both. Not
+     the same defect as F1's degenerate corpus (a real drive that happened not to exercise a
+     rule) -- this is a rule NO drive on this hardware can ever exercise, one level further in.
+     `_forward_ttc_missing` did not have this problem on its reachable (leader-pair) axis,
+     because `leader_gap_m` is class (B); a mutation of that axis was caught. Its
+     merge-conflict axis has the identical unreachable shape as `lane_changes_per_km`, and
+     was, on inspection, equally unpinned until this fix.
+
+     Fixed by constructing `SafetyInputs` directly (bypassing the builder) for the exact
+     mixed-evidence states the rig cannot produce: `lane_changes_last_km` evidenced with
+     `lane_change_distances_m` not (and the reverse), and, for `forward_ttc`, the
+     merge-conflict pair evidenced and operative with the leader pair explicitly built
+     WITHOUT evidence (needed so the fixture actually discriminates -- an earlier draft left
+     the leader pair evidenced via the blanket-evidence test helper, which the generic rule
+     would also have accepted, for the wrong reason). Each pinning test is paired with an
+     explicit "disagrees with the generic rule" check, and the manual-neuter re-run (reverting
+     each function to the generic rule inline) now fails on all six of these tests where
+     before it silently passed one of them. `absolute_distance_m`'s inert value of `+inf`
+     (unchanged from round 2) is correct for a reason worth restating because it is not
+     obvious: `window_start = max(0.0, +inf - 1000.0)` is `+inf`, and no finite recorded
+     distance is `>= +inf`, so the recorded-change count is zero regardless of what the
+     distances list contains.
+
      **Commits** (branch `mainz-src-port`, each by explicit pathspec, never `git add -A`,
      never a bare `git commit`): `346fb9d` (F1 + Fix 2 + F2/Fix-3 infra, in
      `policy/safety_gate.py`), `2c660a8` (F3/F4/F5/F6, in `score_safety.py`), `e12e62c` (F5/F6,
      in `eval_run.py`), `89a1048` (F7, in `ui/dashboard.py`), `ba3ac2a` (F2's pipeline wiring,
      F9/Fix-8, F8/Fix-9 -- `pipeline.py`, `policy/advisory.py`, `run_demo.py`,
      `transport/messages.py`, `config.yaml`, `ARCHITECTURE.md`), `f788735` (F10 code half, in
-     `policy/safety_gate.py`).
+     `policy/safety_gate.py`), `dedd3c1` (round 2: `forward_ttc`/`lane_changes_per_km`
+     evaluability corrected twice, `inert_state()`, R2-2, R2-1 record fixes), and the mutation
+     fix above (`policy/safety_gate.py`, `tests/test_safety_gate.py`, this record), committed
+     separately from `dedd3c1` so that delta stays legible.
 
 145. **The rig cannot run the controller the paper is about.** Implemented 2026-09-12
      (implementer-145) against `plans/plan_task145_dsrc_policy_runtime.md`. The plan's
