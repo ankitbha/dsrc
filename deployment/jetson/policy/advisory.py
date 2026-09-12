@@ -234,6 +234,19 @@ class SegmentAdvisoryDecoder:
         # `SegmentStateBuilder.__init__` guards the runtime/builder pair
         # (validator round 1, fix 2b).
         self.network_fingerprint = network_fingerprint
+        if expected_network_fingerprint is not None and self.network_fingerprint is None:
+            raise ValueError(
+                "SegmentAdvisoryDecoder was given expected_network_fingerprint "
+                f"{expected_network_fingerprint!r} to check against, but no "
+                "network_fingerprint of its own -- this constructor is not handed enough "
+                "of the network definition to compute one (segment_ids here are display "
+                "ids, not the edge-id lists the hash covers, and lanes/length_km are not "
+                "given at all), so a mismatch would silently compare against None and "
+                "never fire. Use SegmentAdvisoryDecoder.from_network_definition, which "
+                "computes network_fingerprint from the full network definition and can "
+                "actually check it, or omit expected_network_fingerprint if no check is "
+                "wanted."
+            )
         if (
             expected_network_fingerprint is not None
             and self.network_fingerprint is not None

@@ -308,6 +308,27 @@ class PerceptionPolicyPipeline:
                 "dsrc_runtime, dsrc_segment_builder and dsrc_advisory_decoder must be "
                 "given together or not at all"
             )
+        # The "all three or none" check above catches a half-wired feature; it does not
+        # catch three fully-wired parts loaded from three DIFFERENT network definitions.
+        # SegmentStateBuilder and SegmentAdvisoryDecoder.from_network_definition always
+        # compute their own network_fingerprint (a raw-constructed SegmentAdvisoryDecoder
+        # carries None), so comparing all three here refuses that case at the one place
+        # that holds all three objects, instead of leaving it to whichever caller
+        # remembered to pass expected_network_fingerprint into each part individually.
+        if dsrc_runtime is not None:
+            fingerprints = (
+                dsrc_runtime.network_fingerprint,
+                dsrc_segment_builder.network_fingerprint,
+                dsrc_advisory_decoder.network_fingerprint,
+            )
+            if len(set(fingerprints)) > 1:
+                raise ValueError(
+                    "dsrc_runtime, dsrc_segment_builder and dsrc_advisory_decoder must be "
+                    "constructed from the same network definition, but their "
+                    f"network_fingerprint values disagree: {fingerprints} -- a None here "
+                    "means a SegmentAdvisoryDecoder built by its raw constructor rather "
+                    "than from_network_definition."
+                )
         self.dsrc_runtime = dsrc_runtime
         self.dsrc_segment_builder = dsrc_segment_builder
         self.dsrc_advisory_decoder = dsrc_advisory_decoder

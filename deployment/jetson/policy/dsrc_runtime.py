@@ -152,8 +152,9 @@ class DsrcRuntime:
                 f"DSRC bundle was exported for network_fingerprint "
                 f"{bundle_fingerprint} but this device's network definition "
                 f"({network_definition_path}) is {device_fingerprint} -- same "
-                "shape, different segment ids, feature order or speed limits; "
-                "re-export the policy against this network definition."
+                "shape, different segment ids, feature order, speed limits, lanes, "
+                "length or polylines; re-export the policy against this network "
+                "definition."
             )
 
         bundle_fractions = tuple(self.manifest.get("action_fractions", ()))
