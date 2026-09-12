@@ -101,8 +101,14 @@ def main() -> int:
               f"{measured[-1]['speed']:>8.2f} {served:>9.0f} {error:>8.0f} "
               f"{served / rate:>14.2f}", flush=True)
 
-    peak = max(measured, key=lambda row: row["served"])
-    beyond = [row for row in measured if row["density"] > peak["density"]]
+    # CAPACITY IS THE BEST FLOW WHILE DEMAND WAS STILL BEING MET, not the largest
+    # number in the column. Once the network saturates, a later point can read higher
+    # than the pre-breakdown one through noise or a transient, and taking the global
+    # maximum then places the peak past the breakdown and reports that nothing was
+    # sampled beyond it.
+    free = [row for row in measured if row["served"] >= 0.95 * row["rate"]]
+    peak = max(free or measured, key=lambda row: row["served"])
+    beyond = [row for row in measured if row["rate"] > peak["rate"]]
     print(f"\n  peak served flow {peak['served']:.0f} veh/h at "
           f"{peak['density']:.1f} veh/km/lane ({peak['rate']} offered)")
     if not beyond:

@@ -902,3 +902,44 @@ should be swept across demand before it is quoted as a property of the network. 
 selected checkpoint is its last episode, so it may not have converged. EIDM's parameters
 are SUMO defaults rather than anything calibrated against measured traffic, and the
 three-into-two exit drop is a modelling choice of ours.
+
+## `inverted_tree` under EIDM
+
+Asked whether the tree passes the same gate. Both variants do, and less strongly than
+Mainz with a lane-drop exit. Five seeds, 1,500 s episodes at dt 0.5, flat sustained
+demand, no control.
+
+`inverted_tree`:
+
+| offered | 900 | 1,200 | 1,500 | 1,800 | 2,100 | 2,400 | 3,000 | 3,600 |
+|---|---|---|---|---|---|---|---|---|
+| served | 900 | 1,198 | 1,478 | 1,793 | 1,728 | 1,759 | 1,665 | 1,859 |
+| +/-2se | 1 | 4 | 18 | 5 | 11 | 71 | 178 | 87 |
+
+Capacity is 1,793 +/- 5 veh/h at 1,800 offered, the last point where demand was met, and
+the first saturated point serves 1,728 +/- 11: a fall of 65 veh/h, **3.6%, resolved**.
+Past that the curve is not monotone -- 1,759, 1,665, then 1,859 with bars of 71 to 178 --
+so only the first step past breakdown is readable.
+
+`inverted_tree_bottleneck`, which has the final lane drop:
+
+| offered | 900 | 1,200 | 1,500 | 1,800 | 2,100 | 2,400 | 3,000 | 3,600 |
+|---|---|---|---|---|---|---|---|---|
+| served | 901 | 1,199 | 1,161 | 1,207 | 1,140 | 1,224 | 1,148 | 1,201 |
+| +/-2se | 2 | 5 | 62 | 20 | 20 | 29 | 21 | 16 |
+
+Capacity 1,199 +/- 5, lowest past it 1,140 +/- 20: a fall of 59 veh/h, **4.9%,
+resolved**.
+
+Both capacities are lower bounds, because the grid steps from a fully served point
+straight to a saturated one and the true peak lies between. Against Mainz with a
+three-into-two exit drop at 11.3%, the tree's drop is a third the size, so Mainz remains
+the topology to run the arms on.
+
+Two instrument defects were fixed to get here. `SumoTopologyEnv._FOLLOWING_ATTRIBUTES` is
+an allowlist and refused EIDM's `tau` and `actionStepLength` outright, so the tree could
+not have been run with this fleet at all. And the verdict took the largest number in the
+served column as capacity; once a network saturates, a later point can read higher than
+the pre-breakdown one through noise, which put the peak past the breakdown and reported
+that nothing was sampled beyond it. Capacity is now the best flow measured while demand
+was still being met.

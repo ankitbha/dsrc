@@ -1158,11 +1158,19 @@ class SumoTopologyEnv:
 
     #: The vType attribute each `human_model.sumo` key becomes. Named rather than
     #: derived so an unknown key is a caller error instead of silently ignored.
+    #: Config key to vType attribute. An allowlist, so a key a config sets and this
+    #: map lacks is refused rather than silently dropped -- but it also means a new
+    #: model's parameters have to be added here before its config can be used at all.
     _FOLLOWING_ATTRIBUTES = {
         "car_following_model": "carFollowModel",
         "min_gap_m": "minGap",
         "cc1": "cc1", "cc2": "cc2", "cc3": "cc3", "cc4": "cc4", "cc5": "cc5",
         "cc6": "cc6", "cc7": "cc7", "cc8": "cc8", "cc9": "cc9",
+        # EIDM's, which `eidm_reaction` sets. actionStepLength is the driver's
+        # reaction time and is what gives that fleet a capacity drop.
+        "tau": "tau", "action_step_length": "actionStepLength",
+        "actionStepLength": "actionStepLength", "sigma": "sigma",
+        "startup_delay_s": "startupDelay",
     }
 
     def _car_following_attributes(self) -> str:
@@ -1176,7 +1184,11 @@ class SumoTopologyEnv:
         perfect-information metering oracle confirmed by failing to beat inaction.
 
         `configs/human_models/w99_calibrated.yaml` carries the Wiedemann-99
-        parameters the predecessor paper calibrated for exactly this reason.
+        parameters the predecessor paper calibrated for exactly this reason. That
+        calibration turned out not to have a capacity drop either on SUMO: its queues
+        discharge FASTER than free-flowing traffic at capacity, 1,980 veh/h against
+        1,899. `eidm_reaction` is the fleet that has one, and its header carries the
+        measurements.
         """
         model = (self.config.get("human_model") or {}).get("sumo") or {}
         unknown = set(model) - set(self._FOLLOWING_ATTRIBUTES)
