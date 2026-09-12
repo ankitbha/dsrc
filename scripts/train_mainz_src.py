@@ -31,21 +31,19 @@ from src.rl.src_q import (  # noqa: E402
 )
 from src.sumo.mainz import HERE_FEATURES, SRC_FEATURES, MainzEnv  # noqa: E402
 
-#: The files each network is built into. `build_mainz_scenario.py` and
-#: `build_tree_scenario.py` write the same five, so one env and one driver run both and
-#: the two results are comparable. `gated_routes` holds the routes and vehicle types
-#: with no vehicles, for runs where the env grants entry itself.
+#: The files the network is built into. `gated_routes` holds the routes and vehicle
+#: types with no vehicles, for runs where the env grants entry itself.
+#:
+#: This is a mapping rather than five constants because a second scenario,
+#: `inverted_tree_bottleneck`, was driven through the same env and driver. That network
+#: is out of scope -- one link per super-segment, so there is no aggregation in it -- and
+#: its builder is gone, but the shape is kept so another network needs no new driver.
 SCENARIOS = {
     "mainz": {"net": "data/mainz/mainz.net.xml",
               "routes": "data/mainz/mainz.rou.xml",
               "gated_routes": "data/mainz/mainz_routes.rou.xml",
               "segments": "data/mainz/mainz_segments.json",
               "schedule": "data/mainz/mainz_schedule.json"},
-    "tree": {"net": "data/tree/net.net.xml",
-             "routes": "data/tree/tree.rou.xml",
-             "gated_routes": "data/tree/tree_routes.rou.xml",
-             "segments": "data/tree/tree_segments.json",
-             "schedule": "data/tree/tree_schedule.json"},
 }
 
 

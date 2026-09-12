@@ -41,7 +41,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.sumo.env import _sumo  # noqa: E402
+from src.sumo.binding import _sumo  # noqa: E402
 
 LANES = 2
 FEED_M, MEASURE_M, DRAIN_M = 1000.0, 1000.0, 1000.0

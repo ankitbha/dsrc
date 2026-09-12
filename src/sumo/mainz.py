@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from src.sumo.env import _sumo
+from src.sumo.binding import _sumo
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA = REPO_ROOT / "data" / "mainz"
