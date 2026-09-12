@@ -144,20 +144,51 @@ bars of 44 and 61, which bounds the cost of restricting the observation at under
 of baseline. That is the enabling claim for decentralized execution. Both arms beating no
 control by about 6.4% is the supporting claim.
 
+## Why this is not a reproduction, and why that is the design
+
+Ankit's position, and it is a claim the paper should make rather than a limitation it
+should concede: **the result has now been shown in two simulators with different
+car-following models, which is stronger than matching one number in one of them.** SRC
+showed the mechanism in Vissim under Wiedemann-99; this shows it again in SUMO under
+EIDM. A mechanism that survives a change of driver model is robust to it; one that
+appears only under a single calibration is fragile.
+
+The comparison that carries the headline is unaffected either way. DSRC and SRC run the
+same vehicles on the same network under the same demand, so the fleet cancels between
+them entirely. The fleet only enters the supporting claim, that either arm beats no
+control, and there it is doing the opposite of weakening it.
+
+**The one thing a reviewer will reach for, and the answer.** EIDM was chosen BECAUSE it
+has a capacity drop, which can be read as selecting the conditions that produce the
+result. The answer is that the capacity drop is not a free parameter: real queue
+discharge is 5 to 20% below free-flow capacity, and that is a documented property of
+traffic, not of a model. Measured here, W99 discharges **4.3% faster** than free flow --
+the wrong sign -- and EIDM with a one-second reaction time **21% slower**, the right sign
+and slightly steep. Choosing the fleet that reproduces a known property of real traffic
+is calibration. In Ankit's own words: the simulator must be consistent with reality, and
+a simulation failing to replicate a measured phenomenon is a setting problem rather than
+evidence that the simulation is the reference.
+
+The same reasoning covers the exit lane drop and the dropped right-of-way. The port
+carries 2 junctions with conflicting movements against 10 active conflict areas in the
+source `.inpx`, because `netconvert --vissim-file` does not import them, so the ported
+network has LESS constraint than the one the paper ran. The three-into-two lane drop at
+the exit restores a bottleneck of the kind the network is supposed to have. Both are
+stated modelling choices and both apply identically to every arm.
+
+What follows from this, and should be written into the paper rather than left implicit:
+**no number here is comparable to the published table.** Throughput, capacity and critical
+density all belong to this network and this fleet. Every claim is against this port's own
+no-control baseline.
+
 ## What is not established, stated flatly
 
-* **It is not a reproduction of the AAAI result.** The fleet is EIDM with a one-second
-  reaction time rather than the paper's W99 calibration, because W99 has no capacity drop
-  on SUMO -- its queues discharge 4.3% FASTER than free-flowing traffic at capacity. The
-  three-into-two exit lane drop is ours as well. Both are stated modelling choices.
-* **The port drops the network's right-of-way.** The produced net has 2 junctions with
-  conflicting movements against 10 active conflict areas in the source `.inpx`;
-  `netconvert --vissim-file` does not import them. Unfixed.
 * **The gate's behaviour is unmeasured.** How often local sensing clamps a DSRC advisory,
   and what it costs, is not known in this configuration. Three runs would settle it:
   advisory gated, advisory ungated, no control.
 * **One topology and one demand level.** `inverted_tree` is out of scope -- one link per
   super-segment, so there is no aggregation in it -- which means Mainz is the only
-  network, as it is for the AAAI paper.
+  network, as it is for the AAAI paper. The demand level was chosen just past the point
+  where the network breaks down; the gain has not been swept across demand.
 * **Is there a recorded drive?** The deployment plan and per-task plans exist; a drive
   result document does not. A gate exercised only in loopback is a design.
