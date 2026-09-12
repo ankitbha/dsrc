@@ -240,10 +240,13 @@ def _dsrc_tick(dsrc_pipeline, t_mono: float, here_feed_source=None):
 def test_the_first_tick_runs_a_dsrc_decision(dsrc_pipeline) -> None:
     tick = _dsrc_tick(dsrc_pipeline, time.monotonic() - 0.01)
     assert tick.stages["segment_assemble"].basis == "measured"
-    assert tick.stages["dsrc_infer"].basis == "measured"
-    assert tick.dsrc is not None
     # No HereFeed source was given, so there is nothing to match against --
-    # a real, measured attempt that found no coverage, not a silent gap.
+    # the builder still ran (measured above), but the coverage gate refused
+    # before the network did, so dsrc_infer records no inference happened
+    # rather than the refusal's own, much shorter, wall time.
+    assert tick.stages["dsrc_infer"].basis == "absent"
+    assert tick.stages["dsrc_infer"].reason == "no dsrc action: no_response_yet"
+    assert tick.dsrc is not None
     assert tick.dsrc.outcome == "no_response_yet"
     assert tick.dsrc.rows == ()
 

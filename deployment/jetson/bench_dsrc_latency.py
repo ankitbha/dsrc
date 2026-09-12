@@ -122,16 +122,25 @@ def main() -> None:
         segment_state = builder.build(links, reading, now)
         t1 = time.monotonic()
         decision = runtime.decide(segment_state)
-        t2 = time.monotonic()
         assemble_ms.append((t1 - t0) * 1000.0)
-        infer_ms.append((t2 - t1) * 1000.0)
+        # decide() short-circuits without running the network whenever the
+        # coverage gate refuses (decision.latency_ms is None then); only a
+        # decision that actually ran the network measures an inference.
+        if decision.latency_ms is not None:
+            infer_ms.append(decision.latency_ms)
         coverage_outcomes[decision.outcome] = coverage_outcomes.get(decision.outcome, 0) + 1
 
     source = str(args.here_log) if args.here_log else "synthetic (no --here-log given)"
     print(f"source: {source}")
     print(f"coverage outcomes over {args.ticks} ticks: {coverage_outcomes}")
     print("segment_assemble_ms (THIS MACHINE, not the Orin):", pctl(assemble_ms))
-    print("dsrc_infer_ms       (THIS MACHINE, not the Orin):", pctl(infer_ms))
+    if infer_ms:
+        print("dsrc_infer_ms       (THIS MACHINE, not the Orin):", pctl(infer_ms))
+    else:
+        print(
+            "dsrc_infer_ms       (THIS MACHINE, not the Orin): no tick ran the "
+            f"network -- coverage outcomes were {coverage_outcomes}"
+        )
 
 
 if __name__ == "__main__":

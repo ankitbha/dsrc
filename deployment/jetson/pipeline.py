@@ -460,7 +460,6 @@ class PerceptionPolicyPipeline:
         segment_state = self.dsrc_segment_builder.build(links, reading, t_now_mono)
         t1 = time.monotonic()
         decision = self.dsrc_runtime.decide(segment_state)
-        t2 = time.monotonic()
         advisory = self.dsrc_advisory_decoder.decode(
             decision,
             ego_lat=gps.lat if gps.valid else None,
@@ -468,9 +467,21 @@ class PerceptionPolicyPipeline:
         )
         self._dsrc_last_advisory = advisory
 
+        # decide() short-circuits without running the network whenever the
+        # coverage gate refuses (decision.latency_ms is None); wall-clock
+        # time around the call would then record how long the refusal took
+        # to detect, not an inference, so it is reported as `measured` only
+        # when the network actually ran.
+        if decision.latency_ms is None:
+            dsrc_infer_stage = StageTiming.absent(
+                clock="jetson", reason=f"no dsrc action: {decision.outcome}",
+            )
+        else:
+            dsrc_infer_stage = StageTiming.measured(decision.latency_ms, clock="jetson")
+
         return (
             StageTiming.measured((t1 - t0) * 1000.0, clock="jetson"),
-            StageTiming.measured((t2 - t1) * 1000.0, clock="jetson"),
+            dsrc_infer_stage,
             advisory,
         )
 
