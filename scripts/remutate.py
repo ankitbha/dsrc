@@ -3147,18 +3147,34 @@ MUTATIONS = [
     # TEMPORARY CONTROL -- proves the harness can report a survivor at all.
     # Every one of the seven "sim contract:" entries above was CAUGHT the
     # first time the gate ran them, which is a clean run and not yet a proven
-    # gate: nothing had exercised the SURVIVED branch. decode_speed_bin's
-    # `min_contextual_speed_mps` default (12.0) is read by no test in the
-    # whole suite -- grepped: the only test call site (test_sim_contract.py)
-    # always passes it explicitly from the recorded grid, and the three
-    # production call sites (advisory.py, safety_gate.py x2) always pass
-    # their own context value, never falling through to this default. It also
-    # does not move contract_fingerprint(). This entry is expected to SURVIVE
-    # and is removed once that is confirmed.
-    ("CONTROL (temporary): decode_speed_bin's min_contextual_speed_mps default, unread by any test",
+    # gate: nothing had exercised the SURVIVED branch.
+    #
+    # First attempt, not used (left here as the record of what was tried):
+    # decode_speed_bin's `min_contextual_speed_mps` default (12.0) looked
+    # unread by anything -- the only direct test call site always passes it
+    # explicitly from the recorded grid, and the three production call sites
+    # (advisory.py, safety_gate.py x2) always pass their own context value.
+    # It was CAUGHT anyway, by test_regeneration_leaves_every_pre_existing_
+    # case_byte_identical: the generator's own speed_bin_mps derivation calls
+    # both decode_speed_bin's *without* pinning min_contextual_speed_mps
+    # either, so Account A (the reference, unmutated) and Account B (the
+    # vendored copy, mutated) disagreed inside the generator, and the
+    # regeneration test's subprocess call failed. A real catch, but an
+    # indirect and fragile one -- it depends on the regeneration test's torch
+    # + git dependency being satisfied, which is why it must not be trusted
+    # as this control.
+    #
+    # Second attempt, used below: active_heads()'s except branch. Every
+    # caller in the tree (export_policy.py's VendoredActor default,
+    # actor_runtime.py, this generator, every test) only ever passes profile
+    # "full", which succeeds without touching the except branch at all -- so
+    # its message text is read by nothing. It does not move
+    # contract_fingerprint() either. Removed once the gate has been seen to
+    # report it SURVIVED.
+    ("CONTROL (temporary): active_heads()'s unsupported-profile message, unreached by any caller",
      "deployment/jetson/policy/sim_contract.py",
-     "    min_contextual_speed_mps: float = 12.0,",
-     "    min_contextual_speed_mps: float = 99.0,",
+     '        raise ValueError(f"unsupported action profile \'{profile}\'") from None',
+     '        raise ValueError(f"unrecognized action profile \'{profile}\'") from None',
      "python"),
 ]
 
