@@ -478,6 +478,163 @@ there is no aggregation for the observation to summarise.
 
 ICRA.
 
+## Where to read, by section
+
+Paths verified against the tree on 2026-09-12. An agent writing a section should read
+what is listed under it; the repository is small enough now that everything named here is
+live code or a live record.
+
+### Read first, whatever you are writing
+
+| | |
+|---|---|
+| `README.md` | the map, and a closing note on what was removed |
+| `plans/task_list.md` | the working record. Sections D to I are the system and the evidence; K is findings. **The paper's own framing is in its "The paper" section** |
+| `deployment/jetson/ARCHITECTURE.md` | dataflow, module map, the measured latency budget, contract vendoring, degraded modes |
+
+### DESIGN
+
+**The rig.** The phone captures and forwards; the Jetson interprets and decides.
+
+* Phone, under `phone/app/src/main/kotlin/com/dsrc/phone/`: `SensingService.kt` and
+  `SensingStateMachine.kt`, with the four sources in `sensors/` -- `CameraPipeline.kt`,
+  `GpsPipeline.kt`, `ImuPipeline.kt`, `HerePipeline.kt` and `HereClient.kt`. Status in
+  `plans/section_e_status.md`.
+* Jetson tick loop: `deployment/jetson/pipeline.py`.
+* Perception, under `deployment/jetson/perception/`: `detector.py`, `tracker.py`,
+  `distance.py`, `observation_builder.py`, and `feed_fusion.py`, which decides *which
+  observation fields the traffic feed may own, and on what terms*.
+* Policy and advisory, under `deployment/jetson/policy/`: `actor_runtime.py`,
+  `advisory.py`.
+* Display: `deployment/jetson/ui/dashboard.py`.
+
+**The sampling controller**, which is a contribution and not plumbing:
+
+* `deployment/jetson/policy/sensing_controller.py` -- "four rates, decided here and
+  commanded to the phone".
+* `deployment/jetson/policy/sensing_loop.py` (decide, mark the mode, send) and
+  `deployment/jetson/policy/shadow_mode.py` (gated for real,
+  or only recorded).
+* `plans/plan_task29_sensing_controller.md`; `plans/task_list.md` task 34 for the attribution
+  record, which is the composition chain the code actually walks.
+
+**The transport**, two devices and one wire:
+
+* `specs/transport_protocol.md` -- 854 lines, the contract: frame layout, header fields,
+  the eight channels with priorities, overflow policies and depths, and the shared
+  timebase.
+* `specs/transport_golden_frames.json` pins the wire format; both sides test against it.
+* Jetson side `deployment/jetson/transport/` (18 modules); phone side
+  `phone/transport/src/main/kotlin/com/dsrc/transport/` (17).
+* `plans/plan_task19_gps_and_transport.md`, `plans/plan_task32_network_end_to_end.md`.
+
+**Safety and etiquette**, the gate:
+
+* `src/safety/safety_layer.py`, `src/safety/etiquette.py`, `src/safety/constraints.py`.
+* `specs/action_schema.md` for the action format the layer decodes.
+
+**Contract vendoring**, which is how the device cannot drift from what was trained:
+
+* `deployment/jetson/policy/sim_contract.py`, `deployment/jetson/policy/export_policy.py`,
+  `specs/observation_schema.md`, and ARCHITECTURE section 6.
+
+### EXPERIENCE
+
+**The telemetry vocabulary** -- measured, converted with a bound, or absent with a named
+reason:
+
+* `deployment/jetson/perception/provenance.py` -- the closed vocabulary itself.
+* `deployment/jetson/logio/failure_log.py` -- "a time axis, an episode, and a reader for
+  the failures this repository already had".
+* `plans/plan_task33_per_stage_timestamps.md` through `plans/plan_task39_session_summary.md`,
+  and `plans/task_list.md` tasks 33 to 39. **Task 39 carries the denominator-blindness
+  finding**, which is the limit of the whole vocabulary.
+
+**The two clocks:**
+
+* `deployment/jetson/transport/timebase.py` -- "the one sanctioned way to compare the two
+  devices' clocks" -- and `deployment/jetson/transport/clock.py`, which forbids the unsanctioned way.
+* `specs/transport_protocol.md`, Shared Timebase section; `scripts/run_timebase_probe.py`.
+* `plans/task_list.md` task 15 for the measurements and the degenerate validator.
+
+**Thermal:**
+
+* `deployment/jetson/sensors/thermal.py`; phone side `ThermalReader`,
+  `ThermalStatusWatcher`, `ThermalZones` under `phone/app/.../sensors/`.
+* `plans/plan_task37_thermal.md`; `plans/task_list.md` task 37 for the inert-sampler finding
+  and task 45 for the soak that was never reached.
+
+**The install faults and the rotation:**
+
+* `plans/task_list.md` task 48 (cable, sunlight, 152.8 minutes of car power) and task 63 (the
+  90-degree rotation, 16 detection-bearing ticks in 22,929).
+* `deployment/jetson/calibration/auto_horizon.py`, `deployment/jetson/calibration/camera_calibration.py`.
+
+### EXPERIMENTS
+
+**The drives:** `plans/task_list.md` section I, tasks 49 to 52. Eight runs, 2026-09-08.
+
+**Latency:** ARCHITECTURE section 4 for the on-device budget;
+`plans/results_task42_43_47_usb_campaign.md` for the USB campaign -- p95 116.19 ms pooled
+over 2,684 ticks against a 200 ms target, and the tailnet baseline at 215.63 ms;
+`deployment/jetson/bench_latency.py` for how it is produced.
+
+**Shadow against live:** `deployment/jetson/score_shadow.py` (scores candidates against
+one drive's logged decisions) and `deployment/jetson/check_shadow_commands.py` (compares through the
+real wire codec); `plans/plan_task35_shadow_decision_log.md`; `plans/task_list.md` tasks 43 and 44.
+
+**Scoring a run:** `deployment/jetson/eval_run.py` for the gated PASS/FAIL report,
+`deployment/jetson/drive_health.py` for health while a drive is happening.
+
+### THE SIMULATION HALF
+
+* `plans/mainz_src_port.md` -- the full account, and it leads with the result.
+* `src/sumo/mainz.py` -- the environment, SRC's reward, both observations, the entry
+  gate, and `DENSITY_CRITICAL` with the measurement that set it.
+* `src/rl/src_q.py` -- SRC's own Q-learning, ported.
+* `scripts/build_mainz_scenario.py` -- every conversion decision is in its docstrings:
+  why `--flatten`, why the speed factor, why the routes need both end links, and why the
+  exit is a lane drop rather than a signal.
+* `scripts/train_mainz_src.py` -- train on 1-10, select on 11-15, read 16-30 once.
+* `scripts/measure_mainz_fundamental_diagram.py` -- **the gate**. Served flow must fall as
+  demand rises, by more than the seed spread.
+* `scripts/measure_fd_straight.py`, `scripts/measure_fd_open_road.py`, `scripts/measure_fd_exit.py`.
+* `configs/human_models/eidm_reaction.yaml` -- why the fleet is not the paper's, with the
+  measurements, in its header.
+* `results/` with its own README, and `data/mainz/` for the scenario itself.
+
+### Assets
+
+`paper/images/` holds `system_architecture.pdf`, `system_vision.png`,
+`on-vehicle-perception.jpg`, `bus_depth.jpg` and `owl_predict.jpg`; the two `*_old.*`
+files beside them are superseded. `paper/refs.bib` has 211 entries, of which the current
+draft cites 37. `paper/related_materials/` holds two reference PDFs.
+
+The draft's sections are `paper/abstract.tex`, `intro.tex`, `vision.tex`,
+`architecture.tex`, `eval.tex`, `related.tex` and `discussion.tex` -- 259 lines in total,
+carried over from the earlier submission and not yet rewritten for this story.
+`paper/main.tex` is the IEEE/ICRA shell and carries a table of what the port from acmart
+changed.
+
+## Do not read these: superseded
+
+They describe the project's earlier formulation -- a MAPPO policy on a local-sensing
+observation, trained on a ladder of synthetic topologies. **None of it is this paper**, and
+an agent that reads it without this warning will write the wrong one. The code is deleted;
+these records remain because they are how the decisions were made.
+
+* `plans/result_simulation_leg_null.md` -- the MAPPO leg, closed as a null.
+* `plans/plan_simulations.md`, `plans/plan_task_67_merge_blind_collisions.md`,
+  `plans/plan_task_84_sumo_simulator.md`, `plans/plan_task_103_local_credit.md`.
+* `plans/result_fleet_mix_sweep.md`, `plans/replication_state.json`,
+  `plans/result_task93_burst_evaluation.json`,
+  `plans/result_task99_corrected_road.json`.
+* `plans/task_list.md` **section C**, which carries a superseded banner, and everything in
+  section K numbered 77 to 140, which is that leg's findings. Task 141 is the supersession.
+* The 39-field local-sensing observation contract. It is still live *for the safety gate*;
+  it is not the policy's input, and the `observation_parity` ledger of it (deleted; see task 47) of it was deleted
+  with the rest.
+
 ## Open
 
 * **The HERE-observation policy has not yet been run on the device.** The observation
