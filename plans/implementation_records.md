@@ -3242,6 +3242,180 @@ would have failed is absent rather than wrong.
      zero-clamp-rate deliverable, decision 7 (Mainz is a separate task), and findings F2/F3
      staying unfixed -- is for the user.
 
+     **Validator round 1 (2026-09-12): two blocking findings, confirmed and fixed, plus eight
+     further fixes.**
+
+     **F1 (blocking), fixed.** `run_safety_gate` fed `apply_safety_layer` the SAME context
+     `evaluate_rules`'s census read, built from the observation's own values including its
+     substituted defaults for not-evidence fields. Reproduced before the fix:
+     `local_density_veh_per_km` substituted at `0.0` (below the 12.0 veh/km uncongested
+     threshold) raised `bounded_speed_mps` from the proposed `20.0` to `22.0`, while
+     `low_speed_uncongested`'s own census entry read `not_evaluable` and all twelve rules read
+     `not_evaluable`. Fixed by `SafetyInputs.inert_context()`: a second `SafetyContext`, read
+     only by `apply_safety_layer`, where every field lacking evidence is replaced by a value
+     declared in `INERT_CONTEXT_VALUES` (beside `RULE_READS`), each derived from the one
+     comparison the field's rule makes, not guessed. After the fix, the same reproduction gives
+     `bounded_speed_mps == proposed_speed_mps == 20.0`, `delta_speed_mps == 0.0`,
+     `low_speed_uncongested` still `not_evaluable`. Checked: no field is read by two rules with
+     opposite senses (the front/rear gap-and-relative-speed pairs are each read by two rules,
+     both with the SAME sense -- larger gap, non-closing relative speed, is inert for both).
+
+     **Fix 2, the invariant that proves F1.** Asserts: every reason in `apply_safety_layer`'s
+     raw diagnostics names a rule the independent census calls `RULE_FIRED` -- checked on
+     genuine firings for the speed path, the lane path, and `emergency_override`, plus the
+     contrapositive (all twelve rules `not_evaluable`: `bounded_speed_mps ==
+     proposed_speed_mps`, the lane action is `None` by withholding rather than by masking,
+     `emergency_override is False`), plus the headway carve-out (`create_gap`'s merge bonus is
+     the one unconditional transformation `apply_safety_layer` makes -- verified by reading the
+     function end to end: every other returned value is either a plain decode with no rule
+     involved, or moves only inside one of the twelve rules' own `if`/`elif` body). Every new
+     assertion was checked by neutering the mechanism it pins (`inert_context` monkeypatched
+     back to the raw context) and confirming the reproduction's own assertion then failed.
+
+     One exception found while writing this, not fixed: `forward_ttc`'s `RULE_READS` requires
+     the merge-conflict pair as evidence (`merge_conflict_gap_m`,
+     `merge_conflict_relative_speed_mps`), always class (C) on this rig, so its census reads
+     `not_evaluable` even on a tick where the leader pair alone (real evidence: `leader_gap_m`
+     3.0 m, `leader_relative_speed_mps` -5.0 m/s, closing) correctly drives
+     `emergency_override`. The decision is correct here; only the census label undersells it.
+     Narrowing `forward_ttc`'s evaluability criterion to the operative (smaller) pair alone is
+     a decision-3-level call, left to the plan owner rather than made in this pass.
+
+     **F2 (blocking), fixed.** `withhold_lane_when_not_evaluable` never controlled the speed
+     or headway; `config.yaml`, `ARCHITECTURE.md` and the plan's decision 3 all documented it
+     as the whole gate's rollback. Reproduced before the fix: both
+     `withhold_lane_when_not_evaluable=True` and `=False` gave `bounded_speed_mps == 22.0` on
+     the F1 fixture, unaffected by the flag either way. Fixed by adding `safety.enabled`
+     (default `true`) as the actual rollback: `run_safety_gate(..., enabled=False)` skips
+     `apply_safety_layer` entirely -- `bounded_* == proposed_*` exactly, including headway (the
+     `create_gap` bonus is `apply_safety_layer`'s own first step and does not apply when it
+     does not run) -- while the full per-rule census still runs and is still recorded in a new
+     `safety.config` block (also carrying `withhold_lane_when_not_evaluable`, `time_s`,
+     `min_contextual_speed_mps`, `density_max_age_s` -- F3/F4 below).
+     `withhold_lane_when_not_evaluable`'s own wording is corrected in `config.yaml` and
+     `ARCHITECTURE.md` to state it covers the lane/merge action only. The plan's own sentence
+     ("Setting it false restores exactly the current display") is left alone, per the brief,
+     for the user to correct.
+
+     **F3/F4, fixed.** `score_safety.py` always replayed with its own module defaults, never a
+     tick's own recorded configuration -- it could not read a run recorded with
+     `withhold_lane_when_not_evaluable=false` (F3), and reconstructed `time_s` as the tick's
+     epoch `t_wall` rather than `pipeline.step`'s `time.monotonic()` (F4), a ~1.79e9 s
+     discrepancy invisible only because it reaches the record solely through
+     `lane_change_dwell`, `not_evaluable` on every tick in this corpus. Every `safety` block
+     now carries the `config` sub-key named above; `score_safety.py` replays from it, refusing
+     -- and naming the missing key -- for a `safety` block recorded after task 144 but before
+     this fix.
+
+     **F5, fixed, and widened by one finding.** Two additions to the per-rule census: (a) a
+     count of non-finite compared values among a rule's evaluable ticks
+     (`target_lane_front_gap`'s reproduction: the compared gap is `inf` on all 1,229
+     "evaluable" ticks, so its own 0.0% fired rate is not a rate -- the threshold could never
+     physically be crossed); (b) a provenance-consistency check, from a finding the coordinator
+     measured directly against `outputs/task42_usb/`, independent of and stronger than the
+     finding above: `target_lane_front_gap`'s value and `field_sources` entry are both aliased
+     verbatim from `leader_gap` unconditionally (`perception/observation_builder.py`, one dict
+     literal each, no other writer of either key under `perception/`), so under today's
+     contract the two `field_sources` entries can never disagree -- and
+     `baseline_run_20260902_183446`'s 1,229 ticks (recorded 2026-09-02; `n_detections == 0` on
+     every one) do disagree (`target_lane_front_gap` tagged `derived`, `leader_gap` tagged
+     `fallback_neutral`, both non-finite), meaning they were written under a superseded builder
+     and are not evidence under today's rule regardless of their own recorded tag. Both tools
+     still count such ticks evaluable (that is what today's rule says of the recorded source)
+     and flag them as `stale_provenance_ticks`, printed rather than silently trusted or
+     silently dropped. Consequence for the plan's own prose: "none of its twelve rules has
+     evaluable inputs on any of 3,913 ticks" is now true without the qualifier the 1,229 used
+     to force.
+
+     **Corpus re-measurement, all four runs, 3,913 ticks, via `score_safety.py`** (before: a
+     `git worktree add --detach` mirror at `972ded9`, this round's own parent commit; after:
+     the current commit; same corpus files both times). Forced `desired_speed_bin="slow"`:
+     before, clamped 3,913 of 3,913, mean delta +2.00 m/s (F1's bug, reproduced on the real
+     corpus, matching this record's own earlier E5 measurement); after, raised on 0 of 3,913,
+     lowered on 0 of 3,913. `emergency_override`: 0 of 3,913 both before and after, in every
+     arm. This confirms the coordinator's own reading of the class partition: `forward_ttc`
+     needs the merge-conflict pair (always class (C)) and this corpus's `leader_gap` is
+     `fallback_neutral` on every tick, so F1's neutralisation and the pre-fix substituted
+     default happen to coincide on THIS corpus -- F1 changes the recorded numbers only for
+     `low_speed_uncongested`, the one field whose substituted default (0.0) was not already
+     inert for its own rule.
+
+     **F6, fixed.** `score_safety.py`'s arms and `eval_run.py`'s `## Safety` section both
+     pooled raised and lowered speed changes into one signed mean and called the total
+     "clamped", which reads as a reduction regardless of which direction moved. Both now report
+     `raised_ticks`/`lowered_ticks` and each direction's own distribution (mean in
+     `score_safety.py`; median and mean in `eval_run.py`, matching its existing `pctl`
+     convention), rendered in words: "recommended speed raised on N of M ticks ...; lowered on
+     N of M ticks ...".
+
+     **F7, fixed for the one surface it was safe to touch.**
+     `Advisory.speed_display_withheld` was read by nothing. `ui/dashboard.py`'s
+     recommended-speed line (pulled into `_recommended_speed_line`, unit-testable without
+     `cv2`) now shows "WITHHELD (override)" in red instead of a number.
+     `advisory_message_from_advisory`/`AdvisoryMessage` (`transport/messages.py`) deliberately
+     NOT extended with this field: doing so would change the bytes
+     `specs/transport_golden_frames.json` pins for its `message_advisory` case (a "protocol
+     change" per that test file's own docstring), and regenerating it runs
+     `scripts/generate_transport_golden_frames.py` -- `scripts/` was another agent's active
+     file this round. Left undone and reported here rather than silently done or silently
+     skipped.
+
+     **F9/Fix 8, fixed.** `merge_text` is decoded from the policy's raw `merge_mode` and is not
+     one of the twelve rules, so it survived lane withholding untouched -- "Creating merge gap"
+     could show beside a `lane_text` already reading "Keep lane" for the identical
+     `not_evaluable` reason. `pipeline.step` now resets `merge_text` to its normal value
+     whenever `gate_result.lane_withheld is not None`.
+
+     **F8/Fix 9, fixed.** The gate already bounds what the driver is shown for speed and lane;
+     headway was not -- `advisory.headway_target_s` displayed the raw, unbounded decode while
+     `safety.bounded.headway_s` (with `create_gap`'s bonus applied) reached no surface.
+     `Advisory` gains `headway_display_s` (defaults to `headway_target_s` via `__post_init__`,
+     so every existing construction site is unaffected until `pipeline.step` overwrites it);
+     `headway_target_s` itself is untouched and `set_target_headway` keeps feeding it back raw
+     (decision 2). `ui/dashboard.py`, `Advisory.one_line()`, and the wire field
+     `headway_target_s` (via `advisory_message_from_advisory` -- a value change, not a schema
+     change; confirmed the golden test never calls that function) all now show the bounded
+     value.
+
+     **F10, the code half.** `target_lane_front_gap`/`target_lane_front_ttc`'s recorded
+     evidence now carries `gap_source_slot: "leader_gap"`, naming where the compared gap
+     actually comes from (the CURRENT lane, not the one being changed into), so the persisted
+     record cannot be misread as a genuine target-lane measurement. This is the same fact F5's
+     provenance-consistency check surfaces from the other direction: F10 is why the field can
+     carry evidence at all; F5's check is why 1,229 of those evaluable ticks should not be
+     trusted as evidence today.
+
+     **Two numbers added to the size discussion (E6/decision 4) above.** At the corpus's 5.0
+     ticks/s, the `safety` block's measured mean (2,576 B) costs **47.7 MB/hour** of
+     uncompressed JSONL, on top of **~182 MB/hour** for the rest of the tick record. The
+     plan's own comparison against a cheaper form (1,103 B, dropping each substituted field's
+     own provenance class) was the wrong comparison: dropping only the twelve `missing` lists
+     -- reconstructible from `RULE_READS` given the rest of the block, since `RULE_READS` names
+     exactly which fields a `not_evaluable` rule's `missing` would list -- gives **1,707 B**,
+     inside the plan's 1,300-1,800 B band, with every provenance class still present; the cost
+     is that the log is no longer self-describing (a reader needs `RULE_READS` alongside it to
+     reconstruct `missing`). Not implemented, recorded for the user's decision.
+
+     **Test counts.** Baseline stated for this round: `deployment/jetson/tests/` 2,390 passed /
+     28 skipped / 0 failed at `58cb284`. Current, at this round's last commit: 2,505 passed /
+     24 skipped / 0 failed. The skip count moved from 28 to 24 entirely via the 12 commits
+     already on the branch between `58cb284` and this round's own starting commit (`972ded9`)
+     -- concurrent tasks 142/143/145, not this round: task 143's own `2692c3b` rewrote
+     `test_sim_contract.py` to 0 skipped (was 1, per that task's own record above), and the
+     same span of commits also removed the 3 "pre-existing and unrelated"
+     `test_run_demo_loop.py` skips this record's own earlier paragraph named. Neither file was
+     touched this round. This round's own new tests: 30, across `test_safety_gate.py` (11),
+     `test_score_safety.py` (9), `test_safety_gate_pipeline.py` (5), `test_dashboard.py` (3, a
+     new file -- `ui/dashboard.py` had none before), `test_eval_run_safety.py` (2).
+
+     **Commits** (branch `mainz-src-port`, each by explicit pathspec, never `git add -A`,
+     never a bare `git commit`): `346fb9d` (F1 + Fix 2 + F2/Fix-3 infra, in
+     `policy/safety_gate.py`), `2c660a8` (F3/F4/F5/F6, in `score_safety.py`), `e12e62c` (F5/F6,
+     in `eval_run.py`), `89a1048` (F7, in `ui/dashboard.py`), `ba3ac2a` (F2's pipeline wiring,
+     F9/Fix-8, F8/Fix-9 -- `pipeline.py`, `policy/advisory.py`, `run_demo.py`,
+     `transport/messages.py`, `config.yaml`, `ARCHITECTURE.md`), `f788735` (F10 code half, in
+     `policy/safety_gate.py`).
+
 145. **The rig cannot run the controller the paper is about.** Implemented 2026-09-12
      (implementer-145) against `plans/plan_task145_dsrc_policy_runtime.md`. The plan's
      sign-off checklist (its section 11) is unaddressed: none of it carries user sign-off,
