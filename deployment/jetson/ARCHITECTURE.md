@@ -146,15 +146,39 @@ field lists + FIELD_SCALES + `encode_local_observation` (numpy twin),
 action heads/values/forced defaults, `decode_speed_bin` / `decode_headway_bin`,
 neutral fallbacks, and `_bin` semantics.
 
+The reference this is checked against is `specs/sim_contract_golden_vectors.json`,
+not a live sim import: `src/rl/encoders.py`, `src/rl/actions.py` and
+`src/rl/models.py` (the modules `test_sim_contract.py` used to import) were
+deleted in `6b538f2`, and there is no machine left on which they import.
+`scripts/generate_sim_contract_golden_vectors.py` derives every recorded
+quantity twice -- once from the simulation at `SIM_COMMIT` (`git archive`d
+into a temporary directory) and once from `policy/sim_contract.py` -- and
+refuses to write the golden file if the two disagree.
+`deployment/jetson/tests/test_sim_contract.py` reads that frozen file and
+imports no simulation module; all but two of its tests run on any machine,
+this one included.
+
 **When the sim contract changes:** update `sim_contract.py` (and
-`SIM_COMMIT`), run `python3 -m pytest tests/test_sim_contract.py` on a
-machine where the sim imports (encoder tests run everywhere torch exists;
-action/wrapper tests need highway_env), then re-export the policy bundle
-(`export_policy.py` refuses dim mismatches).
+`SIM_COMMIT`), then run `python3 scripts/generate_sim_contract_golden_vectors.py
+--write --force` to regenerate the golden file -- that is the step that
+touches the simulation, not `test_sim_contract.py` itself -- then re-export
+the policy bundle (`export_policy.py` refuses dim mismatches). Two of
+`test_sim_contract.py`'s tests need more than numpy and skip with a stated
+reason where their dependency is absent: the actor-layout test needs
+`torch`, and the regeneration test (the one that spawns the generator above)
+needs both `torch` and a `git` repository holding the `SIM_COMMIT` object.
+Nothing today checks the vendored contract against the live simulation on
+any machine without both `git` and `torch` -- including the device
+(validator round 1, S2) -- so that comparison against `d477dba` is a
+development-machine step; this section is not a claim that it also runs on
+the Jetson.
 
 The actor architecture (`backbone.{0,2,4}` + `heads.<name>` state-dict
-layout) is likewise mirrored in `export_policy.VendoredActor` and checked by
-`test_actor_state_dict_layout_matches_sim`.
+layout) is mirrored the same way in `export_policy.VendoredActor`, checked
+against the golden file's own recorded `actor_state_dict_layout` by
+`test_actor_state_dict_layout_matches_the_recorded_layout` (needs `torch`
+only, since it compares against the frozen file rather than regenerating
+it).
 
 ### 6.1 The safety and etiquette contract (task 144)
 
