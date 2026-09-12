@@ -36,15 +36,17 @@ SPEED_ACTIONS_KMH: tuple[float, ...] = (30.0, 45.0, 60.0)
 DECISION_INTERVAL_S: float = 60.0
 #: The density past which flow falls on THIS network, measured rather than adopted.
 #:
-#: SRC uses 0.3 of jam. Measured on a straight two-lane road at Mainz's own 60 km/h
-#: limit with the same W99 calibration, flow peaks at 1,000 veh/h/lane at 21.1
-#: veh/km/lane and falls 22% beyond it, so the critical density is 21.1/222 = 0.095 of
-#: jam. SRC's 0.3 is 67 veh/km/lane, three times past the point where flow starts to
-#: fall: a reward thresholded there pays for congestion long after the capacity drop it
-#: exists to prevent has already happened.
+#: Re-measured for the EIDM fleet, which replaced the paper's W99 calibration because
+#: W99 has no capacity drop on SUMO at all. On a straight two-lane road at Mainz's own
+#: 60 km/h, EIDM reaches 1,877 veh/h/lane at 39.6 veh/km/lane and stops at a jam density
+#: of 128.5 veh/km/lane. Density here is occupancy, `count * VEHICLE_LENGTH_M /
+#: lane_metres`, so 39.6 veh/km/lane is 0.178 of the roadway covered.
 #:
-#: Jam density is 1000/4.5 = 222 veh/km/lane, which is what makes this a fraction.
-DENSITY_CRITICAL: float = 0.095
+#: Against the measured jam density the critical point is 39.6/128.5 = 0.308, which is
+#: within 3% of the 0.3 of jam SRC publishes. Under the W99 fleet the same comparison
+#: gave 0.134, so SRC's threshold was more than twice the critical density; under EIDM
+#: it is the critical density. The published value was not wrong, the fleet was.
+DENSITY_CRITICAL: float = 0.178
 #: SRC's own value, kept so the two can be compared.
 DENSITY_CRITICAL_SRC: float = 0.3
 #: The metres of road one vehicle occupies in SRC's density, which fixes the jam

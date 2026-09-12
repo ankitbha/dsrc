@@ -47,7 +47,7 @@ CONNECTOR_ID_BASE = 10000
 
 
 def add_exit_constraint(net: Path, speed_mps: float, green_fraction: float,
-                        cycle_s: float) -> float:
+                        cycle_s: float, lanes: int = 0) -> float:
     """Continue the network past its exit into a road whose discharge we set.
 
     Vehicles reaching the end of a route leave instantly, so whatever edge they leave
@@ -81,7 +81,8 @@ def add_exit_constraint(net: Path, speed_mps: float, green_fraction: float,
 
     loaded = sumolib.net.readNet(str(net))
     link = loaded.getEdge("218")
-    lanes = link.getLaneNumber()
+    source_lanes = link.getLaneNumber()
+    lanes = lanes or source_lanes
     end = link.getToNode()
     x, y = end.getCoord()
     # Extend along the link's own final heading. Placing the nodes on a compass
@@ -91,9 +92,11 @@ def add_exit_constraint(net: Path, speed_mps: float, green_fraction: float,
     ux, uy = (qx - px) / span, (qy - py) / span
 
     directory = net.parent
+    signalled = green_fraction > 0.0
     (directory / "exit.nod.xml").write_text(
         f'<nodes><node id="exit_meter" x="{x + 300.0 * ux:.2f}" '
-        f'y="{y + 300.0 * uy:.2f}" type="traffic_light"/>'
+        f'y="{y + 300.0 * uy:.2f}"'
+        f'{" type=\"traffic_light\"" if signalled else ""}/>'
         f'<node id="exit_sink" x="{x + 600.0 * ux:.2f}" '
         f'y="{y + 600.0 * uy:.2f}"/></nodes>')
     (directory / "exit.edg.xml").write_text(
@@ -103,17 +106,25 @@ def add_exit_constraint(net: Path, speed_mps: float, green_fraction: float,
         f'numLanes="{lanes}" speed="{speed_mps:.3f}"/></edges>')
     # Merging an edge into an existing SUMO net does not generate the connections into
     # it, so a route through the new edge breaks unless they are given explicitly.
+    # Lane i runs straight into lane i where the widths match. Where the exit road is
+    # NARROWER the surplus lanes merge into the outermost one, which is a lane drop and
+    # a real merge: that turbulence is where a capacity drop comes from, and link 218
+    # ending into free outflow has none. Earlier versions fanned every lane into every
+    # lane, which made the movements cross and throttled the junction itself.
     connections = "".join(
-        f'<connection from="218" to="exit_road" fromLane="{i}" toLane="{i}"/>'
+        f'<connection from="218" to="exit_road" fromLane="{i}" '
+        f'toLane="{min(i, lanes - 1)}"/>' for i in range(source_lanes)
+    ) + "".join(
         f'<connection from="exit_road" to="exit_tail" fromLane="{i}" toLane="{i}"/>'
         for i in range(lanes))
     (directory / "exit.con.xml").write_text(f"<connections>{connections}</connections>")
     # The meter's program, written out rather than derived, so the green share is the
     # number chosen and not whatever netconvert infers.
     yellow = 3.0
-    green = max(5.0, round(green_fraction * cycle_s - yellow))
-    red = max(5.0, cycle_s - green - yellow)
+    green = max(5.0, round(green_fraction * cycle_s - yellow)) if signalled else cycle_s
+    red = max(5.0, cycle_s - green - yellow) if signalled else 0.0
     (directory / "exit.tll.xml").write_text(
+        "<tlLogics></tlLogics>" if not signalled else
         f'<tlLogics><tlLogic id="exit_meter" type="static" programID="0" offset="0">'
         f'<phase duration="{green:.0f}" state="{"G" * lanes}"/>'
         f'<phase duration="{yellow:.0f}" state="{"y" * lanes}"/>'
@@ -304,23 +315,28 @@ def rush(volumes: dict[str, list[tuple[float, float, float]]],
     return reshaped
 
 
-def vtype_lines(junction_block_s: float | None = None) -> list[str]:
-    """Vehicle types carrying the paper's own Vissim calibration.
+def vtype_lines(model: str = "eidm_reaction",
+                junction_block_s: float | None = None) -> list[str]:
+    """Vehicle types from a named human-model config.
 
-    SUMO's default Krauss model computes a collision-free safe speed exactly and
-    recovers from a disturbance immediately, so it produces no capacity drop and
-    roughly twice the capacity this network should have. `w99_calibrated` transcribes
-    Appendix A of the SRC paper, which is the calibration its own Vissim runs used, so
-    using it is part of reproducing the paper rather than a tuning choice of ours.
+    Every key under the config's `sumo` block other than the model name and the
+    standstill gap is written straight through as a vType attribute, so a config can
+    carry W99's cc1..cc9 or EIDM's tau and actionStepLength without this function
+    knowing which.
+
+    The default is `eidm_reaction` rather than the paper's `w99_calibrated`. Under W99
+    a bottleneck's discharge does not fall once a queue stands behind it -- it rises --
+    so served flow is a constant and there is no capacity drop for a density-holding
+    controller to recover. That config's header carries the measurements.
     """
     import yaml
 
     config = yaml.safe_load(
-        (REPO_ROOT / "configs" / "human_models" / "w99_calibrated.yaml").read_text())
+        (REPO_ROOT / "configs" / "human_models" / f"{model}.yaml").read_text())
     sumo = config["sumo"]
     attributes = " ".join(
-        f'{name}="{sumo[name]}"' for name in
-        ("cc1", "cc2", "cc3", "cc4", "cc5", "cc6", "cc7", "cc8", "cc9")
+        f'{name}="{value}"' for name, value in sumo.items()
+        if name not in ("car_following_model", "min_gap_m")
     )
     common = (f'carFollowModel="{sumo["car_following_model"]}" '
               f'minGap="{sumo["min_gap_m"]}" {attributes} maxSpeed="16.67"')
@@ -343,7 +359,8 @@ def vtype_lines(junction_block_s: float | None = None) -> list[str]:
 
 def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str, float],
                  duration_s: float, av_fraction: float, seed: int,
-                 junction_block_s: float | None = None) -> int:
+                 junction_block_s: float | None = None,
+                 human_model: str = "eidm_reaction") -> int:
     """One explicit departure per vehicle, evenly spaced, sorted by time.
 
     Explicit vehicles rather than `<flow>` so a vehicle's id encodes whether it is an
@@ -359,7 +376,7 @@ def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str,
     * `mainz_schedule.json`, the vehicles that file omits, with the entry link each one
       is waiting at so the gate can be applied per entry.
     """
-    header = ["<routes>"] + vtype_lines(junction_block_s)
+    header = ["<routes>"] + vtype_lines(human_model, junction_block_s)
     for entry, edges in sorted(built.items(), key=lambda kv: int(kv[0])):
         header.append(f'  <route id="r{entry}" edges="{" ".join(edges)}"/>')
     departures: list[tuple[float, str, str]] = []
@@ -409,8 +426,13 @@ def main() -> int:
                              "outflow at 3,899 veh/h, above the 2,880 the network "
                              "delivers, so without the meter the exit never binds and "
                              "vehicles leave as fast as they arrive")
+    parser.add_argument("--exit-lanes", type=int, default=0,
+                        help="lanes on the road the network exits into; 0 matches link "
+                             "218's three. Fewer is a lane drop, which is a merge, and "
+                             "a merge is where a capacity drop comes from -- 218 ends "
+                             "into free outflow and has none")
     parser.add_argument("--exit-speed-mps", type=float, default=16.67)
-    parser.add_argument("--exit-green-fraction", type=float, default=0.85,
+    parser.add_argument("--exit-green-fraction", type=float, default=0.0,
                         help="share of the cycle the exit meter is green. Measured "
                              "discharge is about 1,900 veh/h at 0.85 and 1,440 at "
                              "0.62, against the 2,880 veh/h the network delivers with "
@@ -421,6 +443,10 @@ def main() -> int:
                              "the .inpx intervals; the published scenario surges for "
                              "1,200 s and then stops, which leaves the rest of the "
                              "episode draining rather than at an operating point")
+    parser.add_argument("--human-model", default="eidm_reaction",
+                        help="a config under configs/human_models. The paper's "
+                             "w99_calibrated has no capacity drop on SUMO, so it cannot "
+                             "support a throughput claim; see that config's header")
     parser.add_argument("--junction-block-after-s", type=float, default=None,
                         help="seconds of accumulated waiting after which a vehicle "
                              "enters a junction it cannot clear, blocking it. SUMO "
@@ -445,9 +471,12 @@ def main() -> int:
     run_netconvert(inpx, net_file)
     if not args.no_exit_meter:
         allowed = add_exit_constraint(net_file, args.exit_speed_mps,
-                                      args.exit_green_fraction, args.exit_cycle_s)
-        print(f"  exit: metered at {args.exit_green_fraction:.2f} green, "
-              f"at most {allowed:.0f} veh/h")
+                                      args.exit_green_fraction, args.exit_cycle_s,
+                                      args.exit_lanes)
+        shape = (f"{args.exit_lanes} lanes" if args.exit_lanes else "218's own width")
+        meter = (f", metered at {args.exit_green_fraction:.2f} green"
+                 if args.exit_green_fraction > 0.0 else ", unsignalled")
+        print(f"  exit: {shape}{meter}, at most {allowed:.0f} veh/h")
     present = edge_ids(net_file)
     links = outgoing(net_file)
     print(f"  {len(present)} named edges")
@@ -482,7 +511,7 @@ def main() -> int:
               f"{last_end:g} s, then zero")
     count = write_routes(DATA / "mainz.rou.xml", built, volumes,
                          args.duration_s, args.av_fraction, args.seed,
-                         args.junction_block_after_s)
+                         args.junction_block_after_s, args.human_model)
     print(f"  {count} vehicle departures over {args.duration_s:g} s")
 
     groups = eval((DATA / "rl_links_mainz.txt").read_text())
