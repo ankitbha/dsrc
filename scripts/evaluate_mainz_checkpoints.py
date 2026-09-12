@@ -50,11 +50,11 @@ number the code in the tree cannot produce.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import inspect
 import json
 import math
 import statistics
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -69,6 +69,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from train_mainz_src import SCENARIOS, evaluate_no_control, run_episode  # noqa: E402
+from record_deployed_commit import _git_commit, _git_is_dirty  # noqa: E402
 from src.rl.src_q import SrcQNetwork  # noqa: E402
 from src.sumo.mainz import HERE_FEATURES, MainzEnv, SRC_FEATURES  # noqa: E402
 
@@ -76,6 +77,12 @@ from src.sumo.mainz import HERE_FEATURES, MainzEnv, SRC_FEATURES  # noqa: E402
 #: name so a checkpoint can never be pointed at the wrong feature tuple by passing
 #: the two as independent flags.
 CHECKPOINT_FEATURES: dict[str, tuple[str, ...]] = {"here": HERE_FEATURES, "src": SRC_FEATURES}
+
+#: `zeroed_head` (plan section 8's falsification arm) is not a checkpoint of its
+#: own -- it is this arm's checkpoint with `_zero_output_head` applied afterwards --
+#: so it is bound to a real trained arm's checkpoint file rather than given one of
+#: its own to keep in sync.
+ZEROED_HEAD_BASE_ARM: str = "here"
 
 DEFAULT_SEEDS: tuple[int, ...] = tuple(range(16, 31))
 DEFAULT_ARMS: tuple[str, ...] = ("no_control", "here", "src")
@@ -123,14 +130,43 @@ def _build_and_load(checkpoint_path: Path, features: tuple[str, ...],
     return model
 
 
+def _checkpoint_name_for_arm(name: str) -> str:
+    """The checkpoint file's own name for `name`: `zeroed_head` has no checkpoint of
+    its own and reads `ZEROED_HEAD_BASE_ARM`'s file instead, so it can never drift
+    from the checkpoint the arm it falsifies actually uses.
+    """
+    return ZEROED_HEAD_BASE_ARM if name == "zeroed_head" else name
+
+
+def checkpoint_path_for_arm(name: str, checkpoint_dir: Path) -> Path:
+    return checkpoint_dir / f"mainz_{_checkpoint_name_for_arm(name)}_best.pt"
+
+
+def _file_sha256(path: Path) -> str:
+    """A sha256 over `path`'s bytes -- a path names where a checkpoint was read
+    from, not what is in it, and a retrained checkpoint written to the same path is
+    indistinguishable from the one it replaced unless its bytes are recorded too.
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def load_arm_model(name: str, checkpoint_dir: Path,
                    num_segments: int) -> tuple[SrcQNetwork, tuple[str, ...]]:
-    """Bind a trained arm's checkpoint and feature tuple, and load it."""
-    if name not in CHECKPOINT_FEATURES:
+    """Bind a trained arm's checkpoint and feature tuple, and load it.
+
+    `zeroed_head` loads `ZEROED_HEAD_BASE_ARM`'s checkpoint and then zeros its
+    output layer (`_zero_output_head`): plan section 8's falsification arm must run
+    the same checkpoint file the arm it falsifies runs, or it is not testing that
+    that arm's own result is distinguishable from an obviously wrong policy.
+    """
+    checkpoint_name = _checkpoint_name_for_arm(name)
+    if checkpoint_name not in CHECKPOINT_FEATURES:
         raise ValueError(f"{name!r} has no checkpoint; only here/src are trained arms")
-    features = CHECKPOINT_FEATURES[name]
-    checkpoint_path = checkpoint_dir / f"mainz_{name}_best.pt"
+    features = CHECKPOINT_FEATURES[checkpoint_name]
+    checkpoint_path = checkpoint_path_for_arm(name, checkpoint_dir)
     model = _build_and_load(checkpoint_path, features, num_segments)
+    if name == "zeroed_head":
+        _zero_output_head(model)
     return model, features
 
 
@@ -187,6 +223,7 @@ def paired_statistics(arm_flows: list[float], baseline_flows: list[float]) -> di
     two_se = 2.0 * statistics.stdev(differences) / math.sqrt(n)
     baseline_mean = statistics.fmean(baseline_flows)
     return {
+        "n": n,
         "differences": differences,
         "gain": gain,
         "two_se": two_se,
@@ -214,15 +251,74 @@ def per_arm_two_se(values: list[float]) -> float:
 def _demand_veh_per_h(paths: dict, duration_s: float) -> float:
     """The schedule's own arrival rate, informational only: it is fixed by the
     schedule file and does not change with how the episode is configured to read it.
+
+    `duration_s` is accepted only for call-site symmetry with the rest of this
+    module's per-run configuration; it is never used below. Dividing by it instead
+    of the schedule's own departure span reports a rate that swings with an
+    unrelated setting -- at `duration_s=1250.0` that gave 8997.12 veh/h for a
+    schedule whose own span puts the rate at about 4506.
     """
     rows = json.loads((REPO_ROOT / paths["schedule"]).read_text())
-    return len(rows) / duration_s * 3600.0
+    departures = [row["depart"] for row in rows]
+    span_s = max(departures) - min(departures)
+    return len(rows) / span_s * 3600.0
 
 
-def _git_commit() -> str:
-    result = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT),
-                            capture_output=True, text=True, check=True)
-    return result.stdout.strip()
+def _validate_no_duplicates(*, arms: tuple[str, ...], seeds: tuple[int, ...]) -> None:
+    """Reject a duplicate arm or seed before any episode runs.
+
+    A duplicate seed silently shrinks the sample: `seeds=(16, 17, 17, 18)` would run
+    four episodes but only three distinct traffic realisations, `config["seeds"]`
+    would still list four entries, and every `paired` statistic would be computed
+    over `n=3` with nothing in the artifact saying the sample was smaller than it
+    claimed. A duplicate arm re-runs and re-records the same (arm, seed) pair twice.
+    """
+    if len(set(arms)) != len(arms):
+        raise ValueError(f"duplicate arms in {arms!r}")
+    if len(set(seeds)) != len(seeds):
+        raise ValueError(f"duplicate seeds in {seeds!r}")
+
+
+def _validate_seed_count(seeds: tuple[int, ...]) -> None:
+    """At least two distinct seeds: `paired_statistics` needs `n >= 2` for a sample
+    standard deviation and otherwise raises only after every episode has already
+    run, discarding the simulation time it cost to get there.
+    """
+    if len(set(seeds)) < 2:
+        raise ValueError(f"need at least two distinct seeds, got {seeds!r}")
+
+
+def _provenance() -> dict:
+    """Git commit and dirty state, read once before the first episode runs.
+
+    Reuses `record_deployed_commit.py`'s `_git_commit`/`_git_is_dirty` (return-code
+    checked, a bounded subprocess timeout, `OSError`/`SubprocessError` both caught)
+    rather than a second implementation. The implementation this module wrote for
+    itself called `git rev-parse HEAD` with `check=True` from inside the summary
+    build, after the episode loop -- so a tree with no `.git` (an untracked rsync
+    copy, a `git archive` extraction) raised `CalledProcessError` only once every
+    episode had already run, and the run was unrecoverable because `--resume` does
+    not exist (plan decision 10). Absence is now a recorded fact instead of a crash.
+    """
+    commit = _git_commit(REPO_ROOT)
+    if commit is None:
+        return {
+            "commit": None,
+            "dirty": None,
+            "commit_unavailable_reason":
+                "`git rev-parse HEAD` did not succeed in this tree -- not a git "
+                "checkout, git is unreachable, or there is no commit yet",
+        }
+    return {"commit": commit, "dirty": _git_is_dirty(REPO_ROOT), "commit_unavailable_reason": None}
+
+
+def _header_record(config: dict, provenance: dict) -> dict:
+    """The JSONL's own first line: this run's config and provenance, so a reader
+    holding only the `.jsonl` file -- the summary not yet written, or lost
+    separately -- can still tell which run produced it, under what configuration,
+    and at what commit.
+    """
+    return {"type": "header", "config": config, **provenance}
 
 
 def _compact_metrics(metrics: dict) -> dict:
@@ -263,7 +359,8 @@ def _check_gate_asymmetry(per_seed: dict[str, dict[int, dict]]) -> None:
             "not appear to be active")
 
 
-def _build_summary(*, commit: str, config: dict,
+def _build_summary(*, commit: str | None, dirty: bool | None,
+                   commit_unavailable_reason: str | None, config: dict,
                    per_seed: dict[str, dict[int, dict]]) -> dict:
     arms_summary = {}
     for name, seed_metrics in per_seed.items():
@@ -294,7 +391,9 @@ def _build_summary(*, commit: str, config: dict,
             baseline_flows = [baseline_seed_metrics[seed]["flow"] for seed in common_seeds]
             paired[name] = paired_statistics(arm_flows, baseline_flows)
 
-    return {"commit": commit, "config": config, "per_seed": per_seed,
+    return {"commit": commit, "dirty": dirty,
+            "commit_unavailable_reason": commit_unavailable_reason,
+            "config": config, "per_seed": per_seed,
             "arms": arms_summary, "paired": paired}
 
 
@@ -310,25 +409,50 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
     closed its own, which `run_episode` and `evaluate_no_control` each guarantee with
     a `finally`.
     """
+    _validate_no_duplicates(arms=arms, seeds=seeds)
+    _validate_seed_count(seeds)
+
     paths = SCENARIOS[scenario]
     num_segments = _num_segments(paths)
 
     models: dict[str, SrcQNetwork] = {}
     features_by_arm: dict[str, tuple[str, ...]] = {}
-    checkpoints_used: dict[str, str] = {}
+    checkpoints_used: dict[str, dict] = {}
     for name in arms:
         if name == "no_control":
             continue
         model, features = load_arm_model(name, checkpoint_dir, num_segments)
         models[name] = model
         features_by_arm[name] = features
-        checkpoints_used[name] = str(checkpoint_dir / f"mainz_{name}_best.pt")
+        checkpoint_path = checkpoint_path_for_arm(name, checkpoint_dir)
+        checkpoints_used[name] = {"path": str(checkpoint_path),
+                                  "sha256": _file_sha256(checkpoint_path)}
+
+    # Read before the first episode runs, not after the loop: a tree with no `.git`
+    # must not be able to discard a completed run just because its provenance is
+    # unreadable (F1).
+    provenance = _provenance()
+    config = {
+        "seeds": list(seeds),
+        "duration_s": duration_s,
+        "step_length_s": step_length,
+        "window_start_s": window_start_s,
+        "warmup_s": WARMUP_S,
+        "demand_veh_per_h": _demand_veh_per_h(paths, duration_s),
+        "scenario": scenario,
+        "action_set": "SPEED_ACTION_FRACTIONS",
+        "checkpoints": checkpoints_used,
+        "gate_entries": {name: gate_for_arm(name) for name in arms},
+    }
 
     out_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = out_dir / "mainz_paired_seeds.jsonl"
+    partial_jsonl_path = out_dir / "mainz_paired_seeds.jsonl.partial"
     per_seed: dict[str, dict[int, dict]] = {name: {} for name in arms}
 
-    with jsonl_path.open("w") as handle:
+    with partial_jsonl_path.open("w") as handle:
+        handle.write(json.dumps(_header_record(config, provenance)) + "\n")
+        handle.flush()
         for name in arms:
             for seed in seeds:
                 if name == "no_control":
@@ -342,7 +466,7 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
                 else:
                     metrics = run_episode(models[name], seed, features_by_arm[name],
                                           duration_s, 0.0, None, step_length,
-                                          window_start_s, True, paths)
+                                          window_start_s, gate_for_arm(name), paths)
                 record = _episode_record(name, seed, metrics)
                 per_seed[name][seed] = _compact_metrics(metrics)
                 handle.write(json.dumps(record) + "\n")
@@ -350,24 +474,21 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
 
     _check_gate_asymmetry(per_seed)
 
-    config = {
-        "seeds": list(seeds),
-        "duration_s": duration_s,
-        "step_length_s": step_length,
-        "window_start_s": window_start_s,
-        "warmup_s": WARMUP_S,
-        "demand_veh_per_h": _demand_veh_per_h(paths, duration_s),
-        "scenario": scenario,
-        "action_set": "SPEED_ACTION_FRACTIONS",
-        "checkpoints": checkpoints_used,
-        "gate_entries": {name: gate_for_arm(name) for name in arms},
-    }
-    summary = _build_summary(commit=_git_commit(), config=config, per_seed=per_seed)
+    summary = _build_summary(commit=provenance["commit"], dirty=provenance["dirty"],
+                             commit_unavailable_reason=provenance["commit_unavailable_reason"],
+                             config=config, per_seed=per_seed)
 
-    # Whole-then-rename: a reader never sees a partially written summary.
+    # Whole-then-rename: a reader never sees a partially written summary. The JSONL
+    # is renamed from its `.partial` name into place right beside it, at the same
+    # point, so a re-run that dies before this line (the gate-asymmetry check above
+    # included) leaves only the `.partial` file behind rather than a `mainz_paired_
+    # seeds.jsonl` that looks complete -- a narrower re-run must not be able to make
+    # a wider previous run's JSONL disappear until its own replacement is actually
+    # done (F4).
     summary_path = out_dir / "mainz_paired_seeds.json"
     tmp_path = out_dir / "mainz_paired_seeds.json.tmp"
     tmp_path.write_text(json.dumps(summary, indent=1))
+    partial_jsonl_path.rename(jsonl_path)
     tmp_path.rename(summary_path)
 
     return summary
@@ -380,8 +501,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scenario", choices=tuple(SCENARIOS), default="mainz")
-    parser.add_argument("--arms", nargs="+", choices=("no_control", "here", "src"),
-                        default=list(DEFAULT_ARMS))
+    parser.add_argument("--arms", nargs="+",
+                        choices=("no_control", "here", "src", "zeroed_head"),
+                        default=list(DEFAULT_ARMS),
+                        help="zeroed_head is the falsification arm (plan section 8): "
+                             "the here checkpoint with its output layer zeroed")
     parser.add_argument("--seeds", type=int, nargs="+", default=list(DEFAULT_SEEDS),
                         help="paired against no_control seed for seed; the committed "
                              "checkpoints were selected on seeds 11-15 and never see "
@@ -401,10 +525,22 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = REPO_ROOT / args.out
     checkpoint_dir = REPO_ROOT / args.checkpoint_dir
 
+    # Before the banner, and before any episode: a duplicate or single-seed request
+    # should fail here rather than after 45 episodes have already run (F5, F6).
+    _validate_no_duplicates(arms=tuple(args.arms), seeds=tuple(args.seeds))
+    _validate_seed_count(tuple(args.seeds))
+
+    provenance = _provenance()
     print(f"scenario {args.scenario}  arms {args.arms}  "
           f"seeds {args.seeds[0]}-{args.seeds[-1]} ({len(args.seeds)} total)")
     print(f"step-length {args.step_length}s  duration {args.duration_s}s  "
           f"window-start {args.window_start_s}s  warmup {WARMUP_S}s")
+    if provenance["commit"] is None:
+        print(f"commit unavailable: {provenance['commit_unavailable_reason']}")
+    else:
+        dirty = provenance["dirty"]
+        dirty_label = "dirty" if dirty else ("clean" if dirty is False else "dirty unknown")
+        print(f"commit {provenance['commit'][:12]} ({dirty_label})")
 
     started = time.time()
     summary = run(arms=tuple(args.arms), seeds=tuple(args.seeds),
@@ -422,9 +558,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {name} vs no_control: paired gain {stats['gain']:+.2f} "
               f"+/- {stats['two_se']:.1f} veh/h ({stats['percent']:+.1f}%) -- {status}")
 
+    commit_display = summary["commit"][:12] if summary["commit"] else "unavailable"
     print(f"\nwrote {out_dir / 'mainz_paired_seeds.json'} and "
           f"{out_dir / 'mainz_paired_seeds.jsonl'} in {elapsed:.0f}s, at commit "
-          f"{summary['commit'][:12]}")
+          f"{commit_display}")
     return 0
 
 
