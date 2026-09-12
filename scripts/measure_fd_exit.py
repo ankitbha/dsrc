@@ -1,6 +1,21 @@
 #!/usr/bin/env python3
 """The exit super-segment's flow-density curve, measured as the straight road's was.
 
+THIS CURVE IS NOT EVIDENCE OF A CAPACITY DROP, and reading it as one is what cost this
+leg four training runs. What it measures is `q = k v` on a stretch of road: as the road
+fills, speed falls faster than density rises, so the product falls. Every car-following
+model does that. Measured on the straight road at Mainz's 60 km/h, the calibrated W99
+fleet peaks at 997 veh/h/lane and falls 23%, and SUMO's default Krauss fleet -- which
+this project recorded as having NO capacity drop, served flow rising monotonically with
+demand -- peaks at 2,127 and falls 15%. The hill is present either way.
+
+The capacity drop a controller can recover is a different quantity: the discharge of the
+network's bottleneck falling once a queue stands behind it, which shows as SERVED FLOW
+falling as demand rises. `measure_mainz_fundamental_diagram.py` measures that, and it is
+the gate to pass before spending a training run. This script describes a road; that one
+decides whether there is anything to recover.
+
+
     .venv/bin/python scripts/measure_fd_exit.py
 
 Mainz's outflow was never restricted. Routes end on link 218, and a vehicle reaching

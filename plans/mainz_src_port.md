@@ -769,3 +769,39 @@ congested branch, then falling back below capacity, and the question is whether 
 returns to 2,865 or stays near 2,340. If it stays, the network has hysteresis, a
 controller that prevents the breakdown recovers 18%, and the experiment has something to
 measure. If it recovers immediately, it does not.
+
+## The conflation at the root of this leg
+
+Two different quantities were being called the fundamental diagram, and only one of them
+bears on whether a controller can gain throughput.
+
+**A link's `q = k v` curve.** Measure density and speed on a stretch of road and multiply.
+As the road fills, speed falls faster than density rises, so the product falls and the
+plot is a hill. This is what `measure_fd_straight.py` and `measure_fd_exit.py` produce,
+and it is what was delivered when the request was to make the network behave like a
+fundamental diagram. It is a correct measurement of a real relation.
+
+**It is not evidence of a capacity drop.** Measured on the straight road at Mainz's
+60 km/h with a 0.5 s step:
+
+| fleet | peak flow | at density | fall past the peak |
+|---|---|---|---|
+| W99, the paper's calibration | 997 veh/h/lane | 21.1 veh/km/lane | 23% |
+| Krauss, SUMO's default | 2,127 veh/h/lane | 43.0 veh/km/lane | 15% |
+
+Krauss is the model this project recorded as having no capacity drop at all -- on
+`inverted_tree` its served flow rose monotonically from 890 to 1,110 veh/h and a
+perfect-information metering oracle could not beat inaction. It produces the hill anyway.
+The hill is the shape of `v(k)`, which every car-following model has.
+
+**The quantity that matters is the bottleneck's discharge falling once a queue stands
+behind it**, which shows as SERVED FLOW falling as offered demand rises. That is what
+`measure_mainz_fundamental_diagram.py` measures and what a controller holding density
+below critical recovers. On Mainz it does not fall at any exit setting, entry policy or
+junction parameter: 2,853 to 2,894 veh/h across a 3.6x density range. On `inverted_tree`
+it does not fall either once the seed spread is computed.
+
+So the exit backpressure did what was asked of it -- the exit super-segment traces a
+proper hill, peak 826 veh/h/lane at 17.0, falling 28%, loading and unloading agreeing to
+1% -- and that result is sound. It was the inference from it that was wrong: a link that
+traces a hill does not imply a network whose throughput can be recovered.
