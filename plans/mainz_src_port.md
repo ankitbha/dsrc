@@ -857,3 +857,48 @@ its Vissim runs used. Keeping it means keeping a fleet in which the mechanism th
 depends on does not exist. `carFollowModel="EIDM"` with `actionStepLength="1.0"` is
 SUMO's model for driver imperfection and reaction time, and its parameters here are
 defaults rather than anything calibrated, which is a provenance question of its own.
+
+## Result on the EIDM fleet with a lane-drop exit
+
+The first configuration in this leg whose pre-training gate passed, and the first with a
+throughput difference. Seeds 1-10 train, 11-15 validate and select, 16-20 read once. 80
+episodes, 2,500 s, 100% penetration, 0.5 s steps, flow counted from 900 s. Demand is a
+sustained 4,500 veh/h, just past the 3,900 at which the network breaks down, so there is
+a drop to prevent rather than one that cannot be avoided.
+
+| arm | flow veh/h | arrivals | return | space-mean speed | held at entry |
+|---|---|---|---|---|---|
+| DSRC, the HERE observation | **3,775** (+5.8%) | 1,997 | 182.5 | 40.81 | 51 |
+| SRC, its original six features | 3,756 (+5.3%) | 1,991 | **193.8** | 40.82 | 50 |
+| no control | 3,568 | 1,951 | 55.1 | **42.68** | 0 |
+
+Per seed, and paired on seed because each arm ran the same traffic realisation:
+
+| seed | 16 | 17 | 18 | 19 | 20 | mean | +/-2se |
+|---|---|---|---|---|---|---|---|
+| no control | 3,722 | 3,553 | 3,564 | 3,556 | 3,444 | 3,568 | 89 |
+| DSRC | 3,760 | 3,756 | 3,793 | 3,811 | 3,753 | 3,775 | 23 |
+| SRC | 3,849 | 3,707 | 3,564 | 3,827 | 3,836 | 3,756 | 109 |
+
+DSRC gains **+207 +/- 92 veh/h**, SRC **+188 +/- 133**. Both are resolved against the
+seed spread, DSRC comfortably and SRC narrowly.
+
+**The deployable observation costs nothing, on a network where throughput can move.**
+Every earlier version of this comparison was made where served flow was a constant, so
+the two arms agreeing said little. Here throughput responds and they still agree: 3,775
+against 3,756, a difference of 0.5% inside both bars. DSRC is also far steadier across
+seeds, 23 against 109. The four features a traffic API cannot return -- density,
+following gap, and the entry and exit counts -- carry no information this controller uses.
+
+**The gain is throughput bought with speed.** Both arms run SLOWER than no control,
+40.8 against 42.7 km/h, while serving more vehicles. That is the mechanism working as
+described: holding density below critical upstream of the merge keeps the merge
+discharging near capacity instead of breaking down to the congested branch. It is not an
+artifact of admission control -- the entry gate held about 50 of 3,124 vehicles, against
+1,750 in the earlier W99 runs where it was doing all the work.
+
+**What is not established.** One demand level, chosen just past breakdown; the gain
+should be swept across demand before it is quoted as a property of the network. DSRC's
+selected checkpoint is its last episode, so it may not have converged. EIDM's parameters
+are SUMO defaults rather than anything calibrated against measured traffic, and the
+three-into-two exit drop is a modelling choice of ours.
