@@ -536,6 +536,63 @@ def thermal_result(
     }
 
 
+def safety_result(ticks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The task-144 gate's rollup: per-rule evaluable/fired counts, the
+    clamp-delta distribution, and how often the lane action was withheld.
+
+    `None` for a run recorded before this task existed -- the same
+    convention `thermal_result`/`failures_result` already use for an
+    instrument absent from an older log, never a manufactured zero.
+
+    Reported and NOT gated, for the reason this file's own module docstring
+    already gives about an untrained bundle: the actions this rolls up are
+    arbitrary by construction, and even trained ones have no ground truth
+    here. This is a census of what the gate did, not a verdict on it.
+
+    A rule's rate is reported only over the ticks it was evaluable on --
+    never over every tick including the ones it could not be evaluated on,
+    which would dilute a real rate with structurally blind ticks, and never
+    printed at all when a rule was evaluable on zero ticks (score_safety.py's
+    own refuse-before-misleading rule, applied here to the same census).
+    """
+    safety_ticks = [t["safety"] for t in ticks if t.get("safety") is not None]
+    if not safety_ticks:
+        return None
+
+    rule_names = sorted({name for s in safety_ticks for name in s.get("rules", {})})
+    rules: dict[str, Any] = {}
+    for name in rule_names:
+        statuses = [s["rules"][name]["status"] for s in safety_ticks if name in s.get("rules", {})]
+        evaluable = sum(1 for st in statuses if st != RULE_NOT_EVALUABLE)
+        fired = sum(1 for st in statuses if st == RULE_FIRED)
+        entry: dict[str, Any] = {
+            "total_ticks": len(statuses),
+            "evaluable_ticks": evaluable,
+            "not_evaluable_ticks": len(statuses) - evaluable,
+        }
+        if evaluable == 0:
+            entry["fired_fraction_of_evaluable"] = None
+        else:
+            entry["fired_ticks"] = fired
+            entry["fired_fraction_of_evaluable"] = round(fired / evaluable, 4)
+        rules[name] = entry
+
+    deltas = [s["delta_speed_mps"] for s in safety_ticks]
+    clamped_deltas = [d for d in deltas if d != 0.0]
+    clamped = len(clamped_deltas)
+    lane_withheld = sum(1 for s in safety_ticks if s.get("lane_withheld") is not None)
+    emergency = sum(1 for s in safety_ticks if s.get("emergency_override"))
+    return {
+        "n_ticks": len(safety_ticks),
+        "rules": rules,
+        "clamped_ticks": clamped,
+        "clamped_fraction": round(clamped / len(safety_ticks), 4),
+        "clamp_delta_mps": pctl(clamped_deltas) if clamped_deltas else None,
+        "lane_withheld_ticks": lane_withheld,
+        "emergency_override_ticks": emergency,
+    }
+
+
 def _join_failure_episodes(failure_events: list[dict]) -> list[dict]:
     """Pair every `open` record with its `close`, by `episode_id`.
 
@@ -1096,6 +1153,7 @@ def analyze(
         "observation": observation,
         "gps": gps_metrics,
         "advisory": advisory,
+        "safety": safety_result(ticks),
         "gates": gates,
         # A run whose log is short did not pass; it was not fully read. Folded into
         # the verdict rather than reported beside it, because a field nobody looks at
@@ -1200,6 +1258,43 @@ def render_plots(result: dict[str, Any], run_dir: Path) -> list[str]:
     fig.tight_layout(); fig.savefig(run_dir / "eval_leader.png"); plt.close(fig)
     written.append("eval_leader.png")
     return written
+
+
+def _safety_lines(safety: dict[str, Any] | None) -> list[str]:
+    """Rendered right after `## Advisory`: the task-144 gate's per-rule
+    evaluability census, the clamp-delta distribution, and how often the
+    lane action was withheld. `[]` -- no section at all -- for a run
+    recorded before this task existed, the same convention `_thermal_lines`
+    uses for a log with no thermal records.
+
+    A rule's rate is printed only when it was evaluable on at least one
+    tick; a rule evaluable on zero ticks names the fact in words, with no
+    percentage, matching score_safety.py's own refusal.
+    """
+    if not safety:
+        return []
+    lines = ["", "## Safety (evaluability census -- not gated)", ""]
+    for name, entry in safety["rules"].items():
+        if entry["evaluable_ticks"] == 0:
+            lines.append(f"- {name}: not evaluable on any tick (0 of {entry['total_ticks']})")
+        else:
+            lines.append(
+                f"- {name}: evaluable on {entry['evaluable_ticks']} of {entry['total_ticks']}; "
+                f"fired on {entry['fired_ticks']} ({entry['fired_fraction_of_evaluable']:.1%})"
+            )
+    delta = safety["clamp_delta_mps"]
+    delta_clause = (
+        f"delta p50 {delta['p50']:.2f} m/s (mean {delta['mean']:.2f})" if delta else "no ticks clamped"
+    )
+    lines.append(
+        f"- clamped: {safety['clamped_ticks']} of {safety['n_ticks']} "
+        f"({safety['clamped_fraction']:.1%}), {delta_clause}"
+    )
+    lines.append(
+        f"- lane action withheld on {safety['lane_withheld_ticks']} of {safety['n_ticks']} ticks; "
+        f"emergency_override on {safety['emergency_override_ticks']}"
+    )
+    return lines
 
 
 def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
@@ -2188,6 +2283,7 @@ def render_markdown(
         f"- confidence labels: {a['confidence_labels']}",
         f"- head distributions: {json.dumps(a['head_distributions'], indent=2)}",
     ]
+    lines += _safety_lines(r.get("safety"))
     if session is not None:
         lines += _sensing_lines(session.get("sensing"))
     join = r.get("phone_join")
