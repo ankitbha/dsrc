@@ -364,7 +364,21 @@ def test_hashed_by_contract_fingerprint_matches_what_it_actually_reads():
     that drifted from what the function actually hashes would silently exempt a
     constant from BOTH digests -- R2-1's exact failure (a constant in no digest at
     all) reached a third way. Checked against the function's own source text rather
-    than trusted as a comment.
+    than trusted as a comment, and bidirectionally: a name absent from the claimed
+    set but present in the source fails this test too, catching a constant that
+    starts being hashed without HASHED_BY_CONTRACT_FINGERPRINT being told.
+
+    Brittle in one specific, known way: this is a TEXTUAL check on
+    `inspect.getsource(...)`, so it cannot distinguish a constant the function
+    hashes from one merely named in its docstring. `SIM_COMMIT` currently passes
+    this check by coincidence rather than by the property this test claims to
+    verify -- it appears in `contract_fingerprint()`'s own docstring (the sentence
+    explaining why `SIM_COMMIT` is deliberately not hashed), so its name is present
+    in `source`, and it survives only because it is also in `PINNED_SEPARATELY`.
+    Add a sentence to that docstring naming any other constant, for any reason
+    at all, and this test starts failing spuriously. That failure is loud, not
+    silent -- the safe direction -- so the fix, if it is ever needed, is to
+    strip docstrings before searching rather than to weaken this check.
     """
     import inspect
 
