@@ -31,6 +31,35 @@ from src.rl.src_q import (  # noqa: E402
 )
 from src.sumo.mainz import HERE_FEATURES, SRC_FEATURES, MainzEnv  # noqa: E402
 
+#: The files each network is built into. `build_mainz_scenario.py` and
+#: `build_tree_scenario.py` write the same five, so one env and one driver run both and
+#: the two results are comparable. `gated_routes` holds the routes and vehicle types
+#: with no vehicles, for runs where the env grants entry itself.
+SCENARIOS = {
+    "mainz": {"net": "data/mainz/mainz.net.xml",
+              "routes": "data/mainz/mainz.rou.xml",
+              "gated_routes": "data/mainz/mainz_routes.rou.xml",
+              "segments": "data/mainz/mainz_segments.json",
+              "schedule": "data/mainz/mainz_schedule.json"},
+    "tree": {"net": "data/tree/net.net.xml",
+             "routes": "data/tree/tree.rou.xml",
+             "gated_routes": "data/tree/tree_routes.rou.xml",
+             "segments": "data/tree/tree_segments.json",
+             "schedule": "data/tree/tree_schedule.json"},
+}
+
+
+def make_env(paths, *, seed, duration_s, features, step_length, gate_entries):
+    return MainzEnv(
+        seed=seed, duration_s=duration_s, features=features,
+        step_length_s=step_length, gate_entries=gate_entries,
+        net_file=REPO_ROOT / paths["net"],
+        route_file=REPO_ROOT / paths["gated_routes" if gate_entries else "routes"],
+        segment_file=REPO_ROOT / paths["segments"],
+        schedule_file=REPO_ROOT / paths["schedule"],
+    )
+
+
 TRAIN_SEEDS = tuple(range(1, 11))
 VALIDATION_SEEDS = tuple(range(11, 16))
 TEST_SEEDS = tuple(range(16, 21))
@@ -39,14 +68,16 @@ TEST_SEEDS = tuple(range(16, 21))
 def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
                 duration_s: float, epsilon: float,
                 generator: torch.Generator | None, step_length: float = 1.0,
-                window_start_s: float = 0.0, gate_entries: bool = True) -> dict:
+                window_start_s: float = 0.0, gate_entries: bool = True,
+                paths=None) -> dict:
     """One episode. Returns the trajectory and the outcome metrics.
 
     The controller acts from t=0 so it can prevent a jam rather than inherit one, but
     throughput is counted only from `window_start_s`, after the network has filled.
     """
-    env = MainzEnv(seed=seed, duration_s=duration_s, features=features,
-                   step_length_s=step_length, gate_entries=gate_entries)
+    env = make_env(paths or SCENARIOS["mainz"], seed=seed, duration_s=duration_s,
+                   features=features, step_length=step_length,
+                   gate_entries=gate_entries)
     states, actions, rewards = [], [], []
     marked = window_start_s <= 0.0
     try:
@@ -82,9 +113,9 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
 
 
 def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
-             window_start_s=0.0, gate_entries=True) -> dict:
+             window_start_s=0.0, gate_entries=True, paths=None) -> dict:
     runs = [run_episode(model, s, features, duration_s, 0.0, None, step_length,
-                        window_start_s, gate_entries) for s in seeds]
+                        window_start_s, gate_entries, paths) for s in seeds]
     return {
         "return": statistics.fmean(r["return"] for r in runs),
         "arrived": statistics.fmean(r["arrived"] for r in runs),
@@ -98,6 +129,7 @@ def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scenario", choices=tuple(SCENARIOS), default="mainz")
     parser.add_argument("--episodes", type=int, default=30)
     parser.add_argument("--duration-s", type=float, default=2500.0)
     parser.add_argument("--features", choices=("here", "src"), default="here")
@@ -126,8 +158,10 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=True)
 
     gate = not args.no_gate_entries
+    paths = SCENARIOS[args.scenario]
     probe = MainzEnv(seed=1, duration_s=1.0, warmup_s=0.0, features=features,
-                     gate_entries=gate)
+                     gate_entries=gate,
+                     segment_file=REPO_ROOT / paths["segments"])
     num_segments = len(probe.segments)
     model = SrcQNetwork(num_segments, len(features), 3)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
@@ -136,6 +170,7 @@ def main() -> int:
 
     print(f"features {args.features}: {features}")
     print(f"{num_segments} super-segments, {sum(p.numel() for p in model.parameters())} parameters")
+    print(f"scenario {args.scenario}")
     print(f"entry gate {'on' if gate else 'off'} for the trained arm, "
           f"never for no control")
     print(f"train {TRAIN_SEEDS}  validate {VALIDATION_SEEDS}  test {TEST_SEEDS}\n")
@@ -149,7 +184,8 @@ def main() -> int:
         seed = TRAIN_SEEDS[episode % len(TRAIN_SEEDS)]
         started = time.time()
         run = run_episode(model, seed, features, args.duration_s, epsilon,
-                          generator, args.step_length, args.window_start_s, gate)
+                          generator, args.step_length, args.window_start_s, gate,
+                          paths)
         loss = td_loss(model, run["states"], run["actions"], run["rewards"], DISCOUNT)
         total = loss.sum(dim=1).mean()
         optimizer.zero_grad()
@@ -162,7 +198,7 @@ def main() -> int:
         note = ""
         if (episode + 1) % args.validate_every == 0 or episode == args.episodes - 1:
             scores = evaluate(model, VALIDATION_SEEDS, features, args.duration_s,
-                              args.step_length, args.window_start_s, gate)
+                              args.step_length, args.window_start_s, gate, paths)
             note = (f"   return {scores['return']:.1f}  flow {scores['flow']:.0f}"
                     f"  speed {scores['mean_speed_kmh']:.2f}")
             if scores["return"] > best["return"]:
@@ -178,9 +214,9 @@ def main() -> int:
 
     print("\nreading the held-out test seeds, once")
     test = evaluate(model, TEST_SEEDS, features, args.duration_s, args.step_length,
-                    args.window_start_s, gate)
+                    args.window_start_s, gate, paths)
     baseline = evaluate_no_control(TEST_SEEDS, features, args.duration_s,
-                                   args.step_length, args.window_start_s)
+                                   args.step_length, args.window_start_s, paths)
     for label, row in (("trained   ", test), ("no control", baseline)):
         print(f"  {label} flow {row['flow']:>7.0f} veh/h  return {row['return']:>8.1f}"
               f"  space-mean speed {row['space_mean_speed_kmh']:>6.2f} km/h"
@@ -191,13 +227,14 @@ def main() -> int:
           f"in steady-state flow")
 
     (out / "result.json").write_text(json.dumps(
-        {"features": args.features, "best": best, "test": test,
+        {"scenario": args.scenario, "features": args.features,
+         "best": best, "test": test,
          "no_control": baseline, "history": history}, indent=1))
     return 0
 
 
 def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
-                        window_start_s=0.0) -> dict:
+                        window_start_s=0.0, paths=None) -> dict:
     """Every vehicle left to the car-following model, on the same seeds.
 
     NO CONTROL RUNS WITHOUT THE ENTRY GATE, and that is deliberate rather than an
@@ -217,8 +254,8 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
 
     runs = []
     for seed in seeds:
-        env = MainzEnv(seed=seed, duration_s=duration_s, features=features,
-                       step_length_s=step_length, gate_entries=False)
+        env = make_env(paths or SCENARIOS["mainz"], seed=seed, duration_s=duration_s,
+                       features=features, step_length=step_length, gate_entries=False)
         total = 0.0
         marked = window_start_s <= 0.0
         try:

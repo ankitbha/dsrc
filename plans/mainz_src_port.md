@@ -10,15 +10,22 @@ this summary is the state as of the latest run.
 Held-out seeds 16-20, Mainz, EIDM fleet, three-into-two lane drop at the exit, demand a
 sustained 4,500 veh/h. Seeds 1-10 train, 11-15 select, 80 episodes, 100% penetration.
 
-| arm | flow veh/h | arrivals | return | space-mean speed |
+| arm | flow veh/h | paired gain | arrivals | space-mean speed |
 |---|---|---|---|---|
-| DSRC, the HERE observation | **3,775** (+5.8%) | 1,997 | 182.5 | 40.81 |
-| SRC, its original six features | 3,756 (+5.3%) | 1,991 | **193.8** | 40.82 |
-| no control | 3,568 | 1,951 | 55.1 | **42.68** |
+| DSRC, the HERE observation | **3,765** | **+230 +/- 44** (+6.5%) | 1,997 | 40.81 |
+| SRC, its original six features | 3,759 | +224 +/- 61 (+6.3%) | 1,991 | 40.82 |
+| no control | 3,535 | -- | 1,951 | **42.68** |
 
-Paired on seed, DSRC gains **+207 +/- 92 veh/h** and SRC **+188 +/- 133**; both are
-resolved against the seed spread, and DSRC is far steadier across seeds (+/-23 against
-+/-109). The two arms differ by 0.5%, inside both bars.
+Fifteen evaluation seeds, 16 to 30, paired on seed because each arm ran the same traffic
+realisation. Both gains are resolved. The two arms differ by 0.2%, well inside both bars.
+
+**Five seeds was not enough, and the check matters.** On the five pre-registered test
+seeds the same checkpoints read +207 +/- 92 and +188 +/- 133. Mainz survived the
+extension and tightened -- +230 +/- 44 -- but `inverted_tree_bottleneck` did not: there
+the five-seed reading of +185 +/- 211 veh/h, or +14.2%, fell to +44 +/- 111, or +3.2%,
+and stopped being resolved. Seeds 16 to 20 happened to hold three unusually poor
+no-control runs on that network. Checkpoint selection was unchanged; only the evaluation
+set was enlarged.
 
 **Restricting the observation to what a traffic API returns costs nothing, measured on a
 network where throughput can move.** Both arms run slower than no control, 40.8 against
@@ -989,3 +996,38 @@ served column as capacity; once a network saturates, a later point can read high
 the pre-breakdown one through noise, which put the peak past the breakdown and reported
 that nothing was sampled beyond it. Capacity is now the best flow measured while demand
 was still being met.
+
+## `inverted_tree_bottleneck`: no resolved gain
+
+The tree was trained with the same driver and the same fleet, by writing it into the same
+five files Mainz uses -- `scripts/build_tree_scenario.py` -- so one env and one training
+script run both networks and the results are comparable. Six entries, ten super-segments,
+1,500 veh/h sustained, just past the 1,200 to 1,500 where the gate puts capacity.
+
+Held-out seeds 16 to 30, paired on seed:
+
+| arm | flow veh/h | +/-2se | paired gain | resolved |
+|---|---|---|---|---|
+| DSRC | 1,435 | 52 | +44 +/- 111 (+3.2%) | no |
+| SRC | 1,395 | 69 | +4 +/- 123 (+0.3%) | no |
+| no control | 1,391 | 85 | -- | -- |
+
+On seeds 16 to 20 alone the same checkpoints read +185 +/- 211 (+14.2%) and +144 +/- 180
+(+11.0%). The point estimate collapsed by a factor of four when ten more seeds were
+added, because those five contained three no-control runs at 1,113, 1,149 and 1,271 veh/h
+where the other ten are mostly near 1,500.
+
+**The size of the available gain tracks the size of the capacity drop.** The tree's drop
+is 4.9% and Mainz's with a lane-drop exit is 11.3%; the tree's measured gain is 3.2% and
+unresolved, Mainz's is 6.5% and resolved. That is the expected relation and it is a
+reason to believe the Mainz number rather than an accident of it.
+
+Two things about the tree's own training are worth recording. DSRC's selected checkpoint
+is episode 4 of 80, and no control holds 82 vehicles against DSRC's 42 at nearly the same
+throughput, so whatever the controller does there it does very early and by keeping the
+network far emptier.
+
+`SPEED_ACTIONS_KMH` was also generalised to `SPEED_ACTION_FRACTIONS`, a half, three
+quarters and all of a segment's own limit. SRC's 30, 45 and 60 km/h are exactly that on
+Mainz's 60 km/h network; taken literally on the tree's 108 km/h roads they would have
+been a standing order to crawl rather than a speed advisory. Mainz is unchanged.

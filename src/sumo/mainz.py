@@ -32,6 +32,12 @@ DATA = REPO_ROOT / "data" / "mainz"
 
 #: SRC's action set, `speeds = [30, 45, 60]` km/h in its train.py.
 SPEED_ACTIONS_KMH: tuple[float, ...] = (30.0, 45.0, 60.0)
+#: The same three actions as fractions of a segment's own speed limit, which is what
+#: they are: Mainz is limited to 60 km/h, so SRC's 30, 45 and 60 are a half, three
+#: quarters and all of it. Stated this way the set carries to a network with a different
+#: limit -- `inverted_tree` is 108 km/h, where a literal 30/45/60 would be a standing
+#: order to crawl rather than a speed advisory.
+SPEED_ACTION_FRACTIONS: tuple[float, ...] = (0.5, 0.75, 1.0)
 #: SRC's `FEEDBACK_STEP`.
 DECISION_INTERVAL_S: float = 60.0
 #: The density past which flow falls on THIS network, measured rather than adopted.
@@ -104,6 +110,7 @@ class MainzEnv:
         net_file: Path | None = None,
         route_file: Path | None = None,
         segment_file: Path | None = None,
+        schedule_file: Path | None = None,
     ) -> None:
         self.seed = seed
         self.duration_s = duration_s
@@ -115,6 +122,7 @@ class MainzEnv:
         default_routes = "mainz_routes.rou.xml" if gate_entries else "mainz.rou.xml"
         self.route_file = route_file or DATA / default_routes
         self.segment_file = segment_file or DATA / "mainz_segments.json"
+        self.schedule_file = schedule_file or DATA / "mainz_schedule.json"
         self.segments: list[list[str]] = json.loads(self.segment_file.read_text())
         self._running = False
         self._static: dict[str, dict[str, float]] = {}
@@ -175,7 +183,7 @@ class MainzEnv:
         self._schedule, self._admitted = {}, {}
         if not self.gate_entries:
             return
-        rows = json.loads((DATA / "mainz_schedule.json").read_text())
+        rows = json.loads(self.schedule_file.read_text())
         for row in rows:
             self._schedule.setdefault(row["entry"], []).append(row)
         for entry, queued in self._schedule.items():
@@ -314,8 +322,9 @@ class MainzEnv:
         safety gate, and it is the same semantics as Vissim's `DesSpeed`.
         """
         for index, segment in enumerate(self.segments):
-            target_mps = SPEED_ACTIONS_KMH[int(actions[index])] / 3.6
+            fraction = SPEED_ACTION_FRACTIONS[int(actions[index])]
             for edge in segment:
+                target_mps = fraction * self._static[edge]["free_flow_kmh"] / 3.6
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
                     if _sumo.vehicle.getTypeID(vehicle) == "av":
                         _sumo.vehicle.setSpeed(vehicle, target_mps)
