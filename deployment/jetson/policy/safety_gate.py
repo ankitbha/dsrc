@@ -439,11 +439,15 @@ class SafetyInputs:
         identical to `context()` except that every field with
         `is_evidence(name)` False this tick is replaced by
         `INERT_CONTEXT_VALUES[name]` rather than the observation's own
-        substituted value. `evaluate_rules`'s census keeps reading the
-        UNMODIFIED `context()` -- this method exists only for the copy that
-        reaches the driver-facing decision, so a not_evaluable rule is inert
-        in the number the driver sees, not only in the record (decision 3:
-        "nothing. It is recorded and the advisory is unchanged").
+        substituted value, so a not_evaluable rule is inert in the number
+        the driver sees, not only in the record (decision 3: "nothing. It
+        is recorded and the advisory is unchanged"). `evaluate_rules`'s
+        census also reads this method now, not the raw `context()`
+        (validator round 3: the two disagreeing about which
+        disjunct/branch a partial-evidence tick's `missing` reasoned about
+        let the census assert `fired` on values the decision never
+        evidenced -- see `evaluate_rules`'s own docstring for the
+        reproduction).
 
         A field absent from `INERT_CONTEXT_VALUES` (`ego_speed_mps`,
         `follower_gap_m`, `follower_relative_speed_mps`, `near_merge`) gates
@@ -675,29 +679,37 @@ RULE_READS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: validator round 2 (coordinator sweep, 2026-09-12): built the most
-#: favourable observation `safety_inputs_from_observation` can produce --
-#: every source `measured`, a fresh `last_detection_age_s` -- and checked
-#: which rules still have no field able to carry evidence. Seven of twelve
-#: are unreachable on this rig BY CONSTRUCTION, not by chance of what a
-#: drive happened to record, because the fields they read are class (C)
-#: unconditionally, regardless of any observation:
-#: `all_lane_low_speed_occupancy` (no cooperating peers -- reads
-#: `all_lanes_av_occupied`/`av_mean_speed_mps`/`downstream_congested`, all
-#: V2V-only), `lane_change_dwell` and `lane_changes_per_km` (no
-#: lane-change detector), `target_lane_missing` (no lane detection),
-#: `target_lane_rear_gap`/`target_lane_rear_ttc`/`target_lane_rear_braking`
-#: (no rear sensor). The remaining five are reachable, wholly
-#: (`low_speed_uncongested`, `target_lane_front_gap`) or partly --
-#: `passing_lane_slow_hold` (`local_mean_speed_mps` yes, `in_passing_lane`
-#: no), `target_lane_front_ttc` (gap yes, relative speed no), `forward_ttc`
-#: (leader pair yes, merge-conflict pair no). This is why a per-rule
-#: evaluability refinement (`_forward_ttc_missing`,
-#: `_lane_changes_per_km_missing`) can only ever be pinned by a hand-built
-#: `SafetyInputs` for `lane_changes_per_km` (wholly unreachable) and, on
-#: its unreachable merge-conflict axis only, for `forward_ttc` -- see the
-#: docstrings on both functions and on their tests in
-#: `tests/test_safety_gate.py`.
+#: validator round 2/3 sweep (2026-09-12): which of the twelve rules can
+#: EVER be evaluable through `safety_inputs_from_observation` -- built the
+#: most favourable observation it can produce (every source `measured`, a
+#: fresh `last_detection_age_s`) and, for `forward_ttc`, a 20,000-draw
+#: sweep over the builder's own reachable range. Answer: exactly THREE --
+#: `low_speed_uncongested`, `target_lane_front_gap` (each gated by a
+#: single class-(B) field) and `forward_ttc` (reachable only because of
+#: `_forward_ttc_missing`'s own per-disjunct refinement below; under the
+#: generic "every `RULE_READS` field must be evidence" rule its
+#: permanently-class-(C) merge-conflict pair would put it in the list
+#: below too). The other NINE can never be evaluable, for two different
+#: reasons: seven read only class-(C) fields, unconditionally, regardless
+#: of any observation -- `all_lane_low_speed_occupancy` (no cooperating
+#: peers -- reads `all_lanes_av_occupied`/`av_mean_speed_mps`/
+#: `downstream_congested`, all V2V-only), `lane_change_dwell` and
+#: `lane_changes_per_km` (no lane-change detector), `target_lane_missing`
+#: (no lane detection), `target_lane_rear_gap`/`target_lane_rear_ttc`/
+#: `target_lane_rear_braking` (no rear sensor); two more each have exactly
+#: ONE class-(B) field but are blocked by evaluability's generic
+#: "all-fields" rule regardless, because their OTHER read is permanently
+#: class (C) -- `passing_lane_slow_hold` (`local_mean_speed_mps` can vary;
+#: `in_passing_lane` cannot) and `target_lane_front_ttc` (`target_lane_
+#: front_gap_m` can vary; `target_lane_front_relative_speed_mps` cannot).
+#: Having one flexible field is not the same claim as being reachable --
+#: only `forward_ttc` has a refinement narrow enough to matter here, and
+#: it does. This is why a per-rule evaluability refinement
+#: (`_forward_ttc_missing`, `_lane_changes_per_km_missing`) can only ever
+#: be pinned by a hand-built `SafetyInputs` for `lane_changes_per_km`
+#: (wholly unreachable) and, on its unreachable merge-conflict axis only,
+#: for `forward_ttc` -- see the docstrings on both functions and on their
+#: tests in `tests/test_safety_gate.py`.
 
 #: validator round 1, F1: the value substituted for a SafetyContext field's
 #: slot in the copy `apply_safety_layer` reads (`SafetyInputs.inert_context`),
@@ -1134,8 +1146,36 @@ def evaluate_rules(
     """All twelve rules, each a total predicate over its own evaluability --
     never short-circuited by chain position, unlike `apply_safety_layer`'s
     lane-guard elif chain (decision 3's "never confuse a short-circuited
-    guard with an unevaluable one")."""
-    context = inputs.context()
+    guard with an unevaluable one").
+
+    Evaluates each predicate over `inputs.inert_context()`/
+    `inputs.inert_state(state)`, not the raw `context()`/`state`
+    (validator round 3 correction). Decision 3 originally said the census
+    reads the unmodified context; that was wrong for `forward_ttc` and
+    `lane_changes_per_km`, whose `missing` is computed from EFFECTIVE
+    (inert-or-real) values to decide which disjunct/branch applies
+    (`_forward_ttc_missing`, `_lane_changes_per_km_missing`). Running the
+    predicate itself on the RAW context/state let that choice disagree
+    with what `missing` reasoned about: reproduced by the coordinator --
+    leader pair not evidence (raw gap 6.0 m), merge pair evidence (gap
+    6.0 m). `missing` picks the merge pair (its real 6.0 m beats the
+    leader's inert +inf) and reports `()`; the raw predicate then compares
+    `merge_conflict_gap_m(6.0) < leader_gap_m(6.0)`, which is False, so it
+    silently kept the LEADER pair -- and reported `fired`, with `ttc_s`
+    computed from the leader's un-evidenced gap and relative speed. A
+    positive claim on substituted values is worse than the `not_evaluable`
+    problem F1 fixed: that at least said "unknown".
+
+    The census's job is to describe truthfully what the decision did, and
+    a census computed over values the decision never saw describes a
+    hypothetical, not this tick. Nothing is lost by neutralising here:
+    `Tick.to_record()`'s `obs`/`field_sources` still carry the actual
+    observed values and their provenance regardless of what this function
+    reports; only the `evidence` dict below changes, to name the values
+    the rule actually compared.
+    """
+    context = inputs.inert_context()
+    state = inputs.inert_state(state)
     return {
         name: _evaluate_one_rule(name, action=action, inputs=inputs, context=context, state=state, constraints=constraints)
         for name in RULE_NAMES
@@ -1250,15 +1290,22 @@ def run_safety_gate(
     the driver is shown even when the observation's own substituted value
     for that field is not itself inert (`local_density_veh_per_km`'s 0.0
     default was the reproduced case: 0.0 is BELOW the uncongested threshold,
-    the opposite of inert). `evaluate_rules`'s census, below, keeps reading
-    the unmodified `context`/`state` -- the record must still say what was
-    actually observed, not what the decision was neutralised against.
+    the opposite of inert). `evaluate_rules`'s census, below, ALSO now reads
+    `inert_context()`/`inert_state()`, not the raw `context()`/`state`
+    (validator round 3 correction -- see `evaluate_rules`'s own docstring:
+    a census computed on raw values could disagree with `missing` about
+    which disjunct/branch applied and assert `fired` on substituted data).
+    The record still says what was actually observed: `Tick.to_record()`'s
+    `obs`/`field_sources` carry that regardless of what this function
+    reports; only the per-rule `evidence` dict changes, to the values the
+    rule actually compared.
 
-    This closes the invariant along one axis only (which containers the
-    decision reads are neutralised); `forward_ttc`'s own evaluability
-    computation (`_forward_ttc_missing`) closes a second, different axis --
-    an evidence requirement wider than the comparison that actually
-    determines the rule's result.
+    This closes the invariant along two independent axes: which containers
+    the decision AND the census read (neutralised in both, identically),
+    and, separately, `forward_ttc`/`lane_changes_per_km`'s own evaluability
+    computations (`_forward_ttc_missing`, `_lane_changes_per_km_missing`)
+    close an evidence requirement wider than the comparison/branch that
+    actually determines each rule's result.
 
     `enabled=False` (validator round 1, F2/F3 -- `safety.enabled`) is the
     actual rollback mechanism `config.yaml`/`ARCHITECTURE.md` had wrongly

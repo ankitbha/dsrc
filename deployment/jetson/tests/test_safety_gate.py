@@ -1212,6 +1212,83 @@ def test_forward_ttc_missing_disagrees_with_the_generic_rule_on_the_merge_confli
     )
 
 
+def test_evaluate_rules_agrees_with_its_own_missing_about_which_pair_is_operative() -> None:
+    """validator round 3's case 42: `evaluate_rules` used to run each
+    predicate on the RAW context/state while `missing` reasoned about
+    EFFECTIVE (inert-or-real) values -- letting the two disagree about
+    which disjunct/branch applies. Leader pair NOT evidence (gap 6.0 m,
+    relative speed -8.0 m/s -- real numbers, just unevidenced); merge pair
+    evidence (gap 6.0 m, relative speed -0.5 m/s, ttc 12.0 s).
+
+    `missing`'s own comparison correctly picks the merge pair (its real
+    6.0 m beats the leader's inert +inf) and reports `()`. Before this
+    fix, the predicate then ran on the RAW context, where
+    `merge_conflict_gap_m(6.0) < leader_gap_m(6.0)` is False (a tie, not a
+    strict `<`), so it silently kept the LEADER pair instead and reported
+    `fired` with `ttc_s 0.75` (6.0 / 8.0) -- a positive safety claim
+    computed entirely from values `missing` had just certified as not
+    needed. Fixed: `evaluate_rules` now runs the predicate on
+    `inert_context()`/`inert_state()`, so it uses the SAME operative pair
+    `missing` did -- `quiet`, `ttc_s 12.0`, the merge pair's own value.
+    """
+    fields = dict(_inputs_with_overrides(
+        merge_conflict_gap_m=6.0, merge_conflict_relative_speed_mps=-0.5,
+    ).fields)
+    fields["leader_gap_m"] = SafetyInputField(value=6.0, input_class="evidence_required", source=None, evidence=False)
+    fields["leader_relative_speed_mps"] = SafetyInputField(value=-8.0, input_class="evidence_required", source=None, evidence=False)
+    inputs = SafetyInputs(fields=fields)
+    constraints = SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0)
+
+    assert _forward_ttc_missing(inputs, constraints) == ()
+
+    rules = evaluate_rules(action(), inputs, SafetyState(), constraints)
+    record = rules["forward_ttc"]
+    assert record.status == RULE_QUIET
+    assert record.missing == ()
+    assert record.evidence["gap_m"] == pytest.approx(6.0)
+    assert record.evidence["ttc_s"] == pytest.approx(12.0), (
+        "must be the MERGE pair's ttc (12.0 = 6.0 / 0.5), not the leader "
+        "pair's un-evidenced 0.75 (6.0 / 8.0) that the raw-context predicate "
+        "silently fell back to before this fix"
+    )
+
+    result = run_safety_gate(action(), inputs, SafetyState(), constraints)
+    assert result.emergency_override is False
+    assert result.raw_diagnostics["external_safety_override"] == []
+
+
+def test_evaluate_rules_case_42_fails_against_the_raw_context_mechanism(monkeypatch) -> None:
+    """Confirms the test above actually discriminates: neuters `evaluate_
+    rules` back to reading the raw `context()`/`state` (what it did before
+    this fix) and confirms case 42 then disagrees with `missing` exactly
+    as the coordinator reproduced -- `fired`, `ttc_s 0.75`, on the
+    leader's own un-evidenced values.
+    """
+    import policy.safety_gate as safety_gate_module
+
+    def unfixed_evaluate_rules(action, inputs, state, constraints):
+        context = inputs.context()
+        return {
+            name: safety_gate_module._evaluate_one_rule(
+                name, action=action, inputs=inputs, context=context, state=state, constraints=constraints,
+            )
+            for name in RULE_NAMES
+        }
+    monkeypatch.setattr(safety_gate_module, "evaluate_rules", unfixed_evaluate_rules)
+
+    fields = dict(_inputs_with_overrides(
+        merge_conflict_gap_m=6.0, merge_conflict_relative_speed_mps=-0.5,
+    ).fields)
+    fields["leader_gap_m"] = SafetyInputField(value=6.0, input_class="evidence_required", source=None, evidence=False)
+    fields["leader_relative_speed_mps"] = SafetyInputField(value=-8.0, input_class="evidence_required", source=None, evidence=False)
+    inputs = SafetyInputs(fields=fields)
+    constraints = SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0)
+
+    record = safety_gate_module.evaluate_rules(action(), inputs, SafetyState(), constraints)["forward_ttc"]
+    assert record.status == RULE_FIRED, "the pre-fix mechanism disagrees with missing==() and wrongly fires"
+    assert record.evidence["ttc_s"] == pytest.approx(0.75)
+
+
 def test_safety_gate_config_is_recorded() -> None:
     obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(

@@ -3820,6 +3820,79 @@ would have failed is absent rather than wrong.
      distance is `>= +inf`, so the recorded-change count is zero regardless of what the
      distances list contains.
 
+     **Round 3: `evaluate_rules` computed `missing` from EFFECTIVE (inert-or-real) values
+     while running the predicate itself on the RAW context/state -- the two could disagree
+     about which disjunct/branch applied, and the census could assert `fired` on substituted
+     data.** Reproduced by the coordinator (their case 42): leader pair NOT evidence (raw gap
+     6.0 m, raw relative speed -8.0 m/s -- real numbers, just unevidenced), merge pair evidence
+     (gap 6.0 m). `_forward_ttc_missing`'s own comparison correctly picks the merge pair (its
+     real 6.0 m beats the leader's inert +inf) and reports `missing=()`. The predicate then ran
+     on the raw context, where `merge_conflict_gap_m(6.0) < leader_gap_m(6.0)` is False (a tie,
+     not a strict `<`), so it silently kept the LEADER pair instead and reported `fired`, with
+     `ttc_s 0.75` computed from the leader's own un-evidenced gap and relative speed --
+     `emergency_override False` and empty diagnostics, so nothing acted on it, but the record
+     positively claimed a rule was evaluated and fired, on substituted values. Worse than the
+     `not_evaluable` problem F1 fixed: that at least said "unknown".
+
+     Fixed exactly as specified: `evaluate_rules` now builds `context = inputs.inert_context()`
+     and `state = inputs.inert_state(state)` before evaluating each rule, so the predicate runs
+     over the SAME effective values its own `missing` computation reasoned about. Verified
+     independently (not merely trusted from the report): re-ran case 42 after the fix --
+     `quiet`, `missing=()`, `ttc_s 12.0` (the merge pair's own value, `6.0 / 0.5`) -- and pinned
+     it as `test_evaluate_rules_agrees_with_its_own_missing_about_which_pair_is_operative`, with
+     a paired test that reverts `evaluate_rules` to the raw-context mechanism inline and
+     confirms it then reproduces the coordinator's exact numbers (`fired`, `ttc_s 0.75`).
+
+     This changes nothing for the OTHER ten rules: none has a branch-aware `missing`
+     computation, so whenever a simple rule is evaluable (every `RULE_READS` field has
+     evidence, by the generic rule), the inert-substituted and raw values are identical for
+     every field that rule reads -- substitution only ever replaces a field THAT rule needs
+     when that field lacks evidence, which evaluable-by-the-generic-rule already rules out. The
+     corpus census is confirmed unchanged (below).
+
+     **`_lane_changes_per_km_missing` kept, not deleted, on the coordinator's ruling against
+     the validator's proposal.** The validator argued deletion is defensible -- all three of
+     its fields are class (C), so the refinement is a no-op through the builder today. Ruled
+     otherwise: the first lane-change detector makes it live, a silent no-op today becomes a
+     wrong census the day the hardware changes, and it is no longer invisible -- it is pinned
+     by hand-built fixtures (the previous commit). `_forward_ttc_missing` was never in
+     question: it changes reachable behaviour today (`forward_ttc` is one of the three rules
+     ever evaluable through the builder -- next paragraph).
+
+     **Decision 3's own wording is corrected, here and wherever it is cited.** It said the
+     census reads the unmodified context; after this fix it does not, for
+     `forward_ttc`/`lane_changes_per_km`'s branch-aware evaluability. The reason is one
+     sentence: the census's job is to describe truthfully what the decision did, and a census
+     computed over values the decision never saw describes a hypothetical, not this tick.
+     Nothing is lost -- `Tick.to_record()`'s `obs`/`field_sources` still carry the actually
+     observed values and their provenance regardless of what the per-rule `evidence` dict
+     reports. (`ARCHITECTURE.md` sec 6.1 makes the same claim and needs the same correction;
+     left alone, per this round's own standing constraint that file is task 143's while it is
+     active there.)
+
+     **The reachable-rule count is THREE, not the five an earlier sweep in this record
+     estimated.** The validator's 20,000-draw sweep, through `safety_inputs_from_observation`
+     only: `low_speed_uncongested` and `target_lane_front_gap` (each gated by one class-(B)
+     field), and `forward_ttc` (reachable only because of its own per-disjunct refinement --
+     under the generic rule its permanently-class-(C) merge-conflict pair would put it with the
+     nine below). Nine of twelve can never be evaluable: seven read only class-(C) fields, and
+     two more -- `passing_lane_slow_hold` (`local_mean_speed_mps` can vary), `target_lane_front_
+     ttc` (its gap can vary) -- are still always blocked by the generic all-fields rule because
+     their OTHER read is permanently class (C). Having one flexible field is not the same claim
+     as being reachable; corrected in the code comment beside `RULE_READS` and above.
+
+     **Corpus census independently re-confirmed unchanged after this fix.** Re-ran
+     `score_safety.py` over all four archived runs (3,913 ticks) and diffed the rendered report
+     against `results/safety/gate_census_corpus.json`'s own `after` section: byte-identical.
+     Expected, and now measured twice (once by the coordinator, once independently here): every
+     field `_forward_ttc_missing`/`_lane_changes_per_km_missing` branch on lacks evidence on
+     every tick in this corpus, so the fix is forward-looking and moves nothing measurable
+     today.
+
+     **Suite:** 2,530 passed / 24 skipped / 0 failed (this round added 2 new tests to round 2's
+     count; the skip-count note earlier in this record explains the 24 vs. the plan's original
+     28).
+
      **Commits** (branch `mainz-src-port`, each by explicit pathspec, never `git add -A`,
      never a bare `git commit`): `346fb9d` (F1 + Fix 2 + F2/Fix-3 infra, in
      `policy/safety_gate.py`), `2c660a8` (F3/F4/F5/F6, in `score_safety.py`), `e12e62c` (F5/F6,
@@ -3827,9 +3900,11 @@ would have failed is absent rather than wrong.
      F9/Fix-8, F8/Fix-9 -- `pipeline.py`, `policy/advisory.py`, `run_demo.py`,
      `transport/messages.py`, `config.yaml`, `ARCHITECTURE.md`), `f788735` (F10 code half, in
      `policy/safety_gate.py`), `dedd3c1` (round 2: `forward_ttc`/`lane_changes_per_km`
-     evaluability corrected twice, `inert_state()`, R2-2, R2-1 record fixes), and the mutation
-     fix above (`policy/safety_gate.py`, `tests/test_safety_gate.py`, this record), committed
-     separately from `dedd3c1` so that delta stays legible.
+     evaluability corrected twice, `inert_state()`, R2-2, R2-1 record fixes), `2ecff72` (pinned
+     both refinements against the surviving mutation with hand-built `SafetyInputs`, the
+     seven-unreachable-rules comment), and round 3 above (`policy/safety_gate.py`,
+     `tests/test_safety_gate.py`, this record), each committed separately so the deltas stay
+     legible.
 
 145. **The rig cannot run the controller the paper is about.** Implemented 2026-09-12
      (implementer-145) against `plans/plan_task145_dsrc_policy_runtime.md`. The plan's
