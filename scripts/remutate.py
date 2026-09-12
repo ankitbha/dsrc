@@ -3261,6 +3261,23 @@ PYTEST_VERDICT_RETURNCODES = frozenset({0, 1})
 #: run before any mutation is applied: measuring it *after* would let a
 #: mutation's own collection failure lower both sides of the comparison
 #: together, hiding exactly the failure mode this check exists to catch.
+#:
+#: R2-5 (validator round 2): what this constant cannot do, and the trade round 1
+#: made silently by replacing a literal with it. It only compares the MUTATED run's
+#: collected count against THIS SAME TREE'S OWN baseline, measured moments earlier
+#: -- so a module silently dropped by something already present before either run
+#: even starts (an untracked `pytest.ini` with `addopts = --ignore=...`, a stray
+#: `conftest.py`) contaminates both sides equally and this comparison never moves.
+#: Reproduced: an untracked `pytest.ini` ignoring `test_sim_contract.py` measured a
+#: baseline of 2470 against a true 2545, and a real mutation in the ignored module
+#: then reported `*** SURVIVED ***` -- a false SURVIVED, not a false CAUGHT, but a
+#: verdict on a suite this script was never told had shrunk. The old literal this
+#: replaced *would* have caught that specific case (an absolute expectation notices
+#: a suite that shrank; a self-measured baseline, by construction, cannot notice a
+#: shrink it was there to measure) -- traded away deliberately for the staleness
+#: fix, not an oversight left standing. What closes it now is
+#: `_refuse_if_tree_is_dirty()`'s separate check for untracked files that change
+#: collection, run once before any of this.
 _BASELINE_PYTHON_TESTCASES: int | None = None
 
 
@@ -3407,21 +3424,58 @@ if SIDECAR.exists():
     SIDECAR.unlink()
 
 
-def _refuse_if_tree_is_dirty() -> None:
-    """B2, second route (validator round 1). A shared worktree carrying another
-    agent's uncommitted, in-progress edit is a red tree that does not *look*
-    red: `git status --porcelain` shows a modified tracked file, not a failing
-    test, and nothing in `run()` or `_baseline_python_testcases()` checks
-    either. If that in-progress edit fails a test at the moment this gate
-    happens to run -- which mid-edit code routinely does -- every mutation
-    below is scored CAUGHT by that unrelated failure, `survived` stays empty,
-    and this exits 0 having checked nothing. That is the exact failure mode
-    the first route of B2 exists to close, reached by a second door this
-    check exists to shut. Refuse before applying anything, naming what is
-    dirty, rather than let a mutation run start against it. Run this gate
-    from its own `git worktree add --detach`, never a tree another agent is
-    also committing to.
+#: Untracked files pytest itself would notice -- an exact name pytest treats
+#: specially, or the shape of a test module -- so their mere presence changes what
+#: gets collected without git ever calling the tree dirty in the sense the tracked-
+#: file check below covers. R2-5 (validator round 2): an untracked `pytest.ini`
+#: carrying `addopts = --ignore=deployment/jetson/tests/test_sim_contract.py` gave a
+#: baseline of 2470 testcases against a true 2545, and a real mutation inside the
+#: ignored module then reported `*** SURVIVED ***` -- a false SURVIVED, never a false
+#: CAUGHT, because the baseline was measured under the exact same contamination as
+#: the mutated run, so the two never disagreed. `conftest.py` can do the same through
+#: collection hooks; `setup.cfg`/`tox.ini`/`pyproject.toml` can carry the same
+#: `[pytest]`/`[tool:pytest]` `addopts` `pytest.ini` does; an untracked `test_*.py`
+#: changes collection by simply existing.
+_COLLECTION_AFFECTING_NAMES = frozenset(
+    {"conftest.py", "pytest.ini", "setup.cfg", "tox.ini", "pyproject.toml"}
+)
+
+
+def _refuse_if_tree_is_dirty(kinds: list[str] | None) -> None:
+    """B2, second route (validator round 1), plus R2-5 (validator round 2).
+
+    Route one: a shared worktree carrying another agent's uncommitted, in-
+    progress edit is a red tree that does not *look* red: `git status
+    --porcelain` shows a modified tracked file, not a failing test, and
+    nothing in `run()` or `_baseline_python_testcases()` checks either. If
+    that in-progress edit fails a test at the moment this gate happens to
+    run -- which mid-edit code routinely does -- every mutation below is
+    scored CAUGHT by that unrelated failure, `survived` stays empty, and
+    this exits 0 having checked nothing.
+
+    Route two (R2-5): an untracked file that changes what pytest collects
+    (`_COLLECTION_AFFECTING_NAMES` above) contaminates the baseline and every
+    mutated run identically, so `_baseline_python_testcases()`'s own
+    fresh-vs-mutated comparison can never see it -- see that constant's
+    docstring for the reproduced false SURVIVED.
+
+    Refuse before applying anything, naming what is dirty or collection-
+    affecting, rather than let a mutation run start against either. Run this
+    gate from its own `git worktree add --detach`, never a tree another
+    agent is also committing to.
+
+    R2-6 (validator round 2): scoped to the kinds actually selected
+    (`kinds`, the parsed `WANTED` below -- `None` means every kind). A
+    Gradle-only run depends on neither check above -- it never calls
+    `_baseline_python_testcases()` or reads Python collection counts -- and a
+    `git archive` mirror with no `.git` at all made `git status` itself exit
+    128 for every kind including those, refusing a run this guard was never
+    protecting. That friction is what makes someone disable the guard
+    entirely; scoping it removes the friction without weakening the
+    protection a Python run still gets.
     """
+    if kinds is not None and "python" not in kinds:
+        return
     result = subprocess.run(
         ["git", "status", "--porcelain"], cwd=str(ROOT),
         capture_output=True, text=True, timeout=10.0,
@@ -3431,9 +3485,19 @@ def _refuse_if_tree_is_dirty() -> None:
             "could not check whether the working tree is clean: git status exited "
             f"{result.returncode}\n{result.stdout}\n{result.stderr}"
         )
-    # "??" is an untracked file -- a build artifact, a scratch file -- not another
-    # agent's edit to something this gate might mutate or run tests against.
-    dirty = [line for line in result.stdout.splitlines() if not line.startswith("??")]
+    dirty = []
+    collection_affecting = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("??"):
+            dirty.append(line)
+            continue
+        # Porcelain untracked lines are "?? <path>"; a build artifact or scratch
+        # file is not another agent's edit to something this gate might mutate or
+        # run tests against, but a collection-affecting name is a third thing
+        # this check exists to catch even though it is also untracked.
+        name = pathlib.Path(line[3:]).name
+        if name in _COLLECTION_AFFECTING_NAMES or (name.startswith("test_") and name.endswith(".py")):
+            collection_affecting.append(line)
     if dirty:
         sys.exit(
             "refusing: the working tree has uncommitted changes to tracked files, so a "
@@ -3441,9 +3505,16 @@ def _refuse_if_tree_is_dirty() -> None:
             "rather than by the mutation itself -- commit or stash them first, or run "
             "this gate from its own `git worktree add --detach`:\n" + "\n".join(dirty)
         )
+    if collection_affecting:
+        sys.exit(
+            "refusing: an untracked file here would change what pytest collects "
+            "(conftest.py, pytest.ini, setup.cfg, tox.ini, pyproject.toml, or a "
+            "test_*.py module), and _baseline_python_testcases()'s self-measured "
+            "count cannot tell that apart from a clean tree that legitimately "
+            "collects fewer tests -- remove it, or run this gate from its own "
+            "`git worktree add --detach`:\n" + "\n".join(collection_affecting)
+        )
 
-
-_refuse_if_tree_is_dirty()
 
 # Optional kind filter: `python3 scripts/remutate.py python` runs only the Python
 # entries. The docstring says to run this after landing a batch of fixes, and a batch
@@ -3460,6 +3531,10 @@ if WANTED:
     unknown = [k for k in WANTED if k not in RESULTS]
     if unknown:
         sys.exit(f"unknown kind(s) {unknown}; known: {sorted(RESULTS)}")
+
+# R2-6: below the WANTED parse, and scoped to it -- see _refuse_if_tree_is_dirty's
+# own docstring for why.
+_refuse_if_tree_is_dirty(WANTED)
 
 # Measured once, here, before the loop below applies its first mutation --
 # see `_baseline_python_testcases`'s docstring for why it must be measured

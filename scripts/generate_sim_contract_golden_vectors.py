@@ -460,34 +460,30 @@ def derive(sim_commit: str) -> tuple[dict[str, Any], Mismatches]:
         # B1 (write side): a grid this loop iterates zero times contributes zero
         # mismatches and an empty list, and the generator would print "the reference
         # and the vendored contract agree on every recorded quantity" and write that
-        # empty section. Refuse instead: every grid constant must be non-empty, and
-        # each emitted list's length must equal what its own source implies.
+        # empty section. Refuse instead: every grid constant must be non-empty.
+        #
+        # R2-4 (validator round 2): this used to also compare each emitted list's
+        # length against a value computed from the same grid that built the list
+        # (e.g. `len(bin_index_grid) != len(BIN_INDEX_VALUES)`) -- two quantities
+        # that move together by construction (the loop above appends exactly once
+        # per element of that same grid), so no edit can ever make them disagree.
+        # Shortening BIN_INDEX_VALUES from 8 to 5 wrote the file and exited 0. Those
+        # four checks are deleted rather than kept as dead weight: a guard that can
+        # never fire is worse than no guard, because it reads as protection. The
+        # real protection against a shortened grid is downstream and unaffected --
+        # `test_sim_contract.py`'s `assert len(entries) == 8` (etc.) compares
+        # against a literal that does NOT move with the generator's own constants,
+        # so it still catches exactly this.
         if not sim_contract.HEADWAY_BIN_S:
             mismatches.add("sim_contract.HEADWAY_BIN_S is empty -- headway_bin_s would record nothing")
-        elif len(headway_bin_s) != len(sim_contract.HEADWAY_BIN_S):
-            mismatches.add(
-                f"headway_bin_s: emitted {len(headway_bin_s)} entries, "
-                f"HEADWAY_BIN_S has {len(sim_contract.HEADWAY_BIN_S)}"
-            )
         if not SPEED_BIN_FREE_FLOWS:
             mismatches.add("SPEED_BIN_FREE_FLOWS is empty -- speed_bin_mps would record nothing")
         if not sim_contract.SPEED_BIN_OFFSETS_MPS:
             mismatches.add(
                 "sim_contract.SPEED_BIN_OFFSETS_MPS is empty -- speed_bin_mps would record nothing"
             )
-        expected_speed_bin_mps = len(sim_contract.SPEED_BIN_OFFSETS_MPS) * len(SPEED_BIN_FREE_FLOWS)
-        if len(speed_bin_mps) != expected_speed_bin_mps:
-            mismatches.add(
-                f"speed_bin_mps: emitted {len(speed_bin_mps)} entries, "
-                f"SPEED_BIN_OFFSETS_MPS x SPEED_BIN_FREE_FLOWS implies {expected_speed_bin_mps}"
-            )
         if not BIN_INDEX_VALUES:
             mismatches.add("BIN_INDEX_VALUES is empty -- bin_index would record nothing")
-        elif len(bin_index_grid) != len(BIN_INDEX_VALUES):
-            mismatches.add(
-                f"bin_index: emitted {len(bin_index_grid)} entries, "
-                f"BIN_INDEX_VALUES has {len(BIN_INDEX_VALUES)}"
-            )
 
         # -- neutral fallbacks (specs/observation_schema.md) --------------------
         neutral_cooperation = []
@@ -512,14 +508,10 @@ def derive(sim_commit: str) -> tuple[dict[str, Any], Mismatches]:
 
         # B1 (write side), continued: NEUTRAL_FREE_FLOWS is the grid constant behind
         # neutral_cooperation; empty, the loop above contributes nothing and the
-        # section is silently recorded as `[]`.
+        # section is silently recorded as `[]`. (R2-4: no length-relation check here
+        # either, for the same reason -- see the comment above the decoders block.)
         if not NEUTRAL_FREE_FLOWS:
             mismatches.add("NEUTRAL_FREE_FLOWS is empty -- neutral_cooperation would record nothing")
-        elif len(neutral_cooperation) != len(NEUTRAL_FREE_FLOWS):
-            mismatches.add(
-                f"neutral_cooperation: emitted {len(neutral_cooperation)} entries, "
-                f"NEUTRAL_FREE_FLOWS has {len(NEUTRAL_FREE_FLOWS)}"
-            )
 
         # -- actor state-dict layout --------------------------------------------
         import policy.export_policy as export_policy  # noqa: E402  (adds JETSON_DIR at sys.path[0] again; harmless)
