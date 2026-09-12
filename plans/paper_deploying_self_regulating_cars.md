@@ -675,8 +675,28 @@ it is the one that has not driven.
   incumbent replaying byte-for-byte first. It has not been run against the six. Until it
   does, whether the shadow-mode predictions held in live mode is unanswered -- and that is
   the comparison the two live runs were collected for.
-* **The gate's behaviour is unmeasured in simulation.** How often local safety clamps an
-  advisory, and what it costs. Three runs would settle it: gated, ungated, no control.
+* **The gate's behaviour question, as previously posed, cannot be answered on either side.**
+  It asked how often local safety clamps an advisory and what it costs, and said three runs
+  would settle it: gated, ungated, no control. Both halves are now measured, and neither is a
+  matter of spending more compute.
+
+  *In simulation, there is nothing to gate.* `setSpeedMode` appears nowhere in the repository,
+  and `AVAction` is not used on the SUMO path at all; `src/sumo/mainz.py` calls only `setSpeed`,
+  at `:330` to command the fraction and `:338` to release it. `setSpeed` is already bounded by
+  SUMO's own car-following safe speed -- the file's own docstring at `:320` says so -- and there
+  is no discrete action for `apply_safety_layer` to intercept. So a "gated" arm has nothing to do
+  differently from an "ungated" one. Making the comparison constructible is a change to the
+  action contract, which is task 87's undecided question, not an experiment.
+
+  *On the device, the filter runs and binds nothing, for a structural reason rather than a
+  contingent one.* Over the 3,913 recorded ticks none of the twelve rules has evaluable inputs.
+  More usefully: with every observation source marked measured and a fresh detection age -- the
+  most favourable input the builder can produce -- seven of the twelve still cannot be evaluable
+  at all, because the rig has no rear sensor (three rules), no lane detection, no lane-change
+  detector (two) and no cooperating peers. Five could become evaluable given a tracked leader.
+  The census is recorded per rule and committed at `results/safety/gate_census_corpus.json`.
+  That is also why the lane advisory is withheld on every tick: three of its eight guards read
+  fields this rig has no instrument for.
 * **The critical path in `plans/implementation_records.md` is stale.** It names tasks 68 and 69,
   training and evaluating MAPPO on `inverted_tree`, as the flow-level half. That was
   superseded on 2026-09-11 by the SRC port on Mainz.
