@@ -42,7 +42,8 @@ if str(REPO_ROOT) not in sys.path:
 BASE_VEH_PER_HOUR = 18000.0
 
 
-def build(rate: float, green: float | None, duration_s: float) -> None:
+def build(rate: float, green: float | None, duration_s: float,
+          block_after_s: float | None) -> None:
     command = [str(REPO_ROOT / ".venv" / "bin" / "python"),
                str(REPO_ROOT / "scripts" / "build_mainz_scenario.py"),
                "--av-fraction", "1.0",
@@ -51,6 +52,8 @@ def build(rate: float, green: float | None, duration_s: float) -> None:
                "--demand-duration-s", f"{duration_s:.0f}"]
     command += (["--no-exit-meter"] if green is None
                 else ["--exit-green-fraction", f"{green:.4f}"])
+    if block_after_s is not None:
+        command += ["--junction-block-after-s", f"{block_after_s:g}"]
     result = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(result.stdout + result.stderr)
@@ -62,7 +65,7 @@ def run(rate: float, green: float | None, seed: int, args) -> dict:
 
     import src.sumo.mainz as mainz
 
-    build(rate, green, args.duration_s)
+    build(rate, green, args.duration_s, args.block_after_s)
     # No control, and no entry gate: the gate stands in for a policy, and this is the
     # network's own behaviour that any policy would have to improve on.
     env = mainz.MainzEnv(seed=seed, duration_s=args.duration_s, features=("speed",),
@@ -136,6 +139,9 @@ def main() -> int:
     parser.add_argument("--seeds", type=int, nargs="+", default=[16])
     parser.add_argument("--rates", type=float, nargs="+",
                         default=[1800, 2400, 3000, 3600, 4800, 6000, 9000, 18000])
+    parser.add_argument("--block-after-s", type=float, default=None,
+                        help="pass through to --junction-block-after-s, so the sweep "
+                             "can be run on a network whose junctions block")
     parser.add_argument("--greens", nargs="+", default=["none", "0.98", "0.85"],
                         help="exit meter green fractions; 'none' leaves the exit "
                              "unmetered, so the network's own capacity is the limit")

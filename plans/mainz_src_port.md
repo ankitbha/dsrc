@@ -728,3 +728,44 @@ junction, and SUMO's junction model keeps a vehicle out of a junction it cannot 
 which is what prevents the blocking that costs a real network its throughput. Vissim's
 conflict areas model exactly that blocking; the base layout carries one and it is
 PASSIVE, while the four signalised variants carry 68 of which 11 are active.
+
+## Why no exit setting, entry gate or junction parameter changes the answer
+
+**Mainz as published has almost no conflicting movements.** Of 139 priority junctions in
+the produced net, 2 have any conflicting movement at all; the rest are merges and
+diverges where movements do not cross. That is consistent with the paper's own title,
+which is about free flow road networks. Making junctions block therefore changes nothing,
+because there is nothing to block: with `jmIgnoreKeepClearTime` at 0 s served flow is
+2,869 to 2,891 veh/h and with SUMO's default it is 2,853 to 2,894.
+
+**Throughput is the capacity of the single exit link.** Every route leaves through link
+218, three lanes. Measured at 9,000 veh/h offered, 218 carries 954 veh/h/lane, and the
+other high-throughput links sit at 836 to 969 veh/h/lane -- the same per-lane capacity
+measured on the straight road, 1,000 veh/h/lane at 21.1 veh/km/lane. Three lanes at 955
+is 2,865 veh/h, which is the served flow. The network funnels everything through one link
+running at its capacity.
+
+**An uncongested link's capacity does not drop.** 218 is at capacity but not congested,
+because nothing downstream restricts it, so its discharge is a constant. The congestion
+that does exist -- links 53, 56 and 59 at 120 to 125 veh/km/lane moving at 0.8 km/h -- is
+a queue upstream of 218 that feeds it at exactly its capacity. Queue length varies with
+demand; discharge does not.
+
+That is the whole of it. The port is not broken: this network's throughput is a constant
+by construction, and no controller acting on density can change a constant.
+
+### What remains, and it needs a different demand rather than a different network
+
+A link does have a capacity drop: the straight road falls from 1,000 veh/h/lane at 21.1
+veh/km/lane to 779 at 38.1, a fall of 22%, and the exit super-segment falls 28%. So if
+link 218 were pushed INTO congestion it would discharge about 780 veh/h/lane, or 2,340
+veh/h against 2,865. The 18% difference is real and is exactly what SRC exists to
+recover.
+
+Flat demand cannot show it. Below 2,865 veh/h nothing congests; above it, the excess
+queues upstream and 218 still runs at capacity. There is no flat demand at which 218
+breaks down. A BURST can: demand above capacity for long enough to push 218 into the
+congested branch, then falling back below capacity, and the question is whether discharge
+returns to 2,865 or stays near 2,340. If it stays, the network has hysteresis, a
+controller that prevents the breakdown recovers 18%, and the experiment has something to
+measure. If it recovers immediately, it does not.

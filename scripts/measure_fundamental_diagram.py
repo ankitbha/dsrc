@@ -77,21 +77,50 @@ def main() -> int:
     seconds = args.duration_steps * args.dt
     print(f"{args.topology}, car following: {args.human_model or 'Krauss (SUMO default)'}, "
           f"dt {args.dt}, {seconds:.0f} s episodes, seeds {tuple(args.seeds)}.\n")
-    print(f"  {'offered':>8} {'density':>9} {'speed':>8} {'served/h':>9} {'served/offered':>15}")
-    peak = (None, -1.0)
+    # TWO STANDARD ERRORS ACROSS SEEDS, on every row. The curve recorded in
+    # configs/demand/sumo_saturating.yaml rises non-monotonically -- 948, 1130, 1072,
+    # 1298, 1052 -- which is either a real shape or seed noise, and three seeds with no
+    # spread reported cannot tell the two apart. A peak that is not separated from its
+    # neighbours by more than this bar is not a peak.
+    print(f"  {'offered':>8} {'density':>9} {'speed':>8} {'served/h':>9} "
+          f"{'+/-2se':>8} {'served/offered':>15}")
+    measured = []
     for rate in args.rates:
         rows = [run(rate=rate, seed=s, topology=args.topology,
                     human_model=args.human_model, dt=args.dt,
                     duration_steps=args.duration_steps, warmup_steps=args.warmup_steps,
                     work_dir=args.work_dir) for s in args.seeds]
-        served = statistics.fmean(r["arrived"] for r in rows) * (3600.0 / seconds)
-        if served > peak[1]:
-            peak = (rate, served)
-        print(f"  {rate:>8} {statistics.fmean(r['density'] for r in rows):>9.1f} "
-              f"{statistics.fmean(r['speed'] for r in rows):>8.2f} {served:>9.0f} "
+        flows = [r["arrived"] * (3600.0 / seconds) for r in rows]
+        served = statistics.fmean(flows)
+        error = (2.0 * statistics.stdev(flows) / len(flows) ** 0.5
+                 if len(flows) > 1 else float("nan"))
+        measured.append({"rate": rate, "served": served, "error": error,
+                         "density": statistics.fmean(r["density"] for r in rows),
+                         "speed": statistics.fmean(r["speed"] for r in rows)})
+        print(f"  {rate:>8} {measured[-1]['density']:>9.1f} "
+              f"{measured[-1]['speed']:>8.2f} {served:>9.0f} {error:>8.0f} "
               f"{served / rate:>14.2f}", flush=True)
-    print(f"\n  peak served flow {peak[1]:.0f} veh/h at {peak[0]} veh/h offered")
-    print("  A capacity drop shows as served flow FALLING after that peak.")
+
+    peak = max(measured, key=lambda row: row["served"])
+    beyond = [row for row in measured if row["density"] > peak["density"]]
+    print(f"\n  peak served flow {peak['served']:.0f} veh/h at "
+          f"{peak['density']:.1f} veh/km/lane ({peak['rate']} offered)")
+    if not beyond:
+        print("  FAILS: the peak is at the highest density reached, so nothing was")
+        print("  sampled past capacity.")
+        return 0
+    worst = min(beyond, key=lambda row: row["served"])
+    fall = peak["served"] - worst["served"]
+    bar = (peak["error"] ** 2 + worst["error"] ** 2) ** 0.5
+    print(f"  lowest served flow past the peak {worst['served']:.0f} veh/h at "
+          f"{worst['density']:.1f} veh/km/lane: a fall of {fall:.0f} veh/h "
+          f"({100.0 * fall / peak['served']:.1f}%) against a combined bar of "
+          f"{bar:.0f} veh/h")
+    if fall > bar:
+        print("  PASSES: served flow rises to a peak and falls by more than the seed")
+        print("  spread, so there is a capacity drop for a controller to prevent.")
+    else:
+        print("  FAILS: the fall is inside the seed spread, so it is not resolved.")
     return 0
 
 

@@ -304,7 +304,7 @@ def rush(volumes: dict[str, list[tuple[float, float, float]]],
     return reshaped
 
 
-def vtype_lines() -> list[str]:
+def vtype_lines(junction_block_s: float | None = None) -> list[str]:
     """Vehicle types carrying the paper's own Vissim calibration.
 
     SUMO's default Krauss model computes a collision-free safe speed exactly and
@@ -324,6 +324,17 @@ def vtype_lines() -> list[str]:
     )
     common = (f'carFollowModel="{sumo["car_following_model"]}" '
               f'minGap="{sumo["min_gap_m"]}" {attributes} maxSpeed="16.67"')
+    if junction_block_s is not None:
+        # JUNCTION BLOCKING, AND IT IS A MODELLING CHOICE OF OURS, not the paper's.
+        # SUMO keeps a vehicle out of a junction it cannot clear, which prevents
+        # deadlock and also prevents the throughput loss that blocking causes in a
+        # real network: measured with no control, Mainz served a constant 2,853 to
+        # 2,894 veh/h while interior links reached 125 veh/km/lane at 0.8 km/h, so
+        # gridlock cost it nothing. `jmIgnoreKeepClearTime` is the accumulated waiting
+        # time after which a vehicle enters anyway; SUMO's default of -1 means never.
+        # Vissim's conflict areas model the same behaviour, which is the ground for
+        # choosing it, but the value here is ours and is not transcribed from anything.
+        common += f' jmIgnoreKeepClearTime="{junction_block_s:g}"'
     return [
         f'  <vType id="human" {common}/>',
         f'  <vType id="av" {common} color="1,0,0"/>',
@@ -331,7 +342,8 @@ def vtype_lines() -> list[str]:
 
 
 def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str, float],
-                 duration_s: float, av_fraction: float, seed: int) -> int:
+                 duration_s: float, av_fraction: float, seed: int,
+                 junction_block_s: float | None = None) -> int:
     """One explicit departure per vehicle, evenly spaced, sorted by time.
 
     Explicit vehicles rather than `<flow>` so a vehicle's id encodes whether it is an
@@ -347,7 +359,7 @@ def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str,
     * `mainz_schedule.json`, the vehicles that file omits, with the entry link each one
       is waiting at so the gate can be applied per entry.
     """
-    header = ["<routes>"] + vtype_lines()
+    header = ["<routes>"] + vtype_lines(junction_block_s)
     for entry, edges in sorted(built.items(), key=lambda kv: int(kv[0])):
         header.append(f'  <route id="r{entry}" edges="{" ".join(edges)}"/>')
     departures: list[tuple[float, str, str]] = []
@@ -409,6 +421,11 @@ def main() -> int:
                              "the .inpx intervals; the published scenario surges for "
                              "1,200 s and then stops, which leaves the rest of the "
                              "episode draining rather than at an operating point")
+    parser.add_argument("--junction-block-after-s", type=float, default=None,
+                        help="seconds of accumulated waiting after which a vehicle "
+                             "enters a junction it cannot clear, blocking it. SUMO "
+                             "never does this by default, which is why gridlock costs "
+                             "this network no throughput. Ours, not the paper's")
     parser.add_argument("--demand-rush-s", type=float, default=None,
                         help="reshape demand into a rush of this length that climbs "
                              "from a quarter of the opening volume to it and back, so "
@@ -464,7 +481,8 @@ def main() -> int:
         print(f"  demand: {len(volumes)} entries, {opening:g} veh/h until "
               f"{last_end:g} s, then zero")
     count = write_routes(DATA / "mainz.rou.xml", built, volumes,
-                         args.duration_s, args.av_fraction, args.seed)
+                         args.duration_s, args.av_fraction, args.seed,
+                         args.junction_block_after_s)
     print(f"  {count} vehicle departures over {args.duration_s:g} s")
 
     groups = eval((DATA / "rl_links_mainz.txt").read_text())
