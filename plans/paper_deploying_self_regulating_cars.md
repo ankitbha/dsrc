@@ -690,10 +690,14 @@ it is the one that has not driven.
 
   *On the device, the filter runs and binds nothing, for a structural reason rather than a
   contingent one.* Over the 3,913 recorded ticks none of the twelve rules has evaluable inputs.
-  More usefully: with every observation source marked measured and a fresh detection age -- the
-  most favourable input the builder can produce -- seven of the twelve still cannot be evaluable
-  at all, because the rig has no rear sensor (three rules), no lane detection, no lane-change
-  detector (two) and no cooperating peers. Five could become evaluable given a tracked leader.
+  More usefully, and this is the claim rather than the observation: **only three of the twelve
+  rules can ever be evaluable on this rig** -- `low_speed_uncongested`, `target_lane_front_gap`
+  and `forward_ttc`, each of which becomes evaluable once a leader is tracked. The other nine
+  cannot be evaluable whatever data is collected, because every verdict they depend on reads at
+  least one field the rig has no instrument for: no rear sensor (three rules), no lane detection,
+  no lane-change detector (two), no cooperating peers, no passing-lane index, and no non-leader
+  relative speed. Measured over 20,000 draws constructed only through the observation builder,
+  those three are the only rules ever evaluable.
   The census is recorded per rule and committed at `results/safety/gate_census_corpus.json`.
   That is also why the lane advisory is withheld on every tick: three of its eight guards read
   fields this rig has no instrument for.
