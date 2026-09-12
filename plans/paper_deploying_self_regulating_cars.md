@@ -44,8 +44,23 @@ for development with the phone in hand, USB in the car.
 binding costs are HERE API quota, thermal headroom and Jetson compute -- not energy,
 since both devices are powered from the car.
 
-**The safety and etiquette filters.** `src/safety/safety_layer.py`, `etiquette.py`,
-`constraints.py`. The advisory is bounded before it reaches the driver.
+**The safety and etiquette filters.** `deployment/jetson/policy/safety_gate.py`, vendored from
+`src/safety/safety_layer.py`, `etiquette.py` and `constraints.py`. The advisory passes the filter
+before it reaches the driver, and the filter's twelve rules each record whether they could be
+evaluated at all.
+
+Stated carefully, because the obvious shorter sentence is false. When this was first written the
+vendored filter had no caller outside its own test: nothing under `deployment/` imported it, and
+the advisory's only bound was `max(12.0, base_speed + offset)`. It is wired now (task 144). But
+**on the recorded corpus it binds nothing**, and not by accident of the drive: only three of its
+twelve rules -- `low_speed_uncongested`, `target_lane_front_gap`, `forward_ttc` -- can ever be
+evaluable on this rig, each requiring a tracked leader, and none of the 3,913 recorded ticks has
+one. The other nine read at least one field the hardware cannot supply. The per-rule census is
+committed at `results/safety/gate_census_corpus.json`.
+
+So the claim the paper can make is that the filter is present, wired, and reports per rule what
+it could and could not check -- not that it was observed to bound anything. What it would do in
+traffic is not established here.
 
 **The cloud is observability, not control.** HERE supplies traffic state; nothing in the
 loop waits on a server.
@@ -530,7 +545,9 @@ live code or a live record.
 
 **Safety and etiquette**, the gate:
 
-* `src/safety/safety_layer.py`, `src/safety/etiquette.py`, `src/safety/constraints.py`.
+* `src/safety/safety_layer.py`, `src/safety/etiquette.py`, `src/safety/constraints.py`, and
+  `deployment/jetson/policy/safety_gate.py`, which vendors all three so the device runs the
+  filter without importing the simulation.
 * `specs/action_schema.md` for the action format the layer decodes.
 
 **Contract vendoring**, which is how the device cannot drift from what was trained:
