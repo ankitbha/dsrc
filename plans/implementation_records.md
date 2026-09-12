@@ -132,11 +132,17 @@ outside the project.
    per-tick inputs and gates on the incumbent reproducing byte-for-byte. Until it runs,
    whether the shadow-mode predictions held in live mode is unanswered, and that is the
    comparison the two live drives were collected for. No new driving, no new decisions.
-7. **Run the HERE-observation policy on the rig.** The observation matches and the data
-   was collected; what remains is loading that policy.
-8. **Measure the gate's firing rate in simulation**: how often local safety clamps an
-   advisory and what it costs. Three runs -- gated, ungated, no control.
-9. Write the paper.
+7. ~~**Run the HERE-observation policy on the rig.**~~ **RESTATED 2026-09-12 as task 145.**
+   Its old wording -- "what remains is loading that policy" -- was wrong: `SrcQNetwork`
+   reads the whole network's state and its weights are Mainz's, so there is no Mainz
+   observation in the drive corpus and no policy for the roads that were driven.
+8. **Measure the gate's firing rate**: how often local safety clamps an advisory and what
+   it costs. Folded into task 144, which has to make the gate run before its rate can be
+   measured.
+9. **Section L, tasks 142 to 145.** Four claims the paper plan makes that the repository
+   contradicts, found by reading the two against each other on 2026-09-12. 142 is the only
+   one that touches a number the paper quotes.
+10. Write the paper.
 
 **Tasks 67 and 63 are independent of each other**, so their relative order is free.
 
@@ -2865,6 +2871,105 @@ findings and is in `detours.md`.
     The latch is deliberately **not** cleared when telemetry goes absent, stale or
     unstamped. A gap in the reporting is not evidence the handset cooled, which is
     the same reading of silence the `unknown` tier already takes.
+
+## L. Claims the repository does not support
+
+Four defects found on 2026-09-12 by reading `paper_deploying_self_regulating_cars.md`
+against the files it points at. Each is a statement the paper plan makes that the code or
+the artifacts contradict. None was found by a test, because in every case the thing that
+would have failed is absent rather than wrong.
+
+142. **The paper's headline simulation result has no generator and no artifact.** Open.
+
+     `3,765 / 3,759 / 3,535 veh/h` with paired gains of `+230 +/- 44` and `+224 +/- 61`
+     over seeds 16-30 is asserted in four documents: this file, `mainz_src_port.md`,
+     `results/README.md` and the paper plan. Nothing produces it.
+
+     `scripts/train_mainz_src.py` reads `TEST_SEEDS = tuple(range(16, 21))` -- five seeds.
+     The committed `results/checkpoints/mainz_{here,src}_result.json` carry that five-seed
+     read and nothing else: **3,774.7 / 3,756.4 / 3,568.0**, which is +5.8% and +5.3%. No
+     script in the tree evaluates seeds 16-30, and none ever did -- `git log -S "range(16,
+     31)" --all` returns no commit. The per-seed values the `+/- 44` is computed from exist
+     nowhere.
+
+     The checkpoints are committed, so the number is re-derivable rather than lost. What
+     the repository currently does is assert one figure while storing another.
+
+     **The task:** an evaluator that loads a committed checkpoint, runs seeds 16-30 against
+     the same no-control baseline, pairs on seed, and writes the per-seed table with its own
+     two-standard-error bar. Then run it and either reproduce the quoted figures or correct
+     every document carrying them. `mainz_src_port.md` also heads its result table
+     "Held-out seeds 16-20" nine lines above "Fifteen evaluation seeds, 16 to 30"; whichever
+     way the numbers land, that heading is wrong today.
+
+143. **The vendored contract's equality check has no reference left to check against.** Open.
+
+     `policy/sim_contract.py` vendors the encoder, the scales and the action heads from sim
+     commit `d477dba`, and the paper plan calls this "what makes 'the device runs what was
+     trained' checkable rather than asserted". The check is
+     `deployment/jetson/tests/test_sim_contract.py`, which opens
+     `pytest.importorskip("src.rl.encoders")`.
+
+     `src/rl/` now holds only `src_q.py`. `encoders.py`, `actions.py` and `models.py` were
+     deleted in `6b538f2`. Measured: the file collects one test and reports `1 skipped`.
+     `ARCHITECTURE.md` section 6 still instructs running it "on a machine where the sim
+     imports", which no longer describes any machine.
+
+     Restoring the deleted modules would undo a deliberate cleanup to serve a test. The
+     alternative is the idiom this repository already uses across two languages:
+     `specs/transport_golden_frames.json` freezes the wire format and both implementations
+     test against the file rather than against each other.
+
+     **The task:** freeze the encoder's output and the contract fingerprint as golden
+     vectors, so the check runs everywhere with no sim import, and prove it fails against a
+     mutated contract before anything relies on it. A guard that has never been seen to fail
+     is not a guard.
+
+144. **The safety and etiquette layer runs nowhere.** Open.
+
+     The paper plan's DESIGN section names `src/safety/safety_layer.py`, `etiquette.py` and
+     `constraints.py` and says "the advisory is bounded before it reaches the driver". It
+     also records, correctly, that the layer is unexercised in simulation, and concludes
+     "the gate is real on the device and implicit in the simulation".
+
+     `apply_safety_layer` has exactly one caller in the repository:
+     `tests/test_safety_layer.py`. Nothing under `deployment/` imports it -- the two matches
+     in that tree are a comment saying one observation field mirrors `etiquette.py`, and two
+     docstrings citing `plan_deployment.md`. The advisory the driver is shown comes from
+     `AdvisoryDecoder.decode`, whose only bound is `max(12.0, base_speed + offset)` at
+     `policy/advisory.py:87`. Task 87 established the same absence in simulation. The layer
+     is unexercised in both.
+
+     It also cannot run on the Jetson as written: `safety_layer.py` imports
+     `src.envs.base_ctde_env` and `src.envs.wrappers`, which is the simulation stack
+     `policy/sim_contract.py` exists to keep off the device.
+
+     **The task:** vendor the filter the way the encoder is vendored, call it on the advisory
+     path, and measure how often it clamps and by how much. That measurement is also the
+     paper plan's third open item, which asks for the gate's firing rate.
+
+145. **The rig cannot run the controller the paper is about.** Open.
+
+     The deployed actor is a 39 -> 128 -> 128 -> 4x3 MLP over the local-sensing contract:
+     `ObservationBuilder.build` produces the vector, `ActorRuntime.act` runs it,
+     `AdvisoryDecoder.decode` turns it into the advisory. The paper's controller is
+     `SrcQNetwork`, which takes the whole network's state as 12 super-segments x 5 features.
+
+     The paper plan says of the 39-field contract, "It is not the policy's input". That is
+     true of the simulation and false of the device, and it contradicts the plan's own first
+     open item, which says the HERE-observation policy has not been run on the rig.
+
+     **The harder half, which no document states.** `SrcQNetwork`'s input is the entire
+     network and its weights are trained for Mainz, so the policy is network-specific. The
+     123 HERE bodies collected on 2026-09-08 are New Jersey roads, so the gap cannot be
+     closed by replaying the drives: there is no Mainz observation in the corpus and no
+     Westfield policy. "What remains is loading that policy" understates what is left.
+
+     **The task:** build the device-side runtime that executes a DSRC checkpoint from
+     super-segment features and produces an advisory, demonstrate it on the rig against
+     replayed segment state, measure its latency, and require it to reproduce the
+     simulator's action for the same input. Then state plainly what still stands between
+     that and a policy a vehicle could run on a road it can drive to.
 
 ---
 

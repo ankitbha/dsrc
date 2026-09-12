@@ -48,3 +48,7 @@ paper/*.out
 paper/*.synctex.gz
 paper/*.pdf
 paper/missfont.log
+# latexmk's own dependency database. Written by any `latexmk` run, absent from a plain
+# pdflatex one, which is why the list above missed them.
+paper/*.fdb_latexmk
+paper/*.fls
