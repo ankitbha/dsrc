@@ -18,7 +18,7 @@ question. Every mutation is restored in a `finally`, including on Ctrl-C -- but
 this edits files in place, so do not run it with uncommitted work you would mind
 losing, and never point it at a tree a validator is reading.
 """
-import pathlib, shutil, subprocess, sys
+import os, pathlib, shutil, subprocess, sys
 from xml.etree import ElementTree
 
 ROOT = pathlib.Path(".")
@@ -3143,6 +3143,23 @@ MUTATIONS = [
      '    "segment_target_speed",\n    "merge_pressure",',
      '    "merge_pressure",\n    "segment_target_speed",',
      "python"),
+
+    # TEMPORARY CONTROL -- proves the harness can report a survivor at all.
+    # Every one of the seven "sim contract:" entries above was CAUGHT the
+    # first time the gate ran them, which is a clean run and not yet a proven
+    # gate: nothing had exercised the SURVIVED branch. decode_speed_bin's
+    # `min_contextual_speed_mps` default (12.0) is read by no test in the
+    # whole suite -- grepped: the only test call site (test_sim_contract.py)
+    # always passes it explicitly from the recorded grid, and the three
+    # production call sites (advisory.py, safety_gate.py x2) always pass
+    # their own context value, never falling through to this default. It also
+    # does not move contract_fingerprint(). This entry is expected to SURVIVE
+    # and is removed once that is confirmed.
+    ("CONTROL (temporary): decode_speed_bin's min_contextual_speed_mps default, unread by any test",
+     "deployment/jetson/policy/sim_contract.py",
+     "    min_contextual_speed_mps: float = 12.0,",
+     "    min_contextual_speed_mps: float = 99.0,",
+     "python"),
 ]
 
 RESULTS = {
@@ -3237,14 +3254,34 @@ PYTEST_VERDICT_RETURNCODES = frozenset({0, 1})
 _BASELINE_PYTHON_TESTCASES: int | None = None
 
 
+def _purge_pycache() -> None:
+    """Remove every __pycache__ directory under the tree this runs against.
+
+    A same-second edit that leaves a .py file's size unchanged can reuse a
+    stale .pyc (Python's default invalidation is mtime+size), so a mutation
+    applied and reverted within one wall-clock second can silently run the
+    previous file's bytecode. That has already produced a wrong verdict on
+    this project twice. `PYTHONDONTWRITEBYTECODE=1` (set on every pytest
+    subprocess below) stops new staleness from being written; this clears out
+    whatever a run before that fix -- or a run under a different interpreter
+    -- already left behind.
+    """
+    for cache_dir in pathlib.Path(".").rglob("__pycache__"):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+_NO_BYTECODE_ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+
+
 def _baseline_python_testcases() -> int:
     baseline_dir = ROOT / "build" / "pytest-results-baseline"
     if baseline_dir.exists():
         shutil.rmtree(baseline_dir)
+    _purge_pycache()
     result = subprocess.run(
         [".venv/bin/python3", "-m", "pytest", "-q", "deployment/jetson/tests/",
          "-p", "no:cacheprovider", f"--junit-xml={baseline_dir}/results.xml"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=_NO_BYTECODE_ENV,
     )
     if result.returncode not in PYTEST_VERDICT_RETURNCODES:
         sys.exit(
@@ -3294,10 +3331,11 @@ def run(kind):
         if base.exists():
             shutil.rmtree(base)          # or a previous run's failures count as this one's
     if kind == "python":
+        _purge_pycache()
         result = subprocess.run(
             [".venv/bin/python3", "-m", "pytest", "-q", "deployment/jetson/tests/",
              "-p", "no:cacheprovider", f"--junit-xml={RESULTS['python'][0]}/results.xml"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=_NO_BYTECODE_ENV,
         )
         if result.returncode not in PYTEST_VERDICT_RETURNCODES:
             return INCONCLUSIVE
