@@ -50,25 +50,6 @@ since both devices are powered from the car.
 **The cloud is observability, not control.** HERE supplies traffic state; nothing in the
 loop waits on a server.
 
-### A telemetry vocabulary, and the limit of it
-
-Every instrumented quantity reports in a closed three-state vocabulary rather than a
-number: **measured, or converted with a stated bound, or absent with a named reason --
-never a zero.** Trigger attribution is **fired, quiet, or not evaluable with the missing
-inputs named**, with a reconstruction identity `_clamp(base x scale) == rates[k]`. Field
-provenance is a closed eleven-member vocabulary over all 39 encoder slots, and logs
-recorded before that work **refuse by name** rather than being scored against defaults.
-The session summary reports `answered of attempted` as two independently counted integers,
-with **no percentage anywhere and no scalar health field** -- a scalar is what a dashboard
-plots on its own, and once plotted the enumeration is gone.
-
-**And then the limit, which is the part worth writing.** An axis of the form
-`answered of attempted` is **blind by construction to an event that stops the attempting**.
-A 54.58 s link outage destroyed numerator and denominator together -- about 273 of roughly
-1,502 ticks, **18.2% of every denominator** -- and the summary reported `attempted = 1229`
-and called every axis fully answered. The vocabulary protects the numerator; nothing was
-watching the denominator.
-
 ### The device cannot drift from what was trained
 
 The Jetson must not import the simulator stack, so `policy/sim_contract.py` vendors the
@@ -147,6 +128,25 @@ phone-side half *could not run*, it printed `ok=False` and **exited 0**.
 Ankit: this is most of what there is to say, and it is extremely important to talk
 about. The failures below are not incidental to the contribution; they are the part of it
 that cannot be obtained any other way.
+
+### A telemetry vocabulary, and the limit of it
+
+Every instrumented quantity reports in a closed three-state vocabulary rather than a
+number: **measured, or converted with a stated bound, or absent with a named reason --
+never a zero.** Trigger attribution is **fired, quiet, or not evaluable with the missing
+inputs named**, with a reconstruction identity `_clamp(base x scale) == rates[k]`. Field
+provenance is a closed eleven-member vocabulary over all 39 encoder slots, and logs
+recorded before that work **refuse by name** rather than being scored against defaults.
+The session summary reports `answered of attempted` as two independently counted integers,
+with **no percentage anywhere and no scalar health field** -- a scalar is what a dashboard
+plots on its own, and once plotted the enumeration is gone.
+
+**And then the limit, which is the part worth writing.** An axis of the form
+`answered of attempted` is **blind by construction to an event that stops the attempting**.
+A 54.58 s link outage destroyed numerator and denominator together -- about 273 of roughly
+1,502 ticks, **18.2% of every denominator** -- and the summary reported `attempted = 1229`
+and called every axis fully answered. The vocabulary protects the numerator; nothing was
+watching the denominator.
 
 ### The two clocks, and a guarantee that states its own error
 
