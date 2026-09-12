@@ -253,7 +253,11 @@ class TestGoldenActions:
         # a different episode count would do the same for "recorded".
         assert len(golden["recorded"]) == 185, (
             f"{GOLDEN_PATH} claims {len(golden['recorded'])} recorded "
-            "decisions, not 185 -- regenerated against different seeds?"
+            "decisions, not 185 -- 185 is derived from scripts/export_dsrc_golden.py's "
+            "TEST_SEEDS (5 episodes), DURATION_S and WARMUP_S (how many decisions fit in "
+            "one episode) and policy.dsrc_contract.DECISION_INTERVAL_S (the decision "
+            "cadence), not a constant on its own; regenerated against a different value "
+            "of one of those four?"
         )
         assert golden["random"]["count"] == 20_000, (
             f"{GOLDEN_PATH} claims {golden['random']['count']} random "
@@ -463,3 +467,17 @@ class TestTheDemonstrationHasBeenSeenToFail:
         # this test printed 0/185 and still passed against the previous
         # `assert 0 <= decisions_changed <= n`, which no count can fail.
         assert decisions_changed > 0
+        # Same discipline for the whole-network loop's other reported count:
+        # per_segment_changed was computed and printed above but never
+        # gated, so a mechanism that stopped perturbing individual segments
+        # (while still tripping decisions_changed some other way) would
+        # print 0/2220 and still pass.
+        assert per_segment_changed > 0
+        # Round 2 found the same gap in the single-segment loop above,
+        # fifteen lines from decisions_changed's own assertion: computed
+        # and printed, gated by nothing. The validator proved it by
+        # replacing the perturbation `altered[0, 2] = rng_single.uniform(0.0,
+        # 10.0)` with the no-op `altered[0, 2] = state[0, 2]`: this test
+        # printed "0/185 decisions ... redrawn for segment 0 alone" and
+        # still passed, because nothing here checked that number.
+        assert single_segment_changed > 0
