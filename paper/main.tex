@@ -1,0 +1,69 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% ICRA / IEEE conference format.
+%
+% Ported from the earlier ACM `acmart[sigconf]` submission, whose source this shares.
+% What changed and why, so the next person does not have to diff two classes:
+%
+%   acmart                          ieeeconf
+%   ------------------------------  --------------------------------------------
+%   \documentclass[sigconf,...]     \documentclass[letterpaper,10pt,conference]
+%   \settopmatter / \setcopyright   dropped; ieeeconf has no ACM front matter
+%   \citestyle{acmnumeric}          dropped; IEEEtran.bst is numeric already
+%   \bibliographystyle{plainnat}    \bibliographystyle{IEEEtran}
+%   \title[short]{long}             \title{...}; ieeeconf has no running short title
+%   \keywords{}                     dropped; ICRA takes keywords through PaperPlaza
+%   \Description{...}               commented out in the section files; acmart-only
+%   graphicx loaded by the class    loaded explicitly here
+%
+% ICRA is not double-blind, so the anonymous option is gone and the author block is
+% filled in below.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[letterpaper, 10pt, conference]{ieeeconf}
+
+\IEEEoverridecommandlockouts   % needed for \thanks
+\overrideIEEEmargins           % meets the printer requirements
+
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{array}
+\usepackage{booktabs}
+% enumitem clashes with ieeeconf, which already defines \labelindent. Freeing the name
+% before loading it is the usual fix; no section uses an enumitem option list, so it is
+% loaded only because the ACM source loaded it.
+\makeatletter\let\labelindent\relax\makeatother
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,calc,positioning}
+
+\newcommand{\sys}{self-regulating cars}
+\newcommand{\vstate}{local-aggregate V2V}
+
+\title{\LARGE \bf The Case for Self-Regulating Cars}
+
+% TODO: author list and affiliations. Carried over from an anonymous submission, so
+% there is nothing to port here -- fill in before submitting.
+\author{Ankit Bhardwaj$^{1}$%
+\thanks{$^{1}$New York University. {\tt\small ankit@usenash.com}}%
+}
+
+\begin{document}
+
+\maketitle
+\thispagestyle{empty}
+\pagestyle{empty}
+
+\input{abstract}
+
+\input{intro}
+\input{vision}
+\input{architecture}
+\input{eval}
+\input{related}
+\input{discussion}
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}

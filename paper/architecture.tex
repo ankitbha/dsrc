@@ -7,7 +7,8 @@ Minimal fleets only work if converting one car is cheap and simple. So we state 
 \centering
 \includegraphics[width=\columnwidth,height=0.50\columnwidth,keepaspectratio]{images/system_architecture.png}
 \caption{The self-regulating retrofit. Onboard sensing feeds an ego-centric digital twin; a learned policy proposes a coarse action; a safety and etiquette filter bounds what is shown as an advisory. Peer vehicles broadcast small aggregate summaries that widen the twin's view; the cloud only trains and ships model updates offline, never in the real-time loop.}
-\Description{Block diagram of the on-vehicle pipeline from sensing through digital twin, policy, and safety filter to a bounded advisory, with peer broadcast summaries entering the twin and an offline cloud path for training and model updates.}
+% \Description is acmart-only; kept as alt text for the figure.
+% \Description{Block diagram of the on-vehicle pipeline from sensing through digital twin, policy, and safety filter to a bounded advisory, with peer broadcast summaries entering the twin and an offline cloud path for training and model updates.}
 \label{fig:architecture}
 \end{figure}
 % TODO: replace images/system_architecture.pdf with the final diagram export; caption is written for the corrected version (advisory terminus, no V2V hub, dashed offline cloud edges).

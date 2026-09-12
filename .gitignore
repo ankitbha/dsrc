@@ -32,3 +32,14 @@ device-test-*/
 # disk, out of git, like every other harness data file.
 data/mainz/
 data/tree/
+
+# LaTeX build products. The source is tracked; the artifacts are rebuilt by any run,
+# and a stale .aux from a different document class breaks the next build.
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.synctex.gz
+paper/*.pdf
+paper/missfont.log
