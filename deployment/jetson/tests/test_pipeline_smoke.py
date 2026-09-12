@@ -196,7 +196,7 @@ def test_stage_timings_recorded(pipeline) -> None:
 ALL_STAGE_KEYS = {
     "capture", "capture_to_encode_start", "encode", "encode_done_to_enqueue",
     "enqueue_to_wire", "transport", "jpeg_decode", "detect", "track", "fuse",
-    "infer", "decode", "segment_assemble", "dsrc_infer",
+    "infer", "decode", "gate", "segment_assemble", "dsrc_infer",
 }
 
 
