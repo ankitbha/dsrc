@@ -1,0 +1,1 @@
+<connections><connection from="218" to="exit_road" fromLane="0" toLane="0"/><connection from="218" to="exit_road" fromLane="1" toLane="1"/><connection from="218" to="exit_road" fromLane="2" toLane="1"/><connection from="exit_road" to="exit_tail" fromLane="0" toLane="0"/><connection from="exit_road" to="exit_tail" fromLane="1" toLane="1"/></connections>

@@ -1,0 +1,1 @@
+<edges><edge id="exit_road" from="218-end" to="exit_meter" numLanes="2" speed="16.670"/><edge id="exit_tail" from="exit_meter" to="exit_sink" numLanes="2" speed="16.670"/></edges>
