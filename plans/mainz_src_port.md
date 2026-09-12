@@ -21,11 +21,12 @@ realisation. Both gains are resolved. The two arms differ by 0.2%, well inside b
 
 **Five seeds was not enough, and the check matters.** On the five pre-registered test
 seeds the same checkpoints read +207 +/- 92 and +188 +/- 133. Mainz survived the
-extension and tightened -- +230 +/- 44 -- but `inverted_tree_bottleneck` did not: there
-the five-seed reading of +185 +/- 211 veh/h, or +14.2%, fell to +44 +/- 111, or +3.2%,
-and stopped being resolved. Seeds 16 to 20 happened to hold three unusually poor
-no-control runs on that network. Checkpoint selection was unchanged; only the evaluation
-set was enlarged.
+extension and tightened -- +230 +/- 44 -- but a second network did not: a five-seed
+reading of +185 +/- 211 veh/h, or +14.2%, fell to +44 +/- 111, or +3.2%, and stopped
+being resolved, because those five seeds held three unusually poor no-control runs.
+Checkpoint selection was unchanged; only the evaluation set was enlarged. That second
+network, `inverted_tree_bottleneck`, is since out of scope for an unrelated reason -- one
+link per super-segment -- but the seed lesson it produced is general.
 
 **Restricting the observation to what a traffic API returns costs nothing, measured on a
 network where throughput can move.** Both arms run slower than no control, 40.8 against
@@ -997,7 +998,28 @@ the pre-breakdown one through noise, which put the peak past the breakdown and r
 that nothing was sampled beyond it. Capacity is now the best flow measured while demand
 was still being met.
 
-## `inverted_tree_bottleneck`: no resolved gain
+## `inverted_tree_bottleneck`: OUT OF SCOPE, and it was never a test of this controller
+
+Dropped 2026-09-11. It is a synthetic topology with no super-segments to speak of, so
+its result neither supports nor undermines the Mainz one. Measured:
+
+| | super-segments | edges each | length |
+|---|---|---|---|
+| the SRC paper | -- | -- | 2 to 3 km |
+| Mainz as ported | 12 | 2 to 33, median 16 | 0.79 to 9.12 km, median 3.78 |
+| `inverted_tree_bottleneck` | 10 | **1** | 0.3 to 0.6 km |
+
+Every tree "super-segment" is a single link of 300 to 600 m. There is no aggregation in
+it: the segment observation is one edge's density and speed, so the quantity the
+controller is supposed to act on -- a super-segment's state, averaged over a few
+kilometres of road -- does not exist there. That is a stronger reason to set it aside
+than its size, and it also explains the null: there was nothing for the observation to
+summarise.
+
+The measurements below stand as recorded and are kept because they carry the seed lesson,
+which is general. They are not evidence about the controller.
+
+### What was measured before it was set aside
 
 The tree was trained with the same driver and the same fleet, by writing it into the same
 five files Mainz uses -- `scripts/build_tree_scenario.py` -- so one env and one training
@@ -1017,10 +1039,10 @@ On seeds 16 to 20 alone the same checkpoints read +185 +/- 211 (+14.2%) and +144
 added, because those five contained three no-control runs at 1,113, 1,149 and 1,271 veh/h
 where the other ten are mostly near 1,500.
 
-**The size of the available gain tracks the size of the capacity drop.** The tree's drop
-is 4.9% and Mainz's with a lane-drop exit is 11.3%; the tree's measured gain is 3.2% and
-unresolved, Mainz's is 6.5% and resolved. That is the expected relation and it is a
-reason to believe the Mainz number rather than an accident of it.
+The tree's capacity drop is 4.9% against Mainz's 11.3%, and its gain 3.2% unresolved
+against Mainz's 6.5% resolved. That ordering is consistent, but with one link per segment
+the comparison does not isolate the controller from the topology, so it is not offered as
+support for the Mainz number.
 
 Two things about the tree's own training are worth recording. DSRC's selected checkpoint
 is episode 4 of 80, and no control holds 82 vehicles against DSRC's 42 at nearly the same
