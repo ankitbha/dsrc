@@ -3143,6 +3143,33 @@ MUTATIONS = [
      '    "segment_target_speed",\n    "merge_pressure",',
      '    "merge_pressure",\n    "segment_target_speed",',
      "python"),
+    # S4 (validator round 1). Registered because B1 showed the 15-entry
+    # speed_bin_mps section can be emptied with nothing noticing; this is the
+    # behavioural pin over that section's actual arithmetic, not just its
+    # population. Caught by exactly one test.
+    ("sim contract: SPEED_BIN_OFFSETS_MPS['slow'] narrowed by 2 m/s",
+     "deployment/jetson/policy/sim_contract.py",
+     'SPEED_BIN_OFFSETS_MPS: dict[str, float] = {"slow": -10.0, "nominal": -3.0, "fast": 0.0}',
+     'SPEED_BIN_OFFSETS_MPS: dict[str, float] = {"slow": -8.0, "nominal": -3.0, "fast": 0.0}',
+     "python"),
+    # S4 (validator round 1). Registered so the `cooperation_distinct_values` /
+    # `lane_distribution_distinct_values` (D13) cases are shown to catch
+    # something: without an entry that reorders LANE_DISTRIBUTION_LANES,
+    # nothing in this gate ever exercises what those two cases were added for.
+    ("sim contract: LANE_DISTRIBUTION_LANES reordered",
+     "deployment/jetson/policy/sim_contract.py",
+     'LANE_DISTRIBUTION_LANES: tuple[str, ...] = ("0", "1", "2")',
+     'LANE_DISTRIBUTION_LANES: tuple[str, ...] = ("0", "2", "1")',
+     "python"),
+    # Deliberately absent: removing `_number`'s `if isinstance(value, bool):
+    # return float(value)` branch. It SURVIVES, but it is an inert mutation --
+    # both bool-valued fields (`is_active`, `uncongested_low_speed_flag`) have
+    # FIELD_SCALES of 1.0, so the branch this removes and the `plain` branch it
+    # falls through to compute the same thing: float(True)/1.0 == float(True).
+    # Registering a mutation that cannot change behaviour would be a mutation
+    # that can never be caught for the wrong reason. See
+    # plans/implementation_records.md for the condition that would make it
+    # separable (a bool field with a non-1.0 scale).
 ]
 
 RESULTS = {
@@ -3257,6 +3284,28 @@ _NO_BYTECODE_ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
 
 
 def _baseline_python_testcases() -> int:
+    """Measure the clean tree's testcase count -- and refuse if it is not clean.
+
+    B2. This used to accept pytest's returncode 1 (a suite with at least one
+    failing test) only to throw the failing names away (`_, total, usable =
+    failing_tests_in(...)`), keeping only the count. `run()` then returned the
+    *mutated* run's failing names with no subtraction against that baseline, so
+    any pre-existing failure in the clean tree made every mutation below score
+    CAUGHT "by" that same unrelated test, and `survived` stayed empty -- exit 0
+    on a gate that had checked nothing. The validator reproduced this end to
+    end with a planted `assert 1 == 2` test: every mutation reported CAUGHT
+    by that planted test, `survived: 0`.
+
+    The returncode is still accepted long enough to read the failing names --
+    a clean pytest run legitimately exits 1 when nothing failed only if nothing
+    was collected, which the `total == 0` check below still catches -- but a
+    non-empty name list now refuses rather than being discarded. A mutation
+    gate run against a red tree settles nothing either way, so refusing is
+    better than subtracting: subtraction would have to assume the baseline
+    failure is stable and unrelated to every mutation below, which is exactly
+    the assumption this project has already been burned by once (see the
+    module docstring).
+    """
     baseline_dir = ROOT / "build" / "pytest-results-baseline"
     if baseline_dir.exists():
         shutil.rmtree(baseline_dir)
@@ -3271,9 +3320,15 @@ def _baseline_python_testcases() -> int:
             "could not measure a baseline Python testcase count: pytest exited "
             f"{result.returncode}\n{result.stdout}\n{result.stderr}"
         )
-    _, total, usable = failing_tests_in(baseline_dir)
+    names, total, usable = failing_tests_in(baseline_dir)
     if not usable or total == 0:
         sys.exit("could not measure a baseline Python testcase count: no usable JUnit XML")
+    if names:
+        sys.exit(
+            f"refusing: the clean Python tree already has {len(names)} failing test(s), "
+            "so a mutation gate run against it would settle nothing either way -- fix "
+            f"these first: {names}"
+        )
     return total
 
 
@@ -3351,6 +3406,45 @@ if SIDECAR.exists():
     target.write_text(saved[1])
     SIDECAR.unlink()
 
+
+def _refuse_if_tree_is_dirty() -> None:
+    """B2, second route (validator round 1). A shared worktree carrying another
+    agent's uncommitted, in-progress edit is a red tree that does not *look*
+    red: `git status --porcelain` shows a modified tracked file, not a failing
+    test, and nothing in `run()` or `_baseline_python_testcases()` checks
+    either. If that in-progress edit fails a test at the moment this gate
+    happens to run -- which mid-edit code routinely does -- every mutation
+    below is scored CAUGHT by that unrelated failure, `survived` stays empty,
+    and this exits 0 having checked nothing. That is the exact failure mode
+    the first route of B2 exists to close, reached by a second door this
+    check exists to shut. Refuse before applying anything, naming what is
+    dirty, rather than let a mutation run start against it. Run this gate
+    from its own `git worktree add --detach`, never a tree another agent is
+    also committing to.
+    """
+    result = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=str(ROOT),
+        capture_output=True, text=True, timeout=10.0,
+    )
+    if result.returncode != 0:
+        sys.exit(
+            "could not check whether the working tree is clean: git status exited "
+            f"{result.returncode}\n{result.stdout}\n{result.stderr}"
+        )
+    # "??" is an untracked file -- a build artifact, a scratch file -- not another
+    # agent's edit to something this gate might mutate or run tests against.
+    dirty = [line for line in result.stdout.splitlines() if not line.startswith("??")]
+    if dirty:
+        sys.exit(
+            "refusing: the working tree has uncommitted changes to tracked files, so a "
+            "mutation run here could be scored CAUGHT by whatever they currently break "
+            "rather than by the mutation itself -- commit or stash them first, or run "
+            "this gate from its own `git worktree add --detach`:\n" + "\n".join(dirty)
+        )
+
+
+_refuse_if_tree_is_dirty()
+
 # Optional kind filter: `python3 scripts/remutate.py python` runs only the Python
 # entries. The docstring says to run this after landing a batch of fixes, and a batch
 # is almost always one kind -- rebuilding both Gradle suites per mutation to check a
@@ -3424,7 +3518,10 @@ for name, rel, old, new, kind in MUTATIONS:
         print(f"  INCONCLUSIVE       {name}")
     elif failed:
         print(f"  CAUGHT ({len(failed)})         {name}")
-        print(f"                     by {failed[0]}")
+        # All of them, not just failed[0]: with several tests failing, the first
+        # name alone cannot say whether the mutation was caught by the test built
+        # for it or only by an unrelated fingerprint test happening to also fail.
+        print(f"                     by {', '.join(failed)}")
     else:
         survived.append(name)
         print(f"  *** SURVIVED ***   {name}")

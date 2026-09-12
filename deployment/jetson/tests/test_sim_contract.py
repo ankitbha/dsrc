@@ -227,7 +227,12 @@ def test_action_heads_match():
 
 
 def test_action_values_and_their_order_match():
-    for entry in DOCUMENT["actions"]["values"]:
+    entries = DOCUMENT["actions"]["values"]
+    assert {entry["head"] for entry in entries} == set(sim_contract.ACTION_HEADS), (
+        "the recorded actions.values section must cover every head; an empty or "
+        "partial section checks nothing for the heads it drops"
+    )
+    for entry in entries:
         assert tuple(entry["values"]) == sim_contract.ACTION_VALUES[entry["head"]], entry["head"]
 
 
@@ -237,7 +242,12 @@ def test_forced_actions_match():
 
 
 def test_action_profiles_match():
-    for entry in DOCUMENT["actions"]["profiles"]:
+    entries = DOCUMENT["actions"]["profiles"]
+    assert {entry["profile"] for entry in entries} == set(sim_contract.ACTION_PROFILES), (
+        "the recorded actions.profiles section must cover every profile; an empty or "
+        "partial section checks nothing for the profiles it drops"
+    )
+    for entry in entries:
         assert tuple(entry["heads"]) == sim_contract.ACTION_PROFILES[entry["profile"]]
 
 
@@ -250,12 +260,16 @@ def test_default_indices_match():
 
 
 def test_decode_headway_bin_matches_the_recorded_grid():
-    for entry in DOCUMENT["decoders"]["headway_bin_s"]:
+    entries = DOCUMENT["decoders"]["headway_bin_s"]
+    assert len(entries) == 3, "the recorded headway_bin_s grid; an empty or shrunk section checks nothing"
+    for entry in entries:
         assert sim_contract.decode_headway_bin(entry["bin"]) == entry["seconds"]
 
 
 def test_decode_speed_bin_matches_the_recorded_grid():
-    for entry in DOCUMENT["decoders"]["speed_bin_mps"]:
+    entries = DOCUMENT["decoders"]["speed_bin_mps"]
+    assert len(entries) == 15, "the recorded speed_bin_mps grid; an empty or shrunk section checks nothing"
+    for entry in entries:
         got = sim_contract.decode_speed_bin(
             entry["bin"], entry["free_flow_mps"], entry["min_contextual_mps"]
         )
@@ -263,7 +277,9 @@ def test_decode_speed_bin_matches_the_recorded_grid():
 
 
 def test_bin_index_matches_the_recorded_grid():
-    for entry in DOCUMENT["decoders"]["bin_index"]:
+    entries = DOCUMENT["decoders"]["bin_index"]
+    assert len(entries) == 8, "the recorded bin_index grid; an empty or shrunk section checks nothing"
+    for entry in entries:
         got = sim_contract.bin_index(entry["value"], entry["edges"])
         assert got == entry["index"], entry
 
@@ -272,7 +288,9 @@ def test_bin_index_matches_the_recorded_grid():
 
 
 def test_neutral_cooperation_matches_the_recorded_values():
-    for entry in DOCUMENT["neutral_cooperation"]:
+    entries = DOCUMENT["neutral_cooperation"]
+    assert len(entries) == 2, "the recorded neutral_cooperation section; empty checks nothing"
+    for entry in entries:
         got = sim_contract.neutral_cooperation(entry["free_flow_mps"])
         recorded = {v["field"]: v["value"] for v in entry["values"]}
         assert got == recorded
@@ -301,6 +319,43 @@ def test_neutral_cooperation_matches_the_observation_schema_doc():
 def test_contract_fingerprint_matches_the_file_and_the_pinned_literal():
     assert sim_contract.contract_fingerprint() == DOCUMENT["contract_fingerprint"]
     assert sim_contract.contract_fingerprint() == PINNED_FINGERPRINT
+
+
+def _second_pinned_digest() -> str:
+    """S2: a digest over what `contract_fingerprint()` does not hash.
+
+    `contract_fingerprint()` hashes only `LOCAL_OBS_FIELDS` and `FIELD_SCALES`, so a
+    coordinated edit -- changing a value in `sim_contract.py` and the matching values
+    in the golden file at the same time, so every vector-comparison test still agrees
+    with itself -- moves neither it nor any golden-vector comparison. The validator
+    reproduced exactly this for `HEADWAY_BIN_S["larger"]` (2.2 -> 2.3 in both files):
+    the full Jetson suite stayed byte-identical to clean. `200.0` is `_number`'s
+    inf-clamp constant; it has no module-level name to read, so it is typed here.
+    """
+    import hashlib
+    import json as _json
+
+    payload = _json.dumps(
+        {
+            "headway_bin_s": sim_contract.HEADWAY_BIN_S,
+            "speed_bin_offsets_mps": sim_contract.SPEED_BIN_OFFSETS_MPS,
+            "cooperation_fields": list(sim_contract.COOPERATION_FIELDS),
+            "lane_distribution_lanes": list(sim_contract.LANE_DISTRIBUTION_LANES),
+            "action_values": {k: list(v) for k, v in sim_contract.ACTION_VALUES.items()},
+            "inf_clamp_constant": 200.0,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+# The literal this file is pinned against, independent of the JSON and of
+# contract_fingerprint() -- same idiom as PINNED_FINGERPRINT above.
+PINNED_SECOND_FINGERPRINT = "6ac1218184e2c3fa"
+
+
+def test_the_second_pinned_digest_covers_what_the_fingerprint_does_not():
+    assert _second_pinned_digest() == PINNED_SECOND_FINGERPRINT
 
 
 def test_the_fingerprint_is_stable_across_calls():
@@ -417,6 +472,13 @@ def test_regeneration_leaves_every_pre_existing_case_byte_identical():
     assert fresh["contract_fingerprint"] == DOCUMENT["contract_fingerprint"]
     assert fresh["slot_names"] == DOCUMENT["slot_names"]
     assert fresh["field_scales"] == DOCUMENT["field_scales"]
+    # S3: together with the `cases` check above, this test compared 4 of 12 top-level
+    # keys (cases, contract_fingerprint, slot_names, field_scales) -- which is why it
+    # still passed against a golden file with four sections emptied by hand
+    # (decoders.headway_bin_s, decoders.speed_bin_mps, decoders.bin_index,
+    # neutral_cooperation). A disagreement anywhere in the document must be caught,
+    # not only in those four.
+    assert fresh == DOCUMENT
 
 
 # -- actor layout (needs torch) --------------------------------------------
