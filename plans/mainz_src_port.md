@@ -2,7 +2,53 @@
 
 What this is, why each conversion decision was made, and what the runs have shown so
 far. Written as the port progresses rather than after it, so the decisions are
-recorded where they were taken.
+recorded where they were taken. The sections below are in the order they were written;
+this summary is the state as of the latest run.
+
+## Result
+
+Held-out seeds 16-20, Mainz, EIDM fleet, three-into-two lane drop at the exit, demand a
+sustained 4,500 veh/h. Seeds 1-10 train, 11-15 select, 80 episodes, 100% penetration.
+
+| arm | flow veh/h | arrivals | return | space-mean speed |
+|---|---|---|---|---|
+| DSRC, the HERE observation | **3,775** (+5.8%) | 1,997 | 182.5 | 40.81 |
+| SRC, its original six features | 3,756 (+5.3%) | 1,991 | **193.8** | 40.82 |
+| no control | 3,568 | 1,951 | 55.1 | **42.68** |
+
+Paired on seed, DSRC gains **+207 +/- 92 veh/h** and SRC **+188 +/- 133**; both are
+resolved against the seed spread, and DSRC is far steadier across seeds (+/-23 against
++/-109). The two arms differ by 0.5%, inside both bars.
+
+**Restricting the observation to what a traffic API returns costs nothing, measured on a
+network where throughput can move.** Both arms run slower than no control, 40.8 against
+42.7 km/h, while serving more vehicles: they hold density below critical upstream of the
+merge so it discharges near capacity instead of breaking down.
+
+## What it took, and what is load-bearing
+
+Three findings decided everything, each measured rather than assumed:
+
+1. **A link's `q = k v` hill is not a capacity drop.** Krauss produces one too, at 15%,
+   and Krauss has no capacity drop. The quantity that matters is served flow falling as
+   offered demand rises.
+2. **The SRC paper's W99 calibration has no capacity drop on SUMO.** Its queues discharge
+   FASTER than free-flowing traffic at capacity, 1,980 veh/h against 1,899. No bottleneck
+   of any kind, no start-up delay and no reaction time changed that, so every network
+   tried served a constant and no controller could gain throughput.
+3. **A bottleneck sets the LEVEL of throughput, not its dependence on density.** EIDM
+   with a one-second reaction time has a 21% drop at an isolated lane drop; on Mainz it
+   needed a merge at the exit as well, because link 218 ends into free outflow.
+
+## Open
+
+* One demand level only. The gain should be swept across demand before it is quoted as a
+  property of the network.
+* DSRC's selected checkpoint is its last episode, so it may not have converged.
+* EIDM's parameters are SUMO defaults, not calibrated against measured traffic, and the
+  three-into-two exit drop is a modelling choice of ours.
+* `DENSITY_CRITICAL` is 0.178 in occupancy units, which is 0.308 of the measured jam
+  density -- within 3% of SRC's published 0.3. Under W99 the same comparison gave 0.134.
 
 ## Why the observation had to change
 
