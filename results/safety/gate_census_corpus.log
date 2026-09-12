@@ -1,0 +1,50 @@
+# Verbatim score_safety.py output behind gate_census_corpus.json
+
+## BEFORE -- commit 2692c3b (validator round 1 findings live)
+
+n_ticks: 3913
+COUNTERFACTUAL: no `safety` block in these logs -- nothing below describes what the rig showed a driver, only what the gate would have decided against the same recorded inputs.
+
+-- per-rule evaluability census --
+  low_speed_uncongested: not evaluable on any tick (0 of 3913)
+  all_lane_low_speed_occupancy: not evaluable on any tick (0 of 3913)
+  passing_lane_slow_hold: not evaluable on any tick (0 of 3913)
+  lane_change_dwell: not evaluable on any tick (0 of 3913)
+  lane_changes_per_km: not evaluable on any tick (0 of 3913)
+  target_lane_missing: not evaluable on any tick (0 of 3913)
+  target_lane_front_gap: evaluable on 1229 of 3913 ticks; fired on 0 of 1229 evaluable (0.0%)
+  target_lane_rear_gap: not evaluable on any tick (0 of 3913)
+  target_lane_front_ttc: not evaluable on any tick (0 of 3913)
+  target_lane_rear_ttc: not evaluable on any tick (0 of 3913)
+  target_lane_rear_braking: not evaluable on any tick (0 of 3913)
+  forward_ttc: not evaluable on any tick (0 of 3913)
+
+-- counterfactual arms --
+  recorded: clamped 0 of 3913 (0.0%), mean delta n/a, events={}, emergency_override=0, lane_withheld=3913
+  forced_nominal: clamped 0 of 3913 (0.0%), mean delta n/a, events={}, emergency_override=0, lane_withheld=3913
+  forced_slow: clamped 3913 of 3913 (100.0%), mean delta +2.00 m/s, events={'etiquette_blocked_action:low_speed_uncongested': 3913}, emergency_override=0, lane_withheld=3913
+
+
+## AFTER -- commit dedd3c1 (round 1 and round 2 fixes applied)
+
+n_ticks: 3913
+COUNTERFACTUAL: no `safety` block in these logs -- nothing below describes what the rig showed a driver, only what the gate would have decided against the same recorded inputs.
+
+-- per-rule evaluability census --
+  low_speed_uncongested: not evaluable on any tick (0 of 3913)
+  all_lane_low_speed_occupancy: not evaluable on any tick (0 of 3913)
+  passing_lane_slow_hold: not evaluable on any tick (0 of 3913)
+  lane_change_dwell: not evaluable on any tick (0 of 3913)
+  lane_changes_per_km: not evaluable on any tick (0 of 3913)
+  target_lane_missing: not evaluable on any tick (0 of 3913)
+  target_lane_front_gap: evaluable on 1229 of 3913 ticks; fired on 0 of 1229 evaluable (0.0%); the compared value (gap_m) is inf on all 1229; all 1229 disagree with leader_gap's own source (target_lane_front_gap is defined to alias it verbatim) -- recorded under a superseded contract, not evidence under today's rule
+  target_lane_rear_gap: not evaluable on any tick (0 of 3913)
+  target_lane_front_ttc: not evaluable on any tick (0 of 3913)
+  target_lane_rear_ttc: not evaluable on any tick (0 of 3913)
+  target_lane_rear_braking: not evaluable on any tick (0 of 3913)
+  forward_ttc: not evaluable on any tick (0 of 3913)
+
+-- counterfactual arms --
+  recorded: recommended speed raised on 0 of 3913 ticks; lowered on 0 of 3913 ticks; events={}, emergency_override=0, lane_withheld=3913
+  forced_nominal: recommended speed raised on 0 of 3913 ticks; lowered on 0 of 3913 ticks; events={}, emergency_override=0, lane_withheld=3913
+  forced_slow: recommended speed raised on 0 of 3913 ticks; lowered on 0 of 3913 ticks; events={}, emergency_override=0, lane_withheld=3913
