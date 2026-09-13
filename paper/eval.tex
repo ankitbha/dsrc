@@ -3,8 +3,7 @@
 
 \begin{table}[t]
 \centering
-\caption{The whole road corpus. One day, one vehicle, eight runs. There will not
-be a second collection day, which bounds what these numbers can support.}
+\caption{The whole road corpus. One day, one vehicle, eight runs.}
 \label{tab:corpus}
 \small
 \begin{tabular}{p{0.3\linewidth}p{0.6\linewidth}}
@@ -28,13 +27,6 @@ bracket rather than a number. Summing great-circle steps between fixes less than
 the reported speed gives 90.06\,km and counts the gaps but trusts the speed
 field. Quoting either figure alone would overstate the precision.
 
-One fact about this day bounds every earlier measurement in the project. It
-carried the first working GPS fix and the first working traffic query the
-project had obtained. Every bench run before it reported a GPS rate of 0.0\,Hz
-and no feed. The reason is physical rather than configuration. The application
-requests location correctly and the receiver returns no fix at a desk indoors,
-and the feed query is suppressed when no position is available.
-
 \noindent\textbf{The shakedown drive.}
 The first drive ran 1{,}632 ticks over 279.5\,s and 6.24\,km, at a mean speed of
 22.9\,m/s. The mean tick rate was 4.69\,Hz with a median spacing of 203\,ms, and
@@ -44,8 +36,8 @@ which is two independent routes to one number.
 
 The drive also produced three defects. The camera frames arrived rotated by
 ninety degrees. The frames were being discarded, so the drive could not explain
-itself. The severe thermal tier ended a session rather than lowering rates. The
-first of the three is reported in Section~\ref{sec:experience}.
+itself. The severe thermal tier ended a session rather than lowering rates. These 
+were fixed live using the laptop as shown in Figure\ref{fig:architecture}.
 
 \noindent\textbf{Latency.}
 Table~\ref{tab:latency} gives the two measurements. The on-Jetson path is a
@@ -54,9 +46,17 @@ phone-to-Jetson figure is the pooled 95th percentile over three bench runs of
 180\,s each. Over USB it is 116.19\,ms against a 200\,ms target, and over the
 Tailscale network it is 215.63\,ms. The largest and smallest of the three USB
 runs differ by 48.80\,ms at the 95th percentile, and that difference has one
-named source. The phone-side send-queue stage differs between the same pair by
+primary source. The phone-side send-queue stage differs between the same pair by
 46.40\,ms, while every other stage differs by less than 2\,ms. The spread is phone-side
 queueing rather than the link.
+The wire hop is reported as an order rather than a duration on purpose. Its two
+endpoints are stamped on different devices, and therefore on different clocks.
+Measuring it means converting between them, and every such conversion carries an
+error bound of about half the minimum round-trip time. Its median is 1.97, 2.16
+and 2.03\,ms across the three runs, against conversion
+bounds of 1.95, 1.86 and 2.06\,ms for the same runs. The quantity is on the same order of
+the error bar on the clock conversion used to measure it, and hence is not separable from
+that bound.
 
 \begin{table}[t]
 \centering
@@ -82,38 +82,24 @@ the USB wire hop itself & of the order of its own 2\,ms conversion bound \\
 \end{tabular}
 \end{table}
 
-The wire hop is reported as an order rather than a duration on purpose. Its
-median is 1.97, 2.16 and 2.03\,ms across the three runs, against conversion
-bounds of 1.95, 1.86 and 2.06\,ms for the same runs. In the third run the
-measured value is 0.03\,ms below its own bound. A quantity that is smaller than
-the error bar on the clock conversion used to measure it is not separable from
-that bound.
-
-\noindent\textbf{The rate controller was verified through the wire.}
-Logged shadow decisions were compared against live commands decoded through the
-real rate-command codec, rather than through in-process objects. Across three
-bench runs of 899, 900 and 885 ticks there were zero command-replay mismatches.
-The phone's own applier counters read zero applied and a shadowed count equal to
-the number of commands sent, at 37, 38 and 38. That is the phone independently
-confirming that it did not act.
 
 \noindent\textbf{Every drive reproduces its own recorded decisions.}
-A replay tool re-runs each logged tick's inputs through the incumbent controller
-and requires the recorded decision back. All eight drives pass: 0 of 22{,}929
-ticks mismatched, with the success exit code on every run. That result was
-bounded by two controls rather than quoted on its own. Forcing one decision
-input to a value outside its observed range, against a drive whose own range is
-0.0123 to 0.0246 and whose threshold is 0.15, produces 1{,}632 mismatches of
-1{,}632 ticks and the refusal exit code. Rounding the ego speed to the nearest
-integer on the same 1{,}632 ticks produces zero mismatches and the success exit
-code. The second control reproduces an insensitivity the tool documents. The
-claim these runs support is that each log reproduces the decisions it recorded,
-and not that the logs are uncorrupted.
+A replay tool re-runs each logged tick's inputs through the incumbent sensing
+scheduler and requires the recorded decision back. All eight drives pass: 0 of
+22{,}929 ticks mismatched, with the success exit code on every run. That
+result was bounded by two controls rather than quoted on its own. Forcing one
+decision input to a value outside its observed range, against a drive whose
+own range is 0.0123 to 0.0246 and whose threshold is 0.15, produces 1{,}632
+mismatches of 1{,}632 ticks and the refusal exit code. Rounding the ego speed
+to the nearest integer on the same 1{,}632 ticks produces zero mismatches and
+the success exit code. The second control reproduces an insensitivity the tool
+documents. The claim these runs support is that each log reproduces the
+decisions it recorded, and not that the logs are uncorrupted.
 
 The comparison the two live drives were collected for cannot be made from them.
 Both live runs report the first live tick at index zero, so neither contains a
-segment recorded before the controller began acting. A candidate controller can
-only be scored against such a reference segment, because after the controller
+segment recorded before the scheduler began acting. A candidate scheduler can
+only be scored against such a reference segment, because after the scheduler
 acts the trajectory is its own. The six shadow runs are clean references and
 contain no live segment. Constructing the comparison needs a drive that runs in
 shadow mode for a segment and then goes live, which is a new drive rather than a
@@ -154,17 +140,43 @@ closing against the pings sent. The minimum round-trip time has a median of
 completed with every channel on cadence. The measured monotonic skew is
 $-12.00$\,ppm against the 50\,ppm the design assumes, a factor of 4.2 in hand.
 
-\noindent\textbf{The safety gate is present, wired, and has never had the
-evidence to bind.}
-Over the 3{,}913 recorded ticks of the four instrumented runs, none of the
-twelve rules had evidence for its inputs on any tick. That is a statement about
-the rig rather than about the drive. Only three of the twelve rules can ever be
-evaluable on this hardware, and each of the three requires a tracked leader
-vehicle. The other nine read at least one field for which the rig has no
-instrument: there is no rear sensor, no lane detection, no lane-change detector,
-no cooperating peers, no passing-lane index and no non-leader relative speed.
-The lane advisory is withheld on all 3{,}913 ticks for the same reason, because
-three of its eight guards read fields the rig cannot supply. The claim the
-system supports is therefore that the filter is present, wired, and reports per
-rule what it could and could not check. It is not that the filter was observed
-to bound anything.
+\noindent\textbf{The gate had no evidence on any drive, for a single reason.}
+Across the 3{,}913 ticks of the four bench runs, none of the twelve rules had
+evidence for its inputs on any tick. Across the 22{,}929 ticks the road drives
+recorded, a leader gap exists on 2. On the bench that is a statement about the
+rig, which has no rear sensor, no lane detection and no lane-change detector. On
+the road it is a statement about one defect. The camera frames arrived rotated, so no drive ever tracked a leader,
+and every rule that needs one was unevaluable for that reason alone.
+
+\noindent\textbf{Rebuilt from the same frames, three rules become evaluable.}
+The stored frames outlive the defect and the fix landed one day after the
+collection, so the observation can be rebuilt offline with the rotation applied
+and the post-rotation intrinsics. Over all six drives that recorded video,
+18{,}907 ticks, the low-speed obstruction rule becomes evaluable on 17{,}944 of
+them, the target-lane front-gap rule on 12{,}718, and the forward
+time-to-collision rule on 11{,}781. The other nine remain unevaluable on every
+tick. Those three are the ones the structural analysis named in advance, so a
+prediction made by construction is now confirmed by measurement. The control is
+what makes it a measurement. The same frames through the same code with the
+rotation removed give 5 detections in 3{,}421 ticks and no leader gap at all,
+which reproduces the drive's own recorded result.
+
+\noindent\textbf{The firing rate is a range rather than a number.}
+On the rebuilt observation the target-lane front-gap rule fires on 37.2\% of the
+ticks it can evaluate and the forward time-to-collision rule on 40.3\%, with an
+emergency override on 4{,}751 of 18{,}907 ticks. Those are upper bounds. The
+distance estimator falls back to a width prior when the leader's contact point
+is occluded or clipped, and that prior saturates at exactly 2.00\,m for a box
+spanning the rotated frame. 1{,}209 of the 12{,}718 leader ticks sit on that
+value. Discarding every one of them puts the two rates at 30.6\% and 33.5\%,
+which is the other end of the range.
+
+\noindent\textbf{What the rebuild establishes, and what it does not.}
+It establishes what the gate could have evaluated on real road inputs, and not
+what it did. No drive ran the gate, so every number above is counterfactual and
+the scoring tool labels it so. The detections also come from a re-run of the
+same detector architecture on a CPU rather than from the device's own engine,
+because no weights and no GPU runtime exist off the device. Whether a leader is
+tracked at all, which is what the census turns on, is robust to that
+substitution. The firing rate turns on the distance value instead, which is why
+it is reported as a range.

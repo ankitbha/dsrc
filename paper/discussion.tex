@@ -52,14 +52,17 @@ temperature is recorded and read by nothing, and there is no Jetson-side
 backoff. On a desk it sits at equilibrium with a heatsink and airflow, and a
 closed vehicle has neither.
 
-\noindent\textbf{The safety gate cannot bind on this rig.}
-Nine of its twelve rules read a field this hardware has no instrument for, and
-the remaining three each need a tracked leader vehicle. What would change that
-is specific: a rear-facing sensor, lane detection, and a lane-change detector.
-Until then the census is the deliverable, and no clamp rate is reportable. The
-rate is also not reportable from simulation, because the simulated action
-contract has no discrete action for the filter to intercept, so a gated arm and
-an ungated arm have nothing to do differently.
+\noindent\textbf{Nine of the gate's twelve rules cannot bind on this rig.}
+They read a field this hardware has no instrument for, and no amount of data
+changes that. What would change it is specific: a rear-facing sensor, lane
+detection, and a lane-change detector. The other three are now measured on
+rebuilt road inputs (Section~\ref{sec:eval}), and two caveats bound that result.
+It is counterfactual, because no drive ran the gate, and its firing rate rests
+on a distance estimate that saturates on 9.5\% of the ticks carrying a leader.
+Closing the second needs a camera calibration validated against something other
+than itself. The rate is separately not reportable from simulation, because the
+simulated action contract has no discrete action for the filter to intercept, so
+a gated arm and an ungated arm have nothing to do differently.
 
 \noindent\textbf{The simulation covers one demand level on one network.}
 The gain should be swept across demand before it is quoted as a property of the
