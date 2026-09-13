@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.envs.base_ctde_env import AVAction
-from src.envs.wrappers import decode_headway_bin, decode_speed_bin, lane_preference_to_action
+from src.envs.wrappers import decode_headway_bin, decode_speed_bin
 from src.safety.constraints import SafetyConstraints
-from src.safety.etiquette import is_all_lane_low_speed_occupancy, is_low_speed_uncongested, is_passing_lane_slow_hold
+from src.safety.etiquette import is_low_speed_uncongested
 
 
 @dataclass
@@ -58,7 +58,6 @@ class SafetyContext:
 class SafetyDecision:
     target_speed_mps: float
     target_headway_s: float
-    lane_action: str | None
     acceleration_mps2: float = 0.0
     emergency_override: bool = False
     diagnostics: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
@@ -92,51 +91,10 @@ def apply_safety_layer(
     target_headway = decode_headway_bin(action["desired_headway_bin"])
     if action["merge_mode"] == "create_gap":
         target_headway += constraints.merge_gap_headway_bonus_s
-    lane_action = None if action["merge_mode"] == "hold_lane" else lane_preference_to_action(action["lane_preference"])
 
     if is_low_speed_uncongested(target_speed, context.free_flow_speed_mps, context.local_density_veh_per_km, constraints):
         target_speed = max(target_speed, context.free_flow_speed_mps - constraints.low_speed_free_flow_delta_mps)
         diagnostics["etiquette_blocked_action"].append({"agent_id": agent_id, "reason": "low_speed_uncongested"})
-
-    if is_all_lane_low_speed_occupancy(
-        context.all_lanes_av_occupied,
-        context.av_mean_speed_mps,
-        context.free_flow_speed_mps,
-        context.downstream_congested,
-        constraints,
-    ):
-        lane_action = None
-        diagnostics["etiquette_blocked_action"].append({"agent_id": agent_id, "reason": "all_lane_low_speed_occupancy"})
-
-    if is_passing_lane_slow_hold(context.in_passing_lane, target_speed, context.local_mean_speed_mps, constraints):
-        diagnostics["etiquette_blocked_action"].append({"agent_id": agent_id, "reason": "passing_lane_slow_hold"})
-
-    if lane_action is not None:
-        dwell = float("inf") if state.last_lane_change_time_s is None else context.time_s - state.last_lane_change_time_s
-        if dwell < constraints.lane_change_dwell_s:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "lane_change_dwell"})
-        elif _lane_change_count_exceeded(state, constraints):
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "lane_changes_per_km"})
-        elif not context.target_lane_exists:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_missing"})
-        elif context.target_lane_front_gap_m < constraints.min_front_gap_m:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_front_gap"})
-        elif context.target_lane_rear_gap_m < constraints.min_rear_gap_m:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_rear_gap"})
-        elif _ttc_from_relative_speed(context.target_lane_front_gap_m, -context.target_lane_front_relative_speed_mps) < constraints.min_lane_change_ttc_s:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_front_ttc"})
-        elif _ttc_from_relative_speed(context.target_lane_rear_gap_m, context.target_lane_rear_relative_speed_mps) < constraints.min_lane_change_ttc_s:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_rear_ttc"})
-        elif context.target_lane_rear_required_decel_mps2 > constraints.max_follower_braking_mps2:
-            lane_action = None
-            diagnostics["follower_disruption_blocked"].append({"agent_id": agent_id, "reason": "target_lane_rear_braking"})
 
     acceleration, emergency_override = physical_control_command(target_speed, target_headway, context, constraints)
     if emergency_override:
@@ -145,7 +103,6 @@ def apply_safety_layer(
     return SafetyDecision(
         target_speed_mps=target_speed,
         target_headway_s=target_headway,
-        lane_action=lane_action,
         acceleration_mps2=acceleration,
         emergency_override=emergency_override,
         diagnostics=diagnostics,
@@ -196,35 +153,6 @@ def safety_penalty_terms(
             any(event.get("reason") == "lane_changes_per_km" for event in diagnostics.get("safety_masked_action", []))
         ),
     }
-
-
-def _lane_preference_safe(
-    state: SafetyState,
-    context: SafetyContext,
-    constraints: SafetyConstraints,
-) -> bool:
-    dwell = float("inf") if state.last_lane_change_time_s is None else context.time_s - state.last_lane_change_time_s
-    return (
-        dwell >= constraints.lane_change_dwell_s
-        and not _lane_change_count_exceeded(state, constraints)
-        and context.target_lane_exists
-        and context.target_lane_front_gap_m >= constraints.min_front_gap_m
-        and context.target_lane_rear_gap_m >= constraints.min_rear_gap_m
-        and _ttc_from_relative_speed(context.target_lane_front_gap_m, -context.target_lane_front_relative_speed_mps)
-        >= constraints.min_lane_change_ttc_s
-        and _ttc_from_relative_speed(context.target_lane_rear_gap_m, context.target_lane_rear_relative_speed_mps)
-        >= constraints.min_lane_change_ttc_s
-        and context.target_lane_rear_required_decel_mps2 <= constraints.max_follower_braking_mps2
-    )
-
-
-def _lane_change_count_exceeded(state: SafetyState, constraints: SafetyConstraints) -> bool:
-    if state.lane_change_distances_m:
-        window_start = max(0.0, state.absolute_distance_m - 1000.0)
-        recent_changes = sum(1 for distance in state.lane_change_distances_m if distance >= window_start)
-    else:
-        recent_changes = state.lane_changes_last_km
-    return recent_changes >= constraints.max_lane_changes_per_km
 
 
 def _forward_hazard(context: SafetyContext) -> tuple[float, float]:
