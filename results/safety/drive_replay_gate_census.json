@@ -1,0 +1,349 @@
+{
+ "what": "The safety gate's per-rule evaluability census over the 2026-09-08 road drives, with the ninety-degree frame rotation corrected offline. The drives themselves recorded the rotation defect, so every rule read not_evaluable on every tick; this rebuilds the observation from the same stored frames with the fix applied.",
+ "generator": "scripts/replay_drive_safety_census.py, then deployment/jetson/score_safety.py, assembled by scripts/build_drive_gate_census_artefact.py",
+ "measured_at": "2026-09-13T19:48:50.096638+00:00",
+ "commit": "71cb81094f579877acd3c6859872a2ce53a8f861",
+ "tracked_files_dirty": true,
+ "environment": {
+  "machine": "macOS-26.6.2-arm64-arm-64bit",
+  "python": "3.12.14"
+ },
+ "substitutions_that_limit_the_claim": [
+  "The detector is ultralytics YOLOv8n in FP32 on the CPU, not the device's YOLOv8n TensorRT FP16 engine. Neither TensorRT nor CUDA nor any weights file exists off-device. Same architecture and the same confidence, IoU and vehicle-class settings read from the deployed config; a different implementation and a different precision.",
+  "The action is the one each drive recorded, not one re-inferred from the rebuilt observation. The actor bundle is absent off-device, and the perception half is the half the defect broke.",
+  "Timing is the replay's. Frames are paired to ticks by index, while the live loop is latest-value-wins and drops frames under load.",
+  "Distance rests on intrinsics measured over forty frames of one run, which nothing in the corpus independently validates.",
+  "No `safety` block exists in these logs, so score_safety labels every number COUNTERFACTUAL: this is what the gate could have evaluated, not what it did."
+ ],
+ "rotated": {
+  "runs": [
+   "run_20260908_155910",
+   "run_20260908_161422",
+   "run_20260908_170849",
+   "run_20260908_173809",
+   "run_20260908_183538",
+   "run_20260908_190548"
+  ],
+  "census": {
+   "n_ticks": 18907,
+   "counterfactual": true,
+   "replayed_incumbent": false,
+   "rule_census": {
+    "low_speed_uncongested": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 17944,
+     "not_evaluable_ticks": 963,
+     "fired_ticks": 0,
+     "fired_fraction_of_evaluable": 0.0,
+     "non_finite_compared_ticks": 0
+    },
+    "all_lane_low_speed_occupancy": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "passing_lane_slow_hold": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "lane_change_dwell": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "lane_changes_per_km": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_missing": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_front_gap": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 12718,
+     "not_evaluable_ticks": 6189,
+     "fired_ticks": 4733,
+     "fired_fraction_of_evaluable": 0.3721497090737537,
+     "non_finite_compared_ticks": 0,
+     "stale_provenance_ticks": 0
+    },
+    "target_lane_rear_gap": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_front_ttc": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_rear_ttc": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_rear_braking": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 18907,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "forward_ttc": {
+     "total_ticks": 18907,
+     "evaluable_ticks": 11781,
+     "not_evaluable_ticks": 7126,
+     "fired_ticks": 4751,
+     "fired_fraction_of_evaluable": 0.4032764620999915,
+     "non_finite_compared_ticks": 0
+    }
+   },
+   "arms": {
+    "recorded": {
+     "n_ticks": 18907,
+     "clamped_ticks": 0,
+     "clamped_fraction": 0.0,
+     "mean_delta_speed_mps": null,
+     "raised_ticks": 0,
+     "lowered_ticks": 0,
+     "mean_raise_mps": null,
+     "mean_lower_mps": null,
+     "events": {},
+     "emergency_override_ticks": 4751,
+     "lane_withheld_ticks": 14174
+    },
+    "forced_nominal": {
+     "n_ticks": 18907,
+     "clamped_ticks": 0,
+     "clamped_fraction": 0.0,
+     "mean_delta_speed_mps": null,
+     "raised_ticks": 0,
+     "lowered_ticks": 0,
+     "mean_raise_mps": null,
+     "mean_lower_mps": null,
+     "events": {},
+     "emergency_override_ticks": 4751,
+     "lane_withheld_ticks": 14174
+    },
+    "forced_slow": {
+     "n_ticks": 18907,
+     "clamped_ticks": 2945,
+     "clamped_fraction": 0.15576241603638863,
+     "mean_delta_speed_mps": 2.0,
+     "raised_ticks": 2945,
+     "lowered_ticks": 0,
+     "mean_raise_mps": 2.0,
+     "mean_lower_mps": null,
+     "events": {
+      "etiquette_blocked_action:low_speed_uncongested": 2945
+     },
+     "emergency_override_ticks": 4751,
+     "lane_withheld_ticks": 14174
+    }
+   }
+  },
+  "report": "n_ticks: 18907\nCOUNTERFACTUAL: no `safety` block in these logs -- nothing below describes what the rig showed a driver, only what the gate would have decided against the same recorded inputs.\n\n-- per-rule evaluability census --\n  low_speed_uncongested: evaluable on 17944 of 18907 ticks; fired on 0 of 17944 evaluable (0.0%)\n  all_lane_low_speed_occupancy: not evaluable on any tick (0 of 18907)\n  passing_lane_slow_hold: not evaluable on any tick (0 of 18907)\n  lane_change_dwell: not evaluable on any tick (0 of 18907)\n  lane_changes_per_km: not evaluable on any tick (0 of 18907)\n  target_lane_missing: not evaluable on any tick (0 of 18907)\n  target_lane_front_gap: evaluable on 12718 of 18907 ticks; fired on 4733 of 12718 evaluable (37.2%)\n  target_lane_rear_gap: not evaluable on any tick (0 of 18907)\n  target_lane_front_ttc: not evaluable on any tick (0 of 18907)\n  target_lane_rear_ttc: not evaluable on any tick (0 of 18907)\n  target_lane_rear_braking: not evaluable on any tick (0 of 18907)\n  forward_ttc: evaluable on 11781 of 18907 ticks; fired on 4751 of 11781 evaluable (40.3%)\n\n-- counterfactual arms --\n  recorded: recommended speed raised on 0 of 18907 ticks; lowered on 0 of 18907 ticks; events={}, emergency_override=4751, lane_withheld=14174\n  forced_nominal: recommended speed raised on 0 of 18907 ticks; lowered on 0 of 18907 ticks; events={}, emergency_override=4751, lane_withheld=14174\n  forced_slow: recommended speed raised on 2945 of 18907 ticks (mean +2.00 m/s); lowered on 0 of 18907 ticks; events={'etiquette_blocked_action:low_speed_uncongested': 2945}, emergency_override=4751, lane_withheld=14174\n",
+  "gaps": {
+   "ticks": 18907,
+   "ticks_with_a_finite_leader_gap": 12718,
+   "leader_gap_median_m": 6.439344662541231,
+   "leader_gap_p75_m": 10.273587226867676,
+   "leader_gap_max_m": 56.93020301818848,
+   "ego_speed_median_mps": 11.73,
+   "saturated_at_width_prior": {
+    "value_m": 2.0,
+    "ticks": 1209,
+    "share_of_leader_ticks": 0.09506211668501337,
+    "why": "800 px focal length times a 1.8 m car width over a 720 px frame is exactly 2.00 m, so a detection box spanning the full rotated frame produces this value through the width-prior fallback. These are not vehicles two metres ahead."
+   },
+   "leader_gap_median_excluding_saturated_m": 7.07435941696167
+  }
+ },
+ "control_no_rotation": {
+  "why": "Same frames, same code, same thresholds, rotation removed. It has to reproduce the drive's own recorded zero, or the rotated count is an assertion rather than a measurement.",
+  "runs": [
+   "run_20260908_155910"
+  ],
+  "census": {
+   "n_ticks": 3421,
+   "counterfactual": true,
+   "replayed_incumbent": false,
+   "rule_census": {
+    "low_speed_uncongested": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "all_lane_low_speed_occupancy": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "passing_lane_slow_hold": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "lane_change_dwell": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "lane_changes_per_km": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_missing": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_front_gap": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_rear_gap": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_front_ttc": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_rear_ttc": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "target_lane_rear_braking": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    },
+    "forward_ttc": {
+     "total_ticks": 3421,
+     "evaluable_ticks": 0,
+     "not_evaluable_ticks": 3421,
+     "rate": null,
+     "note": "not evaluable on any tick"
+    }
+   },
+   "arms": {
+    "recorded": {
+     "n_ticks": 3421,
+     "clamped_ticks": 0,
+     "clamped_fraction": 0.0,
+     "mean_delta_speed_mps": null,
+     "raised_ticks": 0,
+     "lowered_ticks": 0,
+     "mean_raise_mps": null,
+     "mean_lower_mps": null,
+     "events": {},
+     "emergency_override_ticks": 0,
+     "lane_withheld_ticks": 3421
+    },
+    "forced_nominal": {
+     "n_ticks": 3421,
+     "clamped_ticks": 0,
+     "clamped_fraction": 0.0,
+     "mean_delta_speed_mps": null,
+     "raised_ticks": 0,
+     "lowered_ticks": 0,
+     "mean_raise_mps": null,
+     "mean_lower_mps": null,
+     "events": {},
+     "emergency_override_ticks": 0,
+     "lane_withheld_ticks": 3421
+    },
+    "forced_slow": {
+     "n_ticks": 3421,
+     "clamped_ticks": 0,
+     "clamped_fraction": 0.0,
+     "mean_delta_speed_mps": null,
+     "raised_ticks": 0,
+     "lowered_ticks": 0,
+     "mean_raise_mps": null,
+     "mean_lower_mps": null,
+     "events": {},
+     "emergency_override_ticks": 0,
+     "lane_withheld_ticks": 3421
+    }
+   }
+  },
+  "report": "n_ticks: 3421\nCOUNTERFACTUAL: no `safety` block in these logs -- nothing below describes what the rig showed a driver, only what the gate would have decided against the same recorded inputs.\n\n-- per-rule evaluability census --\n  low_speed_uncongested: not evaluable on any tick (0 of 3421)\n  all_lane_low_speed_occupancy: not evaluable on any tick (0 of 3421)\n  passing_lane_slow_hold: not evaluable on any tick (0 of 3421)\n  lane_change_dwell: not evaluable on any tick (0 of 3421)\n  lane_changes_per_km: not evaluable on any tick (0 of 3421)\n  target_lane_missing: not evaluable on any tick (0 of 3421)\n  target_lane_front_gap: not evaluable on any tick (0 of 3421)\n  target_lane_rear_gap: not evaluable on any tick (0 of 3421)\n  target_lane_front_ttc: not evaluable on any tick (0 of 3421)\n  target_lane_rear_ttc: not evaluable on any tick (0 of 3421)\n  target_lane_rear_braking: not evaluable on any tick (0 of 3421)\n  forward_ttc: not evaluable on any tick (0 of 3421)\n\n-- counterfactual arms --\n  recorded: recommended speed raised on 0 of 3421 ticks; lowered on 0 of 3421 ticks; events={}, emergency_override=0, lane_withheld=3421\n  forced_nominal: recommended speed raised on 0 of 3421 ticks; lowered on 0 of 3421 ticks; events={}, emergency_override=0, lane_withheld=3421\n  forced_slow: recommended speed raised on 0 of 3421 ticks; lowered on 0 of 3421 ticks; events={}, emergency_override=0, lane_withheld=3421\n",
+  "gaps": {
+   "ticks": 3421,
+   "ticks_with_a_finite_leader_gap": 0,
+   "leader_gap_median_m": null,
+   "leader_gap_p75_m": null,
+   "leader_gap_max_m": null,
+   "ego_speed_median_mps": 8.11,
+   "saturated_at_width_prior": {
+    "value_m": 2.0,
+    "ticks": 0,
+    "share_of_leader_ticks": null,
+    "why": "800 px focal length times a 1.8 m car width over a 720 px frame is exactly 2.00 m, so a detection box spanning the full rotated frame produces this value through the width-prior fallback. These are not vehicles two metres ahead."
+   },
+   "leader_gap_median_excluding_saturated_m": null
+  }
+ },
+ "replay_log": "[replay] rotation 90 deg cw, detector /private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/74a3b6a3-b76c-4322-9224-4a3f73d81187/scratchpad/yolov8n.pt on cpu, conf 0.35, intrinsics cx=360.0 cy=640.0 horizon=717\n[replay] run_20260908_155910: 3421 ticks, 2535 with a detection, 2004 with a leader gap, 64.3s\n[replay] run_20260908_173809: 2103 ticks, 1704 with a detection, 1418 with a leader gap, 39.1s\n[replay] run_20260908_183538: 386 ticks, 109 with a detection, 57 with a leader gap, 7.1s\n[replay] run_20260908_190548: 8016 ticks, 7087 with a detection, 5582 with a leader gap, 170.4s\n[replay] run_20260908_161422: 2555 ticks, 2217 with a detection, 1769 with a leader gap, 48.3s\n[replay] run_20260908_170849: 2426 ticks, 2061 with a detection, 1888 with a leader gap, 45.4s\n[\n  {\n    \"run\": \"run_20260908_155910\",\n    \"rotate_cw_deg\": 90,\n    \"live_tick_records\": 3421,\n    \"frames_replayed\": 3421,\n    \"ticks_written\": 3421,\n    \"ticks_with_a_detection\": 2535,\n    \"ticks_with_a_finite_leader_gap\": 2004,\n    \"seconds\": 64.3\n  },\n  {\n    \"run\": \"run_20260908_173809\",\n    \"rotate_cw_deg\": 90,\n    \"live_tick_records\": 2103,\n    \"frames_replayed\": 2103,\n    \"ticks_written\": 2103,\n    \"ticks_with_a_detection\": 1704,\n    \"ticks_with_a_finite_leader_gap\": 1418,\n    \"seconds\": 39.1\n  },\n  {\n    \"run\": \"run_20260908_183538\",\n    \"rotate_cw_deg\": 90,\n    \"live_tick_records\": 386,\n    \"frames_replayed\": 386,\n    \"ticks_written\": 386,\n    \"ticks_with_a_detection\": 109,\n    \"ticks_with_a_finite_leader_gap\": 57,\n    \"seconds\": 7.1\n  },\n  {\n    \"run\": \"run_20260908_190548\",\n    \"rotate_cw_deg\": 90,\n    \"live_tick_records\": 8016,\n    \"frames_replayed\": 8016,\n    \"ticks_written\": 8016,\n    \"ticks_with_a_detection\": 7087,\n    \"ticks_with_a_finite_leader_gap\": 5582,\n    \"seconds\": 170.4\n  },\n  {\n    \"run\": \"run_20260908_161422\",\n    \"rotate_cw_deg\": 90,\n    \"live_tick_records\": 2555,\n    \"frames_replayed\": 2555,\n    \"ticks_written\": 2555,\n    \"ticks_with_a_detection\": 2217,\n    \"ticks_with_a_finite_leader_gap\": 1769,\n    \"seconds\": 48.3\n  },\n  {\n    \"run\": \"run_20260908_170849\",\n    \"rotate_cw_deg\": 90,\n    \"live_tick_records\": 2426,\n    \"frames_replayed\": 2426,\n    \"ticks_written\": 2426,\n    \"ticks_with_a_detection\": 2061,\n    \"ticks_with_a_finite_leader_gap\": 1888,\n    \"seconds\": 45.4\n  }\n]\n",
+ "firing_rate_is_bounded_not_measured": {
+  "why": "The distance estimator falls back to a width prior when the contact point is occluded or clipped, and 800 px focal length times a 1.8 m car over a 720 px rotated frame is exactly 2.00 m. A box spanning the frame therefore reports a 2.00 m leader, which fires every gap rule. 1,209 of 12,718 leader ticks (9.5%) sit within a centimetre of that value.",
+  "target_lane_front_gap": {
+   "upper_pct": 37.2,
+   "lower_pct_discarding_every_saturated_tick": 30.6
+  },
+  "forward_ttc": {
+   "upper_pct": 40.3,
+   "lower_pct_discarding_every_saturated_tick": 33.5
+  },
+  "reading": "The evaluability census is robust, because it turns on whether a leader is tracked at all. The firing rate turns on the distance value and is reported as a range whose upper end assumes every saturated tick is a real close follow and whose lower end assumes none of them is."
+ }
+}
