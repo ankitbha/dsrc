@@ -621,6 +621,14 @@
   },
   "tension_with_the_published_figure": "results/evaluation/mainz_paired_seeds.json reports the traffic-API arm gaining 230 +/- 44 veh/h. That figure is arrivals inside the 900 to 2500 s window only. The entry gate delays departures, which shifts completions later and into the window. These whole-episode measures have no window and show the opposite sign.",
   "what_this_does_not_settle": "Which metric should decide the question. Window throughput is a standard traffic measure and the window exists so the network is full before counting. But a gain that appears under a window and reverses without one needs the window justified rather than assumed.",
-  "instrument_caveat": "departDelay reads 0 for the gated arms because they inject vehicles through the simulator API with an immediate departure, so time held by the gate never appears as a departure delay. It shows instead as vehicles absent from the record: about 3,073 of 3,124 scheduled appear for the traffic-API arm."
+  "instrument_caveat": "departDelay reads 0 for the gated arms because they inject vehicles through the simulator API with an immediate departure, so time held by the gate never appears as a departure delay. It shows instead as vehicles absent from the record: about 3,073 of 3,124 scheduled appear for the traffic-API arm.",
+  "superseded_by": "CORRECTION below: the warm-up must be excluded."
+ },
+ "CORRECTION": {
+  "date": "2026-09-13",
+  "statement": "These figures span the whole episode, including the 0 to 900 s fill. That makes them the wrong instrument for the question. The measurement window opens at 900 s precisely so the network is full before anything is counted, and the entry gate is throttling hardest during the fill, so a whole-episode average charges the controlled arms for a transient the experiment excludes by design.",
+  "consequence": "The 'finding' block above does NOT overturn the windowed result. results/evaluation/mainz_paired_seeds.json's +230 +/- 44 veh/h remains the figure, and the window is the correct framing rather than an artefact of it.",
+  "what_would_be_a_fair_whole-network_speed": "The same trip record restricted to distance and time accumulated inside the window, which is not what this run measured.",
+  "authority": "Stated by the project owner, 2026-09-13."
  }
 }
