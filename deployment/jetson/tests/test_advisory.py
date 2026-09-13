@@ -68,7 +68,7 @@ def test_units_kmh() -> None:
 
 import numpy as np
 
-from policy.advisory import SegmentAdvisory, SegmentAdvisoryDecoder, SegmentAdvisoryRow
+from policy.segment_advisory import SegmentAdvisory, SegmentAdvisoryDecoder, SegmentAdvisoryRow
 from policy.dsrc_runtime import DsrcDecision
 
 

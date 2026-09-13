@@ -31,6 +31,8 @@ from policy.advisory import (
     AdvisoryDecoder,
     GATED_LANE_TEXT,
     MERGE_TEXT,
+)
+from policy.segment_advisory import (
     SegmentAdvisory,
     SegmentAdvisoryDecoder,
 )

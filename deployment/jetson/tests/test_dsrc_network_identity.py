@@ -20,7 +20,7 @@ import pytest
 from perception.segment_state import SegmentStateBuilder
 from pipeline import PerceptionPolicyPipeline
 from policy import export_dsrc_policy as export_mod
-from policy.advisory import SegmentAdvisoryDecoder
+from policy.segment_advisory import SegmentAdvisoryDecoder
 from policy.dsrc_runtime import DsrcRuntime
 
 

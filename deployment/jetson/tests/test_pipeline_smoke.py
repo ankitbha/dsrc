@@ -25,7 +25,8 @@ from perception.tracker import IouTracker
 from pipeline import PerceptionPolicyPipeline
 from policy import export_dsrc_policy, sim_contract
 from policy.actor_runtime import ActorRuntime
-from policy.advisory import AdvisoryDecoder, SegmentAdvisoryDecoder
+from policy.advisory import AdvisoryDecoder
+from policy.segment_advisory import SegmentAdvisoryDecoder
 from policy.dsrc_runtime import DsrcRuntime
 from policy.export_policy import build_random, export
 from sensors.camera_stream import Frame
