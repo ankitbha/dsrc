@@ -48,8 +48,6 @@ class TypedMessagesTest {
         currentSpeedDisplay = 28.0,
         units = "mph",
         headwayTargetS = 2.0,
-        laneText = "keep",
-        mergeText = "normal",
         trafficText = "clear",
         confidence = 0.87,
         confidenceLabel = "high",
@@ -107,8 +105,8 @@ class TypedMessagesTest {
         )
         assertEquals(
             setOf("t_capture_mono_ns", "rec_speed_mps", "rec_speed_display",
-                "current_speed_display", "units", "headway_target_s", "lane_text",
-                "merge_text", "traffic_text", "confidence", "confidence_label", "action"),
+                "current_speed_display", "units", "headway_target_s",
+                "traffic_text", "confidence", "confidence_label", "action"),
             advisory().toExtensions().keys,
         )
         assertEquals(

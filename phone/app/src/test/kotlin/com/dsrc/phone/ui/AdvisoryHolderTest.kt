@@ -18,8 +18,6 @@ class AdvisoryHolderTest {
         currentSpeedDisplay = 28.0,
         units = "mph",
         headwayTargetS = 2.0,
-        laneText = "keep",
-        mergeText = "",
         trafficText = "moderate",
         confidence = 0.87,
         confidenceLabel = "high",
