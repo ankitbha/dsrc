@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.envs.base_ctde_env import AVAction
-from src.envs.wrappers import decode_headway_bin, decode_speed_bin
 from src.safety.constraints import SafetyConstraints
 from src.safety.etiquette import is_low_speed_uncongested
 
@@ -75,22 +73,22 @@ def empty_diagnostics() -> dict[str, list[dict[str, Any]]]:
 
 
 def apply_safety_layer(
-    action: AVAction,
-    state: SafetyState,
+    target_speed_mps: float,
+    target_headway_s: float,
     context: SafetyContext,
     constraints: SafetyConstraints | None = None,
     agent_id: str | None = None,
 ) -> SafetyDecision:
+    """Bound a proposed speed and following distance.
+
+    Takes the speed directly rather than an action to decode. The controller
+    this bounds emits one speed per super-segment, so there is no bin to decode
+    and no lane or merge head to read.
+    """
     constraints = constraints or SafetyConstraints()
     diagnostics = empty_diagnostics()
-    target_speed = decode_speed_bin(
-        action["desired_speed_bin"],
-        free_flow_speed_mps=context.free_flow_speed_mps,
-        min_contextual_speed_mps=context.min_contextual_speed_mps,
-    )
-    target_headway = decode_headway_bin(action["desired_headway_bin"])
-    if action["merge_mode"] == "create_gap":
-        target_headway += constraints.merge_gap_headway_bonus_s
+    target_speed = target_speed_mps
+    target_headway = target_headway_s
 
     if is_low_speed_uncongested(target_speed, context.free_flow_speed_mps, context.local_density_veh_per_km, constraints):
         target_speed = max(target_speed, context.free_flow_speed_mps - constraints.low_speed_free_flow_delta_mps)

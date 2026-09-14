@@ -13,7 +13,6 @@ vacuous the day the original is deleted; a golden file cannot.
 
 Two things do NOT come from `src/safety/`, by design (plan_task144 decision 1):
 
-- This module calls `sim_contract.decode_speed_bin` / `decode_headway_bin`
   rather than carrying its own copies, so the device has exactly one decoder
   for each -- the one `AdvisoryDecoder` also uses. Two decoders on one
   device, decided independently, is the failure mode `src/envs/wrappers.py`
@@ -41,7 +40,6 @@ from typing import Any, Mapping
 
 from perception import provenance
 from perception.observation_builder import ObservationResult
-from policy import sim_contract
 from policy.sensing_controller import RULE_FIRED, RULE_NOT_EVALUABLE, RULE_QUIET
 
 # --- Vendored from src/safety/constraints.py ---------------------------------
@@ -66,6 +64,9 @@ class SafetyConstraints:
     min_uncongested_speed_mps: float = 12.0
     uncongested_density_threshold_veh_per_km: float = 12.0
     low_speed_free_flow_delta_mps: float = 8.0
+    #: No longer applied: the bonus keyed on `merge_mode`, which the speed-only
+    #: advisory does not carry. Kept because specs/safety_contract_golden.json
+    #: pins both sides' field sets against each other.
     merge_gap_headway_bonus_s: float = 0.8
 
 
@@ -146,26 +147,22 @@ def empty_diagnostics() -> dict[str, list[dict[str, Any]]]:
 
 
 def apply_safety_layer(
-    action: Mapping[str, str],
-    state: SafetyState,
+    target_speed_mps: float,
+    target_headway_s: float,
     context: SafetyContext,
     constraints: SafetyConstraints | None = None,
     agent_id: str | None = None,
 ) -> SafetyDecision:
-    """Verbatim port of src/safety/safety_layer.py:apply_safety_layer, with
-    `decode_speed_bin`/`decode_headway_bin` and `lane_preference_to_action`
-    coming from this module's own imports/helpers rather than
-    src.envs.wrappers (see module docstring)."""
+    """Port of src/safety/safety_layer.py:apply_safety_layer.
+
+    Takes the speed directly rather than an action to decode: the controller
+    this bounds emits one speed per super-segment, so there is no bin to decode
+    and no lane or merge head to read.
+    """
     constraints = constraints or SafetyConstraints()
     diagnostics = empty_diagnostics()
-    target_speed = sim_contract.decode_speed_bin(
-        action["desired_speed_bin"],
-        free_flow_speed_mps=context.free_flow_speed_mps,
-        min_contextual_speed_mps=context.min_contextual_speed_mps,
-    )
-    target_headway = sim_contract.decode_headway_bin(action["desired_headway_bin"])
-    if action["merge_mode"] == "create_gap":
-        target_headway += constraints.merge_gap_headway_bonus_s
+    target_speed = target_speed_mps
+    target_headway = target_headway_s
 
     if _is_low_speed_uncongested(target_speed, context.free_flow_speed_mps, context.local_density_veh_per_km, constraints):
         target_speed = max(target_speed, context.free_flow_speed_mps - constraints.low_speed_free_flow_delta_mps)
@@ -680,13 +677,6 @@ class RuleRecord:
         return record
 
 
-def _target_speed(action: Mapping[str, str], context: SafetyContext) -> float:
-    return sim_contract.decode_speed_bin(
-        action["desired_speed_bin"],
-        free_flow_speed_mps=context.free_flow_speed_mps,
-        min_contextual_speed_mps=context.min_contextual_speed_mps,
-    )
-
 
 def _forward_ttc_missing(inputs: SafetyInputs, constraints: SafetyConstraints) -> tuple[str, ...]:
     """`forward_ttc`'s evaluability, computed over the inputs the tick's
@@ -753,7 +743,7 @@ def _forward_ttc_missing(inputs: SafetyInputs, constraints: SafetyConstraints) -
 def _evaluate_one_rule(
     name: str,
     *,
-    action: Mapping[str, str],
+    target_speed: float,
     inputs: SafetyInputs,
     context: SafetyContext,
     state: SafetyState,
@@ -767,7 +757,6 @@ def _evaluate_one_rule(
         evidence = {f"{f}_source": inputs.fields[f].source for f in missing}
         return RuleRecord(status=RULE_NOT_EVALUABLE, missing=missing, evidence=evidence)
 
-    target_speed = _target_speed(action, context)
     if name == "low_speed_uncongested":
         fired = _is_low_speed_uncongested(
             target_speed, context.free_flow_speed_mps, context.local_density_veh_per_km, constraints,
@@ -792,7 +781,7 @@ def _evaluate_one_rule(
 
 
 def evaluate_rules(
-    action: Mapping[str, str],
+    target_speed: float,
     inputs: SafetyInputs,
     state: SafetyState,
     constraints: SafetyConstraints,
@@ -830,7 +819,7 @@ def evaluate_rules(
     """
     context = inputs.inert_context()
     return {
-        name: _evaluate_one_rule(name, action=action, inputs=inputs, context=context, state=state, constraints=constraints)
+        name: _evaluate_one_rule(name, target_speed=target_speed, inputs=inputs, context=context, state=state, constraints=constraints)
         for name in RULE_NAMES
     }
 
@@ -910,7 +899,8 @@ class SafetyGateResult:
 
 
 def run_safety_gate(
-    action: Mapping[str, str],
+    proposed_speed_mps: float,
+    proposed_headway_s: float,
     inputs: SafetyInputs,
     state: SafetyState,
     constraints: SafetyConstraints | None = None,
@@ -919,9 +909,8 @@ def run_safety_gate(
 ) -> SafetyGateResult:
     """Run the vendored `apply_safety_layer` (the bound the driver is shown)
     and the independent per-rule census (decision 3) from the same inputs,
-    then apply decision 3's own addition: withhold the lane action outright
-    when any of its guards could not be evaluated (open item 1), rather than
-    letting an unevaluated guard's "safe" default speak for it.
+    from the same inputs. A rule that cannot be evaluated is inert: it is
+    recorded as such and cannot move the bounded speed in either direction.
 
     `apply_safety_layer` is run against `inputs.inert_context()` and
     `inputs.inert_context()`, not the raw `context` (validator
@@ -963,14 +952,14 @@ def run_safety_gate(
     """
     constraints = constraints or SafetyConstraints()
     context = inputs.context()
-    rules = evaluate_rules(action, inputs, state, constraints)
+    rules = evaluate_rules(proposed_speed_mps, inputs, state, constraints)
 
-    proposed_speed = _target_speed(action, context)
-    proposed_headway = sim_contract.decode_headway_bin(action["desired_headway_bin"])
+    proposed_speed = proposed_speed_mps
+    proposed_headway = proposed_headway_s
 
     if enabled:
         inert_context = inputs.inert_context()
-        decision = apply_safety_layer(action, state, inert_context, constraints)
+        decision = apply_safety_layer(proposed_speed, proposed_headway, inert_context, constraints)
         bounded_speed = decision.target_speed_mps
         bounded_headway = decision.target_headway_s
         emergency_override = decision.emergency_override

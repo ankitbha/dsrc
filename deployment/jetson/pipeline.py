@@ -413,7 +413,8 @@ class PerceptionPolicyPipeline:
             density_max_age_s=2.0 * self.builder.config.gps_stale_after_s,
         )
         gate_result: SafetyGateResult = run_safety_gate(
-            policy_out.action, safety_inputs, self._safety_state, self.safety_constraints,
+            advisory.recommended_speed_mps, advisory.headway_target_s,
+            safety_inputs, self._safety_state, self.safety_constraints,
             enabled=self.safety_enabled,
         )
         # advisory.recommended_speed_mps/display are overwritten to the BOUNDED

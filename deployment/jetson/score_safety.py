@@ -118,6 +118,20 @@ def _observation_result_from_tick(tick: dict[str, Any]) -> ObservationResult:
     )
 
 
+#: The bin decode the recorded logs were written under. Kept here, local to the
+#: replay tool, because every log this tool reads predates the speed-only
+#: advisory and carries a four-head action. The live gate takes a speed and no
+#: longer decodes anything.
+_SPEED_BIN_OFFSETS_MPS = {"slow": -10.0, "nominal": -3.0, "fast": 0.0}
+_HEADWAY_BIN_S = {"normal": 1.6, "larger": 2.2, "largest": 3.0}
+
+
+def _decode_speed_bin(speed_bin: str, free_flow_speed_mps: float,
+                      min_contextual_speed_mps: float) -> float:
+    return max(min_contextual_speed_mps,
+               free_flow_speed_mps + _SPEED_BIN_OFFSETS_MPS[speed_bin])
+
+
 def _forced_action(action: dict[str, str], desired_speed_bin: str | None) -> dict[str, str]:
     if desired_speed_bin is None:
         return dict(action)
@@ -232,8 +246,12 @@ def score_ticks(
                 density_max_age_s=tick_density_max_age_s,
             )
             action = _forced_action(tick["action"], forced_bin)
+            free_flow = float(tick["obs"].get("segment_target_speed", 30.0))
             result = run_safety_gate(
-                action, inputs, state, constraints,
+                _decode_speed_bin(action["desired_speed_bin"], free_flow,
+                                  tick_min_contextual_speed_mps),
+                _HEADWAY_BIN_S[action["desired_headway_bin"]],
+                inputs, state, constraints,
                 enabled=tick_enabled,
             )
 

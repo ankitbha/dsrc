@@ -288,22 +288,3 @@ def test_merge_text_is_untouched_when_nothing_is_withheld(actor_bundle: str) -> 
     tick = run_ticks(pipeline, 5)
 
 
-def test_displayed_headway_is_bounded_while_the_raw_one_is_fed_back(actor_bundle: str) -> None:
-    """validator round 1, F8/Fix 9: create_gap's merge headway bonus bounds
-    what the gate shows (headway_display_s), but headway_target_s -- what
-    set_target_headway feeds back into the next observation -- must stay
-    the raw, unbounded decode (decision 2)."""
-    pipeline = _make_pipeline(actor_bundle)
-    pipeline.actor.act = lambda encoded: PolicyOutput(
-        action=dict(FORCED_CREATE_GAP_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
-    )
-    tick = run_ticks(pipeline, 5)
-    bonus = pipeline.safety_constraints.merge_gap_headway_bonus_s
-    assert bonus > 0.0
-    assert tick.safety_gate.bounded_headway_s == pytest.approx(tick.safety_gate.proposed_headway_s + bonus)
-    assert tick.advisory.headway_display_s == pytest.approx(tick.safety_gate.bounded_headway_s)
-    assert tick.advisory.headway_target_s == pytest.approx(tick.safety_gate.proposed_headway_s)
-    assert tick.advisory.headway_target_s != tick.advisory.headway_display_s
-    record = tick.to_record()
-    assert record["advisory"]["headway_target_s"] == pytest.approx(tick.safety_gate.proposed_headway_s)
-    assert record["advisory"]["headway_display_s"] == pytest.approx(tick.safety_gate.bounded_headway_s)

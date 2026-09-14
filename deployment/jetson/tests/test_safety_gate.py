@@ -39,7 +39,13 @@ from policy.safety_gate import (
 from policy.sim_contract import decode_headway_bin
 
 
-def action(**overrides: str) -> dict[str, str]:
+#: What the bins decoded to, kept as named speeds so each test still says
+#: which case it is exercising.
+SPEED_MPS = {"slow": 20.0, "nominal": 27.0, "fast": 30.0}
+NORMAL_HEADWAY_S = 1.6
+
+
+def _unused_action(**overrides: str) -> dict[str, str]:
     value = {
         "desired_speed_bin": "nominal",
         "desired_headway_bin": "normal",
@@ -59,8 +65,7 @@ def action(**overrides: str) -> dict[str, str]:
 
 def test_low_speed_uncongested_is_lifted_and_diagnosed() -> None:
     decision = apply_safety_layer(
-        action(desired_speed_bin="slow"),
-        SafetyState(),
+        SPEED_MPS["slow"], NORMAL_HEADWAY_S,
         SafetyContext(time_s=0.0, free_flow_speed_mps=30.0, local_density_veh_per_km=2.0),
     )
     assert decision.target_speed_mps >= 22.0
@@ -69,8 +74,7 @@ def test_low_speed_uncongested_is_lifted_and_diagnosed() -> None:
 
 def test_speed_control_acceleration_is_bounded() -> None:
     decision = apply_safety_layer(
-        action(desired_speed_bin="fast"),
-        SafetyState(),
+        SPEED_MPS["fast"], NORMAL_HEADWAY_S,
         SafetyContext(time_s=0.0, ego_speed_mps=10.0, free_flow_speed_mps=30.0),
         SafetyConstraints(max_accel_mps2=1.5),
     )
@@ -80,8 +84,7 @@ def test_speed_control_acceleration_is_bounded() -> None:
 
 def test_low_forward_ttc_triggers_emergency_override() -> None:
     decision = apply_safety_layer(
-        action(desired_speed_bin="fast"),
-        SafetyState(),
+        SPEED_MPS["fast"], NORMAL_HEADWAY_S,
         SafetyContext(
             time_s=0.0, ego_speed_mps=25.0, leader_gap_m=10.0, leader_relative_speed_mps=-10.0,
         ),
@@ -170,8 +173,7 @@ def test_low_speed_uncongested_reduces_to_the_speed_bin_alone() -> None:
     evidence (this is `test_low_speed_uncongested_is_lifted_and_diagnosed`
     above, restated against the free-flow speed this rig actually runs)."""
     decision = apply_safety_layer(
-        action(desired_speed_bin="slow"),
-        SafetyState(),
+        SPEED_MPS["slow"], NORMAL_HEADWAY_S,
         SafetyContext(time_s=0.0, free_flow_speed_mps=30.0, local_density_veh_per_km=2.0),
     )
     assert decision.target_speed_mps == 22.0
@@ -193,7 +195,7 @@ def test_not_evaluable_rule_is_inert_in_the_decision_not_only_the_record() -> No
     inputs = safety_inputs_from_observation(
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
-    result = run_safety_gate(action(desired_speed_bin="slow"), inputs, SafetyState(), SafetyConstraints())
+    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints())
     assert result.proposed_speed_mps == 20.0
     assert result.bounded_speed_mps == 20.0
     assert result.delta_speed_mps == 0.0
@@ -218,7 +220,7 @@ def test_run_safety_gate_exposes_raw_diagnostics_for_the_elif_chain_attribution(
     inputs = safety_inputs_from_observation(
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
-    result = run_safety_gate(action(desired_speed_bin="slow"), inputs, SafetyState(), SafetyConstraints())
+    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints())
     assert result.raw_diagnostics["etiquette_blocked_action"][0]["reason"] == "low_speed_uncongested"
     # The persisted record uses only decision 3's independent per-rule census,
     # not the raw elif-chain diagnostics -- see SafetyGateResult's docstring.
@@ -236,7 +238,7 @@ def test_invariant_holds_on_a_genuine_speed_path_firing() -> None:
     inputs = safety_inputs_from_observation(
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
-    result = run_safety_gate(action(desired_speed_bin="slow"), inputs, SafetyState(), SafetyConstraints())
+    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints())
     assert result.raw_diagnostics["etiquette_blocked_action"]  # non-empty: a real event exists
     _assert_every_raw_diagnostics_reason_is_a_fired_rule(result)
 
@@ -272,7 +274,7 @@ def test_emergency_override_genuinely_fires_and_forward_ttc_reads_fired() -> Non
     inputs = safety_inputs_from_observation(
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
-    result = run_safety_gate(action(), inputs, SafetyState(), SafetyConstraints(min_forward_ttc_s=2.0))
+    result = run_safety_gate(SPEED_MPS["nominal"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints(min_forward_ttc_s=2.0))
     assert result.emergency_override is True
     assert result.raw_diagnostics["external_safety_override"][0]["reason"] == "forward_ttc"
     assert result.rules["forward_ttc"].status == RULE_FIRED
@@ -291,7 +293,7 @@ def test_the_invariant_fails_against_the_unfixed_mechanism(monkeypatch) -> None:
     inputs = safety_inputs_from_observation(
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
-    result = run_safety_gate(action(desired_speed_bin="slow"), inputs, SafetyState(), SafetyConstraints())
+    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints())
     with pytest.raises(AssertionError):
         assert result.bounded_speed_mps == result.proposed_speed_mps
 
@@ -314,7 +316,7 @@ def test_forward_ttc_missing_leader_operative_not_critical_relative_speed_absent
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
     assert _forward_ttc_missing(inputs, SafetyConstraints(min_front_gap_m=5.0)) == ("leader_relative_speed_mps",)
-    result = run_safety_gate(action(), inputs, SafetyState(), SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0))
+    result = run_safety_gate(SPEED_MPS["nominal"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0))
     assert result.rules["forward_ttc"].status == RULE_NOT_EVALUABLE
     assert result.emergency_override is False
 
@@ -358,7 +360,7 @@ def test_evaluate_rules_case_42_fails_against_the_raw_context_mechanism(monkeypa
         context = inputs.context()
         return {
             name: safety_gate_module._evaluate_one_rule(
-                name, action=action, inputs=inputs, context=context, state=state, constraints=constraints,
+                name, target_speed=SPEED_MPS["nominal"], inputs=inputs, context=context, state=state, constraints=constraints,
             )
             for name in RULE_NAMES
         }
@@ -372,7 +374,7 @@ def test_evaluate_rules_case_42_fails_against_the_raw_context_mechanism(monkeypa
     inputs = SafetyInputs(fields=fields)
     constraints = SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0)
 
-    record = safety_gate_module.evaluate_rules(action(), inputs, SafetyState(), constraints)["forward_ttc"]
+    record = safety_gate_module.evaluate_rules(SPEED_MPS["nominal"], inputs, SafetyState(), constraints)["forward_ttc"]
     assert record.status == RULE_FIRED, "the pre-fix mechanism disagrees with missing==() and wrongly fires"
     assert record.evidence["ttc_s"] == pytest.approx(0.75)
 
@@ -464,7 +466,7 @@ def _case_low_speed_uncongested():
     inputs = safety_inputs_from_observation(
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
-    return inputs, SafetyState(), action(desired_speed_bin="slow"), SafetyConstraints(), True
+    return inputs, SafetyState(), SPEED_MPS["slow"], SafetyConstraints(), True
 
 
 
@@ -482,7 +484,7 @@ def _case_forward_ttc_full_evidence():
     inputs = safety_inputs_from_observation(
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
-    return inputs, SafetyState(), action(), SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), True
+    return inputs, SafetyState(), SPEED_MPS["nominal"], SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), True
 
 def _case_forward_ttc_gap_only_critical():
     """The coordinator's correction, axis 3 (partial evidence within one
@@ -503,7 +505,7 @@ def _case_forward_ttc_gap_only_critical():
     inputs = safety_inputs_from_observation(
         obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
     )
-    return inputs, SafetyState(), action(), SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), True
+    return inputs, SafetyState(), SPEED_MPS["nominal"], SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), True
 
 
 CASES = {
@@ -527,8 +529,8 @@ def test_invariant_grid(case_name: str) -> None:
     test_the_grid_fails_without_this_rounds_follow_up_fixes below for the
     confirmation that it actually would have caught all four regressions.
     """
-    inputs, state, act, constraints, expect_fired = CASES[case_name]()
-    result = run_safety_gate(act, inputs, state, constraints)
+    inputs, state, proposed_speed, constraints, expect_fired = CASES[case_name]()
+    result = run_safety_gate(proposed_speed, NORMAL_HEADWAY_S, inputs, state, constraints)
     rule_name = next(n for n in RULE_NAMES if case_name.startswith(n))
     if expect_fired:
         assert result.rules[rule_name].status == RULE_FIRED, (
