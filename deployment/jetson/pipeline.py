@@ -34,7 +34,6 @@ from policy.dsrc_runtime import DsrcRuntime
 from policy.safety_gate import (
     SafetyConstraints,
     SafetyGateResult,
-    SafetyState,
     run_safety_gate,
     safety_inputs_from_observation,
 )
@@ -299,7 +298,6 @@ class PerceptionPolicyPipeline:
         distance: DistanceEstimator,
         builder: ObservationBuilder,
         *,
-        min_contextual_speed_mps: float = 12.0,
         target_headway_s: float = 1.6,
         dsrc_runtime: DsrcRuntime | None = None,
         dsrc_segment_builder: SegmentStateBuilder | None = None,
@@ -312,17 +310,10 @@ class PerceptionPolicyPipeline:
         self.tracker = tracker
         self.distance = distance
         self.builder = builder
-        #: The floor the gate's low-speed rule measures against, and the
-        #: following distance it bounds. Both were policy heads on the
-        #: 39-field runtime; with a speed-only advisory they are settings.
-        self.min_contextual_speed_mps = min_contextual_speed_mps
+        #: The following distance the gate bounds against. It was a policy
+        #: head on the 39-field runtime; with a speed-only advisory it is a
+        #: rig setting, and there is no feedback loop that changes it.
         self.target_headway_s = target_headway_s
-        # task 144. One SafetyState for the pipeline's life, mirroring
-        # ObservationBuilder's own _EgoState: nothing on this rig ever
-        # advances last_lane_change_time_s or lane_changes_last_km (no
-        # lane-change detector exists), so it never departs from its class
-        # defaults, but it is held rather than rebuilt so a future detector
-        # has somewhere to write.
         self.safety_constraints = safety_constraints or SafetyConstraints()
         #: validator round 1, F2/Fix 3: the actual rollback for the whole
         #: gate (the lane withholding it replaced covered only the
@@ -330,7 +321,6 @@ class PerceptionPolicyPipeline:
         #: apply_safety_layer entirely -- bounded_* equals proposed_*
         #: exactly -- while the census still runs and is still recorded.
         self.safety_enabled = safety_enabled
-        self._safety_state = SafetyState()
         # All three or none: a DsrcRuntime with nowhere to put its state, or
         # a builder with no runtime to hand it to, is a half-wired feature
         # that would fail confusingly later rather than obviously now.
@@ -432,8 +422,7 @@ class PerceptionPolicyPipeline:
         # same obs_result -- no separate sensing path, so the gate and the
         # advisory see identical evidence for identical fields.
         safety_inputs = safety_inputs_from_observation(
-            obs_result, self._safety_state, time_s=t3a,
-            min_contextual_speed_mps=self.min_contextual_speed_mps,
+            obs_result,
             density_max_age_s=2.0 * self.builder.config.gps_stale_after_s,
         )
         # No advisory means nothing to bound. The census is not run against a
@@ -444,8 +433,8 @@ class PerceptionPolicyPipeline:
             row = advisory.rows[advisory.ego_segment]
             gate_result = run_safety_gate(
                 row.recommended_speed_mps, self.target_headway_s,
-                safety_inputs, self._safety_state, self.safety_constraints,
-                enabled=self.safety_enabled,
+                safety_inputs, self.safety_constraints,
+                time_s=t3a, enabled=self.safety_enabled,
             )
             advisory = _bound_ego_row(advisory, gate_result)
         t3c = time.monotonic()

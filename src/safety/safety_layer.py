@@ -7,39 +7,22 @@ from src.safety.constraints import SafetyConstraints
 from src.safety.etiquette import is_low_speed_uncongested
 
 
-@dataclass
-class SafetyState:
-    last_lane_change_time_s: float | None = None
-    lane_changes_last_km: int = 0
-    distance_since_window_start_m: float = 0.0
-    absolute_distance_m: float = 0.0
-    lane_change_distances_m: list[float] = field(default_factory=list)
-    last_lane_index: Any | None = None
-
-
 @dataclass(frozen=True)
 class SafetyContext:
-    time_s: float
+    """Everything the bound on a recommended speed reads.
+
+    Every field here is read by `apply_safety_layer` or by
+    `physical_control_command` below. The lane, rear-gap, cooperation and
+    passing-lane fields were removed with the rules that read them; a field
+    carried into a decision that never looks at it is indistinguishable, in
+    the record, from one that was measured and did not matter.
+    """
+
     ego_speed_mps: float = 0.0
     free_flow_speed_mps: float = 30.0
-    min_contextual_speed_mps: float = 12.0
     local_density_veh_per_km: float = 0.0
-    downstream_congested: bool = False
     leader_gap_m: float = float("inf")
     leader_relative_speed_mps: float = 0.0
-    follower_gap_m: float = float("inf")
-    follower_relative_speed_mps: float = 0.0
-    target_lane_exists: bool = True
-    target_lane_front_gap_m: float = float("inf")
-    target_lane_front_relative_speed_mps: float = 0.0
-    target_lane_rear_gap_m: float = float("inf")
-    target_lane_rear_relative_speed_mps: float = 0.0
-    target_lane_rear_required_decel_mps2: float = 0.0
-    all_lanes_av_occupied: bool = False
-    av_mean_speed_mps: float = 30.0
-    in_passing_lane: bool = False
-    local_mean_speed_mps: float = 30.0
-    near_merge: bool = False
     #: Distance to the joining node of the nearest vehicle converging on it from a
     #: different arc, projected onto that node so it reads as a following
     #: distance. Infinite when nobody is converging.
@@ -63,12 +46,16 @@ class SafetyDecision:
 
 
 def empty_diagnostics() -> dict[str, list[dict[str, Any]]]:
+    """The two buckets the surviving rules write to.
+
+    `safety_masked_action`, `follower_disruption_blocked` and
+    `simulator_blocked_action` were removed with the lane and follower rules.
+    An always-empty bucket reads as "this never happened" where it means "this
+    can no longer happen", which are different statements about a drive.
+    """
     return {
-        "safety_masked_action": [],
         "etiquette_blocked_action": [],
-        "follower_disruption_blocked": [],
         "external_safety_override": [],
-        "simulator_blocked_action": [],
     }
 
 
@@ -140,16 +127,16 @@ def safety_penalty_terms(
     *,
     emergency_override: bool = False,
 ) -> dict[str, float]:
+    """One term per rule that can fire. `unsafe_lane_preference`,
+    `follower_disruption` and `excessive_lane_change` were removed with their
+    rules: each was computed from a diagnostics bucket nothing appends to any
+    more, so each was a constant 0.0 reported as a measurement.
+    """
     return {
-        "unsafe_lane_preference": float(bool(diagnostics.get("safety_masked_action"))),
-        "follower_disruption": float(bool(diagnostics.get("follower_disruption_blocked"))),
         "low_speed_uncongested": float(
             any(event.get("reason") == "low_speed_uncongested" for event in diagnostics.get("etiquette_blocked_action", []))
         ),
         "emergency_override": float(emergency_override),
-        "excessive_lane_change": float(
-            any(event.get("reason") == "lane_changes_per_km" for event in diagnostics.get("safety_masked_action", []))
-        ),
     }
 
 

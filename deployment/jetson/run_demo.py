@@ -199,16 +199,13 @@ def _build_rest(config: dict):
     # own copy of the same three lines.
     builder = ObservationBuilder(BuilderConfig.from_full_config(config))
 
-    p = config["policy"]
-    dsrc = build_dsrc_parts(config)
     pipeline = PerceptionPolicyPipeline(
         detector, tracker, distance, builder,
-        min_contextual_speed_mps=p["min_contextual_speed_mps"],
-        # validator round 1, Fix 3: plain subscript, matching the sibling key
-        # above -- a config that predates safety.enabled should fail loudly,
-        # not silently default to the gate being on.
+        # validator round 1, Fix 3: plain subscript -- a config that predates
+        # safety.enabled should fail loudly, not silently default to the gate
+        # being on.
         safety_enabled=config["safety"]["enabled"],
-        **dsrc,
+        **build_dsrc_parts(config),
     )
     return pipeline
 

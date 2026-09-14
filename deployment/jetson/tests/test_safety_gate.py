@@ -29,7 +29,6 @@ from policy.safety_gate import (
     SafetyGateResult,
     SafetyInputField,
     SafetyInputs,
-    SafetyState,
     apply_safety_layer,
     evaluate_rules,
     run_safety_gate,
@@ -66,7 +65,7 @@ def _unused_action(**overrides: str) -> dict[str, str]:
 def test_low_speed_uncongested_is_lifted_and_diagnosed() -> None:
     decision = apply_safety_layer(
         SPEED_MPS["slow"], NORMAL_HEADWAY_S,
-        SafetyContext(time_s=0.0, free_flow_speed_mps=30.0, local_density_veh_per_km=2.0),
+        SafetyContext(free_flow_speed_mps=30.0, local_density_veh_per_km=2.0),
     )
     assert decision.target_speed_mps >= 22.0
     assert decision.diagnostics["etiquette_blocked_action"][0]["reason"] == "low_speed_uncongested"
@@ -75,7 +74,7 @@ def test_low_speed_uncongested_is_lifted_and_diagnosed() -> None:
 def test_speed_control_acceleration_is_bounded() -> None:
     decision = apply_safety_layer(
         SPEED_MPS["fast"], NORMAL_HEADWAY_S,
-        SafetyContext(time_s=0.0, ego_speed_mps=10.0, free_flow_speed_mps=30.0),
+        SafetyContext(ego_speed_mps=10.0, free_flow_speed_mps=30.0),
         SafetyConstraints(max_accel_mps2=1.5),
     )
     assert decision.acceleration_mps2 == 1.5
@@ -86,7 +85,7 @@ def test_low_forward_ttc_triggers_emergency_override() -> None:
     decision = apply_safety_layer(
         SPEED_MPS["fast"], NORMAL_HEADWAY_S,
         SafetyContext(
-            time_s=0.0, ego_speed_mps=25.0, leader_gap_m=10.0, leader_relative_speed_mps=-10.0,
+            ego_speed_mps=25.0, leader_gap_m=10.0, leader_relative_speed_mps=-10.0,
         ),
         SafetyConstraints(emergency_decel_mps2=7.0, min_forward_ttc_s=2.0),
     )
@@ -102,7 +101,7 @@ def test_class_a_configured_field_is_always_evidence_even_when_fallback() -> Non
     read from."""
     obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
     field = inputs.fields["free_flow_speed_mps"]
     assert field.input_class == "configured"
@@ -112,7 +111,7 @@ def test_class_a_configured_field_is_always_evidence_even_when_fallback() -> Non
 def test_class_b_evidence_required_field_is_not_evidence_when_substituted() -> None:
     obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
     field = inputs.fields["leader_gap_m"]
     assert field.input_class == "evidence_required"
@@ -127,7 +126,7 @@ def test_class_b_evidence_required_field_is_evidence_when_measured() -> None:
     src["leader_gap"] = provenance.SOURCE_MEASURED
     obs_result = _obs_result(obs, src, {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
     field = inputs.fields["leader_gap_m"]
     assert field.evidence is True
@@ -139,7 +138,7 @@ def test_density_derived_empty_is_not_evidence_without_a_detection_age() -> None
     a derived_empty density is a blind camera, not an empty road."""
     obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
     assert inputs.fields["local_density_veh_per_km"].evidence is False
 
@@ -147,7 +146,7 @@ def test_density_derived_empty_is_not_evidence_without_a_detection_age() -> None
 def test_density_derived_empty_is_evidence_within_the_detection_age_bound() -> None:
     obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": 1.0})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
     assert inputs.fields["local_density_veh_per_km"].evidence is True
 
@@ -155,7 +154,7 @@ def test_density_derived_empty_is_evidence_within_the_detection_age_bound() -> N
 def test_density_derived_empty_is_not_evidence_past_the_detection_age_bound() -> None:
     obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": 10.0})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
     assert inputs.fields["local_density_veh_per_km"].evidence is False
 
@@ -174,7 +173,7 @@ def test_low_speed_uncongested_reduces_to_the_speed_bin_alone() -> None:
     above, restated against the free-flow speed this rig actually runs)."""
     decision = apply_safety_layer(
         SPEED_MPS["slow"], NORMAL_HEADWAY_S,
-        SafetyContext(time_s=0.0, free_flow_speed_mps=30.0, local_density_veh_per_km=2.0),
+        SafetyContext(free_flow_speed_mps=30.0, local_density_veh_per_km=2.0),
     )
     assert decision.target_speed_mps == 22.0
     assert decision.diagnostics["etiquette_blocked_action"][0]["reason"] == "low_speed_uncongested"
@@ -193,9 +192,9 @@ def test_not_evaluable_rule_is_inert_in_the_decision_not_only_the_record() -> No
     """
     obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
-    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints())
+    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyConstraints(), time_s=0.0)
     assert result.proposed_speed_mps == 20.0
     assert result.bounded_speed_mps == 20.0
     assert result.delta_speed_mps == 0.0
@@ -218,9 +217,9 @@ def test_run_safety_gate_exposes_raw_diagnostics_for_the_elif_chain_attribution(
     src["local_density_bin"] = provenance.SOURCE_DERIVED
     obs_result = _obs_result(obs, src, {"density_veh_per_km": 2.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
-    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints())
+    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyConstraints(), time_s=0.0)
     assert result.raw_diagnostics["etiquette_blocked_action"][0]["reason"] == "low_speed_uncongested"
     # The persisted record uses only decision 3's independent per-rule census,
     # not the raw elif-chain diagnostics -- see SafetyGateResult's docstring.
@@ -236,9 +235,9 @@ def test_invariant_holds_on_a_genuine_speed_path_firing() -> None:
     src["local_density_bin"] = provenance.SOURCE_DERIVED
     obs_result = _obs_result(obs, src, {"density_veh_per_km": 2.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
-    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints())
+    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyConstraints(), time_s=0.0)
     assert result.raw_diagnostics["etiquette_blocked_action"]  # non-empty: a real event exists
     _assert_every_raw_diagnostics_reason_is_a_fired_rule(result)
 
@@ -272,9 +271,9 @@ def test_emergency_override_genuinely_fires_and_forward_ttc_reads_fired() -> Non
     src["leader_relative_speed"] = provenance.SOURCE_MEASURED
     obs_result = _obs_result(obs, src, {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
-    result = run_safety_gate(SPEED_MPS["nominal"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints(min_forward_ttc_s=2.0))
+    result = run_safety_gate(SPEED_MPS["nominal"], NORMAL_HEADWAY_S, inputs, SafetyConstraints(min_forward_ttc_s=2.0), time_s=0.0)
     assert result.emergency_override is True
     assert result.raw_diagnostics["external_safety_override"][0]["reason"] == "forward_ttc"
     assert result.rules["forward_ttc"].status == RULE_FIRED
@@ -291,9 +290,9 @@ def test_the_invariant_fails_against_the_unfixed_mechanism(monkeypatch) -> None:
     monkeypatch.setattr(SafetyInputs, "inert_context", SafetyInputs.context)
     obs_result = _obs_result(_base_obs(), _base_field_sources(), {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
-    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints())
+    result = run_safety_gate(SPEED_MPS["slow"], NORMAL_HEADWAY_S, inputs, SafetyConstraints(), time_s=0.0)
     with pytest.raises(AssertionError):
         assert result.bounded_speed_mps == result.proposed_speed_mps
 
@@ -313,10 +312,10 @@ def test_forward_ttc_missing_leader_operative_not_critical_relative_speed_absent
     src["leader_gap"] = provenance.SOURCE_MEASURED
     obs_result = _obs_result(obs, src, {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
     assert _forward_ttc_missing(inputs, SafetyConstraints(min_front_gap_m=5.0)) == ("leader_relative_speed_mps",)
-    result = run_safety_gate(SPEED_MPS["nominal"], NORMAL_HEADWAY_S, inputs, SafetyState(), SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0))
+    result = run_safety_gate(SPEED_MPS["nominal"], NORMAL_HEADWAY_S, inputs, SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), time_s=0.0)
     assert result.rules["forward_ttc"].status == RULE_NOT_EVALUABLE
     assert result.emergency_override is False
 
@@ -356,11 +355,11 @@ def test_evaluate_rules_case_42_fails_against_the_raw_context_mechanism(monkeypa
     """
     import policy.safety_gate as safety_gate_module
 
-    def unfixed_evaluate_rules(action, inputs, state, constraints):
+    def unfixed_evaluate_rules(action, inputs, constraints):
         context = inputs.context()
         return {
             name: safety_gate_module._evaluate_one_rule(
-                name, target_speed=SPEED_MPS["nominal"], inputs=inputs, context=context, state=state, constraints=constraints,
+                name, target_speed=SPEED_MPS["nominal"], inputs=inputs, context=context, constraints=constraints,
             )
             for name in RULE_NAMES
         }
@@ -374,7 +373,7 @@ def test_evaluate_rules_case_42_fails_against_the_raw_context_mechanism(monkeypa
     inputs = SafetyInputs(fields=fields)
     constraints = SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0)
 
-    record = safety_gate_module.evaluate_rules(SPEED_MPS["nominal"], inputs, SafetyState(), constraints)["forward_ttc"]
+    record = safety_gate_module.evaluate_rules(SPEED_MPS["nominal"], inputs, constraints)["forward_ttc"]
     assert record.status == RULE_FIRED, "the pre-fix mechanism disagrees with missing==() and wrongly fires"
     assert record.evidence["ttc_s"] == pytest.approx(0.75)
 
@@ -417,26 +416,19 @@ def _base_field_sources() -> dict:
 
 def _inputs_with_overrides(**value_overrides: float) -> SafetyInputs:
     """A SafetyInputs built directly (bypassing safety_inputs_from_observation)
-    with every evidence-required and structural field marked as evidence --
+    with every evidence-required AND structural field marked as evidence --
     a configuration decision 3's real classification never produces on this
-    rig (only target_lane_front_gap_m can ever be evidence among the lane
-    guards), used here purely to exercise the chain-order invariant itself,
-    independent of what this device can actually measure.
+    rig, since the merge-conflict pair is structurally absent. Used here to
+    exercise `_forward_ttc_missing`'s merge-conflict axis, which no
+    observation this device can build will ever reach.
     """
     from policy.safety_gate import CONFIGURED_FIELDS, EVIDENCE_REQUIRED_FIELDS, STRUCTURAL_FIELDS
 
     defaults = {
-        "time_s": 30.0, "free_flow_speed_mps": 30.0, "min_contextual_speed_mps": 12.0,
+        "free_flow_speed_mps": 30.0,
         "ego_speed_mps": 0.0, "leader_gap_m": float("inf"), "leader_relative_speed_mps": 0.0,
-        "local_density_veh_per_km": 0.0, "local_mean_speed_mps": 30.0, "target_lane_front_gap_m": float("inf"),
-        "follower_gap_m": float("inf"), "follower_relative_speed_mps": 0.0,
-        "target_lane_rear_gap_m": float("inf"), "target_lane_rear_relative_speed_mps": 0.0,
-        "target_lane_rear_required_decel_mps2": 0.0, "target_lane_exists": True,
-        "in_passing_lane": False, "target_lane_front_relative_speed_mps": 0.0,
-        "all_lanes_av_occupied": False, "av_mean_speed_mps": 30.0, "downstream_congested": False,
-        "near_merge": False, "merge_conflict_gap_m": float("inf"), "merge_conflict_relative_speed_mps": 0.0,
-        "last_lane_change_time_s": None, "lane_changes_last_km": 0, "lane_change_distances_m": [],
-        "absolute_distance_m": 0.0,
+        "local_density_veh_per_km": 0.0,
+        "merge_conflict_gap_m": float("inf"), "merge_conflict_relative_speed_mps": 0.0,
     }
     defaults.update(value_overrides)
     fields: dict[str, SafetyInputField] = {}
@@ -464,9 +456,9 @@ def _case_low_speed_uncongested():
     src["local_density_bin"] = provenance.SOURCE_DERIVED
     obs_result = _obs_result(obs, src, {"density_veh_per_km": 2.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
-    return inputs, SafetyState(), SPEED_MPS["slow"], SafetyConstraints(), True
+    return inputs, SPEED_MPS["slow"], SafetyConstraints(), True
 
 
 
@@ -482,9 +474,9 @@ def _case_forward_ttc_full_evidence():
     src["leader_relative_speed"] = provenance.SOURCE_MEASURED
     obs_result = _obs_result(obs, src, {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
-    return inputs, SafetyState(), SPEED_MPS["nominal"], SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), True
+    return inputs, SPEED_MPS["nominal"], SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), True
 
 def _case_forward_ttc_gap_only_critical():
     """The coordinator's correction, axis 3 (partial evidence within one
@@ -503,9 +495,9 @@ def _case_forward_ttc_gap_only_critical():
     # (SOURCE_FALLBACK_NEUTRAL) -- substituted, deliberately.
     obs_result = _obs_result(obs, src, {"density_veh_per_km": 0.0, "last_detection_age_s": None})
     inputs = safety_inputs_from_observation(
-        obs_result, SafetyState(), time_s=1.0, min_contextual_speed_mps=12.0, density_max_age_s=4.0,
+        obs_result, density_max_age_s=4.0,
     )
-    return inputs, SafetyState(), SPEED_MPS["nominal"], SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), True
+    return inputs, SPEED_MPS["nominal"], SafetyConstraints(min_front_gap_m=5.0, min_forward_ttc_s=2.0), True
 
 
 CASES = {
@@ -523,14 +515,13 @@ assert _rules_covered == set(RULE_NAMES), f"grid is missing: {set(RULE_NAMES) - 
 def test_invariant_grid(case_name: str) -> None:
     """The grid the coordinator asked for, corrected twice: one uniform
     neutralisation policy cannot serve every rule (`forward_ttc` needs
-    per-disjunct evidence, `lane_changes_per_km` needs per-branch
-    evidence), so this grid checks the INVARIANT on each case rather than
-    asserting a single shared shape. See
+    per-disjunct evidence), so this grid checks the INVARIANT on each case
+    rather than asserting a single shared shape. See
     test_the_grid_fails_without_this_rounds_follow_up_fixes below for the
     confirmation that it actually would have caught all four regressions.
     """
-    inputs, state, proposed_speed, constraints, expect_fired = CASES[case_name]()
-    result = run_safety_gate(proposed_speed, NORMAL_HEADWAY_S, inputs, state, constraints)
+    inputs, proposed_speed, constraints, expect_fired = CASES[case_name]()
+    result = run_safety_gate(proposed_speed, NORMAL_HEADWAY_S, inputs, constraints, time_s=0.0)
     rule_name = next(n for n in RULE_NAMES if case_name.startswith(n))
     if expect_fired:
         assert result.rules[rule_name].status == RULE_FIRED, (

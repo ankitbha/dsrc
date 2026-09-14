@@ -7,7 +7,7 @@ before misleading. Applied here to plan_task144's own finding -- that a
 statement about the fallback values, not about traffic -- this tool:
 
   1. Reports the per-rule EVALUABILITY CENSUS first: how many of the loaded
-     ticks each of the twelve rules could actually be checked on. A rule
+     ticks each rule could actually be checked on. A rule
      evaluable on zero ticks is reported as "not evaluable on any tick" with
      no percentage at all -- printing "0% firing rate" for a rule that was
      never evaluable is exactly the defect this task exists to avoid.
@@ -33,6 +33,16 @@ statement about the fallback values, not about traffic -- this tool:
 Every SafetyContext input is reconstructable from a tick record's `obs`,
 `obs_diagnostics`, `field_sources` and `action` alone, so this needs no
 video and no device -- it is a pure function of `metadata.jsonl`.
+
+**Every log this reads predates the speed-only advisory.** The three arms
+force `desired_speed_bin`, which only a tick carrying an `action` block has,
+and the gate at the time ran twelve rules rather than two. So this tool keeps
+its own `_decode_speed_bin`/`_HEADWAY_BIN_S` and its own
+`min_contextual_speed_mps`, reads the four-key `safety.config` those runs
+recorded, and refuses a log with no `action` by name rather than raising.
+The census it prints is over whichever of `RULE_NAMES` the current gate
+carries, which is the honest thing to report: a rule that no longer exists
+cannot be scored.
 
     python3 deployment/jetson/score_safety.py <run_dir> [<run_dir> ...] [--no-json]
 
@@ -65,17 +75,15 @@ from policy.safety_gate import (  # noqa: E402
     RULE_NOT_EVALUABLE,
     RULE_QUIET,
     SafetyConstraints,
-    SafetyState,
     run_safety_gate,
     safety_inputs_from_observation,
 )
 
-#: This tool's own defaults for the two inputs `safety_inputs_from_observation`
-#: needs beyond what a tick record carries -- config.yaml's current values
-#: (`policy.min_contextual_speed_mps`, and `2 * gps.stale_after_s` for the
-#: density derived_empty carve-out). Used ONLY for a tick with no `safety`
-#: block at all (a run recorded before task 144 shipped the gate); a tick
-#: that carries one always replays with ITS OWN recorded `safety.config`
+#: This tool's own defaults for the two inputs a tick record does not carry:
+#: the floor the removed actor's speed decode used, and `2 * gps.stale_after_s`
+#: for the density derived_empty carve-out. Used ONLY for a tick with no
+#: `safety` block at all (a run recorded before task 144 shipped the gate); a
+#: tick that carries one always replays with ITS OWN recorded `safety.config`
 #: instead (validator round 1, F3/F4) -- see `_tick_gate_config`.
 DEFAULT_MIN_CONTEXTUAL_SPEED_MPS = 12.0
 DEFAULT_DENSITY_MAX_AGE_S = 4.0
@@ -219,11 +227,6 @@ def score_ticks(
 
         for tick in ticks:
             obs_result = _observation_result_from_tick(tick)
-            # A fresh SafetyState every tick: nothing on this rig advances the
-            # lane-change counters (no lane-change detector exists), so the
-            # running state a live pipeline would carry never differs from
-            # the class default -- see safety_gate.py's class (C) list.
-            state = SafetyState()
             # This tick's OWN recorded configuration when it has one (Fix
             # 4), never this tool's module defaults -- a tick with no
             # `safety` block at all (pre-task-144) is the one case those
@@ -241,9 +244,7 @@ def score_ticks(
                 tick_withhold = True
                 tick_enabled = True
             inputs = safety_inputs_from_observation(
-                obs_result, state, time_s=tick_time_s,
-                min_contextual_speed_mps=tick_min_contextual_speed_mps,
-                density_max_age_s=tick_density_max_age_s,
+                obs_result, density_max_age_s=tick_density_max_age_s,
             )
             action = _forced_action(tick["action"], forced_bin)
             free_flow = float(tick["obs"].get("segment_target_speed", 30.0))
@@ -251,8 +252,8 @@ def score_ticks(
                 _decode_speed_bin(action["desired_speed_bin"], free_flow,
                                   tick_min_contextual_speed_mps),
                 _HEADWAY_BIN_S[action["desired_headway_bin"]],
-                inputs, state, constraints,
-                enabled=tick_enabled,
+                inputs, constraints,
+                time_s=tick_time_s, enabled=tick_enabled,
             )
 
             if arm_name == "recorded":

@@ -326,10 +326,11 @@ def test_safety_block_is_present_and_json_shaped(dsrc_bundle: str) -> None:
     assert safety["evaluable"] + safety["not_evaluable"] == 2
     # validator round 1, Fix 4 (F3/F4): the gate's own configuration this
     # tick ran under, so a replay tool need not assume its own defaults.
-    assert set(safety["config"]) == {
-        "enabled", "time_s",
-        "min_contextual_speed_mps", "density_max_age_s",
-    }
+    # `min_contextual_speed_mps` was recorded here and read by no surviving
+    # rule, so it is gone: `low_speed_uncongested` raises a recommendation to
+    # `free_flow_speed_mps - low_speed_free_flow_delta_mps`, never to a
+    # contextual minimum.
+    assert set(safety["config"]) == {"enabled", "time_s", "density_max_age_s"}
 
 
 def test_gate_ms_is_always_measured_never_absent(dsrc_bundle: str) -> None:

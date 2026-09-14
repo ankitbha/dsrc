@@ -229,54 +229,46 @@ fraction per super-segment and no headway at all.
 **Decision 3's per-field input-class partition** is what keeps a
 `fallback_neutral` observation from either silently never firing a rule (a
 statement about the fallback, not about traffic) or firing on a substituted
-constant (worse). Every `SafetyContext` field is exactly one of: (A)
-*configured road property* (`time_s`, `free_flow_speed_mps`,
-`min_contextual_speed_mps`) -- never blocks a rule; (B) *evidence-required*
-(6 fields, incl. `local_density_veh_per_km`'s own carve-out: a
-`derived_empty` density counts as evidence only when
+constant (worse). Each of the seven `SafetyContext` fields is exactly one
+of: (A) *configured road property* (`free_flow_speed_mps`) -- never blocks a
+rule; (B) *evidence-required* (`ego_speed_mps`, `leader_gap_m`,
+`leader_relative_speed_mps`, `local_density_veh_per_km`, the last with its
+own carve-out: a `derived_empty` density counts as evidence only when
 `obs_diagnostics.last_detection_age_s` bounds how recently the camera saw
 anything at all) -- blocks the rules that read it whenever its
-`perception.provenance` class is in `SUBSTITUTED`; (C) *structurally
-absent* (14 fields, incl. two `SafetyState` lane-change counters this rig
-can never advance) -- blocks unconditionally, no sensor exists. Each of the
-twelve rules is evaluated as a total, independent predicate for the
-per-tick `safety` record (`Tick.to_record()`, beside `advisory`), never
-short-circuited by chain position the way `apply_safety_layer`'s own
-elif-driven lane decision is -- the two are cross-checked
-(`tests/test_safety_gate.py`) to agree on which rule's reason a
-masked lane action actually carries.
+`perception.provenance` class is in `SUBSTITUTED`; (C) *structurally absent*
+(the merge-conflict pair, which needs a map match to a joining node this rig
+cannot make) -- blocks unconditionally, no sensor exists. Both rules are
+evaluated as total, independent predicates for the per-tick `safety` record
+(`Tick.to_record()`, beside `advisory`), never short-circuited by chain
+position.
 
 **A not_evaluable rule changes nothing in the decision, not only in the
 record (validator round 1, F1).** `apply_safety_layer` runs against
 `SafetyInputs.inert_context()`, not the raw observed context: every field
 lacking evidence this tick is replaced by its `INERT_CONTEXT_VALUES` entry
 (`policy/safety_gate.py`, beside `RULE_READS`) before it reaches the
-decision, so a not_evaluable rule cannot move the recommended speed, the
-lane action or `emergency_override` by reading the observation's own
-substituted default -- `local_density_veh_per_km`'s substituted `0.0` was
-the reproduced case: below the uncongested threshold, the opposite of
-inert, and it used to raise the recommended speed 20.0 -> 22.0 with every
-one of the twelve rules not_evaluable. `evaluate_rules`'s own census
+decision, so a not_evaluable rule cannot move the recommended speed or
+`emergency_override` by reading the observation's own substituted default --
+`local_density_veh_per_km`'s substituted `0.0` was the reproduced case:
+below the uncongested threshold, the opposite of inert, and it used to raise
+the recommended speed 20.0 -> 22.0 with every rule not_evaluable. `evaluate_rules`'s own census
 (above) keeps reading the unmodified context, so the record still says
 what was actually observed.
 
-**The one behavioral change this rig cannot avoid.** Three lane guards
-(`target_lane_rear_gap`, `target_lane_rear_ttc`, `target_lane_rear_braking`)
-and four others (`lane_change_dwell`, `lane_changes_per_km`,
-`target_lane_missing`, `target_lane_front_ttc`) are `not_evaluable` on every
-tick this rig will ever produce -- no rear sensor, no lane-change detector,
-no lane index but the assumed one. `config.yaml`'s
-`safety.withhold_lane_when_not_evaluable` (default `true`) withholds the
-lane/merge advisory outright whenever any of the eight is not_evaluable,
-rather than showing "Prepare left (if safe)" backed by a guard that was
-never checked; `false` shows it anyway. **This flag covers the lane/merge
-action only** -- it does not touch the recommended speed or headway, and
-it is not a way to disable the gate (validator round 1, F2: it was wrongly
-documented here, in `config.yaml` and in the plan as though it were).
-`safety.enabled` (default `true`; validator round 1, Fix 3) is the actual
-rollback for the whole gate: `false` still runs the full census and writes
-the complete record, but `bounded_*` equals `proposed_*` exactly -- speed,
-headway and lane action -- and nothing is withheld.
+**What is left of the twelve rules, and why.** Ten were removed, and the
+test was effect rather than name: a rule earns its place by bounding the
+recommended speed. `low_speed_uncongested` raises a low recommendation on an
+uncongested road and `forward_ttc` drives the emergency override, so both
+survive. The other ten only nulled the lane action, which a speed-only
+advisory does not carry -- and seven of the ten were `not_evaluable` on every
+tick this rig could ever produce anyway (no rear sensor, no lane-change
+detector, no lane index but the assumed one). `config.yaml`'s
+`safety.withhold_lane_when_not_evaluable` went with them: a flag over a
+decision the controller no longer makes had nothing left to withhold.
+`safety.enabled` (default `true`; validator round 1, Fix 3) is the rollback
+for the whole gate: `false` still runs the full census and writes the
+complete record, but `bounded_*` equals `proposed_*` exactly.
 `deployment/jetson/score_safety.py` measures the resulting per-rule
 evaluability census against recorded runs, refuses to print a firing rate
 for a rule evaluable on zero ticks, and replays each run under its OWN
@@ -301,13 +293,13 @@ recorded before that config block existed.
    the same GPU stream budget - measure; consider 448 engine for both),
    a mirrored `DistanceEstimator`, and pass rear vehicles to the builder.
    The observation builder already has the field slots. On the safety gate
-   (§6.1), this is what makes `target_lane_rear_gap`, `target_lane_rear_ttc`
-   and `target_lane_rear_braking` evaluable for the first time -- the three
-   lane guards `safety_gate.py`'s class (C) partition marks structurally
-   absent for lack of any rear sensor at all. It does not on its own restore
-   the lane advisory: four more guards (`lane_change_dwell`,
-   `lane_changes_per_km`, `target_lane_missing`, `target_lane_front_ttc`)
-   stay not_evaluable until a lane-change detector and a lane index exist.
+   (§6.1) it would restore nothing on its own: the three rear rules
+   (`target_lane_rear_gap`, `target_lane_rear_ttc`,
+   `target_lane_rear_braking`) were removed along with the lane action they
+   nulled, so a rear camera means reinstating them and the lane advisory they
+   guard, which also needs a lane-change detector and a lane index for the
+   four guards (`lane_change_dwell`, `lane_changes_per_km`,
+   `target_lane_missing`, `target_lane_front_ttc`) that read those.
 2. **OBD-II speed** (`sensors/obd_reader.py`): python-obd over ELM327 BT/USB;
    prefer OBD speed over GPS when fresh; GPS-vs-OBD comparison feeds the
    plan's observation-quality metrics.
