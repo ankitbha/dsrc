@@ -198,7 +198,7 @@ def require_str(extensions: Mapping[str, Any], field: str) -> str:
     value = require(extensions, field)
     # Null before type, completing a fix that landed on require_int and require_bool and
     # missed this one. Nine string fields diverged from Kotlin because of it: camera
-    # `format`; advisory `units`, `lane_text`, `merge_text`, `traffic_text`,
+    # `format`; advisory `units`, `traffic_text`,
     # `confidence_label`; rate_cmd `trigger`; here `request_url`; telemetry
     # `thermal_status`.
     if value is None:
@@ -751,8 +751,6 @@ class AdvisoryMessage:
     current_speed_display: float
     units: str
     headway_target_s: float
-    lane_text: str
-    merge_text: str
     traffic_text: str
     confidence: float
     confidence_label: str
@@ -769,8 +767,6 @@ class AdvisoryMessage:
                 "current_speed_display": to_wire_number(self.current_speed_display),
                 "units": self.units,
                 "headway_target_s": to_wire_number(self.headway_target_s),
-                "lane_text": self.lane_text,
-                "merge_text": self.merge_text,
                 "traffic_text": self.traffic_text,
                 "confidence": to_wire_number(self.confidence),
                 "confidence_label": self.confidence_label,
@@ -822,8 +818,6 @@ class AdvisoryMessage:
             current_speed_display=require_number(extensions, "current_speed_display"),
             units=units,
             headway_target_s=require_number(extensions, "headway_target_s"),
-            lane_text=require_str(extensions, "lane_text"),
-            merge_text=require_str(extensions, "merge_text"),
             traffic_text=require_str(extensions, "traffic_text"),
             confidence=require_number(extensions, "confidence"),
             confidence_label=require_str(extensions, "confidence_label"),
@@ -1159,7 +1153,7 @@ def advisory_message_from_advisory(advisory: Any, t_capture_mono_ns: int) -> Adv
     `advisory.headway_target_s` (validator round 1, F8/Fix 9): the wire
     field's NAME is unchanged (a protocol change, unlike this), but its
     MEANING already is "what the driver is shown" for `rec_speed_mps` and
-    `lane_text` above -- `headway_display_s` is the gate's bounded value,
+    the speed above -- `headway_display_s` is the gate's bounded value,
     the same principle applied to headway. `advisory.headway_target_s`
     itself stays the raw value fed back into `set_target_headway` and is
     never put on the wire.
@@ -1171,8 +1165,6 @@ def advisory_message_from_advisory(advisory: Any, t_capture_mono_ns: int) -> Adv
         current_speed_display=float(advisory.current_speed_display),
         units=str(advisory.units),
         headway_target_s=float(advisory.headway_display_s),
-        lane_text=str(advisory.lane_text),
-        merge_text=str(advisory.merge_text),
         traffic_text=str(advisory.traffic_text),
         confidence=float(advisory.confidence),
         confidence_label=str(advisory.confidence_label),

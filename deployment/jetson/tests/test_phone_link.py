@@ -1082,8 +1082,7 @@ class TestTheReturnPath:
 def _advisory(**over):
     fields = dict(recommended_speed_mps=13.4, recommended_speed_display=30.0,
                   current_speed_display=28.0, units="mph", headway_target_s=2.0,
-                  lane_text="keep lane", merge_text="no merge", traffic_text="moderate",
-                  confidence=0.8, confidence_label="high",
+                  traffic_text="Light", confidence=0.8, confidence_label="high",
                   action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
                           "lane_preference": "keep", "merge_mode": "normal"})
     fields.update(over)

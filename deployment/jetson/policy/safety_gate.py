@@ -113,21 +113,11 @@ class SafetyContext:
 class SafetyDecision:
     target_speed_mps: float
     target_headway_s: float
-    lane_action: str | None
     acceleration_mps2: float = 0.0
     emergency_override: bool = False
     diagnostics: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     penalty_terms: dict[str, float] = field(default_factory=dict)
 
-
-def _lane_preference_to_action(lane_preference: str) -> str | None:
-    """Vendored from src/envs/wrappers.py:lane_preference_to_action -- a
-    three-entry literal with no decoder-drift risk (see module docstring)."""
-    return {
-        "keep": None,
-        "prefer_left_if_safe": "LANE_LEFT",
-        "prefer_right_if_safe": "LANE_RIGHT",
-    }[lane_preference]
 
 
 def _is_low_speed_uncongested(
@@ -143,34 +133,6 @@ def _is_low_speed_uncongested(
     )
 
 
-def _is_all_lane_low_speed_occupancy(
-    all_lanes_av_occupied: bool,
-    av_mean_speed_mps: float,
-    free_flow_speed_mps: float,
-    downstream_congested: bool,
-    constraints: SafetyConstraints,
-) -> bool:
-    """Vendored from src/safety/etiquette.py:is_all_lane_low_speed_occupancy."""
-    return (
-        all_lanes_av_occupied
-        and not downstream_congested
-        and av_mean_speed_mps < free_flow_speed_mps - constraints.low_speed_free_flow_delta_mps
-    )
-
-
-def _is_passing_lane_slow_hold(
-    in_passing_lane: bool,
-    ego_speed_mps: float,
-    local_mean_speed_mps: float,
-    constraints: SafetyConstraints,
-) -> bool:
-    """Vendored from src/safety/etiquette.py:is_passing_lane_slow_hold.
-
-    The second argument is named `ego_speed_mps` in the original, but every
-    caller (there and here) passes the DECODED TARGET speed, not
-    `context.ego_speed_mps` -- kept exactly as the original calls it.
-    """
-    return in_passing_lane and ego_speed_mps < local_mean_speed_mps - constraints.low_speed_free_flow_delta_mps
 
 
 def empty_diagnostics() -> dict[str, list[dict[str, Any]]]:
@@ -204,51 +166,10 @@ def apply_safety_layer(
     target_headway = sim_contract.decode_headway_bin(action["desired_headway_bin"])
     if action["merge_mode"] == "create_gap":
         target_headway += constraints.merge_gap_headway_bonus_s
-    lane_action = None if action["merge_mode"] == "hold_lane" else _lane_preference_to_action(action["lane_preference"])
 
     if _is_low_speed_uncongested(target_speed, context.free_flow_speed_mps, context.local_density_veh_per_km, constraints):
         target_speed = max(target_speed, context.free_flow_speed_mps - constraints.low_speed_free_flow_delta_mps)
         diagnostics["etiquette_blocked_action"].append({"agent_id": agent_id, "reason": "low_speed_uncongested"})
-
-    if _is_all_lane_low_speed_occupancy(
-        context.all_lanes_av_occupied,
-        context.av_mean_speed_mps,
-        context.free_flow_speed_mps,
-        context.downstream_congested,
-        constraints,
-    ):
-        lane_action = None
-        diagnostics["etiquette_blocked_action"].append({"agent_id": agent_id, "reason": "all_lane_low_speed_occupancy"})
-
-    if _is_passing_lane_slow_hold(context.in_passing_lane, target_speed, context.local_mean_speed_mps, constraints):
-        diagnostics["etiquette_blocked_action"].append({"agent_id": agent_id, "reason": "passing_lane_slow_hold"})
-
-    if lane_action is not None:
-        dwell = float("inf") if state.last_lane_change_time_s is None else context.time_s - state.last_lane_change_time_s
-        if dwell < constraints.lane_change_dwell_s:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "lane_change_dwell"})
-        elif _lane_change_count_exceeded(state, constraints):
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "lane_changes_per_km"})
-        elif not context.target_lane_exists:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_missing"})
-        elif context.target_lane_front_gap_m < constraints.min_front_gap_m:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_front_gap"})
-        elif context.target_lane_rear_gap_m < constraints.min_rear_gap_m:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_rear_gap"})
-        elif _ttc_from_relative_speed(context.target_lane_front_gap_m, -context.target_lane_front_relative_speed_mps) < constraints.min_lane_change_ttc_s:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_front_ttc"})
-        elif _ttc_from_relative_speed(context.target_lane_rear_gap_m, context.target_lane_rear_relative_speed_mps) < constraints.min_lane_change_ttc_s:
-            lane_action = None
-            diagnostics["safety_masked_action"].append({"agent_id": agent_id, "reason": "target_lane_rear_ttc"})
-        elif context.target_lane_rear_required_decel_mps2 > constraints.max_follower_braking_mps2:
-            lane_action = None
-            diagnostics["follower_disruption_blocked"].append({"agent_id": agent_id, "reason": "target_lane_rear_braking"})
 
     acceleration, emergency_override = physical_control_command(target_speed, target_headway, context, constraints)
     if emergency_override:
@@ -257,7 +178,6 @@ def apply_safety_layer(
     return SafetyDecision(
         target_speed_mps=target_speed,
         target_headway_s=target_headway,
-        lane_action=lane_action,
         acceleration_mps2=acceleration,
         emergency_override=emergency_override,
         diagnostics=diagnostics,
@@ -312,14 +232,6 @@ def safety_penalty_terms(
     }
 
 
-def _lane_change_count_exceeded(state: SafetyState, constraints: SafetyConstraints) -> bool:
-    if state.lane_change_distances_m:
-        window_start = max(0.0, state.absolute_distance_m - 1000.0)
-        recent_changes = sum(1 for distance in state.lane_change_distances_m if distance >= window_start)
-    else:
-        recent_changes = state.lane_changes_last_km
-    return recent_changes >= constraints.max_lane_changes_per_km
-
 
 def _forward_hazard(context: SafetyContext) -> tuple[float, float]:
     gap = context.leader_gap_m
@@ -341,11 +253,6 @@ def _ttc_from_relative_speed(gap_m: float, closing_speed_mps: float) -> float:
     return max(0.0, gap_m / max(closing_speed_mps, 1e-6))
 
 
-def _dwell_s(state: SafetyState, context: SafetyContext) -> float:
-    return float("inf") if state.last_lane_change_time_s is None else context.time_s - state.last_lane_change_time_s
-
-
-# --- decision 3: the per-field input-class partition -------------------------
 
 #: (A) Configured road property. Accepted as given; never makes a rule
 #: not_evaluable -- these are operator statements about the road, not
@@ -462,53 +369,6 @@ class SafetyInputs:
                 values[name] = inert_value
         return SafetyContext(**values)
 
-    def inert_state(self, state: SafetyState) -> SafetyState:
-        """The state `apply_safety_layer` reads (validator round 1, F1
-        follow-up, found by the coordinator): mirrors `inert_context()`
-        for the four `SafetyState` fields that method cannot reach (it
-        only builds a `SafetyContext`) and that decision 3's evidence
-        machinery covers: `last_lane_change_time_s`, `lane_changes_last_km`,
-        `lane_change_distances_m` and `absolute_distance_m`. All four are
-        always class (C) -- never evidence -- and were being passed to
-        `apply_safety_layer` RAW, unneutralised.
-
-        The other two `SafetyState` fields (`distance_since_window_start_m`,
-        `last_lane_index`) are read by no function `apply_safety_layer`
-        reaches at all -- not merely ungated, genuinely dead as far as the
-        twelve rules are concerned -- and are copied through unchanged,
-        from `state` itself, not from `self.fields`, which never carries
-        them.
-
-        This method has no sibling named `state()`: an earlier one existed,
-        had zero callers (`run_safety_gate` always uses its own `state`
-        argument, never a reconstruction from `SafetyInputs`), and was
-        removed rather than left beside this one for a later reader to
-        wire to by mistake.
-        """
-        return dataclasses_replace(
-            state,
-            last_lane_change_time_s=(
-                self.fields["last_lane_change_time_s"].value
-                if self.is_evidence("last_lane_change_time_s")
-                else INERT_STATE_VALUES["last_lane_change_time_s"]
-            ),
-            lane_changes_last_km=(
-                self.fields["lane_changes_last_km"].value
-                if self.is_evidence("lane_changes_last_km")
-                else INERT_STATE_VALUES["lane_changes_last_km"]
-            ),
-            lane_change_distances_m=(
-                list(self.fields["lane_change_distances_m"].value)
-                if self.is_evidence("lane_change_distances_m")
-                else list(INERT_STATE_VALUES["lane_change_distances_m"])
-            ),
-            absolute_distance_m=(
-                self.fields["absolute_distance_m"].value
-                if self.is_evidence("absolute_distance_m")
-                else INERT_STATE_VALUES["absolute_distance_m"]
-            ),
-        )
-
     def is_evidence(self, name: str) -> bool:
         return self.fields[name].evidence
 
@@ -623,56 +483,21 @@ def safety_inputs_from_observation(
 # --- decision 3 / step 9: the twelve rules as total independent predicates ---
 
 #: The order `apply_safety_layer`'s elif chain checks the eight lane/merge
-#: guards in -- used both to build `LANE_GUARD_RULES` below and by
+#: guards in -- used by
 #: tests/test_safety_gate_pipeline.py's chain-order invariant.
-_LANE_GUARD_CHAIN_ORDER: tuple[str, ...] = (
-    "lane_change_dwell",
-    "lane_changes_per_km",
-    "target_lane_missing",
-    "target_lane_front_gap",
-    "target_lane_rear_gap",
-    "target_lane_front_ttc",
-    "target_lane_rear_ttc",
-    "target_lane_rear_braking",
-)
-
-#: All twelve rules, in the order E4 and the plan's steps name them.
+#: The two rules that survive the speed-only advisory. A rule earns its place
+#: by bounding the recommended speed: `low_speed_uncongested` raises it, and
+#: `forward_ttc` drives the emergency override. The nine that only nulled the
+#: lane action went with the lane action itself.
 RULE_NAMES: tuple[str, ...] = (
     "low_speed_uncongested",
-    "all_lane_low_speed_occupancy",
-    "passing_lane_slow_hold",
-    *_LANE_GUARD_CHAIN_ORDER,
     "forward_ttc",
 )
-
-#: The lane/merge-action guards: decision 3 says the lane action is withheld
-#: when any of these is not_evaluable. Identical set to the chain order above,
-#: named separately because "which rules guard the lane action" and "what
-#: order does the chain check them in" are two different facts a reader
-#: might want independently.
-LANE_GUARD_RULES: tuple[str, ...] = _LANE_GUARD_CHAIN_ORDER
 
 #: Which SafetyInputs field names each rule's not_evaluable verdict depends
 #: on. A rule is not_evaluable when ANY named field is not evidence.
 RULE_READS: dict[str, tuple[str, ...]] = {
     "low_speed_uncongested": ("local_density_veh_per_km",),
-    "all_lane_low_speed_occupancy": ("all_lanes_av_occupied", "av_mean_speed_mps", "downstream_congested"),
-    "passing_lane_slow_hold": ("in_passing_lane", "local_mean_speed_mps"),
-    "lane_change_dwell": ("last_lane_change_time_s",),
-    # absolute_distance_m added (validator round 1, F1 follow-up): read by
-    # _lane_change_count_exceeded's window branch alongside
-    # lane_change_distances_m, and previously in no rule's RULE_READS at
-    # all. Evaluability is NOT the generic "every field here must be
-    # evidence" rule for this entry -- see _lane_changes_per_km_missing,
-    # which computes it by which branch the tick's own
-    # lane_change_distances_m value actually selects.
-    "lane_changes_per_km": ("lane_changes_last_km", "lane_change_distances_m", "absolute_distance_m"),
-    "target_lane_missing": ("target_lane_exists",),
-    "target_lane_front_gap": ("target_lane_front_gap_m",),
-    "target_lane_rear_gap": ("target_lane_rear_gap_m",),
-    "target_lane_front_ttc": ("target_lane_front_gap_m", "target_lane_front_relative_speed_mps"),
-    "target_lane_rear_ttc": ("target_lane_rear_gap_m", "target_lane_rear_relative_speed_mps"),
-    "target_lane_rear_braking": ("target_lane_rear_required_decel_mps2",),
     "forward_ttc": (
         "leader_gap_m", "leader_relative_speed_mps",
         "merge_conflict_gap_m", "merge_conflict_relative_speed_mps",
@@ -705,11 +530,9 @@ RULE_READS: dict[str, tuple[str, ...]] = {
 #: Having one flexible field is not the same claim as being reachable --
 #: only `forward_ttc` has a refinement narrow enough to matter here, and
 #: it does. This is why a per-rule evaluability refinement
-#: (`_forward_ttc_missing`, `_lane_changes_per_km_missing`) can only ever
-#: be pinned by a hand-built `SafetyInputs` for `lane_changes_per_km`
-#: (wholly unreachable) and, on its unreachable merge-conflict axis only,
-#: for `forward_ttc` -- see the docstrings on both functions and on their
-#: tests in `tests/test_safety_gate.py`.
+#: (`_forward_ttc_missing`) can only ever be pinned by a hand-built
+#: `SafetyInputs`, on its unreachable merge-conflict axis only -- see
+#: that function's docstring and its tests in `tests/test_safety_gate.py`.
 
 #: validator round 1, F1: the value substituted for a SafetyContext field's
 #: slot in the copy `apply_safety_layer` reads (`SafetyInputs.inert_context`),
@@ -724,7 +547,7 @@ RULE_READS: dict[str, tuple[str, ...]] = {
 #: A field absent from this table gates none of the twelve rules and is left
 #: out on purpose: `ego_speed_mps` (evidence-required) only feeds
 #: `physical_control_command`'s unrecorded `acceleration_mps2`, never
-#: `target_speed_mps`/`lane_action`/`emergency_override`; `follower_gap_m`,
+#: `target_speed_mps`/`emergency_override`; `follower_gap_m`,
 #: `follower_relative_speed_mps` and `near_merge` (all structural) are read
 #: nowhere at all in this module. `inert_context()` passes all four through
 #: unchanged regardless of evidence, since there is no comparison to make
@@ -802,14 +625,6 @@ INERT_CONTEXT_VALUES: dict[str, Any] = {
 #: `lane_changes_per_km`'s `lane_changes_last_km` is a bounded count.
 RULE_COMPARED_VALUE_KEY: dict[str, str] = {
     "low_speed_uncongested": "local_density_veh_per_km",
-    "all_lane_low_speed_occupancy": "av_mean_speed_mps",
-    "passing_lane_slow_hold": "target_speed_mps",
-    "lane_change_dwell": "dwell_s",
-    "target_lane_front_gap": "gap_m",
-    "target_lane_rear_gap": "gap_m",
-    "target_lane_front_ttc": "ttc_s",
-    "target_lane_rear_ttc": "ttc_s",
-    "target_lane_rear_braking": "required_decel_mps2",
     "forward_ttc": "gap_m",
 }
 
@@ -833,7 +648,7 @@ RULE_COMPARED_VALUE_KEY: dict[str, str] = {
 #: alias-checking mechanism -- this is the one rule this task found it
 #: changing an evaluability verdict for.
 RULE_ALIASED_PROVENANCE_FIELDS: dict[str, tuple[str, str]] = {
-    "target_lane_front_gap": ("target_lane_front_gap", "leader_gap"),
+
 }
 
 #: F10 (validator round 1, Fix 10): the `field_sources`/`obs` key
@@ -842,65 +657,6 @@ RULE_ALIASED_PROVENANCE_FIELDS: dict[str, tuple[str, str]] = {
 #: own evidence (below) so a reader of the per-tick record cannot mistake
 #: an evaluable gap for a genuine target-lane measurement.
 TARGET_LANE_FRONT_GAP_SOURCE_SLOT = "leader_gap"
-
-#: validator round 1, F1 follow-up (found by the coordinator, 2026-09-12):
-#: `SafetyContext` and `SafetyState` are the complete set of containers
-#: `apply_safety_layer` reads sensed data from -- derived, not assumed, by
-#: the transitive closure of every function it calls: the only
-#: module-level data touched anywhere in that closure is
-#: `sim_contract.decode_speed_bin`/`decode_headway_bin`, contract constants
-#: rather than sensed values. `inert_context()` neutralises the first
-#: container; this table and `SafetyInputs.inert_state()` neutralise the
-#: second, which `run_safety_gate` was passing to `apply_safety_layer` RAW.
-#: Latent only because nothing on this rig ever advances these past their
-#: class defaults (`None`, `0`, `()`, and -- for `absolute_distance_m`, see
-#: below -- `0.0`), which happen to already be inert -- the same shape F1
-#: itself had before a policy emitted `slow`. `SafetyConstraints` needs no
-#: inert treatment: it is operator configuration, not sensing, so it was
-#: never a candidate for substitution in the first place, not an oversight.
-#:
-#: One uniform neutralisation policy cannot serve every rule this table
-#: feeds, and `lane_changes_per_km` is why: `_lane_change_count_exceeded`
-#: consults `lane_change_distances_m` (and `absolute_distance_m` alongside
-#: it) OR `lane_changes_last_km`, never both -- an alternative, not a
-#: conjunction -- so evaluability must be computed by WHICH BRANCH the
-#: inert-or-real `lane_change_distances_m` value actually selects, not by
-#: requiring every field in this table as evidence unconditionally (see
-#: `_lane_changes_per_km_missing`). The values below stay a single fixed
-#: substitution each; only which of them EVALUABILITY depends on, per
-#: tick, is rule-specific.
-#:
-#: Each entry derived from the one comparison the reading rule makes, the
-#: same way as `INERT_CONTEXT_VALUES`:
-INERT_STATE_VALUES: dict[str, Any] = {
-    # lane_change_dwell masks when `time_s - last < lane_change_dwell_s`;
-    # `_dwell_s` already special-cases `None` to mean "no lane change yet"
-    # (dwell = inf), so `None` is the value the code already treats as
-    # inert, not a new convention introduced here.
-    "last_lane_change_time_s": None,
-    # lane_changes_per_km's `_lane_change_count_exceeded` takes the
-    # window-based branch whenever `lane_change_distances_m` is non-empty
-    # and does not read `lane_changes_last_km` at all in that case; else it
-    # falls back to `lane_changes_last_km` directly. `()` is falsy, so it
-    # sends the function to the `lane_changes_last_km` branch; `0` there is
-    # below `max_lane_changes_per_km` for any positive threshold.
-    "lane_change_distances_m": (),
-    "lane_changes_last_km": 0,
-    # Read only inside the window branch, alongside `lane_change_distances_m`
-    # (`window_start = max(0.0, absolute_distance_m - 1000.0)`), and in NO
-    # rule's `RULE_READS` before this fix. `+inf` pushes `window_start` to
-    # `+inf`, so no real (finite) recorded distance can ever read as
-    # "recent" -- the same gap-inertness derivation as `leader_gap_m`,
-    # applied to a distance-since-start counter instead of a distance-ahead
-    # one. This field can never itself be evidence (no odometry sensor
-    # exists on this rig at all), so whenever the window branch is the one
-    # a tick's `lane_change_distances_m` selects, `lane_changes_per_km` is
-    # not_evaluable regardless of `lane_change_distances_m`'s own evidence
-    # -- a second sensor this rule needs that this rig will never have,
-    # the same shape as `forward_ttc`'s permanently-absent merge-conflict
-    # pair.
-    "absolute_distance_m": float("inf"),
-}
 
 
 @dataclass(frozen=True)
@@ -993,40 +749,6 @@ def _forward_ttc_missing(inputs: SafetyInputs, constraints: SafetyConstraints) -
     return () if inputs.is_evidence(relspeed_field) else (relspeed_field,)
 
 
-def _lane_changes_per_km_missing(inputs: SafetyInputs) -> tuple[str, ...]:
-    """`lane_changes_per_km`'s evaluability, computed over the inputs the
-    tick's own branch actually consulted (the same principle as
-    `_forward_ttc_missing`, validator round 1's correction: the first
-    version of this fix required both `lane_change_distances_m` and
-    `lane_changes_last_km` as evidence together, which was also wrong --
-    `_lane_change_count_exceeded` consults them as ALTERNATIVES, never
-    both, so requiring both would report `not_evaluable` on a tick whose
-    `lane_changes_last_km` is real evidence and decisive, only because an
-    unconsulted `lane_change_distances_m` happened to also lack it).
-
-    `_lane_change_count_exceeded` takes the window-based branch whenever
-    `lane_change_distances_m` -- after inert substitution, mirroring
-    `_forward_ttc_missing`'s gap comparison -- is non-empty, and reads
-    `lane_changes_last_km` only in the else branch. Whichever branch is
-    selected is the one whose fields must have evidence.
-
-    The window branch also reads `absolute_distance_m`, in no rule's
-    `RULE_READS` before this fix and never itself evidence (no odometry
-    sensor exists on this rig at all) -- so whenever the window branch is
-    the one selected, this rule is not_evaluable regardless of
-    `lane_change_distances_m`'s own evidence, the same shape as
-    `forward_ttc`'s permanently-absent merge-conflict pair: a second
-    sensor this rule needs that this rig will never have.
-    """
-    distances_effective = (
-        inputs.fields["lane_change_distances_m"].value if inputs.is_evidence("lane_change_distances_m")
-        else INERT_STATE_VALUES["lane_change_distances_m"]
-    )
-    if distances_effective:
-        window_fields = ("lane_change_distances_m", "absolute_distance_m")
-        return tuple(f for f in window_fields if not inputs.is_evidence(f))
-    return () if inputs.is_evidence("lane_changes_last_km") else ("lane_changes_last_km",)
-
 
 def _evaluate_one_rule(
     name: str,
@@ -1039,8 +761,6 @@ def _evaluate_one_rule(
 ) -> RuleRecord:
     if name == "forward_ttc":
         missing = _forward_ttc_missing(inputs, constraints)
-    elif name == "lane_changes_per_km":
-        missing = _lane_changes_per_km_missing(inputs)
     else:
         missing = tuple(f for f in RULE_READS[name] if not inputs.is_evidence(f))
     if missing:
@@ -1058,72 +778,6 @@ def _evaluate_one_rule(
             "threshold_mps": context.free_flow_speed_mps - constraints.low_speed_free_flow_delta_mps,
             "local_density_veh_per_km": context.local_density_veh_per_km,
             "density_threshold_veh_per_km": constraints.uncongested_density_threshold_veh_per_km,
-        }
-    elif name == "all_lane_low_speed_occupancy":
-        fired = _is_all_lane_low_speed_occupancy(
-            context.all_lanes_av_occupied, context.av_mean_speed_mps, context.free_flow_speed_mps,
-            context.downstream_congested, constraints,
-        )
-        evidence = {
-            "all_lanes_av_occupied": context.all_lanes_av_occupied,
-            "av_mean_speed_mps": context.av_mean_speed_mps,
-            "threshold_mps": context.free_flow_speed_mps - constraints.low_speed_free_flow_delta_mps,
-            "downstream_congested": context.downstream_congested,
-        }
-    elif name == "passing_lane_slow_hold":
-        fired = _is_passing_lane_slow_hold(context.in_passing_lane, target_speed, context.local_mean_speed_mps, constraints)
-        evidence = {
-            "in_passing_lane": context.in_passing_lane,
-            "target_speed_mps": target_speed,
-            "threshold_mps": context.local_mean_speed_mps - constraints.low_speed_free_flow_delta_mps,
-        }
-    elif name == "lane_change_dwell":
-        dwell = _dwell_s(state, context)
-        fired = dwell < constraints.lane_change_dwell_s
-        evidence = {"dwell_s": dwell, "threshold_s": constraints.lane_change_dwell_s}
-    elif name == "lane_changes_per_km":
-        fired = _lane_change_count_exceeded(state, constraints)
-        evidence = {
-            "lane_changes_last_km": state.lane_changes_last_km,
-            "threshold": constraints.max_lane_changes_per_km,
-        }
-    elif name == "target_lane_missing":
-        fired = not context.target_lane_exists
-        evidence = {"target_lane_exists": context.target_lane_exists}
-    elif name == "target_lane_front_gap":
-        fired = context.target_lane_front_gap_m < constraints.min_front_gap_m
-        evidence = {
-            "gap_m": context.target_lane_front_gap_m, "threshold_m": constraints.min_front_gap_m,
-            # F10 (plan_task144's own out-of-scope finding, still true with
-            # the gate live): perception/observation_builder.py sets this
-            # slot to the CURRENT lane's leader_gap
-            # (src["target_lane_front_gap"] = src["leader_gap"]), not a
-            # measurement of the lane being changed INTO. Named here so a
-            # reader of this rule's evidence cannot mistake "evaluable, gap
-            # 3.0 m" for a genuine target-lane reading.
-            "gap_source_slot": TARGET_LANE_FRONT_GAP_SOURCE_SLOT,
-        }
-    elif name == "target_lane_rear_gap":
-        fired = context.target_lane_rear_gap_m < constraints.min_rear_gap_m
-        evidence = {"gap_m": context.target_lane_rear_gap_m, "threshold_m": constraints.min_rear_gap_m}
-    elif name == "target_lane_front_ttc":
-        ttc = _ttc_from_relative_speed(context.target_lane_front_gap_m, -context.target_lane_front_relative_speed_mps)
-        fired = ttc < constraints.min_lane_change_ttc_s
-        evidence = {
-            "ttc_s": ttc, "threshold_s": constraints.min_lane_change_ttc_s,
-            # Same F10 caveat as target_lane_front_gap above: the gap half
-            # of this ttc is the current lane's leader_gap.
-            "gap_source_slot": TARGET_LANE_FRONT_GAP_SOURCE_SLOT,
-        }
-    elif name == "target_lane_rear_ttc":
-        ttc = _ttc_from_relative_speed(context.target_lane_rear_gap_m, context.target_lane_rear_relative_speed_mps)
-        fired = ttc < constraints.min_lane_change_ttc_s
-        evidence = {"ttc_s": ttc, "threshold_s": constraints.min_lane_change_ttc_s}
-    elif name == "target_lane_rear_braking":
-        fired = context.target_lane_rear_required_decel_mps2 > constraints.max_follower_braking_mps2
-        evidence = {
-            "required_decel_mps2": context.target_lane_rear_required_decel_mps2,
-            "threshold_mps2": constraints.max_follower_braking_mps2,
         }
     elif name == "forward_ttc":
         gap, relative_speed = _forward_hazard(context)
@@ -1149,12 +803,12 @@ def evaluate_rules(
     guard with an unevaluable one").
 
     Evaluates each predicate over `inputs.inert_context()`/
-    `inputs.inert_state(state)`, not the raw `context()`/`state`
+    `inputs.inert_context()`, not the raw `context()`
     (validator round 3 correction). Decision 3 originally said the census
     reads the unmodified context; that was wrong for `forward_ttc` and
     `lane_changes_per_km`, whose `missing` is computed from EFFECTIVE
     (inert-or-real) values to decide which disjunct/branch applies
-    (`_forward_ttc_missing`, `_lane_changes_per_km_missing`). Running the
+    (`_forward_ttc_missing`). Running the
     predicate itself on the RAW context/state let that choice disagree
     with what `missing` reasoned about: reproduced by the coordinator --
     leader pair not evidence (raw gap 6.0 m), merge pair evidence (gap
@@ -1175,7 +829,6 @@ def evaluate_rules(
     the rule actually compared.
     """
     context = inputs.inert_context()
-    state = inputs.inert_state(state)
     return {
         name: _evaluate_one_rule(name, action=action, inputs=inputs, context=context, state=state, constraints=constraints)
         for name in RULE_NAMES
@@ -1188,7 +841,7 @@ class SafetyGateConfig:
     and census were actually run under, persisted alongside them so a replay
     tool (`score_safety.py`) can reproduce the SAME run rather than silently
     assuming its own current defaults. Both F3 (`score_safety.py` always
-    replayed with `withhold_lane_when_not_evaluable=True`, so it could not
+    replayed with the lane guards in place, so it could not
     read a run recorded with the flag off) and F4 (it reconstructed `time_s`
     as the tick's epoch `t_wall`, when the live pipeline passes
     `time.monotonic()`) trace back to this information never having been
@@ -1196,7 +849,6 @@ class SafetyGateConfig:
     """
 
     enabled: bool
-    withhold_lane_when_not_evaluable: bool
     time_s: float
     min_contextual_speed_mps: float
     density_max_age_s: float
@@ -1204,7 +856,6 @@ class SafetyGateConfig:
     def to_record(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
-            "withhold_lane_when_not_evaluable": self.withhold_lane_when_not_evaluable,
             "time_s": self.time_s,
             "min_contextual_speed_mps": self.min_contextual_speed_mps,
             "density_max_age_s": self.density_max_age_s,
@@ -1229,13 +880,10 @@ class SafetyGateResult:
 
     proposed_speed_mps: float
     proposed_headway_s: float
-    proposed_lane_action: str | None
     bounded_speed_mps: float
     bounded_headway_s: float
-    bounded_lane_action: str | None
     delta_speed_mps: float
     emergency_override: bool
-    lane_withheld: str | None
     evaluable_count: int
     not_evaluable_count: int
     rules: dict[str, RuleRecord]
@@ -1247,16 +895,13 @@ class SafetyGateResult:
             "proposed": {
                 "speed_mps": round(self.proposed_speed_mps, 2),
                 "headway_s": round(self.proposed_headway_s, 2),
-                "lane_action": self.proposed_lane_action,
             },
             "bounded": {
                 "speed_mps": round(self.bounded_speed_mps, 2),
                 "headway_s": round(self.bounded_headway_s, 2),
-                "lane_action": self.bounded_lane_action,
             },
             "delta_speed_mps": round(self.delta_speed_mps, 2),
             "emergency_override": self.emergency_override,
-            "lane_withheld": self.lane_withheld,
             "evaluable": self.evaluable_count,
             "not_evaluable": self.not_evaluable_count,
             "rules": {name: rule.to_record() for name, rule in self.rules.items()},
@@ -1270,7 +915,6 @@ def run_safety_gate(
     state: SafetyState,
     constraints: SafetyConstraints | None = None,
     *,
-    withhold_lane_when_not_evaluable: bool = True,
     enabled: bool = True,
 ) -> SafetyGateResult:
     """Run the vendored `apply_safety_layer` (the bound the driver is shown)
@@ -1280,18 +924,18 @@ def run_safety_gate(
     letting an unevaluated guard's "safe" default speak for it.
 
     `apply_safety_layer` is run against `inputs.inert_context()` and
-    `inputs.inert_state(state)`, not the raw `context`/`state` (validator
+    `inputs.inert_context()`, not the raw `context` (validator
     round 1, F1, and its follow-up: `SafetyContext` and `SafetyState` are
     the complete set of containers the decision reads sensed data from --
     derived from `apply_safety_layer`'s own transitive call closure, not
     assumed). Every field either container lacks evidence for is replaced
-    by its `INERT_CONTEXT_VALUES`/`INERT_STATE_VALUES` entry before it
+    by its `INERT_CONTEXT_VALUES` entry before it
     reaches the decision, so a not_evaluable rule cannot move the number
     the driver is shown even when the observation's own substituted value
     for that field is not itself inert (`local_density_veh_per_km`'s 0.0
     default was the reproduced case: 0.0 is BELOW the uncongested threshold,
     the opposite of inert). `evaluate_rules`'s census, below, ALSO now reads
-    `inert_context()`/`inert_state()`, not the raw `context()`/`state`
+    `inert_context()`, not the raw `context()`
     (validator round 3 correction -- see `evaluate_rules`'s own docstring:
     a census computed on raw values could disagree with `missing` about
     which disjunct/branch applied and assert `fired` on substituted data).
@@ -1303,18 +947,18 @@ def run_safety_gate(
     This closes the invariant along two independent axes: which containers
     the decision AND the census read (neutralised in both, identically),
     and, separately, `forward_ttc`/`lane_changes_per_km`'s own evaluability
-    computations (`_forward_ttc_missing`, `_lane_changes_per_km_missing`)
+    computations (`_forward_ttc_missing`)
     close an evidence requirement wider than the comparison/branch that
     actually determines each rule's result.
 
     `enabled=False` (validator round 1, F2/F3 -- `safety.enabled`) is the
     actual rollback mechanism `config.yaml`/`ARCHITECTURE.md` had wrongly
-    attributed to `withhold_lane_when_not_evaluable`: the census and the
+    attributed to the lane withholding: the census and the
     full record are still produced, but `apply_safety_layer` is not run at
     all, so `bounded_* == proposed_*` exactly (including headway -- even the
     unconditional `create_gap` bonus does not apply, since that bonus is
     `apply_safety_layer`'s own first step) and the lane action is never
-    withheld. `withhold_lane_when_not_evaluable` continues to cover only the
+    withheld. That withholding covered only the
     lane/merge action, as it always has.
     """
     constraints = constraints or SafetyConstraints()
@@ -1323,37 +967,23 @@ def run_safety_gate(
 
     proposed_speed = _target_speed(action, context)
     proposed_headway = sim_contract.decode_headway_bin(action["desired_headway_bin"])
-    proposed_lane_action = (
-        _lane_preference_to_action(action["lane_preference"]) if action["merge_mode"] != "hold_lane" else None
-    )
 
     if enabled:
         inert_context = inputs.inert_context()
-        inert_state = inputs.inert_state(state)
-        decision = apply_safety_layer(action, inert_state, inert_context, constraints)
+        decision = apply_safety_layer(action, state, inert_context, constraints)
         bounded_speed = decision.target_speed_mps
         bounded_headway = decision.target_headway_s
-        bounded_lane_action = decision.lane_action
         emergency_override = decision.emergency_override
         raw_diagnostics = decision.diagnostics
-
-        lane_guard_not_evaluable = any(rules[name].status == RULE_NOT_EVALUABLE for name in LANE_GUARD_RULES)
-        lane_withheld: str | None = None
-        if withhold_lane_when_not_evaluable and lane_guard_not_evaluable and bounded_lane_action is not None:
-            bounded_lane_action = None
-            lane_withheld = RULE_NOT_EVALUABLE
     else:
         bounded_speed = proposed_speed
         bounded_headway = proposed_headway
-        bounded_lane_action = proposed_lane_action
         emergency_override = False
         raw_diagnostics = empty_diagnostics()
-        lane_withheld = None
 
     evaluable = sum(1 for r in rules.values() if r.status != RULE_NOT_EVALUABLE)
     config = SafetyGateConfig(
         enabled=enabled,
-        withhold_lane_when_not_evaluable=withhold_lane_when_not_evaluable,
         time_s=context.time_s,
         min_contextual_speed_mps=context.min_contextual_speed_mps,
         density_max_age_s=inputs.density_max_age_s,
@@ -1361,13 +991,10 @@ def run_safety_gate(
     return SafetyGateResult(
         proposed_speed_mps=proposed_speed,
         proposed_headway_s=proposed_headway,
-        proposed_lane_action=proposed_lane_action,
         bounded_speed_mps=bounded_speed,
         bounded_headway_s=bounded_headway,
-        bounded_lane_action=bounded_lane_action,
         delta_speed_mps=bounded_speed - proposed_speed,
         emergency_override=emergency_override,
-        lane_withheld=lane_withheld,
         evaluable_count=evaluable,
         not_evaluable_count=len(rules) - evaluable,
         rules=rules,

@@ -603,7 +603,6 @@ def safety_result(ticks: list[dict[str, Any]]) -> dict[str, Any] | None:
     lowered_deltas = [d for d in deltas if d < 0.0]
     clamped_deltas = raised_deltas + lowered_deltas
     clamped = len(clamped_deltas)
-    lane_withheld = sum(1 for s in safety_ticks if s.get("lane_withheld") is not None)
     emergency = sum(1 for s in safety_ticks if s.get("emergency_override"))
     return {
         "n_ticks": len(safety_ticks),
@@ -619,7 +618,6 @@ def safety_result(ticks: list[dict[str, Any]]) -> dict[str, Any] | None:
         "lowered_ticks": len(lowered_deltas),
         "raise_delta_mps": pctl(raised_deltas) if raised_deltas else None,
         "lower_delta_mps": pctl(lowered_deltas) if lowered_deltas else None,
-        "lane_withheld_ticks": lane_withheld,
         "emergency_override_ticks": emergency,
     }
 
@@ -1345,7 +1343,6 @@ def _safety_lines(safety: dict[str, Any] | None) -> list[str]:
     )
     lines.append(f"- {raise_clause}; {lower_clause}")
     lines.append(
-        f"- lane action withheld on {safety['lane_withheld_ticks']} of {safety['n_ticks']} ticks; "
         f"emergency_override on {safety['emergency_override_ticks']}"
     )
     return lines

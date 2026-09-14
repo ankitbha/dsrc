@@ -48,11 +48,11 @@ def test_safety_result_census_and_clamp_rollup() -> None:
     ticks = [
         _tick(_safety_block(delta=0.0, rules={
             "forward_ttc": _rule_block("not_evaluable", leader_gap_m_source="fallback_neutral"),
-            "target_lane_front_gap": _rule_block("quiet", gap_m=42.0, threshold_m=5.0),
+            "low_speed_uncongested": _rule_block("quiet", gap_m=42.0, threshold_m=5.0),
         })),
         _tick(_safety_block(delta=2.0, rules={
             "forward_ttc": _rule_block("not_evaluable", leader_gap_m_source="fallback_neutral"),
-            "target_lane_front_gap": _rule_block("fired", gap_m=3.0, threshold_m=5.0),
+            "low_speed_uncongested": _rule_block("fired", gap_m=3.0, threshold_m=5.0),
         })),
     ]
     result = safety_result(ticks)
@@ -60,13 +60,12 @@ def test_safety_result_census_and_clamp_rollup() -> None:
     assert result["rules"]["forward_ttc"]["evaluable_ticks"] == 0
     assert result["rules"]["forward_ttc"]["fired_fraction_of_evaluable"] is None
     assert "fired_ticks" not in result["rules"]["forward_ttc"]
-    assert result["rules"]["target_lane_front_gap"]["evaluable_ticks"] == 2
-    assert result["rules"]["target_lane_front_gap"]["fired_ticks"] == 1
-    assert result["rules"]["target_lane_front_gap"]["fired_fraction_of_evaluable"] == 0.5
+    assert result["rules"]["low_speed_uncongested"]["evaluable_ticks"] == 2
+    assert result["rules"]["low_speed_uncongested"]["fired_ticks"] == 1
+    assert result["rules"]["low_speed_uncongested"]["fired_fraction_of_evaluable"] == 0.5
     assert result["clamped_ticks"] == 1
     assert result["clamped_fraction"] == 0.5
     assert result["clamp_delta_mps"]["mean"] == 2.0
-    assert result["lane_withheld_ticks"] == 2
 
 
 def test_safety_result_ignores_ticks_predating_the_task() -> None:
@@ -100,12 +99,12 @@ def test_safety_lines_names_zero_evaluable_rules_without_a_percentage() -> None:
 
 def test_safety_lines_reports_a_rate_for_an_evaluable_rule() -> None:
     result = safety_result([
-        _tick(_safety_block(delta=0.0, rules={"target_lane_front_gap": _rule_block("quiet")})),
-        _tick(_safety_block(delta=0.0, rules={"target_lane_front_gap": _rule_block("fired")})),
+        _tick(_safety_block(delta=0.0, rules={"forward_ttc": _rule_block("quiet")})),
+        _tick(_safety_block(delta=0.0, rules={"forward_ttc": _rule_block("fired")})),
     ])
     lines = _safety_lines(result)
     joined = "\n".join(lines)
-    assert "target_lane_front_gap: evaluable on 2 of 2; fired on 1 (50.0%)" in joined
+    assert "forward_ttc: evaluable on 2 of 2; fired on 1 (50.0%)" in joined
 
 
 def test_safety_lines_names_a_non_finite_compared_value() -> None:
@@ -114,16 +113,16 @@ def test_safety_lines_names_a_non_finite_compared_value() -> None:
     would otherwise read as a real (if low) firing rate."""
     result = safety_result([
         _tick(_safety_block(delta=0.0, rules={
-            "target_lane_front_gap": _rule_block("quiet", gap_m=float("inf"), threshold_m=5.0),
+            "forward_ttc": _rule_block("quiet", gap_m=float("inf"), threshold_m=5.0),
         })),
         _tick(_safety_block(delta=0.0, rules={
-            "target_lane_front_gap": _rule_block("quiet", gap_m=float("inf"), threshold_m=5.0),
+            "forward_ttc": _rule_block("quiet", gap_m=float("inf"), threshold_m=5.0),
         })),
     ])
     lines = _safety_lines(result)
     joined = "\n".join(lines)
     assert (
-        "target_lane_front_gap: evaluable on 2 of 2; fired on 0 (0.0%); "
+        "forward_ttc: evaluable on 2 of 2; fired on 0 (0.0%); "
         "the compared value (gap_m) is inf on all 2"
     ) in joined
 

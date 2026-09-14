@@ -182,7 +182,6 @@ def _build_rest(config: dict):
     # worse.
     pipeline = PerceptionPolicyPipeline(
         detector, tracker, distance, builder, actor, decoder,
-        withhold_lane_when_not_evaluable=config["safety"]["withhold_lane_when_not_evaluable"],
         # validator round 1, Fix 3: plain subscript, matching the sibling key
         # above -- a config that predates safety.enabled should fail loudly,
         # not silently default to the gate being on.

@@ -115,8 +115,6 @@ def render_dashboard(
     speed_text, speed_color = _recommended_speed_line(adv)
     put(speed_text, speed_color, 0.8, 36, 2)
     put(f"Current:     {adv.current_speed_display:5.0f} {adv.units}", WHITE, 0.8, 38, 2)
-    put(f"Lane:    {adv.lane_text}", YELLOW, 0.55, 26)
-    put(f"Merge:   {adv.merge_text}", WHITE, 0.5, 24)
     # validator round 1, F8: the bounded headway (what the gate actually
     # shows the driver), not headway_target_s (the raw value fed back into
     # set_target_headway).

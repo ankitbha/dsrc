@@ -29,16 +29,6 @@ from policy.dsrc_runtime import DsrcDecision
 MPS_TO_MPH = 2.236936
 MPS_TO_KMH = 3.6
 
-LANE_TEXT = {
-    "keep": "Keep lane",
-    "prefer_left_if_safe": "Prepare left (if safe)",
-    "prefer_right_if_safe": "Prepare right (if safe)",
-}
-MERGE_TEXT = {
-    "normal": "Normal driving",
-    "create_gap": "Creating merge gap",
-    "hold_lane": "Hold lane (merge zone)",
-}
 TRAFFIC_TEXT = {0: "Light", 1: "Moderate", 2: "Heavy"}
 
 #: task 144: the safety gate's lane/merge-action vocabulary
@@ -46,13 +36,6 @@ TRAFFIC_TEXT = {0: "Light", 1: "Moderate", 2: "Heavy"}
 #: / None), separate from LANE_TEXT above because that dict is keyed on the
 #: POLICY's raw lane_preference string, not on what the gate decided to show
 #: after withholding. pipeline.step uses this to redisplay lane_text once the
-#: gate has bounded (and possibly withheld) the action.
-GATED_LANE_TEXT = {
-    None: "Keep lane",
-    "LANE_LEFT": "Prepare left (if safe)",
-    "LANE_RIGHT": "Prepare right (if safe)",
-}
-
 
 @dataclass
 class Advisory:
@@ -66,8 +49,6 @@ class Advisory:
     #: the safety gate bounded it to -- see `headway_display_s` below for
     #: the number actually shown to the driver.
     headway_target_s: float
-    lane_text: str
-    merge_text: str
     traffic_text: str
     confidence_label: str
     confidence: float
@@ -81,7 +62,7 @@ class Advisory:
     #: driver, which the safety gate may have bounded (`create_gap`'s merge
     #: headway bonus, applied unconditionally in `apply_safety_layer`).
     #: ARCHITECTURE.md sec 6.1 says "the gate bounds what the driver is
-    #: shown", already true for `recommended_speed_mps`/`lane_text`; before
+    #: shown", already true for `recommended_speed_mps`; before
     #: this fix the displayed headway was still the raw, unbounded one.
     #: `None` here means "not yet bounded by a gate" and `__post_init__`
     #: defaults it to `headway_target_s`, so `AdvisoryDecoder.decode`'s raw
@@ -97,7 +78,7 @@ class Advisory:
         return (
             f"rec {self.recommended_speed_display:5.1f} {self.units} | "
             f"cur {self.current_speed_display:5.1f} {self.units} | "
-            f"{self.lane_text} | headway {self.headway_display_s:.1f}s | "
+            f"headway {self.headway_display_s:.1f}s | "
             f"traffic {self.traffic_text} | conf {self.confidence_label}"
         )
 
@@ -143,8 +124,6 @@ class AdvisoryDecoder:
             current_speed_display=self.display(float(obs.get("ego_speed", 0.0))),
             units=self.units,
             headway_target_s=headway,
-            lane_text=LANE_TEXT[action["lane_preference"]],
-            merge_text=MERGE_TEXT[action["merge_mode"]],
             traffic_text=TRAFFIC_TEXT.get(int(obs.get("local_density_bin", 0)), "?"),
             confidence_label=confidence_label,
             confidence=policy_out.confidence,

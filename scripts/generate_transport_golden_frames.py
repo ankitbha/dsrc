@@ -221,7 +221,7 @@ MESSAGES = [
         AdvisoryMessage(
             t_capture_mono_ns=1_000_000_005, rec_speed_mps=11.176,
             rec_speed_display=25.0, current_speed_display=27.5, units="mph",
-            headway_target_s=1.6, lane_text="Keep lane", merge_text="Normal driving",
+            headway_target_s=1.6,
             traffic_text="Moderate", confidence=0.87, confidence_label="high",
             action={
                 "desired_speed_bin": "nominal", "desired_headway_bin": "normal",

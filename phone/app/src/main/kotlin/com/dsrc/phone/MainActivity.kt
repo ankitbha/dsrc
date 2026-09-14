@@ -184,9 +184,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         speedLabel.text = "${advisory.recSpeedDisplay} ${advisory.units}"
-        adviceLabel.text = listOf(advisory.laneText, advisory.mergeText, advisory.trafficText)
-            .filter { it.isNotBlank() }
-            .joinToString("  \u00b7  ")
+        adviceLabel.text = advisory.trafficText
         confidenceLabel.text = advisory.confidenceLabel
     }
 

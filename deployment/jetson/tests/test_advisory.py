@@ -38,14 +38,12 @@ def test_slow_decode_floors_at_contextual_minimum() -> None:
     assert adv.recommended_speed_mps == 12.0  # max(12, 20 - 10)
 
 
-def test_headway_and_texts() -> None:
+def test_headway_decode() -> None:
     adv = AdvisoryDecoder().decode(
         policy_out(headway="largest", lane="prefer_left_if_safe", merge="create_gap"),
         obs_with(),
     )
     assert adv.headway_target_s == 3.0
-    assert "left" in adv.lane_text.lower()
-    assert "gap" in adv.merge_text.lower()
     assert adv.traffic_text == "Moderate"
 
 

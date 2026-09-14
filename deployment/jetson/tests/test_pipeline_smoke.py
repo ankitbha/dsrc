@@ -160,7 +160,6 @@ def test_pipeline_produces_aligned_observation_and_advisory(pipeline) -> None:
     assert obs["active_vehicle_count_local"] == 6
 
     assert tick.advisory.recommended_speed_mps >= 12.0
-    assert tick.advisory.lane_text
     assert tick.policy.action["desired_speed_bin"] in sim_contract.ACTION_VALUES["desired_speed_bin"]
 
 

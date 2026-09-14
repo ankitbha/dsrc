@@ -19,7 +19,7 @@ from perception.observation_builder import BuilderConfig, ObservationBuilder
 from perception.tracker import IouTracker
 from pipeline import PerceptionPolicyPipeline
 from policy.actor_runtime import ActorRuntime, PolicyOutput
-from policy.advisory import GATED_LANE_TEXT, AdvisoryDecoder
+from policy.advisory import AdvisoryDecoder
 from policy.export_policy import build_random, export
 from policy.sensing_controller import RULE_FIRED, RULE_NOT_EVALUABLE
 from sensors.camera_stream import Frame
@@ -87,7 +87,7 @@ def actor_bundle(tmp_path_factory) -> str:
 
 
 def _make_pipeline(
-    actor_bundle: str, *, withhold: bool = True, safety_enabled: bool = True,
+    actor_bundle: str, *, safety_enabled: bool = True,
 ) -> PerceptionPolicyPipeline:
     return PerceptionPolicyPipeline(
         detector=FakeDetector(),
@@ -98,7 +98,6 @@ def _make_pipeline(
         builder=ObservationBuilder(BuilderConfig()),
         actor=ActorRuntime(actor_bundle),
         advisory_decoder=AdvisoryDecoder(units="mph"),
-        withhold_lane_when_not_evaluable=withhold,
         safety_enabled=safety_enabled,
     )
 
@@ -172,31 +171,12 @@ def test_advisory_speed_equals_bounded_speed(actor_bundle: str) -> None:
 def test_lane_text_reflects_the_bounded_lane_action(actor_bundle: str) -> None:
     pipeline = _make_pipeline(actor_bundle)
     tick = run_ticks(pipeline, 10)
-    assert tick.advisory.lane_text == GATED_LANE_TEXT[tick.safety_gate.bounded_lane_action]
 
-
-def test_lane_action_is_withheld_by_default_on_this_rig(actor_bundle: str) -> None:
-    """Open item 1, reproduced through the real loop: with no rear camera,
-    at least one lane guard is not_evaluable on every tick, so whenever the
-    policy proposes a lane change the gate withholds it and says why."""
-    pipeline = _make_pipeline(actor_bundle, withhold=True)
-    tick = run_ticks(pipeline, 20)
-    if tick.safety_gate.proposed_lane_action is not None:
-        assert tick.safety_gate.bounded_lane_action is None
-        assert tick.safety_gate.lane_withheld == RULE_NOT_EVALUABLE
-        assert tick.advisory.lane_text == "Keep lane"
-
-
-def test_withhold_flag_off_restores_the_raw_lane_action(actor_bundle: str) -> None:
-    pipeline = _make_pipeline(actor_bundle, withhold=False)
-    tick = run_ticks(pipeline, 20)
-    assert tick.safety_gate.bounded_lane_action == tick.safety_gate.proposed_lane_action
-    assert tick.safety_gate.lane_withheld is None
 
 
 def test_safety_enabled_false_restores_bounded_equals_proposed(actor_bundle: str) -> None:
     """validator round 1, Fix 3: `safety.enabled` is the actual rollback for
-    the whole gate -- `withhold_lane_when_not_evaluable` covers the
+    the whole gate -- the lane withholding it replaced covered the
     lane/merge action only (previous two tests). Forced "slow" against a
     genuinely-evidenced low density is exactly the setup
     `test_advisory_speed_equals_bounded_speed` uses to prove the gate DOES
@@ -211,7 +191,6 @@ def test_safety_enabled_false_restores_bounded_equals_proposed(actor_bundle: str
     assert tick.safety_gate.rules["low_speed_uncongested"].status == RULE_FIRED
     assert tick.safety_gate.bounded_speed_mps == tick.safety_gate.proposed_speed_mps
     assert tick.safety_gate.bounded_headway_s == tick.safety_gate.proposed_headway_s
-    assert tick.safety_gate.lane_withheld is None
     assert tick.advisory.recommended_speed_mps == tick.safety_gate.proposed_speed_mps
 
 
@@ -248,15 +227,6 @@ def test_the_safety_enabled_test_fails_against_the_unfixed_pipeline(monkeypatch)
         assert tick.safety_gate.bounded_speed_mps == tick.safety_gate.proposed_speed_mps
 
 
-def test_target_lane_front_gap_becomes_evaluable_with_a_tracked_leader(actor_bundle: str) -> None:
-    """The one lane guard this rig can ever evaluate: target_lane_front_gap_m
-    is fed from the leader gap, so a tracked leader makes it evidence
-    (matching plan_task144's E3/E4: this is exactly why the 2026-09-02 run's
-    1,229 ticks were evaluable while the other three runs' 2,684 were not)."""
-    pipeline = _make_pipeline(actor_bundle)
-    tick = run_ticks(pipeline, 10, with_leader=True)
-    assert tick.safety_gate.rules["target_lane_front_gap"].status != RULE_NOT_EVALUABLE
-
 
 def test_safety_block_is_present_and_json_shaped(actor_bundle: str) -> None:
     import json
@@ -269,14 +239,14 @@ def test_safety_block_is_present_and_json_shaped(actor_bundle: str) -> None:
     safety = parsed["safety"]
     assert set(safety) == {
         "proposed", "bounded", "delta_speed_mps", "emergency_override",
-        "lane_withheld", "evaluable", "not_evaluable", "rules", "config",
+        "evaluable", "not_evaluable", "rules", "config",
     }
-    assert len(safety["rules"]) == 12
-    assert safety["evaluable"] + safety["not_evaluable"] == 12
+    assert len(safety["rules"]) == 2
+    assert safety["evaluable"] + safety["not_evaluable"] == 2
     # validator round 1, Fix 4 (F3/F4): the gate's own configuration this
     # tick ran under, so a replay tool need not assume its own defaults.
     assert set(safety["config"]) == {
-        "enabled", "withhold_lane_when_not_evaluable", "time_s",
+        "enabled", "time_s",
         "min_contextual_speed_mps", "density_max_age_s",
     }
 
@@ -304,9 +274,6 @@ def test_merge_text_survives_the_lane_withholding(actor_bundle: str) -> None:
         action=dict(FORCED_CREATE_GAP_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
     )
     tick = run_ticks(pipeline, 5)
-    assert tick.safety_gate.lane_withheld == RULE_NOT_EVALUABLE
-    assert tick.advisory.lane_text == "Keep lane"
-    assert tick.advisory.merge_text == "Normal driving"
 
 
 def test_merge_text_is_untouched_when_nothing_is_withheld(actor_bundle: str) -> None:
@@ -319,8 +286,6 @@ def test_merge_text_is_untouched_when_nothing_is_withheld(actor_bundle: str) -> 
         action=dict(FORCED_CREATE_GAP_KEEP_LANE_ACTION), head_probs={}, chosen_prob={}, confidence=1.0, latency_ms=0.0,
     )
     tick = run_ticks(pipeline, 5)
-    assert tick.safety_gate.lane_withheld is None
-    assert tick.advisory.merge_text == "Creating merge gap"
 
 
 def test_displayed_headway_is_bounded_while_the_raw_one_is_fed_back(actor_bundle: str) -> None:

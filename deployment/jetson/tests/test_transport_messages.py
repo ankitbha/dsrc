@@ -99,8 +99,7 @@ def an_advisory(**over):
     fields = dict(
         t_capture_mono_ns=666, rec_speed_mps=11.18, rec_speed_display=25.0,
         current_speed_display=27.5, units="mph", headway_target_s=1.6,
-        lane_text="Keep lane", merge_text="Normal driving", traffic_text="Moderate",
-        confidence=0.87, confidence_label="high",
+        traffic_text="Light", confidence=0.87, confidence_label="high",
         action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
                 "lane_preference": "keep", "merge_mode": "normal"},
     )
@@ -397,7 +396,6 @@ def test_a_wrong_json_type_is_refused():
         (Channel.CAMERA, a_camera_frame, "width", "1280"),
         (Channel.CAMERA, a_camera_frame, "format", 7),
         (Channel.HERE, a_here_response, "status", "200"),
-        (Channel.ADVISORY, an_advisory, "lane_text", 3),
         (Channel.RATE_CMD, a_rate_command, "shadow", "true"),
         (Channel.TELEMETRY, a_telemetry, "here_calls", "30"),
     ]
@@ -577,8 +575,7 @@ def test_the_advisory_bridge_works_against_the_real_advisory():
     advisory = Advisory(
         recommended_speed_mps=11.18, recommended_speed_display=25.0,
         current_speed_display=27.5, units="mph", headway_target_s=1.6,
-        lane_text="Keep lane", merge_text="Normal driving", traffic_text="Moderate",
-        confidence_label="high", confidence=0.87,
+        traffic_text="Light", confidence_label="high", confidence=0.87,
         action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
                 "lane_preference": "keep", "merge_mode": "normal"},
     )
@@ -1762,8 +1759,6 @@ REQUIRE_STR_FIELDS = [
     (Channel.HERE, a_here_response, "request_url"),
     (Channel.TELEMETRY, a_telemetry, "thermal_status"),
     (Channel.ADVISORY, an_advisory, "units"),
-    (Channel.ADVISORY, an_advisory, "lane_text"),
-    (Channel.ADVISORY, an_advisory, "merge_text"),
     (Channel.ADVISORY, an_advisory, "traffic_text"),
     (Channel.ADVISORY, an_advisory, "confidence_label"),
     (Channel.RATE_CMD, a_rate_command, "trigger"),
@@ -1829,7 +1824,10 @@ def test_every_required_field_of_each_helper_is_covered_above():
     }
     # Recorded, so a pattern that matches nothing is a failure and not a pass. These
     # are counts of *call sites the pattern must keep finding*, not of behaviours.
-    at_least = {"require_int": 9, "require_str": 9, "require_bool": 2}
+    # require_str fell from 9 to 7 when the advisory lost lane_text and merge_text
+    # with the lane advisory itself. Lowered deliberately: the point of the floor is
+    # that a pattern matching nothing fails, not that the count never changes.
+    at_least = {"require_int": 9, "require_str": 7, "require_bool": 2}
 
     for helper, covered in named.items():
         found = set()

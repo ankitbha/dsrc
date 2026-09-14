@@ -22,8 +22,6 @@ def _advisory(**over) -> Advisory:
         current_speed_display=20.0,
         units="mph",
         headway_target_s=1.6,
-        lane_text="Keep lane",
-        merge_text="Normal driving",
         traffic_text="Light",
         confidence_label="high",
         confidence=0.9,

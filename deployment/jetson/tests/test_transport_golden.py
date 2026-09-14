@@ -237,7 +237,6 @@ def test_no_message_case_contains_a_nan_token():
 def test_the_advisory_case_carries_both_the_display_text_and_the_action():
     case = next(c for c in MESSAGE_CASES if c["name"] == "message_advisory")
     header = json.loads(bytes.fromhex(case["header_hex"]).decode("utf-8"))
-    assert header["lane_text"] == "Keep lane"
     assert header["units"] == "mph"
     assert set(header["action"]) == {
         "desired_speed_bin", "desired_headway_bin", "lane_preference", "merge_mode",

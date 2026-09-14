@@ -82,7 +82,7 @@ DEFAULT_DENSITY_MAX_AGE_S = 4.0
 
 #: validator round 1, Fix 4: the five keys `safety.config` must carry for
 #: this tool to replay a tick's own recorded configuration rather than
-#: assuming its own defaults. F3's bug was `withhold_lane_when_not_evaluable`
+#: assuming its own defaults. F3's bug was a gate flag
 #: never being read back at all (this tool always replayed with the
 #: default True, so it could not read a run recorded with the flag off);
 #: F4's was reconstructing `time_s` as the tick's epoch `t_wall` when the
@@ -90,7 +90,7 @@ DEFAULT_DENSITY_MAX_AGE_S = 4.0
 #: invisible only because it reaches the record solely through
 #: `lane_change_dwell`, not_evaluable on every tick in this corpus.
 REQUIRED_SAFETY_CONFIG_KEYS: tuple[str, ...] = (
-    "enabled", "withhold_lane_when_not_evaluable", "time_s",
+    "enabled", "time_s",
     "min_contextual_speed_mps", "density_max_age_s",
 )
 
@@ -169,7 +169,7 @@ def score_ticks(
     # validator round 1, Fix 4: refuse up front, before anything is reported,
     # when a tick carries a `safety` block that predates this fix -- naming
     # the missing key rather than silently assuming a default for it (a
-    # `safety.config` that reads `withhold_lane_when_not_evaluable: false`
+    # `safety.config` that reads a disabled gate
     # is exactly the run this tool most needs to be able to read).
     for tick in ticks:
         _, missing_key = _tick_gate_config(tick)
@@ -201,7 +201,6 @@ def score_ticks(
         raised_deltas: list[float] = []
         lowered_deltas: list[float] = []
         emergency_ticks = 0
-        lane_withheld_ticks = 0
         event_counter: Counter = Counter()
 
         for tick in ticks:
@@ -220,7 +219,6 @@ def score_ticks(
                 tick_time_s = tick_config["time_s"]
                 tick_min_contextual_speed_mps = tick_config["min_contextual_speed_mps"]
                 tick_density_max_age_s = tick_config["density_max_age_s"]
-                tick_withhold = tick_config["withhold_lane_when_not_evaluable"]
                 tick_enabled = tick_config["enabled"]
             else:
                 tick_time_s = float(tick.get("t_wall", 0.0))
@@ -236,7 +234,7 @@ def score_ticks(
             action = _forced_action(tick["action"], forced_bin)
             result = run_safety_gate(
                 action, inputs, state, constraints,
-                withhold_lane_when_not_evaluable=tick_withhold, enabled=tick_enabled,
+                enabled=tick_enabled,
             )
 
             if arm_name == "recorded":
@@ -277,8 +275,6 @@ def score_ticks(
                     event_counter[f"safety_masked_action:{events['reason']}"] += 1
             if result.emergency_override:
                 emergency_ticks += 1
-            if result.lane_withheld is not None:
-                lane_withheld_ticks += 1
 
         all_deltas = raised_deltas + lowered_deltas
         arm_results[arm_name] = {
@@ -296,7 +292,6 @@ def score_ticks(
             "mean_lower_mps": (sum(lowered_deltas) / len(lowered_deltas)) if lowered_deltas else None,
             "events": dict(event_counter),
             "emergency_override_ticks": emergency_ticks,
-            "lane_withheld_ticks": lane_withheld_ticks,
         }
 
     if has_safety_block and replay_mismatches:
@@ -435,7 +430,6 @@ def render_report(result: dict[str, Any]) -> str:
         lines.append(
             f"  {arm_name}: {raise_clause}; {lower_clause}; "
             f"events={arm['events']}, emergency_override={arm['emergency_override_ticks']}, "
-            f"lane_withheld={arm['lane_withheld_ticks']}"
         )
     return "\n".join(lines)
 
