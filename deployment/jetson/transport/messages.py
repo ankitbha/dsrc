@@ -40,23 +40,6 @@ from transport.frames import RESERVED_EXTENSIONS, WIRE_STAMP_KEY
 
 CAPTURE_KEY = "t_capture_mono_ns"
 
-# Mirrored from policy/sim_contract.py, which is itself a vendored copy of the
-# simulation's action schema -- the edge runtime must not import the sim stack,
-# and the transport must not import policy. A test asserts this copy, that one
-# and specs/action_schema.md all agree.
-ACTION_HEADS: tuple[str, ...] = (
-    "desired_speed_bin",
-    "desired_headway_bin",
-    "lane_preference",
-    "merge_mode",
-)
-ACTION_VALUES: dict[str, tuple[str, ...]] = {
-    "desired_speed_bin": ("slow", "nominal", "fast"),
-    "desired_headway_bin": ("normal", "larger", "largest"),
-    "lane_preference": ("keep", "prefer_left_if_safe", "prefer_right_if_safe"),
-    "merge_mode": ("normal", "create_gap", "hold_lane"),
-}
-
 DISPLAY_UNITS: tuple[str, ...] = ("mph", "kmh", "mps")
 RATE_KEYS: tuple[str, ...] = ("camera_hz", "gps_hz", "imu_hz", "here_hz")
 DROP_KEYS: tuple[str, ...] = ("camera", "gps", "imu", "here")
@@ -198,7 +181,7 @@ def require_str(extensions: Mapping[str, Any], field: str) -> str:
     value = require(extensions, field)
     # Null before type, completing a fix that landed on require_int and require_bool and
     # missed this one. Nine string fields diverged from Kotlin because of it: camera
-    # `format`; advisory `units`, `lane_text`, `merge_text`, `traffic_text`,
+    # `format`; advisory `units`, `traffic_text`,
     # `confidence_label`; rate_cmd `trigger`; here `request_url`; telemetry
     # `thermal_status`.
     if value is None:
@@ -750,13 +733,7 @@ class AdvisoryMessage:
     rec_speed_display: float
     current_speed_display: float
     units: str
-    headway_target_s: float
-    lane_text: str
-    merge_text: str
     traffic_text: str
-    confidence: float
-    confidence_label: str
-    action: dict[str, str]
 
     CHANNEL: ClassVar[Channel] = Channel.ADVISORY
 
@@ -768,13 +745,7 @@ class AdvisoryMessage:
                 "rec_speed_display": to_wire_number(self.rec_speed_display),
                 "current_speed_display": to_wire_number(self.current_speed_display),
                 "units": self.units,
-                "headway_target_s": to_wire_number(self.headway_target_s),
-                "lane_text": self.lane_text,
-                "merge_text": self.merge_text,
                 "traffic_text": self.traffic_text,
-                "confidence": to_wire_number(self.confidence),
-                "confidence_label": self.confidence_label,
-                "action": {head: self.action[head] for head in ACTION_HEADS},
             },
             b"",
         )
@@ -785,49 +756,13 @@ class AdvisoryMessage:
         units = require_str(extensions, "units")
         if units not in DISPLAY_UNITS:
             raise MessageError(f"units {units!r} not one of {DISPLAY_UNITS}", REASON_UNKNOWN_VALUE)
-        action = require(extensions, "action")
-        if action is None:
-            # Same row of the table as every other required-but-null field. This check is
-            # inline rather than going through _nested_object -- `action`'s heads are a
-            # closed set, unlike the additive rate objects -- which is why the earlier fix
-            # to _nested_object did not reach it.
-            raise MessageError("action must not be null", REASON_NULL_NOT_ALLOWED)
-        if not isinstance(action, Mapping):
-            raise MessageError(
-                f"action is {type(action).__name__}, expected object", REASON_WRONG_TYPE
-            )
-        missing = [head for head in ACTION_HEADS if head not in action]
-        if missing:
-            raise MessageError(f"action missing {', '.join(missing)}", REASON_MISSING_FIELD)
-        unexpected = [head for head in action if head not in ACTION_HEADS]
-        if unexpected:
-            raise MessageError(
-                f"action has unexpected {', '.join(sorted(unexpected))}",
-                REASON_UNKNOWN_VALUE,
-            )
-        for head in ACTION_HEADS:
-            value = action[head]
-            if value not in ACTION_VALUES[head]:
-                raise MessageError(
-                    f"action.{head} is {value!r}, not one of {ACTION_VALUES[head]}",
-                    # A value outside a closed set, exactly like `units`, which
-                    # the spec gives an adjacent refusal row. Filed as a type
-                    # error, it was wrong in the case the counter exists for.
-                    REASON_UNKNOWN_VALUE,
-                )
         return cls(
             t_capture_mono_ns=require_capture(extensions),
             rec_speed_mps=require_number(extensions, "rec_speed_mps"),
             rec_speed_display=require_number(extensions, "rec_speed_display"),
             current_speed_display=require_number(extensions, "current_speed_display"),
             units=units,
-            headway_target_s=require_number(extensions, "headway_target_s"),
-            lane_text=require_str(extensions, "lane_text"),
-            merge_text=require_str(extensions, "merge_text"),
             traffic_text=require_str(extensions, "traffic_text"),
-            confidence=require_number(extensions, "confidence"),
-            confidence_label=require_str(extensions, "confidence_label"),
-            action={head: str(action[head]) for head in ACTION_HEADS},
         )
 
 
@@ -1153,24 +1088,21 @@ def gps_record_from_fix(fix: Any, t_capture_mono_ns: int) -> GpsRecord:
 
 
 def advisory_message_from_advisory(advisory: Any, t_capture_mono_ns: int) -> AdvisoryMessage:
-    """An AdvisoryMessage from anything shaped like policy.advisory.Advisory."""
+    """An AdvisoryMessage from anything carrying a recommended speed.
+
+    The advisory is a speed. There is no headway head, no lane or merge head,
+    and no calibrated confidence: the controller is a deterministic argmax over
+    three speed fractions, so a confidence field would have had no source and is
+    not carried rather than invented.
+    """
     return AdvisoryMessage(
         t_capture_mono_ns=int(t_capture_mono_ns),
         rec_speed_mps=float(advisory.recommended_speed_mps),
         rec_speed_display=float(advisory.recommended_speed_display),
         current_speed_display=float(advisory.current_speed_display),
         units=str(advisory.units),
-        headway_target_s=float(advisory.headway_target_s),
-        lane_text=str(advisory.lane_text),
-        merge_text=str(advisory.merge_text),
         traffic_text=str(advisory.traffic_text),
-        confidence=float(advisory.confidence),
-        confidence_label=str(advisory.confidence_label),
-        action={head: str(advisory.action[head]) for head in ACTION_HEADS},
     )
-
-
-# -- routing -----------------------------------------------------------------
 
 
 @dataclass

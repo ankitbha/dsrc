@@ -1,0 +1,48 @@
+id: eidm_reaction
+kind: human_model
+description: >-
+  SUMO's Extended IDM with a one-second driver reaction time. Used wherever the capacity
+  drop matters, because it is the only fleet measured here that has one.
+
+# WHY THIS REPLACES w99_calibrated ON SUMO. The SRC paper's Appendix A calibration is a
+# faithful transcription of what its Vissim runs used, and on SUMO it does not reproduce
+# the phenomenon the paper's mechanism depends on. Measured at a two-into-one lane drop
+# with the restriction in place and demand swept from below capacity to four times it,
+# W99 serves a flat 930 to 976 veh/h whatever is offered. Its queues discharge FASTER
+# than free-flowing traffic at capacity -- 1,980 veh/h against 1,899 -- because a
+# discharging W99 platoon is perfectly regular at the model's tightest headway while
+# free flow at capacity has spread in speeds and gaps. Real queue discharge is 5 to 20%
+# BELOW capacity. Neither startupDelay at 0, 1 or 2 s, nor reaction time, nor a lane
+# drop, nor a metered exit changed it.
+#
+# A bottleneck sets the LEVEL of throughput and does not make throughput fall with
+# density, so under W99 every network tried here -- Mainz, inverted_tree, a straight
+# road with a lane drop -- served a constant, and a density-holding controller cannot
+# recover a constant.
+#
+# WHAT THIS FLEET MEASURES, five seeds, same lane drop, two-standard-error bars:
+#
+#   offered   1600   1800   2000   2200   2600   3000   3600
+#   served    1603   1798   2018   1668   1602   1619   1595
+#   +/-2se      10     29     26    161     42     98     91
+#
+# Free-flow capacity 2,018 veh/h/lane, queue discharge about 1,600, a fall of 423 veh/h
+# or 21.0% against a combined bar of 95 -- resolved rather than noise. Both figures are
+# closer to reality than W99's: real single-lane capacity is 2,000 to 2,400 veh/h and
+# real queue discharge 1,700 to 2,000, where W99 at CC1 = 2.5 gives 950.
+#
+# PROVENANCE. These are SUMO defaults for EIDM plus a stated reaction time. They are not
+# calibrated against measured traffic and are not the paper's. The reason for the choice
+# is the table above and nothing else.
+sumo:
+  car_following_model: EIDM
+  # Standstill gap. 0.5 m, which the paper's CC0 sets, puts drivers half a metre apart
+  # when stopped; 2.5 m is SUMO's default and nearer what people leave.
+  min_gap_m: 2.5
+  # Desired time headway. With minGap it sets capacity: 2,018 veh/h/lane measured.
+  tau: 1.0
+  # THE REACTION TIME, and the parameter that creates the capacity drop. It is the
+  # interval at which a driver re-decides, against the 0.5 s physics step. At the
+  # default the two are equal and drivers respond instantly, which is what lets a queue
+  # discharge as a perfect platoon. Without this EIDM's drop is 10.9% instead of 21.0%.
+  actionStepLength: 1.0

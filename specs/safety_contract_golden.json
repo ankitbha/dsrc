@@ -1,0 +1,51 @@
+{
+  "_comment": "Golden reference for src/safety/ (SafetyConstraints, SafetyContext), frozen for task 144 (deployment/jetson/policy/safety_gate.py). deployment/jetson/tests/test_safety_contract.py checks the vendored copy against this file unconditionally; tests/test_safety_contract_matches_golden.py checks src/safety/ the same way. A change on either side must edit this file, which then shows in a diff.",
+  "safety_constraints": {
+    "uncongested_density_threshold_veh_per_km": 12.0,
+    "low_speed_free_flow_delta_mps": 8.0,
+    "min_front_gap_m": 5.0,
+    "min_forward_ttc_s": 2.0,
+    "emergency_decel_mps2": 6.0,
+    "speed_control_kp": 0.6,
+    "max_accel_mps2": 2.0,
+    "max_decel_mps2": 3.0
+  },
+  "safety_context_fields": [
+    {
+      "name": "ego_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "free_flow_speed_mps",
+      "has_default": true,
+      "default": 30.0
+    },
+    {
+      "name": "local_density_veh_per_km",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "leader_gap_m",
+      "has_default": true,
+      "default": Infinity
+    },
+    {
+      "name": "leader_relative_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    },
+    {
+      "name": "merge_conflict_gap_m",
+      "has_default": true,
+      "default": Infinity
+    },
+    {
+      "name": "merge_conflict_relative_speed_mps",
+      "has_default": true,
+      "default": 0.0
+    }
+  ],
+  "hash": "b405304d1c65a663"
+}

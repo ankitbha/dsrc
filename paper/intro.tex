@@ -1,0 +1,96 @@
+\section{Introduction}
+\label{sec:intro}
+
+A free-flow road network can jam without a crash and without a fixed bottleneck.
+A small burst of inflow pushes local density past a critical value, flow on the
+affected links falls, and the queue then feeds itself until the demand drains
+away~\cite{bhardwaj2023understanding,sugiyama2008traffic}. The fundamental
+diagram states the same fact as a curve: flow rises with density to a critical
+point and falls after it~\cite{greenshields1935study,lighthill1955kinematic,richards1956shock}.
+A controller that holds density below that point therefore protects
+throughput, and it does not need to know anything about the rest of the network
+to do so.
+
+Earlier work introducing self-regulating cars built such a controller and
+measured it. We divided the Mainz highway network into twelve
+super-segments, learned a policy that assigns each super-segment a
+desired speed, and applied that speed to the vehicles on it. In PTV Vissim the
+policy raised throughput by 5\% and cut average delay by 13\% against no
+control~\cite{self_regulating_cars}. The result holds at partial adoption and
+improves as the controlled fraction grows. Its deployment model is centralized.
+A central coordinator collects the network state, computes the action, and
+sends every participating vehicle its desired speed.
+
+This work is not the first to propose a vehicle-side traffic controller.
+Learned controllers that smooth mixed-autonomy
+traffic have been studied for years, and they report gains at low penetration
+in microscopic
+simulators~\cite{wu2017flow,vinitsky2018benchmarks,kreidieh2018dissipating}.
+Deployment, on the other hand, is generally treated
+as an engineering detail rather than as a research question, and what it would
+cost goes unreported, except for a few exceptions~\cite{stern2018dissipation,lee2024traffic}.
+
+This paper tackles deploying self-regulating cars as its central question.
+Two properties of the centralized model make its deployment costly. The first is the
+observation. The policy reads six features per super-segment, and four of them
+come from vehicle-level ground truth that a vehicle cannot easily obtain in reality. 
+The second property is the
+cloud coordinator. It has to be built, paid for, kept available, and trusted,
+and it sits inside the control loop.
+
+Ease of adoption is decided by the size of the change. 
+The controller's benefit grows with the fraction of vehicles carrying
+it. This fraction is therefore the quantity a deployment design has to
+maximise. Anything that raises the cost of one installation lowers it. A
+purpose-built vehicle~\cite{lee2024traffic}, a roadside
+sensor~\cite{arnold1998ramp,papageorgiou2002freeway} and a per-vehicle service
+contract~\cite{self_regulating_cars} each put a floor under that cost, and
+each has been part of a previous design. The target here is the opposite. It
+is the least that has to be added to a vehicle that already exists.
+We call this target the minimum viable deployment, and discuss it in 
+Section~\ref{sec:vision}. The answer has four parts: an
+ordinary Android phone, one single-board computer, a traffic API, and a filter
+that bounds the advisory before it is displayed. The computer is an NVIDIA
+Jetson Orin Nano developer kit, which lists at about
+US\$250~\cite{nvidia2025orinnano}. The phone used for the drives reported here
+is a OnePlus Nord N10 (2021 model), which is a mid-range handset rather than a flagship.
+Neither part is purpose-built, nothing is installed on the road, and no server
+has to be hosted. 
+
+The division of labour inside the rig is as follows: the
+phone captures and forwards, the Jetson interprets and decides. Nothing is
+wired to the throttle, the brakes, the steering or the vehicle bus. The only
+connection to the vehicle is a 12\,V power lead, so the installation changes
+no system the vehicle already depends on. 
+
+\noindent\textbf{Scope of the work.}
+No advisory this project computed has ever been acted on. On every drive, the
+human drove without interfere while the Jetson rendered a
+recommended speed on the phone's display. There are two independent
+reasons for this. An experiment in which an advisory
+influences a human driver requires approval from an institutional review board,
+which this project does not hold. One instrumented vehicle also cannot produce a
+flow effect, so a compliance experiment on a single car would establish nothing
+about throughput or delay. In this paper ``deployed'' means that the system ran
+on a road and computed its outputs there. It does not mean that the recommendations 
+were acted on. The flow-level claim is made in simulation for the same reason.
+
+\noindent\textbf{Contributions.}
+\begin{itemize}[leftmargin=1.2em,itemsep=1pt,topsep=2pt]
+\item A vehicle-side realization of the self-regulating-cars controller, built
+from commodity parts, with a sensing scheduler that sets the sampling rate of every sensor at run
+time rather than fixing it at install time (Sections~\ref{sec:vision}
+and~\ref{sec:architecture}).
+\item A measured account of that system running on a road: eight drives with a total 
+of 152.8 minutes on vehicle power, with per-stage timing and
+field provenance recorded (Section~\ref{sec:eval}).
+\item The experiences that deployment produced, reported in the same section.
+The phone overheated on the road, from its own load and from sunlight on the
+windscreen, and a ninety-degree camera rotation sent perception to offline
+processing for the whole campaign.
+\item A flow-level measurement of the observation change. On a SUMO port of the
+same Mainz network, a policy restricted to the five fields a traffic API returns
+gains $230 \pm 44$\,veh/h over no control, and the original six-feature policy
+gains $224 \pm 61$\,veh/h (Section~\ref{sec:simulation}).
+\end{itemize}
+

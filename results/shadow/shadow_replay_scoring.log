@@ -1,0 +1,166 @@
+# Verbatim score_shadow.py output for all eight 2026-09-08 drives
+
+########## run_20260908_142253 ##########
+[score_shadow] /Users/ankit_nash/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_20260908_142253
+  ticks: 1632 (unparseable lines: 0)
+  log_truncation: recorded=1632 scored=1632 missing=0
+  tick_coverage: actual=1632 absent_from_log=0 never_produced=5333
+  replay_identity: ok (0/1632 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=1632 contaminated=0 first_live_tick_id=None
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=['feed_congestion', 'source_disagreement']
+    reference_rates_hold=True
+  reference_witness (reference segment): 1630 ticks with achieved, 2 with no telemetry, 333 reports, 0 stale
+  RULE NEVER EXERCISED (log-wide): source_disagreement (all 1632 ticks, missing={'feed_congestion': 1632})
+    why: {'camera_density_bin_source': {'derived_empty': 1632}, 'camera_last_detection_age_s': {None: 1632}, 'feed_declined': {'feed_outcome': 1632}}
+  input_provenance: ego_acceleration {'fallback_neutral': 43, 'derived': 1589}
+  input_provenance: ego_speed {'fallback_neutral': 37, 'measured_converted': 1595}
+  input_provenance: camera_density_bin {'derived_empty': 1632}
+SCORE_SHADOW EXIT: 0
+
+########## run_20260908_144642 ##########
+[score_shadow] /Users/ankit_nash/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_20260908_144642
+  ticks: 2390 (unparseable lines: 0)
+  log_truncation: recorded=2390 scored=2390 missing=0
+  tick_coverage: actual=2390 absent_from_log=0 never_produced=58
+  replay_identity: ok (0/2390 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=2390 contaminated=0 first_live_tick_id=None
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=['feed_congestion', 'source_disagreement']
+    reference_rates_hold=True
+  reference_witness (reference segment): 2387 ticks with achieved, 3 with no telemetry, 467 reports, 0 stale
+  RULE NEVER EXERCISED (log-wide): source_disagreement (all 2390 ticks, missing={'feed_congestion': 2390})
+    why: {'camera_density_bin_source': {'derived_empty': 2390}, 'camera_last_detection_age_s': {None: 2390}, 'feed_declined': {'feed_outcome': 2390}}
+  input_provenance: ego_acceleration {'fallback_neutral': 4, 'derived': 2386}
+  input_provenance: ego_speed {'fallback_neutral': 2, 'measured_arrival_proxy': 20, 'measured_converted': 2368}
+  input_provenance: camera_density_bin {'derived_empty': 2390}
+SCORE_SHADOW EXIT: 0
+
+########## run_20260908_155910 ##########
+[score_shadow] /Users/ankit_nash/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_20260908_155910
+  ticks: 3421 (unparseable lines: 0)
+  log_truncation: recorded=3421 scored=3421 missing=0
+  tick_coverage: actual=3421 absent_from_log=0 never_produced=360
+  replay_identity: ok (0/3421 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=3421 contaminated=0 first_live_tick_id=None
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=['feed_congestion', 'source_disagreement']
+    reference_rates_hold=True
+  reference_witness (reference segment): 3421 ticks with achieved, 0 with no telemetry, 708 reports, 0 stale
+  RULE NEVER EXERCISED (log-wide): source_disagreement (all 3421 ticks, missing={'feed_congestion': 3421})
+    why: {'camera_density_bin_source': {'derived_empty': 3421}, 'camera_last_detection_age_s': {None: 3421}, 'feed_declined': {'feed_outcome': 3421}}
+  input_provenance: ego_acceleration {'fallback_neutral': 6, 'derived': 3415}
+  input_provenance: ego_speed {'measured_converted': 3419, 'fallback_neutral': 2}
+  input_provenance: camera_density_bin {'derived_empty': 3421}
+SCORE_SHADOW EXIT: 0
+
+########## run_20260908_173809 ##########
+[score_shadow] /Users/ankit_nash/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_20260908_173809
+  ticks: 2103 (unparseable lines: 0)
+  log_truncation: recorded=2103 scored=2103 missing=0
+  tick_coverage: actual=2103 absent_from_log=0 never_produced=18
+  replay_identity: ok (0/2103 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=2103 contaminated=0 first_live_tick_id=None
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=['feed_congestion', 'source_disagreement']
+    reference_rates_hold=True
+  reference_witness (reference segment): 2103 ticks with achieved, 0 with no telemetry, 411 reports, 0 stale
+  RULE NEVER EXERCISED (log-wide): source_disagreement (all 2103 ticks, missing={'feed_congestion': 2103})
+    why: {'camera_density_bin_source': {'derived_empty': 2102, 'derived': 1}, 'camera_last_detection_age_s': {'min': 0.0, 'median': 174.601, 'max': 350.369, 'none': 362}, 'feed_declined': {'feed_outcome': 2103}}
+  input_provenance: ego_acceleration {'fallback_neutral': 13, 'derived': 2090}
+  input_provenance: ego_speed {'fallback_neutral': 7, 'measured_converted': 2096}
+  input_provenance: camera_density_bin {'derived_empty': 2102, 'derived': 1}
+SCORE_SHADOW EXIT: 0
+
+########## run_20260908_183538 ##########
+[score_shadow] /Users/ankit_nash/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_20260908_183538
+  ticks: 386 (unparseable lines: 1)
+  tick_coverage: actual=386 absent_from_log=0 never_produced=5
+  replay_identity: ok (0/386 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=386 contaminated=0 first_live_tick_id=None
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=['feed_congestion', 'source_disagreement']
+    reference_rates_hold=True
+  reference_witness (reference segment): 384 ticks with achieved, 2 with no telemetry, 76 reports, 0 stale
+  RULE NEVER EXERCISED (log-wide): source_disagreement (all 386 ticks, missing={'feed_congestion': 386})
+    why: {'camera_density_bin_source': {'derived_empty': 386}, 'camera_last_detection_age_s': {None: 386}, 'feed_declined': {'feed_outcome': 386}}
+  input_provenance: ego_acceleration {'fallback_neutral': 15, 'derived': 371}
+  input_provenance: ego_speed {'fallback_neutral': 11, 'measured_converted': 375}
+  input_provenance: camera_density_bin {'derived_empty': 386}
+SCORE_SHADOW EXIT: 0
+
+########## run_20260908_190548 ##########
+[score_shadow] /Users/ankit_nash/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_20260908_190548
+  ticks: 8016 (unparseable lines: 0)
+  log_truncation: recorded=8016 scored=8016 missing=0
+  tick_coverage: actual=8016 absent_from_log=0 never_produced=233
+  replay_identity: ok (0/8016 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=8016 contaminated=0 first_live_tick_id=None
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=['feed_congestion', 'source_disagreement']
+    reference_rates_hold=True
+  reference_witness (reference segment): 8009 ticks with achieved, 7 with no telemetry, 1560 reports, 0 stale
+  input_provenance: ego_acceleration {'fallback_neutral': 40, 'derived': 7976}
+  input_provenance: ego_speed {'fallback_neutral': 26, 'measured_converted': 7926, 'measured_arrival_proxy': 64}
+  input_provenance: camera_density_bin {'derived_empty': 8015, 'derived': 1}
+SCORE_SHADOW EXIT: 0
+
+########## run_20260908_161422 ##########
+[score_shadow] /Users/ankit_nash/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_20260908_161422
+  ticks: 2555 (unparseable lines: 0)
+  log_truncation: recorded=2555 scored=2555 missing=0
+  tick_coverage: actual=2555 absent_from_log=0 never_produced=1398
+  replay_identity: ok (0/2555 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=0 contaminated=2555 first_live_tick_id=0
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=[]
+    reference_rates_hold=False
+  reference_witness (contaminated segment): 2553 ticks with achieved, 2 with no telemetry, 1641 reports, 0 stale
+  input_provenance: ego_acceleration {'fallback_neutral': 6, 'derived': 2549}
+  input_provenance: ego_speed {'fallback_neutral': 4, 'measured_converted': 2551}
+  input_provenance: camera_density_bin {'derived_empty': 2555}
+SCORE_SHADOW EXIT: 0
+
+########## run_20260908_170849 ##########
+[score_shadow] /Users/ankit_nash/Desktop/ankit_summer_2026/dsrc_drive_data_20260908/run_20260908_170849
+  ticks: 2426 (unparseable lines: 0)
+  log_truncation: recorded=2426 scored=2426 missing=0
+  tick_coverage: actual=2426 absent_from_log=0 never_produced=16
+  replay_identity: ok (0/2426 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=0 contaminated=2426 first_live_tick_id=0
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=[]
+    reference_rates_hold=False
+  reference_witness (contaminated segment): 2426 ticks with achieved, 0 with no telemetry, 1560 reports, 0 stale
+  input_provenance: ego_acceleration {'fallback_neutral': 115, 'derived': 2311}
+  input_provenance: ego_speed {'fallback_neutral': 113, 'measured_converted': 2313}
+  input_provenance: camera_density_bin {'derived_empty': 2426}
+SCORE_SHADOW EXIT: 0
+
+
+
+# CONTROL THAT FIRED (policy_margin forced across its threshold)
+
+[score_shadow] /private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/74a3b6a3-b76c-4322-9224-4a3f73d81187/scratchpad/ctrl_run2
+  ticks: 1632 (unparseable lines: 0)
+  tick_coverage: actual=1632 absent_from_log=0 never_produced=5333
+  replay_identity: failed (1632/1632 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+    first mismatch: {'tick_id': 0, 'keys': ['rules_fired', 'reasons', 'attribution']}
+
+
+# CONTROL THAT DID NOT FIRE (ego_speed rounded)
+
+[score_shadow] /private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/74a3b6a3-b76c-4322-9224-4a3f73d81187/scratchpad/ctrl_run
+  ticks: 1632 (unparseable lines: 0)
+  tick_coverage: actual=1632 absent_from_log=0 never_produced=5333
+  replay_identity: ok (0/1632 mismatched, 9 keys compared, 6 log-only: ['advisory_sent', 'command_sent', 'decision_inputs', 'reference', 'send_reason', 'shadow'])
+  segments: reference=1632 contaminated=0 first_live_tick_id=None
+  limits: shadow_predicts='the decision function, not the trajectory'
+    structurally_absent=['feed_congestion', 'source_disagreement']
+    reference_rates_hold=True
+  reference_witness (reference segment): 1630 ticks with achieved, 2 with no telemetry, 333 reports, 0 stale
+  RULE NEVER EXERCISED (log-wide): source_disagreement (all 1632 ticks, missing={'feed_congestion': 1632})
+    why: {'camera_density_bin_source': {'derived_empty': 1632}, 'camera_last_detection_age_s': {None: 1632}, 'feed_declined': {'feed_outcome': 1632}}
+  input_provenance: ego_acceleration {'fallback_neutral': 43, 'derived': 1589}
+  input_provenance: ego_speed {'fallback_neutral': 37, 'measured_converted': 1595}
+  input_provenance: camera_density_bin {'derived_empty': 1632}

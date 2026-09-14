@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from perception.observation_builder import OBS_FIELDS
+
 from eval_run import (
     GATE_TICK_COVERAGE_MISSING_FRACTION,
     _failure_lines,
@@ -25,13 +27,35 @@ RATE_HZ = 30.0
 #: recorded before per-tick timebase.source existed, which is its own test.
 _TIMEBASE_AUTO = object()
 
+#: Same distinction for the advisory: the default is the ordinary tick, on a
+#: super-segment, with a recommendation. `advisory=None` is the other real
+#: case -- a rig off its policy's network -- and is what the axis has to count
+#: rather than skip.
+_ADVISORY_AUTO = object()
+
+
+def an_advisory(*, action_index: int = 2, segment_id: str = "0",
+                withheld: bool = False) -> dict:
+    """One tick's advisory record, as `Tick._advisory_record()` writes it."""
+    return {
+        "segment_id": segment_id,
+        "action_index": action_index,
+        "recommended_speed_mps": 24.0,
+        "recommended_speed_display": 53.7,
+        "units": "mph",
+        "speed_display_withheld": withheld,
+    }
+
 
 def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
               gps_fresh=True, leader_rel_measured=True, jetson_ms=None,
               link_ms=None, timebase_source=_TIMEBASE_AUTO, proxy_reason=None,
-              field_sources=None, missingness=0.3) -> dict:
+              field_sources=None, missingness=0.3,
+              advisory=_ADVISORY_AUTO) -> dict:
     has_leader = leader_gap is not None
     gap = leader_gap if has_leader else float("inf")
+    if advisory is _ADVISORY_AUTO:
+        advisory = an_advisory()
     if timebase_source is _TIMEBASE_AUTO:
         # A real Tick always carries a timebase dict whenever link_ms is not
         # None (link_ms comes FROM frame.timebase.link_s), and round_trip is
@@ -82,11 +106,7 @@ def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
             "gps_fresh": gps_fresh,
             "leader_track_id": 1 if has_leader else None,
         },
-        "action": {"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                   "lane_preference": "keep", "merge_mode": "normal"},
-        "advisory": {"recommended_speed_mps": 24.0, "recommended_speed_display": 53.7,
-                     "units": "mph", "headway_target_s": 1.6, "lane_text": "keep lane",
-                     "merge_text": "normal", "confidence_label": "low"},
+        "advisory": advisory,
         "gps": {"valid": gps_fresh, "lat": 39.0, "lon": -77.0,
                 "speed_mps": ego_speed, "heading_deg": 105.0, "num_sats": 10, "hdop": 0.8},
         "n_peers": 0,
@@ -138,6 +158,73 @@ def test_healthy_run_passes_all_gates(tmp_path):
     assert result["perception"]["leader_rel_speed_measured_fraction"] == 1.0
     assert all(g["pass"] in (True, None) for g in result["gates"].values())
     assert result["overall_pass"]
+
+
+class TestTheAdvisoryAxis:
+    """What the advisory axis counts, now that the advisory is one speed.
+
+    The four-head distribution and the confidence-label histogram are gone
+    along with the 39-field actor. What replaces them is the ego super-segment
+    row: which action index it carried, how often that changed, and which
+    segments the drive was actually on.
+    """
+
+    def test_it_counts_the_ticks_that_had_no_advisory_rather_than_skipping_them(self, tmp_path):
+        # Ten ticks off the policy's network, eighty on it. A statistic over
+        # the eighty alone cannot tell this drive from a ninety-tick one.
+        ticks = [make_tick(i, advisory=None) for i in range(10)]
+        ticks += [make_tick(i) for i in range(10, 90)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+
+        advisory = result["advisory"]
+        assert advisory["ticks_with_an_advisory"] == 80
+        assert advisory["ticks_with_no_advisory"] == 10
+        assert advisory["recommended_speed_mps"]["n"] == 80
+
+    def test_a_drive_with_no_advisory_at_all_is_not_a_crash(self, tmp_path):
+        ticks = [make_tick(i, advisory=None) for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+
+        advisory = result["advisory"]
+        assert advisory["ticks_with_an_advisory"] == 0
+        assert advisory["recommended_speed_mps"]["n"] == 0
+        assert advisory["action_index"]["distribution"] == {}
+        assert advisory["ego_segments"] == {}
+        # The report has to render from this, not just the dict survive.
+        render_markdown(result, [])
+
+    def test_the_action_index_distribution_and_switch_count(self, tmp_path):
+        # Alternating every tick at 30 Hz: 59 switches across 60 ticks, over
+        # the 59/30 s the first and last tick are apart. `result["duration_s"]`
+        # is rounded for the report, so the rate is derived from the schedule
+        # this test wrote rather than read back out of the rounded number.
+        ticks = [make_tick(i, advisory=an_advisory(action_index=i % 2)) for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+
+        index = result["advisory"]["action_index"]
+        assert index["n"] == 60
+        assert index["distribution"] == {"0": 0.5, "1": 0.5}
+        elapsed_s = 59 / RATE_HZ
+        assert index["switches_per_minute"] == pytest.approx(59 / (elapsed_s / 60.0))
+
+    def test_a_held_action_records_no_switches(self, tmp_path):
+        """The control for the test above: the same shape with nothing
+        changing must read zero, or the switch count is measuring the loop
+        rather than the decision."""
+        ticks = [make_tick(i) for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+        assert result["advisory"]["action_index"]["switches_per_minute"] == 0.0
+
+    def test_a_withheld_speed_number_is_counted(self, tmp_path):
+        ticks = [make_tick(i, advisory=an_advisory(withheld=i < 7)) for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+        assert result["advisory"]["speed_display_withheld"] == 7
+
+    def test_the_ego_segments_the_drive_was_on(self, tmp_path):
+        ticks = [make_tick(i, advisory=an_advisory(segment_id="0" if i < 20 else "3"))
+                 for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+        assert result["advisory"]["ego_segments"] == {"0": 20, "3": 40}
 
 
 def test_latency_gate_fails_on_slow_run(tmp_path):
@@ -1621,9 +1708,9 @@ class TestStageTimings:
 
 
 def _grounded_field_sources() -> dict:
-    """A real 39-key `field_sources` map, produced by the actual builder --
-    not hand-typed, so this fixture cannot drift from what
-    `ObservationBuilder` actually emits.
+    """A real `field_sources` map, produced by the actual builder -- not
+    hand-typed, so this fixture cannot drift from what `ObservationBuilder`
+    actually emits.
     """
     from perception.observation_builder import BuilderConfig, ObservationBuilder
     from sensors.gps_reader import GpsFix
@@ -1639,17 +1726,17 @@ def _grounded_field_sources() -> dict:
 
 
 class TestObservationProvenance:
-    """`observation`'s four new keys, computed from each tick's own
+    """`observation`'s four keys, computed from each tick's own
     `field_sources` -- which every log back to the beginning carries, so an
     old, 1-key fixture reports `covers_encoder: False` rather than crashing
-    (the `jetson_ms_source` precedent), and a full 39-key one reports the
-    real rollup.
+    (the `jetson_ms_source` precedent), and a map of either known shape
+    reports the real rollup.
     """
 
-    def test_a_pre_task_36_style_fixture_reports_covers_encoder_false(self, tmp_path):
-        # `make_tick`'s own default `field_sources` is a single key -- never
-        # the full 33- or 39-field map -- which is exactly the shape a log
-        # missing this task's coverage takes.
+    def test_a_pre_task_36_style_fixture_reports_covers_obs_false(self, tmp_path):
+        # `make_tick`'s own default `field_sources` is a single key -- neither
+        # known shape -- which is exactly what a log missing this coverage
+        # takes.
         ticks = [make_tick(i) for i in range(10)]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
@@ -1657,13 +1744,13 @@ class TestObservationProvenance:
         assert obs["covers_encoder"] is False
         assert obs["provenance_fields"] == 1
 
-    def test_a_full_map_reports_covers_encoder_true_and_by_source_sums_to_one(self, tmp_path):
+    def test_a_full_map_reports_covers_obs_true_and_by_source_sums_to_one(self, tmp_path):
         sources = _grounded_field_sources()
         ticks = [make_tick(i, field_sources=sources) for i in range(10)]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
         obs = result["observation"]
-        assert obs["provenance_fields"] == 39
+        assert obs["provenance_fields"] == len(OBS_FIELDS) == 7
         assert obs["covers_encoder"] is True
         # Each class's fraction is independently rounded to three places, so
         # the sum is close to but not always exactly 1.0.
@@ -1685,9 +1772,24 @@ class TestObservationProvenance:
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
         report = render_markdown(result, [])
-        assert "provenance covers 39 of 39 encoder slots" in report
+        assert "provenance covers 7 of 7 observation fields" in report
         assert "by source:" in report
         assert "local_density_bin" in report
+
+    def test_a_legacy_39_field_map_still_reports_full_coverage(self, tmp_path):
+        """Every drive in the recorded corpus was written under the 39-slot
+        shape, and this tool has to keep reporting them. A run recorded then
+        is not a run with a broken provenance map."""
+        from eval_run import LEGACY_ENCODER_SLOTS
+
+        legacy = {name: "fallback_neutral" for name in LEGACY_ENCODER_SLOTS}
+        legacy["ego_speed"] = "measured"
+        ticks = [make_tick(i, field_sources=legacy) for i in range(5)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        assert result["observation"]["provenance_fields"] == 39
+        assert result["observation"]["covers_encoder"] is True
+        assert "provenance covers 39 of 39 observation fields" in render_markdown(result, [])
 
     def test_a_pre_task_36_style_fixture_still_renders_a_report(self, tmp_path):
         # Does not crash on the shape every pre-task-36 log has, and states
@@ -1697,7 +1799,7 @@ class TestObservationProvenance:
         result = analyze(run_dir)
         report = render_markdown(result, [])
         assert "encoder-field missingness" in report
-        assert "provenance covers 1 of 39 encoder slots" in report
+        assert "provenance covers 1 of 7 observation fields" in report
 
     def test_a_mixed_run_reports_the_mixture_instead_of_the_first_ticks_size(self, tmp_path):
         # `by_source` pools every tick's `field_sources` regardless of its
@@ -1714,20 +1816,20 @@ class TestObservationProvenance:
         assert obs["provenance_fields_mixed"] is True
         assert obs["covers_encoder"] is False
         # Pins the "first tick" half of the name: the 1-key ticks are first,
-        # so this is 1, not 39 (the last tick's size) and not 5 (the number
+        # so this is 1, not 7 (the last tick's size) and not 2 (the number
         # of distinct sizes) -- `render_markdown` below prints this number
         # as "first tick has {pf}", and nothing else makes that sentence true.
         assert obs["provenance_fields"] == 1
 
     def test_the_mixed_guard_still_refuses_coverage_with_the_full_map_first(self, tmp_path):
-        # Same mixture as above, reordered: the 39-key ticks come first this
+        # Same mixture as above, reordered: the full-map ticks come first this
         # time. `covers_encoder` must still be False -- a run whose maps are
         # not all the same size is not a run with settled coverage, whichever
         # tick happens to be first. (With the 1-key ticks first, the union of
-        # every name ever seen already equals the full 39-name set, because
-        # that one key is itself one of the 39 -- so this order is the one
-        # that actually exercises the mixed short-circuit rather than passing
-        # by coincidence.)
+        # every name ever seen already equals the full name set, because that
+        # one key is itself one of them -- so this order is the one that
+        # actually exercises the mixed short-circuit rather than passing by
+        # coincidence.)
         sources = _grounded_field_sources()
         ticks = (
             [make_tick(i, field_sources=sources) for i in range(5)]
@@ -1738,21 +1840,21 @@ class TestObservationProvenance:
         obs = result["observation"]
         assert obs["provenance_fields_mixed"] is True
         assert obs["covers_encoder"] is False
-        assert obs["provenance_fields"] == 39
+        assert obs["provenance_fields"] == len(OBS_FIELDS)
 
-    def test_covers_encoder_is_false_on_a_same_size_name_swap(self, tmp_path):
-        # The defect `_covers_encoder` was written to catch, reproduced at
-        # the surface an operator reads: a map the same SIZE as the full
-        # contract but not the same set of NAMES is not coverage. Deleting
-        # "ego_speed" and adding "not_a_real_slot" keeps the count at 39.
+    def test_covers_obs_is_false_on_a_same_size_name_swap(self, tmp_path):
+        # The defect `_covers_obs` was written to catch, reproduced at the
+        # surface an operator reads: a map the same SIZE as the real field set
+        # but not the same set of NAMES is not coverage. Deleting "ego_speed"
+        # and adding "not_a_real_field" keeps the count where it was.
         sources = dict(_grounded_field_sources())
         del sources["ego_speed"]
-        sources["not_a_real_slot"] = "measured"
+        sources["not_a_real_field"] = "measured"
         ticks = [make_tick(i, field_sources=sources) for i in range(10)]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
         obs = result["observation"]
-        assert obs["provenance_fields"] == 39
+        assert obs["provenance_fields"] == len(OBS_FIELDS)
         assert obs["provenance_fields_mixed"] is False
         assert obs["covers_encoder"] is False
         assert "ego_speed" not in obs["fields_by_source"].get("measured", {})

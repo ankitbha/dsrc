@@ -40,7 +40,8 @@ sys.path.insert(0, str(JETSON_DIR))
 import numpy as np  # noqa: E402
 
 from perception import provenance  # noqa: E402
-from policy import sim_contract  # noqa: E402
+from perception.observation_builder import OBS_FIELDS  # noqa: E402
+from policy.safety_gate import RULE_COMPARED_VALUE_KEY  # noqa: E402
 from policy.sensing_controller import (  # noqa: E402
     MAX_TELEMETRY_AGE_S,
     RULE_FIRED,
@@ -450,7 +451,7 @@ def fmt_row(name: str, s: dict[str, float]) -> str:
 STAGE_ORDER = (
     "capture", "capture_to_encode_start", "encode", "encode_done_to_enqueue",
     "enqueue_to_wire", "transport", "jpeg_decode", "detect", "track", "fuse",
-    "infer", "decode", "return", "render",
+    "infer", "decode", "segment_assemble", "dsrc_infer", "return", "render",
 )
 
 
@@ -533,6 +534,91 @@ def thermal_result(
         "ticks_by_basis": ticks_by_basis,
         "sample_gaps_s": pctl(gaps) if gaps else None,
         "events": thermal_events,
+    }
+
+
+def safety_result(ticks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The task-144 gate's rollup: per-rule evaluable/fired counts, the
+    clamp-delta distribution, and how often the lane action was withheld.
+
+    `None` for a run recorded before this task existed -- the same
+    convention `thermal_result`/`failures_result` already use for an
+    instrument absent from an older log, never a manufactured zero.
+
+    Reported and NOT gated, for the reason this file's own module docstring
+    already gives about an untrained bundle: the actions this rolls up are
+    arbitrary by construction, and even trained ones have no ground truth
+    here. This is a census of what the gate did, not a verdict on it.
+
+    A rule's rate is reported only over the ticks it was evaluable on --
+    never over every tick including the ones it could not be evaluated on,
+    which would dilute a real rate with structurally blind ticks, and never
+    printed at all when a rule was evaluable on zero ticks (score_safety.py's
+    own refuse-before-misleading rule, applied here to the same census).
+    """
+    safety_ticks = [t["safety"] for t in ticks if t.get("safety") is not None]
+    if not safety_ticks:
+        return None
+
+    rule_names = sorted({name for s in safety_ticks for name in s.get("rules", {})})
+    rules: dict[str, Any] = {}
+    for name in rule_names:
+        statuses = [s["rules"][name]["status"] for s in safety_ticks if name in s.get("rules", {})]
+        evaluable = sum(1 for st in statuses if st != RULE_NOT_EVALUABLE)
+        fired = sum(1 for st in statuses if st == RULE_FIRED)
+        entry: dict[str, Any] = {
+            "total_ticks": len(statuses),
+            "evaluable_ticks": evaluable,
+            "not_evaluable_ticks": len(statuses) - evaluable,
+        }
+        if evaluable == 0:
+            entry["fired_fraction_of_evaluable"] = None
+        else:
+            entry["fired_ticks"] = fired
+            entry["fired_fraction_of_evaluable"] = round(fired / evaluable, 4)
+            # validator round 1, F5: a fired-fraction computed entirely over
+            # ticks whose compared value is non-finite is not a firing rate
+            # -- the threshold could never physically be crossed. Read off
+            # the persisted rule record directly (RuleRecord.to_record()
+            # flattens each evidence key, including the compared one,
+            # alongside `status` whenever the rule was evaluable).
+            compared_key = RULE_COMPARED_VALUE_KEY.get(name)
+            if compared_key is not None:
+                non_finite = 0
+                for s in safety_ticks:
+                    record = s.get("rules", {}).get(name)
+                    if record is None or record["status"] == RULE_NOT_EVALUABLE:
+                        continue
+                    value = record.get(compared_key)
+                    if value is not None and not math.isfinite(value):
+                        non_finite += 1
+                entry["non_finite_compared_ticks"] = non_finite
+        rules[name] = entry
+
+    # validator round 1, F6: kept apart by direction -- a pooled delta
+    # cannot say whether the gate raised or lowered the recommended speed,
+    # and "clamped" alone reads as a reduction regardless of which one it was.
+    deltas = [s["delta_speed_mps"] for s in safety_ticks]
+    raised_deltas = [d for d in deltas if d > 0.0]
+    lowered_deltas = [d for d in deltas if d < 0.0]
+    clamped_deltas = raised_deltas + lowered_deltas
+    clamped = len(clamped_deltas)
+    emergency = sum(1 for s in safety_ticks if s.get("emergency_override"))
+    return {
+        "n_ticks": len(safety_ticks),
+        "rules": rules,
+        "clamped_ticks": clamped,
+        "clamped_fraction": round(clamped / len(safety_ticks), 4),
+        # Kept for existing consumers: the pooled distribution across BOTH
+        # directions, which is exactly what F6 says cannot state a direction
+        # on its own -- prefer raised_ticks/lowered_ticks and their own
+        # distributions below.
+        "clamp_delta_mps": pctl(clamped_deltas) if clamped_deltas else None,
+        "raised_ticks": len(raised_deltas),
+        "lowered_ticks": len(lowered_deltas),
+        "raise_delta_mps": pctl(raised_deltas) if raised_deltas else None,
+        "lower_delta_mps": pctl(lowered_deltas) if lowered_deltas else None,
+        "emergency_override_ticks": emergency,
     }
 
 
@@ -891,14 +977,14 @@ def analyze(
     total_field_ticks = sum(by_source_counter.values())
     provenance_fields_mixed = len(provenance_field_sizes) > 1
     # Coverage is decided by NAME, mirroring
-    # `ObservationBuilder._covers_encoder` -- a map with the right number of
-    # keys but the wrong ones (a real slot missing, a name the encoder never
-    # reads standing in for it) is not coverage, and a count comparison
+    # `ObservationBuilder._covers_obs` -- a map with the right number of keys
+    # but the wrong ones (a real field missing, a name the observation does
+    # not carry standing in for it) is not coverage, and a count comparison
     # cannot tell the two apart.
     covers_encoder = (
         None if provenance_fields is None
         else False if provenance_fields_mixed
-        else provenance_field_names == set(sim_contract.encoded_slot_names())
+        else provenance_field_names in KNOWN_PROVENANCE_KEY_SETS
     )
     observation = {
         "missingness": pctl(missingness),
@@ -953,29 +1039,46 @@ def analyze(
         sim_truth = {"elapsed": elapsed, "truth": truth, "measured": measured, "dropouts": dropouts}
 
     # --- policy / advisory --------------------------------------------------
-    head_dists: dict[str, Counter] = defaultdict(Counter)
-    switches = 0
-    prev_action = None
-    for t in ticks:
-        action = t["action"]
-        for head, value in action.items():
-            head_dists[head][value] += 1
-        if prev_action is not None:
-            switches += sum(1 for h in action if action[h] != prev_action[h])
-        prev_action = action
-    adv_speeds = [t["advisory"]["recommended_speed_mps"] for t in ticks]
-    confidence_labels = Counter(t["advisory"]["confidence_label"] for t in ticks)
+    # A tick has an advisory when the rig had a policy for the road it was on
+    # AND the fix matched one of that policy's super-segments. Both absences
+    # are counted rather than skipped: a drive with no advisory at all and a
+    # drive whose every advisory was the same speed are different runs, and a
+    # statistic over an empty list cannot tell them apart.
+    advised = [t for t in ticks if t.get("advisory") is not None]
+    adv_speeds = [t["advisory"]["recommended_speed_mps"] for t in advised]
+    withheld = sum(
+        1 for t in advised if t["advisory"].get("speed_display_withheld")
+    )
+    # The ego segment's own action index, and how often it changed. Replaces
+    # the four-head distribution and switch count: the controller emits one
+    # action per super-segment, and the one the driver sees is the ego row's.
+    # Absent from a log recorded before the speed-only advisory, which is why
+    # `n` is reported beside the distribution rather than assumed to be
+    # `len(ticks)`.
+    indices = [
+        t["advisory"]["action_index"] for t in advised
+        if "action_index" in t["advisory"]
+    ]
+    index_switches = sum(1 for a, b in zip(indices, indices[1:]) if a != b)
+    segments = Counter(
+        t["advisory"]["segment_id"] for t in advised if "segment_id" in t["advisory"]
+    )
     advisory = {
-        "trained_policy": bool(summary.get("policy_trained", False)),
-        "head_distributions": {
-            h: {k: round(c / len(ticks), 3) for k, c in dist.items()}
-            for h, dist in head_dists.items()
-        },
+        "ticks_with_an_advisory": len(advised),
+        "ticks_with_no_advisory": len(ticks) - len(advised),
         "recommended_speed_mps": pctl(adv_speeds),
-        "head_switches_per_minute": (
-            switches / (duration_s / 60.0) if duration_s > 0 else 0.0
-        ),
-        "confidence_labels": {k: round(c / len(ticks), 3) for k, c in confidence_labels.items()},
+        "speed_display_withheld": withheld,
+        "action_index": {
+            "n": len(indices),
+            "distribution": {
+                str(k): round(c / len(indices), 3)
+                for k, c in sorted(Counter(indices).items())
+            } if indices else {},
+            "switches_per_minute": (
+                index_switches / (duration_s / 60.0) if duration_s > 0 else 0.0
+            ),
+        },
+        "ego_segments": dict(sorted(segments.items())),
     }
 
     # --- gates ---------------------------------------------------------------
@@ -1096,6 +1199,7 @@ def analyze(
         "observation": observation,
         "gps": gps_metrics,
         "advisory": advisory,
+        "safety": safety_result(ticks),
         "gates": gates,
         # A run whose log is short did not pass; it was not fully read. Folded into
         # the verdict rather than reported beside it, because a field nobody looks at
@@ -1167,8 +1271,15 @@ def render_plots(result: dict[str, Any], run_dir: Path) -> list[str]:
         ax.plot(sim_truth["elapsed"], sim_truth["truth"], lw=1.0, ls="--", label="scripted truth")
         for a, b in sim_truth["dropouts"]:
             ax.axvspan(a, b, color="orange", alpha=0.25)
+    # NaN, not a skipped point: a tick with no advisory is a gap in the line,
+    # and dropping it instead would slide every later point onto the wrong time.
     ax.plot(
-        ts, [t["advisory"]["recommended_speed_mps"] for t in ticks],
+        ts,
+        [
+            t["advisory"]["recommended_speed_mps"] if t.get("advisory") is not None
+            else float("nan")
+            for t in ticks
+        ],
         lw=0.8, alpha=0.8, label="advisory speed",
     )
     ax.set_xlabel("run time (s)"); ax.set_ylabel("m/s")
@@ -1200,6 +1311,65 @@ def render_plots(result: dict[str, Any], run_dir: Path) -> list[str]:
     fig.tight_layout(); fig.savefig(run_dir / "eval_leader.png"); plt.close(fig)
     written.append("eval_leader.png")
     return written
+
+
+def _safety_lines(safety: dict[str, Any] | None) -> list[str]:
+    """Rendered right after `## Advisory`: the task-144 gate's per-rule
+    evaluability census, the clamp-delta distribution, and how often the
+    lane action was withheld. `[]` -- no section at all -- for a run
+    recorded before this task existed, the same convention `_thermal_lines`
+    uses for a log with no thermal records.
+
+    A rule's rate is printed only when it was evaluable on at least one
+    tick; a rule evaluable on zero ticks names the fact in words, with no
+    percentage, matching score_safety.py's own refusal.
+    """
+    if not safety:
+        return []
+    lines = ["", "## Safety (evaluability census -- not gated)", ""]
+    for name, entry in safety["rules"].items():
+        if entry["evaluable_ticks"] == 0:
+            lines.append(f"- {name}: not evaluable on any tick (0 of {entry['total_ticks']})")
+        else:
+            line = (
+                f"- {name}: evaluable on {entry['evaluable_ticks']} of {entry['total_ticks']}; "
+                f"fired on {entry['fired_ticks']} ({entry['fired_fraction_of_evaluable']:.1%})"
+            )
+            # validator round 1, F5: name it when the fraction above cannot
+            # move -- the compared value was non-finite on some or all of
+            # the ticks the rule was otherwise evaluable on.
+            non_finite = entry.get("non_finite_compared_ticks")
+            if non_finite:
+                compared_key = RULE_COMPARED_VALUE_KEY[name]
+                if non_finite == entry["evaluable_ticks"]:
+                    line += f"; the compared value ({compared_key}) is inf on all {non_finite}"
+                else:
+                    line += (
+                        f"; the compared value ({compared_key}) is inf on "
+                        f"{non_finite} of {entry['evaluable_ticks']} evaluable"
+                    )
+            lines.append(line)
+    # validator round 1, F6: named quantity, named direction. "clamped"
+    # alone reads as a reduction; it is a speed INCREASE on this rig's only
+    # reachable path (low_speed_uncongested), and a pooled median across
+    # both directions cannot say which one moved.
+    raise_stats = safety["raise_delta_mps"]
+    raise_clause = (
+        f"recommended speed raised on {safety['raised_ticks']} of {safety['n_ticks']} ticks, "
+        f"by a median of {raise_stats['p50']:.2f} m/s (mean {raise_stats['mean']:.2f})"
+        if raise_stats else f"recommended speed raised on 0 of {safety['n_ticks']} ticks"
+    )
+    lower_stats = safety["lower_delta_mps"]
+    lower_clause = (
+        f"lowered on {safety['lowered_ticks']} of {safety['n_ticks']} ticks, "
+        f"by a median of {lower_stats['p50']:.2f} m/s (mean {lower_stats['mean']:.2f})"
+        if lower_stats else f"lowered on 0 of {safety['n_ticks']} ticks"
+    )
+    lines.append(f"- {raise_clause}; {lower_clause}")
+    lines.append(
+        f"emergency_override on {safety['emergency_override_ticks']}"
+    )
+    return lines
 
 
 def _thermal_lines(thermal: dict[str, Any] | None) -> list[str]:
@@ -1942,12 +2112,6 @@ def render_markdown(
         lines += [f"Scenario: {r['scenario']['description']}", ""]
     if r["scenario"]["video_source"]:
         lines += [f"Video: `{r['scenario']['video_source']}`", ""]
-    if not r["advisory"]["trained_policy"]:
-        lines += [
-            "**UNTRAINED policy bundle** - advisory values are random-init placeholders;",
-            "this report certifies plumbing and latency, not advisory quality.",
-            "",
-        ]
     lines += [
         f"{r['n_ticks']} ticks over {r['duration_s']} s "
         f"(median {r['tick_rate_hz_median']} Hz, "
@@ -2135,9 +2299,11 @@ def render_markdown(
                 "is not meaningful for this run"
             )
         else:
-            lines.append(
-                f"- provenance covers {pf} of {sim_contract.local_obs_dim()} encoder slots"
+            expected = (
+                len(LEGACY_ENCODER_SLOTS) if pf == len(LEGACY_ENCODER_SLOTS)
+                else len(OBS_FIELDS)
             )
+            lines.append(f"- provenance covers {pf} of {expected} observation fields")
     if obs.get("by_source"):
         by_source_str = ", ".join(
             f"{source} {frac:.1%}"
@@ -2178,16 +2344,19 @@ def render_markdown(
     a = r["advisory"]
     lines += [
         "",
-        "## Advisory (not gated"
-        + ("" if a["trained_policy"] else "; UNTRAINED bundle")
-        + ")",
+        "## Advisory",
         "",
+        f"- ticks with an advisory: {a['ticks_with_an_advisory']} "
+        f"(no advisory on {a['ticks_with_no_advisory']})",
         f"- recommended speed: p50 {a['recommended_speed_mps']['p50']:.1f} m/s "
-        f"(mean {a['recommended_speed_mps']['mean']:.1f})",
-        f"- head switches: {a['head_switches_per_minute']:.1f} / min",
-        f"- confidence labels: {a['confidence_labels']}",
-        f"- head distributions: {json.dumps(a['head_distributions'], indent=2)}",
+        f"(mean {a['recommended_speed_mps']['mean']:.1f}, n {a['recommended_speed_mps']['n']})",
+        f"- speed number withheld on an emergency override: {a['speed_display_withheld']} ticks",
+        f"- action index switches: {a['action_index']['switches_per_minute']:.1f} / min "
+        f"(n {a['action_index']['n']})",
+        f"- action index distribution: {json.dumps(a['action_index']['distribution'])}",
+        f"- ego segments: {json.dumps(a['ego_segments'])}",
     ]
+    lines += _safety_lines(r.get("safety"))
     if session is not None:
         lines += _sensing_lines(session.get("sensing"))
     join = r.get("phone_join")
@@ -2266,7 +2435,7 @@ THERMAL_FAILURES_VOCABULARY = frozenset({THERMAL_BASIS_STALE}) | ABSENT_REASONS
 #: of the right size, whether it carries any field that is actually evidence
 #: about this tick.
 #:
-#: D7: `sim_contract`'s always-derived slots (`ego_headway_s`,
+#: D7: the legacy contract's always-derived slots (`ego_headway_s`,
 #: `target_lane_front_gap`, `uncongested_low_speed_flag`) carry `derived` or
 #: `approximated` on every tick of every drive, regardless of whether the
 #: quantities they were computed from were themselves measured or
@@ -2280,7 +2449,44 @@ THERMAL_FAILURES_VOCABULARY = frozenset({THERMAL_BASIS_STALE}) | ABSENT_REASONS
 #: (`PROVENANCE_PRIMARY_EVIDENCE`, below) -- which a real derivation would
 #: have been built from, since there is no input to `derived`/`approximated`
 #: outside this same map.
+#: The 39 `field_sources` keys every drive in the recorded corpus was written
+#: under, when the observation still mirrored the simulator's encoder contract.
+#: A literal here rather than an import: the module that defined it
+#: (`policy/sim_contract.py`) went with the actor it served, and these drives
+#: have to stay readable by the tool that reports them.
+LEGACY_ENCODER_SLOTS: frozenset[str] = frozenset({
+    "is_active", "ego_speed", "ego_acceleration", "ego_lane",
+    "ego_headway_s", "target_headway_s", "time_since_last_lane_change",
+    "lane_changes_last_km", "distance_to_next_merge",
+    "distance_to_downstream_bottleneck", "leader_gap",
+    "leader_relative_speed", "follower_gap", "follower_relative_speed",
+    "left_lane_front_gap", "left_lane_rear_gap", "right_lane_front_gap",
+    "right_lane_rear_gap", "target_lane_front_gap",
+    "target_lane_rear_gap", "target_lane_rear_required_decel",
+    "downstream_congestion_estimate", "merge_pressure",
+    "segment_target_speed", "uncongested_low_speed_flag",
+    "local_density_bin", "local_mean_speed_bin", "local_queue_estimate",
+    "active_vehicle_count_local", "active_av_count_local",
+    "nearby_av_count", "nearby_av_density", "nearby_av_mean_speed",
+    "cooperation.segment_target_speed", "cooperation.merge_pressure",
+    "cooperation.downstream_congestion_estimate",
+    "nearby_av_lane_distribution.0", "nearby_av_lane_distribution.1",
+    "nearby_av_lane_distribution.2",
+})
+
+#: Both shapes this tool can read, newest first. A tick whose key set is
+#: neither is reported by name and count rather than scored, because a
+#: provenance map of an unknown shape cannot be said to cover anything.
+KNOWN_PROVENANCE_KEY_SETS: tuple[frozenset[str], ...] = (
+    frozenset(OBS_FIELDS),
+    LEGACY_ENCODER_SLOTS,
+)
+
 PROVENANCE_MIXED_REASON = "provenance_fields_mixed"
+#: A map matching neither known shape, censused by its own key count. The
+#: count follows the prefix, so every distinct size is its own reason and a
+#: reader can see whether a drive produced one wrong shape or several.
+PROVENANCE_UNKNOWN_SHAPE_PREFIX = "unknown shape: "
 PROVENANCE_EXCLUDED = provenance.SUBSTITUTED | {
     provenance.SOURCE_DERIVED_EMPTY, provenance.SOURCE_DERIVED, provenance.SOURCE_APPROXIMATED,
 }
@@ -2541,16 +2747,22 @@ def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
     """
     attempted = len(ticks)
     answered = 0
-    encoder_slots = set(sim_contract.encoded_slot_names())
     counts: dict[str, int] = {}
     for t in ticks:
         field_sources = t.get("field_sources") or {}
         keys = set(field_sources)
-        if keys != encoder_slots:
-            if len(keys) != len(encoder_slots):
-                key = f"short: {len(keys)}" if len(keys) < len(encoder_slots) else f"long: {len(keys)}"
-            else:
+        if keys not in KNOWN_PROVENANCE_KEY_SETS:
+            # Reported by size, not as `short` or `long`. Those words needed a
+            # single reference shape to be measured against, and there are two
+            # now -- the current seven fields and the legacy thirty-nine -- so
+            # a 20-key map is 13 long of one and 19 short of the other, and
+            # picking one reference would name the wrong direction as often as
+            # the right one. A map whose size matches a known shape but whose
+            # names do not is the separate `mixed` case below.
+            if any(len(keys) == len(known) for known in KNOWN_PROVENANCE_KEY_SETS):
                 key = PROVENANCE_MIXED_REASON
+            else:
+                key = f"{PROVENANCE_UNKNOWN_SHAPE_PREFIX}{len(keys)}"
             counts[key] = counts.get(key, 0) + 1
             continue
         classes_present = set(field_sources.values())
@@ -2573,8 +2785,9 @@ def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
         axis="provenance", attempted=attempted, answered=answered,
         attempted_is="ticks",
         answered_is=(
-            "ticks whose field_sources key set equals sim_contract.encoded_slot_names() "
-            "and carry at least one field in eval_run.PROVENANCE_PRIMARY_EVIDENCE"
+            "ticks whose field_sources key set is one of "
+            "eval_run.KNOWN_PROVENANCE_KEY_SETS and carry at least one field "
+            "in eval_run.PROVENANCE_PRIMARY_EVIDENCE"
         ),
         unanswered_by_reason=census, vocabulary="eval_run.PROVENANCE_VOCABULARY",
         vocabulary_violations=violations, unbuildable=None, section="## Observation quality",

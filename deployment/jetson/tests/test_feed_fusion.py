@@ -170,125 +170,16 @@ class TestTheRecord:
 
 
 class TestTheBuilderChain:
-    """Ownership resolved inside `ObservationBuilder`, with the vector unchanged.
+    """Ownership resolved inside `ObservationBuilder`, with the observation
+    unchanged. The feed supplies no field: it is published beside the
+    observation, on `ObservationResult.feed`, for the sensing controller and
+    the record.
 
-    Task 47 wants field-for-field parity with the simulator, so nothing here adds,
-    removes or renames a field -- the feed either supplies an existing one or hands
-    it on.
-    """
-
-    def builder(self):
-        from perception.observation_builder import BuilderConfig, ObservationBuilder
-        return ObservationBuilder(BuilderConfig())
-
-    def test_a_run_with_no_feed_is_exactly_what_it_was(self):
-        # The regression that matters most: ingestion must change nothing for a run
-        # without a phone. Same fields, same values, same provenance.
-        from sensors.gps_reader import GpsFix
-
-        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
-                     heading_deg=90.0, t_mono=100.0)
-        without = self.builder().build([], gps, t_mono=100.0)
-        with_none = self.builder().build([], gps, t_mono=100.0, feed=None)
-
-        assert without.obs == with_none.obs
-        assert without.field_sources == with_none.field_sources
-        assert with_none.obs["downstream_congestion_estimate"] == 0.0
-
-    def test_the_feed_does_not_write_the_congestion_field_either(self):
-        # The retraction this task ended on. The simulator's `if not local_av:` is
-        # a BLOCK gate: with no AVs near it pins congestion, merge_pressure and
-        # target speed together while density, lane distribution and both AV counts
-        # go to zero. So congestion > 0 implies nearby_av_count >= 1 in every
-        # observation it can emit -- 0 of 1,095 rollout samples in the other cell.
-        # A lone instrumented car has no equipped neighbours, so writing the feed's
-        # value here would put the policy in that empty cell on every tick, one
-        # field lifted out of a neutral block whose other five stay pinned.
-        from sensors.gps_reader import GpsFix
-
-        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
-                     heading_deg=90.0, t_mono=100.0)
-        result = self.builder().build([], gps, t_mono=100.0,
-                                      feed=reading(link=link(speed=6.0, free_flow=30.0)))
-
-        assert result.obs["downstream_congestion_estimate"] == 0.0
-        assert result.obs["cooperation"]["downstream_congestion_estimate"] == 0.0
-        assert result.field_sources["downstream_congestion_estimate"] == "fallback_neutral"
-
-    def test_the_reading_is_still_available_beside_the_vector(self):
-        # Not in the observation is not the same as thrown away: the sensing
-        # controller reads it, and the record keeps it, so a drive can still act on
-        # traffic data without the policy seeing an input it never trained on.
-        from sensors.gps_reader import GpsFix
-
-        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
-                     heading_deg=90.0, t_mono=100.0)
-        result = self.builder().build([], gps, t_mono=100.0,
-                                      feed=reading(link=link(speed=6.0, free_flow=30.0)))
-
-        assert result.feed is not None
-        assert result.feed.owns_congestion is True
-        assert result.feed.downstream_congestion == pytest.approx(0.8)
-        assert result.diagnostics["feed"]["downstream_congestion"] == pytest.approx(0.8)
-
-    def test_the_no_av_block_stays_whole(self):
-        # Every field the simulator pins together when no AVs are near must move
-        # together or not at all. This is the check the units question could not
-        # ask, generalised past the one pair that failed it.
-        from sensors.gps_reader import GpsFix
-
-        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
-                     heading_deg=90.0, t_mono=100.0)
-        result = self.builder().build([], gps, t_mono=100.0,
-                                      feed=reading(link=link(speed=2.0, free_flow=30.0)))
-
-        assert result.obs["nearby_av_count"] == 0
-        assert result.obs["downstream_congestion_estimate"] == 0.0
-        assert result.obs["merge_pressure"] == 0.0
-        assert result.obs["nearby_av_density"] == 0.0
-        assert result.obs["cooperation"]["segment_target_speed"] == pytest.approx(
-            result.obs["nearby_av_mean_speed"]
-        )
-
-    def test_a_declined_reading_leaves_the_field_where_it_was(self):
-        from sensors.gps_reader import GpsFix
-
-        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
-                     heading_deg=90.0, t_mono=100.0)
-        result = self.builder().build([], gps, t_mono=100.0,
-                                      feed=reading(outcome=Outcome.STALE, link=None))
-
-        assert result.obs["downstream_congestion_estimate"] == 0.0
-        assert result.field_sources["downstream_congestion_estimate"] == "fallback_neutral"
-
-    def test_the_feed_does_not_touch_the_bottleneck_flag(self):
-        # It looks like exactly what `link_distance_m` is, and it is not: the
-        # simulator uses 0.0 for "in a bottleneck segment" and inf otherwise, so
-        # the policy has only ever seen {0, inf} there. A real distance in that
-        # field is the same error as jamFactor/10, one field along.
-        from sensors.gps_reader import GpsFix
-
-        gps = GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
-                     heading_deg=90.0, t_mono=100.0)
-        result = self.builder().build([], gps, t_mono=100.0, feed=reading())
-
-        assert math.isinf(result.obs["distance_to_downstream_bottleneck"])
-        assert result.field_sources["distance_to_downstream_bottleneck"] == "sim_parity"
-
-
-class TestTheFeedDoesNotSetTheTargetSpeed:
-    """`freeFlow` is the same quantity in the same units, and still must not be used.
-
-    The units check passed and was not enough. The simulator fills
-    `segment_target_speed` AND `nearby_av_mean_speed` from the one
-    `ego.free_flow_speed_mps` whenever no AVs are near, and the schema states it, so
-    the two are perfectly correlated in every training sample. Moving one produces a
-    pair the policy has never seen.
-
-    And it is the base speed the advisory decodes from, which has a floor and no
-    ceiling here. The simulator's safety layer clamps `min(target_speed, free_flow)`
-    -- a no-op there precisely BECAUSE they are equal -- so decoupling them removes
-    the clamp's premise, and a parser-legal 120 m/s link would advise 268 mph.
+    The fields these tests used to check -- `downstream_congestion_estimate`,
+    `merge_pressure`, `nearby_av_*`, `distance_to_downstream_bottleneck` --
+    were removed with the local-sensing observation. The property survives
+    them, on the one field the feed could still plausibly reach:
+    `segment_target_speed`.
     """
 
     def builder(self):
@@ -300,24 +191,82 @@ class TestTheFeedDoesNotSetTheTargetSpeed:
         return GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
                       heading_deg=90.0, t_mono=100.0)
 
-    def test_the_pair_the_simulator_keeps_identical_stays_identical(self):
-        result = self.builder().build(
+    def test_a_run_with_no_feed_is_exactly_what_it_was(self):
+        # The regression that matters most: ingestion must change nothing for a
+        # run without a phone. Same fields, same values, same provenance.
+        without = self.builder().build([], self.gps(), t_mono=100.0)
+        with_none = self.builder().build([], self.gps(), t_mono=100.0, feed=None)
+
+        assert without.obs == with_none.obs
+        assert without.field_sources == with_none.field_sources
+
+    def test_a_congested_reading_changes_no_field_at_all(self):
+        """The retraction this task ended on, restated over the fields that
+        remain. A reading that says the road ahead is at 6 m/s under a 30 m/s
+        free flow -- congestion 0.8 -- must leave every observed field exactly
+        where a tick with no reading left it."""
+        no_feed = self.builder().build([], self.gps(), t_mono=100.0)
+        congested = self.builder().build(
             [], self.gps(), t_mono=100.0,
-            feed=reading(link=link(speed=2.0, free_flow=8.3)),
+            feed=reading(link=link(speed=6.0, free_flow=30.0)),
         )
-        assert result.obs["cooperation"]["segment_target_speed"] == pytest.approx(
-            result.obs["nearby_av_mean_speed"]
-        )
+
+        assert congested.obs == no_feed.obs
+        assert congested.field_sources == no_feed.field_sources
+        # And the reading really was one the fusion layer took ownership of,
+        # so this is not a null result from a declined reading.
+        assert congested.feed.owns_congestion is True
+        assert congested.feed.downstream_congestion == pytest.approx(0.8)
+
+    def test_the_reading_is_still_available_beside_the_observation(self):
+        # Not in the observation is not the same as thrown away: the sensing
+        # controller reads it, and the record keeps it, so a drive can still act
+        # on traffic data without it becoming a field.
+        result = self.builder().build([], self.gps(), t_mono=100.0,
+                                      feed=reading(link=link(speed=6.0, free_flow=30.0)))
+
+        assert result.feed is not None
+        assert result.feed.owns_congestion is True
+        assert result.feed.downstream_congestion == pytest.approx(0.8)
+        assert result.diagnostics["feed"]["downstream_congestion"] == pytest.approx(0.8)
+
+    def test_a_declined_reading_changes_nothing_either(self):
+        no_feed = self.builder().build([], self.gps(), t_mono=100.0)
+        declined = self.builder().build([], self.gps(), t_mono=100.0,
+                                        feed=reading(outcome=Outcome.STALE, link=None))
+
+        assert declined.obs == no_feed.obs
+        assert declined.field_sources == no_feed.field_sources
+
+
+class TestTheFeedDoesNotSetTheTargetSpeed:
+    """`freeFlow` is the same quantity in the same units as
+    `segment_target_speed`, and still must not be used.
+
+    It is the base speed the gate bounds against: `physical_control_command`
+    clamps `min(target_speed, free_flow_speed_mps)` and
+    `low_speed_uncongested` raises toward `free_flow - 8`. A parser-legal
+    120 m/s link reaching that field would advise 268 mph, and the clamp that
+    is supposed to stop it is the very thing being moved.
+    """
+
+    def builder(self):
+        from perception.observation_builder import BuilderConfig, ObservationBuilder
+        return ObservationBuilder(BuilderConfig())
+
+    def gps(self):
+        from sensors.gps_reader import GpsFix
+        return GpsFix(valid=True, lat=51.49, lon=-0.20, speed_mps=20.0,
+                      heading_deg=90.0, t_mono=100.0)
 
     def test_an_urban_links_free_flow_does_not_become_the_target_speed(self):
         from perception.observation_builder import BuilderConfig
-        cfg = BuilderConfig()
         result = self.builder().build(
             [], self.gps(), t_mono=100.0,
             feed=reading(link=link(speed=2.0, free_flow=8.3)),
         )
-        assert result.obs["cooperation"]["segment_target_speed"] == pytest.approx(
-            cfg.free_flow_speed_mps
+        assert result.obs["segment_target_speed"] == pytest.approx(
+            BuilderConfig().free_flow_speed_mps
         )
 
     def test_a_parser_legal_but_absurd_free_flow_cannot_reach_the_advisory(self):
@@ -329,7 +278,7 @@ class TestTheFeedDoesNotSetTheTargetSpeed:
             [], self.gps(), t_mono=100.0,
             feed=reading(link=link(speed=1.0, free_flow=120.0)),
         )
-        assert result.obs["cooperation"]["segment_target_speed"] == pytest.approx(
+        assert result.obs["segment_target_speed"] == pytest.approx(
             BuilderConfig().free_flow_speed_mps
         )
 
@@ -341,7 +290,7 @@ class TestTheFeedDoesNotSetTheTargetSpeed:
             [], self.gps(), t_mono=100.0, feed=reading(link=link(free_flow=8.3)),
         )
         assert result.field_sources["segment_target_speed"] == "fallback_neutral"
-        assert result.obs["cooperation"]["segment_target_speed"] != 8.3
+        assert result.obs["segment_target_speed"] != 8.3
 
 
 class TestDeclineProvenance:

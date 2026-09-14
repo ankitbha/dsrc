@@ -707,3 +707,105 @@ class TestWhichLinkIsChosen:
         reading = feed.at(fix(*HOME, heading_deg=0.0, t_mono=100.0), t_mono=100.0)
         assert reading.ok
         assert reading.link.speed_mps == pytest.approx(20.0)
+
+
+class TestSnapshotLinks:
+    """The whole-snapshot accessor `perception.segment_state` needs: every
+    usable link, gated by response freshness alone -- never by the
+    per-vehicle radius, cone or fix checks `at()` applies.
+    """
+
+    def test_nothing_has_arrived_yet(self):
+        feed = HereFeed()
+        links, reading = feed.snapshot_links(t_mono=0.0)
+        assert links == ()
+        assert reading.outcome == Outcome.NO_RESPONSE_YET
+        assert reading.link is None
+
+    def test_returns_every_usable_link_with_no_radius_or_heading_gate(self):
+        # Two links kilometres apart and in opposite directions -- `at()` would
+        # keep at most one of them, and only the one ahead of the fix. A
+        # whole-network question is not "what is ahead of the vehicle", so
+        # both must come back.
+        near = stretch(*HOME, east_m=500.0)
+        far = stretch(*offset(*HOME, north_m=5000.0, east_m=-5000.0), east_m=500.0)
+        both = json.loads(body(near, speed=20.0, freeFlow=25.0).decode("utf-8"))
+        both["results"].extend(
+            json.loads(body(far, speed=8.0, freeFlow=25.0).decode("utf-8"))["results"]
+        )
+        feed = HereFeed()
+        feed.offer(status=200, body=json.dumps(both).encode("utf-8"), received_t_mono=100.0)
+
+        links, reading = feed.snapshot_links(t_mono=100.0)
+
+        assert reading.outcome == Outcome.OK
+        assert reading.link is None
+        assert {round(link.speed_mps, 1) for link in links} == {20.0, 8.0}
+
+    def test_a_link_with_no_congestion_information_is_excluded(self):
+        shape = stretch(*HOME, east_m=500.0)
+        payload = json.loads(
+            body(shape, speed=20.0, freeFlow=25.0).decode("utf-8")
+        )
+        # A shape with a currentFlow block carrying nothing usable at all.
+        payload["results"].append({
+            "location": {"length": 800.0, "shape": {"links": [{"points": shape}]}},
+            "currentFlow": {},
+        })
+        feed = HereFeed()
+        feed.offer(status=200, body=json.dumps(payload).encode("utf-8"), received_t_mono=100.0)
+
+        links, reading = feed.snapshot_links(t_mono=100.0)
+
+        assert reading.outcome == Outcome.OK
+        assert len(links) == 1
+        assert links[0].speed_mps == pytest.approx(20.0)
+
+    def test_a_stale_response_returns_no_links(self):
+        feed = HereFeed(max_response_age_s=30.0)
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=500.0)),
+                  received_t_mono=100.0)
+
+        links, reading = feed.snapshot_links(t_mono=100.0 + 31.0)
+
+        assert links == ()
+        assert reading.outcome == Outcome.STALE
+        assert reading.response_age_s == pytest.approx(31.0)
+
+    def test_it_does_not_require_or_touch_a_gps_fix(self):
+        """No `gps` parameter at all -- a whole-network question is not about
+        where the vehicle is."""
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=500.0)),
+                  received_t_mono=100.0)
+        # No exception, no fix argument, and the answer does not depend on one.
+        links, reading = feed.snapshot_links(t_mono=100.0)
+        assert reading.outcome == Outcome.OK
+        assert len(links) == 1
+
+    def test_it_does_not_touch_last_query(self):
+        """`_last_query` is `at()`'s own field (`to_record`'s `last_outcome`);
+        a whole-network read must not overwrite what the per-vehicle query
+        last answered."""
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=500.0)),
+                  received_t_mono=100.0)
+        feed.at(fix(*HOME, t_mono=100.0), t_mono=100.0)
+        before = feed.to_record()["last_outcome"]
+
+        # Force a mismatch in the other direction: an outcome snapshot_links
+        # would never itself set on `at()`'s behalf.
+        feed.snapshot_links(t_mono=100.0 + 60.0)  # stale for snapshot_links
+
+        assert feed.to_record()["last_outcome"] == before
+
+    def test_response_age_provenance_is_reported(self):
+        feed = HereFeed()
+        feed.offer(status=200, body=body(stretch(*HOME, east_m=500.0)),
+                  received_t_mono=100.0, bound_s=0.05, proxy=True)
+
+        _, reading = feed.snapshot_links(t_mono=102.0)
+
+        assert reading.response_age_s == pytest.approx(2.0)
+        assert reading.response_age_bound_s == pytest.approx(0.05)
+        assert reading.response_age_is_proxy is True

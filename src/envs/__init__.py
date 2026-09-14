@@ -1,6 +1,10 @@
-"""Environment interfaces for DSRC experiments."""
+"""The action contract the safety layer decodes.
 
-from src.envs.base_ctde_env import BaseCTDEEnv
+What remains is `base_ctde_env` and `wrappers`, which define `AVAction` and the bin
+decoders. The topology environment they were written for is gone with the rest of the
+highway-env ladder.
+"""
 
-__all__ = ["BaseCTDEEnv"]
+from src.envs.base_ctde_env import AVAction
 
+__all__ = ["AVAction"]

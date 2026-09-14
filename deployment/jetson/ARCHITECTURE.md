@@ -7,9 +7,10 @@ maps onto the simulation. Written to be sufficient for resuming work cold.
 
 1. **Latency over accuracy** (project decision). Every choice below trades
    estimation quality for milliseconds; the budget table in §4 shows the result.
-2. **Sim-contract fidelity.** The actor must see the same 39-dim observation
-   it saw in training, including the spec's neutral fallbacks for unsensed
-   fields. The contract is vendored and test-locked (§6).
+2. **Measure what is read.** The observation carries the seven fields its
+   four readers actually read (§5), each tagged with how it was obtained. It
+   used to mirror the simulator's 39-dim encoder contract, because a local
+   actor consumed the whole vector; that actor is gone.
 3. **Degrade, never die.** Missing GPS, no camera, no display, no trained
    checkpoint - each has a defined degraded mode, because in-car debugging
    time is expensive.
@@ -26,9 +27,13 @@ maps onto the simulation. Written to be sufficient for resuming work cold.
  |  (detector.py)              (tracker.py)     lateral + d/dt slope   |
  |                                              (distance.py)          |
  |                    -> observation_builder.py                        |
- |                       39-field sim obs + provenance tags            |
- |                    -> actor_runtime.py (numpy MLP mirror)           |
- |                    -> advisory.py (decode = sim wrappers)           |
+ |                       7 measured fields + provenance tags           |
+ |                    -> dsrc_runtime.py (one speed action per         |
+ |                       super-segment, every 60 s)                    |
+ |                    -> segment_advisory.py (decode = speed limit     |
+ |                       x action fraction)                            |
+ |                    -> safety_gate.py (bounds the ego segment's      |
+ |                       recommended speed)                            |
  +------------+------------------+------------------+-----------------+
               |                  |                  |
               v                  v                  v
@@ -65,11 +70,11 @@ sensors/time_sync.py       monotonic vs wall clock rules, GPS-UTC offset
 perception/detector.py     TensorRT 10 wrapper (pinned buffers), letterbox, NMS
 perception/tracker.py      SORT-lite: greedy IoU + constant-velocity predict
 perception/distance.py     ground-plane / width-prior distance, lateral, dZ/dt
-perception/observation_builder.py  sensors -> 39-field sim observation + provenance
-policy/sim_contract.py     VENDORED sim contract (fields, scales, encode, bins)
-policy/export_policy.py    sim checkpoint -> TorchScript bundle (+ --random)
-policy/actor_runtime.py    bundle loader; numpy MLP fast path (verified vs TS)
-policy/advisory.py         action -> driver-facing text; decode mirrors sim
+perception/observation_builder.py  sensors -> the 7 measured fields + provenance
+policy/export_dsrc_policy.py  DSRC checkpoint -> TorchScript bundle (+ --random)
+policy/dsrc_runtime.py     bundle loader; argmax over three speed fractions
+policy/segment_advisory.py one speed per super-segment -> the driver's number
+policy/safety_gate.py      bounds that number; two speed rules, with a census
 ui/dashboard.py            HUD render + window (main thread)
 logio/                     JSONL metadata, raw video, UDP telemetry, jtop stats
 v2v/beacon.py              optional UDP-broadcast cooperation beacons
@@ -88,7 +93,7 @@ End-to-end p50 **19.8 ms** / p95 20.2 ms at 48.5 FPS (`models/bench_results.json
 | detection | 17.7 ms | GPU compute is only 3.9 ms (trtexec); the rest is letterbox resize + `cv2.dnn.blobFromImage` preprocessing (was 23 ms with numpy preprocessing) and CPU NMS. Pinned host buffers, single CUDA stream. |
 | tracking + distance | 1.1 ms | greedy IoU, no Hungarian/Kalman |
 | observation + encode | 0.4 ms | pure-python field assembly |
-| actor + advisory | 0.5 ms | numpy mirror of the TorchScript MLP (was ~4 ms p50 / 10.7 ms p95 through the TorchScript interpreter); mirror is verified against TS at load |
+| policy + advisory | 0.5 ms | measured when the local-sensing actor ran this block. It now holds the DSRC step (a decision every 60 s, held over in between) and the safety gate, and is not comparable tick for tick with the number above. |
 | capture wait | + up to 1 frame interval | 33 ms at 30 fps camera; not in the table above (bench uses pre-stamped frames). Live e2e ≈ 25-55 ms expected. |
 
 Remaining levers, in order of value: 448-px engine (`./export_detector.sh
@@ -103,58 +108,130 @@ fail a run for the network's behaviour -- and would loosen silently whenever the
 timebase cannot convert a capture stamp, because the link segment then drops out
 of the sum. `eval_run` gates `latency_jetson_p95`.
 
-## 5. Simulation ↔ prototype observation mapping
+## 5. What one tick measures
 
-(paper table; provenance is logged per-tick in `field_sources`, from the
-closed vocabulary in `perception/provenance.py`. The map covers all 39 slots
-`sim_contract.encoded_slot_names()` lists, not just the 33 flat observation
-fields below -- `cooperation.*` and `nearby_av_lane_distribution.<lane>` each
-get their own entry, dotted, so the missingness metric is a statement about
-the whole encoded vector.)
+Seven fields, each tagged per tick in `field_sources` from the closed
+vocabulary in `perception/provenance.py`. `OBS_FIELDS` in
+`perception/observation_builder.py` is the one place the set is written down,
+and `_covers_obs` checks the provenance map against it by NAME rather than by
+count.
 
-| sim observation field | prototype source | provenance |
-|---|---|---|
-| ego_speed | GPS RMC speed-over-ground (5 Hz); held during dropouts | measured / measured_converted / measured_arrival_proxy / fallback_neutral (held value during a dropout) |
-| ego_acceleration | least-squares slope of GPS speed (~1 s window), refused whenever this tick's GPS fix is not fresh | derived / fallback_neutral |
-| ego_lane | `observation.assumed_lane` (no lane detection in v0) | static_config |
-| ego_headway_s | leader_gap / ego_speed (inf when no leader, as sim) | derived |
-| target_headway_s | previous tick's commanded headway bin (feedback loop, as in sim) | static/feedback |
-| leader_gap, leader_relative_speed | nearest in-corridor track: pinhole distance + dZ/dt slope | measured |
-| left/right_lane_front_gap | nearest track with lateral offset ≈ ∓1 lane | measured |
-| follower_*, *_rear_gap, rear_required_decel | spec "empty road" values (inf / 0) - no rear sensing | fallback_neutral |
-| target_lane_* | = current-lane values (sim defaults target lane to current) | derived |
-| active_vehicle_count_local | forward in-range track count ×2 (symmetric extrapolation, `symmetrize_counts`) | derived / derived_empty (zero in-range tracks) |
-| local_density_bin | sim formula count/(2·range/1000), sim bin edges (12, 30) | derived / derived_empty (zero in-range tracks -- the disagreement rule's only firing condition under shipped constants) |
-| local_mean_speed_bin | mean(ego + rel_speed) over valid tracks, sim edges (8, 18) | derived |
-| local_queue_estimate | tracks with absolute speed < 5 m/s (sim queue_speed) | derived / derived_empty (no in-range tracks) / fallback_neutral (tracks present, none measurable) |
-| uncongested_low_speed_flag | mirrors `safety/etiquette.py` (density < 12 ∧ v < vf − 8), against a locally sensed density where the sim reads a segment one | approximated |
-| distance_to_next_merge | 0.0 - **sim parity**: the sim itself hardcodes 0.0 | sim_parity |
-| distance_to_downstream_bottleneck | inf (no map matching; sim's off-bottleneck value) | sim_parity |
-| time_since_last_lane_change, lane_changes_last_km | inf / 0 (no lane-change detection) | fallback_neutral |
-| nearby_av_*, cooperation.* | V2V beacons when enabled; else spec neutral fallbacks (count 0, mean speed = free-flow, pressure/congestion 0) | measured / fallback_neutral |
-| nearby_av_lane_distribution.{0,1,2} | share of heard peers reporting each lane | derived (a peer carried a lane id) / fallback_neutral (no peers, or none carried one) |
+| field | prototype source | provenance | read by |
+|---|---|---|---|
+| ego_speed | GPS RMC speed-over-ground (5 Hz); held during dropouts | measured / measured_converted / measured_arrival_proxy / fallback_neutral (held value during a dropout) | safety gate, sensing scheduler, advisory, dashboard |
+| ego_acceleration | least-squares slope of GPS speed (~1 s window), refused whenever this tick's GPS fix is not fresh | derived / fallback_neutral | sensing scheduler (the free-tier event rule) |
+| leader_gap | nearest in-corridor track: pinhole distance | measured / fallback_neutral (no leader) | safety gate (`forward_ttc`), dashboard |
+| leader_relative_speed | that track's dZ/dt slope, once the window spans 0.2 s | measured / fallback_neutral | safety gate (`forward_ttc`) |
+| local_density_bin | count/(2·range/1000), bin edges (12, 30) | derived / derived_empty (zero in-range tracks) | safety gate (`low_speed_uncongested`), sensing scheduler, advisory |
+| active_vehicle_count_local | forward in-range track count ×2 (symmetric extrapolation, `symmetrize_counts`) | derived / derived_empty | dashboard |
+| segment_target_speed | mean of heard V2V peers' speeds, else the configured free-flow speed | derived / fallback_neutral | safety gate (free-flow bound) |
 
-Encoding (scales, inf clamping, bool handling) is **bit-identical** to
-`src/rl/encoders.py` - property-tested in `tests/test_sim_contract.py`.
+The lane split still runs -- it is what decides which track is the leader --
+but only the ego lane's nearest reaches a field. The traffic feed owns no
+field at all: it is published beside the observation on
+`ObservationResult.feed`, where the sensing scheduler reads it and the record
+keeps it.
+
+**What used to be here.** Thirty-two more fields, mirroring the simulator's
+39-slot encoder contract, plus the encoded vector itself. They were the
+local-sensing actor's input. That actor was removed; nothing read the vector
+afterwards, and most of the fields were the simulator's "empty road"
+constants for sensors this rig does not have -- a constant carried into a
+decision that never compares it is indistinguishable, in the record, from a
+measurement that did not matter. `policy/sim_contract.py`,
+`specs/sim_contract_golden_vectors.json` and its generator went with them.
+`eval_run.py` still reads the 39-key shape (`LEGACY_ENCODER_SLOTS`), because
+every drive in the recorded corpus was written under it.
 
 ## 6. Contract vendoring
 
-The Jetson must not import the sim env stack (`src.rl.actions` →
-`src.envs.*` → `highway_env`). `policy/sim_contract.py` therefore vendors,
-from sim commit `d477dba`:
-field lists + FIELD_SCALES + `encode_local_observation` (numpy twin),
-action heads/values/forced defaults, `decode_speed_bin` / `decode_headway_bin`,
-neutral fallbacks, and `_bin` semantics.
+### 6.1 The safety and etiquette contract (task 144)
 
-**When the sim contract changes:** update `sim_contract.py` (and
-`SIM_COMMIT`), run `python3 -m pytest tests/test_sim_contract.py` on a
-machine where the sim imports (encoder tests run everywhere torch exists;
-action/wrapper tests need highway_env), then re-export the policy bundle
-(`export_policy.py` refuses dim mismatches).
+`policy/safety_gate.py` vendors `src/safety/{constraints,etiquette,safety_layer}.py`
+by copy rather than by import: the Jetson must not import the simulation
+stack. This is the one vendored contract left on the device --
+`policy/sim_contract.py`, which vendored the 39-slot encoder, went with the
+actor that read it. `SafetyConstraints`
+and `SafetyContext` are checked against a committed reference, `specs/
+safety_contract_golden.json` (field names, defaults, and a hash over both),
+by two tests that never import each other's side:
+`deployment/jetson/tests/test_safety_contract.py` (the vendored copy,
+unconditional, no `importorskip`) and `tests/test_safety_contract_matches_
+golden.py` (`src/safety/` itself). This replaces the older idiom of comparing
+the vendored copy against the original: task 143 found that check goes
+vacuous the moment the original it compares against is deleted
+(`src/rl/encoders.py` and its siblings were, and the test then reported `1
+skipped` and said nothing). A golden file has no side that can disappear out
+from under it.
 
-The actor architecture (`backbone.{0,2,4}` + `heads.<name>` state-dict
-layout) is likewise mirrored in `export_policy.VendoredActor` and checked by
-`test_actor_state_dict_layout_matches_sim`.
+**Where the gate runs, and what it bounds.** `pipeline.step` runs the gate
+right after the DSRC step, on every tick that has an ego row to bound. The
+gate is not run at all on a tick with no recommendation -- a rig with no
+policy for its road, or a fix off the network -- and `tick.safety_gate` is
+`None` there, which is a different fact from a gate that found nothing to
+do. Where it does run it runs whole (`gate_ms`/`stages["gate"]` are
+`measured`, never `absent` -- there is no early-return path here the way
+`dsrc_infer`'s coverage-gate refusal has one).
+
+Only the ego segment's row is bounded. The other eleven rows are the
+controller's output for stretches of road this vehicle is not on, and the
+gate holds no evidence about those stretches. The ego row's
+`recommended_speed_mps` and `recommended_speed_display` are overwritten with
+the bounded values, so that field keeps meaning "the number shown to the
+driver" for every reader that already treats it that way (`eval_run.py`,
+`replay_demo.py`, `transport/messages.py`). The target headway is a fixed
+rig setting rather than a fed-back action: the controller emits one speed
+fraction per super-segment and no headway at all.
+
+**Decision 3's per-field input-class partition** is what keeps a
+`fallback_neutral` observation from either silently never firing a rule (a
+statement about the fallback, not about traffic) or firing on a substituted
+constant (worse). Each of the seven `SafetyContext` fields is exactly one
+of: (A) *configured road property* (`free_flow_speed_mps`) -- never blocks a
+rule; (B) *evidence-required* (`ego_speed_mps`, `leader_gap_m`,
+`leader_relative_speed_mps`, `local_density_veh_per_km`, the last with its
+own carve-out: a `derived_empty` density counts as evidence only when
+`obs_diagnostics.last_detection_age_s` bounds how recently the camera saw
+anything at all) -- blocks the rules that read it whenever its
+`perception.provenance` class is in `SUBSTITUTED`; (C) *structurally absent*
+(the merge-conflict pair, which needs a map match to a joining node this rig
+cannot make) -- blocks unconditionally, no sensor exists. Both rules are
+evaluated as total, independent predicates for the per-tick `safety` record
+(`Tick.to_record()`, beside `advisory`), never short-circuited by chain
+position.
+
+**A not_evaluable rule changes nothing in the decision, not only in the
+record (validator round 1, F1).** `apply_safety_layer` runs against
+`SafetyInputs.inert_context()`, not the raw observed context: every field
+lacking evidence this tick is replaced by its `INERT_CONTEXT_VALUES` entry
+(`policy/safety_gate.py`, beside `RULE_READS`) before it reaches the
+decision, so a not_evaluable rule cannot move the recommended speed or
+`emergency_override` by reading the observation's own substituted default --
+`local_density_veh_per_km`'s substituted `0.0` was the reproduced case:
+below the uncongested threshold, the opposite of inert, and it used to raise
+the recommended speed 20.0 -> 22.0 with every rule not_evaluable. `evaluate_rules`'s own census
+(above) keeps reading the unmodified context, so the record still says
+what was actually observed.
+
+**What is left of the twelve rules, and why.** Ten were removed, and the
+test was effect rather than name: a rule earns its place by bounding the
+recommended speed. `low_speed_uncongested` raises a low recommendation on an
+uncongested road and `forward_ttc` drives the emergency override, so both
+survive. The other ten only nulled the lane action, which a speed-only
+advisory does not carry -- and seven of the ten were `not_evaluable` on every
+tick this rig could ever produce anyway (no rear sensor, no lane-change
+detector, no lane index but the assumed one). `config.yaml`'s
+`safety.withhold_lane_when_not_evaluable` went with them: a flag over a
+decision the controller no longer makes had nothing left to withhold.
+`safety.enabled` (default `true`; validator round 1, Fix 3) is the rollback
+for the whole gate: `false` still runs the full census and writes the
+complete record, but `bounded_*` equals `proposed_*` exactly.
+`deployment/jetson/score_safety.py` measures the resulting per-rule
+evaluability census against recorded runs, refuses to print a firing rate
+for a rule evaluable on zero ticks, and replays each run under its OWN
+recorded `safety.config` rather than this tool's own defaults (validator
+round 1, F3/F4) -- refusing, and naming the missing key, for a run
+recorded before that config block existed.
 
 ## 7. Deviations from plan_deployment.md (and why)
 
@@ -172,7 +249,14 @@ layout) is likewise mirrored in `export_policy.VendoredActor` and checked by
    instantiate a second `CameraStream` + `TrtYoloDetector` (one more ~18 ms on
    the same GPU stream budget - measure; consider 448 engine for both),
    a mirrored `DistanceEstimator`, and pass rear vehicles to the builder.
-   The observation builder already has the field slots.
+   The observation builder already has the field slots. On the safety gate
+   (§6.1) it would restore nothing on its own: the three rear rules
+   (`target_lane_rear_gap`, `target_lane_rear_ttc`,
+   `target_lane_rear_braking`) were removed along with the lane action they
+   nulled, so a rear camera means reinstating them and the lane advisory they
+   guard, which also needs a lane-change detector and a lane index for the
+   four guards (`lane_change_dwell`, `lane_changes_per_km`,
+   `target_lane_missing`, `target_lane_front_ttc`) that read those.
 2. **OBD-II speed** (`sensors/obd_reader.py`): python-obd over ELM327 BT/USB;
    prefer OBD speed over GPS when fresh; GPS-vs-OBD comparison feeds the
    plan's observation-quality metrics.
@@ -191,8 +275,10 @@ per-tick `stage_ms`/`jetson_ms`/`link_ms`/`e2e_ms`/`fps` (system metrics, where
 `link_ms` is null for a local camera and null whenever the capture stamp was
 proxied rather than converted), `vehicles` with
 per-track distance/method (perception metrics), `obs` + `field_sources` +
-`obs_diagnostics.missingness` (observation quality), `head_probs`/`confidence`
-(policy), `type: system` records with power/utilization from jtop, and a
+`obs_diagnostics.missingness` (observation quality), `advisory` and `dsrc`
+(the ego segment's recommended speed, and the whole-network decision it came
+from), `safety` (the gate's proposed/bounded pair and its per-rule census),
+`type: system` records with power/utilization from jtop, and a
 per-tick `thermal` block (Jetson temperature and both devices' throttle-event
 status) beside `type: thermal_sample` (the Jetson's 1 Hz temperature and
 cooling-state series, independent of the tick loop) and `type: thermal_event`

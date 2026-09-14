@@ -315,25 +315,13 @@ class DifferentialTest {
     private fun kotlinReasons(): Map<String, String> {
         val gps = GpsRecord.noFix(1).toExtensions()
         val camera = CameraFrameMessage(1, 1, 1280, 720, "jpeg", 85).toExtensions()
-        val action = mapOf(
-            "desired_speed_bin" to JsonValue.Text("nominal"),
-            "desired_headway_bin" to JsonValue.Text("normal"),
-            "lane_preference" to JsonValue.Text("keep"),
-            "merge_mode" to JsonValue.Text("normal"),
-        )
-        fun advisory(head: Map<String, JsonValue> = action) = mapOf(
+        fun advisory() = mapOf(
             Fields.CAPTURE_KEY to JsonValue.Num(1),
             "rec_speed_mps" to JsonValue.Real(13.4),
             "rec_speed_display" to JsonValue.Real(30.0),
             "current_speed_display" to JsonValue.Real(28.0),
             "units" to JsonValue.Text("mph"),
-            "headway_target_s" to JsonValue.Real(2.0),
-            "lane_text" to JsonValue.Text("keep"),
-            "merge_text" to JsonValue.Text("normal"),
             "traffic_text" to JsonValue.Text("clear"),
-            "confidence" to JsonValue.Real(0.87),
-            "confidence_label" to JsonValue.Text("high"),
-            "action" to JsonValue.Obj(head),
         )
         val rates = mapOf(
             "camera_hz" to JsonValue.Real(5.0), "gps_hz" to JsonValue.Real(1.0),
@@ -398,11 +386,16 @@ class DifferentialTest {
             "camera zero width is accepted by both" to case(camera + ("width" to JsonValue.Num(0)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
             "camera negative frame id is accepted by both" to case(camera + ("frame_id" to JsonValue.Num(-1)), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
             "camera empty format is accepted by both" to case(camera + ("format" to JsonValue.Text("")), empty) { e, p -> CameraFrameMessage.fromWire(e, p) },
-            "advisory action is null" to case(advisory() + ("action" to JsonValue.Null), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
-            "advisory action is not an object" to case(advisory() + ("action" to JsonValue.Num(5)), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
-            "advisory action head is an integer" to case(advisory(action + ("desired_speed_bin" to JsonValue.Num(5))), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
-            "advisory action head outside the set" to case(advisory(action + ("merge_mode" to JsonValue.Text("ram_it"))), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
-            "advisory action missing a head" to case(advisory(action - "merge_mode"), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            // An unknown key is preserved rather than refused, extensions being
+            // additive -- which is what an `action` object left over from the
+            // 39-field actor now is on this channel.
+            "advisory with a leftover action object is accepted by both" to case(
+                advisory() + ("action" to JsonValue.Obj(mapOf(
+                    "desired_speed_bin" to JsonValue.Text("nominal"),
+                ))),
+                empty,
+            ) { e, p -> AdvisoryMessage.fromWire(e, p) },
+            "advisory traffic text is null" to case(advisory() + ("traffic_text" to JsonValue.Null), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
             "advisory units outside the three" to case(advisory() + ("units" to JsonValue.Text("furlongs")), empty) { e, p -> AdvisoryMessage.fromWire(e, p) },
             // The optional `here` object, added with task 21. Absent must be ACCEPTED on both
             // sides -- that is what lets the field be added without a coordinated flag day,

@@ -1,15 +1,6 @@
-"""Plain PyTorch RL components for DSRC CTDE training."""
+"""Reinforcement learning components.
 
-from src.rl.controller import LearnedPolicyController
-from src.rl.models import GlobalCritic, LocalCritic, MultiCategoricalActor
-from src.rl.trainers import MAPPOTrainer, IPPOTrainer, SharedPPOTrainer
-
-__all__ = [
-    "GlobalCritic",
-    "IPPOTrainer",
-    "LearnedPolicyController",
-    "LocalCritic",
-    "MAPPOTrainer",
-    "MultiCategoricalActor",
-    "SharedPPOTrainer",
-]
+Only SRC's own Q-learning remains. The MAPPO stack -- actor, critics, rollout buffer,
+PPO and the three trainers -- belonged to the local-sensing formulation that the paper
+does not use, and is in the history rather than here.
+"""

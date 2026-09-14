@@ -1,57 +1,18 @@
-# Config Layout
+# Configs
 
-All DSRC experiment configs should live under `configs/` and use YAML.
+What remains is the fleet. Every other config directory -- topology, demand, experiments,
+training -- belonged to the highway-env topology ladder and the MAPPO formulation, and is
+in the git history rather than here.
 
-## Families
+## `human_models/`
 
-- `topology/`: road layout and detector placement
-- `demand/`: inflow, AV penetration, burst behavior, branch splits
-- `human_models/`: cautious, normal, aggressive, heterogeneous driver settings
-- `experiments/`: experiment references, controller settings, outputs, and overrides
-- `training/`: RL algorithm and optimizer defaults
+`eidm_reaction.yaml` is the fleet every simulation result uses. Its header carries the
+measurements that chose it: the SRC paper's Wiedemann-99 calibration has no capacity drop
+on SUMO, and without one served flow is a constant and no controller can recover
+anything.
 
-## Naming Rules
+`w99_calibrated.yaml` is that calibration, kept because it is the paper's own and because
+the comparison between the two is a result.
 
-Standard topology IDs:
-
-- `ring`
-- `straight_single_lane`
-- `straight_multilane`
-- `merge`
-- `inverted_tree`
-- `inverted_tree_bottleneck`
-
-Standard vehicle roles:
-
-- `av`
-- `human`
-
-## Composition Model
-
-Experiment configs should reference family configs through a `refs` block. The config loader resolves those references and applies experiment overrides last.
-
-Experiment or environment configs may include optional local AV sensing settings. If omitted, deterministic defaults are used:
-
-```yaml
-sensing:
-  range_m: 150.0
-  latency_s: 0.0
-  position_noise_std: 0.0
-  speed_noise_std: 0.0
-  density_bin_edges_veh_per_km: [12.0, 30.0]
-  mean_speed_bin_edges_mps: [8.0, 18.0]
-  queue_speed_mps: 5.0
-```
-
-Controller configs may set `controller.safety_mode`. Use `integrated_rl` for the DSRC safety/physical-control layer and `simulator_default` for AV baselines that should use simulator/human-like safety behavior instead.
-
-## Example Files
-
-- `topology/ring.yaml`
-- `topology/inverted_tree_bottleneck.yaml`
-- `demand/medium.yaml`
-- `human_models/heterogeneous.yaml`
-- `experiments/exp_ring_wave_damping.yaml`
-- `training/mappo.yaml`
-- `training/shared_ppo.yaml`
-- `training/ippo.yaml`
+The network, the demand and the exit constraint are not configs. They are arguments to
+`scripts/build_mainz_scenario.py`, which writes the scenario from the published `.inpx`.

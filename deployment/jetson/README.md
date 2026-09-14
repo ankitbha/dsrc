@@ -145,11 +145,13 @@ closing-speed signs are fx-invariant); if the ego hood is visible, set
 
 ## Documentation map
 
-- `ARCHITECTURE.md` — internals: dataflow, threading, latency budget, the
-  sim↔real observation mapping table, deviations from the plan, extension roadmap.
+- `ARCHITECTURE.md` — internals: dataflow, threading, latency budget, what one
+  tick measures, deviations from the plan, extension roadmap.
 - `PROGRESS.md` — status against plan tasks P1–P8, measured numbers, exact
   next steps. **Start here when resuming work.**
 - `../../plans/plan_deployment.md` — the original deployment plan.
-- `../../specs/observation_schema.md`, `action_schema.md` — the sim contracts
-  this deployment mirrors (vendored in `policy/sim_contract.py`, guarded by
-  `tests/test_sim_contract.py`).
+- `../../specs/observation_schema.md`, `action_schema.md` — the simulator's own
+  contracts. This deployment no longer mirrors them: the observation carries
+  the seven fields its readers read (`perception/observation_builder.py`,
+  `OBS_FIELDS`) and the advisory is a speed. `specs/safety_contract_golden.json`
+  is the one contract still vendored onto the device.

@@ -45,11 +45,11 @@ from eval_run import (
     sensing_result,
     session_summary,
 )
-from policy.advisory import Advisory
 from policy.sensing_controller import RULE_NOT_EVALUABLE
+from policy.segment_advisory import SegmentAdvisory, SegmentAdvisoryRow
 from policy.sensing_loop import SensingLoop
 from policy.shadow_mode import LIVE, SHADOW, ModeHolder
-from transport.messages import ACTION_HEADS, PhoneTelemetry
+from transport.messages import PhoneTelemetry
 
 # --------------------------------------------------------------------------
 # A real `sensing` block per tick, via a real SensingLoop -- see module
@@ -84,36 +84,31 @@ class FakeObs:
 
 
 @dataclass
-class FakePolicy:
-    head_probs: dict
-
-
-@dataclass
 class FakeTick:
     obs_result: FakeObs
-    policy: FakePolicy
     gps: FakeGps
-    advisory: Advisory
+    dsrc: SegmentAdvisory
     t_capture_mono: float = 1000.0
     tick_id: int = 0
 
 
-def _advisory() -> Advisory:
-    return Advisory(
-        recommended_speed_mps=13.4, recommended_speed_display=30.0,
-        current_speed_display=28.0, units="mph", headway_target_s=2.0,
-        lane_text="keep lane", merge_text="no merge", traffic_text="moderate",
-        confidence=0.8, confidence_label="high",
-        action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                "lane_preference": "keep", "merge_mode": "normal"})
+def _advisory() -> SegmentAdvisory:
+    """One super-segment, decoded, with the vehicle on it."""
+    return SegmentAdvisory(
+        units="mph",
+        outcome="ok",
+        rows=(SegmentAdvisoryRow(segment_id="S00", action_index=2, fraction=1.0,
+                                 recommended_speed_mps=13.4,
+                                 recommended_speed_display=30.0),),
+        ego_segment=0,
+    )
 
 
 def _tick(tick_id: int) -> FakeTick:
     return FakeTick(
         obs_result=FakeObs(obs={"ego_acceleration": 0.0, "ego_speed": 20.0,
                                  "local_density_bin": 2.0}),
-        policy=FakePolicy(head_probs={head: [0.95, 0.05] for head in ACTION_HEADS}),
-        gps=FakeGps(), advisory=_advisory(),
+        gps=FakeGps(), dsrc=_advisory(),
         t_capture_mono=1000.0 + tick_id, tick_id=tick_id,
     )
 
@@ -291,8 +286,20 @@ class TestLatencyAxis:
 
 class TestProvenanceAxis:
     def _encoder_map(self) -> dict[str, str]:
-        from policy import sim_contract
-        return {name: "measured" for name in sim_contract.encoded_slot_names()}
+        """The 39-key shape every drive in the recorded corpus was written
+        under. The axis still has to read those drives, so this is the shape
+        worth testing the size census against -- the current 7-key shape is
+        covered by `test_the_current_seven_field_shape_also_answers`."""
+        from eval_run import LEGACY_ENCODER_SLOTS
+        return {name: "measured" for name in LEGACY_ENCODER_SLOTS}
+
+    def test_the_current_seven_field_shape_also_answers(self):
+        from perception.observation_builder import OBS_FIELDS
+
+        ticks = [{"field_sources": {name: "measured" for name in OBS_FIELDS}}]
+        axis = _axis_provenance(ticks).to_record()
+        assert axis["answered"] == 1
+        assert axis["unanswered_by_reason"] == {}
 
     def test_a_full_correct_map_answers(self):
         ticks = [{"field_sources": self._encoder_map()}]
@@ -301,13 +308,30 @@ class TestProvenanceAxis:
         assert axis["answered"] == 1
         assert axis["unanswered_by_reason"] == {}
 
-    def test_a_short_map_is_censused_by_its_size_and_flagged(self):
-        short = dict(list(self._encoder_map().items())[:20])
-        ticks = [{"field_sources": short}]
+    def test_a_map_matching_neither_shape_is_censused_by_its_size_and_flagged(self):
+        """20 keys is 13 more than the current shape and 19 fewer than the
+        legacy one, so it is reported by its own size. `short`/`long` needed a
+        single reference shape and there are two, which would have named the
+        wrong direction as often as the right one."""
+        odd = dict(list(self._encoder_map().items())[:20])
+        ticks = [{"field_sources": odd}]
         axis = _axis_provenance(ticks).to_record()
         assert axis["answered"] == 0
-        assert axis["unanswered_by_reason"] == {"short: 20": 1}
-        assert axis["vocabulary_violations"] == {"short: 20": 1}
+        assert axis["unanswered_by_reason"] == {"unknown shape: 20": 1}
+        assert axis["vocabulary_violations"] == {"unknown shape: 20": 1}
+
+    def test_a_map_of_a_known_size_with_wrong_names_is_mixed_not_unknown(self):
+        """The control for the test above: same key count as a real shape,
+        one name swapped. That is a different fault from an unrecognised size
+        and has to read as one."""
+        from perception.observation_builder import OBS_FIELDS
+
+        swapped = {name: "measured" for name in OBS_FIELDS}
+        del swapped["ego_speed"]
+        swapped["not_a_real_field"] = "measured"
+        axis = _axis_provenance([{"field_sources": swapped}]).to_record()
+        assert axis["answered"] == 0
+        assert axis["unanswered_by_reason"] == {"provenance_fields_mixed": 1}
 
     def test_a_full_size_map_of_only_substituted_values_does_not_answer(self):
         """M4: a map that covers every encoder slot by NAME but whose every
@@ -1704,11 +1728,10 @@ class TestProvenanceNeedsPrimaryEvidence:
 
     @staticmethod
     def _map(**overrides: str) -> dict[str, str]:
+        from eval_run import LEGACY_ENCODER_SLOTS
         from perception import provenance
-        from policy import sim_contract
 
-        names = sim_contract.encoded_slot_names()
-        out = {n: provenance.SOURCE_FALLBACK_NEUTRAL for n in names}
+        out = {n: provenance.SOURCE_FALLBACK_NEUTRAL for n in LEGACY_ENCODER_SLOTS}
         # The three that carry a computed class no matter what fed them.
         out["ego_headway_s"] = provenance.SOURCE_DERIVED
         out["target_lane_front_gap"] = provenance.SOURCE_DERIVED

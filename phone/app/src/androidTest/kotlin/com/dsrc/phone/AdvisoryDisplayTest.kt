@@ -41,18 +41,7 @@ class AdvisoryDisplayTest {
         recSpeedDisplay = 30.4,
         currentSpeedDisplay = 28.0,
         units = "kmh",
-        headwayTargetS = 2.0,
-        laneText = "Keep lane",
-        mergeText = "",
         trafficText = "Moderate",
-        confidence = 0.87,
-        confidenceLabel = "high",
-        action = mapOf(
-            "lane_preference" to "keep",
-            "merge_mode" to "normal",
-            "desired_speed_bin" to "nominal",
-            "desired_headway_bin" to "normal",
-        ),
     )
 
     @Before

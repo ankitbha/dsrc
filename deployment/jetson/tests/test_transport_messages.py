@@ -22,9 +22,7 @@ from transport.loopback import loopback_pair
 from transport.messages import (
     check_reserved,
     TimeSyncMessage,
-    ACTION_HEADS,
     RATE_KEYS,
-    ACTION_VALUES,
     CAPTURE_KEY,
     DISPLAY_UNITS,
     MAX_RATE_HZ,
@@ -98,11 +96,7 @@ def a_telemetry(**over):
 def an_advisory(**over):
     fields = dict(
         t_capture_mono_ns=666, rec_speed_mps=11.18, rec_speed_display=25.0,
-        current_speed_display=27.5, units="mph", headway_target_s=1.6,
-        lane_text="Keep lane", merge_text="Normal driving", traffic_text="Moderate",
-        confidence=0.87, confidence_label="high",
-        action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                "lane_preference": "keep", "merge_mode": "normal"},
+        current_speed_display=27.5, units="mph", traffic_text="Light",
     )
     fields.update(over)
     return AdvisoryMessage(**fields)
@@ -397,7 +391,6 @@ def test_a_wrong_json_type_is_refused():
         (Channel.CAMERA, a_camera_frame, "width", "1280"),
         (Channel.CAMERA, a_camera_frame, "format", 7),
         (Channel.HERE, a_here_response, "status", "200"),
-        (Channel.ADVISORY, an_advisory, "lane_text", 3),
         (Channel.RATE_CMD, a_rate_command, "shadow", "true"),
         (Channel.TELEMETRY, a_telemetry, "here_calls", "30"),
     ]
@@ -416,26 +409,7 @@ def test_a_boolean_is_not_accepted_where_an_int_is_required():
         decode_message(Channel.CAMERA, extensions, payload)
 
 
-@pytest.mark.parametrize("head", ACTION_HEADS)
-def test_an_action_value_outside_the_schema_is_refused(head):
-    extensions, payload = an_advisory().to_wire()
-    extensions["action"][head] = "sideways"
-    with pytest.raises(MessageError, match=re.escape(f"action.{head}")):
-        decode_message(Channel.ADVISORY, extensions, payload)
 
-
-def test_an_action_missing_a_head_is_refused():
-    extensions, payload = an_advisory().to_wire()
-    del extensions["action"]["merge_mode"]
-    with pytest.raises(MessageError, match="merge_mode"):
-        decode_message(Channel.ADVISORY, extensions, payload)
-
-
-def test_an_action_with_an_extra_head_is_refused():
-    extensions, payload = an_advisory().to_wire()
-    extensions["action"]["desired_altitude"] = "high"
-    with pytest.raises(MessageError, match="unexpected"):
-        decode_message(Channel.ADVISORY, extensions, payload)
 
 
 def test_units_outside_the_three_are_refused():
@@ -567,89 +541,34 @@ def test_the_bridge_works_against_the_real_gps_fix():
     assert roundtrip(record) == record
 
 
-def test_the_advisory_bridge_works_against_the_real_advisory():
-    # policy.advisory arrives by way of the actor runtime, which pulls numpy and
-    # torch. Guarded for the same reason the bridges are duck-typed: this suite
-    # has to run where those are absent, which is the whole argument.
-    pytest.importorskip("torch")
-    from policy.advisory import Advisory
+def test_the_advisory_bridge_works_against_a_real_advisory_row():
+    """The bridge is duck-typed, so this pins the shape it actually reads.
 
-    advisory = Advisory(
+    It used to build the 39-field runtime's `Advisory`, which no longer exists.
+    A `SegmentAdvisoryRow` is what the pipeline hands it now, and it carries the
+    same four names the bridge reads.
+    """
+    from policy.segment_advisory import SegmentAdvisoryRow
+
+    row = SegmentAdvisoryRow(
+        segment_id="3", action_index=2, fraction=1.0,
         recommended_speed_mps=11.18, recommended_speed_display=25.0,
-        current_speed_display=27.5, units="mph", headway_target_s=1.6,
-        lane_text="Keep lane", merge_text="Normal driving", traffic_text="Moderate",
-        confidence_label="high", confidence=0.87,
-        action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                "lane_preference": "keep", "merge_mode": "normal"},
     )
-    message = advisory_message_from_advisory(advisory, t_capture_mono_ns=9)
+
+    class _WithDisplay:
+        recommended_speed_mps = row.recommended_speed_mps
+        recommended_speed_display = row.recommended_speed_display
+        current_speed_display = 27.5
+        units = "mph"
+        traffic_text = "Light"
+
+    message = advisory_message_from_advisory(_WithDisplay(), t_capture_mono_ns=9)
     assert roundtrip(message) == message
-    assert message.action == advisory.action
-    assert message.rec_speed_display == pytest.approx(advisory.recommended_speed_display)
+    assert message.rec_speed_display == pytest.approx(row.recommended_speed_display)
 
 
 # -- the action vocabulary is mirrored, so it must not drift ------------------
 
-
-def test_the_action_vocabulary_matches_the_vendored_sim_contract():
-    """messages.py keeps its own copy so the transport stays stdlib-only and
-    does not import policy. Three copies now exist -- src/, the vendored
-    sim_contract, and this -- so equality is asserted rather than assumed."""
-    pytest.importorskip("numpy")
-    from policy import sim_contract
-
-    assert ACTION_VALUES == sim_contract.ACTION_VALUES
-    assert ACTION_HEADS == sim_contract.ACTION_HEADS
-
-
-def spec_allowed_values(head: str) -> set[str]:
-    """The values under one head's `allowed values:` block, and no further.
-
-    Anchored to the block rather than to the next head: a window running to the
-    next head swept up three other heads' values, so the check passed with a
-    value listed under the wrong head -- which is precisely the drift it exists
-    to catch, since ACTION_VALUES is what the decoder validates against.
-    """
-    text = (REPO / "specs" / "action_schema.md").read_text()
-    after_head = text.split(f"`{head}`", 1)
-    assert len(after_head) == 2, f"{head} is not documented"
-    after_allowed = after_head[1].split("- allowed values:", 1)
-    assert len(after_allowed) == 2, f"{head} has no allowed-values block"
-    block = after_allowed[1].split("- meaning:", 1)[0]
-    return set(re.findall(r"^\s*-\s+`([\w_]+)`\s*$", block, re.M))
-
-
-@pytest.mark.parametrize("head", ACTION_HEADS)
-def test_the_action_vocabulary_matches_the_action_schema_spec(head):
-    """Set equality, both directions: a value in the code and not the spec would
-    accept an out-of-schema action, and one in the spec and not the code would
-    silently drop a legitimate one."""
-    assert spec_allowed_values(head) == set(ACTION_VALUES[head])
-
-
-# `normal` is legitimately shared: it is a headway bin and a merge mode.
-LEGITIMATELY_SHARED_VALUES = {"normal"}
-
-
-def test_the_spec_blocks_are_pairwise_disjoint_apart_from_the_shared_value():
-    """Independent of the code, which the previous version of this was not.
-
-    It compared each block against ACTION_VALUES, and its sibling already
-    asserts those are equal -- so it was empty by construction and passed even
-    when the window was widened and the code widened to match. This asserts a
-    property of the spec text alone: a value appears under one head, except
-    `normal`, which really is both a headway bin and a merge mode.
-    """
-    blocks = {head: spec_allowed_values(head) for head in ACTION_HEADS}
-    for left in ACTION_HEADS:
-        for right in ACTION_HEADS:
-            if left >= right:
-                continue
-            shared = blocks[left] & blocks[right]
-            assert shared <= LEGITIMATELY_SHARED_VALUES, (
-                f"{left} and {right} both list {sorted(shared - LEGITIMATELY_SHARED_VALUES)}"
-            )
-    assert blocks["desired_headway_bin"] & blocks["merge_mode"] == {"normal"}
 
 
 SAMPLE_FOR_CHANNEL = {
@@ -1106,12 +1025,6 @@ SEND_REFUSALS = [
                                    "here_hz": 1.0}),
      "out_of_range"),
     ("bad units", lambda: an_advisory(units="furlongs"), "unknown_value"),
-    ("out-of-schema action",
-     lambda: an_advisory(action={"desired_speed_bin": "nominal",
-                                 "desired_headway_bin": "normal",
-                                 "lane_preference": "keep",
-                                 "merge_mode": "sideways"}),
-     "unknown_value"),
     ("coordinate out of range on a valid fix", lambda: a_gps_record(lat=91.0),
      "out_of_range"),
 ]
@@ -1204,13 +1117,6 @@ def test_a_valid_message_still_sends():
         sender.close()
         receiver.close()
 
-
-def test_a_fractional_drop_count_is_refused():
-    """A count, so integral; truncating it would make the round trip lie."""
-    extensions, payload = a_telemetry().to_wire()
-    extensions["dropped"]["camera"] = 2.7
-    with pytest.raises(MessageError, match="dropped.camera"):
-        decode_message(Channel.TELEMETRY, extensions, payload)
 
 
 def test_the_router_refuses_a_reserved_key_when_sending():
@@ -1336,16 +1242,6 @@ def test_each_reason_is_produced_by_the_condition_it_names(reason):
         decode_message(channel, extensions, payload)
     assert caught.value.reason == reason, f"got {caught.value.reason!r}"
 
-
-def test_an_out_of_schema_action_value_is_an_unknown_value_not_a_type_error():
-    """Adjacent to `units` in the spec's refusal table, and it was filed under
-    wrong_type -- wrong in the one case the counter exists for, since this is
-    where the phone and the sim contract can disagree."""
-    extensions, payload = an_advisory().to_wire()
-    extensions["action"]["merge_mode"] = "sideways"
-    with pytest.raises(MessageError) as caught:
-        decode_message(Channel.ADVISORY, extensions, payload)
-    assert caught.value.reason == "unknown_value"
 
 
 def test_the_reason_vocabulary_is_closed():
@@ -1762,10 +1658,7 @@ REQUIRE_STR_FIELDS = [
     (Channel.HERE, a_here_response, "request_url"),
     (Channel.TELEMETRY, a_telemetry, "thermal_status"),
     (Channel.ADVISORY, an_advisory, "units"),
-    (Channel.ADVISORY, an_advisory, "lane_text"),
-    (Channel.ADVISORY, an_advisory, "merge_text"),
     (Channel.ADVISORY, an_advisory, "traffic_text"),
-    (Channel.ADVISORY, an_advisory, "confidence_label"),
     (Channel.RATE_CMD, a_rate_command, "trigger"),
 ]
 
@@ -1829,7 +1722,10 @@ def test_every_required_field_of_each_helper_is_covered_above():
     }
     # Recorded, so a pattern that matches nothing is a failure and not a pass. These
     # are counts of *call sites the pattern must keep finding*, not of behaviours.
-    at_least = {"require_int": 9, "require_str": 9, "require_bool": 2}
+    # require_str fell from 9 to 7 when the advisory lost lane_text and merge_text
+    # with the lane advisory itself. Lowered deliberately: the point of the floor is
+    # that a pattern matching nothing fails, not that the count never changes.
+    at_least = {"require_int": 9, "require_str": 6, "require_bool": 2}
 
     for helper, covered in named.items():
         found = set()
@@ -2053,3 +1949,10 @@ def test_telemetry_predating_the_network_fields_is_still_accepted():
     decoded = PhoneTelemetry.from_wire(extensions, b"")
     assert decoded.network_transport is None
     assert decoded.network_transport_absent is None
+
+def test_a_fractional_drop_count_is_refused():
+    """A count, so integral; truncating it would make the round trip lie."""
+    extensions, payload = a_telemetry().to_wire()
+    extensions["dropped"]["camera"] = 2.7
+    with pytest.raises(MessageError, match="dropped.camera"):
+        decode_message(Channel.TELEMETRY, extensions, payload)

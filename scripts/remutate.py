@@ -18,7 +18,7 @@ question. Every mutation is restored in a `finally`, including on Ctrl-C -- but
 this edits files in place, so do not run it with uncommitted work you would mind
 losing, and never point it at a tree a validator is reading.
 """
-import pathlib, shutil, subprocess, sys
+import os, pathlib, shutil, subprocess, sys
 from xml.etree import ElementTree
 
 ROOT = pathlib.Path(".")
@@ -3101,6 +3101,75 @@ MUTATIONS = [
      '            "reference_absent_iff_fields_null", "unavailable",\n            HERE_CALLS_PREDATES_TASK_39,',
      '            "reference_absent_iff_fields_null", "failed",\n            HERE_CALLS_PREDATES_TASK_39,',
      "python"),
+
+    # Task 143: specs/sim_contract_golden_vectors.json exists to catch these
+    # seven, and M3, M5 and M7 exist specifically because contract_fingerprint()
+    # (sim_contract.py) does not move on any of them -- a fingerprint test
+    # "catching" one of those three is this gate failing, not passing, because
+    # it would mean the two mechanisms are masking each other rather than
+    # covering different ground.
+    ("sim contract: field order -- two LOCAL_OBS_FIELDS entries swapped, dimension unchanged",
+     "deployment/jetson/policy/sim_contract.py",
+     '    "leader_gap",\n    "leader_relative_speed",',
+     '    "leader_relative_speed",\n    "leader_gap",',
+     "python"),
+    ("sim contract: a FIELD_SCALES value changed",
+     "deployment/jetson/policy/sim_contract.py",
+     '    "leader_gap": 150.0,',
+     '    "leader_gap": 120.0,',
+     "python"),
+    ("sim contract: a HEADWAY_BIN_S bin edge changed (fingerprint does not hash this)",
+     "deployment/jetson/policy/sim_contract.py",
+     'HEADWAY_BIN_S: dict[str, float] = {"normal": 1.6, "larger": 2.2, "largest": 3.0}',
+     'HEADWAY_BIN_S: dict[str, float] = {"normal": 1.6, "larger": 2.3, "largest": 3.0}',
+     "python"),
+    ("sim contract: bin_index's boundary direction, >= flipped to >",
+     "deployment/jetson/policy/sim_contract.py",
+     "return int(sum(float(value) >= edge for edge in edges))",
+     "return int(sum(float(value) > edge for edge in edges))",
+     "python"),
+    ("sim contract: the inf clamp constant, 200.0 changed to 100.0",
+     "deployment/jetson/policy/sim_contract.py",
+     "result = 200.0 if result > 0 else -200.0",
+     "result = 100.0 if result > 0 else -100.0",
+     "python"),
+    ("sim contract: an ACTION_VALUES order within a head reversed",
+     "deployment/jetson/policy/sim_contract.py",
+     '"desired_speed_bin": ("slow", "nominal", "fast"),',
+     '"desired_speed_bin": ("fast", "nominal", "slow"),',
+     "python"),
+    ("sim contract: COOPERATION_FIELDS order changed",
+     "deployment/jetson/policy/sim_contract.py",
+     '    "segment_target_speed",\n    "merge_pressure",',
+     '    "merge_pressure",\n    "segment_target_speed",',
+     "python"),
+    # S4 (validator round 1). Registered because B1 showed the 15-entry
+    # speed_bin_mps section can be emptied with nothing noticing; this is the
+    # behavioural pin over that section's actual arithmetic, not just its
+    # population. Caught by exactly one test.
+    ("sim contract: SPEED_BIN_OFFSETS_MPS['slow'] narrowed by 2 m/s",
+     "deployment/jetson/policy/sim_contract.py",
+     'SPEED_BIN_OFFSETS_MPS: dict[str, float] = {"slow": -10.0, "nominal": -3.0, "fast": 0.0}',
+     'SPEED_BIN_OFFSETS_MPS: dict[str, float] = {"slow": -8.0, "nominal": -3.0, "fast": 0.0}',
+     "python"),
+    # S4 (validator round 1). Registered so the `cooperation_distinct_values` /
+    # `lane_distribution_distinct_values` (D13) cases are shown to catch
+    # something: without an entry that reorders LANE_DISTRIBUTION_LANES,
+    # nothing in this gate ever exercises what those two cases were added for.
+    ("sim contract: LANE_DISTRIBUTION_LANES reordered",
+     "deployment/jetson/policy/sim_contract.py",
+     'LANE_DISTRIBUTION_LANES: tuple[str, ...] = ("0", "1", "2")',
+     'LANE_DISTRIBUTION_LANES: tuple[str, ...] = ("0", "2", "1")',
+     "python"),
+    # Deliberately absent: removing `_number`'s `if isinstance(value, bool):
+    # return float(value)` branch. It SURVIVES, but it is an inert mutation --
+    # both bool-valued fields (`is_active`, `uncongested_low_speed_flag`) have
+    # FIELD_SCALES of 1.0, so the branch this removes and the `plain` branch it
+    # falls through to compute the same thing: float(True)/1.0 == float(True).
+    # Registering a mutation that cannot change behaviour would be a mutation
+    # that can never be caught for the wrong reason. See
+    # plans/implementation_records.md for the condition that would make it
+    # separable (a bool field with a non-1.0 scale).
 ]
 
 RESULTS = {
@@ -3110,9 +3179,9 @@ RESULTS = {
 }
 
 
-def failing_tests(kind):
+def _scan_junit_dirs(bases):
     """Names of the tests that failed, the total testcases seen, and whether
-    every JUnit XML file found parsed cleanly.
+    every JUnit XML file found parsed cleanly, across a list of directories.
 
     Parsed as XML, not by regex over the attributes. Gradle writes `name` first and
     pytest writes `classname` first, so a pattern that fixes the order silently matches
@@ -3131,7 +3200,7 @@ def failing_tests(kind):
     total = 0
     found_xml = False
     parse_failed = False
-    for base in RESULTS[kind]:
+    for base in bases:
         for report in base.rglob("*.xml"):
             found_xml = True
             try:
@@ -3146,6 +3215,14 @@ def failing_tests(kind):
                 cls = (case.get("classname") or "").rsplit(".", 1)[-1]
                 names.append(f"{cls}.{case.get('name')}" if cls else str(case.get("name")))
     return names, total, found_xml and not parse_failed
+
+
+def failing_tests(kind):
+    return _scan_junit_dirs(RESULTS[kind])
+
+
+def failing_tests_in(base):
+    return _scan_junit_dirs([base])
 
 
 BUILD_ERROR = ["<the mutation did not compile>"]
@@ -3167,15 +3244,109 @@ INCONCLUSIVE = ["<inconclusive: the run did not produce a trustworthy result>"]
 #: run.
 PYTEST_VERDICT_RETURNCODES = frozenset({0, 1})
 
-#: Testcases a clean, unmutated Python suite collects today. A mutated run
-#: collecting a different count did not exercise the same suite it is being
-#: scored against -- a partial file copy or a conftest import that silently
-#: drops a whole module both trivially report zero failures, because most
-#: of the suite never ran at all. Update this when the suite's own test
-#: count changes; a run reporting a different count is not proof of drift,
-#: only that it needs checking against `pytest --collect-only` before being
-#: trusted either way.
-EXPECTED_PYTHON_TESTCASES = 2060
+#: Testcases a clean, unmutated Python suite collects -- measured fresh, once
+#: per invocation of this script, rather than typed as a literal.
+#:
+#: A mutated run collecting a different count did not exercise the same suite
+#: it is being scored against -- a partial file copy or a conftest import that
+#: silently drops a whole module both trivially report zero failures, because
+#: most of the suite never ran at all. A literal here goes stale the moment
+#: the suite grows, which happens on every commit landing a test anywhere in
+#: the repository, including work in flight at the same time as a mutation
+#: run: this constant was 2060 against a suite that had already reached 2272,
+#: which made `run()` return INCONCLUSIVE for every Python mutation below,
+#: silently, since the day it drifted. `_baseline_python_testcases()` measures
+#: the count fresh, against the unmutated tree, before this script applies its
+#: first mutation -- see the call at module scope, below `MUTATIONS`. It must
+#: run before any mutation is applied: measuring it *after* would let a
+#: mutation's own collection failure lower both sides of the comparison
+#: together, hiding exactly the failure mode this check exists to catch.
+#:
+#: R2-5 (validator round 2): what this constant cannot do, and the trade round 1
+#: made silently by replacing a literal with it. It only compares the MUTATED run's
+#: collected count against THIS SAME TREE'S OWN baseline, measured moments earlier
+#: -- so a module silently dropped by something already present before either run
+#: even starts (an untracked `pytest.ini` with `addopts = --ignore=...`, a stray
+#: `conftest.py`) contaminates both sides equally and this comparison never moves.
+#: Reproduced: an untracked `pytest.ini` ignoring `test_sim_contract.py` measured a
+#: baseline of 2470 against a true 2545, and a real mutation in the ignored module
+#: then reported `*** SURVIVED ***` -- a false SURVIVED, not a false CAUGHT, but a
+#: verdict on a suite this script was never told had shrunk. The old literal this
+#: replaced *would* have caught that specific case (an absolute expectation notices
+#: a suite that shrank; a self-measured baseline, by construction, cannot notice a
+#: shrink it was there to measure) -- traded away deliberately for the staleness
+#: fix, not an oversight left standing. What closes it now is
+#: `_refuse_if_tree_is_dirty()`'s separate check for untracked files that change
+#: collection, run once before any of this.
+_BASELINE_PYTHON_TESTCASES: int | None = None
+
+
+def _purge_pycache() -> None:
+    """Remove every __pycache__ directory under the tree this runs against.
+
+    A same-second edit that leaves a .py file's size unchanged can reuse a
+    stale .pyc (Python's default invalidation is mtime+size), so a mutation
+    applied and reverted within one wall-clock second can silently run the
+    previous file's bytecode. That has already produced a wrong verdict on
+    this project twice. `PYTHONDONTWRITEBYTECODE=1` (set on every pytest
+    subprocess below) stops new staleness from being written; this clears out
+    whatever a run before that fix -- or a run under a different interpreter
+    -- already left behind.
+    """
+    for cache_dir in pathlib.Path(".").rglob("__pycache__"):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+_NO_BYTECODE_ENV = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+
+
+def _baseline_python_testcases() -> int:
+    """Measure the clean tree's testcase count -- and refuse if it is not clean.
+
+    B2. This used to accept pytest's returncode 1 (a suite with at least one
+    failing test) only to throw the failing names away (`_, total, usable =
+    failing_tests_in(...)`), keeping only the count. `run()` then returned the
+    *mutated* run's failing names with no subtraction against that baseline, so
+    any pre-existing failure in the clean tree made every mutation below score
+    CAUGHT "by" that same unrelated test, and `survived` stayed empty -- exit 0
+    on a gate that had checked nothing. The validator reproduced this end to
+    end with a planted `assert 1 == 2` test: every mutation reported CAUGHT
+    by that planted test, `survived: 0`.
+
+    The returncode is still accepted long enough to read the failing names --
+    a clean pytest run legitimately exits 1 when nothing failed only if nothing
+    was collected, which the `total == 0` check below still catches -- but a
+    non-empty name list now refuses rather than being discarded. A mutation
+    gate run against a red tree settles nothing either way, so refusing is
+    better than subtracting: subtraction would have to assume the baseline
+    failure is stable and unrelated to every mutation below, which is exactly
+    the assumption this project has already been burned by once (see the
+    module docstring).
+    """
+    baseline_dir = ROOT / "build" / "pytest-results-baseline"
+    if baseline_dir.exists():
+        shutil.rmtree(baseline_dir)
+    _purge_pycache()
+    result = subprocess.run(
+        [".venv/bin/python3", "-m", "pytest", "-q", "deployment/jetson/tests/",
+         "-p", "no:cacheprovider", f"--junit-xml={baseline_dir}/results.xml"],
+        capture_output=True, text=True, env=_NO_BYTECODE_ENV,
+    )
+    if result.returncode not in PYTEST_VERDICT_RETURNCODES:
+        sys.exit(
+            "could not measure a baseline Python testcase count: pytest exited "
+            f"{result.returncode}\n{result.stdout}\n{result.stderr}"
+        )
+    names, total, usable = failing_tests_in(baseline_dir)
+    if not usable or total == 0:
+        sys.exit("could not measure a baseline Python testcase count: no usable JUnit XML")
+    if names:
+        sys.exit(
+            f"refusing: the clean Python tree already has {len(names)} failing test(s), "
+            "so a mutation gate run against it would settle nothing either way -- fix "
+            f"these first: {names}"
+        )
+    return total
 
 
 def is_collection_error(names):
@@ -3215,10 +3386,11 @@ def run(kind):
         if base.exists():
             shutil.rmtree(base)          # or a previous run's failures count as this one's
     if kind == "python":
+        _purge_pycache()
         result = subprocess.run(
             [".venv/bin/python3", "-m", "pytest", "-q", "deployment/jetson/tests/",
              "-p", "no:cacheprovider", f"--junit-xml={RESULTS['python'][0]}/results.xml"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=_NO_BYTECODE_ENV,
         )
         if result.returncode not in PYTEST_VERDICT_RETURNCODES:
             return INCONCLUSIVE
@@ -3230,7 +3402,7 @@ def run(kind):
     names, total, usable = failing_tests(kind)
     if not usable:
         return INCONCLUSIVE
-    if kind == "python" and total != EXPECTED_PYTHON_TESTCASES:
+    if kind == "python" and total != _BASELINE_PYTHON_TESTCASES:
         return INCONCLUSIVE
     return names
 
@@ -3251,6 +3423,99 @@ if SIDECAR.exists():
     target.write_text(saved[1])
     SIDECAR.unlink()
 
+
+#: Untracked files pytest itself would notice -- an exact name pytest treats
+#: specially, or the shape of a test module -- so their mere presence changes what
+#: gets collected without git ever calling the tree dirty in the sense the tracked-
+#: file check below covers. R2-5 (validator round 2): an untracked `pytest.ini`
+#: carrying `addopts = --ignore=deployment/jetson/tests/test_sim_contract.py` gave a
+#: baseline of 2470 testcases against a true 2545, and a real mutation inside the
+#: ignored module then reported `*** SURVIVED ***` -- a false SURVIVED, never a false
+#: CAUGHT, because the baseline was measured under the exact same contamination as
+#: the mutated run, so the two never disagreed. `conftest.py` can do the same through
+#: collection hooks; `setup.cfg`/`tox.ini`/`pyproject.toml` can carry the same
+#: `[pytest]`/`[tool:pytest]` `addopts` `pytest.ini` does; an untracked `test_*.py`
+#: changes collection by simply existing.
+_COLLECTION_AFFECTING_NAMES = frozenset(
+    {"conftest.py", "pytest.ini", "setup.cfg", "tox.ini", "pyproject.toml"}
+)
+
+
+def _refuse_if_tree_is_dirty(kinds: list[str] | None) -> None:
+    """B2, second route (validator round 1), plus R2-5 (validator round 2).
+
+    Route one: a shared worktree carrying another agent's uncommitted, in-
+    progress edit is a red tree that does not *look* red: `git status
+    --porcelain` shows a modified tracked file, not a failing test, and
+    nothing in `run()` or `_baseline_python_testcases()` checks either. If
+    that in-progress edit fails a test at the moment this gate happens to
+    run -- which mid-edit code routinely does -- every mutation below is
+    scored CAUGHT by that unrelated failure, `survived` stays empty, and
+    this exits 0 having checked nothing.
+
+    Route two (R2-5): an untracked file that changes what pytest collects
+    (`_COLLECTION_AFFECTING_NAMES` above) contaminates the baseline and every
+    mutated run identically, so `_baseline_python_testcases()`'s own
+    fresh-vs-mutated comparison can never see it -- see that constant's
+    docstring for the reproduced false SURVIVED.
+
+    Refuse before applying anything, naming what is dirty or collection-
+    affecting, rather than let a mutation run start against either. Run this
+    gate from its own `git worktree add --detach`, never a tree another
+    agent is also committing to.
+
+    R2-6 (validator round 2): scoped to the kinds actually selected
+    (`kinds`, the parsed `WANTED` below -- `None` means every kind). A
+    Gradle-only run depends on neither check above -- it never calls
+    `_baseline_python_testcases()` or reads Python collection counts -- and a
+    `git archive` mirror with no `.git` at all made `git status` itself exit
+    128 for every kind including those, refusing a run this guard was never
+    protecting. That friction is what makes someone disable the guard
+    entirely; scoping it removes the friction without weakening the
+    protection a Python run still gets.
+    """
+    if kinds is not None and "python" not in kinds:
+        return
+    result = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=str(ROOT),
+        capture_output=True, text=True, timeout=10.0,
+    )
+    if result.returncode != 0:
+        sys.exit(
+            "could not check whether the working tree is clean: git status exited "
+            f"{result.returncode}\n{result.stdout}\n{result.stderr}"
+        )
+    dirty = []
+    collection_affecting = []
+    for line in result.stdout.splitlines():
+        if not line.startswith("??"):
+            dirty.append(line)
+            continue
+        # Porcelain untracked lines are "?? <path>"; a build artifact or scratch
+        # file is not another agent's edit to something this gate might mutate or
+        # run tests against, but a collection-affecting name is a third thing
+        # this check exists to catch even though it is also untracked.
+        name = pathlib.Path(line[3:]).name
+        if name in _COLLECTION_AFFECTING_NAMES or (name.startswith("test_") and name.endswith(".py")):
+            collection_affecting.append(line)
+    if dirty:
+        sys.exit(
+            "refusing: the working tree has uncommitted changes to tracked files, so a "
+            "mutation run here could be scored CAUGHT by whatever they currently break "
+            "rather than by the mutation itself -- commit or stash them first, or run "
+            "this gate from its own `git worktree add --detach`:\n" + "\n".join(dirty)
+        )
+    if collection_affecting:
+        sys.exit(
+            "refusing: an untracked file here would change what pytest collects "
+            "(conftest.py, pytest.ini, setup.cfg, tox.ini, pyproject.toml, or a "
+            "test_*.py module), and _baseline_python_testcases()'s self-measured "
+            "count cannot tell that apart from a clean tree that legitimately "
+            "collects fewer tests -- remove it, or run this gate from its own "
+            "`git worktree add --detach`:\n" + "\n".join(collection_affecting)
+        )
+
+
 # Optional kind filter: `python3 scripts/remutate.py python` runs only the Python
 # entries. The docstring says to run this after landing a batch of fixes, and a batch
 # is almost always one kind -- rebuilding both Gradle suites per mutation to check a
@@ -3266,6 +3531,23 @@ if WANTED:
     unknown = [k for k in WANTED if k not in RESULTS]
     if unknown:
         sys.exit(f"unknown kind(s) {unknown}; known: {sorted(RESULTS)}")
+
+# R2-6: below the WANTED parse, and scoped to it -- see _refuse_if_tree_is_dirty's
+# own docstring for why.
+_refuse_if_tree_is_dirty(WANTED)
+
+# Measured once, here, before the loop below applies its first mutation --
+# see `_baseline_python_testcases`'s docstring for why it must be measured
+# against the clean tree and not recomputed per mutation.
+if any(
+    kind == "python"
+    and (WANTED is None or "python" in WANTED)
+    and (not NAME_FILTERS or any(f in name for f in NAME_FILTERS))
+    for name, rel, old, new, kind in MUTATIONS
+):
+    print("measuring the current Python suite's testcase count against the clean tree ...")
+    _BASELINE_PYTHON_TESTCASES = _baseline_python_testcases()
+    print(f"  {_BASELINE_PYTHON_TESTCASES} testcases")
 
 survived = []
 for name, rel, old, new, kind in MUTATIONS:
@@ -3311,7 +3593,10 @@ for name, rel, old, new, kind in MUTATIONS:
         print(f"  INCONCLUSIVE       {name}")
     elif failed:
         print(f"  CAUGHT ({len(failed)})         {name}")
-        print(f"                     by {failed[0]}")
+        # All of them, not just failed[0]: with several tests failing, the first
+        # name alone cannot say whether the mutation was caught by the test built
+        # for it or only by an unrelated fingerprint test happening to also fail.
+        print(f"                     by {', '.join(failed)}")
     else:
         survived.append(name)
         print(f"  *** SURVIVED ***   {name}")

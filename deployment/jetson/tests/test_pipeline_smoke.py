@@ -2,10 +2,10 @@
 
 A scripted scene (leader closing at -2 m/s, one vehicle per adjacent
 lane) is projected through the pinhole model and fed to the real
-tracker -> distance -> observation -> actor -> advisory chain with a
-random-init policy bundle. Verifies wiring, sim-schema conformance,
-JSON-serializability of log records, and the action->observation
-headway feedback loop.
+tracker -> distance -> observation chain, and -- where a fixture supplies a
+randomly initialised DSRC bundle -- on through the whole-network decision and
+its per-segment speed advisory. Verifies wiring, sim-schema conformance and
+JSON-serializability of log records.
 """
 
 from __future__ import annotations
@@ -20,14 +20,16 @@ import pytest
 from perception.detector import Detection
 from perception.distance import DistanceEstimator
 from perception.observation_builder import BuilderConfig, ObservationBuilder
+from perception.segment_state import DEFAULT_NETWORK_DEFINITION_PATH, SegmentStateBuilder
 from perception.tracker import IouTracker
 from pipeline import PerceptionPolicyPipeline
-from policy import sim_contract
-from policy.actor_runtime import ActorRuntime
-from policy.advisory import AdvisoryDecoder
-from policy.export_policy import build_random, export
+from perception.observation_builder import OBS_FIELDS
+from policy import export_dsrc_policy
+from policy.dsrc_runtime import DsrcRuntime
+from policy.segment_advisory import SegmentAdvisoryDecoder
 from sensors.camera_stream import Frame
 from sensors.gps_reader import GpsFix
+from sensors.here_feed import HereFeed
 
 FX, CX, HORIZON, CAM_H = 800.0, 640.0, 360.0, 1.25
 
@@ -63,16 +65,15 @@ def scene_detections(t_s: float) -> list[Detection]:
     return [Detection(xyxy=b, conf=0.9, cls=2) for b in boxes]
 
 
-@pytest.fixture(scope="module")
-def actor_bundle(tmp_path_factory) -> str:
-    prefix = tmp_path_factory.mktemp("bundle") / "actor_policy"
-    actor, info = build_random(seed=0)
-    export(actor, info, str(prefix))
-    return str(prefix)
-
-
 @pytest.fixture
-def pipeline(actor_bundle: str) -> PerceptionPolicyPipeline:
+def pipeline() -> PerceptionPolicyPipeline:
+    """The perception chain with no policy behind it.
+
+    This is a supported configuration, not a stub: it is what a rig carrying
+    no policy for the road it is driving runs, and it is the fixture for every
+    test about perception, timing and the log record. `dsrc_pipeline` below is
+    the one with a policy.
+    """
     return PerceptionPolicyPipeline(
         detector=FakeDetector(),
         tracker=IouTracker(min_hits=2),
@@ -80,8 +81,40 @@ def pipeline(actor_bundle: str) -> PerceptionPolicyPipeline:
             fx_px=FX, cx_px=CX, horizon_y_px=HORIZON, camera_height_m=CAM_H, ema_alpha=0.6
         ),
         builder=ObservationBuilder(BuilderConfig()),
-        actor=ActorRuntime(actor_bundle),
-        advisory_decoder=AdvisoryDecoder(units="mph"),
+    )
+
+
+@pytest.fixture(scope="module")
+def dsrc_bundle(tmp_path_factory) -> str:
+    definition = json.loads(DEFAULT_NETWORK_DEFINITION_PATH.read_text())
+    model, info = export_dsrc_policy.build_random(definition, seed=0)
+    prefix = str(tmp_path_factory.mktemp("dsrc_bundle") / "dsrc_policy")
+    export_dsrc_policy.export(model, info, definition, prefix)
+    return prefix
+
+
+@pytest.fixture
+def dsrc_pipeline(dsrc_bundle: str) -> PerceptionPolicyPipeline:
+    # Constructed in this order, and the builder/decoder are handed the
+    # runtime's own network_fingerprint, so a definition mismatch between
+    # the three is refused here rather than silently producing a wrong
+    # action vector (validator round 1, fix 2b).
+    dsrc_runtime = DsrcRuntime(dsrc_bundle)
+    return PerceptionPolicyPipeline(
+        detector=FakeDetector(),
+        tracker=IouTracker(min_hits=2),
+        distance=DistanceEstimator(
+            fx_px=FX, cx_px=CX, horizon_y_px=HORIZON, camera_height_m=CAM_H, ema_alpha=0.6
+        ),
+        builder=ObservationBuilder(BuilderConfig()),
+        dsrc_runtime=dsrc_runtime,
+        dsrc_segment_builder=SegmentStateBuilder(
+            expected_network_fingerprint=dsrc_runtime.network_fingerprint,
+        ),
+        dsrc_advisory_decoder=SegmentAdvisoryDecoder.from_network_definition(
+            expected_network_fingerprint=dsrc_runtime.network_fingerprint,
+        ),
+        dsrc_decision_interval_s=60.0,
     )
 
 
@@ -104,31 +137,36 @@ def run_ticks(pipeline: PerceptionPolicyPipeline, n: int, dt: float = 1 / 30):
     return tick
 
 
-def test_pipeline_produces_aligned_observation_and_advisory(pipeline) -> None:
+def test_pipeline_produces_an_observation_aligned_with_the_scene(pipeline) -> None:
     tick = run_ticks(pipeline, 45)
     obs = tick.obs_result.obs
 
-    assert tick.obs_result.encoded.shape == (sim_contract.local_obs_dim(),)
+    assert set(obs) == set(OBS_FIELDS)
+    assert set(tick.obs_result.field_sources) == set(OBS_FIELDS)
     assert obs["ego_speed"] == pytest.approx(27.0)
     # leader should be locked on and closing
     assert math.isfinite(obs["leader_gap"])
     assert 10.0 < obs["leader_gap"] < 45.0
     assert obs["leader_relative_speed"] == pytest.approx(-2.0, abs=0.7)
-    assert obs["left_lane_front_gap"] == pytest.approx(28.0, rel=0.1)
-    assert obs["right_lane_front_gap"] == pytest.approx(60.0, rel=0.1)
-    # 3 forward vehicles -> symmetrized count
+    # 3 forward vehicles -> symmetrized count. The adjacent-lane vehicles are
+    # still detected and still counted here; what went with the lane rules is
+    # the per-lane gap FIELDS, which nothing read once those rules were gone.
     assert obs["active_vehicle_count_local"] == 6
 
-    assert tick.advisory.recommended_speed_mps >= 12.0
-    assert tick.advisory.lane_text
-    assert tick.policy.action["desired_speed_bin"] in sim_contract.ACTION_VALUES["desired_speed_bin"]
 
-
-def test_headway_feedback_loop(pipeline) -> None:
+def test_the_target_headway_is_a_pipeline_setting_not_an_observation_field(pipeline) -> None:
+    """It used to be fed back from the actor's `desired_headway_bin`, one
+    tick's action shaping the next tick's observation. The controller emits
+    one speed fraction per segment and no headway at all, so the target is a
+    fixed rig setting the gate reads directly, and the observation no longer
+    carries it -- a loop that fed back a constant would be indistinguishable
+    from one that fed back a decision."""
     tick = run_ticks(pipeline, 5)
-    expected = sim_contract.decode_headway_bin(tick.policy.action["desired_headway_bin"])
-    next_tick = run_ticks(pipeline, 1)
-    assert next_tick.obs_result.obs["target_headway_s"] == expected
+    assert "target_headway_s" not in tick.obs_result.obs
+    assert pipeline.target_headway_s == pytest.approx(1.6)
+    assert tick.safety_gate is None or (
+        tick.safety_gate.proposed_headway_s == pytest.approx(pipeline.target_headway_s)
+    )
 
 
 def test_tick_record_is_json_serializable(pipeline) -> None:
@@ -137,9 +175,33 @@ def test_tick_record_is_json_serializable(pipeline) -> None:
     text = json.dumps(record)  # Python JSON: Infinity literals allowed
     parsed = json.loads(text)
     assert parsed["type"] == "tick"
-    assert parsed["obs"]["follower_gap"] == math.inf
-    assert len(parsed["encoded"]) == sim_contract.local_obs_dim()
-    assert parsed["advisory"]["recommended_speed_display"] > 0
+    assert parsed["obs"]["leader_gap"] == pytest.approx(tick.obs_result.obs["leader_gap"])
+    # The encoded actor input is gone with the actor; `obs` is the record.
+    assert "encoded" not in parsed
+    assert set(parsed["obs"]) == set(OBS_FIELDS)
+    # No policy behind this pipeline, so no recommendation was made. Recorded
+    # as absent, not as a zero.
+    assert parsed["advisory"] is None
+    assert parsed["dsrc"] is None
+
+
+def test_an_empty_road_records_an_infinite_leader_gap(pipeline) -> None:
+    """Python JSON's Infinity literal, round-tripped. `inf` is the gap to a
+    leader that is not there, not a missing measurement, so it has to survive
+    the record rather than be written as null or as a large number."""
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    now = time.monotonic()
+    frame = Frame(image=image, frame_id=1, t_mono=now - 0.05, t_wall=time.time() - 0.05)
+    fix = GpsFix(
+        valid=True, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+        fix_quality=1, num_sats=9, hdop=0.9, altitude_m=3.0,
+        utc_epoch_s=time.time(), t_mono=now - 0.05, t_wall=time.time() - 0.05,
+    )
+    tick = pipeline.step(frame, fix, detections_override=[])
+
+    assert tick.obs_result.obs["leader_gap"] == math.inf
+    parsed = json.loads(json.dumps(tick.to_record()))
+    assert parsed["obs"]["leader_gap"] == math.inf
 
 
 def test_stage_timings_recorded(pipeline) -> None:
@@ -157,13 +219,114 @@ def test_stage_timings_recorded(pipeline) -> None:
 ALL_STAGE_KEYS = {
     "capture", "capture_to_encode_start", "encode", "encode_done_to_enqueue",
     "enqueue_to_wire", "transport", "jpeg_decode", "detect", "track", "fuse",
-    "infer", "decode",
+    "gate", "segment_assemble", "dsrc_infer",
 }
 
 
 def test_every_stage_key_is_present_on_a_local_camera_tick(pipeline) -> None:
     tick = run_ticks(pipeline, 3)
     assert set(tick.stages) == ALL_STAGE_KEYS
+
+
+# -- task 145: the DSRC path, wired but off by default -------------------------
+
+
+def test_a_pipeline_with_no_dsrc_runtime_reports_absent_with_a_reason(pipeline) -> None:
+    """No DsrcRuntime was given, so both stages are absent with a named reason
+    and tick.dsrc is None. The perception chain still runs and still logs."""
+    tick = run_ticks(pipeline, 1)
+    for key in ("segment_assemble", "dsrc_infer"):
+        assert tick.stages[key].basis == "absent"
+        assert tick.stages[key].reason == "dsrc runtime not configured"
+    assert tick.dsrc is None
+
+
+def test_dsrc_parts_must_be_given_together_or_not_at_all() -> None:
+    with pytest.raises(ValueError):
+        PerceptionPolicyPipeline(
+            detector=FakeDetector(),
+            tracker=IouTracker(min_hits=2),
+            distance=DistanceEstimator(
+                fx_px=FX, cx_px=CX, horizon_y_px=HORIZON, camera_height_m=CAM_H, ema_alpha=0.6
+            ),
+            builder=ObservationBuilder(BuilderConfig()),
+            dsrc_runtime=object(),  # the other two dsrc_* kwargs are still None
+        )
+
+
+def _dsrc_tick(dsrc_pipeline, t_mono: float, here_feed_source=None):
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    frame = Frame(image=image, frame_id=0, t_mono=t_mono, t_wall=time.time())
+    fix = GpsFix(
+        valid=True, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+        fix_quality=1, num_sats=9, hdop=0.9, altitude_m=3.0,
+        utc_epoch_s=time.time(), t_mono=t_mono, t_wall=time.time(),
+    )
+    return dsrc_pipeline.step(
+        frame, fix, detections_override=scene_detections(0.0), here_feed_source=here_feed_source,
+    )
+
+
+def test_the_first_tick_runs_a_dsrc_decision(dsrc_pipeline) -> None:
+    tick = _dsrc_tick(dsrc_pipeline, time.monotonic() - 0.01)
+    assert tick.stages["segment_assemble"].basis == "measured"
+    # No HereFeed source was given, so there is nothing to match against --
+    # the builder still ran (measured above), but the coverage gate refused
+    # before the network did, so dsrc_infer records no inference happened
+    # rather than the refusal's own, much shorter, wall time.
+    assert tick.stages["dsrc_infer"].basis == "absent"
+    assert tick.stages["dsrc_infer"].reason == "no dsrc action: no_response_yet"
+    assert tick.dsrc is not None
+    assert tick.dsrc.outcome == "no_response_yet"
+    assert tick.dsrc.rows == ()
+
+
+def test_a_second_tick_inside_the_decision_interval_holds_the_first(dsrc_pipeline) -> None:
+    now = time.monotonic() - 0.01
+    first = _dsrc_tick(dsrc_pipeline, now)
+    second = _dsrc_tick(dsrc_pipeline, now + 0.001)
+
+    assert second.stages["segment_assemble"].basis == "absent"
+    assert second.stages["segment_assemble"].reason == "no dsrc decision this tick"
+    assert second.stages["dsrc_infer"].basis == "absent"
+    assert second.dsrc is first.dsrc  # the exact held-over object, not a fresh copy
+
+
+def test_full_coverage_through_a_real_here_feed_produces_an_advisory(dsrc_pipeline) -> None:
+    """A HereFeed carrying one link near every Mainz segment's own synthetic
+    polyline (specs/dsrc_network_mainz.json's own anchor) drives a full
+    decision end to end: assembly, inference and decode."""
+    feed = HereFeed()
+    definition = json.loads(DEFAULT_NETWORK_DEFINITION_PATH.read_text())
+    bodies = []
+    for segment in definition["segments"]:
+        lat, lon = segment["edges"][0]["polyline"][0]
+        bodies.append({
+            "location": {
+                "length": 200.0,
+                "shape": {"links": [{"points": [
+                    {"lat": lat, "lng": lon},
+                    {"lat": lat, "lng": lon + 0.0005},
+                ]}]},
+            },
+            "currentFlow": {"speed": 15.0, "freeFlow": 16.67, "jamFactor": 3.0, "confidence": 0.9},
+        })
+    body = json.dumps({"results": bodies}).encode("utf-8")
+    t_mono = time.monotonic() - 0.01
+    feed.offer(status=200, body=body, received_t_mono=t_mono)
+
+    tick = _dsrc_tick(dsrc_pipeline, t_mono, here_feed_source=feed)
+
+    assert tick.stages["segment_assemble"].basis == "measured"
+    assert tick.stages["dsrc_infer"].basis == "measured"
+    assert tick.dsrc.outcome == "ok"
+    assert len(tick.dsrc.rows) == 12
+    # ego_segment is a separate, independent match (the fix against segment
+    # polylines) from segment coverage (links against segment polylines);
+    # this fix sits at the network's bounding-box centre, which need not be
+    # on any edge, so ego_segment being None here is not itself a defect --
+    # see test_advisory.py's TestEgoSegment for that matching logic in
+    # isolation, on geometry constructed to actually be near a segment.
 
 
 def test_a_local_camera_reports_capture_as_an_instant_on_its_own_clock(pipeline) -> None:
@@ -197,19 +360,19 @@ def test_jpeg_decode_is_absent_for_a_local_source(pipeline) -> None:
 
 def test_the_jetson_side_stages_are_measured_and_non_negative(pipeline) -> None:
     tick = run_ticks(pipeline, 3)
-    for key in ("detect", "track", "fuse", "infer", "decode"):
+    for key in ("detect", "track", "fuse", "gate"):
         stage = tick.stages[key]
         assert stage.basis == "measured", key
         assert stage.clock == "jetson", key
         assert stage.ms is not None and stage.ms >= 0.0, key
 
 
-def test_infer_plus_decode_equals_policy_advisory_within_rounding(pipeline) -> None:
+def test_the_gate_fits_inside_the_policy_advisory_segment_it_runs_in(pipeline) -> None:
+    """`policy_advisory` is the wall clock around the whole policy block --
+    the DSRC step, the gate, and the bookkeeping between them -- so the gate's
+    own measurement must fit inside it rather than merely be close to it."""
     tick = run_ticks(pipeline, 3)
-    total = tick.stages["infer"].ms + tick.stages["decode"].ms
-    # set_target_headway runs between the decode stamp and t4, so the two are
-    # close but not required to be bit-identical.
-    assert total == pytest.approx(tick.stage_ms["policy_advisory"], abs=1.0)
+    assert tick.stages["gate"].ms <= tick.stage_ms["policy_advisory"] + 1e-6
 
 
 def test_fuse_never_exceeds_the_observe_segment_it_is_timed_inside(pipeline) -> None:
@@ -335,17 +498,19 @@ def test_new_stat_series_are_in_the_snapshot(pipeline) -> None:
     run_ticks(pipeline, 3)
     snapshot = pipeline.stats.snapshot()
     for key in ("transport_round_trip_ms", "transport_one_way_ms",
-                "jpeg_decode_ms", "fuse_ms", "infer_ms", "decode_ms"):
+                "jpeg_decode_ms", "fuse_ms", "segment_assemble_ms", "dsrc_infer_ms"):
         assert key in snapshot, key
     # No phone behind any of these ticks: nothing was converted, so the two
     # transport series and jpeg_decode stay empty rather than reporting zeros.
     assert snapshot["transport_round_trip_ms"] is None
     assert snapshot["transport_one_way_ms"] is None
     assert snapshot["jpeg_decode_ms"] is None
-    # fuse/infer/decode ran on every tick, local or not.
+    # fuse ran on every tick, local or not.
     assert snapshot["fuse_ms"]["n"] == 3
-    assert snapshot["infer_ms"]["n"] == 3
-    assert snapshot["decode_ms"]["n"] == 3
+    # No DSRC runtime on this pipeline, so no decision ran and neither series
+    # has a sample. None, not a run of zeros.
+    assert snapshot["segment_assemble_ms"] is None
+    assert snapshot["dsrc_infer_ms"] is None
 
 
 def test_a_phone_fed_frames_stages_pass_through_unchanged(pipeline) -> None:
@@ -391,7 +556,7 @@ def test_the_sensing_loop_reads_a_real_tick(pipeline) -> None:
 
     Every other test of `inputs_from` uses a fake tick, and a fake agrees with the
     code that reads it rather than with the object the pipeline produces. If a field
-    were renamed -- `obs_result.feed`, `policy.head_probs`, `diagnostics["gps_age_s"]`
+    were renamed -- `obs_result.feed`, `obs_result.field_sources`, `diagnostics["gps_age_s"]`
     -- those tests would keep passing while the live loop decided from Nones.
     """
     from policy.sensing_loop import SensingLoop, inputs_from
@@ -424,7 +589,9 @@ def test_the_sensing_loop_reads_a_real_tick(pipeline) -> None:
     assert inputs.ego_speed_source is not None
     assert inputs.camera_density_bin_source is not None
     assert inputs.camera_density_bin in (0, 1, 2, 3)
-    assert inputs.policy_margin is not None and 0.0 <= inputs.policy_margin <= 1.0
+    # No per-head softmax exists any more, so the narrow-margin rule records
+    # itself not evaluable rather than deciding from an invented number.
+    assert inputs.policy_margin is None
     assert inputs.lat == pytest.approx(40.0) and inputs.lon == pytest.approx(-74.0)
     assert inputs.position_valid is True
     assert inputs.position_age_s is not None

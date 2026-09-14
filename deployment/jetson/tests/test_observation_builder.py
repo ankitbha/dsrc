@@ -8,8 +8,13 @@ import pytest
 
 from perception import provenance
 from perception.distance import TrackedVehicle
-from perception.observation_builder import BuilderConfig, ObservationBuilder, PeerState
-from policy import sim_contract
+from perception.observation_builder import (
+    OBS_FIELDS,
+    BuilderConfig,
+    ObservationBuilder,
+    PeerState,
+    bin_index,
+)
 from sensors.gps_reader import GpsFix
 
 
@@ -41,41 +46,47 @@ def builder() -> ObservationBuilder:
     return ObservationBuilder(BuilderConfig())
 
 
+def test_the_observation_is_exactly_the_declared_field_set(builder: ObservationBuilder) -> None:
+    """`OBS_FIELDS` is the one place the set is written down, and both `obs`
+    and `field_sources` are checked against it by NAME. A field produced but
+    untagged, or tagged but not produced, is what the coverage flag exists to
+    catch, and a count comparison cannot tell those apart."""
+    result = builder.build([], GpsFix(), time.monotonic())
+    assert set(result.obs) == set(OBS_FIELDS)
+    assert set(result.field_sources) == set(OBS_FIELDS)
+    assert result.diagnostics["provenance"]["covers_obs"] is True
+
+
 def test_empty_scene_uses_spec_neutral_fallbacks(builder: ObservationBuilder) -> None:
     result = builder.build([], GpsFix(), time.monotonic())
     obs = result.obs
     # spec: neutral fallback values when nothing is sensed
     assert obs["leader_gap"] == math.inf
-    assert obs["follower_gap"] == math.inf
-    assert obs["nearby_av_count"] == 0
-    assert obs["nearby_av_density"] == 0.0
-    assert obs["nearby_av_mean_speed"] == builder.config.free_flow_speed_mps
-    assert obs["nearby_av_lane_distribution"] == {}
-    assert obs["cooperation"]["segment_target_speed"] == builder.config.free_flow_speed_mps
-    assert obs["cooperation"]["merge_pressure"] == 0.0
-    assert obs["cooperation"]["downstream_congestion_estimate"] == 0.0
+    assert obs["leader_relative_speed"] == 0.0
+    assert obs["segment_target_speed"] == builder.config.free_flow_speed_mps
     assert obs["active_vehicle_count_local"] == 0
-    assert result.encoded.shape == (sim_contract.local_obs_dim(),)
     assert result.field_sources["leader_gap"] == "fallback_neutral"
     assert result.diagnostics["gps_fresh"] is False
 
 
-def test_leader_selection_and_lane_split(builder: ObservationBuilder) -> None:
+def test_leader_selection_ignores_the_adjacent_lanes(builder: ObservationBuilder) -> None:
+    """The lane split still runs -- it is what decides which vehicle is the
+    leader -- but only the ego lane's nearest reaches the observation. A
+    vehicle nearer in the left lane must not become the leader, which is the
+    case a builder that had dropped the lane split entirely would get wrong."""
     vehicles = [
         make_vehicle(1, 60.0, 0.2),    # ego lane, far
         make_vehicle(2, 35.0, -0.4, rel=-2.0),  # ego lane, near -> leader
-        make_vehicle(3, 25.0, -3.6),   # left lane
+        make_vehicle(3, 25.0, -3.6),   # left lane, NEARER than the leader
         make_vehicle(4, 50.0, 3.9),    # right lane
     ]
     result = builder.build(vehicles, fresh_fix(20.0), time.monotonic())
     obs = result.obs
     assert obs["leader_gap"] == 35.0
     assert obs["leader_relative_speed"] == -2.0
-    assert obs["left_lane_front_gap"] == 25.0
-    assert obs["right_lane_front_gap"] == 50.0
-    assert obs["target_lane_front_gap"] == obs["leader_gap"]
-    assert obs["ego_headway_s"] == pytest.approx(35.0 / 20.0)
     assert result.field_sources["leader_gap"] == "measured"
+    # All four are in range, so all four are counted, symmetrized.
+    assert obs["active_vehicle_count_local"] == 8
 
 
 def test_density_and_bins_use_sim_formula(builder: ObservationBuilder) -> None:
@@ -88,16 +99,9 @@ def test_density_and_bins_use_sim_formula(builder: ObservationBuilder) -> None:
     assert result.diagnostics["density_veh_per_km"] == pytest.approx(expected_density, abs=0.01)
     # edges (12, 30) -> 37.5 lands in bin 2
     assert obs["local_density_bin"] == 2
-    assert obs["local_density_bin"] == sim_contract.bin_index(
+    assert obs["local_density_bin"] == bin_index(
         expected_density, builder.config.density_bin_edges_veh_per_km
     )
-
-
-def test_queue_estimate_counts_slow_vehicles(builder: ObservationBuilder) -> None:
-    # ego 6 m/s; leader rel -3 -> abs 3 m/s < 5 -> queued
-    vehicles = [make_vehicle(1, 30.0, 0.0, rel=-3.0), make_vehicle(2, 50.0, 0.0, rel=10.0)]
-    result = builder.build(vehicles, fresh_fix(6.0), time.monotonic())
-    assert result.obs["local_queue_estimate"] == 2  # 1 slow, symmetrized x2
 
 
 def test_gps_speed_hold_on_staleness(builder: ObservationBuilder) -> None:
@@ -110,44 +114,27 @@ def test_gps_speed_hold_on_staleness(builder: ObservationBuilder) -> None:
     assert result.field_sources["ego_speed"] == "fallback_neutral"
 
 
-def test_peers_populate_cooperation_fields(builder: ObservationBuilder) -> None:
+def test_peers_set_the_segment_target_speed(builder: ObservationBuilder) -> None:
+    """The one field a cooperating peer still reaches. It is the mean of the
+    beacons' own speeds, computed over the receptions rather than read from
+    one, so `derived` and not `measured`."""
     peers = [
         PeerState(peer_id="a", distance_m=80.0, speed_mps=24.0, lane_id=1),
         PeerState(peer_id="b", distance_m=120.0, speed_mps=26.0, lane_id=2),
     ]
     result = builder.build([], fresh_fix(20.0), time.monotonic(), peers)
-    obs = result.obs
-    src = result.field_sources
-    assert obs["nearby_av_count"] == 2
-    assert obs["nearby_av_mean_speed"] == pytest.approx(25.0)
-    assert obs["cooperation"]["segment_target_speed"] == pytest.approx(25.0)
-    assert obs["nearby_av_lane_distribution"] == {"1": 0.5, "2": 0.5}
-    # `nearby_av_count`, a direct count of receptions, is the primary
-    # evidence a peers tick has and is the one that stays `measured`. The
-    # mean (`segment_target_speed` and `nearby_av_mean_speed` are the same
-    # float read through two keys) and the quotient (`nearby_av_density`)
-    # are computed from that count rather than read, so all three are
-    # `derived` and agree with each other.
-    # `downstream_congestion_estimate` is the literal 0.0 in both branches
-    # of `cooperation`, exactly like `merge_pressure`, and never a reading.
-    #
-    # This tick shape -- peers present, no leader vehicle -- is the only one
-    # that can catch the nested `cooperation.*` entries copying the wrong
-    # flat field's class: on a no-peer tick all three coincide at
-    # `fallback_neutral`.
-    assert src["segment_target_speed"] == "derived"
-    assert src["nearby_av_mean_speed"] == "derived"
-    assert src["nearby_av_density"] == "derived"
-    assert src["downstream_congestion_estimate"] == "fallback_neutral"
-    assert src["merge_pressure"] == "fallback_neutral"
-    assert src["cooperation.segment_target_speed"] == src["segment_target_speed"]
-    assert src["cooperation.merge_pressure"] == src["merge_pressure"]
-    assert src["cooperation.downstream_congestion_estimate"] == src["downstream_congestion_estimate"]
+    assert result.obs["segment_target_speed"] == pytest.approx(25.0)
+    assert result.field_sources["segment_target_speed"] == "derived"
+
+    # The control: no peers, and the field reads the configured free-flow
+    # speed as a fallback rather than a measurement.
+    no_peers = builder.build([], fresh_fix(20.0), time.monotonic())
+    assert no_peers.obs["segment_target_speed"] == builder.config.free_flow_speed_mps
+    assert no_peers.field_sources["segment_target_speed"] == "fallback_neutral"
 
 
 def test_no_field_ever_carries_a_feed_class(builder: ObservationBuilder) -> None:
-    # `SOURCE_FEED` is reserved for the traffic feed, which the comment
-    # above `cooperation`'s own construction documents as owning no
+    # `SOURCE_FEED` is reserved for the traffic feed, which owns no
     # observation field. A V2V peer beacon is not the traffic feed, so
     # nothing in this builder should ever write "feed_derived".
     peers = [PeerState(peer_id="a", distance_m=80.0, speed_mps=24.0, lane_id=1)]
@@ -155,23 +142,6 @@ def test_no_field_ever_carries_a_feed_class(builder: ObservationBuilder) -> None
         result = builder.build([], fresh_fix(20.0), time.monotonic(), peer_list)
         assert provenance.SOURCE_FEED not in result.field_sources.values()
 
-
-def test_uncongested_low_speed_flag_mirrors_etiquette(builder: ObservationBuilder) -> None:
-    # empty road (density 0 < 12), speed 10 < 30 - 8 -> flag on
-    result = builder.build([], fresh_fix(10.0), time.monotonic())
-    assert result.obs["uncongested_low_speed_flag"] is True
-    # `approximated`, not `derived`: the formula reads a locally sensed
-    # density where the simulator reads a segment one, the same threshold
-    # applied to a different quantity.
-    assert result.field_sources["uncongested_low_speed_flag"] == "approximated"
-    result = builder.build([], fresh_fix(28.0), time.monotonic())
-    assert result.obs["uncongested_low_speed_flag"] is False
-
-
-def test_target_headway_feedback(builder: ObservationBuilder) -> None:
-    builder.set_target_headway(2.2)
-    result = builder.build([], fresh_fix(20.0), time.monotonic())
-    assert result.obs["target_headway_s"] == 2.2
 
 
 class TestFuseTiming:
@@ -377,13 +347,12 @@ class TestTheAccelerationProvenanceMatchesTheBranchTaken:
                 now - dropout_start, speed_src, accel_src,
             )
 
-    def test_the_guard_boundary_changes_the_encoded_value_not_just_the_label(self):
-        """D6 replaces a frozen slope with the neutral 0.0 in the actor's
-        OWN input, not only in a record a reader might assume is
-        record-only: `ego_acceleration` is an encoded slot
-        (`sim_contract.py`, scale 8.0), so a tick on either side of the
-        staleness guard produces a different `encoded` vector, not merely a
-        different `field_sources` label.
+    def test_the_guard_boundary_changes_the_value_not_just_the_label(self):
+        """D6 replaces a frozen slope with the neutral 0.0 in the VALUE the
+        sensing controller compares against its event threshold, not only in
+        a record a reader might assume is record-only. So a tick on either
+        side of the staleness guard reports a different `ego_acceleration`,
+        not merely a different `field_sources` label.
         """
         cfg = BuilderConfig()
         builder = ObservationBuilder(cfg)
@@ -394,15 +363,14 @@ class TestTheAccelerationProvenanceMatchesTheBranchTaken:
             gps = GpsFix(valid=True, speed_mps=speed, t_mono=t, t_wall=0.0)
             result = builder.build([], gps, t)
             speed -= 3.0 * 0.2
-        idx = sim_contract.LOCAL_OBS_FIELDS.index("ego_acceleration")
         assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
-        assert result.encoded[idx] != pytest.approx(0.0)
+        assert result.obs["ego_acceleration"] != pytest.approx(0.0)
 
         held = GpsFix(valid=True, speed_mps=speed, t_mono=t, t_wall=0.0)
         past = builder.build([], held, t + 2.1)
         assert past.field_sources["ego_acceleration"] == provenance.SOURCE_FALLBACK_NEUTRAL
-        assert past.encoded[idx] == pytest.approx(0.0)
-        assert past.encoded[idx] != pytest.approx(result.encoded[idx])
+        assert past.obs["ego_acceleration"] == pytest.approx(0.0)
+        assert past.obs["ego_acceleration"] != pytest.approx(result.obs["ego_acceleration"])
 
     def test_a_dropout_gap_is_not_fitted_as_a_slope_once_gps_returns(self):
         """A real dropout (`gps.valid` False, not a stale fix aging in
@@ -481,10 +449,8 @@ class TestTheAccelerationProvenanceMatchesTheBranchTaken:
 
 
 class TestCoverageAndMissingness:
-    """`field_sources` after this task covers all 39 encoder slots, and
-    `missingness` is a statement about the whole vector rather than the 33
-    flat fields alone.
-    """
+    """`field_sources` covers every field `obs` carries, and `missingness` is
+    a statement about that whole set."""
 
     @staticmethod
     def _gps(speed: float, t: float) -> GpsFix:
@@ -502,67 +468,41 @@ class TestCoverageAndMissingness:
             builder.build([], self._gps(20.0, t), t)
         return builder, t
 
-    def test_field_sources_covers_every_encoded_slot(self):
+    def test_field_sources_covers_every_field(self):
         builder, t = self._warmed_up()
         result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1)
-        assert set(result.field_sources) == set(sim_contract.encoded_slot_names())
-        assert len(result.field_sources) == sim_contract.local_obs_dim() == 39
+        assert set(result.field_sources) == set(OBS_FIELDS)
+        assert len(result.field_sources) == len(OBS_FIELDS) == 7
 
     def test_the_no_peer_no_vehicle_fresh_gps_tick_pins_missingness(self):
-        """Pre-task-36 the same tick measured 21/33 = 0.636 (verified by
-        running, recorded in the plan). The move: -1 for
-        `local_queue_estimate` leaving the fallback set into `derived_empty`
-        (D5), +3 cooperation slots, +3 lane slots -- all six neutral on a
-        lone instrumented car with no peers.
+        """A lone instrumented car on an empty road, with a fresh fix.
 
-        `target_lane_front_gap` and `ego_headway_s` each inherit
-        `leader_gap`'s own class rather than a fixed `derived`, so on a
-        no-vehicle tick like this one (`leader_gap` is `INF`) both are
-        `fallback_neutral` and belong to the fallback set: 28/39 = 0.718.
+        Three of the seven are substituted: `leader_gap` and
+        `leader_relative_speed` have no leader to read, and
+        `segment_target_speed` has no peer, so it reports the configured
+        free-flow speed. Two are `derived_empty` -- the count really is zero,
+        nothing failed. `ego_speed` is measured and `ego_acceleration` is
+        derived from a window of measurements. So 3/7 = 0.429.
+
+        The number moved from 0.718 over 39 fields, and it is not the same
+        statistic: the 39-field version was dominated by constants for
+        sensors this rig does not have, which is a fact about the contract
+        rather than about the road.
         """
         builder, t = self._warmed_up()
         result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1)
 
-        assert result.diagnostics["provenance"]["fields"] == 39
-        assert result.diagnostics["missingness"] == 0.718
-        assert result.diagnostics["provenance"]["by_source"]["derived_empty"] == 3
-        assert result.diagnostics["provenance"]["covers_encoder"] is True
+        assert result.diagnostics["provenance"]["fields"] == 7
+        assert result.diagnostics["missingness"] == 0.429
+        assert result.diagnostics["provenance"]["by_source"]["derived_empty"] == 2
+        assert result.diagnostics["provenance"]["covers_obs"] is True
 
-        for field in ("cooperation.segment_target_speed", "cooperation.merge_pressure",
-                     "cooperation.downstream_congestion_estimate"):
-            assert result.field_sources[field] == provenance.SOURCE_FALLBACK_NEUTRAL
-        for lane in ("0", "1", "2"):
-            assert result.field_sources[f"nearby_av_lane_distribution.{lane}"] == (
-                provenance.SOURCE_FALLBACK_NEUTRAL
-            )
         assert result.field_sources["local_density_bin"] == provenance.SOURCE_DERIVED_EMPTY
         assert result.field_sources["active_vehicle_count_local"] == provenance.SOURCE_DERIVED_EMPTY
-        assert result.field_sources["local_queue_estimate"] == provenance.SOURCE_DERIVED_EMPTY
         assert result.field_sources["ego_acceleration"] == provenance.SOURCE_DERIVED
-        # No leader on this tick, so both fields that hold the same float
-        # as `leader_gap` (or a formula over it) must carry `leader_gap`'s
-        # own class, not a fixed `derived`.
-        assert result.field_sources["target_lane_front_gap"] == provenance.SOURCE_FALLBACK_NEUTRAL
-        assert result.field_sources["ego_headway_s"] == provenance.SOURCE_FALLBACK_NEUTRAL
-        assert result.field_sources["target_lane_front_gap"] == result.field_sources["leader_gap"]
-
-    def test_peers_with_lane_id_make_the_lane_slots_derived(self):
-        builder, t = self._warmed_up()
-        peers = [PeerState(peer_id="a", distance_m=50.0, speed_mps=20.0, lane_id=1)]
-        result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1, peers)
-        for lane in ("0", "1", "2"):
-            assert result.field_sources[f"nearby_av_lane_distribution.{lane}"] == (
-                provenance.SOURCE_DERIVED
-            )
-
-    def test_peers_without_lane_id_leave_the_lane_slots_neutral(self):
-        builder, t = self._warmed_up()
-        peers = [PeerState(peer_id="a", distance_m=50.0, speed_mps=20.0, lane_id=None)]
-        result = builder.build([], self._gps(20.0, t + 0.1), t + 0.1, peers)
-        for lane in ("0", "1", "2"):
-            assert result.field_sources[f"nearby_av_lane_distribution.{lane}"] == (
-                provenance.SOURCE_FALLBACK_NEUTRAL
-            )
+        assert result.field_sources["leader_gap"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert result.field_sources["leader_relative_speed"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert result.field_sources["segment_target_speed"] == provenance.SOURCE_FALLBACK_NEUTRAL
 
     def test_by_source_sums_to_fields_across_a_sweep(self):
         builder, t = self._warmed_up()
@@ -580,32 +520,19 @@ class TestCoverageAndMissingness:
             for peers in peers_options:
                 result = builder.build(vehicles, self._gps(20.0, t + 0.1), t + 0.1, peers)
                 prov = result.diagnostics["provenance"]
-                assert sum(prov["by_source"].values()) == prov["fields"] == 39
+                assert sum(prov["by_source"].values()) == prov["fields"] == 7
 
-    def test_covers_encoder_checks_names_not_just_a_count(self):
-        # Same key count as the real 39 (one encoder slot dropped, one name
-        # the encoder never reads put in its place) -- a count comparison
+    def test_covers_obs_checks_names_not_just_a_count(self):
+        # Same key count as the real seven (one field dropped, one name the
+        # observation never carries put in its place) -- a count comparison
         # cannot tell this apart from real coverage.
-        good = {name: "measured" for name in sim_contract.encoded_slot_names()}
-        assert ObservationBuilder._covers_encoder(good) is True
+        good = {name: "measured" for name in OBS_FIELDS}
+        assert ObservationBuilder._covers_obs(good) is True
         bad = dict(good)
         del bad["ego_speed"]
-        bad["not_a_real_slot"] = "measured"
+        bad["not_a_real_field"] = "measured"
         assert len(bad) == len(good)
-        assert ObservationBuilder._covers_encoder(bad) is False
-
-
-def test_nearby_av_density_uses_the_configured_peer_range_not_a_literal():
-    # `peer_range_m` defaults to 150.0, which used to make a mutation that
-    # hardcodes 150.0 in its place a runtime no-op against every test in this
-    # suite -- none of them set it to anything else.
-    cfg = BuilderConfig(peer_range_m=300.0)
-    builder = ObservationBuilder(cfg)
-    peers = [PeerState(peer_id="a", distance_m=80.0, speed_mps=24.0, lane_id=1)]
-    result = builder.build([], fresh_fix(20.0), time.monotonic(), peers)
-    expected_density = 1 / ((2.0 * 300.0) / 1000.0)
-    assert result.obs["nearby_av_density"] == pytest.approx(expected_density)
-    assert result.obs["nearby_av_density"] != pytest.approx(1 / ((2.0 * 150.0) / 1000.0))
+        assert ObservationBuilder._covers_obs(bad) is False
 
 
 class TestTheDensityPath:
@@ -621,7 +548,6 @@ class TestTheDensityPath:
         assert result.obs["local_density_bin"] == 0
         assert result.field_sources["local_density_bin"] == provenance.SOURCE_DERIVED_EMPTY
         assert result.field_sources["active_vehicle_count_local"] == provenance.SOURCE_DERIVED_EMPTY
-        assert result.field_sources["local_queue_estimate"] == provenance.SOURCE_DERIVED_EMPTY
 
     def test_one_in_range_track_is_derived_at_bin_one(self):
         # Under shipped constants (edges 12.0, 30.0; symmetrize_counts=True;
@@ -635,11 +561,15 @@ class TestTheDensityPath:
         assert result.obs["local_density_bin"] == 1
         assert result.field_sources["local_density_bin"] == provenance.SOURCE_DERIVED
 
-    def test_six_tracks_none_measurable_leaves_queue_fallback_but_density_derived(self):
+    def test_density_counts_tracks_whose_speed_was_never_measurable(self):
+        """Density counts tracks, not speeds. Six in range with no usable
+        relative speed is still six vehicles, so the bin is `derived` from a
+        real count rather than falling back -- the distinction the removed
+        `local_queue_estimate` used to draw on the same population."""
         vehicles = [make_vehicle(i, 20.0 + i * 5, 0.0, rel_valid=False) for i in range(6)]
         builder = ObservationBuilder(BuilderConfig())
         result = builder.build(vehicles, self._gps(20.0, 1000.0), 1000.0)
-        assert result.field_sources["local_queue_estimate"] == provenance.SOURCE_FALLBACK_NEUTRAL
+        assert result.obs["active_vehicle_count_local"] == 12
         assert result.field_sources["local_density_bin"] == provenance.SOURCE_DERIVED
 
 
@@ -676,8 +606,8 @@ class TestLastDetectionAge:
 class TestBuilderConfigFromFullConfig:
     """B11 (validation round 2): the merge `run_demo.build_components` and
     `src.analysis.observation_parity._production_builder_config` both need
-    -- config["observation"] plus two cross-section overrides -- lives once
-    here, not as a copy at each call site.
+    -- config["observation"] plus the gps override -- lives once here, not
+    as a copy at each call site.
     """
 
     def _config(self, **overrides):
@@ -692,15 +622,18 @@ class TestBuilderConfigFromFullConfig:
     def test_reads_the_observation_section(self):
         cfg = BuilderConfig.from_full_config(self._config())
         assert cfg.effective_range_m == 80.0
-        assert cfg.assumed_lane == 1
+
+    def test_a_key_this_builder_no_longer_has_is_ignored_rather_than_raising(self):
+        """`config.yaml`'s observation section still carries `assumed_lane`,
+        which `run_demo` reads for the V2V beacon, and the bin edges the
+        removed fields used. `from_dict` takes only the names it declares, so
+        a shipped config keeps loading."""
+        cfg = BuilderConfig.from_full_config(self._config())
+        assert not hasattr(cfg, "assumed_lane")
 
     def test_overrides_gps_stale_after_s_from_the_gps_section(self):
         cfg = BuilderConfig.from_full_config(self._config(gps={"stale_after_s": 9.0}))
         assert cfg.gps_stale_after_s == 9.0
-
-    def test_overrides_peer_range_m_from_the_v2v_section(self):
-        cfg = BuilderConfig.from_full_config(self._config(v2v={"range_m": 300.0}))
-        assert cfg.peer_range_m == 300.0
 
     def test_a_value_named_in_both_the_observation_section_and_an_override_takes_the_override(self):
         """The override sections win, matching build_components' own

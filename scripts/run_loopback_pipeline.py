@@ -33,7 +33,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -49,9 +48,7 @@ from perception.distance import DistanceEstimator  # noqa: E402
 from perception.observation_builder import BuilderConfig, ObservationBuilder  # noqa: E402
 from perception.tracker import IouTracker  # noqa: E402
 from pipeline import PerceptionPolicyPipeline  # noqa: E402
-from policy.actor_runtime import ActorRuntime  # noqa: E402
-from policy.advisory import AdvisoryDecoder  # noqa: E402
-from policy.export_policy import build_random, export  # noqa: E402
+from policy.segment_advisory import DriverAdvisory  # noqa: E402
 from sensors.phone_link import PhoneLink  # noqa: E402
 from sensors.phone_source import PhoneCameraStream, PhoneClockAdapter, PhoneGpsReader  # noqa: E402
 from transport.channels import Channel  # noqa: E402
@@ -142,7 +139,17 @@ def scene_detections(t_s: float) -> list[Detection]:
     return [Detection(xyxy=b, conf=0.9, cls=2) for b in boxes]
 
 
-def build_pipeline(bundle_prefix: str) -> PerceptionPolicyPipeline:
+def build_pipeline() -> PerceptionPolicyPipeline:
+    """The perception and transport chain, with no DSRC policy attached.
+
+    What this harness measures is the wire and the clock conversion, not a
+    recommendation. It used to load a randomly initialised bundle so the tick
+    would carry an advisory to echo back; the echo now carries its own (see
+    `_advisory_message`), so there is nothing left for a policy to contribute
+    and none is loaded. A pipeline with no DSRC parts is a supported
+    configuration, not a stub: it is what a rig carrying no policy for the
+    road it is driving runs.
+    """
     return PerceptionPolicyPipeline(
         detector=_FakeDetector(),
         tracker=IouTracker(min_hits=2),
@@ -150,8 +157,6 @@ def build_pipeline(bundle_prefix: str) -> PerceptionPolicyPipeline:
             fx_px=FX, cx_px=CX, horizon_y_px=HORIZON, camera_height_m=CAM_H, ema_alpha=0.6
         ),
         builder=ObservationBuilder(BuilderConfig()),
-        actor=ActorRuntime(bundle_prefix),
-        advisory_decoder=AdvisoryDecoder(units="mph"),
     )
 
 
@@ -232,10 +237,10 @@ def phone_side(router, mono, stop, sent, sent_lock, advisories, jpeg,
                         sent["invalid"] += 1
             advisory = router.recv(Channel.ADVISORY, timeout=0.0)
             if advisory is not None:
-                if advisory.lane_text.startswith(ADVISORY_ECHO_PREFIX):
+                if advisory.traffic_text.startswith(ADVISORY_ECHO_PREFIX):
                     advisories["received"] += 1
                     advisories["frame_ids"].add(
-                        int(advisory.lane_text[len(ADVISORY_ECHO_PREFIX):])
+                        int(advisory.traffic_text[len(ADVISORY_ECHO_PREFIX):])
                     )
                 else:
                     advisories["unmatched"] += 1
@@ -276,145 +281,141 @@ def run(duration_s: float, offset_ns: int, sync_hz: float) -> dict:
     camera = PhoneCameraStream(jetson_router, adapter).start()
     gps = PhoneGpsReader(jetson_router, adapter).start()
 
-    with tempfile.TemporaryDirectory() as tmp:
-        prefix = str(Path(tmp) / "actor_policy")
-        actor, info = build_random(seed=0)
-        export(actor, info, prefix)
-        pipeline = build_pipeline(prefix)
+    pipeline = build_pipeline()
 
-        stop = threading.Event()
-        sent = {"frames": 0, "fixes": 0, "pongs": 0, "invalid": 0}
-        # `invalid` is written from three threads and `d[k] += 1` is not atomic.
-        sent_lock = threading.Lock()
-        advisories = {"received": 0, "unmatched": 0, "frame_ids": set()}
-        jpeg = a_jpeg()
+    stop = threading.Event()
+    sent = {"frames": 0, "fixes": 0, "pongs": 0, "invalid": 0}
+    # `invalid` is written from three threads and `d[k] += 1` is not atomic.
+    sent_lock = threading.Lock()
+    advisories = {"received": 0, "unmatched": 0, "frame_ids": set()}
+    jpeg = a_jpeg()
 
-        def phone_camera_sender():
-            index = 0
-            period = 1.0 / CAMERA_HZ
-            next_at = time.monotonic()
-            while not stop.is_set():
-                index += 1
+    def phone_camera_sender():
+        index = 0
+        period = 1.0 / CAMERA_HZ
+        next_at = time.monotonic()
+        while not stop.is_set():
+            index += 1
+            try:
+                if phone_router.send(CameraFrame(
+                    t_capture_mono_ns=phone_mono(), frame_id=index,
+                    width=64, height=48, format="jpeg", quality=85, jpeg=jpeg,
+                )):
+                    sent["frames"] += 1
+            except InvalidMessage:
+                with sent_lock:
+                    sent["invalid"] += 1
+            next_at += period
+            delay = next_at - time.monotonic()
+            stop.wait(delay) if delay > 0 else None
+            if delay <= 0:
+                next_at = time.monotonic()
+
+    def phone_gps_sender():
+        period = 1.0 / GPS_HZ
+        next_at = time.monotonic()
+        while not stop.is_set():
+            try:
+                if phone_router.send(GpsRecord(
+                    t_capture_mono_ns=phone_mono(), valid=True, fix_quality=1,
+                    num_sats=9, lat=40.7440, lon=-74.0324, speed_mps=27.0,
+                    heading_deg=90.0, hdop=0.9, altitude_m=10.0,
+                    utc_epoch_ns=now_wall_ns(),
+                )):
+                    sent["fixes"] += 1
+            except InvalidMessage:
+                with sent_lock:
+                    sent["invalid"] += 1
+            next_at += period
+            delay = next_at - time.monotonic()
+            stop.wait(delay) if delay > 0 else None
+            if delay <= 0:
+                next_at = time.monotonic()
+
+    def phone_responder():
+        """Answers time-sync pings and consumes advisories."""
+        while not stop.is_set():
+            arrived = phone_router.recv_with_receipt(Channel.CONTROL, timeout=0.01)
+            if arrived is not None and isinstance(arrived[0], TimeSyncMessage):
                 try:
-                    if phone_router.send(CameraFrame(
-                        t_capture_mono_ns=phone_mono(), frame_id=index,
-                        width=64, height=48, format="jpeg", quality=85, jpeg=jpeg,
-                    )):
-                        sent["frames"] += 1
+                    # On the PHONE's clock. answer_ping's default is the
+                    # host clock, which shipped a message with two devices'
+                    # clocks inside it -- 67.57 hours apart. Inert today,
+                    # because on_pong reads the wire and receipt stamps and
+                    # never the pong's own capture stamp, but it falsified
+                    # this harness's claim that every stamp the phone
+                    # produces is on the phone's clock.
+                    if phone_router.send(answer_ping(arrived, mono_clock=phone_mono)):
+                        sent["pongs"] += 1
                 except InvalidMessage:
                     with sent_lock:
                         sent["invalid"] += 1
-                next_at += period
-                delay = next_at - time.monotonic()
-                stop.wait(delay) if delay > 0 else None
-                if delay <= 0:
-                    next_at = time.monotonic()
+            advisory = phone_router.recv(Channel.ADVISORY, timeout=0.0)
+            if advisory is not None:
+                if advisory.traffic_text.startswith(ADVISORY_ECHO_PREFIX):
+                    advisories["received"] += 1
+                    advisories["frame_ids"].add(
+                        int(advisory.traffic_text[len(ADVISORY_ECHO_PREFIX):])
+                    )
+                else:
+                    advisories["unmatched"] += 1
 
-        def phone_gps_sender():
-            period = 1.0 / GPS_HZ
-            next_at = time.monotonic()
-            while not stop.is_set():
-                try:
-                    if phone_router.send(GpsRecord(
-                        t_capture_mono_ns=phone_mono(), valid=True, fix_quality=1,
-                        num_sats=9, lat=40.7440, lon=-74.0324, speed_mps=27.0,
-                        heading_deg=90.0, hdop=0.9, altitude_m=10.0,
-                        utc_epoch_ns=now_wall_ns(),
-                    )):
-                        sent["fixes"] += 1
-                except InvalidMessage:
-                    with sent_lock:
-                        sent["invalid"] += 1
-                next_at += period
-                delay = next_at - time.monotonic()
-                stop.wait(delay) if delay > 0 else None
-                if delay <= 0:
-                    next_at = time.monotonic()
+    def jetson_syncer():
+        period = 1.0 / sync_hz
+        while not stop.is_set():
+            initiator.send_ping()
+            deadline = time.monotonic() + period
+            while time.monotonic() < deadline and not stop.is_set():
+                initiator.pump(timeout=0.005)
 
-        def phone_responder():
-            """Answers time-sync pings and consumes advisories."""
-            while not stop.is_set():
-                arrived = phone_router.recv_with_receipt(Channel.CONTROL, timeout=0.01)
-                if arrived is not None and isinstance(arrived[0], TimeSyncMessage):
-                    try:
-                        # On the PHONE's clock. answer_ping's default is the
-                        # host clock, which shipped a message with two devices'
-                        # clocks inside it -- 67.57 hours apart. Inert today,
-                        # because on_pong reads the wire and receipt stamps and
-                        # never the pong's own capture stamp, but it falsified
-                        # this harness's claim that every stamp the phone
-                        # produces is on the phone's clock.
-                        if phone_router.send(answer_ping(arrived, mono_clock=phone_mono)):
-                            sent["pongs"] += 1
-                    except InvalidMessage:
-                        with sent_lock:
-                            sent["invalid"] += 1
-                advisory = phone_router.recv(Channel.ADVISORY, timeout=0.0)
-                if advisory is not None:
-                    if advisory.lane_text.startswith(ADVISORY_ECHO_PREFIX):
-                        advisories["received"] += 1
-                        advisories["frame_ids"].add(
-                            int(advisory.lane_text[len(ADVISORY_ECHO_PREFIX):])
-                        )
-                    else:
-                        advisories["unmatched"] += 1
+    threads = [
+        threading.Thread(target=phone_camera_sender, daemon=True),
+        threading.Thread(target=phone_gps_sender, daemon=True),
+        threading.Thread(target=phone_responder, daemon=True),
+        threading.Thread(target=jetson_syncer, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
 
-        def jetson_syncer():
-            period = 1.0 / sync_hz
-            while not stop.is_set():
-                initiator.send_ping()
-                deadline = time.monotonic() + period
-                while time.monotonic() < deadline and not stop.is_set():
-                    initiator.pump(timeout=0.005)
-
-        threads = [
-            threading.Thread(target=phone_camera_sender, daemon=True),
-            threading.Thread(target=phone_gps_sender, daemon=True),
-            threading.Thread(target=phone_responder, daemon=True),
-            threading.Thread(target=jetson_syncer, daemon=True),
-        ]
-        for thread in threads:
-            thread.start()
-
-        ticks: list[dict] = []
-        started = time.monotonic()
-        first_converted_at: float | None = None
-        while time.monotonic() - started < duration_s:
-            frame = camera.wait_for_fresh(timeout=0.5)
-            if frame is None:
-                continue
-            fix = gps.latest()
-            elapsed = time.monotonic() - started
-            tick = pipeline.step(
-                frame, fix, None, detections_override=scene_detections(elapsed)
-            )
-            if not (frame.timebase and frame.timebase.proxy) and first_converted_at is None:
-                first_converted_at = elapsed
-            ticks.append(_tick_row(tick, elapsed))
-            jetson_router.send(_advisory_message(tick))
-
-        stop.set()
-        for thread in threads:
-            thread.join(timeout=3.0)
-        camera.stop()
-        gps.stop()
-
-        # Sampled while the sessions are still open, so the queue depths are the
-        # real ones rather than a difference of counters.
-        channels = (Channel.CAMERA, Channel.GPS)
-        account = _account(
-            phone.stats(), jetson.stats(),
-            pending={c: phone.outbound_pending(c) for c in channels},
-            pending_in={c: jetson.pending(c) for c in channels},
-            decode_errors={
-                c: jetson_router.stats()[c].decode_errors for c in channels
-            },
+    ticks: list[dict] = []
+    started = time.monotonic()
+    first_converted_at: float | None = None
+    while time.monotonic() - started < duration_s:
+        frame = camera.wait_for_fresh(timeout=0.5)
+        if frame is None:
+            continue
+        fix = gps.latest()
+        elapsed = time.monotonic() - started
+        tick = pipeline.step(
+            frame, fix, None, detections_override=scene_detections(elapsed)
         )
-        report = _report(
-            ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps,
-            initiator, pipeline, first_converted_at,
-            phone_stats=phone.stats(), jetson_stats=jetson.stats(), account=account,
-        )
+        if not (frame.timebase and frame.timebase.proxy) and first_converted_at is None:
+            first_converted_at = elapsed
+        ticks.append(_tick_row(tick, elapsed))
+        jetson_router.send(_advisory_message(tick))
+
+    stop.set()
+    for thread in threads:
+        thread.join(timeout=3.0)
+    camera.stop()
+    gps.stop()
+
+    # Sampled while the sessions are still open, so the queue depths are the
+    # real ones rather than a difference of counters.
+    channels = (Channel.CAMERA, Channel.GPS)
+    account = _account(
+        phone.stats(), jetson.stats(),
+        pending={c: phone.outbound_pending(c) for c in channels},
+        pending_in={c: jetson.pending(c) for c in channels},
+        decode_errors={
+            c: jetson_router.stats()[c].decode_errors for c in channels
+        },
+    )
+    report = _report(
+        ticks, duration_s, offset_ns, sent, advisories, adapter, camera, gps,
+        initiator, pipeline, first_converted_at,
+        phone_stats=phone.stats(), jetson_stats=jetson.stats(), account=account,
+    )
     phone.close()
     jetson.close()
     return report
@@ -432,26 +433,39 @@ def _tick_row(tick, elapsed: float) -> dict:
                 "gps_fresh": tick.obs_result.diagnostics.get("gps_fresh"),
                 "gps_age_s": tick.obs_result.diagnostics.get("gps_age_s"),
                 "ego_speed_source": tick.obs_result.field_sources.get("ego_speed"),
-                "advisory": tick.advisory.one_line(),
+                "advisory": _echo_advisory(tick.frame_id).one_line(),
     }
 
 
+def _echo_advisory(frame_id: int) -> DriverAdvisory:
+    """One advisory per frame, with the frame id riding the traffic text.
+
+    The frame id goes in `traffic_text` for the same reason task 15's probe put
+    an exchange id there, and for the same reason it used to ride `lane_text`:
+    it is the one free-form display string on the message, and a round trip
+    that cannot be matched to its origin is two counters that happen to agree
+    rather than a closed loop. The speeds are fixed, because this harness
+    measures the wire and not the recommendation.
+    """
+    return DriverAdvisory(
+        recommended_speed_mps=13.4,
+        recommended_speed_display=30.0,
+        current_speed_display=28.0,
+        units="mph",
+        traffic_text=f"{ADVISORY_ECHO_PREFIX}{frame_id}",
+    )
+
+
 def _advisory_message(tick):
-    """Task 14's bridge, with the frame id riding the lane text.
+    """Task 14's bridge, feeding it the echo advisory for this tick's frame.
 
     The bridge is duck-typed and already exists, so it is used rather than
     reimplemented -- the hand-rolled version got the field names wrong, which is
-    the argument for not having one. The frame id goes in `lane_text` for the
-    same reason task 15's probe put an exchange id there: it is free-form display
-    text, and a round trip that cannot be matched to its origin is two counters
-    that happen to agree rather than a closed loop.
+    the argument for not having one.
     """
-    from dataclasses import replace
-
     from transport.messages import advisory_message_from_advisory
 
-    marked = replace(tick.advisory, lane_text=f"{ADVISORY_ECHO_PREFIX}{tick.frame_id}")
-    return advisory_message_from_advisory(marked, now_mono_ns())
+    return advisory_message_from_advisory(_echo_advisory(tick.frame_id), now_mono_ns())
 
 
 def _why_not_usable(*, ticks, advisories, converted, converted_fresh,
@@ -792,43 +806,39 @@ def _run_link_jetson_session(args, link) -> dict:
     camera, gps = link.camera, link.gps
     stop = threading.Event()
 
-    with tempfile.TemporaryDirectory() as tmp:
-        prefix = str(Path(tmp) / "actor_policy")
-        actor, info = build_random(seed=0)
-        export(actor, info, prefix)
-        pipeline = build_pipeline(prefix)
+    pipeline = build_pipeline()
 
-        ticks: list[dict] = []
-        advisories = {"received": 0, "unmatched": 0, "frame_ids": set()}
-        first_converted_at: float | None = None
-        started = time.monotonic()
-        while time.monotonic() - started < args.duration and not session.is_closed:
-            frame = camera.wait_for_fresh(timeout=0.5)
-            if frame is None:
-                continue
-            elapsed = time.monotonic() - started
-            tick = pipeline.step(frame, gps.latest(), None,
-                                 detections_override=scene_detections(elapsed))
-            if not (frame.timebase and frame.timebase.proxy) and first_converted_at is None:
-                first_converted_at = elapsed
-            ticks.append(_tick_row(tick, elapsed))
-            router.send(_advisory_message(tick))
-        stop.set()
-        camera.stop()
-        gps.stop()
+    ticks: list[dict] = []
+    advisories = {"received": 0, "unmatched": 0, "frame_ids": set()}
+    first_converted_at: float | None = None
+    started = time.monotonic()
+    while time.monotonic() - started < args.duration and not session.is_closed:
+        frame = camera.wait_for_fresh(timeout=0.5)
+        if frame is None:
+            continue
+        elapsed = time.monotonic() - started
+        tick = pipeline.step(frame, gps.latest(), None,
+                             detections_override=scene_detections(elapsed))
+        if not (frame.timebase and frame.timebase.proxy) and first_converted_at is None:
+            first_converted_at = elapsed
+        ticks.append(_tick_row(tick, elapsed))
+        router.send(_advisory_message(tick))
+    stop.set()
+    camera.stop()
+    gps.stop()
 
-        channels = (Channel.CAMERA, Channel.GPS)
-        account = _account(
-            session.stats(), session.stats(),
-            pending={c: session.outbound_pending(c) for c in channels},
-            pending_in={c: session.pending(c) for c in channels},
-            decode_errors={c: router.stats()[c].decode_errors for c in channels},
-        )
-        report = _report(
-            ticks, args.duration, 0, {"frames": 0}, advisories, adapter, camera, gps,
-            link.estimator, pipeline, first_converted_at,
-            phone_stats=session.stats(), jetson_stats=session.stats(), account=account,
-        )
+    channels = (Channel.CAMERA, Channel.GPS)
+    account = _account(
+        session.stats(), session.stats(),
+        pending={c: session.outbound_pending(c) for c in channels},
+        pending_in={c: session.pending(c) for c in channels},
+        decode_errors={c: router.stats()[c].decode_errors for c in channels},
+    )
+    report = _report(
+        ticks, args.duration, 0, {"frames": 0}, advisories, adapter, camera, gps,
+        link.estimator, pipeline, first_converted_at,
+        phone_stats=session.stats(), jetson_stats=session.stats(), account=account,
+    )
     # Over a real link the advisory return path is measured on the phone side,
     # so this role's gate does not charge it: the two reports are read together.
     report["role"] = "jetson"

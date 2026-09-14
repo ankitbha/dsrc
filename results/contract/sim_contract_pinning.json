@@ -1,0 +1,87 @@
+{
+  "what": "Task 143's experiment: the evidence that the vendored simulation contract is pinned to a reference rather than to itself. Two independent measurements -- a double derivation against the pinned sim commit, and a nine-mutation gate.",
+  "commit": "112a29a",
+  "commit_subject": "Task 143 validator round 2: fix R2-1/R2-2, R2-3, R2-4, R2-5, R2-6",
+  "measured_at": "2026-09-12T09:50:44.600602Z",
+  "environment": {
+    "machine": "arm64 Darwin 25.6.0",
+    "python": "3.12.14"
+  },
+  "regeneration_proof": {
+    "measured_by": "the orchestrator, directly, in a dedicated detached worktree",
+    "clean": {
+      "exit": 0,
+      "result": "both derivations agree; the committed file matches a fresh derivation",
+      "golden_sha256_before_and_after": "b77b24e5a8efed4f\u2026 unchanged -- check mode writes nothing"
+    },
+    "control": {
+      "edit": "cases[0].slots[0].value (is_active) 0.0 -> 0.001",
+      "file_sha_moved": "b77b24e5a8ef -> 5a3fd878ee94, so the control genuinely ran",
+      "exit": 1,
+      "message": "disagrees with a fresh derivation: cases differs from the recorded file"
+    },
+    "why_both_halves": "A check that has never been seen to fail is not evidence. The clean run establishes the file matches; the control establishes the check can say otherwise."
+  },
+  "mutation_gate": {
+    "measured_by": "task 143's implementer, in its own `git worktree add --detach`; the verdict is quoted rather than re-run, and the orchestrator independently reproduced the two findings the gate exists to catch (see reproductions below)",
+    "baseline_testcases": 2555,
+    "caught": [
+      {
+        "n_tests": 17,
+        "mutation": "sim contract: field order -- two LOCAL_OBS_FIELDS entries swapped, dimension unchanged"
+      },
+      {
+        "n_tests": 17,
+        "mutation": "sim contract: a FIELD_SCALES value changed"
+      },
+      {
+        "n_tests": 3,
+        "mutation": "sim contract: a HEADWAY_BIN_S bin edge changed (fingerprint does not hash this)"
+      },
+      {
+        "n_tests": 3,
+        "mutation": "sim contract: bin_index's boundary direction, >= flipped to >"
+      },
+      {
+        "n_tests": 14,
+        "mutation": "sim contract: the inf clamp constant, 200.0 changed to 100.0"
+      },
+      {
+        "n_tests": 4,
+        "mutation": "sim contract: an ACTION_VALUES order within a head reversed"
+      },
+      {
+        "n_tests": 16,
+        "mutation": "sim contract: COOPERATION_FIELDS order changed"
+      },
+      {
+        "n_tests": 17,
+        "mutation": "sim contract: SPEED_BIN_OFFSETS_MPS['slow'] narrowed by 2 m/s"
+      },
+      {
+        "n_tests": 6,
+        "mutation": "sim contract: LANE_DISTRIBUTION_LANES reordered"
+      }
+    ],
+    "survived": 0,
+    "isolation": "Run from a detached worktree, not the shared tree. That is not a preference: a shared tree carrying another agent's uncommitted work is a red tree that does not look red, and this harness scored every mutation CAUGHT under exactly that condition earlier the same day."
+  },
+  "reproductions_by_the_orchestrator": {
+    "note": "These are the substantive evidence. Each was reproduced from the defect end before the fix and again after it, with both file shas compared to confirm the edit landed.",
+    "coordinated_FORCED_ACTIONS_edit": {
+      "what": "Change FORCED_ACTIONS['merge_mode'] 'normal' -> 'hold_lane' in the module AND the matching golden forced value and default_indices index. This changes what indices_to_action({}) commands for a head the policy does not emit.",
+      "before_the_fix": "74 passed, 1 skipped -- IDENTICAL to clean; the device behaviour changed silently",
+      "after_the_fix": "1 failed, 75 passed -- caught by exactly one test, the second pinned digest"
+    },
+    "bin_index_boundary_direction": {
+      "what": "Replace the 8 recorded bin_index values with non-boundary ones, count preserved so the length assertion still passes, then flip bin_index's >= to >.",
+      "before_the_fix": "identical to clean; the three discriminating values (0.5, 1.0, 2.0) were simply absent",
+      "after_the_fix": "caught by test_bin_index_counts_edges_at_or_below_the_value, which reads no recorded file at all -- hardcoded edges, hardcoded expectations -- so it fires whatever the golden contains"
+    }
+  },
+  "what_this_does_not_establish": [
+    "That the vendored contract matches the simulation on any machine without git and torch. The double derivation needs both; on the device only the frozen-file comparison runs.",
+    "Behaviour with no constant behind it. A digest over named constants cannot hash a branch order or a boundary direction; bin_index's is now pinned semantically, _number's branch order and decode_speed_bin's max() are recorded residual risk.",
+    "That the harness itself is correct. No test in this repository exercises scripts/remutate.py, so every guard in it -- including the two added today -- can be removed with the suite green. Verified directly by emptying _COLLECTION_AFFECTING_NAMES: 2,527 passed, the unmutated count."
+  ]
+}

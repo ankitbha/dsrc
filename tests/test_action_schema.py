@@ -1,8 +1,74 @@
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
 import pytest
 
-from src.envs.wrappers import validate_action
+from src.envs.wrappers import (
+    HEADWAY_BINS,
+    LANE_PREFERENCES,
+    MERGE_MODES,
+    SPEED_BINS,
+    validate_action,
+)
+
+REPO = Path(__file__).resolve().parents[1]
+
+#: The four heads, and the module that owns each one's vocabulary. This check
+#: used to live in `deployment/jetson/tests/test_transport_messages.py`,
+#: against a copy of the vocabulary the advisory channel carried. The advisory
+#: is a speed now and carries no action, so that copy was deleted and the
+#: check moved here, beside the implementation the spec actually documents.
+HEAD_VALUES: dict[str, tuple[str, ...]] = {
+    "desired_speed_bin": SPEED_BINS,
+    "desired_headway_bin": HEADWAY_BINS,
+    "lane_preference": LANE_PREFERENCES,
+    "merge_mode": MERGE_MODES,
+}
+
+#: `normal` appears in more than one spec block legitimately: it is a headway
+#: bin and a merge mode. Any other overlap is drift.
+LEGITIMATELY_SHARED_VALUES = {"normal"}
+
+
+def spec_allowed_values(head: str) -> set[str]:
+    """The values under one head's `allowed values:` block, and no further.
+
+    Anchored to the block rather than to the next head: a window running to the
+    next head swept up three other heads' values, so the check passed with a
+    value listed under the wrong head -- which is precisely the drift it exists
+    to catch.
+    """
+    text = (REPO / "specs" / "action_schema.md").read_text()
+    after_head = text.split(f"`{head}`", 1)
+    assert len(after_head) == 2, f"{head} is not documented"
+    after_allowed = after_head[1].split("- allowed values:", 1)
+    assert len(after_allowed) == 2, f"{head} has no allowed-values block"
+    block = after_allowed[1].split("- meaning:", 1)[0]
+    return set(re.findall(r"^\s*-\s+`([\w_]+)`\s*$", block, re.M))
+
+
+def test_the_spec_blocks_match_the_implementation():
+    for head, values in HEAD_VALUES.items():
+        assert spec_allowed_values(head) == set(values), head
+
+
+def test_the_spec_blocks_are_pairwise_disjoint_apart_from_the_shared_value():
+    """A property of the spec text alone, independent of the code. A value
+    appears under one head, except `normal`, which really is both a headway
+    bin and a merge mode."""
+    blocks = {head: spec_allowed_values(head) for head in HEAD_VALUES}
+    heads = sorted(HEAD_VALUES)
+    for left in heads:
+        for right in heads:
+            if left >= right:
+                continue
+            shared = blocks[left] & blocks[right]
+            assert shared <= LEGITIMATELY_SHARED_VALUES, (
+                f"{left} and {right} both list {sorted(shared - LEGITIMATELY_SHARED_VALUES)}"
+            )
+    assert blocks["desired_headway_bin"] & blocks["merge_mode"] == {"normal"}
 
 
 def safe_action(**overrides: str) -> dict[str, str]:

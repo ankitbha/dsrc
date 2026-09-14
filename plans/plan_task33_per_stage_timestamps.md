@@ -41,7 +41,7 @@ Three specific things to settle before any code is written, in this order:
 - Section G (tasks 33–39) was just started. Task 33 is at stage `plan`, validator
   round 0 of a 3-round budget. Nothing has been implemented.
 - Pipeline per task: `plan_dsrc_rec | implement_dsrc | validate_dsrc_3 |
-  experiment_dsrc`, then commit, push, strike the task in `plans/task_list.md` and
+  experiment_dsrc`, then commit, push, strike the task in `plans/implementation_records.md` and
   move to the next. Models per stage: plan `fable`, implement `sonnet`, validate
   `opus`.
 - Section-level state lives in `/Users/ankit_nash/Desktop/ankit_summer_2026/.pipeline/state.json`
@@ -140,7 +140,7 @@ block implementation and stay open for the user.
 
 ## The short version
 
-Task 33 (plans/task_list.md:1067) asks for per-stage timestamps across the
+Task 33 (plans/implementation_records.md:1067) asks for per-stage timestamps across the
 whole loop: capture, encode, transport, detect, track, fuse, infer, decode,
 return, render. Four of those already exist on the Jetson
 (`stage_ms` in deployment/jetson/pipeline.py:249-255: `detect`,

@@ -217,16 +217,11 @@ MESSAGES = [
     ),
     (
         "message_advisory",
-        "the advisory as the driver sees it, plus the machine-readable action",
+        "the advisory as the driver sees it: a recommended speed, in context",
         AdvisoryMessage(
             t_capture_mono_ns=1_000_000_005, rec_speed_mps=11.176,
             rec_speed_display=25.0, current_speed_display=27.5, units="mph",
-            headway_target_s=1.6, lane_text="Keep lane", merge_text="Normal driving",
-            traffic_text="Moderate", confidence=0.87, confidence_label="high",
-            action={
-                "desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                "lane_preference": "keep", "merge_mode": "normal",
-            },
+            traffic_text="Moderate",
         ),
     ),
     (

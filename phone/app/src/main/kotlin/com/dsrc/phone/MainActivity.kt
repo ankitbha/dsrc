@@ -184,10 +184,10 @@ class MainActivity : ComponentActivity() {
             return
         }
         speedLabel.text = "${advisory.recSpeedDisplay} ${advisory.units}"
-        adviceLabel.text = listOf(advisory.laneText, advisory.mergeText, advisory.trafficText)
-            .filter { it.isNotBlank() }
-            .joinToString("  \u00b7  ")
-        confidenceLabel.text = advisory.confidenceLabel
+        adviceLabel.text = advisory.trafficText
+        // The controller is a deterministic argmax over three speed fractions, so
+        // there is no confidence to show. The label carries the units instead.
+        confidenceLabel.text = advisory.units
     }
 
     private fun onStartClicked(mode: String) {

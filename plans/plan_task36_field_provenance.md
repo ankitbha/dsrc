@@ -9,7 +9,7 @@
 
 ## The short version
 
-Task 36 (plans/task_list.md:1244) asks for per-tick field provenance and
+Task 36 (plans/implementation_records.md:1244) asks for per-tick field provenance and
 missingness. **Both halves already exist and both are wrong in a specific,
 measurable way.** `field_sources` has recorded a provenance class per
 observation field since before task 28 (observation_builder.py:5-12, :53), it
@@ -66,7 +66,7 @@ becomes the live path with no change to `decide`'s structure; (4) publish the
 result on the three surfaces that exist — `SensingLoop.to_record`,
 `score_shadow`, and `eval_run`'s `report.md` — because task 33's own
 experiment found the measurement present and the surface absent
-(task_list.md:1110-1112). The wire is untouched and the phone is untouched.
+(implementation_records.md:1110-1112). The wire is untouched and the phone is untouched.
 
 **Scope boundary.** In: new `deployment/jetson/perception/provenance.py`;
 `perception/observation_builder.py`; one helper in `policy/sim_contract.py`
@@ -214,7 +214,7 @@ device. That is why D4 below records rather than removes.
 | D10 | Pre-task-36 logs in `score_shadow` | (a) default the new keys; (b) treat as a different incumbent (ship a versioned controller); (c) a named refusal derived from the `Inputs` schema | (c) | (a) is exactly what task 35 D2 forbids: "a silently defaulted input is a silently different replay". (b) means maintaining a second controller whose only consumer is old logs, and the identity gate's value is that it certifies *the code that ships*. Without (c) the tool does not degrade — `Inputs.from_record` raises `ValueError` (sensing_controller.py:293-297) inside `_replay_incumbent` (score_shadow.py:147) and the tool **crashes**, which contradicts its own doctrine ("refuses before it misleads", score_shadow.py:20-25). Made schema-derived rather than a hard-coded key list, so the next `Inputs` change gets a refusal instead of a traceback for free. |
 | D11 | `_rules_never_exercised`'s reason map | (a) keep the special-cased `feed_declined` (score_shadow.py:352-357); (b) a general `why: {evidence_key: {value: count}}` | (b) | After this task a not-evaluable entry can carry `ego_acceleration_source` as well, and the "why" is this task's whole contribution. A task-35 output-shape change, disclosed as open item 5; no existing test asserts the `feed_declined` key (verified — the three tests at test_score_shadow.py:657, :682, :705 assert `rule`, `ticks`, `missing` only). Also printed by `render_table`, which prints `missing` and drops the reason today. |
 | D12 | `Inputs.feed_declined` (task 34 open item 1) | (a) remove as redundant; (b) keep | (b) | It is not redundant: `feed_congestion` is not an observation field and has no `field_sources` entry at all (task 28's conclusion, feed_fusion.py:20-27). It is the same *shape* — a named reason for an absence — and the new fields follow its idiom. Task 34's device run already found it non-null on 899 of 899 ticks. Resolves task 34 open item 1 toward keep. |
-| D13 | Drive-level surfaces | (a) per-tick record only; (b) `SensingLoop.inputs_by_source`, `score_shadow.input_provenance`, an `eval_run` block **and report lines** | (b) | Task 33's experiment: all 900 ticks carried the `stages` block and `report.md` printed none of it (task_list.md:1110-1112). A measurement with no surface is this project's most repeated mistake. `SensingLoop` is the right live home for the same reason task 34 D6 put counters there — `summary["sensing"]` *is* `SensingLoop.to_record()`. |
+| D13 | Drive-level surfaces | (a) per-tick record only; (b) `SensingLoop.inputs_by_source`, `score_shadow.input_provenance`, an `eval_run` block **and report lines** | (b) | Task 33's experiment: all 900 ticks carried the `stages` block and `report.md` printed none of it (implementation_records.md:1110-1112). A measurement with no surface is this project's most repeated mistake. `SensingLoop` is the right live home for the same reason task 34 D6 put counters there — `summary["sensing"]` *is* `SensingLoop.to_record()`. |
 | D14 | `camera_last_detection_age_s` | (a) diagnostics only; (b) an `Inputs` field carried into the rule's evidence | (b) | The misleading record is `{"status": "fired", "camera_density_bin": 0}`; the bound belongs at the point of the claim, not in a block a reader has to join. It is the only evidence available about whether the perception chain was alive, and it is free (one float of builder state). |
 
 ## The record, exactly

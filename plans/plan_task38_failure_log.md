@@ -9,7 +9,7 @@
 
 ## The short version
 
-Task 38 (plans/task_list.md:1422) asks for a failure event log covering GPS
+Task 38 (plans/implementation_records.md:1422) asks for a failure event log covering GPS
 dropout, HERE failure or quota exhaustion, dropped frames and transport stalls,
 with recovery outcome.
 

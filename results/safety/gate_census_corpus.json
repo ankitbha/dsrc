@@ -1,0 +1,110 @@
+{
+  "what": "Task 144's experiment: the safety gate's per-rule evaluability census over the whole archived corpus, before and after validator round 1's fixes, plus the structural reachability of each rule on this rig.",
+  "generator": "deployment/jetson/score_safety.py",
+  "command": "score_safety.py outputs/task42_usb/{baseline_run_20260902_183446,run_20260905_113757,run_20260905_114546,run_20260905_115156} --no-json",
+  "corpus": {
+    "n_ticks": 3913,
+    "runs": {
+      "baseline_run_20260902_183446": 1229,
+      "run_20260905_113757": 899,
+      "run_20260905_114546": 900,
+      "run_20260905_115156": 885
+    },
+    "counted_by": "the orchestrator, directly from each run's metadata.jsonl"
+  },
+  "measured_at": "2026-09-12T09:15:54.217706Z",
+  "environment": {
+    "machine": "arm64 Darwin 25.6.0",
+    "python": "3.12.14"
+  },
+  "before": {
+    "commit": "2692c3b",
+    "census": {
+      "n_ticks": 3913,
+      "rules": {
+        "low_speed_uncongested": "not evaluable on any tick (0 of 3913)",
+        "all_lane_low_speed_occupancy": "not evaluable on any tick (0 of 3913)",
+        "passing_lane_slow_hold": "not evaluable on any tick (0 of 3913)",
+        "lane_change_dwell": "not evaluable on any tick (0 of 3913)",
+        "lane_changes_per_km": "not evaluable on any tick (0 of 3913)",
+        "target_lane_missing": "not evaluable on any tick (0 of 3913)",
+        "target_lane_front_gap": "evaluable on 1229 of 3913 ticks; fired on 0 of 1229 evaluable (0.0%)",
+        "target_lane_rear_gap": "not evaluable on any tick (0 of 3913)",
+        "target_lane_front_ttc": "not evaluable on any tick (0 of 3913)",
+        "target_lane_rear_ttc": "not evaluable on any tick (0 of 3913)",
+        "target_lane_rear_braking": "not evaluable on any tick (0 of 3913)",
+        "forward_ttc": "not evaluable on any tick (0 of 3913)"
+      },
+      "arms": {
+        "recorded": "clamped 0 of 3913 (0.0%), mean delta n/a, events={}, emergency_override=0, lane_withheld=3913",
+        "forced_nominal": "clamped 0 of 3913 (0.0%), mean delta n/a, events={}, emergency_override=0, lane_withheld=3913",
+        "forced_slow": "clamped 3913 of 3913 (100.0%), mean delta +2.00 m/s, events={'etiquette_blocked_action:low_speed_uncongested': 3913}, emergency_override=0, lane_withheld=3913"
+      }
+    }
+  },
+  "after": {
+    "commit": "dedd3c1",
+    "census": {
+      "n_ticks": 3913,
+      "rules": {
+        "low_speed_uncongested": "not evaluable on any tick (0 of 3913)",
+        "all_lane_low_speed_occupancy": "not evaluable on any tick (0 of 3913)",
+        "passing_lane_slow_hold": "not evaluable on any tick (0 of 3913)",
+        "lane_change_dwell": "not evaluable on any tick (0 of 3913)",
+        "lane_changes_per_km": "not evaluable on any tick (0 of 3913)",
+        "target_lane_missing": "not evaluable on any tick (0 of 3913)",
+        "target_lane_front_gap": "evaluable on 1229 of 3913 ticks; fired on 0 of 1229 evaluable (0.0%); the compared value (gap_m) is inf on all 1229; all 1229 disagree with leader_gap's own source (target_lane_front_gap is defined to alias it verbatim) -- recorded under a superseded contract, not evidence under today's rule",
+        "target_lane_rear_gap": "not evaluable on any tick (0 of 3913)",
+        "target_lane_front_ttc": "not evaluable on any tick (0 of 3913)",
+        "target_lane_rear_ttc": "not evaluable on any tick (0 of 3913)",
+        "target_lane_rear_braking": "not evaluable on any tick (0 of 3913)",
+        "forward_ttc": "not evaluable on any tick (0 of 3913)"
+      },
+      "arms": {
+        "recorded": "recommended speed raised on 0 of 3913 ticks; lowered on 0 of 3913 ticks; events={}, emergency_override=0, lane_withheld=3913",
+        "forced_nominal": "recommended speed raised on 0 of 3913 ticks; lowered on 0 of 3913 ticks; events={}, emergency_override=0, lane_withheld=3913",
+        "forced_slow": "recommended speed raised on 0 of 3913 ticks; lowered on 0 of 3913 ticks; events={}, emergency_override=0, lane_withheld=3913"
+      }
+    }
+  },
+  "headline": "Before: eleven rules 'not evaluable on any tick (0 of 3913)', and forced_slow 'clamped 3913 of 3913 (100.0%), mean delta +2.00 m/s' attributed to low_speed_uncongested -- a rule two lines above reported as never evaluable. After: all three arms read 'recommended speed raised on 0 of 3913 ticks; lowered on 0 of 3913', events={}. The 100% clamp rate produced by rules with no evidence is gone end to end.",
+  "predictions": {
+    "note": "Seven predictions were written BEFORE the fixes landed, in the session scratchpad, and all seven held, including two negative controls.",
+    "P1_forced_slow_clamps_zero": "held",
+    "P2_events_empty": "held",
+    "P3_no_clamp_delta": "held",
+    "P4_emergency_override_stays_0_NEGATIVE_CONTROL": "held",
+    "P5_lane_withheld_stays_3913_NEGATIVE_CONTROL": "held",
+    "P6_target_lane_front_gap_line_qualified": "held, and went further than asked",
+    "P7_clamped_replaced_by_a_directional_statement": "held"
+  },
+  "round_2_did_not_move_the_census": "The census at dedd3c1 is byte-identical to the one at 89a1048, before round 2's forward_ttc and lane_changes_per_km evaluability refinements. Expected: every field those refinements branch on lacks evidence on this corpus, so they are forward-looking and change nothing measurable here. Stated because a reader comparing the two commits would otherwise wonder why a correctness fix moved no number.",
+  "structural_reachability": {
+    "method": "Build the observation with EVERY source marked measured and a fresh last_detection_age_s -- the most favourable input safety_inputs_from_observation can produce -- then ask which rules still have no field carrying evidence.",
+    "reachable": [
+      "low_speed_uncongested",
+      "target_lane_front_gap"
+    ],
+    "partly_reachable": {
+      "passing_lane_slow_hold": "local_mean_speed_mps yes, in_passing_lane no",
+      "target_lane_front_ttc": "gap yes, relative speed no",
+      "forward_ttc": "leader pair yes, merge-conflict pair no"
+    },
+    "unreachable": [
+      "all_lane_low_speed_occupancy",
+      "lane_change_dwell",
+      "lane_changes_per_km",
+      "target_lane_missing",
+      "target_lane_rear_gap",
+      "target_lane_rear_ttc",
+      "target_lane_rear_braking"
+    ],
+    "why": "no rear sensor, no lane detection, no lane-change detector, no cooperating peers",
+    "consequence": "Seven of twelve rules cannot be evaluable on this rig whatever data is collected. That makes the census a confirmation of a structural fact rather than an observation about one corpus -- 'we saw none on 3,913 ticks' invites 'collect more data'; this does not. It is also why the lane advisory is withheld on every tick: three of its eight guards read fields the rig has no instrument for."
+  },
+  "what_this_does_not_establish": [
+    "Anything the gate would do in traffic. No rule was evaluable on any recorded tick, so the filter's behaviour under real evidence is unmeasured.",
+    "That the corpus is representative. It is four runs from one rig with a forward camera only.",
+    "The 1,229 'evaluable' ticks for target_lane_front_gap are not evidence: all are from the 2026-09-02 run, tagged derived beside a fallback_neutral leader_gap, a combination today's builder cannot produce, and the compared gap is inf on every one."
+  ]
+}

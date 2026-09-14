@@ -126,7 +126,7 @@ def markdown_table(stats: dict[str, dict[str, float]], fps: float, ticks: int) -
         "detect_ms": "detection (TRT FP16, incl. pre/post)",
         "track_ms": "tracking + distance",
         "observe_ms": "observation build + encode",
-        "policy_ms": "actor + advisory decode",
+        "policy_ms": "network advisory decode",
         "jetson_ms": "ON-JETSON (arrival -> advisory)",
         "link_ms": "LINK (phone capture -> Jetson arrival)",
         "e2e_ms": "END-TO-END (capture -> advisory)",
@@ -155,9 +155,8 @@ def main() -> int:
 
     config = load_config(args.config)
     # bench never opens real sensors
-    camera, gps, pipeline, actor = build_components(config, args.source or "file:/dev/null", use_gps=False)
-    print(f"[bench] warmup: {pipeline.detector.warmup():.1f} ms/frame "
-          f"(trained policy: {actor.is_trained})")
+    camera, gps, pipeline = build_components(config, args.source or "file:/dev/null", use_gps=False)
+    print(f"[bench] warmup: {pipeline.detector.warmup():.1f} ms/frame ")
 
     cam_cfg = config["camera"]
     scenario = SyntheticScenario(

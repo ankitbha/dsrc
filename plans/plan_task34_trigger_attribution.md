@@ -9,7 +9,7 @@
 
 ## The short version
 
-Task 34 (plans/task_list.md:1135) asks the controller to attribute every
+Task 34 (plans/implementation_records.md:1135) asks the controller to attribute every
 firing: which rule, for which sensor, and why. Half of this landed with
 task 29 and is verified below: every per-tick record already carries
 `trigger` (one word from a closed six-value set, sensing_controller.py:121-131),
@@ -153,7 +153,7 @@ wins when several raise rules fire at once.
 | D3 | "For which sensor" | (a) invent a rule-x-sensor matrix; (b) publish the real chain: global gates + per-key composition | (b) | The code decides one level bit and applies per-key modifiers (:338-359); a matrix would attribute agency the code does not have. Per key: base, level-sensitivity, scale applied/exempt, clamp, previous, changed. |
 | D4 | Thermal's entry | (a) it can be `not_evaluable` when telemetry is absent; (b) always evaluable, with a closed `cause` | (b) | Silence maps to the `unknown` tier by doctrine ("no news is cool news" refused, :55-57, :431-433); calling that not-evaluable would contradict the code. `cause` ∈ {`status`, `skin_warm`, `skin_hot`, `no_telemetry`, `stale_telemetry`}, null when the scale is 1.0; on a `min` tie the earlier cause stands (only a strict lowering claims it). |
 | D5 | How `Decision` carries it | (a) optional field defaulting None/{}; (b) required keyword-only field (`field(kw_only=True)`) | (b) | `_record` is the only construction site (verified); an optional default is a silent-absence path, which is the defect class. Existing keys of `to_record` stay byte-identical; the new key is additive. |
-| D6 | Drive-level aggregation | (a) none, leave it to task 39; (b) counts in `SensingLoop` (`decisions_by_trigger`, `rules_by_status`); (c) full tables/percentiles | (b) | (a) leaves `summary["sensing"]` unable to say one word about triggers, which is this task's title; (c) is task 39's session summary generator ("trigger counts" is on its list, task_list.md:1143-1144). Counters live in the loop because `summary["sensing"]` *is* `SensingLoop.to_record()` (run_demo.py:618) and the controller has no record hook. |
+| D6 | Drive-level aggregation | (a) none, leave it to task 39; (b) counts in `SensingLoop` (`decisions_by_trigger`, `rules_by_status`); (c) full tables/percentiles | (b) | (a) leaves `summary["sensing"]` unable to say one word about triggers, which is this task's title; (c) is task 39's session summary generator ("trigger counts" is on its list, implementation_records.md:1143-1144). Counters live in the loop because `summary["sensing"]` *is* `SensingLoop.to_record()` (run_demo.py:618) and the controller has no record hook. |
 | D7 | Naming the feed's absence | (a) `missing: ["feed_congestion"]` bare; (b) also carry `FeedOwnership.declined` into `Inputs` as `feed_declined` | (b) | The named reason exists one call upstream (feed_fusion.py:138-152) and `inputs_from` throws it away (sensing_loop.py:107); writing "missing, reason unknown" when the system knows the reason is a record that names less than it knows. Borders task 36 — flagged as open item 1. |
 | D8 | Evidence in rule entries | (a) reason strings only; (b) structured value+threshold echoed per rule | (b) | "Why" as numbers survives aggregation; free text is the text-mining problem task 29 named. The two disagreement literals (0.5, <=0 at :250-252) become named constants echoed in the entry, consistent with `TestTheConstantsAreValuesNotSelfReferences` (:792). `reasons` texts stay exactly as they are. |
 
@@ -426,7 +426,7 @@ on 896 ticks and `idle` on 3.
 - `MAX_QUERY_RADIUS_M` (10 km) unchecked against HERE v7's accepted range.
 - `achieved["camera_hz"]` overstates the sustained rate when the channel
   evicts; needs `Session.send` to surface the displacement.
-- Task 33's own residue (task_list.md:1128-1134): the CameraX clock
+- Task 33's own residue (implementation_records.md:1128-1134): the CameraX clock
   assumption on `capture_to_encode_start`, `fuse`'s unreachable absent
   branch, one `Thread.sleep(200)`, and ~1.5% unmatched joins on pre-task-33
   phone logs.

@@ -19,12 +19,11 @@ from typing import Any
 import pytest
 
 import check_shadow_commands as csc
-from policy.advisory import Advisory
 from policy.sensing_controller import Inputs, SensingController
+from policy.segment_advisory import SegmentAdvisory, SegmentAdvisoryRow
 from policy.sensing_loop import SensingLoop
 from policy.shadow_mode import LIVE, SHADOW, ModeHolder, command_for
 from sensors.time_sync import capture_stamp_ns
-from transport.messages import ACTION_HEADS
 
 
 class Clock:
@@ -54,37 +53,32 @@ class FakeObs:
 
 
 @dataclass
-class FakePolicy:
-    head_probs: dict
-
-
-@dataclass
 class FakeTick:
     obs_result: FakeObs
-    policy: FakePolicy
     gps: FakeGps
-    advisory: Advisory
+    dsrc: SegmentAdvisory
     t_capture_mono: float = 1000.0
     tick_id: int = 0
 
 
-def _advisory() -> Advisory:
-    return Advisory(
-        recommended_speed_mps=13.4, recommended_speed_display=30.0,
-        current_speed_display=28.0, units="mph", headway_target_s=2.0,
-        lane_text="keep lane", merge_text="no merge", traffic_text="moderate",
-        confidence=0.8, confidence_label="high",
-        action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                "lane_preference": "keep", "merge_mode": "normal"})
+def _advisory() -> SegmentAdvisory:
+    """One super-segment, decoded, with the vehicle on it."""
+    return SegmentAdvisory(
+        units="mph",
+        outcome="ok",
+        rows=(SegmentAdvisoryRow(segment_id="S00", action_index=2, fraction=1.0,
+                                 recommended_speed_mps=13.4,
+                                 recommended_speed_display=30.0),),
+        ego_segment=0,
+    )
 
 
 def _tick(tick_id: int, *, accel: float = 0.0, density: int = 2) -> FakeTick:
     obs = {"ego_acceleration": accel, "ego_speed": 20.0, "local_density_bin": float(density)}
     return FakeTick(
         obs_result=FakeObs(obs=obs),
-        policy=FakePolicy(head_probs={head: [0.95, 0.05] for head in ACTION_HEADS}),
         gps=FakeGps(),
-        advisory=_advisory(),
+        dsrc=_advisory(),
         t_capture_mono=1000.0 + tick_id,
         tick_id=tick_id,
     )

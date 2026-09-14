@@ -15,14 +15,14 @@ time-sync pings and never sends one. A mock would answer whatever it was asked.
 
 from __future__ import annotations
 
+
 import threading
 import time
 from types import SimpleNamespace
 
 import pytest
-
-from policy.advisory import Advisory
 from sensors import phone_link
+from policy.segment_advisory import DriverAdvisory
 from sensors.phone_link import PhoneLink
 from transport.channels import Channel
 from transport.frames import Frame, encode
@@ -1081,13 +1081,9 @@ class TestTheReturnPath:
 
 def _advisory(**over):
     fields = dict(recommended_speed_mps=13.4, recommended_speed_display=30.0,
-                  current_speed_display=28.0, units="mph", headway_target_s=2.0,
-                  lane_text="keep lane", merge_text="no merge", traffic_text="moderate",
-                  confidence=0.8, confidence_label="high",
-                  action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                          "lane_preference": "keep", "merge_mode": "normal"})
+                  current_speed_display=28.0, units="mph", traffic_text="Light")
     fields.update(over)
-    return Advisory(**fields)
+    return DriverAdvisory(**fields)
 
 
 def _rate_command(**over):
