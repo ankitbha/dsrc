@@ -52,3 +52,8 @@ paper/missfont.log
 # pdflatex one, which is why the list above missed them.
 paper/*.fdb_latexmk
 paper/*.fls
+
+# macOS Finder metadata. Written into any directory the Finder opens, including
+# ones nobody edited, so it appears as untracked noise in `git status` and hides
+# real changes in the list.
+.DS_Store
