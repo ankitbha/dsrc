@@ -47,6 +47,12 @@ paper/*.log
 paper/*.out
 paper/*.synctex.gz
 paper/*.pdf
+# ...except the built paper itself, which is tracked on purpose. It is the
+# deliverable rather than an intermediate, and a reader who wants to see what
+# the source produces should not have to install a TeX distribution first. It
+# rebinds on every rebuild, so `git status` will show it dirty after any
+# `pdflatex` run whether or not the source changed.
+!paper/main.pdf
 paper/missfont.log
 # latexmk's own dependency database. Written by any `latexmk` run, absent from a plain
 # pdflatex one, which is why the list above missed them.
