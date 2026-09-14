@@ -35,15 +35,9 @@ CAMERA = {
     "t_capture_mono_ns": 1, "frame_id": 1, "width": 1280, "height": 720,
     "format": "jpeg", "quality": 85,
 }
-ACTION = {
-    "desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-    "lane_preference": "keep", "merge_mode": "normal",
-}
 ADVISORY = {
     "t_capture_mono_ns": 1, "rec_speed_mps": 13.4, "rec_speed_display": 30.0,
-    "current_speed_display": 28.0, "units": "mph", "headway_target_s": 2.0,
-    "lane_text": "keep", "merge_text": "normal", "traffic_text": "clear",
-    "confidence": 0.87, "confidence_label": "high", "action": ACTION,
+    "current_speed_display": 28.0, "units": "mph", "traffic_text": "clear",
 }
 RATES = {"camera_hz": 5.0, "gps_hz": 1.0, "imu_hz": 50.0, "here_hz": 0.2}
 RATE_CMD = {"t_capture_mono_ns": 1, "rates": RATES, "trigger": "thermal", "shadow": False}
@@ -85,19 +79,13 @@ CASES = {
     "camera zero width is accepted by both": (CameraFrame, {**CAMERA, "width": 0}, b""),
     "camera negative frame id is accepted by both": (CameraFrame, {**CAMERA, "frame_id": -1}, b""),
     "camera empty format is accepted by both": (CameraFrame, {**CAMERA, "format": ""}, b""),
-    "advisory action is null": (AdvisoryMessage, {**ADVISORY, "action": None}, b""),
-    "advisory action is not an object": (AdvisoryMessage, {**ADVISORY, "action": 5}, b""),
-    "advisory action head is an integer": (
-        AdvisoryMessage, {**ADVISORY, "action": {**ACTION, "desired_speed_bin": 5}}, b"",
+    # An unknown key is preserved rather than refused, extensions being additive
+    # -- which is what an `action` object left over from the 39-field actor now
+    # is on this channel.
+    "advisory with a leftover action object is accepted by both": (
+        AdvisoryMessage, {**ADVISORY, "action": {"desired_speed_bin": "nominal"}}, b"",
     ),
-    "advisory action head outside the set": (
-        AdvisoryMessage, {**ADVISORY, "action": {**ACTION, "merge_mode": "ram_it"}}, b"",
-    ),
-    "advisory action missing a head": (
-        AdvisoryMessage,
-        {**ADVISORY, "action": {k: v for k, v in ACTION.items() if k != "merge_mode"}},
-        b"",
-    ),
+    "advisory traffic text is null": (AdvisoryMessage, {**ADVISORY, "traffic_text": None}, b""),
     "advisory units outside the three": (AdvisoryMessage, {**ADVISORY, "units": "furlongs"}, b""),
     # The optional `here` object, added with task 21. Absent is "no change" and must be
     # ACCEPTED on both sides -- that is the whole reason the field could be added without a

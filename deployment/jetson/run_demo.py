@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live advisory demo on the Jetson (plan_deployment.md Tasks P1/P6/P8).
 
-Wires camera + GPS -> perception -> observation -> actor -> advisory,
+Wires camera + GPS -> perception -> observation -> safety gate,
 with the dashboard on the main thread and the pipeline on a worker
 thread (latest-frame-wins at every handoff).
 
@@ -48,10 +48,11 @@ from dumpsys_util import parse_last_update_time  # noqa: E402
 from perception.detector import TrtYoloDetector  # noqa: E402
 from perception.distance import DistanceEstimator  # noqa: E402
 from perception.observation_builder import BuilderConfig, ObservationBuilder  # noqa: E402
+from perception.segment_state import SegmentStateBuilder  # noqa: E402
 from perception.tracker import IouTracker  # noqa: E402
 from pipeline import PerceptionPolicyPipeline  # noqa: E402
-from policy.actor_runtime import ActorRuntime  # noqa: E402
-from policy.advisory import AdvisoryDecoder  # noqa: E402
+from policy.dsrc_runtime import DsrcRuntime  # noqa: E402
+from policy.segment_advisory import SegmentAdvisoryDecoder, driver_advisory  # noqa: E402
 from sensors.camera_stream import CameraStream  # noqa: E402
 from sensors.gps_reader import GpsFix, GpsReader  # noqa: E402
 
@@ -67,6 +68,42 @@ def resolve_model_path(config: dict, key_path: str) -> str:
     section, key = key_path.split(".")
     raw = Path(config[section][key])
     return str(raw if raw.is_absolute() else JETSON_DIR / raw)
+
+
+def build_dsrc_parts(config: dict) -> dict:
+    """The runtime, the segment-state builder and the advisory decoder, or an
+    empty dict when no bundle is on disk.
+
+    An empty dict is a supported configuration and not a stub: the pipeline
+    then records both DSRC stages as absent with a named reason and every tick
+    carries `dsrc: None`, which is a rig with no policy for the road it is
+    driving. That is the state a bring-up unit is in before a bundle is copied
+    onto it, and design priority 3 says it must still run, log and display.
+
+    All three parts are built from one network definition and are handed the
+    runtime's own fingerprint, so a bundle and a map that are not the same
+    network are refused here rather than silently producing a wrong action
+    vector.
+    """
+    p = config["policy"]
+    prefix = resolve_model_path(config, "policy.bundle")
+    if not Path(prefix + ".ts").exists():
+        return {}
+    definition_path = resolve_model_path(config, "policy.network_definition")
+    runtime = DsrcRuntime(prefix, definition_path)
+    return {
+        "dsrc_runtime": runtime,
+        "dsrc_segment_builder": SegmentStateBuilder(
+            definition_path,
+            expected_network_fingerprint=runtime.network_fingerprint,
+        ),
+        "dsrc_advisory_decoder": SegmentAdvisoryDecoder.from_network_definition(
+            definition_path,
+            units=config["ui"]["units"],
+            expected_network_fingerprint=runtime.network_fingerprint,
+        ),
+        "dsrc_decision_interval_s": float(p["decision_interval_s"]),
+    }
 
 
 def build_components(
@@ -163,31 +200,17 @@ def _build_rest(config: dict):
     builder = ObservationBuilder(BuilderConfig.from_full_config(config))
 
     p = config["policy"]
-    actor = ActorRuntime(
-        bundle_prefix=resolve_model_path(config, "policy.bundle"),
-        deterministic=p["deterministic"],
-    )
-    decoder = AdvisoryDecoder(
-        units=config["ui"]["units"],
-        min_contextual_speed_mps=p["min_contextual_speed_mps"],
-        confidence_low_below=p["confidence_low_below"],
-        confidence_high_at=p["confidence_high_at"],
-    )
-
-    # task 144: keyword, not positional -- the six positional arguments above
-    # are what let dsrc_runtime/dsrc_segment_builder/dsrc_advisory_decoder
-    # go unpassed here unnoticed (task 145's own gap, left as-is; this call
-    # site still does not wire the DSRC path in). Widening with a keyword
-    # rather than a seventh positional argument at least does not make that
-    # worse.
+    dsrc = build_dsrc_parts(config)
     pipeline = PerceptionPolicyPipeline(
-        detector, tracker, distance, builder, actor, decoder,
+        detector, tracker, distance, builder,
+        min_contextual_speed_mps=p["min_contextual_speed_mps"],
         # validator round 1, Fix 3: plain subscript, matching the sibling key
         # above -- a config that predates safety.enabled should fail loudly,
         # not silently default to the gate being on.
         safety_enabled=config["safety"]["enabled"],
+        **dsrc,
     )
-    return pipeline, actor
+    return pipeline
 
 
 def telemetry_record(tick) -> dict:
@@ -742,15 +765,13 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
         print(f"[run] phone {phone.peer_device_id} on session {phone.session.session_id}",
               flush=True)
 
-    camera, gps, pipeline, actor = build_components(
+    camera, gps, pipeline = build_components(
         config, args.source, use_gps=not args.no_gps, gps_sim_spec=gps_sim_spec,
         phone=phone,
     )
     if gps_sim_spec is not None:
         print(f"[run] GPS: SIMULATED ({args.sim_gps or 'scenario profile'})")
     print(f"[run] detector warmup: {pipeline.detector.warmup():.1f} ms/frame")
-    if not actor.is_trained:
-        print("[run] WARNING: policy bundle is RANDOM-INIT (untrained); advisory values are placeholders")
 
     camera.start()
 
@@ -926,7 +947,14 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             feed = None
             if phone is not None:
                 feed = phone.here.at(fix, time.monotonic())
-            tick = pipeline.step(frame, fix, peers, feed=feed)
+            tick = pipeline.step(
+                frame, fix, peers, feed=feed,
+                # The whole-network snapshot, a separate question from `feed`:
+                # `feed` is the one link ahead of this vehicle, and this is
+                # every usable link in the network, asked on the DSRC path's
+                # own 60 s cadence.
+                here_feed_source=None if phone is None else phone.here,
+            )
             outcome = None
             if sensing is not None:
                 # After the tick, because the decision reads the policy margin and
@@ -967,8 +995,13 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             if not display and now - last_print >= args.print_every:
                 last_print = now
                 link = "" if tick.link_ms is None else f" (link {tick.link_ms:5.1f})"
+                advisory = driver_advisory(tick.dsrc, tick.obs_result.obs)
+                shown = (
+                    "no advisory for this road" if advisory is None
+                    else advisory.one_line()
+                )
                 print(
-                    f"[{tick.tick_id:6d}] {tick.advisory.one_line()} | "
+                    f"[{tick.tick_id:6d}] {shown} | "
                     f"jetson {tick.jetson_ms:5.1f} ms{link}"
                 )
             if args.max_ticks and tick.tick_id + 1 >= args.max_ticks:
@@ -994,7 +1027,7 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
                     continue
                 shown = tick.tick_id
                 canvas = render_dashboard(
-                    image, tick, pipeline.stats.snapshot(), actor.is_trained, horizon_y=horizon
+                    image, tick, pipeline.stats.snapshot(), horizon_y=horizon
                 )
                 if window.show(canvas) == "quit":
                     stop.set()
@@ -1017,7 +1050,6 @@ def run_live(config: dict, args: argparse.Namespace, scenario: dict | None = Non
             # stored is a fact about the drive rather than a detail of logging.
             "here_log": None if here_logger is None else here_logger.to_record(),
             "camera_file_recoveries": camera.file_recoveries,
-            "policy_trained": actor.is_trained,
             # A4 (validation round 2): the code revision, policy bundle,
             # detector engine and phone APK that produced everything in
             # `advisory`/`sensing`/`perception` below -- none of which was
@@ -1139,17 +1171,33 @@ def selfcheck(config: dict, args: argparse.Namespace) -> int:
         except Exception as exc:
             report("detector engine", False, str(exc))
 
-    try:
-        actor = ActorRuntime(resolve_model_path(config, "policy.bundle"))
-        import numpy as np
-
-        out = actor.act(np.zeros(39, dtype=np.float32))
-        detail = f"action {out.action['desired_speed_bin']}, {out.latency_ms:.2f} ms"
-        if not actor.is_trained:
-            detail += " (UNTRAINED random-init bundle)"
-        report("actor policy", True, detail)
-    except Exception as exc:
-        report("actor policy", False, f"{exc}")
+    bundle_prefix = resolve_model_path(config, "policy.bundle")
+    if not Path(bundle_prefix + ".ts").exists():
+        # A warning, not a failure: a rig with no bundle still runs, logs and
+        # displays. It just makes no recommendation, and the run should say
+        # that here rather than leave a reader to infer it from a drive whose
+        # every tick carried `dsrc: null`.
+        report(
+            "dsrc policy", True,
+            f"{bundle_prefix}.ts missing - the rig will run with no advisory",
+            warn=True,
+        )
+    else:
+        try:
+            parts = build_dsrc_parts(config)
+            runtime = parts["dsrc_runtime"]
+            report(
+                "dsrc policy", True,
+                f"{runtime.num_segments} segments, "
+                f"network {runtime.network_fingerprint}"
+                + ("" if runtime.is_trained else " (UNTRAINED bundle)"),
+                warn=not runtime.is_trained,
+            )
+        except Exception as exc:
+            # A fingerprint mismatch between the bundle and the network
+            # definition lands here, which is the one failure this check
+            # exists for: the two are separately copied onto the device.
+            report("dsrc policy", False, str(exc))
 
     try:
         cam = CameraStream(source=args.source or str(config["camera"]["source"]))

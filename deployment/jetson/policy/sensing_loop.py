@@ -43,6 +43,7 @@ from typing import Any
 
 from geo import haversine_m
 from perception import provenance
+from policy.segment_advisory import driver_advisory
 from policy.sensing_controller import Decision, Inputs, SensingController
 from policy.shadow_mode import SHADOW, ModeHolder, command_for
 from sensors.time_sync import capture_stamp_ns
@@ -105,22 +106,6 @@ class TickOutcome:
         }
 
 
-def _margin(head_probs: dict[str, list[float]]) -> float | None:
-    """`top1 - top2`, over the head closest to a boundary.
-
-    The minimum over active heads, not the mean: the policy is at a boundary if ANY
-    of its heads is, and averaging would let three confident heads hide the one that
-    is about to change its mind.
-    """
-    margins = []
-    for probs in head_probs.values():
-        if probs is None or len(probs) < 2:
-            continue
-        top1, top2 = sorted(probs, reverse=True)[:2]
-        margins.append(float(top1) - float(top2))
-    return min(margins) if margins else None
-
-
 def inputs_from(tick: Any, phone: Any, *, now: float) -> Inputs:
     """Everything the controller may look at, gathered from one tick and the link.
 
@@ -172,7 +157,18 @@ def inputs_from(tick: Any, phone: Any, *, now: float) -> Inputs:
             else obs.get("ego_acceleration")
         ),
         ego_speed=obs.get("ego_speed"),
-        policy_margin=_margin(tick.policy.head_probs),
+        # Always None on a live tick now, so NARROW_MARGIN records itself as
+        # not evaluable on every one. The margin was `top1 - top2` of the
+        # 39-field actor's per-head softmax, and that actor is gone. The DSRC
+        # runtime's Q-values are not a distribution, so a gap between two of
+        # them is in reward units and cannot be compared against
+        # `NARROW_MARGIN`, which is a probability difference; and the runtime
+        # decides once every `dsrc_decision_interval_s` rather than once per
+        # tick, so even a converted number would be up to a minute stale.
+        # `Inputs.policy_margin` and the rule itself stay: `score_shadow.py`
+        # replays logged `Inputs` from drives that did carry a margin, and a
+        # controller that no longer has the rule could not reproduce them.
+        policy_margin=None,
         # The feed's own number, from beside the observation vector rather than in
         # it -- task 28 concluded the feed owns no observation field, and the
         # controller is the consumer that reading was published for.
@@ -296,10 +292,15 @@ class SensingLoop:
         advisory_sent = False
         command_sent = False
         reason = self._send_reason(command, now)
+        # No ego row means no recommendation was made this tick, so nothing is
+        # sent. `advisory_sent` stays False, which is what it already means for
+        # a send the link refused: the phone was not given an advisory.
+        advisory = driver_advisory(tick.dsrc, tick.obs_result.obs)
         if phone is not None:
-            advisory_sent = phone.send_advisory(
-                tick.advisory, t_capture_mono_ns=capture_ns
-            )
+            if advisory is not None:
+                advisory_sent = phone.send_advisory(
+                    advisory, t_capture_mono_ns=capture_ns
+                )
             if reason is not None:
                 command_sent = phone.send_rate_command(command)
         if reason is not None and command_sent:

@@ -77,29 +77,26 @@ observation:
   low_speed_free_flow_delta_mps: 8.0
 
 policy:
-  bundle: models/actor_policy        # loads <bundle>.ts + <bundle>.json
-  deterministic: true                # argmax heads (use sampling only for debug)
-  # Advisory decode mirrors dsrc/src/envs/wrappers.py decode_speed_bin /
-  # decode_headway_bin - verified by tests/test_sim_contract.py
+  bundle: models/dsrc_policy         # loads <bundle>.ts + <bundle>.json
+  # The network the bundle was trained on. The runtime, the segment-state
+  # builder and the advisory decoder are all built from this one file and
+  # refuse each other if their fingerprints disagree, so a bundle and a map
+  # that are not the same network cannot be paired by accident.
+  network_definition: ../../specs/dsrc_network_mainz.json
+  # One decision per interval, held over in between. 60 s is what the
+  # checkpoint was trained against, not a tick rate.
+  decision_interval_s: 60.0
+  # The floor the safety gate raises a low recommendation to on an
+  # uncongested road.
   min_contextual_speed_mps: 12.0
-  confidence_low_below: 0.45         # min head prob -> low / medium / high label
-  confidence_high_at: 0.70
 
 safety:
-  # plan_task144 decision 3: the lane/merge advisory is withheld outright
-  # whenever any of its eight guard rules could not be evaluated this tick
-  # (no rear camera on this rig means three of them never can be). true is
-  # the new, safer behavior; false shows lane_text for a guard that was
-  # never checked. Covers the lane/merge action ONLY -- it does not change
-  # the recommended speed or headway.
-  # validator round 1 (F2): this flag was wrongly documented here as the
-  # rollback mechanism for the whole gate. It never was -- `enabled` below
-  # is.
-  withhold_lane_when_not_evaluable: true
-  # validator round 1 (F2/Fix 3): the actual rollback mechanism. false still
-  # runs the full per-rule census and writes the complete record, but
-  # bounded_* equals proposed_* exactly -- speed, headway AND lane action --
-  # and nothing is withheld.
+  # The rollback mechanism for the whole gate (validator round 1, F2/Fix 3).
+  # false still runs the full per-rule census and writes the complete record,
+  # but bounded_* equals proposed_* exactly.
+  # `withhold_lane_when_not_evaluable` stood here too. The advisory is a
+  # speed, the lane and merge rules are gone, and a flag over a decision the
+  # controller no longer makes had nothing left to withhold.
   enabled: true
 
 v2v:

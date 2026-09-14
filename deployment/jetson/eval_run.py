@@ -1039,29 +1039,46 @@ def analyze(
         sim_truth = {"elapsed": elapsed, "truth": truth, "measured": measured, "dropouts": dropouts}
 
     # --- policy / advisory --------------------------------------------------
-    head_dists: dict[str, Counter] = defaultdict(Counter)
-    switches = 0
-    prev_action = None
-    for t in ticks:
-        action = t["action"]
-        for head, value in action.items():
-            head_dists[head][value] += 1
-        if prev_action is not None:
-            switches += sum(1 for h in action if action[h] != prev_action[h])
-        prev_action = action
-    adv_speeds = [t["advisory"]["recommended_speed_mps"] for t in ticks]
-    confidence_labels = Counter(t["advisory"]["confidence_label"] for t in ticks)
+    # A tick has an advisory when the rig had a policy for the road it was on
+    # AND the fix matched one of that policy's super-segments. Both absences
+    # are counted rather than skipped: a drive with no advisory at all and a
+    # drive whose every advisory was the same speed are different runs, and a
+    # statistic over an empty list cannot tell them apart.
+    advised = [t for t in ticks if t.get("advisory") is not None]
+    adv_speeds = [t["advisory"]["recommended_speed_mps"] for t in advised]
+    withheld = sum(
+        1 for t in advised if t["advisory"].get("speed_display_withheld")
+    )
+    # The ego segment's own action index, and how often it changed. Replaces
+    # the four-head distribution and switch count: the controller emits one
+    # action per super-segment, and the one the driver sees is the ego row's.
+    # Absent from a log recorded before the speed-only advisory, which is why
+    # `n` is reported beside the distribution rather than assumed to be
+    # `len(ticks)`.
+    indices = [
+        t["advisory"]["action_index"] for t in advised
+        if "action_index" in t["advisory"]
+    ]
+    index_switches = sum(1 for a, b in zip(indices, indices[1:]) if a != b)
+    segments = Counter(
+        t["advisory"]["segment_id"] for t in advised if "segment_id" in t["advisory"]
+    )
     advisory = {
-        "trained_policy": bool(summary.get("policy_trained", False)),
-        "head_distributions": {
-            h: {k: round(c / len(ticks), 3) for k, c in dist.items()}
-            for h, dist in head_dists.items()
-        },
+        "ticks_with_an_advisory": len(advised),
+        "ticks_with_no_advisory": len(ticks) - len(advised),
         "recommended_speed_mps": pctl(adv_speeds),
-        "head_switches_per_minute": (
-            switches / (duration_s / 60.0) if duration_s > 0 else 0.0
-        ),
-        "confidence_labels": {k: round(c / len(ticks), 3) for k, c in confidence_labels.items()},
+        "speed_display_withheld": withheld,
+        "action_index": {
+            "n": len(indices),
+            "distribution": {
+                str(k): round(c / len(indices), 3)
+                for k, c in sorted(Counter(indices).items())
+            } if indices else {},
+            "switches_per_minute": (
+                index_switches / (duration_s / 60.0) if duration_s > 0 else 0.0
+            ),
+        },
+        "ego_segments": dict(sorted(segments.items())),
     }
 
     # --- gates ---------------------------------------------------------------
@@ -1254,8 +1271,15 @@ def render_plots(result: dict[str, Any], run_dir: Path) -> list[str]:
         ax.plot(sim_truth["elapsed"], sim_truth["truth"], lw=1.0, ls="--", label="scripted truth")
         for a, b in sim_truth["dropouts"]:
             ax.axvspan(a, b, color="orange", alpha=0.25)
+    # NaN, not a skipped point: a tick with no advisory is a gap in the line,
+    # and dropping it instead would slide every later point onto the wrong time.
     ax.plot(
-        ts, [t["advisory"]["recommended_speed_mps"] for t in ticks],
+        ts,
+        [
+            t["advisory"]["recommended_speed_mps"] if t.get("advisory") is not None
+            else float("nan")
+            for t in ticks
+        ],
         lw=0.8, alpha=0.8, label="advisory speed",
     )
     ax.set_xlabel("run time (s)"); ax.set_ylabel("m/s")
@@ -2088,12 +2112,6 @@ def render_markdown(
         lines += [f"Scenario: {r['scenario']['description']}", ""]
     if r["scenario"]["video_source"]:
         lines += [f"Video: `{r['scenario']['video_source']}`", ""]
-    if not r["advisory"]["trained_policy"]:
-        lines += [
-            "**UNTRAINED policy bundle** - advisory values are random-init placeholders;",
-            "this report certifies plumbing and latency, not advisory quality.",
-            "",
-        ]
     lines += [
         f"{r['n_ticks']} ticks over {r['duration_s']} s "
         f"(median {r['tick_rate_hz_median']} Hz, "
@@ -2324,15 +2342,17 @@ def render_markdown(
     a = r["advisory"]
     lines += [
         "",
-        "## Advisory (not gated"
-        + ("" if a["trained_policy"] else "; UNTRAINED bundle")
-        + ")",
+        "## Advisory",
         "",
+        f"- ticks with an advisory: {a['ticks_with_an_advisory']} "
+        f"(no advisory on {a['ticks_with_no_advisory']})",
         f"- recommended speed: p50 {a['recommended_speed_mps']['p50']:.1f} m/s "
-        f"(mean {a['recommended_speed_mps']['mean']:.1f})",
-        f"- head switches: {a['head_switches_per_minute']:.1f} / min",
-        f"- confidence labels: {a['confidence_labels']}",
-        f"- head distributions: {json.dumps(a['head_distributions'], indent=2)}",
+        f"(mean {a['recommended_speed_mps']['mean']:.1f}, n {a['recommended_speed_mps']['n']})",
+        f"- speed number withheld on an emergency override: {a['speed_display_withheld']} ticks",
+        f"- action index switches: {a['action_index']['switches_per_minute']:.1f} / min "
+        f"(n {a['action_index']['n']})",
+        f"- action index distribution: {json.dumps(a['action_index']['distribution'])}",
+        f"- ego segments: {json.dumps(a['ego_segments'])}",
     ]
     lines += _safety_lines(r.get("safety"))
     if session is not None:

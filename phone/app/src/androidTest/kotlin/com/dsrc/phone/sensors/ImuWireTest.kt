@@ -428,13 +428,7 @@ class ImuWireTest {
         val advisory = AdvisoryMessage(
             captureMonoNs = android.os.SystemClock.elapsedRealtimeNanos(),
             recSpeedMps = 13.4, recSpeedDisplay = 30.0, currentSpeedDisplay = 28.0,
-            units = "mph", headwayTargetS = 2.0,
-            laneText = "keep", mergeText = "", trafficText = "moderate",
-            confidence = 0.87, confidenceLabel = "high",
-            action = mapOf(
-                "lane_preference" to "keep", "merge_mode" to "normal",
-                "desired_speed_bin" to "nominal", "desired_headway_bin" to "normal",
-            ),
+            units = "mph", trafficText = "moderate",
         )
         assertTrue(
             "the peer could not send the advisory",

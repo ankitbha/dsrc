@@ -19,7 +19,7 @@ import numpy as np
 
 from perception.detector import COCO_VEHICLE_NAMES
 from pipeline import Tick
-from policy.advisory import Advisory
+from policy.segment_advisory import SegmentAdvisoryRow, display_speed
 
 PANEL_W = 380
 GREEN = (80, 220, 80)
@@ -68,28 +68,28 @@ def annotate_frame(
     return out
 
 
-def _recommended_speed_line(adv: Advisory) -> tuple[str, tuple[int, int, int]]:
+def _recommended_speed_line(
+    row: SegmentAdvisoryRow | None, units: str, withheld: bool,
+) -> tuple[str, tuple[int, int, int]]:
     """The 'Recommended' line's text and color, pulled out of
     render_dashboard so it is unit-testable without a real frame or cv2.
 
-    validator round 1, F7: plan step 6 says to withhold the speed number on
-    an emergency override -- `Advisory.speed_display_withheld` was written
-    into the record (task 144, open item 3) and read by no surface at all
-    until this fix. Withheld, the recommended-speed number is not shown as
-    a cruising target: `physical_control_command` chose an emergency
-    deceleration this tick, and the raw decoded speed above it is not what
-    the vehicle is doing.
+    Withheld, the recommended-speed number is not shown as a cruising target:
+    the gate chose an emergency deceleration this tick, so the recommendation
+    is not what the vehicle is doing. No row at all means the rig carries no
+    advisory for the road it is on, which is shown as such rather than blank.
     """
-    if adv.speed_display_withheld:
+    if row is None:
+        return "Recommended: none for this road", GRAY
+    if withheld:
         return "Recommended: WITHHELD (override)", RED
-    return f"Recommended: {adv.recommended_speed_display:5.0f} {adv.units}", GREEN
+    return f"Recommended: {row.recommended_speed_display:5.0f} {units}", GREEN
 
 
 def render_dashboard(
     image: np.ndarray,
     tick: Tick,
     stats: dict[str, dict[str, float]],
-    policy_trained: bool,
     extra_lines: list[str] | None = None,
     horizon_y: float | None = None,
 ) -> np.ndarray:
@@ -105,25 +105,21 @@ def render_dashboard(
         cv2.putText(panel, text, (14, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
         y += dy
 
-    adv = tick.advisory
+    adv = tick.dsrc
+    row = None if adv is None or adv.ego_segment is None else adv.rows[adv.ego_segment]
+    units = "mph" if adv is None else adv.units
+    withheld = tick.safety_gate is not None and tick.safety_gate.emergency_override
     obs = tick.obs_result.obs
     put("DSRC EDGE PROTOTYPE", BLUE, 0.6, 24, 2)
     put("ADVISORY ONLY - DO NOT FOLLOW", RED, 0.45, 26)
-    if not policy_trained:
-        put("[ UNTRAINED POLICY - BRING-UP ]", RED, 0.5, 28, 2)
     y += 6
-    speed_text, speed_color = _recommended_speed_line(adv)
+    speed_text, speed_color = _recommended_speed_line(row, units, withheld)
     put(speed_text, speed_color, 0.8, 36, 2)
-    put(f"Current:     {adv.current_speed_display:5.0f} {adv.units}", WHITE, 0.8, 38, 2)
-    # validator round 1, F8: the bounded headway (what the gate actually
-    # shows the driver), not headway_target_s (the raw value fed back into
-    # set_target_headway).
-    put(f"Headway: {adv.headway_display_s:.1f} s target", WHITE, 0.5, 28)
+    put(f"Current:     {display_speed(obs['ego_speed'], units):5.0f} {units}", WHITE, 0.8, 38, 2)
     y += 4
-    put(f"Traffic: {adv.traffic_text}   vehicles: {obs['active_vehicle_count_local']}", WHITE, 0.5, 24)
+    put(f"Vehicles ahead: {obs['active_vehicle_count_local']}", WHITE, 0.5, 24)
     lg = obs["leader_gap"]
-    put(f"Leader:  {'%.0f m' % lg if np.isfinite(lg) else '--'}", WHITE, 0.5, 24)
-    put(f"Confidence: {adv.confidence_label} ({tick.policy.confidence:.2f})", WHITE, 0.5, 28)
+    put(f"Leader:  {'%.0f m' % lg if np.isfinite(lg) else '--'}", WHITE, 0.5, 28)
     y += 4
     # `or {}`, not `get(..., {})`: the key is present and None for an absent
     # series, so the default never applies. link_ms is None on every local run.

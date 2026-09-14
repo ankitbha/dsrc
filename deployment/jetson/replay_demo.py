@@ -108,7 +108,7 @@ def main() -> int:
     records = load_tick_records(metadata_path)
     print(f"[replay] {len(records)} live ticks loaded from {metadata_path}")
 
-    _, _, pipeline, actor = build_components(config, "file:/dev/null", use_gps=False)
+    _, _, pipeline = build_components(config, "file:/dev/null", use_gps=False)
     pipeline.detector.warmup()
 
     # The mount angle lives in the deployment config; the run's own config says

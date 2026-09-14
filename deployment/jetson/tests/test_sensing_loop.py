@@ -11,12 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
-
-from policy.advisory import Advisory
 from policy.sensing_loop import QUERY_REFRESH_FRACTION, SensingLoop, inputs_from, reference_from
 from policy.shadow_mode import LIVE, SHADOW, ModeHolder
 from transport.channels import Channel
-from transport.messages import ACTION_HEADS, PhoneTelemetry, decode_message
+from policy.segment_advisory import SegmentAdvisory, SegmentAdvisoryRow
+from transport.messages import PhoneTelemetry, decode_message
 
 
 class Clock:
@@ -75,42 +74,34 @@ class FakeObs:
 
 
 @dataclass
-class FakePolicy:
-    head_probs: dict
-
-
-@dataclass
 class FakeTick:
     obs_result: FakeObs
-    policy: FakePolicy
     gps: FakeGps
-    advisory: Advisory
+    dsrc: SegmentAdvisory | None
     t_capture_mono: float = 1000.0
 
 
-def advisory() -> Advisory:
-    return Advisory(
-        recommended_speed_mps=13.4, recommended_speed_display=30.0,
-        current_speed_display=28.0, units="mph", headway_target_s=2.0,
-        traffic_text="Light",
-        confidence=0.8, confidence_label="high",
-        action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                "lane_preference": "keep", "merge_mode": "normal"})
+def advisory(*, ego_segment: int | None = 0) -> SegmentAdvisory:
+    """One super-segment, decoded. `ego_segment=None` is the rig driving a
+    road its policy does not cover, which is a tick with no recommendation at
+    all rather than one recommending nothing."""
+    return SegmentAdvisory(
+        units="mph",
+        outcome="ok",
+        rows=(SegmentAdvisoryRow(segment_id="S00", action_index=2, fraction=1.0,
+                                 recommended_speed_mps=13.4,
+                                 recommended_speed_display=30.0),),
+        ego_segment=ego_segment,
+    )
 
 
-def tick(*, accel=0.0, speed=20.0, density=2, margins=(0.9, 0.4), feed=None,
-         capture=1000.0, lat=51.49, lon=-0.20) -> FakeTick:
+def tick(*, accel=0.0, speed=20.0, density=2, feed=None,
+         capture=1000.0, lat=51.49, lon=-0.20, dsrc=...) -> FakeTick:
     return FakeTick(
         obs_result=FakeObs(obs={"ego_acceleration": accel, "ego_speed": speed,
                                 "local_density_bin": float(density)}, feed=feed),
-        # One entry per head, keyed by the real head names. Keying them all
-        # "desired_speed_bin" left a dict of one, so a test named for the head
-        # closest to a boundary could only ever see the last margin in the tuple.
-        policy=FakePolicy(head_probs={
-            head: [0.5 + m / 2, 0.5 - m / 2]
-            for head, m in zip(ACTION_HEADS, margins)}),
         gps=FakeGps(lat=lat, lon=lon),
-        advisory=advisory(),
+        dsrc=advisory() if dsrc is ... else dsrc,
         t_capture_mono=capture,
     )
 
@@ -159,6 +150,32 @@ class TestTheAdvisoryGoesEveryTick:
             clock.advance(0.05)
             loop.on_tick(tick(), phone)
         assert len(phone.advisories) == 20
+
+    def test_a_tick_with_no_ego_row_sends_nothing(self):
+        # Two ways to have no recommendation: no DSRC runtime on the rig at
+        # all, and a runtime whose network does not cover the road being
+        # driven. Neither is a recommendation of zero, so neither is sent.
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        phone = Phone()
+        loop.on_tick(tick(dsrc=None), phone)
+        loop.on_tick(tick(dsrc=advisory(ego_segment=None)), phone)
+        assert phone.advisories == []
+        assert loop.ticks == 2
+
+    def test_the_advisory_carries_the_ego_rows_speed_and_the_ticks_own(self):
+        # The recommendation comes off the DSRC row and the current speed off
+        # this tick's observation, converted into the advisory's own units.
+        # Both numbers sit on one panel, so a mismatch in units is a wrong
+        # reading rather than a missing one.
+        clock = Clock()
+        loop = SensingLoop(clock=clock)
+        phone = Phone()
+        loop.on_tick(tick(speed=20.0), phone)
+        sent, _ = phone.advisories[0]
+        assert sent.recommended_speed_display == pytest.approx(30.0)
+        assert sent.current_speed_display == pytest.approx(20.0 * 2.236936)
+        assert sent.units == "mph"
 
 
 class TestTheCommandCadence:
@@ -410,12 +427,23 @@ class TestTheFeedReachesTheController:
 
 class TestInputsFromATick:
 
-    def test_the_margin_is_the_head_closest_to_a_boundary(self):
-        # The minimum over heads, not the mean: the policy is at a boundary if ANY
-        # head is, and averaging lets three confident heads hide the one about to
-        # change its mind.
-        inputs = inputs_from(tick(margins=(0.9, 0.02, 0.5)), None, now=1000.0)
-        assert inputs.policy_margin == pytest.approx(0.02, abs=1e-6)
+    def test_a_live_tick_reports_no_policy_margin(self):
+        # The margin was `top1 - top2` of the 39-field actor's per-head softmax,
+        # and that actor is gone. The DSRC runtime emits Q-values, which are not
+        # a distribution, so there is no number to put here that `NARROW_MARGIN`
+        # could be compared against. The rule is not deleted, because
+        # `score_shadow.py` replays logged `Inputs` from drives that did carry a
+        # margin: it records itself not evaluable instead.
+        from policy.sensing_controller import (
+            RULE_NOT_EVALUABLE, SensingController, Trigger,
+        )
+
+        inputs = inputs_from(tick(), None, now=1000.0)
+        assert inputs.policy_margin is None
+
+        check = SensingController().decide(inputs).attribution.rules[Trigger.NARROW_MARGIN]
+        assert check.status == RULE_NOT_EVALUABLE
+        assert check.missing == ("policy_margin",)
 
     def test_telemetry_age_is_measured_against_this_instant(self):
         clock = Clock()
@@ -480,14 +508,11 @@ class TestInputsFromATickCarriesTheBuildersOwnProvenance:
     instead, so a wrong key reads a real mismatch.
     """
 
-    def _real_tick(self, obs_result, gps, t_mono, margins=(0.9, 0.4)):
+    def _real_tick(self, obs_result, gps, t_mono):
         return FakeTick(
             obs_result=obs_result,
-            policy=FakePolicy(head_probs={
-                head: [0.5 + m / 2, 0.5 - m / 2]
-                for head, m in zip(ACTION_HEADS, margins)}),
             gps=gps,
-            advisory=advisory(),
+            dsrc=advisory(),
             t_capture_mono=t_mono,
         )
 
@@ -595,9 +620,8 @@ class TestInputsFromATickCarriesTheBuildersOwnProvenance:
         )
         fake_tick = FakeTick(
             obs_result=obs_result,
-            policy=FakePolicy(head_probs={head: [0.95, 0.05] for head in ACTION_HEADS}),
             gps=FakeGps(),
-            advisory=advisory(),
+            dsrc=advisory(),
         )
         inputs = inputs_from(fake_tick, None, now=1000.0)
         assert inputs.ego_acceleration_source == provenance.SOURCE_UNATTRIBUTED

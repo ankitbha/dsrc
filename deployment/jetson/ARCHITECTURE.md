@@ -7,9 +7,12 @@ maps onto the simulation. Written to be sufficient for resuming work cold.
 
 1. **Latency over accuracy** (project decision). Every choice below trades
    estimation quality for milliseconds; the budget table in §4 shows the result.
-2. **Sim-contract fidelity.** The actor must see the same 39-dim observation
-   it saw in training, including the spec's neutral fallbacks for unsensed
-   fields. The contract is vendored and test-locked (§6).
+2. **Sim-contract fidelity.** The observation is built to the same 39-dim
+   contract the simulation uses, including the spec's neutral fallbacks for
+   unsensed fields. The contract is vendored and test-locked (§6). The
+   controller that consumed the whole vector is gone; what reads it now is
+   the safety gate, which needs four of the fields, and the sensing
+   scheduler, which needs three.
 3. **Degrade, never die.** Missing GPS, no camera, no display, no trained
    checkpoint - each has a defined degraded mode, because in-car debugging
    time is expensive.
@@ -27,8 +30,12 @@ maps onto the simulation. Written to be sufficient for resuming work cold.
  |                                              (distance.py)          |
  |                    -> observation_builder.py                        |
  |                       39-field sim obs + provenance tags            |
- |                    -> actor_runtime.py (numpy MLP mirror)           |
- |                    -> advisory.py (decode = sim wrappers)           |
+ |                    -> dsrc_runtime.py (one speed action per         |
+ |                       super-segment, every 60 s)                    |
+ |                    -> segment_advisory.py (decode = speed limit     |
+ |                       x action fraction)                            |
+ |                    -> safety_gate.py (bounds the ego segment's      |
+ |                       recommended speed)                            |
  +------------+------------------+------------------+-----------------+
               |                  |                  |
               v                  v                  v
@@ -67,9 +74,10 @@ perception/tracker.py      SORT-lite: greedy IoU + constant-velocity predict
 perception/distance.py     ground-plane / width-prior distance, lateral, dZ/dt
 perception/observation_builder.py  sensors -> 39-field sim observation + provenance
 policy/sim_contract.py     VENDORED sim contract (fields, scales, encode, bins)
-policy/export_policy.py    sim checkpoint -> TorchScript bundle (+ --random)
-policy/actor_runtime.py    bundle loader; numpy MLP fast path (verified vs TS)
-policy/advisory.py         action -> driver-facing text; decode mirrors sim
+policy/export_dsrc_policy.py  DSRC checkpoint -> TorchScript bundle (+ --random)
+policy/dsrc_runtime.py     bundle loader; argmax over three speed fractions
+policy/segment_advisory.py one speed per super-segment -> the driver's number
+policy/safety_gate.py      bounds that number; two speed rules, with a census
 ui/dashboard.py            HUD render + window (main thread)
 logio/                     JSONL metadata, raw video, UDP telemetry, jtop stats
 v2v/beacon.py              optional UDP-broadcast cooperation beacons
@@ -88,7 +96,7 @@ End-to-end p50 **19.8 ms** / p95 20.2 ms at 48.5 FPS (`models/bench_results.json
 | detection | 17.7 ms | GPU compute is only 3.9 ms (trtexec); the rest is letterbox resize + `cv2.dnn.blobFromImage` preprocessing (was 23 ms with numpy preprocessing) and CPU NMS. Pinned host buffers, single CUDA stream. |
 | tracking + distance | 1.1 ms | greedy IoU, no Hungarian/Kalman |
 | observation + encode | 0.4 ms | pure-python field assembly |
-| actor + advisory | 0.5 ms | numpy mirror of the TorchScript MLP (was ~4 ms p50 / 10.7 ms p95 through the TorchScript interpreter); mirror is verified against TS at load |
+| policy + advisory | 0.5 ms | measured when the 39-field actor ran this block. It now holds the DSRC step (a decision every 60 s, held over in between) and the safety gate, and is not comparable tick for tick with the number above. |
 | capture wait | + up to 1 frame interval | 33 ms at 30 fps camera; not in the table above (bench uses pre-stamped frames). Live e2e ≈ 25-55 ms expected. |
 
 Remaining levers, in order of value: 448-px engine (`./export_detector.sh
@@ -118,7 +126,7 @@ the whole encoded vector.)
 | ego_acceleration | least-squares slope of GPS speed (~1 s window), refused whenever this tick's GPS fix is not fresh | derived / fallback_neutral |
 | ego_lane | `observation.assumed_lane` (no lane detection in v0) | static_config |
 | ego_headway_s | leader_gap / ego_speed (inf when no leader, as sim) | derived |
-| target_headway_s | previous tick's commanded headway bin (feedback loop, as in sim) | static/feedback |
+| target_headway_s | fixed rig setting (`PerceptionPolicyPipeline.target_headway_s`); the controller emits no headway, so there is no feedback loop | static_config |
 | leader_gap, leader_relative_speed | nearest in-corridor track: pinhole distance + dZ/dt slope | measured |
 | left/right_lane_front_gap | nearest track with lateral offset ≈ ∓1 lane | measured |
 | follower_*, *_rear_gap, rear_required_decel | spec "empty road" values (inf / 0) - no rear sensing | fallback_neutral |
@@ -162,23 +170,22 @@ this one included.
 `SIM_COMMIT`), then run `python3 scripts/generate_sim_contract_golden_vectors.py
 --write --force` to regenerate the golden file -- that is the step that
 touches the simulation, not `test_sim_contract.py` itself -- then re-export
-the policy bundle (`export_policy.py` refuses dim mismatches). Two of
-`test_sim_contract.py`'s tests need more than numpy and skip with a stated
-reason where their dependency is absent: the actor-layout test needs
-`torch`, and the regeneration test (the one that spawns the generator above)
-needs both `torch` and a `git` repository holding the `SIM_COMMIT` object.
+the policy bundle. One of `test_sim_contract.py`'s tests needs more than
+numpy and skips with a stated reason where its dependency is absent: the
+regeneration test (the one that spawns the generator above) needs both
+`torch` and a `git` repository holding the `SIM_COMMIT` object.
 Nothing today checks the vendored contract against the live simulation on
 any machine without both `git` and `torch` -- including the device
 (validator round 1, S2) -- so that comparison against `d477dba` is a
 development-machine step; this section is not a claim that it also runs on
 the Jetson.
 
-The actor architecture (`backbone.{0,2,4}` + `heads.<name>` state-dict
-layout) is mirrored the same way in `export_policy.VendoredActor`, checked
-against the golden file's own recorded `actor_state_dict_layout` by
-`test_actor_state_dict_layout_matches_the_recorded_layout` (needs `torch`
-only, since it compares against the frozen file rather than regenerating
-it).
+The golden file used to record the 39-field actor's state-dict layout as
+well, mirrored in `export_policy.VendoredActor`. Both are gone: that actor
+was removed from the rig, so there is no local network whose layout could
+drift from the simulator's. What the file still records -- the observation
+encoder, its slot names and scales, the action vocabulary and the decoders
+-- is live, because `observation_builder.py` still encodes through it.
 
 ### 6.1 The safety and etiquette contract (task 144)
 
@@ -200,19 +207,24 @@ deleted (`src/rl/encoders.py` etc. were, and the test now reports `1
 skipped` and says nothing). A golden file has no side that can disappear
 out from under it.
 
-**Where the gate runs, and what it does not change.** `pipeline.step` runs
-the gate between `advisory_decoder.decode` and `set_target_headway`, on
-every tick unconditionally (`gate_ms`/`stages["gate"]` are always
+**Where the gate runs, and what it bounds.** `pipeline.step` runs the gate
+right after the DSRC step, on every tick that has an ego row to bound. The
+gate is not run at all on a tick with no recommendation -- a rig with no
+policy for its road, or a fix off the network -- and `tick.safety_gate` is
+`None` there, which is a different fact from a gate that found nothing to
+do. Where it does run it runs whole (`gate_ms`/`stages["gate"]` are
 `measured`, never `absent` -- there is no early-return path here the way
-`dsrc_infer`'s coverage-gate refusal has one). `AdvisoryDecoder.decode`'s
-raw output is bounded, and `advisory.recommended_speed_mps`/
-`recommended_speed_display`/`lane_text` are overwritten to the bounded
-values so that field keeps meaning "the number shown to the driver" for
-every reader that already treats it that way (`eval_run.py`, `replay_demo.py`,
-`transport/messages.py`). `advisory.headway_target_s` is deliberately left
-untouched, and `set_target_headway` keeps feeding back the RAW decoded
-headway: the observation's `target_headway_s` has to match what the policy
-was trained against, not what the gate bounded it to.
+`dsrc_infer`'s coverage-gate refusal has one).
+
+Only the ego segment's row is bounded. The other eleven rows are the
+controller's output for stretches of road this vehicle is not on, and the
+gate holds no evidence about those stretches. The ego row's
+`recommended_speed_mps` and `recommended_speed_display` are overwritten with
+the bounded values, so that field keeps meaning "the number shown to the
+driver" for every reader that already treats it that way (`eval_run.py`,
+`replay_demo.py`, `transport/messages.py`). The target headway is a fixed
+rig setting rather than a fed-back action: the controller emits one speed
+fraction per super-segment and no headway at all.
 
 **Decision 3's per-field input-class partition** is what keeps a
 `fallback_neutral` observation from either silently never firing a rule (a
@@ -314,8 +326,10 @@ per-tick `stage_ms`/`jetson_ms`/`link_ms`/`e2e_ms`/`fps` (system metrics, where
 `link_ms` is null for a local camera and null whenever the capture stamp was
 proxied rather than converted), `vehicles` with
 per-track distance/method (perception metrics), `obs` + `field_sources` +
-`obs_diagnostics.missingness` (observation quality), `head_probs`/`confidence`
-(policy), `type: system` records with power/utilization from jtop, and a
+`obs_diagnostics.missingness` (observation quality), `advisory` and `dsrc`
+(the ego segment's recommended speed, and the whole-network decision it came
+from), `safety` (the gate's proposed/bounded pair and its per-rule census),
+`type: system` records with power/utilization from jtop, and a
 per-tick `thermal` block (Jetson temperature and both devices' throttle-event
 status) beside `type: thermal_sample` (the Jetson's 1 Hz temperature and
 cooling-state series, independent of the tick loop) and `type: thermal_event`

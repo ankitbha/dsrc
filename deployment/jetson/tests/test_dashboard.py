@@ -11,31 +11,24 @@ from __future__ import annotations
 import pytest
 
 import ui.dashboard as dashboard
-from policy.advisory import Advisory
-from ui.dashboard import GREEN, RED, _recommended_speed_line
+from policy.segment_advisory import SegmentAdvisoryRow
+from ui.dashboard import GRAY, GREEN, RED, _recommended_speed_line
 
 
-def _advisory(**over) -> Advisory:
+def _row(**over) -> SegmentAdvisoryRow:
     fields = dict(
+        segment_id="S03",
+        action_index=2,
+        fraction=1.0,
         recommended_speed_mps=10.0,
         recommended_speed_display=22.0,
-        current_speed_display=20.0,
-        units="mph",
-        headway_target_s=1.6,
-        traffic_text="Light",
-        confidence_label="high",
-        confidence=0.9,
-        action={
-            "desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-            "lane_preference": "keep", "merge_mode": "normal",
-        },
     )
     fields.update(over)
-    return Advisory(**fields)
+    return SegmentAdvisoryRow(**fields)
 
 
 def test_recommended_speed_is_shown_normally_when_not_withheld() -> None:
-    text, color = _recommended_speed_line(_advisory(speed_display_withheld=False))
+    text, color = _recommended_speed_line(_row(), "mph", withheld=False)
     assert "22" in text
     assert "mph" in text
     assert color == GREEN
@@ -43,35 +36,46 @@ def test_recommended_speed_is_shown_normally_when_not_withheld() -> None:
 
 def test_recommended_speed_is_withheld_on_an_emergency_override() -> None:
     """validator round 1, F7: plan step 6 says to withhold the speed number
-    on an emergency override. `Advisory.speed_display_withheld` was written
-    into the per-tick record (task 144, open item 3) and read by no surface
-    -- not `ui/dashboard.py`, not `advisory_message_from_advisory`, not
+    on an emergency override. `speed_display_withheld` was written into the
+    per-tick record (task 144, open item 3) and read by no surface -- not
+    `ui/dashboard.py`, not `advisory_message_from_advisory`, not
     `replay_demo.py`, and by no test -- before this fix."""
     text, color = _recommended_speed_line(
-        _advisory(speed_display_withheld=True, recommended_speed_display=99.0)
+        _row(recommended_speed_display=99.0), "mph", withheld=True
     )
     assert "99" not in text
     assert "WITHHELD" in text
     assert color == RED
 
 
+def test_no_row_is_shown_as_no_advisory_rather_than_blank() -> None:
+    """A rig driving a road its policy does not cover has no ego row at all.
+    That is a third outcome, not a zero and not a withholding, so it gets its
+    own line: a blank panel and a `0 mph` recommendation are both readable as
+    an advisory that was made."""
+    text, color = _recommended_speed_line(None, "mph", withheld=False)
+    assert "none for this road" in text
+    assert color == GRAY
+
+
 def test_the_withheld_test_fails_against_the_unfixed_renderer(monkeypatch) -> None:
-    """Neuters the fix -- makes the rendered line ignore
-    `speed_display_withheld` again, exactly as it read before this fix --
-    and confirms the test above would then fail. Constructed directly on
-    `Advisory` rather than by arranging a real tick to produce an override:
-    `speed_display_withheld` is set from `gate_result.emergency_override`,
-    and forward_ttc's own two other reads (the merge-conflict pair) are
-    always class (C) on this rig, so a test that reached this branch only
-    through a real tick would have a premise that may never be active --
-    the same shape as a frozen clock that never advances.
+    """Neuters the fix -- makes the rendered line ignore the withheld flag
+    again, exactly as it read before this fix -- and confirms the test above
+    would then fail. Constructed directly on a row rather than by arranging a
+    real tick to produce an override: the flag is set from
+    `gate_result.emergency_override`, and forward_ttc's own two other reads
+    (the merge-conflict pair) are always class (C) on this rig, so a test that
+    reached this branch only through a real tick would have a premise that may
+    never be active -- the same shape as a frozen clock that never advances.
     """
-    def unfixed(adv: Advisory) -> tuple[str, tuple[int, int, int]]:
-        return f"Recommended: {adv.recommended_speed_display:5.0f} {adv.units}", GREEN
+    def unfixed(
+        row: SegmentAdvisoryRow | None, units: str, withheld: bool,
+    ) -> tuple[str, tuple[int, int, int]]:
+        return f"Recommended: {row.recommended_speed_display:5.0f} {units}", GREEN
 
     monkeypatch.setattr(dashboard, "_recommended_speed_line", unfixed)
     text, _ = dashboard._recommended_speed_line(
-        _advisory(speed_display_withheld=True, recommended_speed_display=99.0)
+        _row(recommended_speed_display=99.0), "mph", withheld=True
     )
     with pytest.raises(AssertionError):
         assert "99" not in text

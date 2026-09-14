@@ -594,14 +594,9 @@ def test_regeneration_leaves_every_pre_existing_case_byte_identical():
     assert fresh == DOCUMENT
 
 
-# -- actor layout (needs torch) --------------------------------------------
-
-
-def test_actor_state_dict_layout_matches_the_recorded_layout():
-    pytest.importorskip("torch", reason="the actor layout is a torch state_dict")
-    from policy.export_policy import VendoredActor
-
-    actor = VendoredActor(sim_contract.local_obs_dim())
-    layout = {k: list(v.shape) for k, v in actor.state_dict().items()}
-    recorded = {entry["key"]: entry["shape"] for entry in DOCUMENT["actor_state_dict_layout"]}
-    assert layout == recorded
+# The actor state_dict layout was pinned here, against
+# `policy.export_policy.VendoredActor`. Both are gone: the 39-field actor was
+# removed from the rig, so there is no local network whose layout could drift
+# from the simulator's. What this file still pins -- the observation encoder,
+# its slot names and scales, the action vocabulary and the decoders -- is all
+# live, because `perception.observation_builder` still encodes through it.

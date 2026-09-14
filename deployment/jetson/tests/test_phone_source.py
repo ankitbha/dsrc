@@ -602,9 +602,6 @@ def _a_pipeline():
     from perception.distance import DistanceEstimator
     from perception.tracker import IouTracker
     from pipeline import PerceptionPolicyPipeline
-    from policy.actor_runtime import ActorRuntime
-    from policy.advisory import AdvisoryDecoder
-    from policy.export_policy import build_random, export
 
     class _NoDetector:
         def infer(self, image):
@@ -613,18 +610,12 @@ def _a_pipeline():
         def warmup(self, iterations: int = 1) -> float:
             return 0.0
 
-    tmp = tempfile.mkdtemp()
-    prefix = str(pathlib.Path(tmp) / "actor_policy")
-    actor, info = build_random(seed=0)
-    export(actor, info, prefix)
     return PerceptionPolicyPipeline(
         detector=_NoDetector(),
         tracker=IouTracker(min_hits=2),
         distance=DistanceEstimator(fx_px=800.0, cx_px=640.0, horizon_y_px=360.0,
                                    camera_height_m=1.25, ema_alpha=0.6),
         builder=ObservationBuilder(BuilderConfig()),
-        actor=ActorRuntime(prefix),
-        advisory_decoder=AdvisoryDecoder(units="mph"),
     )
 
 

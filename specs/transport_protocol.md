@@ -370,7 +370,7 @@ by the sender's transport rather than by the message.
 | `gps` | `valid`, `lat`, `lon`, `speed_mps`, `heading_deg`, `fix_quality`, `num_sats`, `hdop`, `altitude_m`, `utc_epoch_ns` | empty |
 | `imu` | `ax`, `ay`, `az`, `gx`, `gy`, `gz`, `accuracy` | empty |
 | `here` | `request_url`, `status`, `content_type`, `query_lat`, `query_lon`, `query_radius_m`, `t_request_mono_ns`, `t_response_mono_ns` | response body bytes |
-| `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `headway_target_s`, `traffic_text`, `confidence`, `confidence_label`, `action` | empty |
+| `advisory` | `rec_speed_mps`, `rec_speed_display`, `current_speed_display`, `units`, `traffic_text` | empty |
 | `rate_cmd` | `rates`, `trigger`, `shadow` | empty |
 | `telemetry` | `thermal_status`, `thermal_headroom`, `achieved`, `dropped`, `here_calls`, `here_errors`, `skin_temp_c`*, `skin_temp_zone`*, `thermal_headroom_absent`*, `skin_temp_absent`*, `thermal_status_changes`*, `thermal_change_from`*, `thermal_change_to`*, `thermal_change_at_mono_ns`*, `network_transport`*, `network_transport_absent`* | empty |
 | `control` | `exchange_id`, `t_wire_mono_ns`, `t_peer_recv_mono_ns`, `t_peer_recv_wall_ns`, `t_peer_wire_mono_ns`, `prev_exchange_id`*, `t_prev_pong_wire_mono_ns`*, `t_prev_pong_recv_mono_ns`* | empty |

@@ -25,13 +25,35 @@ RATE_HZ = 30.0
 #: recorded before per-tick timebase.source existed, which is its own test.
 _TIMEBASE_AUTO = object()
 
+#: Same distinction for the advisory: the default is the ordinary tick, on a
+#: super-segment, with a recommendation. `advisory=None` is the other real
+#: case -- a rig off its policy's network -- and is what the axis has to count
+#: rather than skip.
+_ADVISORY_AUTO = object()
+
+
+def an_advisory(*, action_index: int = 2, segment_id: str = "0",
+                withheld: bool = False) -> dict:
+    """One tick's advisory record, as `Tick._advisory_record()` writes it."""
+    return {
+        "segment_id": segment_id,
+        "action_index": action_index,
+        "recommended_speed_mps": 24.0,
+        "recommended_speed_display": 53.7,
+        "units": "mph",
+        "speed_display_withheld": withheld,
+    }
+
 
 def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
               gps_fresh=True, leader_rel_measured=True, jetson_ms=None,
               link_ms=None, timebase_source=_TIMEBASE_AUTO, proxy_reason=None,
-              field_sources=None, missingness=0.3) -> dict:
+              field_sources=None, missingness=0.3,
+              advisory=_ADVISORY_AUTO) -> dict:
     has_leader = leader_gap is not None
     gap = leader_gap if has_leader else float("inf")
+    if advisory is _ADVISORY_AUTO:
+        advisory = an_advisory()
     if timebase_source is _TIMEBASE_AUTO:
         # A real Tick always carries a timebase dict whenever link_ms is not
         # None (link_ms comes FROM frame.timebase.link_s), and round_trip is
@@ -82,11 +104,7 @@ def make_tick(i: int, *, e2e_ms=20.0, ego_speed=20.0, leader_gap=35.0,
             "gps_fresh": gps_fresh,
             "leader_track_id": 1 if has_leader else None,
         },
-        "action": {"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                   "lane_preference": "keep", "merge_mode": "normal"},
-        "advisory": {"recommended_speed_mps": 24.0, "recommended_speed_display": 53.7,
-                     "units": "mph", "headway_target_s": 1.6, "lane_text": "keep lane",
-                     "merge_text": "normal", "confidence_label": "low"},
+        "advisory": advisory,
         "gps": {"valid": gps_fresh, "lat": 39.0, "lon": -77.0,
                 "speed_mps": ego_speed, "heading_deg": 105.0, "num_sats": 10, "hdop": 0.8},
         "n_peers": 0,
@@ -138,6 +156,73 @@ def test_healthy_run_passes_all_gates(tmp_path):
     assert result["perception"]["leader_rel_speed_measured_fraction"] == 1.0
     assert all(g["pass"] in (True, None) for g in result["gates"].values())
     assert result["overall_pass"]
+
+
+class TestTheAdvisoryAxis:
+    """What the advisory axis counts, now that the advisory is one speed.
+
+    The four-head distribution and the confidence-label histogram are gone
+    along with the 39-field actor. What replaces them is the ego super-segment
+    row: which action index it carried, how often that changed, and which
+    segments the drive was actually on.
+    """
+
+    def test_it_counts_the_ticks_that_had_no_advisory_rather_than_skipping_them(self, tmp_path):
+        # Ten ticks off the policy's network, eighty on it. A statistic over
+        # the eighty alone cannot tell this drive from a ninety-tick one.
+        ticks = [make_tick(i, advisory=None) for i in range(10)]
+        ticks += [make_tick(i) for i in range(10, 90)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+
+        advisory = result["advisory"]
+        assert advisory["ticks_with_an_advisory"] == 80
+        assert advisory["ticks_with_no_advisory"] == 10
+        assert advisory["recommended_speed_mps"]["n"] == 80
+
+    def test_a_drive_with_no_advisory_at_all_is_not_a_crash(self, tmp_path):
+        ticks = [make_tick(i, advisory=None) for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+
+        advisory = result["advisory"]
+        assert advisory["ticks_with_an_advisory"] == 0
+        assert advisory["recommended_speed_mps"]["n"] == 0
+        assert advisory["action_index"]["distribution"] == {}
+        assert advisory["ego_segments"] == {}
+        # The report has to render from this, not just the dict survive.
+        render_markdown(result, [])
+
+    def test_the_action_index_distribution_and_switch_count(self, tmp_path):
+        # Alternating every tick at 30 Hz: 59 switches across 60 ticks, over
+        # the 59/30 s the first and last tick are apart. `result["duration_s"]`
+        # is rounded for the report, so the rate is derived from the schedule
+        # this test wrote rather than read back out of the rounded number.
+        ticks = [make_tick(i, advisory=an_advisory(action_index=i % 2)) for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+
+        index = result["advisory"]["action_index"]
+        assert index["n"] == 60
+        assert index["distribution"] == {"0": 0.5, "1": 0.5}
+        elapsed_s = 59 / RATE_HZ
+        assert index["switches_per_minute"] == pytest.approx(59 / (elapsed_s / 60.0))
+
+    def test_a_held_action_records_no_switches(self, tmp_path):
+        """The control for the test above: the same shape with nothing
+        changing must read zero, or the switch count is measuring the loop
+        rather than the decision."""
+        ticks = [make_tick(i) for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+        assert result["advisory"]["action_index"]["switches_per_minute"] == 0.0
+
+    def test_a_withheld_speed_number_is_counted(self, tmp_path):
+        ticks = [make_tick(i, advisory=an_advisory(withheld=i < 7)) for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+        assert result["advisory"]["speed_display_withheld"] == 7
+
+    def test_the_ego_segments_the_drive_was_on(self, tmp_path):
+        ticks = [make_tick(i, advisory=an_advisory(segment_id="0" if i < 20 else "3"))
+                 for i in range(60)]
+        result = analyze(write_run(tmp_path, ticks, scenario=scenario_record()))
+        assert result["advisory"]["ego_segments"] == {"0": 20, "3": 40}
 
 
 def test_latency_gate_fails_on_slow_run(tmp_path):

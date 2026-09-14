@@ -21,7 +21,6 @@ import pytest
 
 import score_shadow
 from perception.feed_fusion import Decline, FeedOwnership
-from policy.advisory import Advisory
 from policy.sensing_controller import (
     RULE_FIRED,
     RULE_NOT_EVALUABLE,
@@ -31,9 +30,10 @@ from policy.sensing_controller import (
     SensingController,
     Trigger,
 )
+from policy.segment_advisory import SegmentAdvisory, SegmentAdvisoryRow
 from policy.sensing_loop import SensingLoop
 from policy.shadow_mode import LIVE, SHADOW, ModeHolder
-from transport.messages import ACTION_HEADS, PhoneTelemetry
+from transport.messages import PhoneTelemetry
 
 
 class Clock:
@@ -92,28 +92,24 @@ class FakeObs:
 
 
 @dataclass
-class FakePolicy:
-    head_probs: dict
-
-
-@dataclass
 class FakeTick:
     obs_result: FakeObs
-    policy: FakePolicy
     gps: FakeGps
-    advisory: Advisory
+    dsrc: SegmentAdvisory
     t_capture_mono: float = 1000.0
     tick_id: int = 0
 
 
-def _advisory() -> Advisory:
-    return Advisory(
-        recommended_speed_mps=13.4, recommended_speed_display=30.0,
-        current_speed_display=28.0, units="mph", headway_target_s=2.0,
-        traffic_text="Light",
-        confidence=0.8, confidence_label="high",
-        action={"desired_speed_bin": "nominal", "desired_headway_bin": "normal",
-                "lane_preference": "keep", "merge_mode": "normal"})
+def _advisory() -> SegmentAdvisory:
+    """One super-segment, decoded, with the vehicle on it."""
+    return SegmentAdvisory(
+        units="mph",
+        outcome="ok",
+        rows=(SegmentAdvisoryRow(segment_id="S00", action_index=2, fraction=1.0,
+                                 recommended_speed_mps=13.4,
+                                 recommended_speed_display=30.0),),
+        ego_segment=0,
+    )
 
 
 def _tick(tick_id: int, *, accel=0.0, density=2, feed=None, field_sources=None) -> FakeTick:
@@ -123,10 +119,8 @@ def _tick(tick_id: int, *, accel=0.0, density=2, feed=None, field_sources=None) 
         obs_kwargs["field_sources"] = field_sources
     return FakeTick(
         obs_result=FakeObs(**obs_kwargs),
-        policy=FakePolicy(head_probs={
-            head: [0.95, 0.05] for head in ACTION_HEADS}),
         gps=FakeGps(),
-        advisory=_advisory(),
+        dsrc=_advisory(),
         t_capture_mono=1000.0 + tick_id,
         tick_id=tick_id,
     )

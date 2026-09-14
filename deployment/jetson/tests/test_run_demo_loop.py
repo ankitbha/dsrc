@@ -630,6 +630,85 @@ class _SilentCamera:
         return None
 
 
+class TestBuildDsrcParts:
+    """`run_demo` did not wire the DSRC runtime into the pipeline at all.
+
+    That was a named, harmless gap while the 39-field actor was there. With
+    the actor gone it meant the rig would run perception and make no
+    recommendation on any tick, which is the same record a rig driving off its
+    policy's network produces -- so nothing downstream could have told the two
+    apart.
+    """
+
+    def _config(self, tmp_path, *, bundle: str) -> dict:
+        config = run_demo.load_config(str(run_demo.JETSON_DIR / "config.yaml"))
+        config["policy"]["bundle"] = bundle
+        return config
+
+    def test_no_bundle_on_disk_is_a_rig_with_no_policy(self, tmp_path):
+        config = self._config(tmp_path, bundle=str(tmp_path / "absent"))
+        assert run_demo.build_dsrc_parts(config) == {}
+
+    def test_a_bundle_on_disk_builds_all_three_parts_on_one_network(self, tmp_path):
+        import json
+
+        from perception.segment_state import DEFAULT_NETWORK_DEFINITION_PATH
+        from policy import export_dsrc_policy
+
+        definition = json.loads(DEFAULT_NETWORK_DEFINITION_PATH.read_text())
+        model, info = export_dsrc_policy.build_random(definition, seed=0)
+        prefix = str(tmp_path / "dsrc_policy")
+        export_dsrc_policy.export(model, info, definition, prefix)
+
+        parts = run_demo.build_dsrc_parts(self._config(tmp_path, bundle=prefix))
+
+        assert set(parts) == {
+            "dsrc_runtime", "dsrc_segment_builder", "dsrc_advisory_decoder",
+            "dsrc_decision_interval_s",
+        }
+        # One network, three parts. The pipeline refuses a mismatch, so the
+        # thing worth pinning here is that this builder does not produce one.
+        assert len({
+            parts["dsrc_runtime"].network_fingerprint,
+            parts["dsrc_segment_builder"].network_fingerprint,
+            parts["dsrc_advisory_decoder"].network_fingerprint,
+        }) == 1
+
+    def test_the_parts_reach_the_pipeline(self, tmp_path, monkeypatch):
+        """The control for the test above: three correct parts that
+        `_build_rest` then drops on the floor would look identical from
+        `build_dsrc_parts`, and would leave the rig making no recommendation
+        exactly as before. Only the detector is stubbed -- it needs TensorRT
+        and an engine file; everything between the config and the pipeline's
+        `dsrc_runtime` attribute is the real path.
+        """
+        import json
+
+        from perception.segment_state import DEFAULT_NETWORK_DEFINITION_PATH
+        from policy import export_dsrc_policy
+
+        definition = json.loads(DEFAULT_NETWORK_DEFINITION_PATH.read_text())
+        model, info = export_dsrc_policy.build_random(definition, seed=0)
+        prefix = str(tmp_path / "dsrc_policy")
+        export_dsrc_policy.export(model, info, definition, prefix)
+
+        class FakeDetector:
+            def __init__(self, *a, **k):
+                pass
+
+        monkeypatch.setattr(run_demo, "TrtYoloDetector", FakeDetector)
+
+        pipeline = run_demo._build_rest(self._config(tmp_path, bundle=prefix))
+        assert pipeline.dsrc_runtime is not None
+        assert pipeline.dsrc_segment_builder is not None
+        assert pipeline.dsrc_advisory_decoder is not None
+
+        # And the negative: no bundle, no parts, and the pipeline says so
+        # rather than carrying a half-built one.
+        bare = run_demo._build_rest(self._config(tmp_path, bundle=str(tmp_path / "absent")))
+        assert bare.dsrc_runtime is None
+
+
 def _build_real_pipeline(tmp_path):
     """A real `PerceptionPolicyPipeline` with a stub detector, built once for
     every test in this file that drives `run_live` itself rather than a
@@ -638,9 +717,6 @@ def _build_real_pipeline(tmp_path):
     from perception.observation_builder import BuilderConfig, ObservationBuilder
     from perception.tracker import IouTracker
     from pipeline import PerceptionPolicyPipeline
-    from policy.actor_runtime import ActorRuntime
-    from policy.advisory import AdvisoryDecoder
-    from policy.export_policy import build_random, export
 
     class FakeDetector:
         def infer(self, image):
@@ -649,12 +725,6 @@ def _build_real_pipeline(tmp_path):
         def warmup(self, iterations: int = 1) -> float:
             return 0.0
 
-    bundle_prefix = tmp_path / "bundle" / "actor_policy"
-    bundle_prefix.parent.mkdir()
-    actor_obj, info = build_random(seed=0)
-    export(actor_obj, info, str(bundle_prefix))
-    actor = ActorRuntime(str(bundle_prefix))
-
     pipeline = PerceptionPolicyPipeline(
         detector=FakeDetector(),
         tracker=IouTracker(min_hits=2),
@@ -662,10 +732,8 @@ def _build_real_pipeline(tmp_path):
             fx_px=800.0, cx_px=640.0, horizon_y_px=360.0, camera_height_m=1.25, ema_alpha=0.6,
         ),
         builder=ObservationBuilder(BuilderConfig()),
-        actor=actor,
-        advisory_decoder=AdvisoryDecoder(units="mph"),
     )
-    return pipeline, actor
+    return pipeline
 
 
 def _real_drive_config(tmp_path):
@@ -724,10 +792,10 @@ class TestRunLiveFailureSamplerIntegration:
     """
 
     def test_a_real_drive_writes_a_failure_summary_tick_block_and_log_health(self, tmp_path, monkeypatch):
-        pipeline, actor = _build_real_pipeline(tmp_path)
+        pipeline = _build_real_pipeline(tmp_path)
         camera = _FiniteCamera(n_frames=6)
 
-        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
+        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline))
 
         config = _real_drive_config(tmp_path)
         args = _real_drive_args()
@@ -781,14 +849,14 @@ class TestWorkerExceptionReachesTheRealThread:
     def test_the_exception_reaches_the_threads_own_hook_and_is_recorded(self, tmp_path, monkeypatch):
         import threading
 
-        pipeline, actor = _build_real_pipeline(tmp_path)
+        pipeline = _build_real_pipeline(tmp_path)
 
         def raising_step(*args, **kwargs):
             raise RuntimeError("perception blew up")
 
         monkeypatch.setattr(pipeline, "step", raising_step)
         camera = _FiniteCamera(n_frames=3)
-        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
+        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline))
 
         caught: list[BaseException] = []
         # `threading.excepthook` is what an uncaught exception on a
@@ -833,9 +901,9 @@ class TestSilentCameraNoteNoFrameReachesTheRealLoop:
     sampler actually recorded it."""
 
     def test_a_silent_camera_is_recorded_through_the_real_tick_loop(self, tmp_path, monkeypatch):
-        pipeline, actor = _build_real_pipeline(tmp_path)
+        pipeline = _build_real_pipeline(tmp_path)
         camera = _SilentCamera()
-        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
+        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline))
 
         config = _real_drive_config(tmp_path)
         # No `end_of_stream` is coming from this camera -- the deadline is the
@@ -1574,9 +1642,9 @@ class TestBuildProvenance:
     def test_a_real_drive_writes_the_build_block(self, tmp_path, monkeypatch):
         """End to end through run_live's own teardown, not a transcription:
         the same real pipeline TestRunLiveFailureSamplerIntegration drives."""
-        pipeline, actor = _build_real_pipeline(tmp_path)
+        pipeline = _build_real_pipeline(tmp_path)
         camera = _FiniteCamera(n_frames=3)
-        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline, actor))
+        monkeypatch.setattr(run_demo, "build_components", lambda *a, **k: (camera, None, pipeline))
 
         config = _real_drive_config(tmp_path)
         args = _real_drive_args()

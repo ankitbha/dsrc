@@ -75,10 +75,10 @@ def real_matched_parts(tmp_path: Path, name: str = "matched"):
 
 
 def pipeline_stub_args() -> tuple:
-    """The six required positional arguments PerceptionPolicyPipeline.__init__
+    """The four required positional arguments PerceptionPolicyPipeline.__init__
     stores on self but never calls a method on -- only step() would. Mocks
     are enough to reach and exercise __init__'s dsrc-wiring checks."""
-    return tuple(Mock() for _ in range(6))
+    return tuple(Mock() for _ in range(4))
 
 
 class TestSegmentAdvisoryDecoderFingerprintGuard:

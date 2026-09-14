@@ -35,6 +35,11 @@ DOCUMENT = json.loads(GOLDEN.read_text())
 CASES = DOCUMENT["cases"]
 IDS = [case["name"] for case in CASES]
 
+#: The header keys every frame carries, whatever message is inside it. Used to
+#: subtract the envelope when asserting what one message type's own field set
+#: is.
+FRAME_HEADER_KEYS = frozenset({"ch", "seq", "n", "t_mono_ns", "t_wall_ns"})
+
 
 def pattern_payload(length: int) -> bytes:
     """The generator the file documents. Period 256, so it tiles."""
@@ -234,12 +239,19 @@ def test_no_message_case_contains_a_nan_token():
         assert "NaN" not in text and "Infinity" not in text, case["name"]
 
 
-def test_the_advisory_case_carries_both_the_display_text_and_the_action():
+def test_the_advisory_case_carries_a_speed_and_nothing_else_to_act_on():
+    """The advisory is a recommended speed. The machine-readable `action`
+    block -- four heads of the 39-field actor -- is gone from the wire along
+    with the actor, so this pins the field set rather than just the presence
+    of the speed: a reintroduced head would otherwise pass unnoticed on both
+    sides of the protocol."""
     case = next(c for c in MESSAGE_CASES if c["name"] == "message_advisory")
     header = json.loads(bytes.fromhex(case["header_hex"]).decode("utf-8"))
     assert header["units"] == "mph"
-    assert set(header["action"]) == {
-        "desired_speed_bin", "desired_headway_bin", "lane_preference", "merge_mode",
+    assert "action" not in header
+    assert {k for k in header if k not in FRAME_HEADER_KEYS} == {
+        "rec_speed_mps", "rec_speed_display", "current_speed_display", "units",
+        "traffic_text", "t_capture_mono_ns",
     }
 
 

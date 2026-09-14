@@ -513,17 +513,11 @@ def derive(sim_commit: str) -> tuple[dict[str, Any], Mismatches]:
         if not NEUTRAL_FREE_FLOWS:
             mismatches.add("NEUTRAL_FREE_FLOWS is empty -- neutral_cooperation would record nothing")
 
-        # -- actor state-dict layout --------------------------------------------
-        import policy.export_policy as export_policy  # noqa: E402  (adds JETSON_DIR at sys.path[0] again; harmless)
-
-        sim_actor = ref_models.MultiCategoricalActor(sim_contract.local_obs_dim())
-        our_actor = export_policy.VendoredActor(sim_contract.local_obs_dim())
-        ref_layout = {k: tuple(v.shape) for k, v in sim_actor.state_dict().items()}
-        our_layout = {k: tuple(v.shape) for k, v in our_actor.state_dict().items()}
-        mismatches.check_equal("actor state_dict layout", ref_layout, our_layout)
-        payload["actor_state_dict_layout"] = [
-            {"key": key, "shape": list(shape)} for key, shape in our_layout.items()
-        ]
+        # The actor state_dict layout was recorded here, checked against the
+        # simulator's own MultiCategoricalActor. Both sides are gone: the
+        # 39-field actor was removed from the rig, so there is no local network
+        # whose layout could drift. The observation encoder, the action
+        # vocabulary and the decoders above are still live and still recorded.
 
         # -- fingerprint ---------------------------------------------------------
         payload["contract_fingerprint"] = sim_contract.contract_fingerprint()
@@ -541,7 +535,6 @@ def derive(sim_commit: str) -> tuple[dict[str, Any], Mismatches]:
         "actions": payload["actions"],
         "decoders": payload["decoders"],
         "neutral_cooperation": payload["neutral_cooperation"],
-        "actor_state_dict_layout": payload["actor_state_dict_layout"],
     }
     return payload, mismatches
 

@@ -47,16 +47,7 @@ class TypedMessagesTest {
         recSpeedDisplay = 30.0,
         currentSpeedDisplay = 28.0,
         units = "mph",
-        headwayTargetS = 2.0,
         trafficText = "clear",
-        confidence = 0.87,
-        confidenceLabel = "high",
-        action = mapOf(
-            "desired_speed_bin" to "nominal",
-            "desired_headway_bin" to "normal",
-            "lane_preference" to "keep",
-            "merge_mode" to "normal",
-        ),
     )
 
     private fun rateCmd() = RateCommand(
@@ -105,8 +96,7 @@ class TypedMessagesTest {
         )
         assertEquals(
             setOf("t_capture_mono_ns", "rec_speed_mps", "rec_speed_display",
-                "current_speed_display", "units", "headway_target_s",
-                "traffic_text", "confidence", "confidence_label", "action"),
+                "current_speed_display", "units", "traffic_text"),
             advisory().toExtensions().keys,
         )
         assertEquals(
@@ -173,43 +163,8 @@ class TypedMessagesTest {
         )
     }
 
-    @Test
-    fun `an action value outside the schema is unknown_value`() {
-        val broken = advisory().copy(action = advisory().action + ("merge_mode" to "ram_it"))
-        assertEquals(
-            RefusalReason.UNKNOWN_VALUE,
-            refusalFor { AdvisoryMessage.fromWire(broken.toExtensions(), ByteArray(0)) },
-        )
-    }
 
-    @Test
-    fun `an extra head in action is unknown_value, because the heads are a closed set`() {
-        // Unlike `rates` and `achieved`, which are additive: an unknown *head* is a policy
-        // this build cannot honour, so accepting it would mean displaying an advisory whose
-        // reasoning is partly unread.
-        val extensions = advisory().toExtensions().toMutableMap()
-        val action = (extensions.getValue("action") as JsonValue.Obj).entries +
-            ("desired_altitude_bin" to JsonValue.Text("cruise"))
-        extensions["action"] = JsonValue.Obj(action)
-        assertEquals(
-            RefusalReason.UNKNOWN_VALUE,
-            refusalFor { AdvisoryMessage.fromWire(extensions, ByteArray(0)) },
-        )
-    }
 
-    @Test
-    fun `a missing head in action is missing_field`() {
-        for (head in AdvisoryMessage.ACTION_HEADS) {
-            val extensions = advisory().toExtensions().toMutableMap()
-            extensions["action"] =
-                JsonValue.Obj((extensions.getValue("action") as JsonValue.Obj).entries - head)
-            assertEquals(
-                RefusalReason.MISSING_FIELD,
-                refusalFor { AdvisoryMessage.fromWire(extensions, ByteArray(0)) },
-                "a missing $head gave the wrong reason",
-            )
-        }
-    }
 
     // -- counts --------------------------------------------------------------
 

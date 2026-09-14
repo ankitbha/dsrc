@@ -25,6 +25,25 @@ from policy.dsrc_runtime import DsrcDecision
 MPS_TO_MPH = 2.236936
 MPS_TO_KMH = 3.6
 
+DISPLAY_UNITS = ("mph", "kmh", "mps")
+
+
+def display_speed(mps: float, units: str) -> float:
+    """Metres per second in the units the driver is shown.
+
+    Module-level rather than a decoder method because the dashboard converts
+    the vehicle's own current speed for the same panel that shows the
+    recommendation, and the two numbers sitting side by side must be in the
+    same units.
+    """
+    if units == "mph":
+        return mps * MPS_TO_MPH
+    if units == "kmh":
+        return mps * MPS_TO_KMH
+    if units == "mps":
+        return mps
+    raise ValueError(f"unknown units '{units}'")
+
 
 @dataclass
 class SegmentAdvisoryRow:
@@ -39,15 +58,7 @@ class SegmentAdvisoryRow:
 
 @dataclass
 class SegmentAdvisory:
-    """One DSRC decision, decoded: a row per super-segment, or none at all.
-
-    `AdvisoryDecoder`/`Advisory` are untouched -- these are two different
-    controllers (plan_task145 section 7's table: one bin per head for the
-    ego vehicle against an offset base, versus one action per super-segment
-    against a fraction of that segment's own speed limit) and a shared
-    decoder branching on which one produced the action would hide exactly
-    the difference this task exists to surface.
-    """
+    """One DSRC decision, decoded: a row per super-segment, or none at all."""
 
     units: str
     #: Mirrors `policy.dsrc_runtime.DsrcDecision.outcome`: "ok" when `rows`
@@ -60,6 +71,59 @@ class SegmentAdvisory:
     #: any segment or no fix was given. The driver is shown one number, and
     #: this is the one.
     ego_segment: int | None
+
+
+#: The driver-facing word for `local_density_bin`. Three bins, so three words.
+TRAFFIC_TEXT = {0: "Light", 1: "Moderate", 2: "Heavy"}
+
+
+@dataclass(frozen=True)
+class DriverAdvisory:
+    """What one tick puts on the phone: a recommended speed, in context.
+
+    The recommendation is the ego super-segment's row, already bounded by the
+    safety gate. The other two fields are context for reading that number, and
+    neither is an instruction: `current_speed_display` is the vehicle's own
+    speed in the same units, and `traffic_text` is the local density bin as a
+    word. There is no headway, lane or merge field, because the controller
+    emits one speed fraction per segment and nothing else.
+    """
+
+    recommended_speed_mps: float
+    recommended_speed_display: float
+    current_speed_display: float
+    units: str
+    traffic_text: str
+
+    def one_line(self) -> str:
+        return (
+            f"rec {self.recommended_speed_display:5.1f} {self.units} | "
+            f"cur {self.current_speed_display:5.1f} {self.units} | "
+            f"traffic {self.traffic_text}"
+        )
+
+
+def driver_advisory(
+    advisory: SegmentAdvisory | None, obs: dict[str, float],
+) -> DriverAdvisory | None:
+    """The ego row plus display context, or `None` when there is no ego row.
+
+    `None` is returned rather than a zeroed advisory: a rig on a road its
+    policy does not cover has made no recommendation, and a displayed 0 would
+    read as one it made.
+    """
+    if advisory is None or advisory.ego_segment is None:
+        return None
+    row = advisory.rows[advisory.ego_segment]
+    return DriverAdvisory(
+        recommended_speed_mps=row.recommended_speed_mps,
+        recommended_speed_display=row.recommended_speed_display,
+        current_speed_display=display_speed(
+            float(obs.get("ego_speed", 0.0)), advisory.units,
+        ),
+        units=advisory.units,
+        traffic_text=TRAFFIC_TEXT.get(int(obs.get("local_density_bin", 0)), "?"),
+    )
 
 
 def _distance_to_polyline(lat: float, lon: float, points: tuple[tuple[float, float], ...]) -> float:
@@ -108,7 +172,7 @@ class SegmentAdvisoryDecoder:
         network_fingerprint: str | None = None,
         expected_network_fingerprint: str | None = None,
     ) -> None:
-        if units not in ("mph", "kmh", "mps"):
+        if units not in DISPLAY_UNITS:
             raise ValueError(f"unknown units '{units}'")
         if not (len(segment_ids) == len(segment_speed_limits_kmh) == len(segment_points)):
             raise ValueError("segment_ids, segment_speed_limits_kmh and segment_points "
@@ -195,11 +259,7 @@ class SegmentAdvisoryDecoder:
         )
 
     def _display(self, mps: float) -> float:
-        if self.units == "mph":
-            return mps * MPS_TO_MPH
-        if self.units == "kmh":
-            return mps * MPS_TO_KMH
-        return mps
+        return display_speed(mps, self.units)
 
     def _ego_segment(self, lat: float | None, lon: float | None) -> int | None:
         if lat is None or lon is None or not math.isfinite(lat) or not math.isfinite(lon):
