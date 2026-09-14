@@ -1,11 +1,9 @@
 """Guard the vendored DSRC network against drift from the simulation source.
 
 The shape/key comparison against `src.rl.src_q.SrcQNetwork` runs only where
-that module is importable (guarded, per-test, the way
-`test_sim_contract.py`'s action-constant tests are) -- it is not a module-
-level `importorskip`, because the golden-action tests below it need no sim
-import at all and must still run on the device, where only this vendored
-copy is trusted.
+that module is importable, guarded per-test rather than by a module-level
+`importorskip`: the golden-action tests below it need no sim import at all
+and must still run on the device, where only this vendored copy is trusted.
 """
 
 from __future__ import annotations
@@ -87,7 +85,7 @@ def test_vendored_network_can_load_the_committed_checkpoint_shapes():
 
 class TestNetworkFingerprint:
     """Mirrors `TestTheBundleGuardSeesMoreThanTheDimension` in
-    `test_sim_contract.py`: the fingerprint must move on a change the shapes
+    the retired sim-contract test: the fingerprint must move on a change the shapes
     cannot see, and must be stable otherwise.
     """
 

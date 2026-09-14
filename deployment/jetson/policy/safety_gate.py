@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field, replace as dataclasses_replace
-from typing import Any, Mapping
+from typing import Any
 
 from perception import provenance
 from perception.observation_builder import ObservationResult
@@ -359,7 +359,6 @@ def safety_inputs_from_observation(
     obs = obs_result.obs
     src = obs_result.field_sources
     diag = obs_result.diagnostics
-    cooperation = obs.get("cooperation", {}) if isinstance(obs.get("cooperation"), Mapping) else {}
 
     def configured(name: str, value: Any) -> SafetyInputField:
         return SafetyInputField(value=value, input_class=INPUT_CLASS_CONFIGURED, source=None, evidence=True)
@@ -379,7 +378,7 @@ def safety_inputs_from_observation(
 
     fields: dict[str, SafetyInputField] = {
         "free_flow_speed_mps": configured(
-            "free_flow_speed_mps", float(cooperation.get("segment_target_speed", 30.0))
+            "free_flow_speed_mps", float(obs.get("segment_target_speed", 30.0))
         ),
         "ego_speed_mps": evidence_required("ego_speed_mps", float(obs.get("ego_speed", 0.0)), "ego_speed"),
         "leader_gap_m": evidence_required("leader_gap_m", float(obs.get("leader_gap", float("inf"))), "leader_gap"),

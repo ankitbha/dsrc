@@ -1,10 +1,11 @@
 """What the traffic feed says about the road ahead, and how much of that to believe.
 
 The phone fetches HERE and forwards the bytes; nothing on this side has ever opened
-them. `downstream_congestion_estimate` -- the observation field this informs -- comes
-from V2V peers as a hardcoded 0.0, or from `sim_contract.neutral_cooperation`
-otherwise, so a field the advisory partly rests on has never been informed by traffic
-data.
+them for the observation's sake. `downstream_congestion_estimate`, the field this
+was meant to inform, was a hardcoded 0.0 on every tick of every drive and has been
+removed with the rest of the local-sensing observation. What this module feeds now
+is the DSRC path, which reads every usable link in the network through
+`snapshot_links`, and the sensing controller, which reads the ownership record.
 
 **Nothing here returns a congestion number for a question it could not answer.**
 Every failure is a named outcome. Zero in this field does not read as "unknown", it

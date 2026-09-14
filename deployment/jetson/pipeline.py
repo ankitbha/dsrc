@@ -176,7 +176,6 @@ class Tick:
                 for v in self.vehicles
             ],
             "obs": self.obs_result.obs,
-            "encoded": [round(float(x), 5) for x in self.obs_result.encoded],
             "field_sources": self.obs_result.field_sources,
             "obs_diagnostics": self.obs_result.diagnostics,
             # The advisory is the ego segment's row of the whole-network

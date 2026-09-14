@@ -40,23 +40,6 @@ from transport.frames import RESERVED_EXTENSIONS, WIRE_STAMP_KEY
 
 CAPTURE_KEY = "t_capture_mono_ns"
 
-# Mirrored from policy/sim_contract.py, which is itself a vendored copy of the
-# simulation's action schema -- the edge runtime must not import the sim stack,
-# and the transport must not import policy. A test asserts this copy, that one
-# and specs/action_schema.md all agree.
-ACTION_HEADS: tuple[str, ...] = (
-    "desired_speed_bin",
-    "desired_headway_bin",
-    "lane_preference",
-    "merge_mode",
-)
-ACTION_VALUES: dict[str, tuple[str, ...]] = {
-    "desired_speed_bin": ("slow", "nominal", "fast"),
-    "desired_headway_bin": ("normal", "larger", "largest"),
-    "lane_preference": ("keep", "prefer_left_if_safe", "prefer_right_if_safe"),
-    "merge_mode": ("normal", "create_gap", "hold_lane"),
-}
-
 DISPLAY_UNITS: tuple[str, ...] = ("mph", "kmh", "mps")
 RATE_KEYS: tuple[str, ...] = ("camera_hz", "gps_hz", "imu_hz", "here_hz")
 DROP_KEYS: tuple[str, ...] = ("camera", "gps", "imu", "here")

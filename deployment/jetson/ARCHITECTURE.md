@@ -7,12 +7,10 @@ maps onto the simulation. Written to be sufficient for resuming work cold.
 
 1. **Latency over accuracy** (project decision). Every choice below trades
    estimation quality for milliseconds; the budget table in §4 shows the result.
-2. **Sim-contract fidelity.** The observation is built to the same 39-dim
-   contract the simulation uses, including the spec's neutral fallbacks for
-   unsensed fields. The contract is vendored and test-locked (§6). The
-   controller that consumed the whole vector is gone; what reads it now is
-   the safety gate, which needs four of the fields, and the sensing
-   scheduler, which needs three.
+2. **Measure what is read.** The observation carries the seven fields its
+   four readers actually read (§5), each tagged with how it was obtained. It
+   used to mirror the simulator's 39-dim encoder contract, because a local
+   actor consumed the whole vector; that actor is gone.
 3. **Degrade, never die.** Missing GPS, no camera, no display, no trained
    checkpoint - each has a defined degraded mode, because in-car debugging
    time is expensive.
@@ -29,7 +27,7 @@ maps onto the simulation. Written to be sufficient for resuming work cold.
  |  (detector.py)              (tracker.py)     lateral + d/dt slope   |
  |                                              (distance.py)          |
  |                    -> observation_builder.py                        |
- |                       39-field sim obs + provenance tags            |
+ |                       7 measured fields + provenance tags           |
  |                    -> dsrc_runtime.py (one speed action per         |
  |                       super-segment, every 60 s)                    |
  |                    -> segment_advisory.py (decode = speed limit     |
@@ -72,8 +70,7 @@ sensors/time_sync.py       monotonic vs wall clock rules, GPS-UTC offset
 perception/detector.py     TensorRT 10 wrapper (pinned buffers), letterbox, NMS
 perception/tracker.py      SORT-lite: greedy IoU + constant-velocity predict
 perception/distance.py     ground-plane / width-prior distance, lateral, dZ/dt
-perception/observation_builder.py  sensors -> 39-field sim observation + provenance
-policy/sim_contract.py     VENDORED sim contract (fields, scales, encode, bins)
+perception/observation_builder.py  sensors -> the 7 measured fields + provenance
 policy/export_dsrc_policy.py  DSRC checkpoint -> TorchScript bundle (+ --random)
 policy/dsrc_runtime.py     bundle loader; argmax over three speed fractions
 policy/segment_advisory.py one speed per super-segment -> the driver's number
@@ -96,7 +93,7 @@ End-to-end p50 **19.8 ms** / p95 20.2 ms at 48.5 FPS (`models/bench_results.json
 | detection | 17.7 ms | GPU compute is only 3.9 ms (trtexec); the rest is letterbox resize + `cv2.dnn.blobFromImage` preprocessing (was 23 ms with numpy preprocessing) and CPU NMS. Pinned host buffers, single CUDA stream. |
 | tracking + distance | 1.1 ms | greedy IoU, no Hungarian/Kalman |
 | observation + encode | 0.4 ms | pure-python field assembly |
-| policy + advisory | 0.5 ms | measured when the 39-field actor ran this block. It now holds the DSRC step (a decision every 60 s, held over in between) and the safety gate, and is not comparable tick for tick with the number above. |
+| policy + advisory | 0.5 ms | measured when the local-sensing actor ran this block. It now holds the DSRC step (a decision every 60 s, held over in between) and the safety gate, and is not comparable tick for tick with the number above. |
 | capture wait | + up to 1 frame interval | 33 ms at 30 fps camera; not in the table above (bench uses pre-stamped frames). Live e2e ≈ 25-55 ms expected. |
 
 Remaining levers, in order of value: 448-px engine (`./export_detector.sh
@@ -111,101 +108,61 @@ fail a run for the network's behaviour -- and would loosen silently whenever the
 timebase cannot convert a capture stamp, because the link segment then drops out
 of the sum. `eval_run` gates `latency_jetson_p95`.
 
-## 5. Simulation ↔ prototype observation mapping
+## 5. What one tick measures
 
-(paper table; provenance is logged per-tick in `field_sources`, from the
-closed vocabulary in `perception/provenance.py`. The map covers all 39 slots
-`sim_contract.encoded_slot_names()` lists, not just the 33 flat observation
-fields below -- `cooperation.*` and `nearby_av_lane_distribution.<lane>` each
-get their own entry, dotted, so the missingness metric is a statement about
-the whole encoded vector.)
+Seven fields, each tagged per tick in `field_sources` from the closed
+vocabulary in `perception/provenance.py`. `OBS_FIELDS` in
+`perception/observation_builder.py` is the one place the set is written down,
+and `_covers_obs` checks the provenance map against it by NAME rather than by
+count.
 
-| sim observation field | prototype source | provenance |
-|---|---|---|
-| ego_speed | GPS RMC speed-over-ground (5 Hz); held during dropouts | measured / measured_converted / measured_arrival_proxy / fallback_neutral (held value during a dropout) |
-| ego_acceleration | least-squares slope of GPS speed (~1 s window), refused whenever this tick's GPS fix is not fresh | derived / fallback_neutral |
-| ego_lane | `observation.assumed_lane` (no lane detection in v0) | static_config |
-| ego_headway_s | leader_gap / ego_speed (inf when no leader, as sim) | derived |
-| target_headway_s | fixed rig setting (`PerceptionPolicyPipeline.target_headway_s`); the controller emits no headway, so there is no feedback loop | static_config |
-| leader_gap, leader_relative_speed | nearest in-corridor track: pinhole distance + dZ/dt slope | measured |
-| left/right_lane_front_gap | nearest track with lateral offset ≈ ∓1 lane | measured |
-| follower_*, *_rear_gap, rear_required_decel | spec "empty road" values (inf / 0) - no rear sensing | fallback_neutral |
-| target_lane_* | = current-lane values (sim defaults target lane to current) | derived |
-| active_vehicle_count_local | forward in-range track count ×2 (symmetric extrapolation, `symmetrize_counts`) | derived / derived_empty (zero in-range tracks) |
-| local_density_bin | sim formula count/(2·range/1000), sim bin edges (12, 30) | derived / derived_empty (zero in-range tracks -- the disagreement rule's only firing condition under shipped constants) |
-| local_mean_speed_bin | mean(ego + rel_speed) over valid tracks, sim edges (8, 18) | derived |
-| local_queue_estimate | tracks with absolute speed < 5 m/s (sim queue_speed) | derived / derived_empty (no in-range tracks) / fallback_neutral (tracks present, none measurable) |
-| uncongested_low_speed_flag | mirrors `safety/etiquette.py` (density < 12 ∧ v < vf − 8), against a locally sensed density where the sim reads a segment one | approximated |
-| distance_to_next_merge | 0.0 - **sim parity**: the sim itself hardcodes 0.0 | sim_parity |
-| distance_to_downstream_bottleneck | inf (no map matching; sim's off-bottleneck value) | sim_parity |
-| time_since_last_lane_change, lane_changes_last_km | inf / 0 (no lane-change detection) | fallback_neutral |
-| nearby_av_*, cooperation.* | V2V beacons when enabled; else spec neutral fallbacks (count 0, mean speed = free-flow, pressure/congestion 0) | measured / fallback_neutral |
-| nearby_av_lane_distribution.{0,1,2} | share of heard peers reporting each lane | derived (a peer carried a lane id) / fallback_neutral (no peers, or none carried one) |
+| field | prototype source | provenance | read by |
+|---|---|---|---|
+| ego_speed | GPS RMC speed-over-ground (5 Hz); held during dropouts | measured / measured_converted / measured_arrival_proxy / fallback_neutral (held value during a dropout) | safety gate, sensing scheduler, advisory, dashboard |
+| ego_acceleration | least-squares slope of GPS speed (~1 s window), refused whenever this tick's GPS fix is not fresh | derived / fallback_neutral | sensing scheduler (the free-tier event rule) |
+| leader_gap | nearest in-corridor track: pinhole distance | measured / fallback_neutral (no leader) | safety gate (`forward_ttc`), dashboard |
+| leader_relative_speed | that track's dZ/dt slope, once the window spans 0.2 s | measured / fallback_neutral | safety gate (`forward_ttc`) |
+| local_density_bin | count/(2·range/1000), bin edges (12, 30) | derived / derived_empty (zero in-range tracks) | safety gate (`low_speed_uncongested`), sensing scheduler, advisory |
+| active_vehicle_count_local | forward in-range track count ×2 (symmetric extrapolation, `symmetrize_counts`) | derived / derived_empty | dashboard |
+| segment_target_speed | mean of heard V2V peers' speeds, else the configured free-flow speed | derived / fallback_neutral | safety gate (free-flow bound) |
 
-Encoding (scales, inf clamping, bool handling) is **bit-identical** to
-`src/rl/encoders.py` - property-tested in `tests/test_sim_contract.py`.
+The lane split still runs -- it is what decides which track is the leader --
+but only the ego lane's nearest reaches a field. The traffic feed owns no
+field at all: it is published beside the observation on
+`ObservationResult.feed`, where the sensing scheduler reads it and the record
+keeps it.
+
+**What used to be here.** Thirty-two more fields, mirroring the simulator's
+39-slot encoder contract, plus the encoded vector itself. They were the
+local-sensing actor's input. That actor was removed; nothing read the vector
+afterwards, and most of the fields were the simulator's "empty road"
+constants for sensors this rig does not have -- a constant carried into a
+decision that never compares it is indistinguishable, in the record, from a
+measurement that did not matter. `policy/sim_contract.py`,
+`specs/sim_contract_golden_vectors.json` and its generator went with them.
+`eval_run.py` still reads the 39-key shape (`LEGACY_ENCODER_SLOTS`), because
+every drive in the recorded corpus was written under it.
 
 ## 6. Contract vendoring
-
-The Jetson must not import the sim env stack (`src.rl.actions` →
-`src.envs.*` → `highway_env`). `policy/sim_contract.py` therefore vendors,
-from sim commit `d477dba`:
-field lists + FIELD_SCALES + `encode_local_observation` (numpy twin),
-action heads/values/forced defaults, `decode_speed_bin` / `decode_headway_bin`,
-neutral fallbacks, and `_bin` semantics.
-
-The reference this is checked against is `specs/sim_contract_golden_vectors.json`,
-not a live sim import: `src/rl/encoders.py`, `src/rl/actions.py` and
-`src/rl/models.py` (the modules `test_sim_contract.py` used to import) were
-deleted in `6b538f2`, and there is no machine left on which they import.
-`scripts/generate_sim_contract_golden_vectors.py` derives every recorded
-quantity twice -- once from the simulation at `SIM_COMMIT` (`git archive`d
-into a temporary directory) and once from `policy/sim_contract.py` -- and
-refuses to write the golden file if the two disagree.
-`deployment/jetson/tests/test_sim_contract.py` reads that frozen file and
-imports no simulation module; all but two of its tests run on any machine,
-this one included.
-
-**When the sim contract changes:** update `sim_contract.py` (and
-`SIM_COMMIT`), then run `python3 scripts/generate_sim_contract_golden_vectors.py
---write --force` to regenerate the golden file -- that is the step that
-touches the simulation, not `test_sim_contract.py` itself -- then re-export
-the policy bundle. One of `test_sim_contract.py`'s tests needs more than
-numpy and skips with a stated reason where its dependency is absent: the
-regeneration test (the one that spawns the generator above) needs both
-`torch` and a `git` repository holding the `SIM_COMMIT` object.
-Nothing today checks the vendored contract against the live simulation on
-any machine without both `git` and `torch` -- including the device
-(validator round 1, S2) -- so that comparison against `d477dba` is a
-development-machine step; this section is not a claim that it also runs on
-the Jetson.
-
-The golden file used to record the 39-field actor's state-dict layout as
-well, mirrored in `export_policy.VendoredActor`. Both are gone: that actor
-was removed from the rig, so there is no local network whose layout could
-drift from the simulator's. What the file still records -- the observation
-encoder, its slot names and scales, the action vocabulary and the decoders
--- is live, because `observation_builder.py` still encodes through it.
 
 ### 6.1 The safety and etiquette contract (task 144)
 
 `policy/safety_gate.py` vendors `src/safety/{constraints,etiquette,safety_layer}.py`
-the same way `sim_contract.py` vendors the encoder: not by importing `src/`
-(the Jetson must not import the simulation stack, and importing `src.safety`
-would additionally put a second copy of `decode_speed_bin`/`decode_headway_bin`
-on the device alongside `sim_contract`'s own -- `safety_gate.py` calls
-`sim_contract`'s decoders instead of carrying its own). `SafetyConstraints`
+by copy rather than by import: the Jetson must not import the simulation
+stack. This is the one vendored contract left on the device --
+`policy/sim_contract.py`, which vendored the 39-slot encoder, went with the
+actor that read it. `SafetyConstraints`
 and `SafetyContext` are checked against a committed reference, `specs/
 safety_contract_golden.json` (field names, defaults, and a hash over both),
 by two tests that never import each other's side:
 `deployment/jetson/tests/test_safety_contract.py` (the vendored copy,
 unconditional, no `importorskip`) and `tests/test_safety_contract_matches_
-golden.py` (`src/safety/` itself). This replaces the `test_sim_contract.py`
-idiom of comparing the vendored copy against the original: task 143 found
-that check goes vacuous the moment the original it compares against is
-deleted (`src/rl/encoders.py` etc. were, and the test now reports `1
-skipped` and says nothing). A golden file has no side that can disappear
-out from under it.
+golden.py` (`src/safety/` itself). This replaces the older idiom of comparing
+the vendored copy against the original: task 143 found that check goes
+vacuous the moment the original it compares against is deleted
+(`src/rl/encoders.py` and its siblings were, and the test then reported `1
+skipped` and said nothing). A golden file has no side that can disappear out
+from under it.
 
 **Where the gate runs, and what it bounds.** `pipeline.step` runs the gate
 right after the DSRC step, on every tick that has an ego row to bound. The

@@ -1,29 +1,38 @@
-"""Build the simulation actor's observation dict from real sensors.
+"""What one tick measures about the road, for the readers that read it.
 
-This is the sim-to-real alignment core. Every one of the 39 slots the actor
-reads (`sim_contract.encoded_slot_names()`) is produced here, each tagged
-with a provenance class in ``field_sources``. The vocabulary itself lives in
-`perception.provenance`, not here: `ego_speed`, `ego_acceleration` and
-`local_density_bin` below are three of eleven classes a field can carry, and
-`provenance.SOURCES` is the closed list.
+This used to build the 39-field observation the local-sensing actor was
+trained on, and encode it into that actor's input vector. The actor is gone.
+What is left is a measurement, not a model input, so it carries what is
+actually read and nothing else:
 
-The provenance map is logged every tick and is the basis for the paper's
-"observation missingness" metric, and (since this module's own field-level
-fixes) for the sensing controller's free-tier event rule -- a substituted
-`ego_acceleration` no longer reads as a calm road.
+  `ego_speed`, `leader_gap`, `leader_relative_speed` and `local_density_bin`
+  are the safety gate's four evidence-required inputs;
+  `ego_acceleration`, `ego_speed` and `local_density_bin` are the sensing
+  scheduler's three; `segment_target_speed` is the gate's one configured
+  input; `active_vehicle_count_local` is on the dashboard.
+
+Seven fields, six producers -- `ego_speed` and `local_density_bin` are each
+read by three of the four consumers. The other thirty-two were the sim's
+"empty road" constants for sensors this rig does not have, and a constant
+carried into a decision that never compares it is indistinguishable, in the
+record, from a measurement that did not matter.
+
+Each field is tagged with a provenance class in ``field_sources``. The
+vocabulary lives in `perception.provenance`, not here, and
+`provenance.SOURCES` is the closed list. The provenance map is logged every
+tick and is the basis for the paper's "observation missingness" metric and
+for the sensing controller's free-tier event rule -- a substituted
+`ego_acceleration` does not read as a calm road.
 
 Key geometry conventions (right-hand traffic, camera ~lane-centered):
   lateral_m > 0 is right of the camera axis; lane assignment is
   round(lateral / lane_width): 0 = ego lane, -1 = left, +1 = right.
 
 Known v0 gaps (documented in ARCHITECTURE.md with upgrade paths):
-  - no rear sensing -> follower_* and *_rear_gap use the sim's "empty
-    road" values (inf gap / 0 relative speed); a second rear-facing
-    camera fills these via a second detector instance.
   - forward-only counts -> density uses symmetric extrapolation
     (2 x forward count over +-range), toggleable via symmetrize_counts.
-  - no map matching yet -> merge/bottleneck distances use sim-parity
-    values (the sim currently hardcodes distance_to_next_merge = 0.0).
+  - no rear sensing and no lane detection, which is why the gate's rear and
+    lane rules were removed rather than fed constants.
 """
 
 from __future__ import annotations
@@ -38,17 +47,44 @@ import numpy as np
 
 from perception import feed_fusion, provenance
 from perception.distance import TrackedVehicle
-from policy import sim_contract
 from sensors.gps_reader import GpsFix
 from sensors.here_feed import FlowReading
 
 INF = float("inf")
 
+#: Every key `obs` carries, and the one place the set is written down. Used by
+#: the coverage check below, which compares `field_sources` against it BY NAME:
+#: a map with the right number of keys but the wrong ones is not coverage, and
+#: a count comparison cannot tell the two apart.
+OBS_FIELDS: tuple[str, ...] = (
+    "ego_speed",
+    "ego_acceleration",
+    "leader_gap",
+    "leader_relative_speed",
+    "local_density_bin",
+    "active_vehicle_count_local",
+    "segment_target_speed",
+)
+
+
+def bin_index(value: float, edges: tuple[float, ...] | list[float]) -> int:
+    """How many of `edges` the value is at or above.
+
+    Was `policy.sim_contract.bin_index`, vendored from the simulator's own
+    binning. That module is gone with the actor it served, and this is the one
+    place left that bins anything, so it lives here rather than in a module of
+    its own.
+    """
+    index = 0
+    for edge in edges:
+        if value >= edge:
+            index += 1
+    return index
+
 
 @dataclass
 class ObservationResult:
-    obs: dict[str, Any]                # sim-schema observation dict
-    encoded: np.ndarray                # (39,) float32 actor input
+    obs: dict[str, Any]                # the seven measured fields, by name
     field_sources: dict[str, str]      # provenance per field
     diagnostics: dict[str, Any]        # raw values for logging/eval
     #: What the traffic feed offered this tick. Deliberately beside the vector
@@ -61,19 +97,11 @@ class ObservationResult:
 class BuilderConfig:
     effective_range_m: float = 80.0
     symmetrize_counts: bool = True
+    #: What `segment_target_speed` reports when no cooperating peer is heard,
+    #: which on a lone instrumented car is every tick.
     free_flow_speed_mps: float = 30.0
-    assumed_lane: int = 1
     lane_width_m: float = 3.7
-    target_headway_default_s: float = 1.6
-    queue_speed_mps: float = 5.0
     density_bin_edges_veh_per_km: tuple[float, ...] = (12.0, 30.0)
-    mean_speed_bin_edges_mps: tuple[float, ...] = (8.0, 18.0)
-    uncongested_density_threshold_veh_per_km: float = 12.0
-    #: The range peers are admitted at, which `nearby_av_density` divides by. Must
-    #: match `v2v.range_m` -- `run_demo` routes that to `BeaconTransceiver` for
-    #: admission and this is the other half of the same number.
-    peer_range_m: float = 150.0
-    low_speed_free_flow_delta_mps: float = 8.0
     gps_stale_after_s: float = 2.0
     # How far into this clock's future a reading may sit and still be believed,
     # when it carries no uncertainty of its own. Covers `now` being sampled just
@@ -99,24 +127,26 @@ class BuilderConfig:
         `config["observation"]` plus two cross-section overrides this
         builder cannot get from its own section alone.
 
-        `gps_stale_after_s` comes from `config["gps"]["stale_after_s"]`,
-        and `peer_range_m` from `config["v2v"]["range_m"]` -- the range the
-        beacon transceiver actually admits peers at, which `nearby_av_
-        density` divides by; a config with `v2v.range_m` changed but this
-        builder still dividing by its own literal used to report double
-        the vehicles per km the admission range implied.
+        `gps_stale_after_s` comes from `config["gps"]["stale_after_s"]`. The
+        `v2v.range_m` override went with `nearby_av_density`, the only field
+        that divided by it.
 
         Extracted (B11, validation round 2) so `run_demo.build_components`
         and `src.analysis.observation_parity._production_builder_config`
-        call the SAME merge rather than each carrying its own copy of these
-        three lines: two copies agree only until one of them gains a fourth
-        override the other does not, and a test built by re-typing the
-        same three lines independently would not catch that either -- it
-        would only ever agree with whichever copy it was transcribed from.
+        call the SAME merge rather than each carrying its own copy: two
+        copies agree only until one of them gains an override the other does
+        not, and a test built by re-typing the same lines independently would
+        not catch that either -- it would only ever agree with whichever copy
+        it was transcribed from.
+
+        `config["observation"]` still carries keys this builder no longer
+        has (`assumed_lane` is read by `run_demo` for the V2V beacon;
+        the bin edges and thresholds the removed fields used are left in the
+        file rather than silently dropped). `from_dict` takes only the names
+        it declares, so an unknown key is ignored rather than raising.
         """
         obs_cfg = dict(config["observation"])
         obs_cfg["gps_stale_after_s"] = config["gps"]["stale_after_s"]
-        obs_cfg["peer_range_m"] = config["v2v"]["range_m"]
         return cls.from_dict(obs_cfg)
 
 
@@ -134,7 +164,6 @@ class _EgoState:
     speed_samples: deque = field(default_factory=lambda: deque(maxlen=20))
     last_speed_mps: float = 0.0
     ever_had_fix: bool = False
-    target_headway_s: float = 1.6
     #: `t_mono` of the last tick whose `in_range` was non-empty. None until
     #: the first in-range detection this builder has ever seen.
     last_in_range_at: float | None = None
@@ -158,7 +187,7 @@ def _speed_provenance(gps: GpsFix) -> str:
 class ObservationBuilder:
     def __init__(self, config: BuilderConfig) -> None:
         self.config = config
-        self._ego = _EgoState(target_headway_s=config.target_headway_default_s)
+        self._ego = _EgoState()
         # Set before the first build, so a reader does not have to guard for an
         # attribute that only exists after a tick has run.
         self.last_feed_ownership = feed_fusion.own(None)
@@ -170,11 +199,6 @@ class ObservationBuilder:
         #: reading `last_timings["fuse_ms"]` here is reading a builder nothing
         #: has run yet, and that is a missing value, not a zero-length fuse.
         self.last_timings: dict[str, float] = {}
-
-    def set_target_headway(self, headway_s: float) -> None:
-        """Feed back the last commanded headway bin (mirrors the sim loop,
-        where target_headway_s reflects the previous action)."""
-        self._ego.target_headway_s = headway_s
 
     # ------------------------------------------------------------------
 
@@ -264,15 +288,13 @@ class ObservationBuilder:
             # Recorded before anything below can refuse or shortcut, so a
             # tick that has a detection always advances this -- the last
             # instant the perception chain produced a track, independent of
-            # what the density/count/queue formulas do with it afterward.
+            # what the density and count formulas do with it afterward.
             self._ego.last_in_range_at = t_mono
         lanes: dict[int, list[TrackedVehicle]] = {}
         for v in in_range:
             lanes.setdefault(self._lane_of(v), []).append(v)
 
         leader = min(lanes.get(0, []), key=lambda v: v.distance_m, default=None)
-        left_front = min(lanes.get(-1, []), key=lambda v: v.distance_m, default=None)
-        right_front = min(lanes.get(1, []), key=lambda v: v.distance_m, default=None)
 
         leader_gap = leader.distance_m if leader else INF
         leader_rel = (
@@ -286,14 +308,7 @@ class ObservationBuilder:
             if leader is not None and leader.rel_speed_valid
             else provenance.SOURCE_FALLBACK_NEUTRAL
         )
-        src["left_lane_front_gap"] = (
-            provenance.SOURCE_MEASURED if left_front else provenance.SOURCE_FALLBACK_NEUTRAL
-        )
-        src["right_lane_front_gap"] = (
-            provenance.SOURCE_MEASURED if right_front else provenance.SOURCE_FALLBACK_NEUTRAL
-        )
-
-        # --- counts, density, speed statistics ------------------------
+        # --- counts and density ---------------------------------------
         n_forward = len(in_range)
         n_local = 2 * n_forward if cfg.symmetrize_counts else n_forward
         # sim formula: count / (2 * range_m / 1000)  over +-range_m
@@ -311,242 +326,41 @@ class ObservationBuilder:
             )
             src["local_density_bin"] = provenance.SOURCE_DERIVED
 
-        # Only vehicles whose relative speed the tracker could measure have a usable
-        # absolute speed, so this population is a subset of `in_range` -- where the
-        # simulator counts the queue and the vehicle count over ONE population
-        # (`src/sensing/local.py:181-188`: `measured` feeds both). The edge cannot
-        # close that gap by inventing a speed for a track it has not measured; what it
-        # can do is stop reporting the shortfall as a measurement.
-        abs_speeds = [
-            max(0.0, ego_speed + v.rel_speed_mps) for v in in_range if v.rel_speed_valid
-        ]
-        measured_fraction = len(abs_speeds) / len(in_range) if in_range else 1.0
-        mean_speed = float(np.mean(abs_speeds)) if abs_speeds else ego_speed
-        src["local_mean_speed_bin"] = (
-            provenance.SOURCE_DERIVED if abs_speeds else provenance.SOURCE_FALLBACK_NEUTRAL
-        )
-        queue_count = sum(1 for s in abs_speeds if s < cfg.queue_speed_mps)
-        if cfg.symmetrize_counts:
-            queue_count *= 2
-
-        # --- cooperation / nearby AVs, and the traffic feed: "fuse" --------
+        # --- the cooperation reading, and the traffic feed: "fuse" --------
         #
         # Timed together as one sub-segment because both are the same job seen
         # from two sources: folding a reading this vehicle cannot itself
         # measure -- another AV's beacon, a traffic service's estimate -- into
-        # what this tick knows, before the vector is assembled. Precedent:
-        # `TrtYoloDetector.last_timings`, a plain dict read after the call
-        # rather than a return value every caller would have to thread through.
+        # what this tick knows. Precedent: `TrtYoloDetector.last_timings`, a
+        # plain dict read after the call rather than a return value every
+        # caller would have to thread through.
         fuse_started = time.monotonic()
         if peers:
-            av_count = len(peers)
-            # The admission range peers were actually accepted at, not a literal.
-            # `config.yaml`'s `v2v.range_m` reaches `BeaconTransceiver`, which admits
-            # peers out to it, and nothing carried it here -- so raising it to 300 m
-            # left the density computed over 150 and reporting twice the vehicles per
-            # km the admission range implies.
-            av_density = av_count / max((2.0 * cfg.peer_range_m) / 1000.0, 1e-9)
-            av_mean_speed = float(np.mean([p.speed_mps for p in peers]))
-            cooperation = {
-                "segment_target_speed": av_mean_speed,
-                "merge_pressure": 0.0,
-                "downstream_congestion_estimate": 0.0,
-            }
-            lane_distribution = self._peer_lane_distribution(peers)
-            src["nearby_av_count"] = provenance.SOURCE_MEASURED
+            segment_target_speed = float(np.mean([p.speed_mps for p in peers]))
+            src["segment_target_speed"] = provenance.SOURCE_DERIVED
         else:
-            av_count = 0
-            av_density = 0.0
-            av_mean_speed = cfg.free_flow_speed_mps
-            cooperation = sim_contract.neutral_cooperation(cfg.free_flow_speed_mps)
-            lane_distribution: dict[str, float] = {}
-            src["nearby_av_count"] = provenance.SOURCE_FALLBACK_NEUTRAL
-        # `_peer_lane_distribution` returns {} both when there are no peers and
-        # when none of them carry a `lane_id` -- either way the three encoded
-        # lane-share slots are neutral rather than computed from a measured
-        # peer.
-        lane_source = (
-            provenance.SOURCE_DERIVED if lane_distribution else provenance.SOURCE_FALLBACK_NEUTRAL
-        )
-        for lane in sim_contract.LANE_DISTRIBUTION_LANES:
-            src[f"nearby_av_lane_distribution.{lane}"] = lane_source
+            segment_target_speed = cfg.free_flow_speed_mps
+            src["segment_target_speed"] = provenance.SOURCE_FALLBACK_NEUTRAL
 
-        # --- the traffic feed: derived, recorded, and NOT in the vector -----
+        # --- the traffic feed: derived, recorded, and NOT a field ----------
         #
-        # It owns no observation field, which is the opposite of what this task
-        # set out to do and is what the evidence supports.
-        #
-        # The simulator's `if not local_av:` at `src/sensing/local.py:203` is a
-        # BLOCK gate, not a congestion gate: with no AVs near it pins
-        # downstream_congestion, merge_pressure and segment_target_speed together,
-        # while density goes to zero, lane distribution empties and both AV counts
-        # go to zero. So `congestion > 0` implies `nearby_av_count >= 1` in every
-        # observation the sim can emit -- measured at 0 of 1,095 rollout samples in
-        # the other cell, against 42 with congestion and 1..7 AVs.
-        #
-        # A lone instrumented car has no equipped neighbours, so `peers` is empty on
-        # every tick of a real drive. Writing the feed's congestion here would put
-        # the policy in that empty cell not occasionally but always -- one field
-        # lifted out of a neutral block whose other five stay pinned.
-        #
-        # Owning it only when peers exist would make the feed fire essentially
-        # never. Making the vector legitimately feed-informed needs the simulator's
-        # sensing model to produce congestion without AVs, which is a change to the
-        # training side and outside section F. Until then the reading is published
-        # on the result for the sensing controller and written to the record, where
-        # it informs decisions without becoming an input the policy never saw.
+        # It owns no observation field. `feed_fusion.own` is run for the
+        # reading's own record and for the sensing controller, which reads
+        # `ObservationResult.feed`; the safety gate does not.
         owned = feed_fusion.own(feed)
         self.last_feed_ownership = owned
         self.last_timings["fuse_ms"] = (time.monotonic() - fuse_started) * 1000.0
 
-        # --- etiquette flag (mirrors src/safety/etiquette.py) ----------
-        # `density` here is the locally sensed one; the simulator uses the segment
-        # density it gets from `segment_metrics` (`src/sensing/local.py:214-221`).
-        # Different quantities, same threshold -- see the provenance below.
-        uncongested_low_speed = bool(
-            density < cfg.uncongested_density_threshold_veh_per_km
-            and ego_speed < cfg.free_flow_speed_mps - cfg.low_speed_free_flow_delta_mps
-        )
-
-        ego_headway = (
-            INF
-            if not math.isfinite(leader_gap) or ego_speed <= 0
-            else max(0.0, leader_gap / max(ego_speed, 1e-6))
-        )
-
         obs: dict[str, Any] = {
-            "is_active": True,
             "ego_speed": float(ego_speed),
             "ego_acceleration": float(ego_accel),
-            "ego_lane": int(cfg.assumed_lane),
-            "ego_headway_s": ego_headway,
-            "target_headway_s": float(self._ego.target_headway_s),
-            "time_since_last_lane_change": INF,   # sim start-state convention
-            "lane_changes_last_km": 0,
-            "current_segment": None,              # map matching not implemented
-            "distance_to_next_merge": 0.0,        # sim parity: sim hardcodes 0.0
-            "distance_to_downstream_bottleneck": INF,  # sim value off-bottleneck
             "leader_gap": float(leader_gap),
             "leader_relative_speed": float(leader_rel),
-            "follower_gap": INF,                  # no rear sensing (yet)
-            "follower_relative_speed": 0.0,
-            "left_lane_front_gap": float(left_front.distance_m) if left_front else INF,
-            "left_lane_rear_gap": INF,
-            "right_lane_front_gap": float(right_front.distance_m) if right_front else INF,
-            "right_lane_rear_gap": INF,
-            # sim: target lane defaults to the current lane
-            "target_lane_front_gap": float(leader_gap),
-            "target_lane_rear_gap": INF,
-            "target_lane_rear_required_decel": 0.0,
-            "downstream_congestion_estimate": cooperation["downstream_congestion_estimate"],
-            "merge_pressure": cooperation["merge_pressure"],
-            "segment_target_speed": cooperation["segment_target_speed"],
-            "uncongested_low_speed_flag": uncongested_low_speed,
-            "local_density_bin": sim_contract.bin_index(density, cfg.density_bin_edges_veh_per_km),
-            "local_mean_speed_bin": sim_contract.bin_index(mean_speed, cfg.mean_speed_bin_edges_mps),
-            "local_queue_estimate": int(queue_count),
+            "local_density_bin": bin_index(density, cfg.density_bin_edges_veh_per_km),
             "active_vehicle_count_local": int(n_local),
-            "active_av_count_local": int(av_count),
-            "nearby_av_count": int(av_count),
-            "nearby_av_density": float(av_density if peers else 0.0),
-            "nearby_av_mean_speed": float(av_mean_speed),
-            "nearby_av_lane_distribution": lane_distribution,
-            "sensor": {
-                "range_m": float(cfg.effective_range_m),
-                "latency_s": 0.0,
-                "position_noise_std": 0.0,
-                "speed_noise_std": 0.0,
-            },
-            "cooperation": cooperation,
+            "segment_target_speed": float(segment_target_speed),
         }
 
-        defaults = {
-            "is_active": provenance.SOURCE_STATIC_CONFIG,
-            "ego_lane": provenance.SOURCE_STATIC_CONFIG,
-            # Computed from `leader_gap`, so it carries that value's own
-            # class rather than a fixed one: with no leader in range, or an
-            # ego speed that was substituted rather than measured, the
-            # headway is a neutral fallback and not evidence.
-            "ego_headway_s": (
-                provenance.SOURCE_FALLBACK_NEUTRAL
-                if not math.isfinite(leader_gap) or provenance.is_substituted(src["ego_speed"])
-                else provenance.SOURCE_DERIVED
-            ),
-            "target_headway_s": provenance.SOURCE_STATIC_CONFIG,
-            "time_since_last_lane_change": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "lane_changes_last_km": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "distance_to_next_merge": provenance.SOURCE_SIM_PARITY,
-            "distance_to_downstream_bottleneck": provenance.SOURCE_SIM_PARITY,
-            "follower_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "follower_relative_speed": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "left_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "right_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "target_lane_front_gap": src["leader_gap"],
-            "target_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "target_lane_rear_required_decel": provenance.SOURCE_FALLBACK_NEUTRAL,
-            # Nothing is ever read into `downstream_congestion_estimate`: it
-            # is the literal 0.0 in both branches of `cooperation`, exactly
-            # like `merge_pressure`. Its class is therefore unconditional,
-            # not keyed on whether peers were received.
-            "downstream_congestion_estimate": provenance.SOURCE_FALLBACK_NEUTRAL,
-            "merge_pressure": provenance.SOURCE_FALLBACK_NEUTRAL,
-            # The mean of the peer beacons' own speeds, computed over the
-            # receptions `nearby_av_count` counts rather than read directly,
-            # so `derived` and not `measured`. `nearby_av_count` keeps
-            # `measured` and carries the primary evidence a peers tick has.
-            # A feed class would be wrong here in any case: `SOURCE_FEED` is
-            # reserved for the traffic feed, which owns no observation field
-            # (`feed_fusion.own`), so writing it would assert HERE data
-            # reached the vector on a peers drive.
-            "segment_target_speed": (
-                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
-            ),
-            # `approximated`, not `derived`. The formula mirrors
-            # `src/safety/etiquette.py`, but the simulator feeds it a SEGMENT density
-            # from `segment_metrics` and this feeds it the locally sensed +-range
-            # density -- the same 12.0 threshold applied to a different quantity. A
-            # single instrumented car has no segment-level view, so the edge cannot
-            # produce the sim's input; substituting one that moves differently is the
-            # unit substitution task 28 retracted two fields for. Marked rather than
-            # silently equated, so the missingness metric and anyone reading the
-            # vector can see which it is.
-            "uncongested_low_speed_flag": provenance.SOURCE_APPROXIMATED,
-            # `local_density_bin` and `active_vehicle_count_local` are set above,
-            # beside `n_forward`, because they need it. `local_queue_estimate`
-            # reads the same population (`in_range`, `abs_speeds`) but has a
-            # third class no other field here needs: an absence of tracks is
-            # `derived_empty`, tracks present but none with a measurable speed
-            # is `fallback_neutral` -- the distinction :415-420 exists for --
-            # and a measurable one is `derived`.
-            "local_queue_estimate": (
-                provenance.SOURCE_DERIVED if abs_speeds
-                else provenance.SOURCE_DERIVED_EMPTY if not in_range
-                else provenance.SOURCE_FALLBACK_NEUTRAL
-            ),
-            "active_av_count_local": src["nearby_av_count"],
-            # A count over a config constant, not a reading this vehicle
-            # took -- same reasoning as `segment_target_speed` above.
-            "nearby_av_density": (
-                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
-            ),
-            # The same float as `segment_target_speed` above (both are
-            # `av_mean_speed`), so it carries that class rather than
-            # `nearby_av_count`'s: a mean over the count is not itself a
-            # reading.
-            "nearby_av_mean_speed": (
-                provenance.SOURCE_FALLBACK_NEUTRAL if not peers else provenance.SOURCE_DERIVED
-            ),
-        }
-        for key, value in defaults.items():
-            src.setdefault(key, value)
-        # The nested `cooperation` block is the same three values as the flat
-        # fields above it, read through a different key -- so their class is
-        # the flat field's class, not a fresh judgement.
-        src["cooperation.segment_target_speed"] = src["segment_target_speed"]
-        src["cooperation.merge_pressure"] = src["merge_pressure"]
-        src["cooperation.downstream_congestion_estimate"] = src["downstream_congestion_estimate"]
-
-        encoded = sim_contract.encode_local_observation(obs)
         prov = provenance.summarise(src)
         if in_range:
             last_detection_age_s = 0.0
@@ -570,7 +384,6 @@ class ObservationBuilder:
             "leader_track_id": leader.track_id if leader else None,
             "leader_method": leader.method if leader else None,
             "density_veh_per_km": round(density, 2),
-            "mean_speed_mps": round(mean_speed, 2),
             "missingness": prov["missingness"],
             # So a drive where the feed never owned a field says why, rather
             # than the congestion column being quietly neutral throughout.
@@ -579,7 +392,7 @@ class ObservationBuilder:
             "provenance": {
                 "fields": prov["fields"],
                 "by_source": prov["by_source"],
-                "covers_encoder": self._covers_encoder(src),
+                "covers_obs": self._covers_obs(src),
             },
             # How long since the perception chain last produced an in-range
             # track -- the only bound available on whether an empty
@@ -588,7 +401,7 @@ class ObservationBuilder:
             # a measured 0.0 on a tick that has one, never a substituted zero.
             "last_detection_age_s": last_detection_age_s,
         }
-        return ObservationResult(obs=obs, encoded=encoded, field_sources=src,
+        return ObservationResult(obs=obs, field_sources=src,
                                  diagnostics=diagnostics, feed=owned)
 
     # ------------------------------------------------------------------
@@ -641,22 +454,11 @@ class ObservationBuilder:
         return float((t * (v - v.mean())).sum() / max((t * t).sum(), 1e-9)), True
 
     @staticmethod
-    def _covers_encoder(field_sources: dict[str, str]) -> bool:
-        """Whether `field_sources` tags every slot the encoder reads, by NAME
+    def _covers_obs(field_sources: dict[str, str]) -> bool:
+        """Whether `field_sources` tags every field `obs` carries, by NAME
         rather than by count -- a map with the right number of keys but the
-        wrong ones (one encoder slot missing, one name the encoder never
-        reads standing in for it) is not coverage, and a count comparison
-        cannot tell the two apart.
+        wrong ones (one field missing, one name `obs` does not carry standing
+        in for it) is not coverage, and a count comparison cannot tell the two
+        apart.
         """
-        return set(field_sources) == set(sim_contract.encoded_slot_names())
-
-    @staticmethod
-    def _peer_lane_distribution(peers: list[PeerState]) -> dict[str, float]:
-        with_lane = [p for p in peers if p.lane_id is not None]
-        if not with_lane:
-            return {}
-        counts: dict[str, int] = {}
-        for p in with_lane:
-            key = str(p.lane_id)
-            counts[key] = counts.get(key, 0) + 1
-        return {k: c / len(with_lane) for k, c in counts.items()}
+        return set(field_sources) == set(OBS_FIELDS)

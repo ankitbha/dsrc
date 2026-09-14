@@ -1,8 +1,8 @@
 """Guard the vendored safety contract against drift from src/safety/.
 
-Unlike test_sim_contract.py, this carries no ``importorskip``: the reference
-this checks against is a committed file (``specs/safety_contract_golden.json``),
-not a sibling package that can be deleted out from under it. It must run
+This carries no ``importorskip``: the reference it checks against is a
+committed file (``specs/safety_contract_golden.json``), not a sibling package
+that can be deleted out from under it. It must run
 everywhere and pass or fail on its own -- task 143's finding is that a check
 written as "compare the vendored copy against the original" goes vacuous the
 moment the original disappears; a golden file cannot go vacuous that way.

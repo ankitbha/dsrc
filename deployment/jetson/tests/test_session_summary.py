@@ -286,8 +286,20 @@ class TestLatencyAxis:
 
 class TestProvenanceAxis:
     def _encoder_map(self) -> dict[str, str]:
-        from policy import sim_contract
-        return {name: "measured" for name in sim_contract.encoded_slot_names()}
+        """The 39-key shape every drive in the recorded corpus was written
+        under. The axis still has to read those drives, so this is the shape
+        worth testing the size census against -- the current 7-key shape is
+        covered by `test_the_current_seven_field_shape_also_answers`."""
+        from eval_run import LEGACY_ENCODER_SLOTS
+        return {name: "measured" for name in LEGACY_ENCODER_SLOTS}
+
+    def test_the_current_seven_field_shape_also_answers(self):
+        from perception.observation_builder import OBS_FIELDS
+
+        ticks = [{"field_sources": {name: "measured" for name in OBS_FIELDS}}]
+        axis = _axis_provenance(ticks).to_record()
+        assert axis["answered"] == 1
+        assert axis["unanswered_by_reason"] == {}
 
     def test_a_full_correct_map_answers(self):
         ticks = [{"field_sources": self._encoder_map()}]
@@ -296,13 +308,30 @@ class TestProvenanceAxis:
         assert axis["answered"] == 1
         assert axis["unanswered_by_reason"] == {}
 
-    def test_a_short_map_is_censused_by_its_size_and_flagged(self):
-        short = dict(list(self._encoder_map().items())[:20])
-        ticks = [{"field_sources": short}]
+    def test_a_map_matching_neither_shape_is_censused_by_its_size_and_flagged(self):
+        """20 keys is 13 more than the current shape and 19 fewer than the
+        legacy one, so it is reported by its own size. `short`/`long` needed a
+        single reference shape and there are two, which would have named the
+        wrong direction as often as the right one."""
+        odd = dict(list(self._encoder_map().items())[:20])
+        ticks = [{"field_sources": odd}]
         axis = _axis_provenance(ticks).to_record()
         assert axis["answered"] == 0
-        assert axis["unanswered_by_reason"] == {"short: 20": 1}
-        assert axis["vocabulary_violations"] == {"short: 20": 1}
+        assert axis["unanswered_by_reason"] == {"unknown shape: 20": 1}
+        assert axis["vocabulary_violations"] == {"unknown shape: 20": 1}
+
+    def test_a_map_of_a_known_size_with_wrong_names_is_mixed_not_unknown(self):
+        """The control for the test above: same key count as a real shape,
+        one name swapped. That is a different fault from an unrecognised size
+        and has to read as one."""
+        from perception.observation_builder import OBS_FIELDS
+
+        swapped = {name: "measured" for name in OBS_FIELDS}
+        del swapped["ego_speed"]
+        swapped["not_a_real_field"] = "measured"
+        axis = _axis_provenance([{"field_sources": swapped}]).to_record()
+        assert axis["answered"] == 0
+        assert axis["unanswered_by_reason"] == {"provenance_fields_mixed": 1}
 
     def test_a_full_size_map_of_only_substituted_values_does_not_answer(self):
         """M4: a map that covers every encoder slot by NAME but whose every
@@ -1699,11 +1728,10 @@ class TestProvenanceNeedsPrimaryEvidence:
 
     @staticmethod
     def _map(**overrides: str) -> dict[str, str]:
+        from eval_run import LEGACY_ENCODER_SLOTS
         from perception import provenance
-        from policy import sim_contract
 
-        names = sim_contract.encoded_slot_names()
-        out = {n: provenance.SOURCE_FALLBACK_NEUTRAL for n in names}
+        out = {n: provenance.SOURCE_FALLBACK_NEUTRAL for n in LEGACY_ENCODER_SLOTS}
         # The three that carry a computed class no matter what fed them.
         out["ego_headway_s"] = provenance.SOURCE_DERIVED
         out["target_lane_front_gap"] = provenance.SOURCE_DERIVED

@@ -72,9 +72,7 @@ from transport.loopback import LoopbackAcceptor, LoopbackConnection, loopback_pa
 from transport.messages import (
     InvalidMessage,
     TimeSyncMessage,
-    ACTION_HEADS,
     REASONS,
-    ACTION_VALUES,
     CAPTURE_KEY,
     DISPLAY_UNITS,
     MAX_RATE_HZ,
@@ -137,8 +135,6 @@ from transport.session import (
 )
 
 __all__ = [
-    "ACTION_HEADS",
-    "ACTION_VALUES",
     "ASSUMED_SKEW_PPM",
     "Acceptor",
     "AdvisoryMessage",

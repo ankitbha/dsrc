@@ -40,7 +40,7 @@ sys.path.insert(0, str(JETSON_DIR))
 import numpy as np  # noqa: E402
 
 from perception import provenance  # noqa: E402
-from policy import sim_contract  # noqa: E402
+from perception.observation_builder import OBS_FIELDS  # noqa: E402
 from policy.safety_gate import RULE_COMPARED_VALUE_KEY  # noqa: E402
 from policy.sensing_controller import (  # noqa: E402
     MAX_TELEMETRY_AGE_S,
@@ -977,14 +977,14 @@ def analyze(
     total_field_ticks = sum(by_source_counter.values())
     provenance_fields_mixed = len(provenance_field_sizes) > 1
     # Coverage is decided by NAME, mirroring
-    # `ObservationBuilder._covers_encoder` -- a map with the right number of
-    # keys but the wrong ones (a real slot missing, a name the encoder never
-    # reads standing in for it) is not coverage, and a count comparison
+    # `ObservationBuilder._covers_obs` -- a map with the right number of keys
+    # but the wrong ones (a real field missing, a name the observation does
+    # not carry standing in for it) is not coverage, and a count comparison
     # cannot tell the two apart.
     covers_encoder = (
         None if provenance_fields is None
         else False if provenance_fields_mixed
-        else provenance_field_names == set(sim_contract.encoded_slot_names())
+        else provenance_field_names in KNOWN_PROVENANCE_KEY_SETS
     )
     observation = {
         "missingness": pctl(missingness),
@@ -2299,9 +2299,11 @@ def render_markdown(
                 "is not meaningful for this run"
             )
         else:
-            lines.append(
-                f"- provenance covers {pf} of {sim_contract.local_obs_dim()} encoder slots"
+            expected = (
+                len(LEGACY_ENCODER_SLOTS) if pf == len(LEGACY_ENCODER_SLOTS)
+                else len(OBS_FIELDS)
             )
+            lines.append(f"- provenance covers {pf} of {expected} observation fields")
     if obs.get("by_source"):
         by_source_str = ", ".join(
             f"{source} {frac:.1%}"
@@ -2433,7 +2435,7 @@ THERMAL_FAILURES_VOCABULARY = frozenset({THERMAL_BASIS_STALE}) | ABSENT_REASONS
 #: of the right size, whether it carries any field that is actually evidence
 #: about this tick.
 #:
-#: D7: `sim_contract`'s always-derived slots (`ego_headway_s`,
+#: D7: the legacy contract's always-derived slots (`ego_headway_s`,
 #: `target_lane_front_gap`, `uncongested_low_speed_flag`) carry `derived` or
 #: `approximated` on every tick of every drive, regardless of whether the
 #: quantities they were computed from were themselves measured or
@@ -2447,7 +2449,44 @@ THERMAL_FAILURES_VOCABULARY = frozenset({THERMAL_BASIS_STALE}) | ABSENT_REASONS
 #: (`PROVENANCE_PRIMARY_EVIDENCE`, below) -- which a real derivation would
 #: have been built from, since there is no input to `derived`/`approximated`
 #: outside this same map.
+#: The 39 `field_sources` keys every drive in the recorded corpus was written
+#: under, when the observation still mirrored the simulator's encoder contract.
+#: A literal here rather than an import: the module that defined it
+#: (`policy/sim_contract.py`) went with the actor it served, and these drives
+#: have to stay readable by the tool that reports them.
+LEGACY_ENCODER_SLOTS: frozenset[str] = frozenset({
+    "is_active", "ego_speed", "ego_acceleration", "ego_lane",
+    "ego_headway_s", "target_headway_s", "time_since_last_lane_change",
+    "lane_changes_last_km", "distance_to_next_merge",
+    "distance_to_downstream_bottleneck", "leader_gap",
+    "leader_relative_speed", "follower_gap", "follower_relative_speed",
+    "left_lane_front_gap", "left_lane_rear_gap", "right_lane_front_gap",
+    "right_lane_rear_gap", "target_lane_front_gap",
+    "target_lane_rear_gap", "target_lane_rear_required_decel",
+    "downstream_congestion_estimate", "merge_pressure",
+    "segment_target_speed", "uncongested_low_speed_flag",
+    "local_density_bin", "local_mean_speed_bin", "local_queue_estimate",
+    "active_vehicle_count_local", "active_av_count_local",
+    "nearby_av_count", "nearby_av_density", "nearby_av_mean_speed",
+    "cooperation.segment_target_speed", "cooperation.merge_pressure",
+    "cooperation.downstream_congestion_estimate",
+    "nearby_av_lane_distribution.0", "nearby_av_lane_distribution.1",
+    "nearby_av_lane_distribution.2",
+})
+
+#: Both shapes this tool can read, newest first. A tick whose key set is
+#: neither is reported by name and count rather than scored, because a
+#: provenance map of an unknown shape cannot be said to cover anything.
+KNOWN_PROVENANCE_KEY_SETS: tuple[frozenset[str], ...] = (
+    frozenset(OBS_FIELDS),
+    LEGACY_ENCODER_SLOTS,
+)
+
 PROVENANCE_MIXED_REASON = "provenance_fields_mixed"
+#: A map matching neither known shape, censused by its own key count. The
+#: count follows the prefix, so every distinct size is its own reason and a
+#: reader can see whether a drive produced one wrong shape or several.
+PROVENANCE_UNKNOWN_SHAPE_PREFIX = "unknown shape: "
 PROVENANCE_EXCLUDED = provenance.SUBSTITUTED | {
     provenance.SOURCE_DERIVED_EMPTY, provenance.SOURCE_DERIVED, provenance.SOURCE_APPROXIMATED,
 }
@@ -2708,16 +2747,22 @@ def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
     """
     attempted = len(ticks)
     answered = 0
-    encoder_slots = set(sim_contract.encoded_slot_names())
     counts: dict[str, int] = {}
     for t in ticks:
         field_sources = t.get("field_sources") or {}
         keys = set(field_sources)
-        if keys != encoder_slots:
-            if len(keys) != len(encoder_slots):
-                key = f"short: {len(keys)}" if len(keys) < len(encoder_slots) else f"long: {len(keys)}"
-            else:
+        if keys not in KNOWN_PROVENANCE_KEY_SETS:
+            # Reported by size, not as `short` or `long`. Those words needed a
+            # single reference shape to be measured against, and there are two
+            # now -- the current seven fields and the legacy thirty-nine -- so
+            # a 20-key map is 13 long of one and 19 short of the other, and
+            # picking one reference would name the wrong direction as often as
+            # the right one. A map whose size matches a known shape but whose
+            # names do not is the separate `mixed` case below.
+            if any(len(keys) == len(known) for known in KNOWN_PROVENANCE_KEY_SETS):
                 key = PROVENANCE_MIXED_REASON
+            else:
+                key = f"{PROVENANCE_UNKNOWN_SHAPE_PREFIX}{len(keys)}"
             counts[key] = counts.get(key, 0) + 1
             continue
         classes_present = set(field_sources.values())
@@ -2740,8 +2785,9 @@ def _axis_provenance(ticks: list[dict[str, Any]]) -> AxisResult:
         axis="provenance", attempted=attempted, answered=answered,
         attempted_is="ticks",
         answered_is=(
-            "ticks whose field_sources key set equals sim_contract.encoded_slot_names() "
-            "and carry at least one field in eval_run.PROVENANCE_PRIMARY_EVIDENCE"
+            "ticks whose field_sources key set is one of "
+            "eval_run.KNOWN_PROVENANCE_KEY_SETS and carry at least one field "
+            "in eval_run.PROVENANCE_PRIMARY_EVIDENCE"
         ),
         unanswered_by_reason=census, vocabulary="eval_run.PROVENANCE_VOCABULARY",
         vocabulary_violations=violations, unbuildable=None, section="## Observation quality",

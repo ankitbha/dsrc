@@ -212,7 +212,7 @@ def _build_rest(config: dict):
 
 def telemetry_record(tick) -> dict:
     rec = tick.to_record()
-    for heavy in ("obs", "encoded", "head_probs", "field_sources", "vehicles"):
+    for heavy in ("obs", "field_sources", "vehicles"):
         rec.pop(heavy, None)
     return rec
 

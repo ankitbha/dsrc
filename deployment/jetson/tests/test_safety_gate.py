@@ -35,7 +35,6 @@ from policy.safety_gate import (
     safety_inputs_from_observation,
     _forward_ttc_missing,
 )
-from policy.sim_contract import decode_headway_bin
 
 
 #: What the bins decoded to, kept as named speeds so each test still says
@@ -379,39 +378,32 @@ def test_evaluate_rules_case_42_fails_against_the_raw_context_mechanism(monkeypa
 
 def _obs_result(obs: dict, field_sources: dict, diagnostics: dict) -> ObservationResult:
     return ObservationResult(
-        obs=obs, encoded=np.zeros(39, dtype=np.float32), field_sources=field_sources,
-        diagnostics=diagnostics, feed=None,
+        obs=obs, field_sources=field_sources, diagnostics=diagnostics, feed=None,
     )
 
 def _base_obs() -> dict:
+    """An empty-road observation, in the shape the builder writes. Every field
+    `safety_inputs_from_observation` reads is present, because a test that
+    left one out would exercise its `.get` default rather than the gate."""
     return {
         "ego_speed": 0.0,
+        "ego_acceleration": 0.0,
         "leader_gap": float("inf"),
         "leader_relative_speed": 0.0,
-        "target_lane_front_gap": float("inf"),
-        "target_lane_rear_gap": float("inf"),
-        "target_lane_rear_required_decel": 0.0,
-        "follower_gap": float("inf"),
-        "follower_relative_speed": 0.0,
-        "nearby_av_mean_speed": 30.0,
-        "downstream_congestion_estimate": 0.0,
-        "cooperation": {"segment_target_speed": 30.0},
+        "local_density_bin": 0,
+        "active_vehicle_count_local": 0,
+        "segment_target_speed": 30.0,
     }
 
 def _base_field_sources() -> dict:
     return {
         "ego_speed": provenance.SOURCE_FALLBACK_NEUTRAL,
+        "ego_acceleration": provenance.SOURCE_FALLBACK_NEUTRAL,
         "leader_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
         "leader_relative_speed": provenance.SOURCE_FALLBACK_NEUTRAL,
-        "target_lane_front_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
-        "target_lane_rear_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
-        "target_lane_rear_required_decel": provenance.SOURCE_FALLBACK_NEUTRAL,
-        "follower_gap": provenance.SOURCE_FALLBACK_NEUTRAL,
-        "follower_relative_speed": provenance.SOURCE_FALLBACK_NEUTRAL,
-        "nearby_av_mean_speed": provenance.SOURCE_FALLBACK_NEUTRAL,
-        "downstream_congestion_estimate": provenance.SOURCE_FALLBACK_NEUTRAL,
         "local_density_bin": provenance.SOURCE_DERIVED_EMPTY,
-        "local_mean_speed_bin": provenance.SOURCE_FALLBACK_NEUTRAL,
+        "active_vehicle_count_local": provenance.SOURCE_DERIVED_EMPTY,
+        "segment_target_speed": provenance.SOURCE_FALLBACK_NEUTRAL,
     }
 
 def _inputs_with_overrides(**value_overrides: float) -> SafetyInputs:

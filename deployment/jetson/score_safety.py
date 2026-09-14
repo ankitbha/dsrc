@@ -114,12 +114,16 @@ ARMS: tuple[tuple[str, str | None], ...] = (
 
 def _observation_result_from_tick(tick: dict[str, Any]) -> ObservationResult:
     """The three fields safety_inputs_from_observation reads, taken straight
-    from a logged tick record. `encoded` is unused downstream of this call
-    and is never logged in full precision, so it is a placeholder here.
+    from a logged tick record.
+
+    A log recorded before the observation was reduced carries all 39 fields
+    and the nested `cooperation` block; the gate reads only the handful it
+    needs, by name, so the extra keys ride along harmlessly. What it does NOT
+    find in such a log is a flat `segment_target_speed` -- those logs have it
+    too, beside the nested copy -- so free-flow speed still reads correctly.
     """
     return ObservationResult(
         obs=tick["obs"],
-        encoded=np.zeros(1, dtype=np.float32),
         field_sources=tick["field_sources"],
         diagnostics=tick["obs_diagnostics"],
         feed=None,
@@ -290,8 +294,6 @@ def score_ticks(
                 # tick the raw decision clamped using a substituted density.
                 for events in result.raw_diagnostics.get("etiquette_blocked_action", []):
                     event_counter[f"etiquette_blocked_action:{events['reason']}"] += 1
-                for events in result.raw_diagnostics.get("safety_masked_action", []):
-                    event_counter[f"safety_masked_action:{events['reason']}"] += 1
             if result.emergency_override:
                 emergency_ticks += 1
 

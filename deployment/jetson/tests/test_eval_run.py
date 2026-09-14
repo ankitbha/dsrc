@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from perception.observation_builder import OBS_FIELDS
+
 from eval_run import (
     GATE_TICK_COVERAGE_MISSING_FRACTION,
     _failure_lines,
@@ -1706,9 +1708,9 @@ class TestStageTimings:
 
 
 def _grounded_field_sources() -> dict:
-    """A real 39-key `field_sources` map, produced by the actual builder --
-    not hand-typed, so this fixture cannot drift from what
-    `ObservationBuilder` actually emits.
+    """A real `field_sources` map, produced by the actual builder -- not
+    hand-typed, so this fixture cannot drift from what `ObservationBuilder`
+    actually emits.
     """
     from perception.observation_builder import BuilderConfig, ObservationBuilder
     from sensors.gps_reader import GpsFix
@@ -1724,17 +1726,17 @@ def _grounded_field_sources() -> dict:
 
 
 class TestObservationProvenance:
-    """`observation`'s four new keys, computed from each tick's own
+    """`observation`'s four keys, computed from each tick's own
     `field_sources` -- which every log back to the beginning carries, so an
     old, 1-key fixture reports `covers_encoder: False` rather than crashing
-    (the `jetson_ms_source` precedent), and a full 39-key one reports the
-    real rollup.
+    (the `jetson_ms_source` precedent), and a map of either known shape
+    reports the real rollup.
     """
 
-    def test_a_pre_task_36_style_fixture_reports_covers_encoder_false(self, tmp_path):
-        # `make_tick`'s own default `field_sources` is a single key -- never
-        # the full 33- or 39-field map -- which is exactly the shape a log
-        # missing this task's coverage takes.
+    def test_a_pre_task_36_style_fixture_reports_covers_obs_false(self, tmp_path):
+        # `make_tick`'s own default `field_sources` is a single key -- neither
+        # known shape -- which is exactly what a log missing this coverage
+        # takes.
         ticks = [make_tick(i) for i in range(10)]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
@@ -1742,13 +1744,13 @@ class TestObservationProvenance:
         assert obs["covers_encoder"] is False
         assert obs["provenance_fields"] == 1
 
-    def test_a_full_map_reports_covers_encoder_true_and_by_source_sums_to_one(self, tmp_path):
+    def test_a_full_map_reports_covers_obs_true_and_by_source_sums_to_one(self, tmp_path):
         sources = _grounded_field_sources()
         ticks = [make_tick(i, field_sources=sources) for i in range(10)]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
         obs = result["observation"]
-        assert obs["provenance_fields"] == 39
+        assert obs["provenance_fields"] == len(OBS_FIELDS) == 7
         assert obs["covers_encoder"] is True
         # Each class's fraction is independently rounded to three places, so
         # the sum is close to but not always exactly 1.0.
@@ -1770,9 +1772,24 @@ class TestObservationProvenance:
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
         report = render_markdown(result, [])
-        assert "provenance covers 39 of 39 encoder slots" in report
+        assert "provenance covers 7 of 7 observation fields" in report
         assert "by source:" in report
         assert "local_density_bin" in report
+
+    def test_a_legacy_39_field_map_still_reports_full_coverage(self, tmp_path):
+        """Every drive in the recorded corpus was written under the 39-slot
+        shape, and this tool has to keep reporting them. A run recorded then
+        is not a run with a broken provenance map."""
+        from eval_run import LEGACY_ENCODER_SLOTS
+
+        legacy = {name: "fallback_neutral" for name in LEGACY_ENCODER_SLOTS}
+        legacy["ego_speed"] = "measured"
+        ticks = [make_tick(i, field_sources=legacy) for i in range(5)]
+        run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
+        result = analyze(run_dir)
+        assert result["observation"]["provenance_fields"] == 39
+        assert result["observation"]["covers_encoder"] is True
+        assert "provenance covers 39 of 39 observation fields" in render_markdown(result, [])
 
     def test_a_pre_task_36_style_fixture_still_renders_a_report(self, tmp_path):
         # Does not crash on the shape every pre-task-36 log has, and states
@@ -1782,7 +1799,7 @@ class TestObservationProvenance:
         result = analyze(run_dir)
         report = render_markdown(result, [])
         assert "encoder-field missingness" in report
-        assert "provenance covers 1 of 39 encoder slots" in report
+        assert "provenance covers 1 of 7 observation fields" in report
 
     def test_a_mixed_run_reports_the_mixture_instead_of_the_first_ticks_size(self, tmp_path):
         # `by_source` pools every tick's `field_sources` regardless of its
@@ -1799,20 +1816,20 @@ class TestObservationProvenance:
         assert obs["provenance_fields_mixed"] is True
         assert obs["covers_encoder"] is False
         # Pins the "first tick" half of the name: the 1-key ticks are first,
-        # so this is 1, not 39 (the last tick's size) and not 5 (the number
+        # so this is 1, not 7 (the last tick's size) and not 2 (the number
         # of distinct sizes) -- `render_markdown` below prints this number
         # as "first tick has {pf}", and nothing else makes that sentence true.
         assert obs["provenance_fields"] == 1
 
     def test_the_mixed_guard_still_refuses_coverage_with_the_full_map_first(self, tmp_path):
-        # Same mixture as above, reordered: the 39-key ticks come first this
+        # Same mixture as above, reordered: the full-map ticks come first this
         # time. `covers_encoder` must still be False -- a run whose maps are
         # not all the same size is not a run with settled coverage, whichever
         # tick happens to be first. (With the 1-key ticks first, the union of
-        # every name ever seen already equals the full 39-name set, because
-        # that one key is itself one of the 39 -- so this order is the one
-        # that actually exercises the mixed short-circuit rather than passing
-        # by coincidence.)
+        # every name ever seen already equals the full name set, because that
+        # one key is itself one of them -- so this order is the one that
+        # actually exercises the mixed short-circuit rather than passing by
+        # coincidence.)
         sources = _grounded_field_sources()
         ticks = (
             [make_tick(i, field_sources=sources) for i in range(5)]
@@ -1823,21 +1840,21 @@ class TestObservationProvenance:
         obs = result["observation"]
         assert obs["provenance_fields_mixed"] is True
         assert obs["covers_encoder"] is False
-        assert obs["provenance_fields"] == 39
+        assert obs["provenance_fields"] == len(OBS_FIELDS)
 
-    def test_covers_encoder_is_false_on_a_same_size_name_swap(self, tmp_path):
-        # The defect `_covers_encoder` was written to catch, reproduced at
-        # the surface an operator reads: a map the same SIZE as the full
-        # contract but not the same set of NAMES is not coverage. Deleting
-        # "ego_speed" and adding "not_a_real_slot" keeps the count at 39.
+    def test_covers_obs_is_false_on_a_same_size_name_swap(self, tmp_path):
+        # The defect `_covers_obs` was written to catch, reproduced at the
+        # surface an operator reads: a map the same SIZE as the real field set
+        # but not the same set of NAMES is not coverage. Deleting "ego_speed"
+        # and adding "not_a_real_field" keeps the count where it was.
         sources = dict(_grounded_field_sources())
         del sources["ego_speed"]
-        sources["not_a_real_slot"] = "measured"
+        sources["not_a_real_field"] = "measured"
         ticks = [make_tick(i, field_sources=sources) for i in range(10)]
         run_dir = write_run(tmp_path, ticks, scenario=scenario_record())
         result = analyze(run_dir)
         obs = result["observation"]
-        assert obs["provenance_fields"] == 39
+        assert obs["provenance_fields"] == len(OBS_FIELDS)
         assert obs["provenance_fields_mixed"] is False
         assert obs["covers_encoder"] is False
         assert "ego_speed" not in obs["fields_by_source"].get("measured", {})

@@ -23,7 +23,8 @@ from perception.observation_builder import BuilderConfig, ObservationBuilder
 from perception.segment_state import DEFAULT_NETWORK_DEFINITION_PATH, SegmentStateBuilder
 from perception.tracker import IouTracker
 from pipeline import PerceptionPolicyPipeline
-from policy import export_dsrc_policy, sim_contract
+from perception.observation_builder import OBS_FIELDS
+from policy import export_dsrc_policy
 from policy.dsrc_runtime import DsrcRuntime
 from policy.segment_advisory import SegmentAdvisoryDecoder
 from sensors.camera_stream import Frame
@@ -140,26 +141,32 @@ def test_pipeline_produces_an_observation_aligned_with_the_scene(pipeline) -> No
     tick = run_ticks(pipeline, 45)
     obs = tick.obs_result.obs
 
-    assert tick.obs_result.encoded.shape == (sim_contract.local_obs_dim(),)
+    assert set(obs) == set(OBS_FIELDS)
+    assert set(tick.obs_result.field_sources) == set(OBS_FIELDS)
     assert obs["ego_speed"] == pytest.approx(27.0)
     # leader should be locked on and closing
     assert math.isfinite(obs["leader_gap"])
     assert 10.0 < obs["leader_gap"] < 45.0
     assert obs["leader_relative_speed"] == pytest.approx(-2.0, abs=0.7)
-    assert obs["left_lane_front_gap"] == pytest.approx(28.0, rel=0.1)
-    assert obs["right_lane_front_gap"] == pytest.approx(60.0, rel=0.1)
-    # 3 forward vehicles -> symmetrized count
+    # 3 forward vehicles -> symmetrized count. The adjacent-lane vehicles are
+    # still detected and still counted here; what went with the lane rules is
+    # the per-lane gap FIELDS, which nothing read once those rules were gone.
     assert obs["active_vehicle_count_local"] == 6
 
 
-def test_the_target_headway_is_the_configured_constant(pipeline) -> None:
+def test_the_target_headway_is_a_pipeline_setting_not_an_observation_field(pipeline) -> None:
     """It used to be fed back from the actor's `desired_headway_bin`, one
     tick's action shaping the next tick's observation. The controller emits
-    one speed fraction per segment and no headway at all, so the target is now
-    a fixed rig setting and the loop is gone rather than quietly feeding back
-    a default."""
+    one speed fraction per segment and no headway at all, so the target is a
+    fixed rig setting the gate reads directly, and the observation no longer
+    carries it -- a loop that fed back a constant would be indistinguishable
+    from one that fed back a decision."""
     tick = run_ticks(pipeline, 5)
-    assert tick.obs_result.obs["target_headway_s"] == pytest.approx(pipeline.target_headway_s)
+    assert "target_headway_s" not in tick.obs_result.obs
+    assert pipeline.target_headway_s == pytest.approx(1.6)
+    assert tick.safety_gate is None or (
+        tick.safety_gate.proposed_headway_s == pytest.approx(pipeline.target_headway_s)
+    )
 
 
 def test_tick_record_is_json_serializable(pipeline) -> None:
@@ -168,12 +175,33 @@ def test_tick_record_is_json_serializable(pipeline) -> None:
     text = json.dumps(record)  # Python JSON: Infinity literals allowed
     parsed = json.loads(text)
     assert parsed["type"] == "tick"
-    assert parsed["obs"]["follower_gap"] == math.inf
-    assert len(parsed["encoded"]) == sim_contract.local_obs_dim()
+    assert parsed["obs"]["leader_gap"] == pytest.approx(tick.obs_result.obs["leader_gap"])
+    # The encoded actor input is gone with the actor; `obs` is the record.
+    assert "encoded" not in parsed
+    assert set(parsed["obs"]) == set(OBS_FIELDS)
     # No policy behind this pipeline, so no recommendation was made. Recorded
     # as absent, not as a zero.
     assert parsed["advisory"] is None
     assert parsed["dsrc"] is None
+
+
+def test_an_empty_road_records_an_infinite_leader_gap(pipeline) -> None:
+    """Python JSON's Infinity literal, round-tripped. `inf` is the gap to a
+    leader that is not there, not a missing measurement, so it has to survive
+    the record rather than be written as null or as a large number."""
+    image = np.zeros((720, 1280, 3), dtype=np.uint8)
+    now = time.monotonic()
+    frame = Frame(image=image, frame_id=1, t_mono=now - 0.05, t_wall=time.time() - 0.05)
+    fix = GpsFix(
+        valid=True, lat=40.0, lon=-74.0, speed_mps=27.0, heading_deg=90.0,
+        fix_quality=1, num_sats=9, hdop=0.9, altitude_m=3.0,
+        utc_epoch_s=time.time(), t_mono=now - 0.05, t_wall=time.time() - 0.05,
+    )
+    tick = pipeline.step(frame, fix, detections_override=[])
+
+    assert tick.obs_result.obs["leader_gap"] == math.inf
+    parsed = json.loads(json.dumps(tick.to_record()))
+    assert parsed["obs"]["leader_gap"] == math.inf
 
 
 def test_stage_timings_recorded(pipeline) -> None:
