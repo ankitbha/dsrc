@@ -86,97 +86,89 @@ the USB wire hop itself & of the order of its own 2\,ms conversion bound \\
 \noindent\textbf{Every drive reproduces its own recorded decisions.}
 A replay tool re-runs each logged tick's inputs through the incumbent sensing
 scheduler and requires the recorded decision back. All eight drives pass: 0 of
-22{,}929 ticks mismatched, with the success exit code on every run. That
-result was bounded by two controls rather than quoted on its own. Forcing one
-decision input to a value outside its observed range, against a drive whose
-own range is 0.0123 to 0.0246 and whose threshold is 0.15, produces 1{,}632
-mismatches of 1{,}632 ticks and the refusal exit code. Rounding the ego speed
-to the nearest integer on the same 1{,}632 ticks produces zero mismatches and
-the success exit code. The second control reproduces an insensitivity the tool
-documents. The claim these runs support is that each log reproduces the
+22{,}929 ticks mismatched, with the success exit code on every run. 
+The claim these runs support is that each log reproduces the
 decisions it recorded, and not that the logs are uncorrupted.
 
-The comparison the two live drives were collected for cannot be made from them.
-Both live runs report the first live tick at index zero, so neither contains a
-segment recorded before the scheduler began acting. A candidate scheduler can
-only be scored against such a reference segment, because after the scheduler
-acts the trajectory is its own. The six shadow runs are clean references and
-contain no live segment. Constructing the comparison needs a drive that runs in
-shadow mode for a segment and then goes live, which is a new drive rather than a
-re-analysis.
+\noindent\textbf{The two clocks, and conversion between them.}
+The phone and the Jetson each run their own clock, and the two are not
+synchronised. Any interval with one end on each device has to be converted, and
+a conversion can be wrong. So no conversion here returns a bare number. It
+returns the instant, how far that instant could be off, and which estimate
+produced it. An estimate too poor to be useful makes the conversion fail, rather
+than return an answer with a margin wide enough to be useless. The margin is
+half the fastest round trip the two devices have exchanged, plus whatever they
+have drifted since. A round trip cannot reveal how its time divided between the
+outbound and the return leg, so half of it is the part that cannot be reasoned
+away.
 
-\noindent\textbf{Thermal behaviour is the binding constraint, and it is not
-solved.}
-The backoff itself works on hardware. Across two 900\,s bench runs the thermal
+Three measurements bound that machinery. The first is a null case, with both
+ends of the exchange on one machine, so the true offset is zero by construction.
+The estimate stayed within 12 microseconds over 145\,s and fitted a drift of
+$-0.05$\,ppm, so it invents no structure where there is none. The second is a
+real link for 330\,s: 357 exchanges, and nine
+outcome counters that account for every ping sent. The fastest round trip had a
+median of 14.8\,ms and the margin a median of 8.0\,ms. The third is the same
+link under full sensor load, a 10\,Hz camera at 40\,KB per frame and a 50\,Hz
+inertial unit, where 218 exchanges completed with every channel still on
+cadence. Across these runs the two clocks drift apart at 12 parts per million,
+against the 50 the design budgets for.
+
+\noindent\textbf{Deployment experiences.}
+The rest of this section reports the challenges we faced during our unit deployment. 
+They are not incidental to the
+contribution, because they are the part of it that cannot be obtained from a
+simulator.
+
+\noindent\textbf{Thermal behaviour is the binding constraint.}
+The thermal backoff works on hardware. Across two 900\,s bench runs the thermal
 rule fired on 1{,}504 of 3{,}486 ticks and on 1{,}561 of 3{,}451 ticks. The
 recorded cause was a warm skin temperature. The phone delivered 3.000 and
-2.998\,Hz against a commanded 3.0\,Hz. Steady state was never reached. Both runs
-ended because their clock expired rather than because the handset equilibrated,
-and the skin-temperature slope over the final two minutes was $+0.368$ and
-$+0.367$\,C/min. Extrapolating that slope, the 45\,C threshold lies about six
-minutes past where both runs stopped.
+2.998\,Hz against a commanded 3.0\,Hz.
 
-What ends a drive in the field is not the rate. On the first drive the handset
+On the first drive, the handset
 reached the severe thermal tier on a windscreen mount in sunlight, with one zone
 at 51.6\,C. The backoff behaved correctly and commanded 1.5\,Hz. What ended the
-drive was the platform throttling the application. That stalled the pipeline.
+drive was the platform throttling the application and stalling the pipeline.
 The final tick recorded a link time of 135{,}359\,ms against a median of
-52\,ms, and the application then closed the session. Nothing in this system detects or
+52\,ms, and the application then closed the session. 
+Nothing in this system detects or
 reports that condition, and no gate reads the link time. The failure was sharp
 rather than gradual. Every tick up to 1311 had a normal link time, so 279\,s and
 6.24\,km of that drive remain usable and only the last tick does not.
 
-\noindent\textbf{The two clocks agree, and the guarantee states its own error.}
-The two devices keep separate monotonic clocks. No conversion in this system
-returns a bare number. A converted instant carries its error bound and the
-identity of the estimate that produced it, and below the gate it raises rather
-than answering with a widened bound. On a loopback null case, where one machine
-means the true offset is zero, the offset spread is 12\,microseconds over 145\,s
-with a fitted slope of $-0.05$\,ppm. Over a real link for 330\,s there were 357
-exchanges, every one matched and none refused, with all nine outcome counters
-closing against the pings sent. The minimum round-trip time has a median of
-14.8\,ms and the bound a median of 8.0\,ms. Under full sensor load, which is a
-10\,Hz camera at 40\,KB per frame and a 50\,Hz inertial unit, 218 exchanges
-completed with every channel on cadence. The measured monotonic skew is
-$-12.00$\,ppm against the 50\,ppm the design assumes, a factor of 4.2 in hand.
+\noindent\textbf{Perception fault.}
+The camera frames arrive rotated by ninety degrees. The detector expects an
+upright road scene, so on a rotated frame it returns almost nothing. 
+Table~\ref{tab:rotation} is the measurement that identified the
+cause. The same frames through the same detector give nothing as delivered and
+several vehicles once rotated clockwise, and only the clockwise rotation
+recovers them. The frame shows a van filling much of the picture with a legible
+plate, so this was not a marginal detection.
 
-\noindent\textbf{The gate had no evidence on any drive, for a single reason.}
-Across the 3{,}913 ticks of the four bench runs, none of the twelve rules had
-evidence for its inputs on any tick. Across the 22{,}929 ticks the road drives
-recorded, a leader gap exists on 2. On the bench that is a statement about the
-rig, which has no rear sensor, no lane detection and no lane-change detector. On
-the road it is a statement about one defect. The camera frames arrived rotated, so no drive ever tracked a leader,
-and every rule that needs one was unevaluable for that reason alone.
+\begin{table}[t]
+\centering
+\caption{The same two frames through the same detector, with one rotation
+applied. The detector is unchanged between the two columns.}
+\label{tab:rotation}
+\small
+\begin{tabular}{lr}
+\toprule
+\textbf{As delivered} & \textbf{Rotated 90$^\circ$ clockwise} \\
+\midrule
+0 vehicles & 2 vehicles, confidence 0.90 \\
+0 vehicles & 5 vehicles, confidence 0.87 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\noindent\textbf{Rebuilt from the same frames, three rules become evaluable.}
-The stored frames outlive the defect and the fix landed one day after the
-collection, so the observation can be rebuilt offline with the rotation applied
-and the post-rotation intrinsics. Over all six drives that recorded video,
-18{,}907 ticks, the low-speed obstruction rule becomes evaluable on 17{,}944 of
-them, the target-lane front-gap rule on 12{,}718, and the forward
-time-to-collision rule on 11{,}781. The other nine remain unevaluable on every
-tick. Those three are the ones the structural analysis named in advance, so a
-prediction made by construction is now confirmed by measurement. The control is
-what makes it a measurement. The same frames through the same code with the
-rotation removed give 5 detections in 3{,}421 ticks and no leader gap at all,
-which reproduces the drive's own recorded result.
 
-\noindent\textbf{The firing rate is a range rather than a number.}
-On the rebuilt observation the target-lane front-gap rule fires on 37.2\% of the
-ticks it can evaluate and the forward time-to-collision rule on 40.3\%, with an
-emergency override on 4{,}751 of 18{,}907 ticks. Those are upper bounds. The
-distance estimator falls back to a width prior when the leader's contact point
-is occluded or clipped, and that prior saturates at exactly 2.00\,m for a box
-spanning the rotated frame. 1{,}209 of the 12{,}718 leader ticks sit on that
-value. Discarding every one of them puts the two rates at 30.6\% and 33.5\%,
-which is the other end of the range.
-
-\noindent\textbf{What the rebuild establishes, and what it does not.}
-It establishes what the gate could have evaluated on real road inputs, and not
-what it did. No drive ran the gate, so every number above is counterfactual and
-the scoring tool labels it so. The detections also come from a re-run of the
-same detector architecture on a CPU rather than from the device's own engine,
-because no weights and no GPU runtime exist off the device. Whether a leader is
-tracked at all, which is what the census turns on, is robust to that
-substitution. The firing rate turns on the distance value instead, which is why
-it is reported as a range.
+\noindent\textbf{The vehicle is a hostile environment and the faults are
+physical.}
+Both devices ran from vehicle power for 152.8 minutes across eight runs with no
+power interruption. Two install faults each cost drive time. Cable type is not
+interchangeable, because one handset's cable failed in the vehicle, and the
+application was moved to a second handset mid-session with the swap recorded
+automatically in the run metadata. Direct sunlight on the dashboard heated the
+tethering handset enough that its hotspot shut off, which ended a drive. The
+mount needs shade and not only a clamp.

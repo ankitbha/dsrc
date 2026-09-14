@@ -161,8 +161,9 @@ file, so the two sides cannot drift by agreeing with each other.
 
 \noindent\textbf{The safety gate.}
 The advisory passes a filter before it is displayed. The filter is vendored
-onto the device from the simulator's safety layer, so the rule that bounds an
-advisory on the road is the rule that bounded it in training. The advisory is a
+onto the device from the simulator's safety layer and checked against a frozen
+copy of it, so the two cannot drift apart. The simulator does not run the layer
+itself, and Section~\ref{sec:simulation} gives the reason. The advisory is a
 speed, so a rule earns its place by bounding that speed, and two do. The first
 raises a recommendation that would have the vehicle travel slowly on an
 uncongested road, which is the obstruction case. The second overrides the

@@ -1,19 +1,15 @@
 \section{The Minimum Viable Deployment}
 \label{sec:vision}
 
-This section states what has to exist on a vehicle, and why the observation had
-to change before anything could be built.
+This section states what at a minimum has to be added to a vehicle for deploying
+the self-regulating cars vision.
 
-\noindent\textbf{Two layers, two sensors.}
-The deployment separates two decisions that earlier formulations combined. The
+\noindent\textbf{Two sensing layers, and two observation spaces.}
+The deployment carries two decisions, and each reads its own sensor. The
 advisory layer decides a desired speed for the super-segment the vehicle is on.
-The safety layer decides whether that speed may be shown. They read different
-sensors, and neither sensor can do the other's job. A traffic API reports
-aggregate speed, free-flow speed and a congestion index per road segment. It
-contains no individual vehicles, so it cannot report a leader distance, a
-follower gap or a lane distribution. A forward camera is the opposite. It
-measures the vehicle ahead and reports nothing about the network.
-Table~\ref{tab:layers} states the split.
+The safety layer decides whether that speed may be shown to the driver.
+Table~\ref{tab:layers} states the split, and the two paragraphs after it state
+what each layer observes.
 
 \begin{table}[t]
 \centering
@@ -33,57 +29,72 @@ Safety & Camera, GPS, IMU & Leader distance, closing speed, ego state & Whether 
 }
 \end{table}
 
-\noindent\textbf{Why the observation had to change.}
-The published policy reads \texttt{[density, num\_lanes, avg\_speed, avg\_gap,
-input\_rate, exit\_rate]} per super-segment. Four of those six are vehicle-level
-ground truth in the published implementation, and a vehicle has no access to
-them. The gap is the mean of each vehicle's follow distance. The entry and exit
-rates are set differences over the vehicle identities present one minute apart.
-The density is counted over the vehicles on the segment. A traffic API
-returns \texttt{speed}, \texttt{freeFlow}, \texttt{jamFactor},
-\texttt{confidence} and \texttt{traversability}~\cite{here_traffic_api}. The
-deployed observation is therefore five fields per super-segment: \texttt{speed},
-\texttt{free\_flow} and \texttt{jam\_factor} from the feed, and \texttt{lanes}
-and \texttt{length\_km} from the map. The reward is unchanged. Training is
-centralized, so it may use privileged information, and it keeps the published
-form on ground-truth density. Only the state the vehicle reads is restricted.
+\noindent\textbf{The advisory observation space.}
+The advisory layer reads the whole network at once, as a fixed partition into
+super-segments, with five fields for each. 
+Three fields come from the traffic feed, which in this deployment is the HERE
+Traffic API~\cite{here_traffic_api}, and two from the map. \texttt{speed}
+is the segment's current aggregate speed, which is the quantity being
+regulated. \texttt{free\_flow} is the speed the segment carries when it is
+uncongested, so the two together state how far below its own capacity the
+segment is running. \texttt{jam\_factor} is a congestion index on a 0 to 10
+scale, which summarises the same shortfall on a bounded scale the feed
+publishes directly. \texttt{lanes} turns a per-segment reading into a per-lane
+one, and \texttt{length\_km} says how much road that reading describes. The
+feed publishes \texttt{confidence} and \texttt{traversability} as well, but
+neither is read.
 
-In the simulator the feed is not available, so \texttt{jam\_factor} is computed
-as $\mathrm{clip}(10\,(1 - \mathrm{speed}/\mathrm{freeFlow}), 0, 10)$. The
-operator does not publish its formula and folds in incident data this project
-does not have. That expression is therefore a stated model rather than a
-measurement, and it is the one place where the simulated observation and the
-deployed observation are not the same quantity.
+The action is one of three speed fractions per super-segment. The base it
+multiplies is that segment's static speed limit from the map, and it is
+deliberately not the feed's free-flow reading, because a live reading used for
+the base as well as for the observation would enter the loop twice. The driver
+sees one number, which is the row for the super-segment the vehicle's own
+position currently falls on.
+
+\noindent\textbf{The safety observation space.}
+The safety layer reads the road immediately around the vehicle. The forward
+camera supplies the distance to the vehicle ahead and the rate at which that
+distance is closing. GPS supplies ego speed, and the slope of that speed over
+a short window supplies ego acceleration. The tracked vehicles in range supply
+a local density and a local mean speed. Those are the quantities needed to
+decide that a recommended speed is unsafe or obstructive at this moment, which
+is a judgement about the road inside the camera's range rather than about the
+network.
+
+\noindent\textbf{The reasoning for the split.}
+A traffic API reports aggregate quantities per road segment and contains no
+individual vehicles, so it cannot report a leader distance, a follower gap or
+a lane distribution. A forward camera is the opposite. It measures the vehicle
+ahead and reports nothing about the road beyond its own horizon. Neither
+sensor can do the other's job, hence a clear split design.
 
 \noindent\textbf{Why not aggregate from local sensing.}
-A vehicle could in principle reconstruct segment-level state from its own
+Another design could be local sensing, where a vehicle reconstructs segment-level state from its own
 sensors and those of its neighbours. That needs either vehicle-to-vehicle
-exchange, which is untested in this deployment, or a server that aggregates. The
-second option removes the reason for the work. If a central server aggregates,
-the centralized design is already available and simpler. Querying a traffic API
-per vehicle is also simpler to operate than having vehicles talk to each other.
-An earlier formulation of this project put per-vehicle quantities into the
-policy's input and then required the feed to restore them, which it cannot. In
-the design reported here the per-vehicle quantities stay where they are
-measurable, and they feed the safety layer only.
+exchange, or a server that aggregates. The
+second option is exactly the deployment cost we want to avoid. Querying a traffic API
+per vehicle is simpler to operate than having vehicles talk to each other. Also, for 
+local sensing to create a rich segment state, a sufficient number of compliant vehicles is 
+required. Such a system can not be tested with a unit deployment. In the design reported 
+here the per-vehicle quantities stay where they are measurable, and they feed the safety layer only.
 
-\noindent\textbf{Decentralized execution is an identity.}
+\noindent\textbf{Decentralized execution.}
 The policy's input is the whole network's state, and the policy is a
 deterministic argmax over three speed fractions. Every vehicle that holds the
 same weights, reads the same map and queries the same feed computes the same
 action for the same super-segment. Decentralized execution therefore reproduces
-centralized execution by construction, and no experiment is required to
-establish it. What does differ on a road is staleness.
-Section~\ref{sec:discussion} states which part of that this system can measure
-and which part it cannot. The query is small. Twelve super-segments at five
-features is sixty numbers per decision, and the decision interval is 60\,s. The
+centralized execution by construction. What does differ on a road
+against the simulation is staleness. A response carries the time it was
+received, which this system measures. It does not carry the time at which the
+conditions it describes held, and nothing in the response reports that. The query is small. O(10) super-segments at five
+features is O(100) numbers per decision, and the decision interval is 60\,s. The
 feed is queried by corridor or by circle, so one request covers the whole extent
 and the number of super-segments does not change the number of requests.
 
 \noindent\textbf{What the vehicle must therefore carry.}
-Five things, and no more. A network definition that names the super-segments and
-their edges. A traffic-feed query bounded by that network's extent. A policy
-trained on that network. A local sensor set for the safety layer. A display. The
-list of what it must not carry is shorter. There is no connection to the
+Five things. (1) A network definition that names the super-segments and
+their edges. (2) A traffic-feed query bounded by that network's extent. (3) A policy
+trained on that network. (4) A local sensor set for the safety layer. (5) A display. 
+There is no connection to the
 throttle, the brakes, the steering or the vehicle bus, and no server inside the
 control loop.

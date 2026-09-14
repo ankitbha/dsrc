@@ -138,7 +138,9 @@ series = {SIGMOD '20}
 
 @inproceedings{ghasemi2022real, title={Real-time camera analytics for enhancing traffic intersection safety}, author={Ghasemi, Mahshid and Kleisarchaki, Sofia and Calmant, Thomas and G{\"u}rgen, Levent and Ghaderi, Javad and Kostic, Zoran and Zussman, Gil}, booktitle={Proceedings of the 20th Annual International Conference on Mobile Systems, Applications and Services}, pages={630--631}, year={2022} }
 
-@article{bhardwaj2023understanding, title={Understanding sudden traffic jams: From emergence to impact}, author={Bhardwaj, Ankit and Iyer, Shiva R and Ramesh, Sriram and White, Jerome and Subramanian, Lakshminarayanan}, journal={Development Engineering}, volume={8}, pages={100105}, year={2023}, publisher={Elsevier} }
+%article{bhardwaj2023understanding, title={Understanding sudden traffic jams: From emergence to impact}, author={Bhardwaj, Ankit and Iyer, Shiva R and Ramesh, Sriram and White, Jerome and Subramanian, Lakshminarayanan}, journal={Development Engineering}, volume={8}, pages={100105}, year={2023}, publisher={Elsevier} }
+
+@article{bhardwaj2023understanding, title={Anonymous Title}, author={Anonymous Authors}, journal={Anonymous Publication}, year={Anonymous Year} }
 
 @article{wang2022enabling, title={Enabling edge-cloud video analytics for robotics applications}, author={Wang, Yiding and Wang, Weiyan and Liu, Duowen and Jin, Xin and Jiang, Junchen and Chen, Kai}, journal={IEEE Transactions on Cloud Computing}, volume={11}, number={2}, pages={1500--1513}, year={2022}, publisher={IEEE} }
 
@@ -1702,12 +1704,28 @@ title = {SCOOT and SCATS: A Closer Look into Their Operations}
   note         = {Accessed: 2025-08-24}
 }
 
+% BibTeX has no comment character, and a leading % does not disable an entry.
+% The parser scans for the at-sign and starts an entry wherever it finds one,
+% comment or not. Leaving that character in place below made BibTeX read this
+% block as a real entry, fail on the commented author line with "You're missing
+% a field name", and then reject the live entry underneath as "Repeated entry",
+% which left every field empty in the output. The at-sign is therefore deleted
+% rather than commented out. Restore it to re-enable this version, and delete
+% the anonymous entry below at the same time.
+%
+% inproceedings{self_regulating_cars,
+%     author = {Ankit Bhardwaj and Rohail Asim and Sachin Kumar Chauhan and Yasir Zaki and Lakshmi Subramanian},
+%     title = {Self-Regulating Cars: Automating Traffic Control in Free Flow Road Networks},
+%     booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
+%     year = {2026},
+%     note = {arXiv:2506.11973}
+% }
+
 @inproceedings{self_regulating_cars,
-    author = {Ankit Bhardwaj and Rohail Asim and Sachin Kumar Chauhan and Yasir Zaki and Lakshmi Subramanian},
-    title = {Self-Regulating Cars: Automating Traffic Control in Free Flow Road Networks},
-    booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
-    year = {2026},
-    note = {arXiv:2506.11973}
+  author = {Anonymous Authors},
+  booktitle = {Anonymous Publication},
+  title = {Anonymous Title},
+  year = {Anonymous Year}
 }
 
 @inproceedings{yang2024depth,
@@ -1947,4 +1965,12 @@ title = {SCOOT and SCATS: A Closer Look into Their Operations}
   number  = {1320},
   pages   = {91--98},
   year    = {1991}
+}
+
+@misc{nvidia2025orinnano,
+  author       = {{NVIDIA Corporation}},
+  title        = {{NVIDIA} Jetson Orin Nano Developer Kit},
+  year         = {2025},
+  howpublished = {\url{https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/}},
+  note         = {Accessed: 2026-09-12}
 }
