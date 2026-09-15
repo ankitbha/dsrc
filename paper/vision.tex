@@ -15,9 +15,6 @@
   font=\small,
   box/.style={draw, rounded corners=1.5pt, align=center, inner sep=3pt},
   api/.style={box, fill=green!8},
-  car/.style={draw, rounded corners=2pt, minimum width=8mm, minimum height=4mm,
-              fill=gray!15, inner sep=0pt, font=\tiny},
-  srccar/.style={car, fill=blue!25, very thick},
   unit/.style={box, fill=gray!6},
   stage/.style={box, fill=blue!7, minimum height=6mm, font=\small},
   data/.style={-{Latex[length=2mm]}, thick},
@@ -26,34 +23,12 @@
   lbl/.style={font=\small, inner sep=1pt, align=center}
 ]
 
-%% ---------------- the feed ----------------------------------------------
-\node[api] (api) at (7.0,12.4)
+%% The road-level loop is Figure 2. This is one vehicle's interior.
+\node[api] (api) at (3.1,9.1)
   {\textbf{Traffic API (cloud)}\\[1pt]
-   speed, free flow and jam factor, per super-segment\\[1pt]
+   speed, free flow, jam factor, per super-segment\\[1pt]
    \emph{observability, not in the control loop}};
 
-%% ---------------- the road ----------------------------------------------
-\fill[gray!22, rounded corners=2pt] (0.8,8.9) rectangle (13.2,11.0);
-\draw[white, very thick, dash pattern=on 5pt off 4pt] (1.0,9.95) -- (13.0,9.95);
-
-\node[car]    (c1) at (2.0,10.5) {};
-\node[srccar] (s1) at (4.6,10.5) {SRC};
-\node[car]    (c2) at (7.4,10.5) {};
-\node[car]    (c3) at (11.6,10.5) {};
-\node[car]    (c4) at (3.0,9.4)  {};
-\node[car]    (c5) at (6.2,9.4)  {};
-\node[srccar] (s2) at (9.0,9.4)  {SRC};
-\node[car]    (c6) at (12.2,9.4) {};
-
-\draw[cell] (api.south -| s1) -- (s1.north);
-\draw[cell] (api.south -| s2) .. controls +(0,-1.1) and +(0,1.3) .. (s2.north);
-\node[lbl, anchor=west, align=left] at (9.6,11.5) {cellular,\\one query / 60\,s};
-
-%% ---------------- zoom callout ------------------------------------------
-\draw[gray, dashed] (s2.south west) -- (0.8,8.3);
-\draw[gray, dashed] (s2.south east) -- (13.2,8.3);
-
-%% ---------------- inside one vehicle ------------------------------------
 \draw[rounded corners=3pt] (0.8,1.5) rectangle (13.2,8.3);
 \node[lbl, anchor=north west] at (0.95,8.2) {\textbf{one self-regulating vehicle}};
 
@@ -61,6 +36,7 @@
 \node[lbl, anchor=north] at (3.1,6.95) {\textbf{phone} (unmodified)};
 \node[stage, minimum width=36mm] (sens)  at (3.1,6.15) {camera \textbar{} GPS \textbar{} IMU};
 \node[stage, minimum width=36mm] (modem) at (3.1,5.2) {cellular modem\\(Traffic API)};
+\draw[cell] (api.south) -- node[lbl, right, pos=0.55]{one query / 60\,s} (phone.north);
 
 \node[unit, minimum width=70mm, minimum height=29mm] (jet) at (9.5,5.9) {};
 \node[lbl, anchor=north] at (9.5,7.25) {\textbf{Jetson Orin Nano}};
@@ -81,7 +57,6 @@
 \draw[ctrl] (samp.south) -- ++(0,-0.75) -| (modem.south);
 \node[lbl, anchor=north] at (2.6,3.95) {per-sensor rate commands};
 
-
 \node[box, fill=orange!12, minimum width=34mm] (disp) at (9.5,2.7)
   {display: recommended speed};
 \node[lbl, anchor=west] (driver) at (11.9,2.7) {driver};
@@ -94,7 +69,6 @@
       node[pos=0.5, fill=white, inner sep=1pt]{$\times$} (act.north east);
 \node[lbl, anchor=north] at (3.1,2.25) {no connection};
 
-%% ---------------- legend ------------------------------------------------
 \draw[data] (0.9,0.7) -- (1.9,0.7); \node[lbl, anchor=west] at (2.0,0.7) {sensor data};
 \draw[ctrl] (5.1,0.7) -- (6.1,0.7); \node[lbl, anchor=west] at (6.2,0.7) {rate commands};
 \draw[cell] (10.3,0.7) -- (11.3,0.7); \node[lbl, anchor=west] at (11.4,0.7) {cellular};
@@ -106,11 +80,10 @@ stretch of road past its critical density; each self-regulating car reads the
 network from a traffic API and the road ahead from its own camera, runs the
 policy locally, and shows the driver a recommended speed. The aggregate of those
 local actions is what moves the network along its flow-density curve, and no
-vehicle talks to another vehicle. In (b) one of those vehicles. Ordinary traffic
-is grey and self-regulating vehicles are blue. The phone captures or queries at
-the rate it is told and forwards raw data, and every interpretation and sampling
-decision is on the Jetson. The dashed box is the set of vehicle systems nothing
-in this design touches.}
+vehicle talks to another vehicle. In (b) one of those vehicles. The phone
+captures or queries at the rate it is told and forwards raw data, and every
+interpretation and sampling decision is on the Jetson. The dashed box is the set
+of vehicle systems nothing in this design touches.}
 \label{fig:overview}
 \end{figure*}
 
