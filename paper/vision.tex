@@ -15,6 +15,9 @@
   font=\small,
   box/.style={draw, rounded corners=1.5pt, align=center, inner sep=3pt},
   api/.style={box, fill=green!8},
+  car/.style={draw, rounded corners=2pt, minimum width=8mm, minimum height=4mm,
+              fill=gray!15, inner sep=0pt, font=\tiny},
+  srccar/.style={car, fill=blue!25, very thick},
   unit/.style={box, fill=gray!6},
   stage/.style={box, fill=blue!7, minimum height=6mm, font=\small},
   data/.style={-{Latex[length=2mm]}, thick},
@@ -23,12 +26,34 @@
   lbl/.style={font=\small, inner sep=1pt, align=center}
 ]
 
-%% The road-level loop is Figure 2. This is one vehicle's interior.
-\node[api] (api) at (3.1,9.1)
+%% ---------------- the feed ----------------------------------------------
+\node[api] (api) at (7.0,12.4)
   {\textbf{Traffic API (cloud)}\\[1pt]
-   speed, free flow, jam factor, per super-segment\\[1pt]
+   speed, free flow and jam factor, per super-segment\\[1pt]
    \emph{observability, not in the control loop}};
 
+%% ---------------- the road ----------------------------------------------
+\fill[gray!22, rounded corners=2pt] (0.8,8.9) rectangle (13.2,11.0);
+\draw[white, very thick, dash pattern=on 5pt off 4pt] (1.0,9.95) -- (13.0,9.95);
+
+\node[car]    (c1) at (2.0,10.5) {};
+\node[srccar] (s1) at (4.6,10.5) {SRC};
+\node[car]    (c2) at (7.4,10.5) {};
+\node[car]    (c3) at (11.6,10.5) {};
+\node[car]    (c4) at (3.0,9.4)  {};
+\node[car]    (c5) at (6.2,9.4)  {};
+\node[srccar] (s2) at (9.0,9.4)  {SRC};
+\node[car]    (c6) at (12.2,9.4) {};
+
+\draw[cell] (api.south -| s1) -- (s1.north);
+\draw[cell] (api.south -| s2) .. controls +(0,-1.1) and +(0,1.3) .. (s2.north);
+\node[lbl, anchor=west, align=left] at (9.6,11.5) {cellular,\\one query / 60\,s};
+
+%% ---------------- zoom callout ------------------------------------------
+\draw[gray, dashed] (s2.south west) -- (0.8,8.3);
+\draw[gray, dashed] (s2.south east) -- (13.2,8.3);
+
+%% ---------------- inside one vehicle ------------------------------------
 \draw[rounded corners=3pt] (0.8,1.5) rectangle (13.2,8.3);
 \node[lbl, anchor=north west] at (0.95,8.2) {\textbf{one self-regulating vehicle}};
 
@@ -36,7 +61,6 @@
 \node[lbl, anchor=north] at (3.1,6.95) {\textbf{phone} (unmodified)};
 \node[stage, minimum width=36mm] (sens)  at (3.1,6.15) {camera \textbar{} GPS \textbar{} IMU};
 \node[stage, minimum width=36mm] (modem) at (3.1,5.2) {cellular modem\\(Traffic API)};
-\draw[cell] (api.south) -- node[lbl, right, pos=0.55]{one query / 60\,s} (phone.north);
 
 \node[unit, minimum width=70mm, minimum height=29mm] (jet) at (9.5,5.9) {};
 \node[lbl, anchor=north] at (9.5,7.25) {\textbf{Jetson Orin Nano}};
@@ -57,6 +81,7 @@
 \draw[ctrl] (samp.south) -- ++(0,-0.75) -| (modem.south);
 \node[lbl, anchor=north] at (2.6,3.95) {per-sensor rate commands};
 
+
 \node[box, fill=orange!12, minimum width=34mm] (disp) at (9.5,2.7)
   {display: recommended speed};
 \node[lbl, anchor=west] (driver) at (11.9,2.7) {driver};
@@ -69,6 +94,7 @@
       node[pos=0.5, fill=white, inner sep=1pt]{$\times$} (act.north east);
 \node[lbl, anchor=north] at (3.1,2.25) {no connection};
 
+%% ---------------- legend ------------------------------------------------
 \draw[data] (0.9,0.7) -- (1.9,0.7); \node[lbl, anchor=west] at (2.0,0.7) {sensor data};
 \draw[ctrl] (5.1,0.7) -- (6.1,0.7); \node[lbl, anchor=west] at (6.2,0.7) {rate commands};
 \draw[cell] (10.3,0.7) -- (11.3,0.7); \node[lbl, anchor=west] at (11.4,0.7) {cellular};
@@ -80,79 +106,109 @@ stretch of road past its critical density; each self-regulating car reads the
 network from a traffic API and the road ahead from its own camera, runs the
 policy locally, and shows the driver a recommended speed. The aggregate of those
 local actions is what moves the network along its flow-density curve, and no
-vehicle talks to another vehicle. In (b) one of those vehicles. The phone
-captures or queries at the rate it is told and forwards raw data, and every
-interpretation and sampling decision is on the Jetson. The dashed box is the set
-of vehicle systems nothing in this design touches.}
+vehicle talks to another vehicle. In (b) one of those vehicles. Ordinary traffic
+is grey and self-regulating vehicles are blue. The phone captures or queries at
+the rate it is told and forwards raw data, and every interpretation and sampling
+decision is on the Jetson. The dashed box is the set of vehicle systems nothing
+in this design touches.}
 \label{fig:overview}
 \end{figure*}
 
-This section states the minimum a vehicle has to acquire for the self-regulating
-cars vision to be deployed on it, and Figure~\ref{fig:overview} is the loop that
-results.
+This section states what at a minimum has to be added to a vehicle for deploying
+the self-regulating cars vision. Figure~\ref{fig:overview} shows the result at
+two scales.
 
 \noindent\textbf{Two sensing layers, and two observation spaces.}
 The deployment carries two decisions, and each reads its own sensor. The
-advisory layer reads a traffic API per super-segment and decides a desired
-speed. The safety layer reads the camera, GPS and inertial unit and decides
-whether that speed may be shown. Neither sensor can supply the other layer's
-inputs, which is the reason for the split. A traffic API reports aggregate
-quantities per road segment and contains no individual vehicles, so it cannot
-report a leader distance or a follower gap. A forward camera is the opposite: it
-measures the vehicle ahead and reports nothing beyond its own horizon.
+advisory layer decides a desired speed for the super-segment the vehicle is on.
+The safety layer decides whether that speed may be shown to the driver.
+Table~\ref{tab:layers} states the split, and the two paragraphs after it state
+what each layer observes.
+
+\begin{table}[t]
+\centering
+\caption{The two layers, the sensor each reads, and the decision each makes.
+Neither sensor can supply the other layer's inputs.}
+\label{tab:layers}
+\small
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{p{0.15\linewidth}p{0.19\linewidth}p{0.26\linewidth}p{0.19\linewidth}}
+\toprule
+\textbf{Layer} & \textbf{Sensor} & \textbf{Produces} & \textbf{Decides} \\
+\midrule
+Advisory & Traffic API, per super-segment & Aggregate speed, free flow, jam factor & The desired speed \\
+Safety & Camera, GPS, IMU & Leader distance, closing speed, ego state & Whether to allow it \\
+\bottomrule
+\end{tabular}
+}
+\end{table}
 
 \noindent\textbf{The advisory observation space.}
 The advisory layer reads the whole network at once, as a fixed partition into
-super-segments with five fields each. Three come from the traffic feed, which in
-this deployment is the HERE Traffic API~\cite{here_traffic_api}, and two from the
-map. \texttt{speed} is the segment's current aggregate speed, the quantity being
-regulated, and \texttt{free\_flow} is the speed it carries when uncongested, so
-the two together state how far below its own capacity the segment is running.
-\texttt{jam\_factor} is a 0 to 10 congestion index summarising the same shortfall
-on a bounded scale the feed publishes directly. \texttt{lanes} turns a
-per-segment reading into a per-lane one, and \texttt{length\_km} says how much
-road that reading describes. The feed's \texttt{confidence} and
-\texttt{traversability} are not read.
+super-segments, with five fields for each. 
+Three fields come from the traffic feed, which in this deployment is the HERE
+Traffic API~\cite{here_traffic_api}, and two from the map. \texttt{speed}
+is the segment's current aggregate speed, which is the quantity being
+regulated. \texttt{free\_flow} is the speed the segment carries when it is
+uncongested, so the two together state how far below its own capacity the
+segment is running. \texttt{jam\_factor} is a congestion index on a 0 to 10
+scale, which summarises the same shortfall on a bounded scale the feed
+publishes directly. \texttt{lanes} turns a per-segment reading into a per-lane
+one, and \texttt{length\_km} says how much road that reading describes. The
+feed publishes \texttt{confidence} and \texttt{traversability} as well, but
+neither is read.
 
 The action is one of three speed fractions per super-segment. The base it
-multiplies is that segment's static speed limit from the map, deliberately not
-the feed's free-flow reading, because a live reading used for the base as well
-as for the observation would enter the loop twice. The driver sees one number,
-the row for the super-segment the vehicle's position currently falls on.
+multiplies is that segment's static speed limit from the map, and it is
+deliberately not the feed's free-flow reading, because a live reading used for
+the base as well as for the observation would enter the loop twice. The driver
+sees one number, which is the row for the super-segment the vehicle's own
+position currently falls on.
 
 \noindent\textbf{The safety observation space.}
 The safety layer reads the road immediately around the vehicle. The forward
 camera supplies the distance to the vehicle ahead and the rate at which that
-distance is closing. GPS supplies ego speed, and the slope of that speed over a
-short window supplies ego acceleration. The tracked vehicles in range supply a
-local density and a local mean speed. Those are the quantities needed to decide
-that a recommended speed is unsafe or obstructive at this moment, which is a
-judgement about the road inside the camera's range rather than about the
+distance is closing. GPS supplies ego speed, and the slope of that speed over
+a short window supplies ego acceleration. The tracked vehicles in range supply
+a local density and a local mean speed. Those are the quantities needed to
+decide that a recommended speed is unsafe or obstructive at this moment, which
+is a judgement about the road inside the camera's range rather than about the
 network.
 
+\noindent\textbf{The reasoning for the split.}
+A traffic API reports aggregate quantities per road segment and contains no
+individual vehicles, so it cannot report a leader distance, a follower gap or
+a lane distribution. A forward camera is the opposite. It measures the vehicle
+ahead and reports nothing about the road beyond its own horizon. Neither
+sensor can do the other's job, hence a clear split design.
+
 \noindent\textbf{Why not aggregate from local sensing.}
-Another design could reconstruct segment-level state from a vehicle's own
+Another design could be local sensing, where a vehicle reconstructs segment-level state from its own
 sensors and those of its neighbours. That needs either vehicle-to-vehicle
-exchange or a server that aggregates, and the second is exactly the deployment
-cost we want to avoid. Local sensing also needs a sufficient number of compliant
-vehicles before it can produce a rich segment state, so it cannot be tested with
-a unit deployment at all. Here the per-vehicle quantities stay where they are
-measurable, and they feed the safety layer only.
+exchange, or a server that aggregates. The
+second option is exactly the deployment cost we want to avoid. Querying a traffic API
+per vehicle is simpler to operate than having vehicles talk to each other. Also, for 
+local sensing to create a rich segment state, a sufficient number of compliant vehicles is 
+required. Such a system can not be tested with a unit deployment. In the design reported 
+here the per-vehicle quantities stay where they are measurable, and they feed the safety layer only.
 
 \noindent\textbf{Decentralized execution.}
 The policy's input is the whole network's state, and the policy is a
-deterministic argmax over three speed fractions. Every vehicle holding the same
-weights, reading the same map and querying the same feed computes the same
-action for the same super-segment, so decentralized execution reproduces
-centralized execution by construction. What differs on a road is staleness: a
-response carries the time it was received, which this system measures, and not
-the time at which the conditions it describes held. The query is small, at
-O(100) numbers per decision on a 60\,s interval, and one request by corridor or
-circle covers the whole extent.
+deterministic argmax over three speed fractions. Every vehicle that holds the
+same weights, reads the same map and queries the same feed computes the same
+action for the same super-segment. Decentralized execution therefore reproduces
+centralized execution by construction. What does differ on a road
+against the simulation is staleness. A response carries the time it was
+received, which this system measures. It does not carry the time at which the
+conditions it describes held, and nothing in the response reports that. The query is small. O(10) super-segments at five
+features is O(100) numbers per decision, and the decision interval is 60\,s. The
+feed is queried by corridor or by circle, so one request covers the whole extent
+and the number of super-segments does not change the number of requests.
 
 \noindent\textbf{What the vehicle must therefore carry.}
-Five things. (1) A network definition that names the super-segments and their
-edges. (2) A traffic-feed query bounded by that network's extent. (3) A policy
-trained on that network. (4) A local sensor set for the safety layer. (5) A
-display. There is no connection to the throttle, the brakes, the steering or the
-vehicle bus, and no server inside the control loop.
+Five things. (1) A network definition that names the super-segments and
+their edges. (2) A traffic-feed query bounded by that network's extent. (3) A policy
+trained on that network. (4) A local sensor set for the safety layer. (5) A display. 
+There is no connection to the
+throttle, the brakes, the steering or the vehicle bus, and no server inside the
+control loop.
