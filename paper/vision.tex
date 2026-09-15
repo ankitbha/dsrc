@@ -75,84 +75,22 @@
 \end{tikzpicture}}\\[3pt]
 {\footnotesize (b) Inside one vehicle.}
 \end{minipage}
-\caption{The deployment, at two scales. In (a) a burst of inflow pushes a
-stretch of road past its critical density; each self-regulating car reads the
-network from a traffic API and the road ahead from its own camera, runs the
-policy locally, and shows the driver a recommended speed. The aggregate of those
-local actions is what moves the network along its flow-density curve, and no
-vehicle talks to another vehicle. In (b) one of those vehicles. The phone
-captures or queries at the rate it is told and forwards raw data, and every
-interpretation and sampling decision is on the Jetson. The dashed box is the set
-of vehicle systems nothing in this design touches.}
+\caption{The deployment, at two scales. In (a) a burst of inflow pushes a stretch of road past its critical density; each self-regulating car reads the network from a traffic API and the road ahead from its own camera, runs the policy locally, and shows the driver a recommended speed. The aggregate of those local actions is what moves the network along its flow-density curve, and no vehicle talks to another vehicle. In (b), we detail one of those vehicles. The phone captures or queries at the rate it is told and forwards raw data, and every interpretation and sampling decision is on the Jetson. The dashed box is the set of vehicle systems that are not touched in this design.}
 \label{fig:overview}
 \end{figure*}
 
-This section states the minimum a vehicle has to acquire for the self-regulating
-cars vision to be deployed on it, and Figure~\ref{fig:overview} is the loop that
-results.
+This section states the minimum a vehicle has to acquire for the self-regulating cars vision to be deployed on it, and Figure~\ref{fig:overview} provides the overview of the system design.
 
-\noindent\textbf{Two sensing layers, and two observation spaces.}
-The deployment carries two decisions, and each reads its own sensor. The
-advisory layer reads a traffic API per super-segment and decides a desired
-speed. The safety layer reads the camera, GPS and inertial unit and decides
-whether that speed may be shown. Neither sensor can supply the other layer's
-inputs, which is the reason for the split. A traffic API reports aggregate
-quantities per road segment and contains no individual vehicles, so it cannot
-report a leader distance or a follower gap. A forward camera is the opposite: it
-measures the vehicle ahead and reports nothing beyond its own horizon.
+\noindent\textbf{Two sensing layers, and two observation spaces.} The deployment carries two decisions, and we give each its own sensor. The division is as follows: the advisory layer reads a traffic API per super-segment and decides a desired speed, and the safety layer reads the camera, GPS and inertial unit and decides whether that speed may be shown. The reason for the split is that neither sensor can supply the other layer's inputs. A traffic API reports aggregate quantities per road segment and contains no individual vehicles, so it cannot report a leader distance or a follower gap. A forward camera is the opposite, as it measures the vehicle ahead and reports nothing beyond its own horizon. Therefore, each decision is built on the only sensor that can supply it.
 
-\noindent\textbf{The advisory observation space.}
-The advisory layer reads the whole network at once, as a fixed partition into
-super-segments with five fields each. Three come from the traffic feed, which in
-this deployment is the HERE Traffic API~\cite{here_traffic_api}, and two from the
-map. \texttt{speed} is the segment's current aggregate speed, the quantity being
-regulated, and \texttt{free\_flow} is the speed it carries when uncongested, so
-the two together state how far below its own capacity the segment is running.
-\texttt{jam\_factor} is a 0 to 10 congestion index summarising the same shortfall
-on a bounded scale the feed publishes directly. \texttt{lanes} turns a
-per-segment reading into a per-lane one, and \texttt{length\_km} says how much
-road that reading describes. The feed's \texttt{confidence} and
-\texttt{traversability} are not read.
+\noindent\textbf{The advisory observation space.} The advisory layer reads the whole network at once, as a fixed partition into super-segments with five fields each. Three of the five come from the traffic feed, which in this deployment is the HERE Traffic API~\cite{here_traffic_api}, and two come from the map. They are as follows. \texttt{speed} is the segment's current aggregate speed, which is the quantity being regulated, and \texttt{free\_flow} is the speed it carries when uncongested, so the two together state how far below its own capacity the segment is running. \texttt{jam\_factor} is a congestion index on a 0 to 10 scale, which summarises the same shortfall on a bounded scale the feed publishes directly. \texttt{lanes} turns a per-segment reading into a per-lane one, and \texttt{length\_km} says how much road that reading describes. The feed also publishes \texttt{confidence} and \texttt{traversability}, and we read neither. This is because the policy is trained in the SUMO simulator and neither can be expressed as an observation in it. Also, they would not add much, as across the 915 flow records logged in our drives, confidence is at or above $0.97$ on 729 of the 909 that carry it, and traversability is a binary field that reports closed on 6, where \texttt{jam\_factor} has already saturated at 10.
 
-The action is one of three speed fractions per super-segment. The base it
-multiplies is that segment's static speed limit from the map, deliberately not
-the feed's free-flow reading, because a live reading used for the base as well
-as for the observation would enter the loop twice. The driver sees one number,
-the row for the super-segment the vehicle's position currently falls on.
+The action is one of three speed fractions per super-segment. The base it multiplies is that segment's static speed limit from the map, and we deliberately do not use the feed's free-flow reading for it, because a live reading used for the base as well as for the observation would enter the loop twice. The driver sees one number, which is the row for the super-segment the vehicle's position currently falls on.
 
-\noindent\textbf{The safety observation space.}
-The safety layer reads the road immediately around the vehicle. The forward
-camera supplies the distance to the vehicle ahead and the rate at which that
-distance is closing. GPS supplies ego speed, and the slope of that speed over a
-short window supplies ego acceleration. The tracked vehicles in range supply a
-local density and a local mean speed. Those are the quantities needed to decide
-that a recommended speed is unsafe or obstructive at this moment, which is a
-judgement about the road inside the camera's range rather than about the
-network.
+\noindent\textbf{The safety observation space.} The safety layer reads the road immediately around the vehicle, and its inputs come from three sources. The forward camera supplies the distance to the vehicle ahead and the rate at which that distance is closing. GPS supplies ego speed, and the slope of that speed over a short window supplies ego acceleration. The tracked vehicles in range supply a local density and a local mean speed. Therefore, the layer can judge whether a recommended speed is unsafe or obstructive at this moment, which is a judgement about the road inside the camera's range rather than about the network.
 
-\noindent\textbf{Why not aggregate from local sensing.}
-Another design could reconstruct segment-level state from a vehicle's own
-sensors and those of its neighbours. That needs either vehicle-to-vehicle
-exchange or a server that aggregates, and the second is exactly the deployment
-cost we want to avoid. Local sensing also needs a sufficient number of compliant
-vehicles before it can produce a rich segment state, so it cannot be tested with
-a unit deployment at all. Here the per-vehicle quantities stay where they are
-measurable, and they feed the safety layer only.
+\noindent\textbf{Why not aggregate from local sensing.} Another design could reconstruct segment-level state from a vehicle's own sensors and those of its neighbours. While that removes the dependence on a traffic feed, it needs either vehicle-to-vehicle exchange or a server that aggregates, and the second is exactly the deployment cost we want to avoid. Local sensing also needs a sufficient number of compliant vehicles before it can produce a rich segment state, so it cannot be tested with a unit deployment at all. Therefore, we keep the per-vehicle quantities where they are measurable, and they feed the safety layer only.
 
-\noindent\textbf{Decentralized execution.}
-The policy's input is the whole network's state, and the policy is a
-deterministic argmax over three speed fractions. Every vehicle holding the same
-weights, reading the same map and querying the same feed computes the same
-action for the same super-segment, so decentralized execution reproduces
-centralized execution by construction. What differs on a road is staleness: a
-response carries the time it was received, which this system measures, and not
-the time at which the conditions it describes held. The query is small, at
-O(100) numbers per decision on a 60\,s interval, and one request by corridor or
-circle covers the whole extent.
+\noindent\textbf{Decentralized execution.} The policy's input is the whole network's state, and the policy is a deterministic argmax over three speed fractions. Every vehicle holding the same weights, reading the same map and querying the same feed computes the same action for the same super-segment. Therefore, decentralized execution reproduces centralized execution by construction. What differs on a road is staleness, because a response carries the time it was received, which this system measures, and not the time at which the conditions it describes held. The query itself is small, at O(100) numbers per decision on a 60\,s interval, and one request by corridor or circle covers the whole extent.
 
-\noindent\textbf{What the vehicle must therefore carry.}
-Five things. (1) A network definition that names the super-segments and their
-edges. (2) A traffic-feed query bounded by that network's extent. (3) A policy
-trained on that network. (4) A local sensor set for the safety layer. (5) A
-display. There is no connection to the throttle, the brakes, the steering or the
-vehicle bus, and no server inside the control loop.
+\noindent\textbf{What the vehicle must therefore carry.} The list has five entries. (1) A network definition that names the super-segments and their edges. (2) A traffic-feed query bounded by that network's extent. (3) A policy trained on that network. (4) A local sensor set for the safety layer. (5) A display. None of the five connects to the throttle, the brakes, the steering or the vehicle bus, and none of them requires a server inside the control loop.

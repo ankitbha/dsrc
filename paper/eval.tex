@@ -20,48 +20,16 @@ archive & 187 files, 2{,}180{,}405{,}759 bytes, verified by digest against the d
 \end{tabular}
 \end{table}
 
-The system was driven on 2026-09-08 in Westfield, New Jersey, on a OnePlus Nord
-N10, and Table~\ref{tab:corpus} is the whole corpus. Distance is a bracket rather
-than a number: summing great-circle steps between fixes less than 3\,s apart
-gives 86.55\,km and omits distance covered during gaps, while integrating the
-reported speed gives 90.06\,km and counts the gaps but trusts the speed field.
-Quoting either figure alone would overstate the precision.
+The system was driven on 2026-09-08 in Westfield, New Jersey, on a OnePlus Nord N10, and Table~\ref{tab:corpus} is the whole corpus. We report distance as a bracket rather than a number, because the two available methods disagree. Summing great-circle steps between fixes less than 3\,s apart gives 86.55\,km and omits distance covered during gaps, while integrating the reported speed gives 90.06\,km and counts the gaps but trusts the speed field. Therefore, quoting either figure alone would overstate the precision.
 
-\noindent\textbf{The shakedown drive.}
-The first drive ran 1{,}632 ticks over 279.5\,s and 6.24\,km, at a mean speed of
-22.9\,m/s. The mean tick rate was 4.69\,Hz with a median spacing of 203\,ms, and
-two gaps longer than 2\,s totalled 5\,s. Distance agrees to 0.01\,km between
-integrating the reported speed and the great-circle path through the fixes,
-which is two independent routes to one number. That drive also produced three
-defects: the camera frames arrived rotated by ninety degrees, the frames were
-being discarded so the drive could not explain itself, and the severe thermal
-tier ended a session rather than lowering rates. The second was fixed at the
-roadside with a laptop attached to the Jetson, and the other two are the subject
-of the last two parts of this section.
+\noindent\textbf{The shakedown drive.} The first drive ran 1{,}632 ticks over 279.5\,s and 6.24\,km, at a mean speed of 22.9\,m/s. The mean tick rate was 4.69\,Hz with a median spacing of 203\,ms, and two gaps longer than 2\,s totalled 5\,s. Distance agrees to 0.01\,km between integrating the reported speed and the great-circle path through the fixes, which is two independent routes to one number. That drive also produced three defects, as follows: the camera frames arrived rotated by ninety degrees, the frames were being discarded and not logged, and the severe thermal tier ended a session rather than lowering rates. We fixed the second at the roadside with a laptop attached to the Jetson, and the other two are the subject of the last two parts of this section.
 
-\noindent\textbf{Latency.}
-Table~\ref{tab:latency} gives the two measurements. The on-Jetson path is a
-bench measurement on pre-stamped frames, so it excludes capture wait. The
-phone-to-Jetson figure is the pooled 95th percentile over three bench runs of
-180\,s each. Over USB it is 116.19\,ms against a 200\,ms target, and over the
-Tailscale network it is 215.63\,ms. The largest and smallest of the three USB
-runs differ by 48.80\,ms at the 95th percentile, and that difference has one
-primary source. The phone-side send-queue stage differs between the same pair by
-46.40\,ms, while every other stage differs by less than 2\,ms. The spread is phone-side
-queueing rather than the link.
-The wire hop itself is reported as an order rather than a duration on purpose.
-Its two endpoints are stamped on different devices and therefore on different
-clocks, and every conversion between them carries an error bound of about half
-the minimum round-trip time. Its median is 1.97, 2.16 and 2.03\,ms across the
-three runs, against conversion bounds of 1.95, 1.86 and 2.06\,ms for the same
-runs, so the quantity is not separable from the bound on the instrument that
-measured it.
+
+\noindent\textbf{Latency.} Table~\ref{tab:latency} gives the two measurements. The on-Jetson path is a bench measurement on pre-stamped frames, so it excludes capture wait. The phone-to-Jetson figure is the pooled 95th percentile over three bench runs of 180\,s each. Over USB it is 116.19\,ms and over the Tailscale network it is 215.63\,ms. The largest and smallest of the three USB runs differ by 48.80\,ms at the 95th percentile, and that difference has one primary source. The phone-side send-queue stage differs between the same pair by 46.40\,ms, while every other stage differs by less than 2\,ms. Therefore, the spread is phone-side queueing rather than the link. We report the wire hop itself as an order rather than a duration on purpose. Its two endpoints are stamped on different devices and therefore on different clocks, and every conversion between them carries an error bound of about half the minimum round-trip time. Its median is 1.97, 2.16 and 2.03\,ms across the three runs, against conversion bounds of 1.95, 1.86 and 2.06\,ms for the same runs, so the quantity is not separable from the bound on the instrument that measured it.
 
 \begin{table}[t]
 \centering
-\caption{Measured latency. The upper block is the on-Jetson compute path,
-measured on the device on pre-stamped frames. The lower block is the
-phone-to-Jetson path, pooled over three 180\,s bench runs, 2{,}684 ticks.}
+\caption{Measured latency. The upper block is the on-Jetson compute path, measured on the device on pre-stamped frames. The lower block is the phone-to-Jetson path, pooled over three 180\,s bench runs, 2{,}684 ticks.}
 \label{tab:latency}
 \small
 \begin{tabular}{p{0.45\linewidth}p{0.45\linewidth}}
@@ -74,7 +42,7 @@ observation and encode & 0.4\,ms p50 \\
 actor and advisory decode & 0.5\,ms p50 \\
 on-Jetson end to end & 19.8\,ms p50, 20.2\,ms p95, 48.5\,FPS \\
 \midrule
-phone to Jetson over USB & 116.19\,ms p95 (target 200\,ms) \\
+phone to Jetson over USB & 116.19\,ms p95 \\
 the same path over Tailscale & 215.63\,ms p95 \\
 the USB wire hop itself & of the order of its own 2\,ms conversion bound \\
 \bottomrule
@@ -82,66 +50,21 @@ the USB wire hop itself & of the order of its own 2\,ms conversion bound \\
 \end{table}
 
 
-\noindent\textbf{Every drive reproduces its own recorded decisions.}
-A replay tool re-runs each logged tick's inputs through the incumbent sensing
-scheduler and requires the recorded decision back. All eight drives pass, with 0
-of 22{,}929 ticks mismatched. These runs support the claim that each log
-reproduces the decisions it recorded, and not that the logs are uncorrupted.
 
-\noindent\textbf{The two clocks, and conversion between them.}
-The phone and the Jetson each run their own clock, and the two are not
-synchronised, so any interval with one end on each device has to be converted.
-No conversion here returns a bare number. It returns the instant, how far that
-instant could be off, and which estimate produced it, and it fails rather than
-return a margin too wide to use. The margin is half the fastest round trip the
-two devices have exchanged plus the drift since, because a round trip cannot
-reveal how its time divided between the two legs. Three runs bound that
-machinery. A null case with both ends on one machine, where the true offset is
-zero by construction, stayed within 12 microseconds over 145\,s. A real link
-over 330\,s gave a fastest round trip with a median of 14.8\,ms and a margin
-with a median of 8.0\,ms across 357 exchanges. The same link under full sensor
-load completed 218 exchanges with every channel still on cadence. Across these
-runs the two clocks drift apart at 12 parts per million, against the 50 the
-design budgets for.
+\noindent\textbf{Every drive reproduces its own recorded decisions.} A replay tool re-runs each logged tick's inputs through the incumbent sensing scheduler and requires the recorded decision back. All eight drives pass, with 0 of 22{,}929 ticks mismatched. These runs support the claim that each log reproduces the decisions it recorded.
 
-\noindent\textbf{Deployment experiences.}
-The rest of this section reports the challenges the unit deployment produced.
-They are not incidental to the contribution, because they are the part of it a
-simulator cannot supply.
 
-\noindent\textbf{Thermal behaviour is the binding constraint.}
-The thermal backoff works on hardware. Across two 900\,s bench runs the rule
-fired on 1{,}504 of 3{,}486 ticks and on 1{,}561 of 3{,}451 ticks, on a recorded
-cause of warm skin temperature, and the phone delivered 3.000 and 2.998\,Hz
-against a commanded 3.0\,Hz. On the first drive the handset reached the severe
-tier on a windscreen mount in sunlight, with one zone at 51.6\,C, and the
-backoff correctly commanded 1.5\,Hz. What ended the drive was the platform
-throttling the application and stalling the pipeline: the final tick recorded a
-link time of 135{,}359\,ms against a median of 52\,ms, and the application then
-closed the session. Nothing in this system detects or reports that condition,
-and no gate reads the link time. The failure was sharp rather than gradual.
-Every tick up to 1311 had a normal link time, so 279\,s and 6.24\,km of that
-drive remain usable and only the last tick does not.
+\noindent\textbf{The two clocks, and conversion between them.} The phone and the Jetson each run their own clock, and the two are not synchronised, so any interval with one end on each device has to be converted. No conversion here returns a bare number. It returns the instant, how far that instant could be off, and which estimate produced it, and it fails rather than return a margin too wide to use. The margin is half the fastest round trip the two devices have exchanged plus the drift since, because a round trip cannot reveal how its time divided between the two legs. Three runs bound that machinery, as follows. A null case with both ends on one machine, where the true offset is zero by construction, stayed within 12 microseconds over 145\,s. A real link over 330\,s gave a fastest round trip with a median of 14.8\,ms and a margin with a median of 8.0\,ms across 357 exchanges. The same link under full sensor load completed 218 exchanges with every channel still on cadence. Across these runs the two clocks drift apart at 12 parts per million.
 
-\noindent\textbf{Perception fault.}
-The camera frames arrive rotated by ninety degrees. The detector expects an
-upright road scene, so on a rotated frame it returns almost nothing. 
-The measurement that identified the cause puts the same frames through the same
-detector twice. As delivered they return 0 vehicles; rotated clockwise they
-return 2 at confidence 0.90 and 5 at 0.87, and only the clockwise rotation
-recovers them. One such frame shows a van filling much of the picture with a
-legible plate, so this was not a marginal detection.
-Figure~\ref{fig:teaser}(b) is a drive frame carried through the whole perception
-stage that way.
+
+\noindent\textbf{Deployment experiences.} The rest of this section reports the challenges the unit deployment produced. They are not incidental to the contribution, because they are the part of it that a simulator cannot supply.
+
+
+\noindent\textbf{Thermal behaviour is the binding constraint.} The thermal backoff works on hardware. Across two 900\,s bench runs the rule fired on 1{,}504 of 3{,}486 ticks and on 1{,}561 of 3{,}451 ticks, on a recorded cause of warm skin temperature, and the phone delivered 3.000 and 2.998\,Hz against a commanded 3.0\,Hz. On the first drive the handset reached the severe tier on a windscreen mount in sunlight, with one zone at 51.6\,C, and the backoff correctly commanded 1.5\,Hz. While the backoff behaved as designed, what ended the drive was the Android platform throttling the application and stalling the pipeline: the final tick recorded a link time of 135{,}359\,ms against a median of 52\,ms, and the application then closed the session. Nothing in the system being tested detected or reported that condition, and no gate read the link time. The failure was sharp rather than gradual. Every tick up to 1311 had a normal link time, so 279\,s and 6.24\,km of that drive remained usable and only the last tick was discarded.
+
+
+\noindent\textbf{Perception fault.} The camera frames arrive rotated by ninety degrees. The detector expected an upright road scene, so on a rotated frame it returned almost nothing. The measurement that identified the cause put the same frames through the same detector twice. As delivered they returned 0 vehicles, and rotated clockwise they returned 2 at confidence 0.90 and 5 at 0.87, and only the clockwise rotation recovered them. One such frame shows a van filling much of the picture with a legible plate, so this was not a marginal detection. Figure~\ref{fig:teaser}(b) is a drive frame carried through the perception stage.
 
 
 
-
-\noindent\textbf{The vehicle is a hostile environment and the faults are
-physical.}
-Both devices ran from vehicle power for 152.8 minutes across eight runs with no
-power interruption. Two install faults each cost drive time. One handset's cable
-failed in the vehicle, so the application was moved to a second handset
-mid-session with the swap recorded automatically in the run metadata. Direct
-sunlight on the dashboard heated the tethering handset until its hotspot shut
-off, which ended a drive. The mount needs shade and not only a clamp.
+\noindent\textbf{The vehicle is a hostile environment and the faults are physical.} Both devices ran from vehicle power for 152.8 minutes across eight runs with no power interruption. Two install faults each cost drive time. One handset's cable failed in the vehicle, so we moved the application to a second handset mid-session, with the swap recorded automatically in the run metadata. Direct sunlight on the dashboard heated the tethering handset until its hotspot shut off, which ended a drive. Overall, the only solution we had to continue the data collection was cooling the phone by putting it in shade. Since the purpose of our drive was data collection and system testing, we ran it on relatively high sensing frequency. Based on the simulation results presented in section \ref{sec:simulation}, setting the camera capture rate to capturing one frame per minute should mostly resolve the heat issue.

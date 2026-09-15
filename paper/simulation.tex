@@ -1,88 +1,26 @@
 \section{The Flow-Level Result}
 \label{sec:simulation}
 
-One instrumented vehicle cannot demonstrate throughput or delay. The flow-level
-claim therefore comes from simulation. The question the simulation answers is narrow. 
-It is whether restricting the
-controller's observation to the fields a traffic API returns costs throughput.
 
-\noindent\textbf{The two observations being compared.}
-The prior controller~\cite{self_regulating_cars} reads six quantities per
-super-segment: density, lane count, mean speed, mean gap, entry rate and exit
-rate. Four are vehicle-level ground truth in the published implementation and a
-vehicle cannot obtain them, because the gap is the mean of each vehicle's follow
-distance, the entry and exit rates are set differences over the vehicle
-identities present one minute apart, and the density is counted over the
-vehicles on the segment. The deployed observation of Section~\ref{sec:vision}
-replaces those six with the five fields a feed and a map supply. The reward is
-unchanged, and training stays centralized on ground-truth density, so only the
-state the controller reads at decision time differs between the arms.
+One instrumented vehicle cannot demonstrate throughput or delay. Therefore, the flow-level claim comes from simulation. The question the simulation answers is narrow, namely whether restricting the controller's observation to the fields a traffic API returns costs throughput.
 
-On the road those five fields come from the HERE Traffic
-API~\cite{here_traffic_api}, whose \emph{jam factor} is a congestion index on a
-0 to 10 scale. The simulator has no such feed. Speed and free flow are read from
-the road itself, and the jam factor is computed as
-$\mathrm{clip}(10\,(1 - \mathrm{speed}/\mathrm{freeFlow}), 0, 10)$. HERE does
-not publish the formula behind its own jam factor, and it folds in incident data
-this project does not have. That expression is therefore a stated model rather than a
-measurement, and it is the one place where the simulated observation and the
-deployed observation are not the same quantity.
 
-\noindent\textbf{The port.}
-The published controller~\cite{self_regulating_cars} ran on the Mainz network in
-PTV Vissim under a Wiedemann-99 car-following model. That network was converted
-to SUMO~\cite{lopez2018sumo} directly from the Vissim XML, producing 410 edges
-over 51.5\,km. Three conversion decisions matter, and all three apply
-identically to every experiment. The source network is flat in the dynamics
-Vissim runs, because every one of its 410 links carries a gradient of zero,
-while its geometry carries vertical offsets of up to six metres that separate
-overpasses from the roads beneath them. The importer reads gradients off that
-geometry and produces edges up to 923\% steep, and SUMO applies gradient to
-acceleration, so flattening the import restores the source's own dynamics.
-Every edge imports with a 50\,km/h limit while the action set tops out at
-60\,km/h, so a speed factor of 1.2 makes all three actions expressible. The exit
-is modelled as a three-into-two lane drop, because the source link ends into
-free outflow and the network otherwise has no bottleneck there. The conversion
-also does not import right-of-way: the port carries 2 junctions with conflicting
-movements against 10 active conflict areas in the source.
+\noindent\textbf{The two observations being compared.} The prior controller~\cite{self_regulating_cars} reads six quantities per super-segment: density, lane count, mean speed, mean gap, entry rate and exit rate. Four of the six are vehicle-level ground truth in the published implementation and a vehicle cannot obtain them, because the gap is the mean of each vehicle's follow distance, the entry and exit rates are set differences over the vehicle identities present one minute apart, and the density is counted over the vehicles on the segment. The deployed observation of Section~\ref{sec:vision} replaces those six with the five fields a feed and a map supply. We leave the reward unchanged and keep training centralized on ground-truth density. Therefore, only the state the controller reads at decision time differs between the arms.
 
-\noindent\textbf{The fleet, and why it is not the published one.}
-The fleet is the Extended Intelligent Driver Model with a one-second reaction
-time~\cite{salles2020eidm,treiber2000idm}, chosen because it has a capacity
-drop. A capacity drop is not a free parameter: real queue discharge runs 5 to
-20\% below free-flow capacity, which is a property of traffic rather than of a
-model~\cite{hall1991capacity}. Measured on this port, the Wiedemann-99
-calibration discharges 4.3\% \emph{faster} than free flow, at 1{,}980\,veh/h
-against 1{,}899\,veh/h, which no measurement of real traffic supports. The
-Extended Intelligent Driver Model drops 21\% at an isolated lane drop. The gate
-applied before any experiment was run is that served flow must fall as offered
-demand rises, by more than the seed spread.
+On the road those five fields come from the HERE Traffic API~\cite{here_traffic_api}, whose \emph{jam factor} is a congestion index on a 0 to 10 scale. The simulator has no such feed. We read speed and free flow from the road itself, and compute the jam factor as $\mathrm{clip}(10\,(1 - \mathrm{speed}/\mathrm{freeFlow}), 0, 10)$. While that expression reproduces the scale, HERE does not publish the formula behind its own jam factor, and it folds in incident data this project does not have. That expression is therefore a stated model rather than a measurement, and it is the one place where the simulated observation and the deployed observation are not the same quantity.
 
-\noindent\textbf{Protocol.}
-Seeds 1 to 10 train, seeds 11 to 15 select the checkpoint, and seeds 16 to 30
-evaluate. Four arms across fifteen seeds is 60 episodes. Each episode runs
-2{,}500\,s at a 0.5\,s step, with the measurement window opening at 900\,s,
-under a sustained demand of 4{,}500\,veh/h and 3{,}124 scheduled departures, at
-100\% penetration.
+\noindent\textbf{The port.} The published controller~\cite{self_regulating_cars} ran on the Mainz network in PTV Vissim under a Wiedemann-99 car-following model. We converted that network to SUMO~\cite{lopez2018sumo} directly from the Vissim XML, producing 410 edges over 51.5\,km. Three conversion decisions matter, and all three apply identically to every experiment. The source network is flat in the dynamics Vissim runs, because every one of its 410 links carries a gradient of zero, while its geometry carries vertical offsets of up to six metres that separate overpasses from the roads beneath them. The importer reads gradients off that geometry and produces edges up to 923\% steep, and SUMO applies gradient to acceleration. Therefore, flattening the import restores the source's own dynamics. Every edge imports with a 50\,km/h limit while the action set tops out at 60\,km/h, so a speed factor of 1.2 makes all three actions expressible. We model the exit as a three-into-two lane drop, because the source link ends into free outflow and the network otherwise has no bottleneck there. The conversion also does not import right-of-way: the port carries 2 junctions with conflicting movements against 10 active conflict areas in the source.
 
-\noindent\textbf{Why the window opens at 900\,s.}
-Served flow is zero until the first trips complete and does not reach its
-sustained level before then. Over 200\,s windows across the fifteen evaluation
-seeds, the no-control arm completes 0, 43, 79 and 139 trips in the four windows
-before 800\,s, and between 188 and 214 in every window after, so measuring from
-the start of the episode would average the fill into the result. The network
-itself does not settle: insertions exceed arrivals in every window, and
-occupancy rises from 776 vehicles at the window start to 1{,}141 at 2{,}400\,s.
-The window makes the throughput figure a measurement of the controller rather
-than of the fill, and it does not make the episode a steady state. Arms are
-paired on seed, and every error bar below is two standard errors of the paired
-difference.
+\noindent\textbf{The fleet.} The fleet is the Extended Intelligent Driver Model with a one-second reaction time~\cite{salles2020eidm,treiber2000idm}, which we chose because it has a capacity drop. A capacity drop is not a free parameter, because real queue discharge runs 5 to 20\% below free-flow capacity, which is a property of traffic rather than of a model~\cite{hall1991capacity}. Measured on this port, the Wiedemann-99 calibration discharges 4.3\% \emph{faster} than free flow, at 1{,}980\,veh/h against 1{,}899\,veh/h, which no measurement of real traffic supports. The Extended Intelligent Driver Model drops 21\% at an isolated lane drop. The gate we applied before any experiment was run is that served flow must fall as offered demand rises, by more than the seed spread.
+
+
+\noindent\textbf{Protocol.} The seed split is as follows: seeds 1 to 10 train, seeds 11 to 15 select the checkpoint, and seeds 16 to 30 evaluate. Four arms across fifteen seeds is 60 episodes. Each episode runs 2{,}500\,s at a 0.5\,s step, with the measurement window opening at 900\,s, under a sustained demand of 4{,}500\,veh/h and 3{,}124 scheduled departures, at 100\% penetration.
+
+\noindent\textbf{Why the window opens at 900\,s.} Served flow is zero until the first trips complete and does not reach its sustained level before then. Over 200\,s windows across the fifteen evaluation seeds, the no-control arm completes 0, 43, 79 and 139 trips in the four windows before 800\,s, and between 188 and 214 in every window after. Therefore, measuring from the start of the episode would average the fill into the result. The window makes the throughput figure a measurement of the controller rather than of the fill. Arms are paired on seed, and every error bar below is two standard errors of the paired difference.
 
 \begin{table}[t]
 \centering
-\caption{Held-out seeds 16 to 30 on the Mainz port, paired on seed. The
-zeroed-head arm is the same network with its output layer zeroed, and it carries
-the entry gate that both controlled arms carry.}
+\caption{Held-out seeds 16 to 30 on the Mainz port, paired on seed. The zeroed-head arm is the same network with its output layer zeroed, and it carries the entry gate that both controlled arms carry.}
 \label{tab:sim}
 \small
 \resizebox{\columnwidth}{!}{%
@@ -99,57 +37,17 @@ Zeroed output layer     & 2{,}847 & $-688 \pm 46$ & 28.8 \\
 }
 \end{table}
 
-\noindent\textbf{The result.}
-Table~\ref{tab:sim} gives it. The two controlled arms differ by 6\,veh/h against
-error bars of 44 and 61\,veh/h, so restricting the observation to what a traffic
-API returns costs nothing this experiment can resolve, and the deployed
-observation is inseparable from the published one. Both controlled arms run
-slower than no control while serving more vehicles: space-mean speed falls from
-42.3 to 40.7\,km/h and arrivals rise from 1{,}940 to 1{,}995 per episode. That is
-the intended mechanism, because holding density below critical upstream of the
-merge lets the merge discharge near capacity instead of breaking down.
 
-\noindent\textbf{Testing the boundary.}
-Both controlled arms hold a vehicle at an entry link while that link is at or
-above critical density, and the no-control arm does not. That gate is a boundary
-condition on the controlled system rather than a piece of road, because applying
-it to an uncontrolled run would credit that run with a control action it is not
-taking. The asymmetry is a candidate explanation for the gain, so it was tested.
-The zeroed-head arm is the same trained network with its output layer zeroed
-after loading. It carries the entry gate and loses $688 \pm 46$\,veh/h against no
-control, 15.7 times the no-control arm's own bar below it. The gate alone does
-not produce the gain.
-
-\noindent\textbf{What this result is not comparable to.}
-No number here is comparable to the published table
-in~\cite{self_regulating_cars}; every claim is against this port's own no-control
-baseline. The two runs share the controller and the shape of the topology and
-differ in almost everything that decides how the controller behaves: PTV Vissim
-against SUMO, Wiedemann-99 against the Extended Intelligent Driver Model at a
-one-second reaction, and an 18{,}000\,veh/h surge against a sustained
-4{,}500\,veh/h. That is why the pair is stronger evidence than a matched number
-in one simulator would be.
+\noindent\textbf{The result.} We present the results in Table~\ref{tab:sim}. The two controlled arms differ by 6\,veh/h against error bars of 44 and 61\,veh/h. Therefore, restricting the observation to what a traffic API returns costs nothing, and the deployed observation is inseparable from the published one in \cite{self_regulating_cars}. Both controlled arms run slower than no control while serving more vehicles, as space-mean speed falls from 42.3 to 40.7\,km/h and arrivals rise from 1{,}940 to 1{,}995 per episode. That is different from the findings in \cite{self_regulating_cars}, but the difference in the simulation environment and geometry makes this unattributable. The throughput results replicate because holding density below critical upstream of the merge lets the merge discharge near capacity instead of breaking down.
 
 
-\noindent\textbf{The simulated gate and the deployed gate answer different
-questions.}
-In simulation the advisory is written as a speed command and SUMO bounds it by
-the car-following model's own safe speed, so a vehicle whose leader is slower
-follows its leader. That is the semantics the published implementation has and
-the documented way to command a speed in SUMO, and we left it alone. Replacing
-the simulator's car following with our own layer would make this arm
-incomparable to the earlier paper, and would make the run reproducible only by
-someone holding our code rather than by someone holding SUMO and the network
-file.
+\noindent\textbf{Testing the boundary.} Both controlled arms hold a vehicle at an entry link while that link is at or above critical density, and the no-control arm does not. This can be understood to be a replication of the self-regulating mechanism on inflow links that lead to the entry nodes in the network. That gate is a boundary condition on the controlled system rather than a piece of road, and applying it to an uncontrolled run would credit that run with a control action it is not taking. The asymmetry is a candidate explanation for the gain, so we tested it. The zeroed-head arm is the same trained network with its output layer zeroed after loading. It carries the entry gate and loses $688 \pm 46$\,veh/h against no control, which is 15.7 times the no-control arm's own bar below it. Therefore, the gate alone does not produce the gain.
 
-On the road that bound would be the wrong instrument. SUMO's safe speed is an
-actuator command, and it works because the simulator sets the vehicle's speed.
-The prototype sets nothing. The driver does the car following, so the vehicle
-already carries the model the simulator supplies, and a second copy of it on the
-phone would recompute what the driver is already doing. The question the road
-poses is whether a recommendation is fit to show, and that is what the deployed
-filter decides. One rule raises a recommendation that would have the vehicle
-travel slowly on an uncongested road. The other withholds the number when the
-gap to the vehicle ahead, or the time left to close it, falls below the
-configured minimum. Neither has an analogue in the simulator, because a
-simulated vehicle has no display and no driver reading it.
+
+\noindent\textbf{What this result is not comparable to.} No number here is comparable to the published table in~\cite{self_regulating_cars}, and every claim is against this port's own no-control baseline. The two runs share the controller and the shape of the topology, and they differ in almost everything that decides how the controller behaves: PTV Vissim against SUMO, Wiedemann-99 against the Extended Intelligent Driver Model at a one-second reaction, and an 18{,}000\,veh/h surge against a sustained 4{,}500\,veh/h. Therefore, the pair is stronger evidence than a matched number in one simulator would be.
+
+
+\noindent\textbf{The simulated gate and the deployed gate answer different questions.} In simulation the advisory is written as a speed command and SUMO bounds it by the car-following model's own safe speed, so a vehicle whose leader is slower follows its leader. That is the semantics the published implementation has and the documented way to command a speed in SUMO, and we left it alone. Replacing the simulator's car following with our own layer would make this arm incomparable to the earlier paper, and it would make the run reproducible only by someone holding our code rather than by someone holding SUMO and the network file.
+
+
+On the road that bound would be the wrong instrument. SUMO's safe speed is an actuator command, and it works because the simulator sets the vehicle's speed. The prototype sets nothing. The driver does the car following, so the vehicle already carries the model the simulator supplies, and a second copy of it on the phone would recompute what the driver is already doing. The question the road poses is whether a recommendation is fit to show, and that is what the deployed filter decides. One rule raises a recommendation that would have the vehicle travel slowly on an uncongested road. The other withholds the number when the gap to the vehicle ahead, or the time left to close it, falls below the configured minimum. Therefore, neither has an analogue in the simulator, because a simulated vehicle has no display and no driver reading it.

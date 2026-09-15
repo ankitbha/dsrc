@@ -1,57 +1,22 @@
 \section{Related Work}
 \label{sec:related}
 
-\noindent\textbf{The controller this paper deploys.}
-Self-regulating cars learns a policy that assigns a desired speed to each
-super-segment of a highway network, and reports a 5\% throughput gain and a 13\%
-delay reduction against no control in PTV Vissim~\cite{self_regulating_cars}.
-Its observer is central and its decisions reach vehicles through a cloud
-service. The failure mode it targets is characterized
-in~\cite{bhardwaj2023understanding}, which defines a sudden traffic jam as a
-burst that pushes density past a critical threshold into a stable low-capacity
-state. This paper changes where the policy is evaluated and what it is allowed
-to read, and it leaves the reward, the training and the controller unchanged.
+% \noindent\textbf{The controller this paper deploys.} Self-regulating cars learns a policy that assigns a desired speed to each super-segment of a highway network, and reports a 5\% throughput gain and a 13\% delay reduction against no control in PTV Vissim~\cite{self_regulating_cars}. Its observer is central and its decisions reach vehicles through a cloud service. The failure mode it targets is characterized in~\cite{bhardwaj2023understanding}, which defines a sudden traffic jam as a burst that pushes density past a critical threshold into a stable low-capacity state. This paper changes where the policy is evaluated and what it is allowed to read, and it leaves the reward, the training and the controller unchanged.
 
-\noindent\textbf{Sparse vehicles as traffic actuators.}
-A single controlled vehicle damps stop-and-go waves on a ring
-track~\cite{stern2018dissipation}, which established the sparse-actuator
-premise. Learned controllers improve simulated traffic at low penetration in the
-mixed-autonomy literature~\cite{wu2017flow,vinitsky2018benchmarks,kreidieh2018dissipating}.
-CIRCLES placed about one hundred controlled vehicles into live interstate
-traffic and is the strongest field evidence available, using purpose-built
-vehicles and a centralized speed planner over cellular
-links~\cite{lee2024traffic}. The work here differs on the deployment axis rather
-than the control axis: the vehicle is unmodified, the compute is commodity, and
-no planner is contacted at run time.
+\noindent\textbf{The controller this paper deploys.} Self-regulating cars learns a policy that assigns a desired speed to each super-segment of a highway network, and reports a 5\% throughput gain and a 13\% delay reduction against no control in PTV Vissim~\cite{self_regulating_cars}. Its observer is central and its decisions reach vehicles through a cloud service. \cite{bhardwaj2023understanding} characterizes the failure mode it targets, defining a sudden traffic jam as a burst that pushes density past a critical threshold into a stable low-capacity state. This paper changes where the policy is evaluated and what it is allowed to read, and it leaves the reward, the training and the controller unchanged.
 
-\noindent\textbf{Infrastructure-centric control.}
-Ramp metering, variable speed limits and adaptive signal control remain the
-deployed tools~\cite{arnold1998ramp,papageorgiou2002freeway,scats,scoot}. They
-are effective where the sensors and actuators exist, and they require owning the
-roadside.
+% \noindent\textbf{Sparse vehicles as traffic actuators.} A single controlled vehicle damps stop-and-go waves on a ring track~\cite{stern2018dissipation}, which established the sparse-actuator premise. Learned controllers improve simulated traffic at low penetration in the mixed-autonomy literature~\cite{wu2017flow,vinitsky2018benchmarks,kreidieh2018dissipating}. CIRCLES placed about one hundred controlled vehicles into live interstate traffic and is the strongest field evidence available, using purpose-built vehicles and a centralized speed planner over cellular links~\cite{lee2024traffic}. The work here differs on the deployment axis rather than the control axis: the vehicle is unmodified, the compute is commodity, and no planner is contacted at run time.
 
-\noindent\textbf{Traffic state from vehicles and from feeds.}
-Probe-vehicle systems estimate network state by uplinking per-vehicle traces to
-a backend that aggregates
-centrally~\cite{seo2017traffic,herrera2010evaluation}, and connected-vehicle
-standards broadcast per-vehicle position, speed and heading at up to ten
-hertz~\cite{sae2020j2735,etsi2019cam,kenney2011dedicated}, which the collective
-perception service extends to per-object detections~\cite{etsi2023cpm}. This
-design uses neither, because the observation it needs is already published as a
-commercial product at segment granularity~\cite{here_traffic_api}, so a query
-replaces both the radio and the aggregation backend. The trade is explicit: a
-feed is a third-party dependency with an unreported lag and different risks, but
-it suffices for a minimum viable deployment.
+\noindent\textbf{Sparse vehicles as traffic actuators.} A single controlled vehicle damps stop-and-go waves on a ring track~\cite{stern2018dissipation}, which established the sparse-actuator premise. Learned controllers improve simulated traffic at low penetration in the mixed-autonomy literature~\cite{wu2017flow,vinitsky2018benchmarks,kreidieh2018dissipating}. CIRCLES placed about one hundred controlled vehicles into live interstate traffic and is the strongest field evidence available, using purpose-built vehicles and a centralized speed planner over cellular links~\cite{lee2024traffic}. While those results settle the control question, the work here differs on the deployment axis rather than the control axis: the vehicle is unmodified, the compute is commodity, and no planner is contacted at run time.
 
-\noindent\textbf{Advisory interfaces and edge perception.}
-Coarse, human-followable advisories have precedent in advisory-autonomy
-work~\cite{Yan_2023,cho2023temporal,fridman2018human}, and mobile telematics
-platforms operate the driver-facing rail at the scale of tens of millions of
-drivers~\cite{cmt2025,samsara2025}. This paper does not evaluate compliance, for
-the reasons stated in Section~\ref{sec:intro}. On the sensing side, embedded
-detectors and Jetson-class hardware make on-vehicle perception
-practical~\cite{redmon2016yolo,nvidia2023jetson,bewley2016sort,yang2024depth},
-and the measurements in Section~\ref{sec:eval} are consistent with that
-literature. The contribution here is not the detector. It is what the rest of
-the system around it has to do to keep the detector's output honest when it is
-wrong.
+% \noindent\textbf{Infrastructure-centric control.} Ramp metering, variable speed limits and adaptive signal control remain the deployed tools~\cite{arnold1998ramp,papageorgiou2002freeway,scats,scoot}. They are effective where the sensors and actuators exist, and they require owning the roadside.
+
+\noindent\textbf{Infrastructure-centric control.} Ramp metering, variable speed limits and adaptive signal control remain the deployed tools~\cite{arnold1998ramp,papageorgiou2002freeway,scats,scoot}. While they are effective where the sensors and actuators exist, they require owning the roadside.
+
+% \noindent\textbf{Traffic state from vehicles and from feeds.} Probe-vehicle systems estimate network state by uplinking per-vehicle traces to a backend that aggregates centrally~\cite{seo2017traffic,herrera2010evaluation}, and connected-vehicle standards broadcast per-vehicle position, speed and heading at up to ten hertz~\cite{sae2020j2735,etsi2019cam,kenney2011dedicated}, which the collective perception service extends to per-object detections~\cite{etsi2023cpm}. This design uses neither, because the observation it needs is already published as a commercial product at segment granularity~\cite{here_traffic_api}, so a query replaces both the radio and the aggregation backend. The trade is explicit: a feed is a third-party dependency with an unreported lag and different risks, but it suffices for a minimum viable deployment.
+
+\noindent\textbf{Traffic state from vehicles and from feeds.} Probe-vehicle systems estimate network state by uplinking per-vehicle traces to a backend that aggregates centrally~\cite{seo2017traffic,herrera2010evaluation}, and connected-vehicle standards broadcast per-vehicle position, speed and heading at up to ten hertz~\cite{sae2020j2735,etsi2019cam,kenney2011dedicated}, which the collective perception service extends to per-object detections~\cite{etsi2023cpm}. This design uses neither, because the observation it needs is already published as a commercial product at segment granularity~\cite{here_traffic_api}. Therefore, a query replaces both the radio and the aggregation backend. The trade is explicit: while a feed is a third-party dependency with an unreported lag and different risks, it suffices for a minimum viable deployment.
+
+% \noindent\textbf{Advisory interfaces and edge perception.} Coarse, human-followable advisories have precedent in advisory-autonomy work~\cite{Yan_2023,cho2023temporal,fridman2018human}, and mobile telematics platforms operate the driver-facing rail at the scale of tens of millions of drivers~\cite{cmt2025,samsara2025}. This paper does not evaluate compliance, for the reasons stated in Section~\ref{sec:intro}. On the sensing side, embedded detectors and Jetson-class hardware make on-vehicle perception practical~\cite{redmon2016yolo,nvidia2023jetson,bewley2016sort,yang2024depth}, and the measurements in Section~\ref{sec:eval} are consistent with that literature. The contribution here is not the detector. It is what the rest of the system around it has to do to keep the detector's output honest when it is wrong.
+
+\noindent\textbf{Advisory interfaces and edge perception.} Coarse, human-followable advisories have precedent in advisory-autonomy work~\cite{Yan_2023,cho2023temporal,fridman2018human}, and mobile telematics platforms operate the driver-facing rail at the scale of tens of millions of drivers~\cite{cmt2025,samsara2025}. This paper does not evaluate compliance, for the reasons stated in Section~\ref{sec:intro}. On the sensing side, embedded detectors and Jetson-class hardware make on-vehicle perception practical~\cite{redmon2016yolo,nvidia2023jetson,bewley2016sort,yang2024depth}, and the measurements in Section~\ref{sec:eval} are consistent with that literature. The contribution here is not the detector. It is what the rest of the system around it has to do to keep the detector's output honest when it is wrong.
