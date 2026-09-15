@@ -1,31 +1,29 @@
 \begin{abstract}
 A free-flow road network jams when a local disturbance pushes density past a
 critical point. Earlier work learned a controller that prevents this by setting
-a desired speed per road segment, and measured a throughput gain for it in
-simulation. That controller reads vehicle-level state a central observer
-collects, and it delivers its decisions through a cloud service. This paper
-asks what has to be added to an ordinary vehicle for the same controller to run
-on the vehicle instead, and reports what happened when that was built and
-driven.
+a desired speed per road segment and measured a throughput gain for it in
+simulation, but that controller reads vehicle-level state a central observer
+collects and delivers its decisions through a cloud service. This paper asks
+what has to be added to an ordinary vehicle for the same controller to run on
+the vehicle instead, and reports what happened when that was built and driven.
 
 The answer has four parts: an Android phone the driver already owns, an NVIDIA
 Jetson Orin Nano developer kit listing at about US\$250, a public traffic API,
 and a filter that bounds the advisory before it is shown. Nothing is installed
 on the road, and no server sits inside the control loop. The policy is a
 deterministic function of a feed every vehicle can query, so vehicles carrying
-the same weights compute the same action without coordinating with each other.
-The phone samples its camera, GPS and inertial unit at rates the Jetson sets at
-run time rather than at install time.
+the same weights compute the same action without coordinating. The phone
+samples its camera, GPS and inertial unit at rates the Jetson sets at run time
+rather than at install time.
 
 Eight drives on one day recorded 22{,}929 ticks over 152.8 minutes on vehicle
-power. The on-Jetson path has a median of 19.8\,ms, and the phone-to-Jetson
-path has a 95th percentile of 116.19\,ms against a 200\,ms target. Nothing was
-connected to the vehicle's controls, and no advisory was acted on by a driver.
-In simulation on the same network, the vehicle-side observation gains
-$230 \pm 44$\,veh/h over no control and the published observation gains
-$224 \pm 61$\,veh/h, so restricting the observation to what a feed returns
-costs nothing this experiment can resolve. Two deployment failures are reported
-because a simulator cannot produce them. The phone overheated on a windscreen
-mount in sunlight and the platform stalled the pipeline. A ninety-degree camera
-rotation sent detection to a null during the drive.
+power. The on-Jetson path has a median of 19.8\,ms and the phone-to-Jetson path
+a 95th percentile of 116.19\,ms against a 200\,ms target. Nothing was connected
+to the vehicle's controls, and no advisory was acted on by a driver. In
+simulation on the same network the vehicle-side observation gains $230 \pm 44$\,veh/h over no control and the published observation gains
+$224 \pm 61$\,veh/h, so restricting the observation to what a feed returns costs
+nothing this experiment can resolve. Two deployment failures are reported
+because a simulator cannot produce them: the phone overheated on a windscreen
+mount in sunlight and the platform stalled the pipeline, and a ninety-degree
+camera rotation sent detection to a null during the drive.
 \end{abstract}

@@ -4,73 +4,66 @@
 \noindent\textbf{The rig.}
 The vehicle side is an ordinary Android phone and a Jetson Orin Nano, with no
 purpose-built hardware (Figure~\ref{fig:overview}(b)). The phone holds no
-interpretation logic. It captures or queries at the rate it is told and forwards
+interpretation logic: it captures or queries at the rate it is told and forwards
 raw data, and every association, fusion and sampling decision happens on the
-Jetson. The phone is connected to the internet via 5G cellular connection.
-Two transports are implemented for the same wire protocol. A Tailscale network
-is used for development with the phone in hand, and USB is used in the vehicle.
-Both devices are powered from the vehicle, so energy is not a binding
-constraint.
+Jetson. The phone reaches the internet over 5G. Two transports are implemented
+for the same wire protocol, a Tailscale network for development with the phone
+in hand and USB in the vehicle, and both devices are powered from the vehicle,
+so energy is not a binding constraint.
 
 \noindent\textbf{The sensing scheduler.}
 Each sensor's sampling rate is set at run time by the Jetson and commanded to
-the phone. The four rates are camera, GPS, inertial unit and traffic feed. The
-costs the scheduler trades against are traffic-API quota, thermal headroom on
-the phone, and Jetson compute. It has two modes. In shadow mode the decision
+the phone. The four rates are camera, GPS, inertial unit and traffic feed, and
+the costs the scheduler trades against are traffic-API quota, thermal headroom
+on the phone, and Jetson compute. It has two modes: in shadow mode the decision
 is recorded and not sent, and in live mode the phone applies it. That
-distinction is about sensing configuration only. The rate command carries
-sampling rates and a shadow flag. The
-word ``live'' here describes what the sensing configuration
-did, and not what the vehicle did.
+distinction is about sensing configuration only, so the word ``live'' here
+describes what the sensing configuration did, and not what the vehicle did.
 
 \noindent\textbf{The transport.}
 One wire protocol carries everything between the phone and the Jetson, over the
 development link and the in-vehicle link alike. It defines eight channels, each
 with its own sequence numbers, priority, overflow policy and queue depth, over a
-shared timebase. The frame layout is frozen in a single specification file.
+shared timebase, and the frame layout is frozen in a single specification file.
 Neither implementation is tested against the other. Both are tested against that
 file, so the two sides cannot drift by agreeing with each other.
 
 \noindent\textbf{The safety gate.}
-The advisory passes a filter before it is displayed. The filter is vendored
-onto the device from the simulator's safety layer and checked against a frozen
-copy of it, so the two cannot drift apart. The simulator does not run the layer
-itself, and Section~\ref{sec:simulation} gives the reason. The advisory is a
-speed, so a rule earns its place by bounding that speed, and two do. The first
-raises a recommendation that would have the vehicle travel slowly on an
-uncongested road, which is the obstruction case. The second overrides the
-recommendation when the gap to the vehicle ahead, or the time left to close it,
-falls below the configured minimum. Each rule records, per tick, whether it
-fired, stayed quiet, or could not be evaluated at all, with the missing inputs
-named. A rule that cannot be evaluated is inert, so it cannot move the
-recommendation in either direction.
+The advisory passes a filter before it is displayed. The filter is vendored onto
+the device from the simulator's safety layer and checked against a frozen copy of
+it, so the two cannot drift apart; the simulator does not run the layer itself,
+for the reason Section~\ref{sec:simulation} gives. The advisory is a speed, so a
+rule earns its place by bounding that speed, and two do. The first raises a
+recommendation that would have the vehicle travel slowly on an uncongested road,
+which is the obstruction case. The second overrides the recommendation when the
+gap to the vehicle ahead, or the time left to close it, falls below the
+configured minimum. Each rule records per tick whether it fired, stayed quiet, or
+could not be evaluated, naming the missing inputs, and a rule that cannot be
+evaluated is inert.
 
 \noindent\textbf{The device cannot drift from what was trained.}
-The observation and action contract is vendored onto the device from the
-simulator and pinned to a named version of it, so the device encodes an
-observation and decodes an action exactly as training did. The export step
-refuses any dimension mismatch. We enforce this using a second frozen specification file, holding
-encoded observations, the action schema, the decoders and the neutral
-fallbacks. Every entry in it is derived twice, once from the pinned version of
-the simulator and once from the vendored copy, and the generator refuses to
-write the file on any disagreement. That derivation runs where the training
-stack lives. The check that runs on the device is the comparison against the
-frozen file, which needs the file and nothing else, so the property is
-testable on the hardware that has to hold it.
+The observation and action contract is vendored onto the device and pinned to a
+named version of the simulator, so the device encodes an observation and decodes
+an action exactly as training did, and the export step refuses any dimension
+mismatch. A second frozen specification file holds the encoded observations, the
+action schema, the decoders and the neutral fallbacks. Every entry is derived
+twice, once from the pinned simulator and once from the vendored copy, and the
+generator refuses to write the file on any disagreement. The check that runs on
+the device needs that file and nothing else, so the property is testable on the
+hardware that has to hold it.
 
 \noindent\textbf{Two design stances.}
 The first is to degrade rather than stop. Missing GPS, no camera, no display and
 no trained checkpoint each have a defined degraded mode, because debugging time
-inside a vehicle is expensive. The second is that the hot path holds no queues,
-and the latest value wins. A frame that was never processed is dropped, a slow
+inside a vehicle is expensive. The second is that the hot path holds no queues
+and the latest value wins: a frame that was never processed is dropped, a slow
 display skips ticks, and a stalled card drops log records. For a real-time
 advisory, stale data is worse than missing data.
 
-\noindent\textbf{Data collection.} A tick is one pass of the Jetson's pipeline. 
-It takes the most recent camera
-frame together with the latest GPS and inertial readings, runs detection,
-tracking and distance estimation, builds the observation, runs the policy,
-decodes the advisory, passes it through the safety gate, and writes one record.
-Camera frames pace the ticks, so the tick rate follows the camera rate the
-sensing scheduler has commanded. Every per-tick count in this paper refers to
-that record.
+\noindent\textbf{Data collection.}
+A tick is one pass of the Jetson's pipeline. It takes the most recent camera
+frame with the latest GPS and inertial readings, runs detection, tracking and
+distance estimation, builds the observation, runs the policy, decodes the
+advisory, passes it through the safety gate, and writes one record. Camera
+frames pace the ticks, so the tick rate follows the commanded camera rate, and
+every per-tick count in this paper refers to that record.
