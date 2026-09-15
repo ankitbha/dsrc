@@ -15,8 +15,10 @@
 %   \Description{...}               commented out in the section files; acmart-only
 %   graphicx loaded by the class    loaded explicitly here
 %
-% ICRA is not double-blind, so the anonymous option is gone and the author block is
-% filled in below.
+% ICRA is double-blind, so the author block stays anonymous until the camera-ready.
+% Two things follow from that and are easy to undo by accident. The affiliation and
+% e-mail in \author are placeholders, and prior work by these authors is cited in the
+% third person, never as "we": see the Mainz paragraph in intro.tex.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 \documentclass[letterpaper, 10pt, conference]{ieeeconf}
@@ -37,9 +39,20 @@
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta,calc,positioning,fit}
 
-\newcommand{\sys}{self-regulating cars}
+% Float parameters. The defaults reserve so much of each column for text that a
+% half-column figure is deferred to the end of the document rather than placed;
+% all three figures here did exactly that before these were raised.
+\renewcommand{\topfraction}{0.88}
+\renewcommand{\bottomfraction}{0.7}
+\renewcommand{\textfraction}{0.1}
+\renewcommand{\floatpagefraction}{0.75}
+\renewcommand{\dbltopfraction}{0.88}
+\renewcommand{\dblfloatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{dbltopnumber}{3}
+\setcounter{totalnumber}{4}
 
-\title{\LARGE \bf Deploying Self-Regulating Cars}
+\title{\LARGE \bf Realizing Self-Regulating Cars on Commodity Hardware}
 
 \author{Anonymous Authors$^{1}$%
 \thanks{$^{1}$Anonymous Affiliations. {\tt\small anonymous.emails}}%

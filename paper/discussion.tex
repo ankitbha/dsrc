@@ -1,33 +1,32 @@
 \section{Conclusion and Limitations}
 
-Moving this controller onto a vehicle is a systems problem rather than a
-control problem. The parts are a phone the driver already owns, a US\$250
-single-board computer, a traffic API, and a filter on the advisory. Nothing is
-installed on the road, and no server sits inside the control loop. The compute
-device's median is 19.8\,ms and the link's 95th percentile is 116.19\,ms
-against a 200\,ms target. Restricting the observation to what a feed returns
-changes throughput by 6\,veh/h against error bars of 44 and 61\,veh/h, while
-both controlled arms gain more than 200\,veh/h over no control. What decided
-whether a drive produced data was thermal, physical and perceptual rather than
-any of this.
+Moving this controller onto a vehicle is a systems problem rather than a control
+problem. The parts are a phone the driver already owns, a US\$250 single-board
+computer, a traffic API, and a filter on the advisory, with nothing installed on
+the road and no server inside the control loop. The compute device's median is
+19.8\,ms and the link's 95th percentile is 116.19\,ms against a 200\,ms target.
+Restricting the observation to what a feed returns changes throughput by
+6\,veh/h against error bars of 44 and 61\,veh/h, while both controlled arms gain
+more than 200\,veh/h over no control. What decided whether a drive produced data
+was thermal, physical and perceptual rather than any of this.
 
 \noindent\textbf{What the deployment does not establish.}
 No advisory was acted on, so nothing here measures compliance. The corpus is
 eight runs on one day, with one vehicle, one driver and one road. The frame
 rotation left the detector returning almost nothing, so the safety layer's
-camera inputs were processed offline. The wire hop is an order rather
-than a duration, because its median and its conversion bound are the same size.
-The feed reports when a response arrived and not when the conditions held, so
+camera inputs were processed offline. The wire hop is an order rather than a
+duration, because its median and its conversion bound are the same size. The
+feed reports when a response arrived and not when the conditions held, so
 nothing bounds the observation's staleness. The first drive ended in a condition
-nothing detects. Distance is a bracket rather than a number, because the two
-methods disagree by 3.5\,km.
+nothing detects, and distance is a bracket because the two methods disagree by
+3.5\,km.
 
 \noindent\textbf{What the simulation does not establish.}
-Every figure is against this port's own baseline, and none is comparable to the
+Every figure is against this port's own baseline and none is comparable to the
 published table. The port differs from its source in right-of-way, exit geometry
-and gradient, and the fleet is not the published one. The
-episode does not reach a steady state. The jam factor the simulated observation
-reads is a stated model rather than a measurement.
+and gradient, the fleet is not the published one, the episode does not reach a
+steady state, and the jam factor the simulated observation reads is a stated
+model rather than a measurement.
 
 \section{Acknowledgements}
 Opus 5 (1M) model was used for writing the code as well as the text of the paper.
