@@ -111,7 +111,7 @@ def test_own_bonnet_is_neither_a_vehicle_nor_a_leader():
     assert camera.vehicle_boxes([hood], w, h) == []
     assert not camera.has_leader([hood], w, h)
     # A wide vehicle that ends well above the bottom edge, or a narrow one at the bottom, still counts.
-    near_car = Box(2, 0.9, 100, 800, 640, 1000)
+    near_car = Box(2, 0.9, 20, 800, 700, 1000)   # as wide as the bonnet, but ends well above the bottom edge
     narrow_low = Box(2, 0.9, 300, 1100, 420, 1275)
     assert not camera.is_ego_hood(near_car, w, h) and not camera.is_ego_hood(narrow_low, w, h)
     assert camera.has_leader([hood, near_car], w, h)

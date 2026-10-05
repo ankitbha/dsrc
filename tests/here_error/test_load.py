@@ -7,6 +7,12 @@ from here_error import load
 from here_error.clock import ClockOffset
 
 T0 = 1788901800.0
+
+
+def near(v):
+    """Epoch-scale seconds: pytest's default relative tolerance would be about 1800 s here."""
+    return pytest.approx(v, rel=0, abs=1e-6)
+
 OFFSET = ClockOffset(1.2, 1.2, 1.2, 10)
 PTS = [(40.0, -74.0), (40.001, -74.0), (40.002, -74.0)]
 
@@ -34,14 +40,14 @@ def test_phone_log_filters_and_sorts_gps(tmp_path):
     log = load.load_phone_log(phone)
     assert [f.utc_s for f in log.gps] == [T0, T0 + 1, T0 + 3]
     assert log.n_gps_invalid == 1 and log.n_gps_duplicate_time == 1
-    assert log.gps[0].wall_s == pytest.approx(T0 + 1.2)
+    assert log.gps[0].wall_s == near(T0 + 1.2)
 
 
 def test_here_body_joined_and_response_time_in_utc(tmp_path):
     d, phone = make(tmp_path)
     log = load.load_phone_log(phone)
     (b,) = load.load_here_bodies("run_x", d, log, OFFSET)
-    assert b.response_utc_s == pytest.approx(T0 + 5.2 - 1.2)
+    assert b.response_utc_s == near(T0 + 5.2 - 1.2)
     import datetime as dt
     assert b.data_time_s == dt.datetime(2026, 9, 8, 21, 10, tzinfo=dt.timezone.utc).timestamp()
     (s,) = b.segments
@@ -83,7 +89,7 @@ def test_phone_sequence_restart_does_not_matter_when_the_pairing_checks_hold(tmp
     d, phone = two_here_records(tmp_path, phone_seqs=(0, 0), mono_gap_2=0.0)
     bodies = load.load_here_bodies("run_x", d, load.load_phone_log(phone), OFFSET)
     assert [b.seq for b in bodies] == [0, 1]
-    assert bodies[1].response_utc_s == pytest.approx(T0 + 65.2 - 1.2)
+    assert bodies[1].response_utc_s == near(T0 + 65.2 - 1.2)
 
 
 def test_receipt_times_that_do_not_line_up_are_refused(tmp_path):
@@ -97,8 +103,8 @@ def test_frame_time_arithmetic(tmp_path):
     log = load.load_phone_log(phone)
     frames = load.load_frames("run_x", d, log, OFFSET)
     # wall = T0+5.2, capture is 0.5 s earlier on the phone clock, then minus the 1.2 s offset.
-    assert frames[0].capture_utc_s == pytest.approx(T0 + 5.2 - 0.5 - 1.2)
-    assert frames[1].capture_utc_s == pytest.approx(T0 + 6.2 - 0.5 - 1.2)
+    assert frames[0].capture_utc_s == near(T0 + 5.2 - 0.5 - 1.2)
+    assert frames[1].capture_utc_s == near(T0 + 6.2 - 0.5 - 1.2)
     assert frames[0].key == "run_x:11"
 
 
