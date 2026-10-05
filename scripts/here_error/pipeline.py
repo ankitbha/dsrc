@@ -17,6 +17,8 @@ from here_error.here_times import (
 from here_error.load import PhoneLog, load_frames, load_here_bodies, load_phone_log
 from here_error.matching import CatalogueEntry, extract_passes
 from here_error.models import Frame, HereBody, Pass, PassTimes
+from here_error.routing import request_for_fixes
+from here_error.models import RouteRequest
 from here_error.stretches import StretchResult, build_stretches
 
 
@@ -101,3 +103,20 @@ def length_flag_counts(asm: Assembly) -> tuple[int, int, int]:
     total = sum(len(c) for c in asm.catalogues.values())
     on_flagged = sum(1 for a in asm.analysed if a.p.segment_length_flag)
     return flagged, total, on_flagged
+
+
+def route_requests(asm: Assembly) -> list[RouteRequest]:
+    """One request per pass that passed the matching gates, and one per stretch.
+
+    A stretch's observed time runs from its first fix to its last fix, so it includes the short
+    gaps between its passes, because the route covers them too.
+    """
+    out = []
+    for p in asm.passes:
+        if p.exclusion is None:
+            out.append(request_for_fixes(p.pass_id, "pass", p.run, p.fixes, p.observed_s))
+    by_id = {p.pass_id: p for p in asm.passes}
+    for s in asm.stretch_result.stretches:
+        fixes = [f for pid in s.pass_ids for f in by_id[pid].fixes]
+        out.append(request_for_fixes(s.stretch_id, "stretch", s.run, fixes, fixes[-1].utc_s - fixes[0].utc_s))
+    return out

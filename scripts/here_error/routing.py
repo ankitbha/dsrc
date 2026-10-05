@@ -6,6 +6,7 @@ message, a cache file or an output file.
 from __future__ import annotations
 
 import datetime as dt
+import csv
 import hashlib
 import json
 import os
@@ -190,3 +191,28 @@ def request_for_fixes(request_id: str, kind: str, run: str, fixes, observed_s: f
         departure_utc_s=fixes[0].utc_s, observed_s=observed_s, matched_m=driven,
         fix_lat=tuple(lat.tolist()), fix_lon=tuple(lon.tolist()),
     )
+
+
+CSV_COLUMNS = ("request_id", "kind", "observed_s", "duration_s", "no_traffic_duration_s", "length_m",
+               "signed_error", "follows_path", "share_within", "length_rel_diff", "exclusion")
+
+
+def write_csv(results: Sequence[RouteResult], path: Path) -> None:
+    with path.open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(CSV_COLUMNS)
+        for r in results:
+            w.writerow([r.request_id, r.kind, r.observed_s, r.duration_s,
+                        "" if r.no_traffic_duration_s is None else r.no_traffic_duration_s, r.length_m,
+                        r.signed_error, int(r.follows_path), r.share_within, r.length_rel_diff, r.exclusion or ""])
+
+
+def read_csv(path: Path) -> list[RouteResult]:
+    with path.open(newline="") as fh:
+        return [RouteResult(
+            request_id=r["request_id"], kind=r["kind"], duration_s=float(r["duration_s"]),
+            no_traffic_duration_s=float(r["no_traffic_duration_s"]) if r["no_traffic_duration_s"] else None,
+            length_m=float(r["length_m"]), observed_s=float(r["observed_s"]), signed_error=float(r["signed_error"]),
+            follows_path=bool(int(r["follows_path"])), share_within=float(r["share_within"]),
+            length_rel_diff=float(r["length_rel_diff"]), exclusion=r["exclusion"] or None,
+        ) for r in csv.DictReader(fh)]
