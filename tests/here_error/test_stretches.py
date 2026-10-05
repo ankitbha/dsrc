@@ -50,3 +50,11 @@ def test_maximum_closes_before_a_pass_that_would_exceed_it():
 def test_runs_are_never_joined():
     rows = [ap("a", 0, 1200, run="run_1"), ap("b", 110, 1200, run="run_2")]
     assert build_stretches(rows).stretches == ()
+
+
+def test_stretch_sums_stopped_time_and_leaves_gaps_out_of_observed_time():
+    rows = [ap("a", 0, 1200, dur=100.0), ap("b", 150, 1200, dur=100.0)]     # 50 s gap between them
+    (s,) = build_stretches(rows).stretches
+    assert s.stopped_s == 10.0                    # 5 s in each pass
+    assert s.observed_s == 200.0                  # not 250 s from first fix to last fix
+    assert s.start_utc_s != s.end_utc_s

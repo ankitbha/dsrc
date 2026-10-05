@@ -46,8 +46,12 @@ class PassRow:
     leader_share: float | None
 
     @property
-    def road(self) -> str:
-        return self.a.p.description
+    def road_id(self) -> str:
+        return self.a.p.road_id
+
+    @property
+    def segment_key(self) -> str:
+        return self.a.p.segment_key
 
 
 def read_label_scores(path: Path) -> list[HalfScore]:
@@ -70,6 +74,12 @@ def camera_coverage(inputs: ReportInputs) -> list[str]:
     return out
 
 
+def valid_routes(inputs: ReportInputs) -> list[RouteResult]:
+    """Routing results that belong to a current request: same id and same observed time."""
+    need = {q.request_id: q.observed_s for q in inputs.requests}
+    return [r for r in (inputs.routing or []) if r.request_id in need and abs(r.observed_s - need[r.request_id]) < 1e-6]
+
+
 def incomplete_reasons(inputs: ReportInputs) -> list[str]:
     reasons = camera_coverage(inputs)
     if inputs.label_scores is None:
@@ -77,10 +87,14 @@ def incomplete_reasons(inputs: ReportInputs) -> list[str]:
     if inputs.routing is None:
         reasons.append("routing results are missing")
     else:
-        have = {r.request_id for r in inputs.routing}
+        good = valid_routes(inputs)
+        stale = len(inputs.routing) - len(good)
+        if stale:
+            reasons.append(f"{stale} routing rows match no current request (stale or foreign id or observed time) and are ignored")
+        have = {r.request_id for r in good}
         need = {q.request_id for q in inputs.requests}
         if need - have:
-            reasons.append(f"routing results cover {len(need & have)} of {len(need)} requests")
+            reasons.append(f"routing results cover {len(need & have)} of {len(need)} current requests")
     return reasons
 
 
@@ -93,7 +107,9 @@ def daylight_only(inputs: ReportInputs) -> bool:
 
 
 def _road_class(fc: int | None) -> str:
-    return "unknown" if fc is None else ("class 2" if fc <= 2 else "class 3-4")
+    if fc is None:
+        return "unknown"
+    return f"class {fc}" if fc <= 2 else "class 3 and above"
 
 
 def pass_rows(inputs: ReportInputs) -> list[PassRow]:
@@ -126,47 +142,105 @@ def pct(x: float, signed: bool = True) -> str:
     return f"{100 * x:+.1f}%" if signed else f"{100 * x:.1f}%"
 
 
-def interval(ci: stats.MedianCI) -> str:
-    return f"{pct(ci.lo)} to {pct(ci.hi)}"
-
-
-def _ci(values, clusters):
-    return stats.cluster_bootstrap_median(values, clusters) if len(values) else None
-
-
 def pp(x: float) -> str:
     """A difference of two signed errors, in percentage points of travel time."""
     return f"{100 * x:+.1f} pp"
 
 
-def _row(label, ci, n_unit, fmt=pct):
-    if ci is None:
-        return f"| {label} | {NOT_COMPUTED}: no data | | |"
-    return f"| {label} | {fmt(ci.median)} | {fmt(ci.lo)} to {fmt(ci.hi)} | {ci.n} {n_unit} on {ci.n_clusters} clusters |"
+_SINGULAR = {"physical roads": "physical road", "directed segments": "directed segment", "stretches": "stretch"}
+
+
+def _interval_text(values, clusters, unit: str, fmt=pct) -> str:
+    """95% cluster-bootstrap interval, or a statement that too few clusters exist to resample."""
+    n = len(set(clusters))
+    if n < params.MIN_N_FOR_INTERVAL:
+        return f"not resolvable: {n} {_SINGULAR[unit] if n == 1 else unit}"
+    ci = stats.cluster_bootstrap_median(values, clusters)
+    return f"{fmt(ci.lo)} to {fmt(ci.hi)}"
+
+
+ROAD_COL = "95% interval resampling physical roads"
+SEGMENT_COL = "95% interval, treats each directed segment as independent"
+
+
+def _row(label, values, roads, segs, n_unit, fmt=pct):
+    if not len(values):
+        return f"| {label} | {NOT_COMPUTED}: no data | | | |"
+    med = float(np.median(values))
+    return (f"| {label} | {fmt(med)} | {_interval_text(values, roads, 'physical roads', fmt)} "
+            f"| {_interval_text(values, segs, 'directed segments', fmt)} "
+            f"| {len(values)} {n_unit} on {len(set(roads))} physical roads and {len(set(segs))} directed segments |")
+
+
+def _stretch_row(label, values, ids, fmt=pct):
+    if not len(values):
+        return f"| {label} | {NOT_COMPUTED}: no data | | | |"
+    return (f"| {label} (interval resamples whole stretches) | {fmt(float(np.median(values)))} "
+            f"| {_interval_text(values, ids, 'stretches', fmt)} | n/a | {len(values)} stretches |")
 
 
 def headline(rows: list[PassRow], stretches) -> list[str]:
-    roads = [r.road for r in rows]
-    he = [r.a.t.signed_error for r in rows]
-    ff = [r.a.t.free_flow_error for r in rows]
-    diff = [abs(r.a.t.signed_error) - abs(r.a.t.free_flow_error) for r in rows]
-    sens = [r.a.t.sensitivity_signed_error for r in rows if r.a.t.sensitivity_signed_error is not None]
-    sens_roads = [r.road for r in rows if r.a.t.sensitivity_signed_error is not None]
-    arr = [r.a.t.arrived_signed_error for r in rows if r.a.t.arrived_signed_error is not None]
-    arr_roads = [r.road for r in rows if r.a.t.arrived_signed_error is not None]
+    def col(f, pick=lambda r: True):
+        sel = [r for r in rows if pick(r)]
+        return [f(r) for r in sel], [r.road_id for r in sel], [r.segment_key for r in sel]
+
     sids = [s.stretch_id for s in stretches]
-    out = [
-        "| Quantity compared | Median | 95% interval | n |",
-        "|---|---|---|---|",
-        _row("Pass: (HERE time - observed time) / observed time, HERE reading with the latest data time before the pass", _ci(he, roads), "passes"),
-        _row("Pass: (free-flow time - observed time) / observed time", _ci(ff, roads), "passes"),
-        _row("Pass: abs(HERE error) - abs(free-flow error), in percentage points; negative means HERE's live speed is closer to the observed time", _ci(diff, roads), "passes", pp),
-        _row("Pass, sensitivity: HERE reading with data time nearest the pass midpoint", _ci(sens, sens_roads), "passes"),
-        _row("Pass, sensitivity: latest reading that had also arrived before the pass began", _ci(arr, arr_roads), "passes"),
-        _row("Stretch: (HERE time - observed time) / observed time", _ci([s.signed_error for s in stretches], sids), "stretches"),
-        _row("Stretch: (free-flow time - observed time) / observed time", _ci([s.free_flow_error for s in stretches], sids), "stretches"),
-        _row("Stretch: abs(HERE error) - abs(free-flow error), in percentage points", _ci([abs(s.signed_error) - abs(s.free_flow_error) for s in stretches], sids), "stretches", pp),
-    ]
+    out = [f"| Quantity compared | Median | {ROAD_COL} | {SEGMENT_COL} | n |", "|---|---|---|---|---|"]
+    out.append(_row("Pass: (HERE time - observed time) / observed time, HERE reading with the latest data time before the pass",
+                    *col(lambda r: r.a.t.signed_error), "passes"))
+    out.append(_row("Pass: (free-flow time - observed time) / observed time",
+                    *col(lambda r: r.a.t.free_flow_error), "passes"))
+    out.append(_row("Pass: abs(HERE error) - abs(free-flow error), in percentage points; negative means HERE's live speed is closer to the observed time",
+                    *col(lambda r: abs(r.a.t.signed_error) - abs(r.a.t.free_flow_error)), "passes", pp))
+    out.append(_row("Pass, sensitivity: HERE reading with data time nearest the pass midpoint",
+                    *col(lambda r: r.a.t.sensitivity_signed_error, lambda r: r.a.t.sensitivity_signed_error is not None), "passes"))
+    out.append(_row("Pass, sensitivity: latest reading that had also arrived before the pass began",
+                    *col(lambda r: r.a.t.arrived_signed_error, lambda r: r.a.t.arrived_signed_error is not None), "passes"))
+    out.append(_stretch_row("Stretch: (HERE time - observed time) / observed time", [s.signed_error for s in stretches], sids))
+    out.append(_stretch_row("Stretch: (free-flow time - observed time) / observed time", [s.free_flow_error for s in stretches], sids))
+    out.append(_stretch_row("Stretch: abs(HERE error) - abs(free-flow error), in percentage points",
+                            [abs(s.signed_error) - abs(s.free_flow_error) for s in stretches], sids, pp))
+    return out
+
+
+def per_road_table(rows: list[PassRow]) -> list[str]:
+    """Median errors for each physical road, with the number of passes and directed segments behind them."""
+    if not rows:
+        return []
+    out = ["Per physical road:", "",
+           "| Road | Label (description of its longest segment) | Passes | Directed segments | Median HERE error | Median free-flow error |",
+           "|---|---|---|---|---|---|"]
+    for rid in sorted({r.road_id for r in rows}):
+        sel = [r for r in rows if r.road_id == rid]
+        out.append(f"| {rid} | {sel[0].a.p.road_label} | {len(sel)} | {len({r.segment_key for r in sel})} "
+                   f"| {pct(float(np.median([r.a.t.signed_error for r in sel])))} "
+                   f"| {pct(float(np.median([r.a.t.free_flow_error for r in sel])))} |")
+    return out
+
+
+def arrival_rows(rows: list[PassRow]) -> list[str]:
+    """A companion row computed on a subset is compared with the primary on that same subset."""
+    out = []
+    sub = [r for r in rows if r.a.t.arrived_signed_error is not None]
+    if sub:
+        prim = [r.a.t.signed_error for r in sub]
+        arr = [r.a.t.arrived_signed_error for r in sub]
+        out.append(f"- Arrival-constrained reading, on its {len(sub)} passes (the others had no reading that had arrived by the first fix): "
+                   f"median signed error with the primary reading {pct(float(np.median(prim)))}, with the arrival-constrained reading "
+                   f"{pct(float(np.median(arr)))}; median of the paired difference (arrival-constrained - primary) "
+                   f"{pp(float(np.median(np.array(arr) - np.array(prim))))}.")
+    return out
+
+
+def v4_rows(rows: list[PassRow]) -> list[str]:
+    out = []
+    sub = [r for r in rows if r.a.t.shuffled_signed_error is not None]
+    if sub:
+        real = np.array([abs(r.a.t.signed_error) for r in sub])
+        shuf = np.array([abs(r.a.t.shuffled_signed_error) for r in sub])
+        out.append(f"- Control V4, on its {len(sub)} passes that have a reading at least {params.SHUFFLE_MIN_S:.0f} s away: median abs(signed error) "
+                   f"{pct(float(np.median(real)), False)} with the real reading, {pct(float(np.median(shuf)), False)} with the shuffled reading; "
+                   f"median of the paired difference (shuffled - real) {pp(float(np.median(shuf - real)))}.")
     return out
 
 
@@ -186,9 +260,8 @@ def _group_line(label, sel: list[PassRow], extra="") -> str:
     if not sel:
         return f"    - {label}: 0 passes"
     errs = [r.a.t.signed_error for r in sel]
-    text = f"    - {label}{(' (' + extra + ')') if extra else ''}: {len(sel)} passes, median {pct(float(np.median(errs)))}"
-    if len(sel) >= params.MIN_N_FOR_INTERVAL:
-        text += f", 95% interval {interval(stats.cluster_bootstrap_median(errs, [r.road for r in sel]))}"
+    text = f"    - {label}{(' (' + extra + ')') if extra else ''}: {len(sel)} passes, median {pct(float(np.median(errs)))}, " \
+           f"95% interval resampling physical roads: {_interval_text(errs, [r.road_id for r in sel], 'physical roads')}"
     return text
 
 
@@ -240,22 +313,74 @@ def driver_offset(rows: list[PassRow]) -> DriverOffset | None:
     return DriverOffset(len(vals), float(np.median(vals))) if vals else None
 
 
-def stage5(rows: list[PassRow], camera_note: str | None) -> list[str]:
-    out = []
-    by_road: dict[str, list[PassRow]] = {}
+@dataclass(frozen=True)
+class Visit:
+    """Passes on one directed segment that follow each other within STRETCH_MAX_GAP_S: one drive over it."""
+
+    segment_key: str
+    rows: tuple[PassRow, ...]
+
+    @property
+    def observed_s(self) -> float:
+        return sum(r.a.t.observed_s for r in self.rows)
+
+    @property
+    def here_s(self) -> float:
+        return sum(r.a.t.here_s for r in self.rows)
+
+    @property
+    def matched_m(self) -> float:
+        return sum(r.a.p.matched_m for r in self.rows)
+
+    @property
+    def signed_error(self) -> float:
+        return (self.here_s - self.observed_s) / self.observed_s
+
+    @property
+    def here_speed(self) -> float:
+        return self.matched_m / self.here_s
+
+
+def segment_visits(rows: list[PassRow]) -> dict[str, list[Visit]]:
+    out: dict[str, list[Visit]] = {}
+    by_seg: dict[str, list[PassRow]] = {}
     for r in rows:
-        by_road.setdefault(r.road, []).append(r)
-    rep = {k: v for k, v in by_road.items() if len(v) >= 2}
-    if rep:
-        dev_err = [r.a.t.signed_error - np.mean([x.a.t.signed_error for x in v]) for v in rep.values() for r in v]
-        spd = lambda r: r.a.p.matched_m / r.a.t.here_s
-        dev_spd = [(spd(r) - np.mean([spd(x) for x in v])) / np.mean([spd(x) for x in v]) for v in rep.values() for r in v]
-        dof = sum(len(v) - 1 for v in rep.values())
-        out.append(f"- Repeated passes: {len(rep)} roads have 2 or more analysed passes ({sum(len(v) for v in rep.values())} passes). "
-                   f"Within-road standard deviation of the signed error of HERE time: {100 * np.sqrt(np.sum(np.square(dev_err)) / dof):.1f} percentage points; "
-                   f"within-road standard deviation of HERE's mean speed over the matched portion: {100 * np.sqrt(np.sum(np.square(dev_spd)) / dof):.1f}% of the road's mean HERE speed.")
-    else:
-        out.append(f"- Repeated passes: {NOT_COMPUTED}: no road has 2 analysed passes")
+        by_seg.setdefault(r.segment_key, []).append(r)
+    for key, rs in by_seg.items():
+        rs = sorted(rs, key=lambda r: r.a.p.first_utc_s)
+        groups = [[rs[0]]]
+        for r in rs[1:]:
+            if r.a.p.first_utc_s - groups[-1][-1].a.p.last_utc_s > params.STRETCH_MAX_GAP_S:
+                groups.append([r])
+            else:
+                groups[-1].append(r)
+        out[key] = [Visit(key, tuple(g)) for g in groups]
+    return out
+
+
+def repeated_visits(rows: list[PassRow]) -> list[str]:
+    """Spread between separate drives over the same directed segment, against the spread of HERE's reading."""
+    rep = {k: v for k, v in segment_visits(rows).items() if len(v) >= 2}
+    if len(rep) < 2:
+        found = ", ".join(f"{rows_[0].rows[0].a.p.description} ({k.split('|')[1]} m)" for k, rows_ in rep.items())
+        return [f"- Repeated passes: {NOT_COMPUTED}: {len(rep)} directed segment{'s' if len(rep) != 1 else ''} driven twice or more "
+                f"more than {params.STRETCH_MAX_GAP_S:.0f} s apart" + (f" ({found})" if found else "")
+                + "; at least 2 are needed for a spread."]
+    dev_err, dev_spd, dof = [], [], 0
+    for visits in rep.values():
+        m_e = np.mean([v.signed_error for v in visits])
+        m_s = np.mean([v.here_speed for v in visits])
+        dev_err += [v.signed_error - m_e for v in visits]
+        dev_spd += [(v.here_speed - m_s) / m_s for v in visits]
+        dof += len(visits) - 1
+    return [f"- Repeated passes: {len(rep)} directed segments were driven twice or more more than {params.STRETCH_MAX_GAP_S:.0f} s apart "
+            f"({sum(len(v) for v in rep.values())} drives). Within-segment standard deviation of the signed error of HERE time: "
+            f"{100 * np.sqrt(np.sum(np.square(dev_err)) / dof):.1f} percentage points; within-segment standard deviation of HERE's mean speed over the "
+            f"matched portion: {100 * np.sqrt(np.sum(np.square(dev_spd)) / dof):.1f}% of the segment's mean HERE speed."]
+
+
+def stage5(rows: list[PassRow], camera_note: str | None) -> list[str]:
+    out = repeated_visits(rows)
     if camera_note:
         out.append(f"- driver offset: {NOT_COMPUTED}: {camera_note}")
         return out
@@ -271,31 +396,38 @@ def stage5(rows: list[PassRow], camera_note: str | None) -> list[str]:
         t = r.a.t
         obs = t.stopped_s + t.moving_s * (1 + off.offset)
         adj.append((t.here_s - obs) / obs)
-    roads = [r.road for r in rows]
-    raw = stats.cluster_bootstrap_median([r.a.t.signed_error for r in rows], roads)
-    fixed = stats.cluster_bootstrap_median(adj, roads)
-    out.append(f"- Median signed error of HERE time without removing the offset: {pct(raw.median)} ({interval(raw)}); "
+    roads = [r.road_id for r in rows]
+    raw_v = [r.a.t.signed_error for r in rows]
+    out.append(f"- Median signed error of HERE time without removing the offset: {pct(float(np.median(raw_v)))} "
+               f"({_interval_text(raw_v, roads, 'physical roads')}); "
                f"with the offset removed from the observed time (stopped time + moving time x (1 + offset)): "
-               f"{pct(fixed.median)} ({interval(fixed)}). With one driver the offset is an estimate, not a correction; "
+               f"{pct(float(np.median(adj)))} ({_interval_text(adj, roads, 'physical roads')}). With one driver the offset is an estimate, not a correction; "
                f"without it the first figure is an upper bound on HERE's error.")
     return out
 
 
-def routing_section(inputs: ReportInputs, rows: list[PassRow]) -> list[str]:
+def routing_section(inputs: ReportInputs, passes_by_id: dict) -> list[str]:
     if inputs.routing is None:
         return [f"- {NOT_COMPUTED}: no routing results"]
-    road_of = {r.a.p.pass_id: r.a.p.description for r in rows}
+    good = valid_routes(inputs)
     out = []
     for kind in ("pass", "stretch"):
-        rs = [r for r in inputs.routing if r.kind == kind]
+        rs = [r for r in good if r.kind == kind]
         ok = [r for r in rs if r.exclusion is None]
         if not ok:
             out.append(f"- {kind}: {NOT_COMPUTED}: {len(rs)} results, none follow the driven path")
             continue
-        ci = stats.cluster_bootstrap_median([r.signed_error for r in ok], [road_of.get(r.request_id, r.request_id) for r in ok])
-        out.append(f"- {kind}: median of (HERE routing duration - observed time) / observed time over {len(ok)} routes "
-                   f"(clusters: {ci.n_clusters}): {pct(ci.median)}, 95% interval {interval(ci)}; {POSITIVE_MEANS}. "
-                   f"{len(rs) - len(ok)} routes excluded because the route did not follow the driven path.")
+        vals = [r.signed_error for r in ok]
+        head = (f"- {kind}: median of (HERE routing duration - observed time) / observed time over {len(ok)} routes: "
+                f"{pct(float(np.median(vals)))}; ")
+        if kind == "pass":
+            roads = [passes_by_id[r.request_id].road_id for r in ok]
+            segs = [passes_by_id[r.request_id].segment_key for r in ok]
+            head += (f"95% interval resampling physical roads: {_interval_text(vals, roads, 'physical roads')}; "
+                     f"treating each directed segment as independent: {_interval_text(vals, segs, 'directed segments')}; ")
+        else:
+            head += f"95% interval resampling whole stretches: {_interval_text(vals, [r.request_id for r in ok], 'stretches')}; "
+        out.append(head + f"{POSITIVE_MEANS}. {len(rs) - len(ok)} routes excluded because the route did not follow the driven path.")
         nt = [(r.no_traffic_duration_s - r.observed_s) / r.observed_s for r in ok if r.no_traffic_duration_s is not None]
         if nt:
             out.append(f"  - median of (HERE no-traffic duration - observed time) / observed time: {pct(float(np.median(nt)))}")
@@ -321,7 +453,8 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
              f"{len(prov.inputs)} input files hashed (listed in the provenance sidecar).")
     L.append("")
     L.append(f"Signed error = (HERE time - observed time) / observed time; {POSITIVE_MEANS}. "
-             "Intervals are 95% percentile intervals from a bootstrap that resamples whole roads (passes) or whole stretches.")
+             "Intervals are 95% percentile intervals from a bootstrap that resamples physical roads (built from segment geometry, not from "
+             "HERE's descriptions, which name the cross street at a segment's end), or directed segments, or whole stretches, as each column says.")
     L.append("")
     L.append("## Headline table")
     if reasons:
@@ -330,18 +463,26 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
         L.append("")
     L += headline(rows, asm.stretch_result.stretches)
     L.append("")
+    L += per_road_table(rows)
+    L.append("")
+    L += arrival_rows(rows)
+    L.append("")
     sd = float(np.std([r.a.t.signed_error for r in rows], ddof=1)) if len(rows) > 1 else float("nan")
-    n_roads = len({r.road for r in rows})
-    L.append(f"Measured standard deviation of the per-pass signed error: {100 * sd:.1f} percentage points over {len(rows)} passes. "
-             f"With {n_roads} roads as independent clusters, the implied half-width of the 95% interval on the median is "
-             f"{100 * stats.median_half_width(sd, n_roads):.1f} percentage points; a bias smaller than that is not resolved.")
+    n_roads = len({r.road_id for r in rows})
+    L.append(f"Measured standard deviation of the per-pass signed error: {100 * sd:.1f} percentage points over {len(rows)} passes on "
+             f"{n_roads} physical road{'s' if n_roads != 1 else ''}. "
+             + (f"Treating the {n_roads} roads as independent, the half-width of the 95% interval on the median would be "
+                f"{100 * stats.median_half_width(sd, n_roads):.1f} percentage points."
+                if n_roads >= params.MIN_N_FOR_INTERVAL else
+                f"With fewer than {params.MIN_N_FOR_INTERVAL} physical roads, no interval across roads is resolvable."))
     L.append("")
     L.append("## Control V4: time-shuffled HERE reading")
     v4 = asm.v4
     if v4.n:
-        L.append(f"Over {v4.n} passes with a reading of the same segment at least {params.SHUFFLE_MIN_S:.0f} s away: median |signed error| "
+        L.append(f"Over {v4.n} passes with a reading of the same segment at least {params.SHUFFLE_MIN_S:.0f} s away: median abs(signed error) "
                  f"{pct(v4.median_abs_real, False)} with the real reading, {pct(v4.median_abs_shuffled, False)} with the shuffled reading. "
                  f"If the second does not exceed the first, this sample cannot resolve HERE's real-time signal.")
+        L += v4_rows(rows)
     else:
         L.append(f"{NOT_COMPUTED}: no pass has a reading of its segment at least {params.SHUFFLE_MIN_S:.0f} s away.")
     L.append("")
@@ -357,7 +498,7 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     L.append("")
     L.append("## Stage 6: HERE Routing v8")
     L.append("A past departure time makes HERE use typical traffic for that weekday and clock time, not the traffic recorded that day.")
-    L += routing_section(inputs, rows)
+    L += routing_section(inputs, {p.pass_id: p for p in asm.passes})
     L.append("")
     L.append("## Gates and exclusions")
     for r in asm.runs:
@@ -385,7 +526,7 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
 
 
 PASS_COLUMNS = (
-    "pass_id", "run", "road", "functional_class", "first_utc_s", "last_utc_s", "n_fixes", "chain_start_m", "chain_end_m",
+    "pass_id", "run", "segment_end_description", "segment_key", "road_id", "road_label", "functional_class", "first_utc_s", "last_utc_s", "n_fixes", "chain_start_m", "chain_end_m",
     "matched_m", "observed_s", "path_positions_m", "path_speed_m", "v3_rel_diff", "segment_length_flag", "exclusion",
     "reading_seq", "reading_age_s", "reading_arrived_before_start", "here_s", "free_flow_s", "signed_error",
     "free_flow_error", "sensitivity_signed_error", "arrived_signed_error", "shuffled_signed_error", "jam_factor",
@@ -403,7 +544,8 @@ def write_passes_csv(asm: pipeline.Assembly, rows: list[PassRow], path: Path) ->
             t = times[p.pass_id]
             c = cond.get(p.pass_id)
             d = dict(
-                pass_id=p.pass_id, run=p.run, road=p.description, functional_class=p.functional_class,
+                pass_id=p.pass_id, run=p.run, segment_end_description=p.description, segment_key=p.segment_key,
+                road_id=p.road_id, road_label=p.road_label, functional_class=p.functional_class,
                 first_utc_s=p.first_utc_s, last_utc_s=p.last_utc_s, n_fixes=len(p.fixes),
                 chain_start_m=p.chain_start_m, chain_end_m=p.chain_end_m, matched_m=p.matched_m, observed_s=p.observed_s,
                 path_positions_m=p.path_positions_m, path_speed_m=p.path_speed_m, v3_rel_diff=p.v3_rel_diff,

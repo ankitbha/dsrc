@@ -133,3 +133,12 @@ def test_reading_without_speed_is_kept_and_marked(tmp_path):
     (d / "here/000000.json").write_text(json.dumps(body("2026-09-08T21:10:00Z", [r])))
     (b,) = load.load_here_bodies("run_x", d, load.load_phone_log(phone), OFFSET)
     assert b.segments[0].speed_mps is None
+
+
+def test_functional_class_is_the_length_weighted_mode_of_the_links():
+    r = result("Mixed", 130.0, [(40.0, -74.0), (40.0001, -74.0), (40.0002, -74.0), (40.001, -74.0)], fc=2)
+    r["location"]["shape"]["links"][0]["length"] = 10.0
+    r["location"]["shape"]["links"][1]["length"] = 10.0
+    r["location"]["shape"]["links"][2]["functionalClass"] = 3
+    r["location"]["shape"]["links"][2]["length"] = 100.0
+    assert load.parse_segment(r).functional_class == 3        # two class-2 links by count, but class 3 by length

@@ -46,3 +46,27 @@ def test_thirds_split_by_value():
 
 def test_median_half_width_matches_the_plan_example():
     assert stats.median_half_width(0.25, 18) == pytest.approx(0.145, abs=0.002)
+
+
+def test_interval_is_the_2_5_to_97_5_percentile_of_resampled_medians():
+    v = np.array([0.1, 0.5, -0.3, 0.2, 0.9, -0.7, 0.4])
+    c = list("abcdefg")
+    got = stats.cluster_bootstrap_median(v, c, n_boot=300, seed=11)
+    rng = np.random.default_rng(11)
+    draws = [np.median(v[rng.integers(0, 7, size=7)]) for _ in range(300)]
+    assert got.lo == pytest.approx(np.percentile(draws, 2.5)) and got.hi == pytest.approx(np.percentile(draws, 97.5))
+    mean_draws = [np.mean(v[np.random.default_rng(11).integers(0, 7, size=7)])]
+    assert got.median == np.median(v) != np.mean(v)
+
+
+def test_thirds_use_less_than_or_equal_at_the_quantile():
+    # Seven values: the 1/3 and 2/3 quantiles are exactly 3 and 5, and those values belong to the lower group.
+    assert list(stats.thirds([1, 2, 3, 4, 5, 6, 7])) == [0, 0, 0, 1, 1, 2, 2]
+
+
+def test_spearman_ties_use_average_ranks_in_the_coefficient():
+    x = [1, 2, 2, 4, 5]
+    y = [5, 6, 7, 8, 7]
+    rx, ry = stats.average_ranks(x), stats.average_ranks(y)
+    assert list(rx) == [1.0, 2.5, 2.5, 4.0, 5.0] and list(ry) == [1.0, 2.0, 3.5, 5.0, 3.5]
+    assert stats.spearman(x, y) == pytest.approx(np.corrcoef(rx, ry)[0, 1])

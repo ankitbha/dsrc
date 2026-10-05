@@ -48,3 +48,9 @@ def test_rejects_other_versions_and_truncated_numbers():
         decode("CFoz5xJ")
     with pytest.raises(ValueError):
         decode("BFoz5xJ67i1B1B7PzIhaxL7")  # last number cut off
+
+
+def test_precision_comes_from_the_header():
+    pts = [(40.123456, -74.654321), (40.123999, -74.654000)]
+    assert decode(encode(pts, precision=6)) == pytest.approx(pts, abs=1e-9)
+    assert decode(encode(pts, precision=5)) == pytest.approx([(40.12346, -74.65432), (40.12400, -74.65400)], abs=1e-9)

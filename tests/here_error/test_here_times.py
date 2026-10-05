@@ -152,3 +152,50 @@ def test_matching_exclusion_carries_through():
     p = Pass(**{**p.__dict__, "exclusion": "v3_failed"})
     idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0)])
     assert ht.compute_pass_times(p, 1000.0, idx, idx).exclusion == "v3_failed"
+
+
+def test_sub_segments_keep_their_order_along_the_shape():
+    # 300 / 400 / 300 m at 10 / 20 / 5 m/s. A matched portion of 100 to 850 m crosses:
+    # 200 m at 10 (20 s), 400 m at 20 (20 s), 150 m at 5 (30 s) = 70 s. Reversed order would give 10 + 20 + 60... differently.
+    seg = sub_segment()
+    assert ht.travel_time_s(seg, 1000.0, 100, 850, free_flow=False) == pytest.approx(70.0, rel=1e-3)
+    # free flow 15 / 25 / 10 m/s: 200/15 + 400/25 + 150/10
+    assert ht.travel_time_s(seg, 1000.0, 100, 850, free_flow=True) == pytest.approx(200 / 15 + 16 + 15, rel=1e-3)
+
+
+def test_stop_threshold_is_1_m_per_s_and_uses_the_earlier_fix():
+    seg = segment("S", EAST)
+    speeds = [0.9, 1.1, 0.9, 1.1]
+    fixes = tuple(fix(i, 100 + i, 0, speed=v) for i, v in enumerate(speeds))
+    p = Pass("x", "r", seg.key, "S", 2, fixes, 100, 103, False, 3, 3, None)
+    # Intervals 0->1 and 2->3 start at a fix below 1 m/s; 1 m/s itself is not stopped.
+    assert ht.stopped_seconds(p) == 2.0
+
+
+def test_equal_data_times_prefer_the_later_response_and_data_time_beats_response_time():
+    seg = body_with(0, 0, 1)[1]
+    tie = ht.index_readings([body_with(0, 900.0, 10.0, resp=950.0)[0], body_with(1, 900.0, 20.0, resp=960.0)[0]])[seg.key]
+    assert ht.select_primary(tie, 1000.0)[0].seq == 1
+    mixed = ht.index_readings([body_with(0, 900.0, 10.0, resp=970.0)[0], body_with(1, 950.0, 20.0, resp=960.0)[0]])[seg.key]
+    assert ht.select_primary(mixed, 1000.0)[0].seq == 1          # newest data, although it arrived first
+    assert ht.select_sensitivity(mixed, 905.0).seq == 0          # sensitivity goes by data time, not arrival
+
+
+def test_arrival_flag_compares_with_the_first_fix_not_the_last():
+    seg = sub_segment()
+    p = make_pass(seg, t0=1000.0, t1=1060.0)
+    idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0, 1030.0)])
+    assert ht.compute_pass_times(p, 1000.0, idx, idx).reading_arrived_before_start is False
+
+
+def test_reading_age_is_measured_from_the_first_fix():
+    seg = sub_segment()
+    p = make_pass(seg, t0=1000.0, t1=1060.0)
+    idx = ht.index_readings([make_body("run_t", 0, [seg], 940.0)])
+    assert ht.compute_pass_times(p, 1000.0, idx, idx).reading_age_s == 60.0
+
+
+def test_jam_factor_is_weighted_by_matched_metres():
+    seg = sub_segment()
+    # 100 m of jam 3 and 500 m of jam 1 over a 100..600 style portion: (200*3 + 300*1)/500 for 100..600? no: see below.
+    assert ht.matched_jam_factor(seg, 1000.0, 100, 600) == pytest.approx((200 * 3 + 300 * 1) / 500)

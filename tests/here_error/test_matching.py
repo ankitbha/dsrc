@@ -132,3 +132,70 @@ def test_plot_writes_a_png(tmp_path):
     out = tmp_path / "v2" / "p.png"
     matching.plot_pass(passes[0], cat, tuple(fixes), out)
     assert out.stat().st_size > 1000
+
+
+# ---- boundaries and rules that a single straight-road fixture does not exercise ---------------
+
+
+def test_stopped_car_stays_on_its_segment_when_a_nearer_ramp_appears():
+    main = segment("Main St", EAST)
+    ramp = segment("Ramp", [(495, 4), (1000, 4)])             # runs 1 m from the fixes, main runs 3 m
+    moving = [fix(i, 10 * i, 3, heading=90.0) for i in range(50)]                    # x = 0 .. 490
+    stopped = [fix(50 + i, 500, 3, speed=0.0, heading=None) for i in range(20)]
+    after = [fix(70 + i, 500 + 10 * i, 3, heading=90.0) for i in range(40)]           # x = 500 .. 890
+    passes, _ = run_match(moving + stopped + after, main, ramp)
+    assert [p.description for p in passes] == ["Main St"]
+    assert passes[0].matched_m == pytest.approx(890.0, abs=1.0)
+
+
+def test_first_candidate_is_the_nearest_not_the_farthest():
+    near = segment("Near", EAST)
+    far = segment("Far", [(0, 9), (1000, 9)])
+    fixes = [fix(i, 100 + 10 * i, 2) for i in range(60)]
+    (p,) = run_match(fixes, near, far)[0]
+    assert p.description == "Near"
+
+
+def test_heading_tolerance_is_45_degrees():
+    east = segment("Main St", EAST)
+    assert run_match([fix(i, 100 + 10 * i, 0, heading=130.0) for i in range(60)], east)[0]       # 40 degrees off
+    assert not run_match([fix(i, 100 + 10 * i, 0, heading=150.0) for i in range(60)], east)[0]   # 60 degrees off
+    assert not run_match([fix(i, 100 + 10 * i, 0, heading=270.0) for i in range(60)], east)[0]   # opposite
+
+
+def test_heading_is_ignored_below_the_minimum_speed():
+    east = segment("Main St", EAST)
+    slow = [fix(i, 100 + 1.5 * i, 0, speed=1.5, heading=270.0) for i in range(200)]
+    assert run_match(slow, east)[0]
+
+
+def test_match_radius_is_15_m():
+    east = segment("Main St", EAST)
+    assert run_match([fix(i, 100 + 10 * i, 14.0) for i in range(60)], east)[0]
+    assert not run_match([fix(i, 100 + 10 * i, 16.0) for i in range(60)], east)[0]
+    assert not run_match([fix(i, 100 + 10 * i, 20.0) for i in range(60)], east)[0]
+
+
+def test_chainage_is_taken_at_the_first_and_last_fix_not_the_extremes():
+    east = segment("Main St", EAST)
+    start = [fix(0, 105, 0, speed=1.5, heading=None), fix(1, 100, 0, speed=1.5, heading=None)]   # jitter backwards
+    body = [fix(2 + i, 110 + 10 * i, 0) for i in range(60)]                                        # to x = 700
+    end = [fix(62, 695, 0, speed=1.5, heading=None)]
+    (p,) = run_match(start + body + end, east)[0]
+    assert p.chain_start_m == pytest.approx(105.0, abs=0.5)
+    assert p.chain_end_m == pytest.approx(695.0, abs=0.5)
+
+
+def test_v3_integrates_speed_with_the_trapezoid_rule():
+    east = segment("Main St", EAST)
+    # Constant acceleration of 1 m/s^2 from rest: speed t, position t^2 / 2.
+    fixes = [fix(t, t * t / 2.0, 0, speed=float(t)) for t in range(31)]
+    (p,) = run_match(fixes, east)[0]
+    assert p.path_speed_m == pytest.approx(450.0)
+    assert p.exclusion is None
+
+
+def test_gap_of_exactly_three_seconds_stays_in_the_pass():
+    east = segment("Main St", EAST)
+    fixes = drive_east(0, 100, 400) + drive_east(33, 430, 700)    # 30 -> 33: 3 s
+    assert len(run_match(fixes, east)[0]) == 1
