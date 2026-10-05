@@ -552,3 +552,17 @@ def test_routing_section_says_stretch_comparison_covers_the_gaps():
     text, _ = render(APS)
     assert ("A stretch's routing comparison runs from its first fix to its last, including the unmatched gaps between passes, "
             "so it covers more ground than the stage-2 stretch rows.") in text
+
+
+def test_no_route_rows_are_counted_among_the_routing_exclusions():
+    nan = float("nan")
+    asm = asm_of(APS)
+    reqs = [q for q in pipeline.route_requests(asm) if q.kind == "pass"]
+    res = [rr(q.request_id, "pass", 0.1 * (i + 1), q.observed_s) for i, q in enumerate(reqs)]
+    bad = reqs[0]
+    res[0] = RouteResult(bad.request_id, "pass", nan, nan, nan, bad.observed_s, nan, False, 0.0, nan, "no_route")
+    res[1] = rr(reqs[1].request_id, "pass", 9.0, reqs[1].observed_s, excl="route_does_not_follow_path")
+    text, _ = render(routing=res, requests=reqs)
+    line = next(l for l in text.splitlines() if l.startswith("- pass: median of (HERE routing"))
+    assert f"over {len(reqs) - 2} routes:" in line
+    assert "2 routes excluded (no_route 1, route_does_not_follow_path 1)" in line

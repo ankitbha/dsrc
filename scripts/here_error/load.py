@@ -191,12 +191,17 @@ def load_here_bodies(run: str, run_dir: Path | str, phone: PhoneLog, offset: Clo
     if len(index) != len(phone.here):
         raise LoadError(f"{run}: {len(index)} HERE index records but {len(phone.here)} phone records")
     mono_gaps = []
+    no_mono = [idx["seq"] for idx, ph in zip(index, phone.here)
+               if ph.response_mono_s is None or idx.get("received_t_mono") is None]
+    if no_mono:
+        raise LoadError(f"{run}: {len(no_mono)} HERE records lack the monotonic times (phone t_response_mono_ns, index "
+                        f"received_t_mono) that the receipt-time pairing check needs, first at index seq {no_mono[0]}; "
+                        "refusing to pair them unchecked")
     for idx, ph in zip(index, phone.here):
         if (abs(ph.query_lat - idx["query_lat"]) > QUERY_CENTRE_TOL_DEG
                 or abs(ph.query_lon - idx["query_lon"]) > QUERY_CENTRE_TOL_DEG):
             raise LoadError(f"{run}: HERE index record {idx['seq']} and its phone record: query centres disagree")
-        if ph.response_mono_s is not None and idx.get("received_t_mono") is not None:
-            mono_gaps.append(ph.response_mono_s - idx["received_t_mono"])
+        mono_gaps.append(ph.response_mono_s - idx["received_t_mono"])
     if mono_gaps and max(mono_gaps) - min(mono_gaps) > MONO_OFFSET_TOL_S:
         raise LoadError(f"{run}: phone and Jetson receipt times do not line up across HERE records "
                         f"(spread {max(mono_gaps) - min(mono_gaps):.3f} s)")

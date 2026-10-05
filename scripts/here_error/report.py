@@ -481,7 +481,12 @@ def routing_section(inputs: ReportInputs, passes_by_id: dict, stretch_roads: dic
             road_cell, own_cell = stretch_columns(vals, [r.request_id for r in ok], [stretch_roads[r.request_id] for r in ok])
             head += (f"95% interval resampling physical roads: {road_cell}; "
                      f"treating each stretch as independent: {own_cell}; ")
-        out.append(head + f"{POSITIVE_MEANS}. {len(rs) - len(ok)} routes excluded because the route did not follow the driven path.")
+        reasons = {}
+        for r in rs:
+            if r.exclusion is not None:
+                reasons[r.exclusion] = reasons.get(r.exclusion, 0) + 1
+        why = ", ".join(f"{k} {v}" for k, v in sorted(reasons.items()))
+        out.append(head + f"{POSITIVE_MEANS}. {len(rs) - len(ok)} routes excluded ({why or 'none'}).")
         nt = [(r.no_traffic_duration_s - r.observed_s) / r.observed_s for r in ok if r.no_traffic_duration_s is not None]
         if nt:
             out.append(f"  - median of (HERE no-traffic duration - observed time) / observed time: {pct(float(np.median(nt)))}")

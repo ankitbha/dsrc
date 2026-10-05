@@ -24,12 +24,12 @@ def make(tmp_path, *, index_lat=40.0, video_ids=(11, 12), extra_phone=()):
         gps_line(2, T0 + 1, 40.0001, -74.0),            # duplicate fix time: dropped
         gps_line(3, T0 + 2, None, -74.0, valid=False),  # invalid: dropped
         gps_line(4, T0 + 3, 40.0002, -74.0),
-        here_line(0, T0 + 5.2, 40.0, -74.0),
+        here_line(0, T0 + 5.2, 40.0, -74.0, resp_mono_s=10.0),
         camera_line(11, T0 + 5.2, mono_gap_s=0.5),
         camera_line(12, T0 + 6.2, mono_gap_s=0.5),
         *extra_phone,
     ]
-    index = [{"seq": 0, "file": "here/000000.json", "query_lat": index_lat, "query_lon": -74.0}]
+    index = [{"seq": 0, "file": "here/000000.json", "query_lat": index_lat, "query_lon": -74.0, "received_t_mono": 10.0}]
     bodies = {"here/000000.json": body("2026-09-08T21:10:00Z", [result("Main St", 222.0, PTS)])}
     d, phone = write_run(tmp_path, "run_x", phone_lines, index, bodies, list(video_ids))
     return d, phone
@@ -158,3 +158,21 @@ def test_uncapped_speed_is_read_and_falls_back_to_the_capped_speed():
     assert (b.speed_mps, b.speed_uncapped_mps, b.uncapped_fallback) == (8.0, 8.0, True)
     plain = load.parse_segment(result("P", 1000.0, [(40.0, -74.0), (40.01, -74.0)], speed=10.0))
     assert plain.speed_uncapped_mps == 10.0 and plain.uncapped_fallback
+
+
+def test_missing_monotonic_times_refuse_the_load_with_a_named_reason(tmp_path):
+    d, phone = make(tmp_path)
+    idx = d / "here_index.jsonl"
+    rec = json.loads(idx.read_text())
+    del rec["received_t_mono"]
+    idx.write_text(json.dumps(rec) + "\n")
+    with pytest.raises(load.LoadError, match="monotonic times.*received_t_mono"):
+        load.load_here_bodies("run_x", d, load.load_phone_log(phone), OFFSET)
+
+
+def test_phone_record_without_a_monotonic_response_time_refuses_too(tmp_path):
+    d, phone = make(tmp_path)
+    text = phone.read_text().replace('"t_response_mono_ns":10000000000,', "")
+    phone.write_text(text)
+    with pytest.raises(load.LoadError, match="monotonic times.*t_response_mono_ns"):
+        load.load_here_bodies("run_x", d, load.load_phone_log(phone), OFFSET)

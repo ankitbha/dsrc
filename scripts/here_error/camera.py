@@ -81,6 +81,30 @@ def _cut_partial_last_line(path: Path) -> None:
         path.write_bytes(data[:cut])
 
 
+def make_fingerprint(weights_sha256: str) -> dict:
+    """Everything that decides what a detection line says: the weights, the thresholds, the regions and the rotation."""
+    return {
+        "weights_sha256": weights_sha256,
+        "yolo_conf": params.YOLO_CONF,
+        "vehicle_classes": list(params.VEHICLE_CLASSES),
+        "leader_centre_share": params.LEADER_CENTRE_SHARE,
+        "leader_min_height_share": params.LEADER_MIN_HEIGHT_SHARE,
+        "ego_hood_bottom_share": params.EGO_HOOD_BOTTOM_SHARE,
+        "ego_hood_min_width_share": params.EGO_HOOD_MIN_WIDTH_SHARE,
+        "rotation": "ROTATE_90_CLOCKWISE",
+    }
+
+
+def read_fingerprint(path: Path | str) -> dict | None:
+    path = Path(path)
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        if line.strip():
+            return json.loads(line).get("fingerprint")
+    return None
+
+
 def load_detections(path: Path | str) -> list[FrameDetections]:
     path = Path(path)
     out = []
@@ -89,6 +113,8 @@ def load_detections(path: Path | str) -> list[FrameDetections]:
     for line in path.read_text().splitlines():
         if line.strip():
             r = json.loads(line)
+            if "fingerprint" in r:
+                continue
             out.append(FrameDetections(r["run"], r["pos"], r["frame_id"], r["utc_s"], r["n_vehicles"],
                                        r["leader"], r["brightness"]))
     return out
@@ -107,12 +133,28 @@ def run_camera(
     frames: Sequence[Frame],
     detector: Detector,
     out_path: Path | str,
+    fingerprint: dict,
     limit: int | None = None,
 ) -> CameraStats:
-    """Detect on frames in video order, appending to `out_path`; positions already there are skipped."""
+    """Detect on frames in video order, appending to `out_path`; positions already there are skipped.
+
+    The first line of the file is the fingerprint of the weights and parameters that produced it.
+    Resuming a file whose fingerprint differs, or that has none, is refused: lines made by another
+    detector would otherwise be mixed in silently.
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     _cut_partial_last_line(out_path)
+    has_content = out_path.exists() and out_path.stat().st_size > 0
+    if has_content:
+        found = read_fingerprint(out_path)
+        if found is None:
+            raise CameraError(f"{out_path} has no fingerprint of the weights and parameters that made it; delete it and rerun")
+        if found != fingerprint:
+            raise CameraError(f"{out_path} was made with different weights or parameters ({found} against {fingerprint}); "
+                              "delete it and rerun")
+    else:
+        out_path.write_text(json.dumps({"fingerprint": fingerprint}, sort_keys=True) + "\n")
     done = {d.pos for d in load_detections(out_path)}
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():

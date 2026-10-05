@@ -137,6 +137,14 @@ def follows_path(route_pts, req: RouteRequest) -> tuple[bool, float, float]:
 
 
 def evaluate(req: RouteRequest, body: dict) -> RouteResult:
+    """A response with no route is a row excluded as `no_route`, so one empty answer does not lose the rest."""
+    if not (body.get("routes") or []):
+        nan = float("nan")
+        return RouteResult(
+            request_id=req.request_id, kind=req.kind, duration_s=nan, no_traffic_duration_s=None, length_m=nan,
+            observed_s=req.observed_s, signed_error=nan, follows_path=False, share_within=0.0, length_rel_diff=nan,
+            exclusion="no_route",
+        )
     dur, base, length, pts = _route_totals(body)
     ok, share, rel = follows_path(pts, req)
     return RouteResult(

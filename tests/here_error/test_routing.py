@@ -150,9 +150,9 @@ def test_route_much_longer_than_the_path_fails_the_check():
     assert not res.follows_path and res.length_rel_diff > params.ROUTE_LENGTH_TOL
 
 
-def test_no_route_raises():
-    with pytest.raises(RoutingError, match="no route"):
-        routing.evaluate(make_request(), {"routes": []})
+def test_an_empty_routes_list_is_a_no_route_row_not_an_error():
+    res = routing.evaluate(make_request(), {"routes": []})
+    assert res.exclusion == "no_route" and not res.follows_path
 
 
 def test_key_straddling_character_200_of_an_error_body_is_scrubbed(monkeypatch):
@@ -165,3 +165,28 @@ def test_key_straddling_character_200_of_an_error_body_is_scrubbed(monkeypatch):
         routing.default_fetch(routing.ROUTER_URL, {"apiKey": KEY})
     msg = str(ei.value)
     assert KEY not in msg and "SECRET" not in msg and "KEY-123" not in msg
+
+
+def test_a_response_with_no_route_is_a_row_excluded_as_no_route(tmp_path):
+    import math
+
+    ok_req = make_request("p1")
+    empty_req = make_request("p2", east=(0, 1100))
+    calls = []
+
+    def fetch(url, query):
+        calls.append(query["destination"])
+        return {"routes": []} if len(calls) == 2 else body_for(STRAIGHT)
+
+    run = routing.run_routing([ok_req, empty_req], tmp_path, fetch, env={"HERE_API_KEY": KEY})
+    assert [r.request_id for r in run.results] == ["p1", "p2"]
+    good, empty = run.results
+    assert good.exclusion is None and empty.exclusion == "no_route"
+    assert not empty.follows_path and math.isnan(empty.duration_s) and math.isnan(empty.signed_error)
+    n = len(calls)
+    again = routing.run_routing([ok_req, empty_req], tmp_path, lambda u, q: (_ for _ in ()).throw(AssertionError("cached")), env={})
+    assert again.n_calls == 0 and again.results[1].exclusion == "no_route" and len(calls) == n
+    out = tmp_path / "r.csv"
+    routing.write_csv(run.results, out)
+    back = routing.read_csv(out)
+    assert back[1].exclusion == "no_route" and math.isnan(back[1].duration_s) and back[0].exclusion is None

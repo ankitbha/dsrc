@@ -99,6 +99,8 @@ def cmd_camera(args) -> int:
     detector = camera.make_yolo_detector(weights, args.device)
     from here_error.provenance import sha256_file
 
+    weights_sha = sha256_file(weights)
+
     for run, phone_name in params.RUNS:
         if args.run not in ("all", run):
             continue
@@ -107,9 +109,10 @@ def cmd_camera(args) -> int:
             raise SystemExit(f"gate V1 failed for {run}")
         out = args.out_dir / f"detections_{run}.jsonl"
         prov = _prov(args, [rd.phone_path, rd.run_dir / "video_index.jsonl", rd.run_dir / "video.avi", weights])
-        st = camera.run_camera(run, rd.run_dir / "video.avi", rd.frames, detector, out, args.limit)
+        st = camera.run_camera(run, rd.run_dir / "video.avi", rd.frames, detector, out,
+                               camera.make_fingerprint(weights_sha), args.limit)
         write_sidecar(out, prov)
-        stats = {"run": run, "device": args.device, "weights": str(weights), "weights_sha256": sha256_file(weights),
+        stats = {"run": run, "device": args.device, "weights": str(weights), "weights_sha256": weights_sha,
                  "new_frames": st.n_new, "skipped_frames": st.n_skipped, "seconds": st.seconds,
                  "seconds_per_new_frame": st.seconds / st.n_new if st.n_new else None}
         (args.out_dir / f"camera_{run}.json").write_text(json.dumps(stats, indent=2))
