@@ -199,3 +199,10 @@ def test_gap_of_exactly_three_seconds_stays_in_the_pass():
     east = segment("Main St", EAST)
     fixes = drive_east(0, 100, 400) + drive_east(33, 430, 700)    # 30 -> 33: 3 s
     assert len(run_match(fixes, east)[0]) == 1
+
+
+def test_match_radius_applies_inside_the_bounding_box_of_a_bent_segment():
+    bent = segment("Bent", [(0, 0), (500, 0), (500, 500)])
+    # (100..400, 20) lies inside the segment's bounding box but 20 m from it.
+    assert not run_match([fix(i, 100 + 10 * i, 20.0) for i in range(30)], bent)[0]
+    assert run_match([fix(i, 100 + 10 * i, 10.0) for i in range(30)], bent)[0]

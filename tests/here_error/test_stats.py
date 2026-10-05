@@ -49,13 +49,13 @@ def test_median_half_width_matches_the_plan_example():
 
 
 def test_interval_is_the_2_5_to_97_5_percentile_of_resampled_medians():
-    v = np.array([0.1, 0.5, -0.3, 0.2, 0.9, -0.7, 0.4])
-    c = list("abcdefg")
-    got = stats.cluster_bootstrap_median(v, c, n_boot=300, seed=11)
+    v = np.random.default_rng(5).normal(0.0, 1.0, 41)
+    c = [f"c{i}" for i in range(41)]
+    got = stats.cluster_bootstrap_median(v, c, n_boot=2000, seed=11)
     rng = np.random.default_rng(11)
-    draws = [np.median(v[rng.integers(0, 7, size=7)]) for _ in range(300)]
+    draws = [np.median(v[rng.integers(0, 41, size=41)]) for _ in range(2000)]
     assert got.lo == pytest.approx(np.percentile(draws, 2.5)) and got.hi == pytest.approx(np.percentile(draws, 97.5))
-    mean_draws = [np.mean(v[np.random.default_rng(11).integers(0, 7, size=7)])]
+    assert got.lo != pytest.approx(np.percentile(draws, 5)) and got.hi != pytest.approx(np.percentile(draws, 95))
     assert got.median == np.median(v) != np.mean(v)
 
 
