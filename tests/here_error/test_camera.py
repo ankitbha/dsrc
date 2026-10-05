@@ -32,7 +32,7 @@ def test_class_filter_and_confidence():
     boxes = [Box(2, 0.9, 0, 0, 10, 10), Box(0, 0.99, 0, 0, 10, 10),      # car, person
              Box(7, 0.5, 0, 0, 10, 10), Box(5, 0.2, 0, 0, 10, 10),       # truck, low-confidence bus
              Box(3, 0.4, 0, 0, 10, 10), Box(1, 0.9, 0, 0, 10, 10)]       # motorcycle, bicycle
-    assert [b.cls for b in camera.vehicle_boxes(boxes)] == [2, 7, 3]
+    assert [b.cls for b in camera.vehicle_boxes(boxes, 720, 1280)] == [2, 7, 3]
 
 
 def test_leader_region():
@@ -102,3 +102,16 @@ def test_frame_count_mismatch_refused(tmp_path):
     write_video(tmp_path / "v.avi", 3)
     with pytest.raises(camera.CameraError, match="holds 3 frames"):
         camera.run_camera("run_t", tmp_path / "v.avi", frames(4), lambda i: [], tmp_path / "d.jsonl")
+
+
+def test_own_bonnet_is_neither_a_vehicle_nor_a_leader():
+    w, h = 720, 1280
+    hood = Box(2, 0.81, 1.6, 955.6, 718.0, 1276.9)        # the box the detector gives for the bonnet
+    assert camera.is_ego_hood(hood, w, h)
+    assert camera.vehicle_boxes([hood], w, h) == []
+    assert not camera.has_leader([hood], w, h)
+    # A wide vehicle that ends well above the bottom edge, or a narrow one at the bottom, still counts.
+    near_car = Box(2, 0.9, 100, 800, 640, 1000)
+    narrow_low = Box(2, 0.9, 300, 1100, 420, 1275)
+    assert not camera.is_ego_hood(near_car, w, h) and not camera.is_ego_hood(narrow_low, w, h)
+    assert camera.has_leader([hood, near_car], w, h)

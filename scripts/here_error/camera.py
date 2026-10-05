@@ -41,14 +41,22 @@ def upright(image: np.ndarray) -> np.ndarray:
     return cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
 
 
-def vehicle_boxes(boxes: Sequence[Box]) -> list[Box]:
-    return [b for b in boxes if b.cls in params.VEHICLE_CLASSES and b.conf >= params.YOLO_CONF]
+def is_ego_hood(b: Box, width: int, height: int) -> bool:
+    """The recording car's own bonnet: a wide box that reaches the bottom of the upright image."""
+    return ((b.x2 - b.x1) >= params.EGO_HOOD_MIN_WIDTH_SHARE * width
+            and b.y2 >= (1.0 - params.EGO_HOOD_BOTTOM_SHARE) * height)
+
+
+def vehicle_boxes(boxes: Sequence[Box], width: int, height: int) -> list[Box]:
+    """Boxes of vehicle classes at or above the confidence threshold, leaving out the recording car's own bonnet."""
+    return [b for b in boxes
+            if b.cls in params.VEHICLE_CLASSES and b.conf >= params.YOLO_CONF and not is_ego_hood(b, width, height)]
 
 
 def has_leader(boxes: Sequence[Box], width: int, height: int) -> bool:
     """A vehicle whose box centre is in the middle LEADER_CENTRE_SHARE of the width and whose box is tall enough."""
     half = params.LEADER_CENTRE_SHARE * width / 2.0
-    for b in vehicle_boxes(boxes):
+    for b in vehicle_boxes(boxes, width, height):
         cx = (b.x1 + b.x2) / 2.0
         if abs(cx - width / 2.0) <= half and (b.y2 - b.y1) >= params.LEADER_MIN_HEIGHT_SHARE * height:
             return True
@@ -60,7 +68,7 @@ def analyse_frame(raw: np.ndarray, detector: Detector) -> tuple[int, bool, float
     boxes = detector(img)
     h, w = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    return len(vehicle_boxes(boxes)), has_leader(boxes, w, h), float(gray.mean())
+    return len(vehicle_boxes(boxes, w, h)), has_leader(boxes, w, h), float(gray.mean())
 
 
 def _cut_partial_last_line(path: Path) -> None:

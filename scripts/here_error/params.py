@@ -49,6 +49,11 @@ VEHICLE_CLASSES = (2, 3, 5, 7)
 LEADER_CENTRE_SHARE = 0.30
 #: ...and its box height is at least this share of the image height. A heuristic, scored by gate V6.
 LEADER_MIN_HEIGHT_SHARE = 0.04
+#: A box whose bottom edge is within this share of the image height of the bottom, and that is at least
+#: EGO_HOOD_MIN_WIDTH_SHARE of the image width, is the recording car's own bonnet, which the detector
+#: reports as a car. It is neither a vehicle in the scene nor a leader.
+EGO_HOOD_BOTTOM_SHARE = 0.03
+EGO_HOOD_MIN_WIDTH_SHARE = 0.8
 #: Local time (America/New_York) that splits daylight from dark everywhere: hour and minute.
 DUSK_SPLIT_LOCAL = (19, 15)
 LOCAL_TZ = "America/New_York"
