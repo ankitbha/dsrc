@@ -74,10 +74,27 @@ def camera_coverage(inputs: ReportInputs) -> list[str]:
     return out
 
 
-def valid_routes(inputs: ReportInputs) -> list[RouteResult]:
-    """Routing results that belong to a current request: same id and same observed time."""
+def audit_routes(inputs: ReportInputs) -> tuple[list[RouteResult], int, int]:
+    """Routing rows that belong to a current request (same id and observed time), each request counted once.
+
+    Returns the usable rows, the number of rows matching no current request, and the number of
+    repeated rows for a request id that was already counted.
+    """
     need = {q.request_id: q.observed_s for q in inputs.requests}
-    return [r for r in (inputs.routing or []) if r.request_id in need and abs(r.observed_s - need[r.request_id]) < 1e-6]
+    good, seen, stale, dup = [], set(), 0, 0
+    for r in inputs.routing or []:
+        if r.request_id not in need or abs(r.observed_s - need[r.request_id]) >= 1e-6:
+            stale += 1
+        elif r.request_id in seen:
+            dup += 1
+        else:
+            seen.add(r.request_id)
+            good.append(r)
+    return good, stale, dup
+
+
+def valid_routes(inputs: ReportInputs) -> list[RouteResult]:
+    return audit_routes(inputs)[0]
 
 
 def incomplete_reasons(inputs: ReportInputs) -> list[str]:
@@ -87,10 +104,11 @@ def incomplete_reasons(inputs: ReportInputs) -> list[str]:
     if inputs.routing is None:
         reasons.append("routing results are missing")
     else:
-        good = valid_routes(inputs)
-        stale = len(inputs.routing) - len(good)
+        good, stale, dup = audit_routes(inputs)
         if stale:
             reasons.append(f"{stale} routing rows match no current request (stale or foreign id or observed time) and are ignored")
+        if dup:
+            reasons.append(f"{dup} routing rows repeat a request id already counted and are ignored")
         have = {r.request_id for r in good}
         need = {q.request_id for q in inputs.requests}
         if need - have:
@@ -172,23 +190,29 @@ def _row(label, values, roads, segs, n_unit, fmt=pct):
             f"| {len(values)} {n_unit} on {len(set(roads))} physical roads and {len(set(segs))} directed segments |")
 
 
-def _stretch_row(label, values, ids, stretch_roads, fmt=pct):
-    """Stretch values in the same columns as passes.
+def stretch_road(stretch, passes_by_id: dict) -> str:
+    """The road holding most of the stretch's matched metres; a tie goes to the road of its first pass."""
+    metres: dict[str, float] = {}
+    for pid in stretch.pass_ids:
+        p = passes_by_id[pid]
+        metres[p.road_id] = metres.get(p.road_id, 0.0) + p.matched_m
+    best = max(metres.values())
+    first = passes_by_id[stretch.pass_ids[0]].road_id
+    return first if metres[first] == best else next(r for r in metres if metres[r] == best)
 
-    A stretch carries the road of each of its passes, so one spanning two roads carries both. The
-    road column counts the distinct roads over all stretches and, when there are enough, resamples
-    stretches grouped by the set of roads they carry. The second column resamples each stretch alone.
-    """
+
+def stretch_columns(values, stretch_ids, roads, fmt=pct) -> tuple[str, str]:
+    """The two interval cells for stretch values: resampling physical roads, and each stretch alone."""
+    return _interval_text(values, roads, 'physical roads', fmt), _interval_text(values, stretch_ids, 'stretches', fmt)
+
+
+def _stretch_row(label, values, ids, roads, fmt=pct):
+    """Stretch values in the same columns as passes; `roads` holds the road each stretch belongs to."""
     if not len(values):
         return f"| {label} | {NOT_COMPUTED}: no data | | | |"
-    n_roads = len(set().union(*stretch_roads))
-    if n_roads < params.MIN_N_FOR_INTERVAL:
-        road_cell = f"not resolvable: {n_roads} {_SINGULAR['physical roads'] if n_roads == 1 else 'physical roads'}"
-    else:
-        ci = stats.cluster_bootstrap_median(values, ["+".join(sorted(r)) for r in stretch_roads])
-        road_cell = f"{fmt(ci.lo)} to {fmt(ci.hi)}"
-    return (f"| {label} | {fmt(float(np.median(values)))} | {road_cell} "
-            f"| {_interval_text(values, ids, 'stretches', fmt)} | {len(values)} stretches on {n_roads} physical roads |")
+    road_cell, own_cell = stretch_columns(values, ids, roads, fmt)
+    return (f"| {label} | {fmt(float(np.median(values)))} | {road_cell} | {own_cell} "
+            f"| {len(values)} stretches on {len(set(roads))} physical roads |")
 
 
 def headline(rows: list[PassRow], stretches, passes_by_id: dict) -> list[str]:
@@ -197,7 +221,7 @@ def headline(rows: list[PassRow], stretches, passes_by_id: dict) -> list[str]:
         return [f(r) for r in sel], [r.road_id for r in sel], [r.segment_key for r in sel]
 
     sids = [s.stretch_id for s in stretches]
-    sroads = [{passes_by_id[pid].road_id for pid in s.pass_ids} for s in stretches]
+    sroads = [stretch_road(s, passes_by_id) for s in stretches]
     out = [f"| Quantity compared | Median | {ROAD_COL} | {SEGMENT_COL} | n |", "|---|---|---|---|---|"]
     out.append(_row("Pass: (HERE time - observed time) / observed time, HERE reading with the latest data time before the pass",
                     *col(lambda r: r.a.t.signed_error), "passes"))
@@ -375,7 +399,7 @@ def repeated_visits(rows: list[PassRow]) -> list[str]:
     """Spread between separate drives over the same directed segment, against the spread of HERE's reading."""
     rep = {k: v for k, v in segment_visits(rows).items() if len(v) >= 2}
     if len(rep) < 2:
-        found = ", ".join(f"{v[0].rows[0].a.p.description}, {v[0].matched_m:.0f} m matched" for v in rep.values())
+        found = ", ".join(f"the directed segment ending at {v[0].rows[0].a.p.description}, road {v[0].rows[0].road_id}, {v[0].matched_m:.0f} m matched" for v in rep.values())
         return [f"- Repeated passes: {NOT_COMPUTED}: {len(rep)} directed segment{'s' if len(rep) != 1 else ''} driven at least twice "
                 f"with the drives more than {params.STRETCH_MAX_GAP_S:.0f} s apart" + (f" ({found})" if found else "")
                 + "; at least 2 are needed for a spread."]
@@ -419,7 +443,7 @@ def stage5(rows: list[PassRow], camera_note: str | None) -> list[str]:
     return out
 
 
-def routing_section(inputs: ReportInputs, passes_by_id: dict) -> list[str]:
+def routing_section(inputs: ReportInputs, passes_by_id: dict, stretch_roads: dict) -> list[str]:
     if inputs.routing is None:
         return [f"- {NOT_COMPUTED}: no routing results"]
     good = valid_routes(inputs)
@@ -439,7 +463,9 @@ def routing_section(inputs: ReportInputs, passes_by_id: dict) -> list[str]:
             head += (f"95% interval resampling physical roads: {_interval_text(vals, roads, 'physical roads')}; "
                      f"treating each directed segment as independent: {_interval_text(vals, segs, 'directed segments')}; ")
         else:
-            head += f"95% interval resampling whole stretches: {_interval_text(vals, [r.request_id for r in ok], 'stretches')}; "
+            road_cell, own_cell = stretch_columns(vals, [r.request_id for r in ok], [stretch_roads[r.request_id] for r in ok])
+            head += (f"95% interval resampling physical roads: {road_cell}; "
+                     f"treating each stretch as independent: {own_cell}; ")
         out.append(head + f"{POSITIVE_MEANS}. {len(rs) - len(ok)} routes excluded because the route did not follow the driven path.")
         nt = [(r.no_traffic_duration_s - r.observed_s) / r.observed_s for r in ok if r.no_traffic_duration_s is not None]
         if nt:
@@ -511,7 +537,8 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     L.append("")
     L.append("## Stage 6: HERE Routing v8")
     L.append("A past departure time makes HERE use typical traffic for that weekday and clock time, not the traffic recorded that day.")
-    L += routing_section(inputs, {p.pass_id: p for p in asm.passes})
+    by_id = {p.pass_id: p for p in asm.passes}
+    L += routing_section(inputs, by_id, {st.stretch_id: stretch_road(st, by_id) for st in asm.stretch_result.stretches})
     L.append("")
     L.append("## Gates and exclusions")
     for r in asm.runs:
@@ -539,7 +566,7 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
 
 
 PASS_COLUMNS = (
-    "pass_id", "run", "segment_end_description", "segment_key", "road_id", "road_label", "functional_class", "first_utc_s", "last_utc_s", "n_fixes", "chain_start_m", "chain_end_m",
+    "pass_id", "run", "segment_end_description", "segment_key", "road_id", "road_label", "road_catalogue_segments", "functional_class", "first_utc_s", "last_utc_s", "n_fixes", "chain_start_m", "chain_end_m",
     "matched_m", "observed_s", "path_positions_m", "path_speed_m", "v3_rel_diff", "segment_length_flag", "exclusion",
     "reading_seq", "reading_age_s", "reading_arrived_before_start", "here_s", "free_flow_s", "signed_error",
     "free_flow_error", "sensitivity_signed_error", "arrived_signed_error", "shuffled_signed_error", "jam_factor",
@@ -549,6 +576,8 @@ PASS_COLUMNS = (
 
 def write_passes_csv(asm: pipeline.Assembly, rows: list[PassRow], path: Path) -> None:
     cond = {r.a.p.pass_id: r for r in rows}
+    # Every segment of the catalogue the road reaches: larger than the segments its passes lie on.
+    catalogue_size = {r.road_id: len(r.segment_keys) for r in asm.roads.roads} if asm.roads else {}
     times = {t.pass_id: t for t in asm.times}
     with path.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=PASS_COLUMNS)
@@ -558,7 +587,8 @@ def write_passes_csv(asm: pipeline.Assembly, rows: list[PassRow], path: Path) ->
             c = cond.get(p.pass_id)
             d = dict(
                 pass_id=p.pass_id, run=p.run, segment_end_description=p.description, segment_key=p.segment_key,
-                road_id=p.road_id, road_label=p.road_label, functional_class=p.functional_class,
+                road_id=p.road_id, road_label=p.road_label,
+                road_catalogue_segments=catalogue_size.get(p.road_id), functional_class=p.functional_class,
                 first_utc_s=p.first_utc_s, last_utc_s=p.last_utc_s, n_fixes=len(p.fixes),
                 chain_start_m=p.chain_start_m, chain_end_m=p.chain_end_m, matched_m=p.matched_m, observed_s=p.observed_s,
                 path_positions_m=p.path_positions_m, path_speed_m=p.path_speed_m, v3_rel_diff=p.v3_rel_diff,

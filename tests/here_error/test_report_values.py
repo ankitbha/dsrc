@@ -239,7 +239,7 @@ def test_routing_keeps_only_current_requests_and_lists_the_rest():
     foreign = rr("zzz-999", "pass", 9.0, 100.0)
     inp = report.ReportInputs(asm, {}, None, good[:-1] + [stale, foreign], reqs)
     reasons = report.incomplete_reasons(inp)
-    assert any("3 routing rows match no current request" in r for r in reasons) or any("2 routing rows match no current request" in r for r in reasons)
+    assert any("2 routing rows match no current request" in r for r in reasons)
     assert any("cover" in r and "current requests" in r for r in reasons)
     text, _ = report.render(inp, PROV)
     assert "9.0" not in text.split("## Stage 6")[1].split("## Gates")[0].replace("90.0", "")
@@ -254,35 +254,81 @@ def test_routing_headline_excludes_routes_off_the_path_and_counts_them():
     text, _ = render(routing=res, requests=reqs)
     line = next(l for l in text.splitlines() if l.startswith("- pass: median of (HERE routing"))
     assert "over 5 routes: +30.0%" in line and "2 routes excluded" in line
-    assert "not resolvable" in line or "to" in line
+    roads = ["R1", "R1", "R2", "R3", "R4"]
+    segs = ["s1", "s2", "s3", "s4", "s5"]
+    own = stats.cluster_bootstrap_median([0.10, 0.20, 0.30, 0.40, 0.50], segs)
+    assert "resampling physical roads: not resolvable: 4 physical roads;" in line
+    assert f"treating each directed segment as independent: {100 * own.lo:+.1f}% to {100 * own.hi:+.1f}%;" in line
 
 
-def stretch_aps(roads):
-    """Each stretch is two 1200 m passes 50 s apart, on the given roads (one road id per pass)."""
+# Six stretches of two passes each (50 s apart). Each tuple: (road of pass 1, metres, road of pass 2, metres).
+STRETCH_SPEC = [("R1", 1200, "R1", 1200), ("R1", 400, "R2", 1800), ("R3", 1200, "R4", 1200),
+                ("R4", 1200, "R4", 1200), ("R5", 1200, "R5", 1200), ("R2", 1200, "R2", 1200)]
+EXPECTED_STRETCH_ROADS = ["R1", "R2", "R3", "R4", "R5", "R2"]     # majority of metres; tie goes to the first pass
+
+
+def stretch_aps(spec=STRETCH_SPEC):
     out, t = [], T0
-    for k, (r1, r2) in enumerate(roads):
-        out.append(mk(2 * k, r1, f"s{2 * k}", t, 100, 150, 50, 100, None, None, matched=1200.0))
-        out.append(mk(2 * k + 1, r2, f"s{2 * k + 1}", t + 150, 100, 130 + 10 * k, 50, 100, None, None, matched=1200.0))
+    for k, (r1, m1, r2, m2) in enumerate(spec):
+        out.append(mk(2 * k, r1, f"s{2 * k}", t, 100, 150, 50, 100, None, None, matched=float(m1)))
+        out.append(mk(2 * k + 1, r2, f"s{2 * k + 1}", t + 150, 100, 130 + 10 * k, 50, 100, None, None, matched=float(m2)))
         t += 600
     return out
 
 
+def test_stretch_belongs_to_the_road_with_most_metres_and_a_tie_goes_to_the_first_pass():
+    asm = asm_of(stretch_aps())
+    by_id = {p.pass_id: p for p in asm.passes}
+    assert [report.stretch_road(s, by_id) for s in asm.stretch_result.stretches] == EXPECTED_STRETCH_ROADS
+
+
 def test_stretch_rows_use_the_road_rule_and_the_independent_column():
-    few = stretch_aps([("R1", "R1"), ("R1", "R2"), ("R2", "R2"), ("R1", "R1")])
-    cells = table_cells(render(few)[0], "Stretch: (HERE time")
-    assert cells[2] == "not resolvable: 2 physical roads"        # a stretch spanning R1 and R2 carries both
-    assert cells[3] == "not resolvable: 4 stretches"             # the independent column holds the stretch-level interval
-    assert cells[4] == "4 stretches on 2 physical roads"
-    many = stretch_aps([("R1", "R1"), ("R2", "R2"), ("R3", "R3"), ("R4", "R4"), ("R5", "R5"), ("R1", "R2")])
-    text, _ = render(many)
-    cells = table_cells(text, "Stretch: (HERE time")
-    asm = asm_of(many)
+    text, _ = render(stretch_aps())
+    asm = asm_of(stretch_aps())
     st = asm.stretch_result.stretches
-    labels = ["+".join(sorted({{a.p.pass_id: a.p.road_id for a in many}[pid] for pid in s.pass_ids})) for s in st]
-    road = stats.cluster_bootstrap_median([s.signed_error for s in st], labels)
-    indep = stats.cluster_bootstrap_median([s.signed_error for s in st], [s.stretch_id for s in st])
+    assert len(st) == 6
+    vals = [s.signed_error for s in st]
+    road = stats.cluster_bootstrap_median(vals, EXPECTED_STRETCH_ROADS)
+    own = stats.cluster_bootstrap_median(vals, [s.stretch_id for s in st])
+    cells = table_cells(text, "Stretch: (HERE time")
     assert cells[2] == f"{100 * road.lo:+.1f}% to {100 * road.hi:+.1f}%"
-    assert cells[3] == f"{100 * indep.lo:+.1f}% to {100 * indep.hi:+.1f}%"
+    assert cells[3] == f"{100 * own.lo:+.1f}% to {100 * own.hi:+.1f}%"
+    assert cells[2] != cells[3]                    # two stretches share a road, so the two resamplings differ
+    assert cells[4] == "6 stretches on 5 physical roads"
+
+
+def test_stretches_on_few_roads_are_not_resolvable_in_the_road_column():
+    spec = [("R1", 1200, "R1", 1200), ("R1", 1200, "R2", 1200), ("R2", 1200, "R2", 1200), ("R1", 1200, "R1", 1200),
+            ("R2", 1200, "R2", 1200), ("R1", 1200, "R1", 1200)]
+    cells = table_cells(render(stretch_aps(spec))[0], "Stretch: (HERE time")
+    assert cells[2] == "not resolvable: 2 physical roads" and " to " in cells[3]
+
+
+def stretch_routes(asm, errs):
+    reqs = pipeline.route_requests(asm)
+    sreq = [q for q in reqs if q.kind == "stretch"]
+    return reqs, [rr(q.request_id, "stretch", e, q.observed_s) for q, e in zip(sreq, errs)]
+
+
+def test_routing_stretch_line_follows_the_two_column_road_rule():
+    asm = asm_of(stretch_aps())
+    reqs, res = stretch_routes(asm, [0.10, 0.25, 0.05, 0.40, 0.30, 0.15])
+    text, _ = render(stretch_aps(), routing=res, requests=reqs)
+    line = next(l for l in text.splitlines() if l.startswith("- stretch: median of (HERE routing"))
+    ids = [s.stretch_id for s in asm.stretch_result.stretches]
+    road = stats.cluster_bootstrap_median([r.signed_error for r in res], EXPECTED_STRETCH_ROADS)
+    own = stats.cluster_bootstrap_median([r.signed_error for r in res], ids)
+    assert f"95% interval resampling physical roads: {100 * road.lo:+.1f}% to {100 * road.hi:+.1f}%;" in line
+    assert f"treating each stretch as independent: {100 * own.lo:+.1f}% to {100 * own.hi:+.1f}%;" in line
+    assert "whole stretches" not in line
+
+
+def test_routing_stretch_line_on_few_roads_is_not_resolvable():
+    spec = [("R1", 1200, "R1", 1200)] * 6
+    asm = asm_of(stretch_aps(spec))
+    reqs, res = stretch_routes(asm, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    line = next(l for l in render(stretch_aps(spec), routing=res, requests=reqs)[0].splitlines() if l.startswith("- stretch: median"))
+    assert "resampling physical roads: not resolvable: 1 physical road;" in line and "treating each stretch as independent: +" in line
 
 
 def test_no_printed_road_label_is_a_lone_description():
@@ -290,3 +336,78 @@ def test_no_printed_road_label_is_a_lone_description():
     for ap in APS:
         assert ap.p.road_label != ap.p.description
     assert "(a segment's description names the cross street at its end, not the road)" in text
+
+
+def test_a_repeated_request_id_counts_once_and_is_listed():
+    asm = asm_of(APS)
+    reqs = pipeline.route_requests(asm)
+    good = [rr(q.request_id, q.kind, 0.1, q.observed_s) for q in reqs]
+    first = good[0]
+    dup = rr(first.request_id, first.kind, 7.7, first.observed_s)
+    inp = report.ReportInputs(asm, {}, None, good + [dup], reqs)
+    kept = report.valid_routes(inp)
+    assert len(kept) == len(reqs) and kept[0].signed_error == 0.1 and 7.7 not in [r.signed_error for r in kept]
+    assert any("1 routing rows repeat a request id" in r for r in report.incomplete_reasons(inp))
+    clean = report.ReportInputs(asm, {}, None, good, reqs)
+    assert not any("repeat" in r for r in report.incomplete_reasons(clean))
+
+
+# ---- clustering: roads against segments against passes ------------------------------------------
+
+def three_roads_many_segments(n=9):
+    return [mk(i, f"R{i % 3}", f"s{i}", T0 + 300 * i, 100, 100 + 6 * i, 70, 100, None, None) for i in range(n)]
+
+
+def test_stage4_groups_resample_roads_not_segments():
+    text, _ = render(three_roads_many_segments())
+    line = next(l for l in text.splitlines() if l.strip().startswith("- lowest"))
+    assert "resampling physical roads: not resolvable: 3 physical roads" in line
+
+
+def test_driver_offset_intervals_resample_roads_not_segments():
+    aps = [mk(i, f"R{i % 3}", f"s{i}", T0 + 300 * i, 50, 60 + i, 62.5, 50, None, None) for i in range(9)]
+    asm = asm_of(aps)
+    text, _ = render(aps, detections=detections_for(asm, leader=False))
+    line = next(l for l in text.splitlines() if l.startswith("- Median signed error of HERE time without removing"))
+    assert line.count("not resolvable: 3 physical roads") == 2
+
+
+def test_routing_pass_road_column_resamples_roads_not_segments():
+    aps = three_roads_many_segments()
+    asm = asm_of(aps)
+    reqs = [q for q in pipeline.route_requests(asm) if q.kind == "pass"]
+    res = [rr(q.request_id, "pass", 0.05 * i, q.observed_s) for i, q in enumerate(reqs)]
+    line = next(l for l in render(aps, routing=res, requests=reqs)[0].splitlines() if l.startswith("- pass: median of (HERE routing"))
+    assert "resampling physical roads: not resolvable: 3 physical roads;" in line
+    assert "treating each directed segment as independent: -" in line or "treating each directed segment as independent: +" in line
+
+
+def test_headline_segment_column_resamples_segments_not_passes():
+    # Six passes, but only four directed segments (one segment holds three passes).
+    aps = [mk(i, f"R{i}", f"s{min(i, 3)}", T0 + 300 * i, 100, 100 + 9 * i, 70, 100, None, None) for i in range(6)]
+    cells = table_cells(render(aps)[0], "Pass: (HERE time")
+    assert cells[3] == "not resolvable: 4 directed segments"
+    assert cells[4].startswith("6 passes on 6 physical roads and 4 directed segments")
+
+
+def test_per_road_table_counts_distinct_segments_and_uses_the_median():
+    aps = [mk(0, "R1", "sA", T0, 100, 100, 70, 100, None, None), mk(1, "R1", "sA", T0 + 300, 100, 100, 70, 100, None, None),
+           mk(2, "R1", "sB", T0 + 600, 100, 190, 70, 100, None, None), mk(3, "R2", "sC", T0 + 900, 100, 120, 70, 100, None, None)]
+    text, _ = render(aps)
+    cells = [c.strip() for c in next(l for l in text.splitlines() if l.startswith("| R1 |")).strip("|").split("|")]
+    assert cells[2] == "3" and cells[3] == "2"            # three passes on two distinct segments
+    assert cells[4] == "+0.0%"                            # the median of 0, 0, +90%; the mean would be +30%
+
+
+def test_v4_paragraph_prints_the_shuffled_value_in_its_place():
+    asm = asm_of(APS)
+    asm = Assembly(asm.runs, asm.passes, asm.times, asm.catalogues, asm.stretch_result, V4Result(5, 0.05, 0.37), ())
+    inp = report.ReportInputs(asm, {}, None, None, [])
+    text, _ = report.render(inp, PROV)
+    assert "5.0% with the real reading, 37.0% with the shuffled reading" in text
+
+
+def test_repeated_visit_sentence_names_the_segment_by_its_end_and_gives_the_road():
+    aps = [mk(0, "R9", "s1", T0, 100, 110, 70, 100, None, None), mk(1, "R9", "s1", T0 + 377, 100, 120, 70, 100, None, None)]
+    (line,) = report.repeated_visits(report.pass_rows(report.ReportInputs(asm_of(aps), {}, None, None, [])))
+    assert "the directed segment ending at desc s1, road R9, 1000 m matched" in line

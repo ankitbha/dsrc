@@ -176,6 +176,16 @@ def extract_passes(run: str, fixes: tuple[GpsFix, ...], bodies: tuple[HereBody, 
     return passes, catalogue
 
 
+def pass_title(p: Pass) -> str:
+    """A HERE description names the cross street at the end of its segment, so it is never given as a road's name."""
+    return (f"{p.pass_id}, road {p.road_id or '(not assigned)'}, segment ending at {p.description}\n"
+            f"chainage {p.chain_start_m:.0f} to {p.chain_end_m:.0f} m, {p.observed_s:.0f} s, {len(p.fixes)} fixes, exclusion: {p.exclusion}")
+
+
+def neighbour_label(segment: HereSegment) -> str:
+    return f"ends at {segment.description}"
+
+
 def plot_pass(p: Pass, catalogue: dict[str, CatalogueEntry], all_fixes: tuple[GpsFix, ...], path: Path) -> None:
     """Gate V2: the segment, the pass's fixes and the neighbouring segments, for inspection by eye."""
     import matplotlib
@@ -197,7 +207,7 @@ def plot_pass(p: Pass, catalogue: dict[str, CatalogueEntry], all_fixes: tuple[Gp
             ax.plot(xy[:, 0], xy[:, 1], color="0.6", lw=1.0)
             mid = xy[len(xy) // 2]
             if lo[0] <= mid[0] <= hi[0] and lo[1] <= mid[1] <= hi[1]:
-                ax.annotate(e.segment.description, mid, fontsize=6, color="0.4")
+                ax.annotate(neighbour_label(e.segment), mid, fontsize=6, color="0.4")
     ax.plot(entry.xy[:, 0], entry.xy[:, 1], color="tab:blue", lw=3, alpha=0.6, label="matched segment")
     ax.plot(entry.xy[0, 0], entry.xy[0, 1], "g^", ms=9, label="segment start")
     if around:
@@ -209,8 +219,7 @@ def plot_pass(p: Pass, catalogue: dict[str, CatalogueEntry], all_fixes: tuple[Gp
     ax.set_aspect("equal")
     ax.set_xlabel("metres east")
     ax.set_ylabel("metres north")
-    ax.set_title(f"{p.pass_id} {p.description}\nchainage {p.chain_start_m:.0f} to {p.chain_end_m:.0f} m, "
-                 f"{p.observed_s:.0f} s, {len(p.fixes)} fixes, exclusion: {p.exclusion}", fontsize=9)
+    ax.set_title(pass_title(p), fontsize=9)
     ax.legend(fontsize=7, loc="upper right")
     fig.tight_layout()
     path.parent.mkdir(parents=True, exist_ok=True)

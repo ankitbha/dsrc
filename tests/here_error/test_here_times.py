@@ -3,7 +3,7 @@ import pytest
 from here_fixtures import fix, make_body, road, segment
 from here_error import here_times as ht
 from here_error import load
-from here_error.models import Pass
+from here_error.models import Pass, PassTimes
 
 EAST = [(0, 0), (500, 0), (1000, 0)]
 SUBS = [
@@ -199,3 +199,15 @@ def test_jam_factor_is_weighted_by_matched_metres():
     seg = sub_segment()
     # 100 m of jam 3 and 500 m of jam 1 over a 100..600 style portion: (200*3 + 300*1)/500 for 100..600? no: see below.
     assert ht.matched_jam_factor(seg, 1000.0, 100, 600) == pytest.approx((200 * 3 + 300 * 1) / 500)
+
+
+def test_v4_summary_compares_real_and_shuffled_on_the_same_passes():
+    def pt(pid, signed, shuffled):
+        return PassTimes(pid, 0, 0.0, 0.0, True, 100.0, 100.0, 70.0, signed, 0.0, 1.0, 0.9, 0.0, 100.0, None, None, None, None, 1, shuffled, None)
+
+    times = [pt("a", 0.10, 0.50), pt("b", -0.20, -0.60), pt("c", 0.05, None), pt("d", 0.30, 0.90)]
+    v4 = ht.v4_summary(times)
+    assert v4.n == 3
+    assert v4.median_abs_real == pytest.approx(0.20)         # passes a, b, d only: |0.10|, |0.20|, |0.30|
+    assert v4.median_abs_shuffled == pytest.approx(0.60)    # |0.50|, |0.60|, |0.90|
+    assert ht.v4_summary([pt("c", 0.05, None)]).n == 0

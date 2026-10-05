@@ -206,3 +206,15 @@ def test_match_radius_applies_inside_the_bounding_box_of_a_bent_segment():
     # (100..400, 20) lies inside the segment's bounding box but 20 m from it.
     assert not run_match([fix(i, 100 + 10 * i, 20.0) for i in range(30)], bent)[0]
     assert run_match([fix(i, 100 + 10 * i, 10.0) for i in range(30)], bent)[0]
+
+
+def test_plot_title_and_labels_never_present_a_description_as_a_road():
+    from dataclasses import replace
+
+    east = segment("Cross St", EAST)
+    passes, _ = run_match(drive_east(0, 100, 700), east)
+    p = replace(passes[0], road_id="R07")
+    title = matching.pass_title(p)
+    assert title.splitlines()[0] == f"{p.pass_id}, road R07, segment ending at Cross St"
+    assert matching.neighbour_label(east) == "ends at Cross St"
+    assert "road (not assigned)" in matching.pass_title(passes[0])
