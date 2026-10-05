@@ -13,8 +13,10 @@ def gps_line(seq, utc_s, lat, lon, speed=10.0, heading=90.0, wall_offset=1.2, va
     return json.dumps(r, sort_keys=True, separators=(",", ":"))
 
 
-def here_line(seq, wall_s, lat, lon):
+def here_line(seq, wall_s, lat, lon, resp_mono_s=None):
     r = {"ch": "here", "seq": seq, "query_lat": lat, "query_lon": lon, "t_wall_ns": int(wall_s * 1e9), "status": 200}
+    if resp_mono_s is not None:
+        r["t_response_mono_ns"] = int(resp_mono_s * 1e9)
     return json.dumps(r, sort_keys=True, separators=(",", ":"))
 
 

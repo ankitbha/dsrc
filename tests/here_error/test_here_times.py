@@ -89,6 +89,16 @@ def test_reading_selection_rules():
     assert ht.select_sensitivity(readings, (first + last) / 2).seq == 2
 
 
+def test_arrived_reading_must_have_reached_the_caller():
+    seg = body_with(0, 0, 1)[1]
+    bodies = [body_with(0, 900.0, 10.0, resp=950.0)[0],      # arrived 50 s before the pass
+              body_with(1, 990.0, 20.0, resp=1090.0)[0]]     # data time before the pass, arrived 90 s after its start
+    readings = ht.index_readings(bodies)[seg.key]
+    assert ht.select_primary(readings, 1000.0)[0].seq == 1
+    assert ht.select_arrived(readings, 1000.0).seq == 0
+    assert ht.select_arrived(readings, 920.0) is None
+
+
 def test_shuffled_pairing_needs_20_minutes_and_takes_the_nearest():
     bodies = [body_with(i, t, 10.0)[0] for i, t in enumerate([0.0, 100.0, 1500.0, 3000.0, 4500.0])]
     seg = body_with(0, 0, 1)[1]
@@ -113,6 +123,7 @@ def test_compute_pass_times_end_to_end_and_v4():
     assert t.observed_s == 60.0
     assert t.signed_error == pytest.approx(-10 / 60, rel=1e-3)       # HERE shorter than the car
     assert t.free_flow_error == pytest.approx((100 / 15 + 26 - 60) / 60, rel=1e-3)
+    assert t.arrived_seq == 0 and t.arrived_signed_error == pytest.approx(t.signed_error)
     assert t.shuffled_seq == 1                                       # 3940 s later
     v4 = ht.v4_summary([t])
     assert v4.n == 1 and v4.median_abs_real == pytest.approx(abs(t.signed_error))

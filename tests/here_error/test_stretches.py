@@ -10,7 +10,7 @@ def ap(pid, t0, length, run="run_t", dur=100.0):
     fixes = (fix(t0, 0, 0), fix(t0 + dur, length, 0))
     p = Pass(pid, run, "k", "R", 2, fixes, 0.0, length, False, length, length, None)
     t = PassTimes(pid, 0, 0.0, 10.0, True, dur, dur * 1.1, dur * 0.9, 0.1, -0.1, 1.0, 0.99, 5.0, dur - 5,
-                  None, None, None, None, None)
+                  None, None, None, None, None, None, None)
     return AnalysedPass(p, t)
 
 

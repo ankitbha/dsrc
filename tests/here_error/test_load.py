@@ -56,11 +56,39 @@ def test_mismatched_query_centre_refused(tmp_path):
         load.load_here_bodies("run_x", d, log, OFFSET)
 
 
-def test_index_sequence_without_phone_record_refused(tmp_path):
+def test_index_and_phone_counts_must_agree(tmp_path):
     d, phone = make(tmp_path)
     idx = d / "here_index.jsonl"
-    idx.write_text(idx.read_text() + json.dumps({"seq": 7, "file": "here/000000.json", "query_lat": 40.0, "query_lon": -74.0}) + "\n")
-    with pytest.raises(load.LoadError, match="no phone record"):
+    idx.write_text(idx.read_text() + json.dumps({"seq": 1, "file": "here/000000.json", "query_lat": 40.0, "query_lon": -74.0}) + "\n")
+    with pytest.raises(load.LoadError, match="1 phone records"):
+        load.load_here_bodies("run_x", d, load.load_phone_log(phone), OFFSET)
+
+
+def two_here_records(tmp_path, *, phone_seqs, mono_gap_2):
+    """Two index records paired with two phone records whose own sequence numbers are `phone_seqs`."""
+    phone_lines = [
+        gps_line(0, T0, 40.0, -74.0),
+        here_line(phone_seqs[0], T0 + 5.2, 40.0, -74.0, resp_mono_s=1000.0),
+        here_line(phone_seqs[1], T0 + 65.2, 40.001, -74.0, resp_mono_s=1060.0),
+    ]
+    index = [
+        {"seq": 0, "file": "here/000000.json", "query_lat": 40.0, "query_lon": -74.0, "received_t_mono": 10.0},
+        {"seq": 1, "file": "here/000001.json", "query_lat": 40.001, "query_lon": -74.0, "received_t_mono": 70.0 + mono_gap_2},
+    ]
+    b = body("2026-09-08T21:10:00Z", [result("Main St", 222.0, PTS)])
+    return write_run(tmp_path, "run_x", phone_lines, index, {"here/000000.json": b, "here/000001.json": b}, [])
+
+
+def test_phone_sequence_restart_does_not_matter_when_the_pairing_checks_hold(tmp_path):
+    d, phone = two_here_records(tmp_path, phone_seqs=(0, 0), mono_gap_2=0.0)
+    bodies = load.load_here_bodies("run_x", d, load.load_phone_log(phone), OFFSET)
+    assert [b.seq for b in bodies] == [0, 1]
+    assert bodies[1].response_utc_s == pytest.approx(T0 + 65.2 - 1.2)
+
+
+def test_receipt_times_that_do_not_line_up_are_refused(tmp_path):
+    d, phone = two_here_records(tmp_path, phone_seqs=(0, 1), mono_gap_2=2.0)
+    with pytest.raises(load.LoadError, match="do not line up"):
         load.load_here_bodies("run_x", d, load.load_phone_log(phone), OFFSET)
 
 

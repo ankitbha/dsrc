@@ -128,6 +128,8 @@ class PassTimes:
     moving_s: float
     sensitivity_seq: int | None
     sensitivity_signed_error: float | None
+    arrived_seq: int | None
+    arrived_signed_error: float | None
     shuffled_seq: int | None
     shuffled_signed_error: float | None
     exclusion: str | None

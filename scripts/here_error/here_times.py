@@ -132,6 +132,17 @@ def select_sensitivity(readings: list[Reading], mid_utc_s: float) -> Reading | N
     return min(readings, key=lambda r: abs(r.data_time_s - mid_utc_s))
 
 
+def select_arrived(readings: list[Reading], first_utc_s: float) -> Reading | None:
+    """Sensitivity: the latest reading that had also reached the caller by the pass's first fix.
+
+    The primary rule goes by the data timestamp, and a response can arrive 35 to 112 s after its
+    data timestamp, so the primary reading may be one a real-time caller did not yet hold.
+    """
+    held = [r for r in readings if r.response_utc_s <= first_utc_s and r.data_time_s <= first_utc_s
+            and first_utc_s - r.data_time_s <= params.MAX_READING_AGE_S]
+    return held[-1] if held else None
+
+
 def select_shuffled(readings: list[Reading], first_utc_s: float, last_utc_s: float) -> Reading | None:
     """Control V4: the reading nearest in time among those at least SHUFFLE_MIN_S from the pass."""
     best, best_d = None, None
@@ -170,6 +181,7 @@ def compute_pass_times(
             reading_arrived_before_start=None, observed_s=p.observed_s, here_s=None, free_flow_s=None,
             signed_error=None, free_flow_error=None, jam_factor=None, confidence=None,
             stopped_s=stopped, moving_s=moving, sensitivity_seq=None, sensitivity_signed_error=None,
+            arrived_seq=None, arrived_signed_error=None,
             shuffled_seq=None, shuffled_signed_error=None, exclusion=reason,
         )
         base.update(kw)
@@ -192,6 +204,7 @@ def compute_pass_times(
         return blank("reading_without_free_flow", reading_seq=primary.seq, reading_data_time_s=primary.data_time_s)
     mid = (p.first_utc_s + p.last_utc_s) / 2.0
     sens = select_sensitivity(cands, mid)
+    arrived = select_arrived(cands, p.first_utc_s)
     shuf = select_shuffled(all_readings.get(p.segment_key, []), p.first_utc_s, p.last_utc_s)
     return PassTimes(
         pass_id=p.pass_id,
@@ -210,6 +223,8 @@ def compute_pass_times(
         moving_s=moving,
         sensitivity_seq=None if sens is None else sens.seq,
         sensitivity_signed_error=_error_with(sens, shape_length_m, p),
+        arrived_seq=None if arrived is None else arrived.seq,
+        arrived_signed_error=_error_with(arrived, shape_length_m, p),
         shuffled_seq=None if shuf is None else shuf.seq,
         shuffled_signed_error=_error_with(shuf, shape_length_m, p),
         exclusion=None,

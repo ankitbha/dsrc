@@ -29,6 +29,7 @@ class LoadError(ValueError):
 class PhoneHereRecord:
     seq: int
     wall_s: float
+    response_mono_s: float | None
     query_lat: float
     query_lon: float
 
@@ -80,7 +81,10 @@ def load_phone_log(path: Path | str) -> PhoneLog:
                 )))
             elif '"ch":"here"' in line:
                 r = json.loads(line)
-                here.append(PhoneHereRecord(r["seq"], _ns(r["t_wall_ns"]), r["query_lat"], r["query_lon"]))
+                here.append(PhoneHereRecord(
+                    r["seq"], _ns(r["t_wall_ns"]),
+                    _ns(r["t_response_mono_ns"]) if r.get("t_response_mono_ns") is not None else None,
+                    r["query_lat"], r["query_lon"]))
             elif '"ch":"camera"' in line:
                 r = json.loads(line)
                 capture = _ns(r["t_wall_ns"]) - (r["t_mono_ns"] - r["t_capture_mono_ns"]) / 1e9
@@ -152,43 +156,48 @@ def parse_segment(result: dict) -> HereSegment:
     )
 
 
-def load_here_bodies(run: str, run_dir: Path | str, phone: PhoneLog, offset: ClockOffset) -> tuple[HereBody, ...]:
-    """Join the run's `here_index.jsonl` to the phone log's `here` records by sequence number.
+MONO_OFFSET_TOL_S = 0.5
 
-    Refuses when a sequence number has no phone record, appears twice, or when the two
-    records disagree on the query centre: the phone time is what places a body on the GPS
-    axis, so a mismatched pair would place it wrongly.
+
+def load_here_bodies(run: str, run_dir: Path | str, phone: PhoneLog, offset: ClockOffset) -> tuple[HereBody, ...]:
+    """Pair the run's `here_index.jsonl` records with the phone log's `here` records, in order.
+
+    The phone's own sequence number is not a key: in one phone log it restarts from 0 partway
+    through, so the i-th index record is paired with the i-th phone record. Three checks guard
+    the pairing, and any failure refuses the load: the counts agree; the two query centres
+    agree; and the phone's monotonic response time minus the index's receipt time is the same
+    for every pair, within MONO_OFFSET_TOL_S, which a mis-paired record would break. The phone
+    wall time of the pair is what places a body on the GPS axis.
     """
     run_dir = Path(run_dir)
-    by_seq: dict[int, PhoneHereRecord] = {}
-    for rec in phone.here:
-        if rec.seq in by_seq:
-            raise LoadError(f"{phone.path}: HERE sequence number {rec.seq} appears twice")
-        by_seq[rec.seq] = rec
-    bodies = []
+    index = []
     with (run_dir / "here_index.jsonl").open() as fh:
-        for line in fh:
-            if not line.strip():
-                continue
-            idx = json.loads(line)
-            ph = by_seq.get(idx["seq"])
-            if ph is None:
-                raise LoadError(f"{run}: HERE index sequence {idx['seq']} has no phone record")
-            if (abs(ph.query_lat - idx["query_lat"]) > QUERY_CENTRE_TOL_DEG
-                    or abs(ph.query_lon - idx["query_lon"]) > QUERY_CENTRE_TOL_DEG):
-                raise LoadError(f"{run}: HERE sequence {idx['seq']} query centres disagree between phone log and index")
-            body = json.loads((run_dir / idx["file"]).read_text())
-            segments = tuple(parse_segment(r) for r in body.get("results", []))
-            bodies.append(HereBody(
-                run=run,
-                seq=idx["seq"],
-                source_file=idx["file"],
-                data_time_s=_parse_time(body["sourceUpdated"]),
-                response_utc_s=wall_to_utc(ph.wall_s, offset),
-                query_lat=idx["query_lat"],
-                query_lon=idx["query_lon"],
-                segments=segments,
-            ))
+        index = [json.loads(line) for line in fh if line.strip()]
+    if len(index) != len(phone.here):
+        raise LoadError(f"{run}: {len(index)} HERE index records but {len(phone.here)} phone records")
+    mono_gaps = []
+    for idx, ph in zip(index, phone.here):
+        if (abs(ph.query_lat - idx["query_lat"]) > QUERY_CENTRE_TOL_DEG
+                or abs(ph.query_lon - idx["query_lon"]) > QUERY_CENTRE_TOL_DEG):
+            raise LoadError(f"{run}: HERE index record {idx['seq']} and its phone record: query centres disagree")
+        if ph.response_mono_s is not None and idx.get("received_t_mono") is not None:
+            mono_gaps.append(ph.response_mono_s - idx["received_t_mono"])
+    if mono_gaps and max(mono_gaps) - min(mono_gaps) > MONO_OFFSET_TOL_S:
+        raise LoadError(f"{run}: phone and Jetson receipt times do not line up across HERE records "
+                        f"(spread {max(mono_gaps) - min(mono_gaps):.3f} s)")
+    bodies = []
+    for idx, ph in zip(index, phone.here):
+        body = json.loads((run_dir / idx["file"]).read_text())
+        bodies.append(HereBody(
+            run=run,
+            seq=idx["seq"],
+            source_file=idx["file"],
+            data_time_s=_parse_time(body["sourceUpdated"]),
+            response_utc_s=wall_to_utc(ph.wall_s, offset),
+            query_lat=idx["query_lat"],
+            query_lon=idx["query_lon"],
+            segments=tuple(parse_segment(r) for r in body.get("results", [])),
+        ))
     return tuple(bodies)
 
 
