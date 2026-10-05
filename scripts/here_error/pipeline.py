@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import collections
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from here_error import params
+from here_error import corridors, params
 from here_error.clock import ClockOffset, estimate_offset
 from here_error.here_times import (
     AnalysedPass,
@@ -42,6 +42,7 @@ class Assembly:
     stretch_result: StretchResult
     v4: V4Result
     gate_v1_failed: tuple[str, ...]
+    roads: corridors.Roads | None = None
 
     @property
     def analysed(self) -> list[AnalysedPass]:
@@ -84,10 +85,13 @@ def assemble(data_dir: Path) -> Assembly:
         for p in run_passes:
             passes.append(p)
             times.append(compute_pass_times(p, cat[p.segment_key].shape_length_m, readings, all_readings))
+    roads = corridors.build_roads(e.segment for c in catalogues.values() for e in c.values())
+    passes = [replace(p, road_id=roads.by_segment[p.segment_key].road_id,
+                      road_label=roads.by_segment[p.segment_key].label) for p in passes]
     asm = Assembly(runs, tuple(passes), tuple(times), catalogues, StretchResult((), 0, 0.0),
-                   v4_summary(times), ())
+                   v4_summary(times), (), roads)
     stretches = build_stretches(asm.analysed)
-    return Assembly(asm.runs, asm.passes, asm.times, asm.catalogues, stretches, asm.v4, ())
+    return Assembly(asm.runs, asm.passes, asm.times, asm.catalogues, stretches, asm.v4, (), roads)
 
 
 def exclusion_counts(asm: Assembly) -> dict[str, int]:

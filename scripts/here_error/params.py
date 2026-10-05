@@ -21,6 +21,17 @@ REVERSE_TOL_M = 20.0
 STOP_MPS = 1.0
 #: Gate V1: largest 5th-to-95th percentile spread of the phone-clock-minus-GPS-UTC offset.
 V1_MAX_SPREAD_S = 1.0
+#: Roads: a segment continues another when its first point is within this many metres of the other's last point...
+ROAD_JOIN_M = 5.0
+#: ...and the bearing changes by less than this many degrees across the joint.
+ROAD_JOIN_TURN_DEG = 30.0
+#: Roads: opposite carriageways run within this many metres of each other...
+ROAD_PAIR_M = 40.0
+#: ...for at least this share of the shorter segment's length, sampled every ROAD_SAMPLE_M metres...
+ROAD_PAIR_SHARE = 0.8
+ROAD_SAMPLE_M = 20.0
+#: ...heading opposite ways: the bearings differ by more than this many degrees.
+ROAD_ANTIPARALLEL_DEG = 135.0
 #: Gate V3: largest relative difference between the path length from positions and from integrated speed.
 V3_MAX_REL_DIFF = 0.03
 #: Allowed relative difference between HERE's stated segment length and the shape's length.

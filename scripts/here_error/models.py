@@ -86,6 +86,8 @@ class Pass:
     path_positions_m: float
     path_speed_m: float | None
     exclusion: str | None
+    road_id: str = ""
+    road_label: str = ""
 
     @property
     def first_utc_s(self) -> float:
