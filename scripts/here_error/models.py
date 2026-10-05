@@ -23,6 +23,8 @@ class HereSubSegment:
     speed_mps: float | None
     free_flow_mps: float | None
     jam_factor: float | None
+    speed_uncapped_mps: float | None = None
+    uncapped_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,8 @@ class HereSegment:
     confidence: float | None
     functional_class: int | None
     subsegments: tuple[HereSubSegment, ...]
+    speed_uncapped_mps: float | None = None
+    uncapped_fallback: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +139,8 @@ class PassTimes:
     shuffled_seq: int | None
     shuffled_signed_error: float | None
     exclusion: str | None
+    here_uncapped_s: float | None = None
+    uncapped_signed_error: float | None = None
 
 
 @dataclass(frozen=True)
@@ -148,7 +154,12 @@ class Stretch:
     observed_s: float
     here_s: float
     free_flow_s: float
+    here_uncapped_s: float
     stopped_s: float
+
+    @property
+    def uncapped_error(self) -> float:
+        return (self.here_uncapped_s - self.observed_s) / self.observed_s
 
     @property
     def signed_error(self) -> float:

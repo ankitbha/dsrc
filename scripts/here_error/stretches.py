@@ -26,6 +26,7 @@ def _stretch(run: str, n: int, rows: list[AnalysedPass]) -> Stretch:
         observed_s=sum(r.t.observed_s for r in rows),
         here_s=sum(r.t.here_s for r in rows),
         free_flow_s=sum(r.t.free_flow_s for r in rows),
+        here_uncapped_s=sum(r.t.here_uncapped_s for r in rows),
         stopped_s=sum(r.t.stopped_s for r in rows),
     )
 

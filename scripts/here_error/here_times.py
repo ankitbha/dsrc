@@ -44,6 +44,7 @@ class _Piece:
     speed_mps: float | None
     free_flow_mps: float | None
     jam_factor: float | None
+    speed_uncapped_mps: float | None = None
 
 
 def pieces(seg: HereSegment, shape_length_m: float) -> list[_Piece]:
@@ -53,7 +54,7 @@ def pieces(seg: HereSegment, shape_length_m: float) -> list[_Piece]:
     A sub-segment missing a field takes the segment's value for it.
     """
     if not seg.subsegments:
-        return [_Piece(0.0, shape_length_m, seg.speed_mps, seg.free_flow_mps, seg.jam_factor)]
+        return [_Piece(0.0, shape_length_m, seg.speed_mps, seg.free_flow_mps, seg.jam_factor, seg.speed_uncapped_mps)]
     total = sum(s.length_m for s in seg.subsegments)
     scale = shape_length_m / total
     out, pos = [], 0.0
@@ -64,6 +65,7 @@ def pieces(seg: HereSegment, shape_length_m: float) -> list[_Piece]:
             s.speed_mps if s.speed_mps is not None else seg.speed_mps,
             s.free_flow_mps if s.free_flow_mps is not None else seg.free_flow_mps,
             s.jam_factor if s.jam_factor is not None else seg.jam_factor,
+            s.speed_uncapped_mps if s.speed_uncapped_mps is not None else seg.speed_uncapped_mps,
         ))
         pos = end
     return out
@@ -73,7 +75,8 @@ def _overlap(piece: _Piece, c0: float, c1: float) -> float:
     return max(0.0, min(piece.end_m, c1) - max(piece.start_m, c0))
 
 
-def travel_time_s(seg: HereSegment, shape_length_m: float, c0: float, c1: float, *, free_flow: bool) -> float | None:
+def travel_time_s(seg: HereSegment, shape_length_m: float, c0: float, c1: float, *, free_flow: bool,
+                  uncapped: bool = False) -> float | None:
     """Sum over pieces of (length of [c0, c1] inside the piece) / (the piece's speed).
 
     None when a piece that the portion crosses has no positive speed.
@@ -83,7 +86,7 @@ def travel_time_s(seg: HereSegment, shape_length_m: float, c0: float, c1: float,
         ov = _overlap(pc, c0, c1)
         if ov <= 0:
             continue
-        v = pc.free_flow_mps if free_flow else pc.speed_mps
+        v = pc.free_flow_mps if free_flow else (pc.speed_uncapped_mps if uncapped else pc.speed_mps)
         if v is None or v <= 0:
             return None
         total += ov / v
@@ -202,6 +205,10 @@ def compute_pass_times(
     ff_s = travel_time_s(seg, shape_length_m, p.chain_start_m, p.chain_end_m, free_flow=True)
     if ff_s is None:
         return blank("reading_without_free_flow", reading_seq=primary.seq, reading_data_time_s=primary.data_time_s)
+    # With no usable `speedUncapped` the capped speed stands in for it.
+    unc_s = travel_time_s(seg, shape_length_m, p.chain_start_m, p.chain_end_m, free_flow=False, uncapped=True)
+    if unc_s is None:
+        unc_s = here_s
     mid = (p.first_utc_s + p.last_utc_s) / 2.0
     sens = select_sensitivity(cands, mid)
     arrived = select_arrived(cands, p.first_utc_s)
@@ -228,6 +235,8 @@ def compute_pass_times(
         shuffled_seq=None if shuf is None else shuf.seq,
         shuffled_signed_error=_error_with(shuf, shape_length_m, p),
         exclusion=None,
+        here_uncapped_s=unc_s,
+        uncapped_signed_error=signed_error(unc_s, p.observed_s),
     )
 
 

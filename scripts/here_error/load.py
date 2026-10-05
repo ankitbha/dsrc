@@ -115,6 +115,16 @@ def _modal_functional_class(links) -> int | None:
     return max(by_class, key=lambda k: (by_class[k], -k))
 
 
+def _uncapped(flow: dict) -> tuple[float | None, bool]:
+    """HERE's `speedUncapped`, or `speed` with a flag when the body does not carry it.
+
+    `speed` is capped at the speed limit; `speedUncapped` and `freeFlow` are not.
+    """
+    if flow.get("speedUncapped") is not None:
+        return flow["speedUncapped"], False
+    return flow.get("speed"), True
+
+
 def parse_segment(result: dict) -> HereSegment:
     loc = result["location"]
     links = loc["shape"]["links"]
@@ -132,15 +142,18 @@ def parse_segment(result: dict) -> HereSegment:
     length = float(loc["length"])
     key = f"{desc}|{round(length)}|{lat[0]:.5f},{lon[0]:.5f}|{lat[-1]:.5f},{lon[-1]:.5f}"
     flow = result.get("currentFlow", {})
-    subs = tuple(
-        HereSubSegment(
+    subs = []
+    for s in flow.get("subSegments", []):
+        unc, fell_back = _uncapped(s)
+        subs.append(HereSubSegment(
             length_m=float(s["length"]),
             speed_mps=s.get("speed"),
             free_flow_mps=s.get("freeFlow"),
             jam_factor=s.get("jamFactor"),
-        )
-        for s in flow.get("subSegments", [])
-    )
+            speed_uncapped_mps=unc,
+            uncapped_fallback=fell_back,
+        ))
+    unc, fell_back = _uncapped(flow)
     return HereSegment(
         key=key,
         description=desc,
@@ -152,7 +165,9 @@ def parse_segment(result: dict) -> HereSegment:
         jam_factor=flow.get("jamFactor"),
         confidence=flow.get("confidence"),
         functional_class=_modal_functional_class(links),
-        subsegments=subs,
+        subsegments=tuple(subs),
+        speed_uncapped_mps=unc,
+        uncapped_fallback=fell_back,
     )
 
 

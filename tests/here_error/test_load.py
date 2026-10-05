@@ -142,3 +142,19 @@ def test_functional_class_is_the_length_weighted_mode_of_the_links():
     r["location"]["shape"]["links"][2]["functionalClass"] = 3
     r["location"]["shape"]["links"][2]["length"] = 100.0
     assert load.parse_segment(r).functional_class == 3        # two class-2 links by count, but class 3 by length
+
+
+def test_uncapped_speed_is_read_and_falls_back_to_the_capped_speed():
+    r = result("S", 1000.0, [(40.0, -74.0), (40.01, -74.0)], speed=10.0)
+    r["currentFlow"]["speedUncapped"] = 14.0
+    r["currentFlow"]["subSegments"] = [
+        {"length": 600.0, "speed": 10.0, "speedUncapped": 13.0, "freeFlow": 15.0, "jamFactor": 1.0},
+        {"length": 400.0, "speed": 8.0, "freeFlow": 15.0, "jamFactor": 2.0},          # no speedUncapped
+    ]
+    seg = load.parse_segment(r)
+    assert seg.speed_mps == 10.0 and seg.speed_uncapped_mps == 14.0 and not seg.uncapped_fallback
+    a, b = seg.subsegments
+    assert (a.speed_mps, a.speed_uncapped_mps, a.uncapped_fallback) == (10.0, 13.0, False)
+    assert (b.speed_mps, b.speed_uncapped_mps, b.uncapped_fallback) == (8.0, 8.0, True)
+    plain = load.parse_segment(result("P", 1000.0, [(40.0, -74.0), (40.01, -74.0)], speed=10.0))
+    assert plain.speed_uncapped_mps == 10.0 and plain.uncapped_fallback

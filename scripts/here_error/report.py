@@ -7,9 +7,11 @@ listed under STATUS, and the sections that depend on it print "not computed".
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -233,10 +235,18 @@ def headline(rows: list[PassRow], stretches, passes_by_id: dict) -> list[str]:
                     *col(lambda r: r.a.t.sensitivity_signed_error, lambda r: r.a.t.sensitivity_signed_error is not None), "passes"))
     out.append(_row("Pass, sensitivity: latest reading that had also arrived before the pass began",
                     *col(lambda r: r.a.t.arrived_signed_error, lambda r: r.a.t.arrived_signed_error is not None), "passes"))
+    out.append(_row("Pass, sensitivity: HERE time from speedUncapped",
+                    *col(lambda r: r.a.t.uncapped_signed_error), "passes"))
+    out.append(_row("Pass, sensitivity: abs(HERE uncapped error) - abs(free-flow error), in percentage points",
+                    *col(lambda r: abs(r.a.t.uncapped_signed_error) - abs(r.a.t.free_flow_error)), "passes", pp))
     out.append(_stretch_row("Stretch: (HERE time - observed time) / observed time", [s.signed_error for s in stretches], sids, sroads))
     out.append(_stretch_row("Stretch: (free-flow time - observed time) / observed time", [s.free_flow_error for s in stretches], sids, sroads))
     out.append(_stretch_row("Stretch: abs(HERE error) - abs(free-flow error), in percentage points",
                             [abs(s.signed_error) - abs(s.free_flow_error) for s in stretches], sids, sroads, pp))
+    out.append(_stretch_row("Stretch, sensitivity: HERE time from speedUncapped",
+                            [s.uncapped_error for s in stretches], sids, sroads))
+    out.append(_stretch_row("Stretch, sensitivity: abs(HERE uncapped error) - abs(free-flow error), in percentage points",
+                            [abs(s.uncapped_error) - abs(s.free_flow_error) for s in stretches], sids, sroads, pp))
     return out
 
 
@@ -299,6 +309,11 @@ def _group_line(label, sel: list[PassRow], extra="") -> str:
     errs = [r.a.t.signed_error for r in sel]
     text = f"    - {label}{(' (' + extra + ')') if extra else ''}: {len(sel)} passes, median {pct(float(np.median(errs)))}, " \
            f"95% interval resampling physical roads: {_interval_text(errs, [r.road_id for r in sel], 'physical roads')}"
+    if len(sel) >= params.MIN_N_FOR_INTERVAL:
+        text += (f"; 95% interval, treats each directed segment as independent: "
+                 f"{_interval_text(errs, [r.segment_key for r in sel], 'directed segments')}")
+    else:
+        text += f"; directed-segment interval needs at least {params.MIN_N_FOR_INTERVAL} passes"
     return text
 
 
@@ -473,6 +488,30 @@ def routing_section(inputs: ReportInputs, passes_by_id: dict, stretch_roads: dic
     return out
 
 
+def uncapped_fallbacks(asm: pipeline.Assembly) -> tuple[int, int]:
+    """Speed readings (sub-segments, or a whole segment without them) lacking `speedUncapped`, and all readings."""
+    n_fb = n = 0
+    for run in asm.runs:
+        for b in run.bodies:
+            for seg in b.segments:
+                for part in (seg.subsegments or (seg,)):
+                    n += 1
+                    n_fb += bool(part.uncapped_fallback)
+    return n_fb, n
+
+
+def drive_span_text(asm: pipeline.Assembly) -> str:
+    """Date and local time span between the first and last valid GPS fix of the analysed runs."""
+    times = [f.utc_s for r in asm.runs if r.phone is not None for f in r.phone.gps]
+    if not times:
+        return "time span unavailable: no GPS fixes"
+    tz = ZoneInfo(params.LOCAL_TZ)
+    a, b = (dt.datetime.fromtimestamp(t, tz) for t in (min(times), max(times)))
+    if a.date() == b.date():
+        return f"{a:%Y-%m-%d}, {a:%H:%M} to {b:%H:%M} {b:%Z}"
+    return f"{a:%Y-%m-%d} {a:%H:%M} to {b:%Y-%m-%d} {b:%H:%M} {b:%Z}"
+
+
 def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     asm = inputs.asm
     reasons = incomplete_reasons(inputs)
@@ -500,10 +539,11 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     stretch_road_ids = {stretch_road(st, by_id) for st in asm.stretch_result.stretches}
     largest = max((pass_roads.count(r) for r in set(pass_roads)), default=0)
     L.append("## Limits")
-    L.append(f"One driver, one car, one evening (2026-09-08, 17:08 to 19:32 EDT). The {len(rows)} analysed passes lie on "
+    L.append(f"One driver, one car, one evening ({drive_span_text(asm)}). The {len(rows)} analysed passes lie on "
              f"{len(set(pass_roads))} physical roads; the largest holds {largest} of them. HERE Traffic Flow speeds are HERE's input to "
              "routing, not its routing output; only the routing section measures routing travel time, and its past departure times get "
-             "HERE's typical traffic for that weekday and hour.")
+             "HERE's typical traffic for that weekday and hour. "
+             f"The daylight/dark split is a fixed local time, {params.DUSK_SPLIT_LOCAL[0]:02d}:{params.DUSK_SPLIT_LOCAL[1]:02d}, chosen for this drive.")
     L.append("")
     L.append("## Headline table")
     if reasons:
@@ -515,7 +555,9 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     L.append("The second interval column treats each directed segment, or each stretch, as independent. Segments along one road at one time "
              "share HERE's behaviour and the evening's traffic, so that column understates the uncertainty. "
              f"A stretch belongs to the road holding most of its matched metres, so the stretch rows count {len(stretch_road_ids)} physical roads "
-             f"while the pass rows count {len(set(pass_roads))}.")
+             f"while the pass rows count {len(set(pass_roads))}. "
+             "HERE time uses HERE's `speed` field, which is capped at the speed limit, while free-flow time uses `freeFlow`, which is not; "
+             "the speedUncapped rows use HERE's `speedUncapped` field.")
     L.append("")
     L += per_road_table(rows)
     L.append("")
@@ -552,6 +594,8 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     L.append("")
     L.append("## Stage 6: HERE Routing v8")
     L.append("A past departure time makes HERE use typical traffic for that weekday and clock time, not the traffic recorded that day.")
+    L.append("A stretch's routing comparison runs from its first fix to its last, including the unmatched gaps between passes, "
+             "so it covers more ground than the stage-2 stretch rows.")
     L += routing_section(inputs, by_id, {st.stretch_id: stretch_road(st, by_id) for st in asm.stretch_result.stretches})
     L.append("")
     L.append("## Gates and exclusions")
@@ -566,6 +610,8 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     L.append("- Exclusions by reason: " + (", ".join(f"{k} {v}" for k, v in sorted(ex.items())) if ex else "none") + ".")
     L.append(f"- Segments whose stated length differs from the shape length by more than {100 * params.SEGMENT_LENGTH_TOL:.0f}%: "
              f"{flagged} of {total}; analysed passes on such segments: {on_flagged}.")
+    n_fb, n_read = uncapped_fallbacks(asm)
+    L.append(f"- Readings with no speedUncapped field, where the capped speed was used in its place: {n_fb} of {n_read}.")
     arrived_late = sum(1 for r in rows if r.a.t.reading_arrived_before_start is False)
     L.append(f"- Analysed passes whose primary reading had not yet arrived at the pass's first fix: {arrived_late} of {len(rows)}.")
     sr = asm.stretch_result
@@ -582,8 +628,8 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
 PASS_COLUMNS = (
     "pass_id", "run", "segment_end_description", "segment_key", "road_id", "road_label", "road_catalogue_segments", "functional_class", "first_utc_s", "last_utc_s", "n_fixes", "chain_start_m", "chain_end_m",
     "matched_m", "observed_s", "path_positions_m", "path_speed_m", "v3_rel_diff", "segment_length_flag", "exclusion",
-    "reading_seq", "reading_age_s", "reading_arrived_before_start", "here_s", "free_flow_s", "signed_error",
-    "free_flow_error", "sensitivity_signed_error", "arrived_signed_error", "shuffled_signed_error", "jam_factor",
+    "reading_seq", "reading_age_s", "reading_arrived_before_start", "here_s", "free_flow_s", "here_uncapped_s", "signed_error",
+    "free_flow_error", "uncapped_signed_error", "sensitivity_signed_error", "arrived_signed_error", "shuffled_signed_error", "jam_factor",
     "stopped_s", "moving_s", "n_frames", "mean_vehicles", "leader_share",
 )
 
@@ -608,7 +654,8 @@ def write_passes_csv(asm: pipeline.Assembly, rows: list[PassRow], path: Path) ->
                 path_positions_m=p.path_positions_m, path_speed_m=p.path_speed_m, v3_rel_diff=p.v3_rel_diff,
                 segment_length_flag=int(p.segment_length_flag), exclusion=t.exclusion, reading_seq=t.reading_seq,
                 reading_age_s=t.reading_age_s, reading_arrived_before_start=t.reading_arrived_before_start,
-                here_s=t.here_s, free_flow_s=t.free_flow_s, signed_error=t.signed_error, free_flow_error=t.free_flow_error,
+                here_s=t.here_s, free_flow_s=t.free_flow_s, here_uncapped_s=t.here_uncapped_s,
+                uncapped_signed_error=t.uncapped_signed_error, signed_error=t.signed_error, free_flow_error=t.free_flow_error,
                 sensitivity_signed_error=t.sensitivity_signed_error, arrived_signed_error=t.arrived_signed_error,
                 shuffled_signed_error=t.shuffled_signed_error, jam_factor=t.jam_factor, stopped_s=t.stopped_s,
                 moving_s=t.moving_s, n_frames=c.n_frames if c else None, mean_vehicles=c.mean_vehicles if c else None,
@@ -618,7 +665,7 @@ def write_passes_csv(asm: pipeline.Assembly, rows: list[PassRow], path: Path) ->
 
 
 STRETCH_COLUMNS = ("stretch_id", "run", "pass_ids", "start_utc_s", "end_utc_s", "matched_m", "observed_s", "here_s",
-                   "free_flow_s", "stopped_s", "signed_error", "free_flow_error")
+                   "free_flow_s", "here_uncapped_s", "stopped_s", "signed_error", "free_flow_error", "uncapped_error")
 
 
 def write_stretches_csv(asm: pipeline.Assembly, path: Path) -> None:
@@ -627,4 +674,4 @@ def write_stretches_csv(asm: pipeline.Assembly, path: Path) -> None:
         w.writerow(STRETCH_COLUMNS)
         for s in asm.stretch_result.stretches:
             w.writerow([s.stretch_id, s.run, " ".join(s.pass_ids), s.start_utc_s, s.end_utc_s, s.matched_m, s.observed_s,
-                        s.here_s, s.free_flow_s, s.stopped_s, s.signed_error, s.free_flow_error])
+                        s.here_s, s.free_flow_s, s.here_uncapped_s, s.stopped_s, s.signed_error, s.free_flow_error, s.uncapped_error])

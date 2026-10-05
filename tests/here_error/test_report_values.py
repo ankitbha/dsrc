@@ -10,6 +10,7 @@ from here_error import params, pipeline, report, stats
 from here_error.clock import ClockOffset
 from here_error.here_times import AnalysedPass, V4Result
 from here_error.models import Frame, FrameDetections, InputFile, Pass, PassTimes, Provenance, RouteResult
+from here_error.load import PhoneLog
 from here_error.pipeline import Assembly, RunData
 from here_error.stretches import StretchResult, build_stretches
 
@@ -18,19 +19,21 @@ T0 = DUSK - 6000.0
 PROV = Provenance("abc", False, (InputFile("x", "y"),), {})
 
 
-def mk(i, rid, seg, t0, dur, here, ff, sens, arr, shuf, stopped=0.0, jam=1.0, fc=2, matched=1000.0, arrived=True):
+def mk(i, rid, seg, t0, dur, here, ff, sens, arr, shuf, stopped=0.0, jam=1.0, fc=2, matched=1000.0, arrived=True, unc=None):
     pid = f"t-{i:03d}"
     fixes = (fix(t0, 0, 0), fix(t0 + dur, matched, 0))
     p = Pass(pid, "run_t", seg, f"desc {seg}", fc, fixes, 0.0, matched, False, matched, matched, None, rid, f"{rid} label")
     e = lambda h: None if h is None else (h - dur) / dur
     t = PassTimes(pid, 0, t0 - 30, 30.0, arrived, dur, here, ff, e(here), e(ff), jam, 0.99, stopped, dur - stopped,
-                  0, e(sens), 0 if arr is not None else None, e(arr), 1, e(shuf), None)
+                  0, e(sens), 0 if arr is not None else None, e(arr), 1, e(shuf), None,
+                  here_uncapped_s=here if unc is None else unc, uncapped_signed_error=e(here if unc is None else unc))
     return AnalysedPass(p, t)
 
 
 def asm_of(aps, n_frames=300):
     frames = tuple(Frame("run_t", k, k, T0 + k * 20.0) for k in range(n_frames))
-    rd = RunData("run_t", Path("."), Path("."), None, ClockOffset(1.2, 1.19, 1.21, 10), (), frames)
+    phone = PhoneLog("x", (fix(T0, 0, 0), fix(T0 + 7200, 0, 0)), (), (), 0, 0)
+    rd = RunData("run_t", Path("."), Path("."), phone, ClockOffset(1.2, 1.19, 1.21, 10), (), frames)
     passes = tuple(a.p for a in aps)
     times = tuple(a.t for a in aps)
     a = Assembly((rd,), passes, times, {}, StretchResult((), 0, 0.0), V4Result(0, None, None), ())
@@ -446,7 +449,7 @@ def test_removing_a_negative_driver_offset_moves_the_median_as_printed():
 def test_summary_states_limits_and_the_two_column_and_stretch_rules():
     text, _ = render(APS)
     assert "## Limits" in text
-    assert "One driver, one car, one evening (2026-09-08, 17:08 to 19:32 EDT)." in text
+    assert "One driver, one car, one evening (2026-09-08, 17:35 to 19:35 EDT)." in text
     assert "The 7 analysed passes lie on 6 physical roads; the largest holds 2 of them." in text
     assert ("HERE Traffic Flow speeds are HERE's input to routing, not its routing output; only the routing section measures "
             "routing travel time, and its past departure times get HERE's typical traffic for that weekday and hour.") in text
@@ -461,3 +464,91 @@ def test_limits_numbers_are_computed_from_the_passes():
     aps = [mk(i, "RA" if i < 5 else "RB", f"s{i}", T0 + 300 * i, 100, 110, 70, 100, None, None) for i in range(8)]
     text, _ = render(aps)
     assert "The 8 analysed passes lie on 2 physical roads; the largest holds 5 of them." in text
+
+
+def test_limits_time_span_is_derived_from_the_gps_fixes_in_local_time():
+    from dataclasses import replace
+
+    asm = asm_of(APS)
+    other = replace(asm.runs[0], phone=PhoneLog("y", (fix(DUSK - 12 * 3600, 0, 0), fix(DUSK + 3600 + 86400, 0, 0)), (), (), 0, 0))
+    moved = Assembly((asm.runs[0], other), asm.passes, asm.times, asm.catalogues, asm.stretch_result, asm.v4, ())
+    # First fix 2026-09-08 07:15 EDT; last fix 2026-09-09 20:15 EDT: two dates.
+    assert report.drive_span_text(moved) == "2026-09-08 07:15 to 2026-09-09 20:15 EDT"
+    empty = replace(asm.runs[0], phone=PhoneLog("z", (), (), (), 0, 0))
+    assert "unavailable" in report.drive_span_text(Assembly((empty,), asm.passes, asm.times, asm.catalogues, asm.stretch_result, asm.v4, ()))
+
+
+def test_limits_states_the_dusk_split_as_a_fixed_local_time(monkeypatch):
+    text, _ = render(APS)
+    assert "The daylight/dark split is a fixed local time, 19:15, chosen for this drive." in text
+    monkeypatch.setattr(params, "DUSK_SPLIT_LOCAL", (18, 5))
+    assert "fixed local time, 18:05, chosen for this drive." in render(APS)[0]
+
+
+def test_stage4_group_lines_show_both_intervals_when_there_are_enough_passes():
+    aps = three_roads_many_segments(9)
+    text, _ = render(aps)
+    line = next(l for l in text.splitlines() if l.strip().startswith("- lowest"))
+    errs = [a.t.signed_error for a in aps]
+    seg = stats.cluster_bootstrap_median(errs, [a.p.segment_key for a in aps])
+    assert "resampling physical roads: not resolvable: 3 physical roads;" in line
+    assert f"95% interval, treats each directed segment as independent: {100 * seg.lo:+.1f}% to {100 * seg.hi:+.1f}%" in line
+    few = [mk(i, "R1", f"s{i}", T0 + 300 * i, 100, 100 + 6 * i, 70, 100, None, None) for i in range(4)]
+    fline = next(l for l in render(few)[0].splitlines() if l.strip().startswith("- lowest"))
+    assert "directed-segment interval needs at least 5 passes" in fline and "treats each directed segment" not in fline
+
+
+def test_uncapped_rows_are_pinned_in_both_interval_columns():
+    # Capped HERE time 110 s, uncapped 140 s, free flow 70 s, observed 100 s on every pass but with distinct per-pass values.
+    aps = [mk(i, f"R{i % 6}", f"s{i}", T0 + 300 * i, 100, 100 + 4 * i, 70 + i, 100, None, None, unc=100 + 9 * i) for i in range(12)]
+    text, _ = render(aps)
+    unc = [(9 * i) / 100 for i in range(12)]
+    cells = table_cells(text, "Pass, sensitivity: HERE time from speedUncapped")
+    assert cells[1] == f"{100 * np.median(unc):+.1f}%"
+    road = stats.cluster_bootstrap_median(unc, [f"R{i % 6}" for i in range(12)])
+    seg = stats.cluster_bootstrap_median(unc, [f"s{i}" for i in range(12)])
+    assert cells[2] == f"{100 * road.lo:+.1f}% to {100 * road.hi:+.1f}%" and cells[3] == f"{100 * seg.lo:+.1f}% to {100 * seg.hi:+.1f}%"
+    diff = [abs(9 * i / 100) - abs((70 + i - 100) / 100) for i in range(12)]
+    cells = table_cells(text, "Pass, sensitivity: abs(HERE uncapped error)")
+    assert cells[1] == f"{100 * np.median(diff):+.1f} pp"
+    assert cells[1] != table_cells(text, "Pass: abs(HERE error)")[1]
+
+
+def test_uncapped_stretch_rows_use_the_stretch_uncapped_time():
+    aps = stretch_aps()
+    text, _ = render(aps)
+    asm = asm_of(aps)
+    st = asm.stretch_result.stretches
+    vals = [s.uncapped_error for s in st]
+    cells = table_cells(text, "Stretch, sensitivity: HERE time from speedUncapped")
+    own = stats.cluster_bootstrap_median(vals, [s.stretch_id for s in st])
+    road = stats.cluster_bootstrap_median(vals, EXPECTED_STRETCH_ROADS)
+    assert cells[1] == f"{100 * np.median(vals):+.1f}%"
+    assert cells[2] == f"{100 * road.lo:+.1f}% to {100 * road.hi:+.1f}%" and cells[3] == f"{100 * own.lo:+.1f}% to {100 * own.hi:+.1f}%"
+    d = [abs(s.uncapped_error) - abs(s.free_flow_error) for s in st]
+    assert table_cells(text, "Stretch, sensitivity: abs(HERE uncapped")[1] == f"{100 * np.median(d):+.1f} pp"
+
+
+def test_summary_names_the_speed_fields_and_counts_the_fallbacks():
+    from here_error.models import HereBody
+    from here_fixtures import segment
+
+    text, _ = render(APS)
+    assert ("HERE time uses HERE's `speed` field, which is capped at the speed limit, while free-flow time uses `freeFlow`, which is not; "
+            "the speedUncapped rows use HERE's `speedUncapped` field.") in text
+    seg_fb = segment("A", [(0, 0), (500, 0)])                      # no speedUncapped: falls back
+    seg_ok = segment("B", [(500, 0), (1000, 0)])
+    from dataclasses import replace
+    seg_ok = replace(seg_ok, speed_uncapped_mps=12.0, uncapped_fallback=False)
+    body = HereBody("run_t", 0, "f", 0.0, 0.0, 0.0, 0.0, (seg_fb, seg_ok))
+    asm = asm_of(APS)
+    asm = Assembly((replace(asm.runs[0], bodies=(body,)),), asm.passes, asm.times, asm.catalogues, asm.stretch_result, asm.v4, ())
+    assert report.uncapped_fallbacks(asm) == (1, 2)
+    t2, _ = report.render(report.ReportInputs(asm, {}, None, None, []), PROV)
+    assert "no speedUncapped field, where the capped speed was used in its place: 1 of 2." in t2
+
+
+def test_routing_section_says_stretch_comparison_covers_the_gaps():
+    text, _ = render(APS)
+    assert ("A stretch's routing comparison runs from its first fix to its last, including the unmatched gaps between passes, "
+            "so it covers more ground than the stage-2 stretch rows.") in text

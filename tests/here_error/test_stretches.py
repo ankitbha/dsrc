@@ -10,7 +10,7 @@ def ap(pid, t0, length, run="run_t", dur=100.0):
     fixes = (fix(t0, 0, 0), fix(t0 + dur, length, 0))
     p = Pass(pid, run, "k", "R", 2, fixes, 0.0, length, False, length, length, None)
     t = PassTimes(pid, 0, 0.0, 10.0, True, dur, dur * 1.1, dur * 0.9, 0.1, -0.1, 1.0, 0.99, 5.0, dur - 5,
-                  None, None, None, None, None, None, None)
+                  None, None, None, None, None, None, None, here_uncapped_s=dur * 1.2, uncapped_signed_error=0.2)
     return AnalysedPass(p, t)
 
 
@@ -58,3 +58,10 @@ def test_stretch_sums_stopped_time_and_leaves_gaps_out_of_observed_time():
     assert s.stopped_s == 10.0                    # 5 s in each pass
     assert s.observed_s == 200.0                  # not 250 s from first fix to last fix
     assert s.start_utc_s != s.end_utc_s
+
+
+def test_stretch_sums_uncapped_time_and_derives_its_error():
+    rows = [ap("a", 0, 1200, dur=100.0), ap("b", 150, 1200, dur=100.0)]          # each with 120 s uncapped
+    (s,) = build_stretches(rows).stretches
+    assert s.here_uncapped_s == pytest.approx(240.0)
+    assert s.uncapped_error == pytest.approx((240.0 - 200.0) / 200.0)

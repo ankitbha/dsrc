@@ -32,7 +32,8 @@ def make_asm(specs, n_frames=200, detections_ready=True):
         times.append(PassTimes(
             pid, 0, s["t0"] - 30, 30.0, True, s["dur"], s["here"], s["ff"], (s["here"] - s["dur"]) / s["dur"],
             (s["ff"] - s["dur"]) / s["dur"], s["jam"], 0.99, s["stopped"], s["dur"] - s["stopped"],
-            0, (s["here"] - s["dur"]) / s["dur"], 0, (s["here"] - s["dur"]) / s["dur"], 1, 0.5, None))
+            0, (s["here"] - s["dur"]) / s["dur"], 0, (s["here"] - s["dur"]) / s["dur"], 1, 0.5, None,
+            s["here"], (s["here"] - s["dur"]) / s["dur"]))
     frames = tuple(Frame("run_t", k, k, T0 + k * 10.0) for k in range(n_frames))
     rd = RunData("run_t", Path("."), Path("."), None, ClockOffset(1.2, 1.19, 1.21, 100), (), frames)
     asm = Assembly((rd,), tuple(passes), tuple(times), {}, StretchResult((), 0, 0.0), V4Result(0, None, None), ())

@@ -213,3 +213,34 @@ def test_v4_summary_compares_real_and_shuffled_on_the_same_passes():
     assert v4.median_abs_real == pytest.approx(0.20)         # passes a, b, d only: |0.10|, |0.20|, |0.30|
     assert v4.median_abs_shuffled == pytest.approx(0.60)    # |0.50|, |0.60|, |0.90|
     assert ht.v4_summary([pt("c", 0.05, None)]).n == 0
+
+
+UNCAPPED_SUBS = [
+    {"length": 300.0, "speed": 10.0, "speedUncapped": 12.0, "freeFlow": 15.0, "jamFactor": 3.0},
+    {"length": 400.0, "speed": 20.0, "speedUncapped": 25.0, "freeFlow": 25.0, "jamFactor": 1.0},
+    {"length": 300.0, "speed": 5.0, "speedUncapped": 5.0, "freeFlow": 10.0, "jamFactor": 7.0},
+]
+
+
+def test_uncapped_time_differs_from_the_capped_time_where_the_speeds_differ():
+    r = road("Main St", EAST, subs=UNCAPPED_SUBS, speed=12.0, free=18.0)
+    r["currentFlow"]["speedUncapped"] = 14.0
+    seg = load.parse_segment(r)
+    # 200..800 m: 100 m, 400 m, 100 m.
+    assert ht.travel_time_s(seg, 1000.0, 200, 800, free_flow=False) == pytest.approx(10 + 20 + 20, rel=1e-3)
+    assert ht.travel_time_s(seg, 1000.0, 200, 800, free_flow=False, uncapped=True) == pytest.approx(100 / 12 + 400 / 25 + 100 / 5, rel=1e-3)
+    p = make_pass(seg)
+    idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0)])
+    t = ht.compute_pass_times(p, 1000.0, idx, idx)
+    assert t.here_s == pytest.approx(50.0, rel=1e-3)
+    assert t.here_uncapped_s == pytest.approx(100 / 12 + 16 + 20, rel=1e-3)
+    assert t.uncapped_signed_error == pytest.approx((t.here_uncapped_s - 60) / 60)
+    assert t.signed_error != pytest.approx(t.uncapped_signed_error)
+
+
+def test_uncapped_time_equals_capped_time_when_the_body_has_no_uncapped_field():
+    seg = sub_segment()
+    p = make_pass(seg)
+    idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0)])
+    t = ht.compute_pass_times(p, 1000.0, idx, idx)
+    assert t.here_uncapped_s == pytest.approx(t.here_s)
