@@ -105,3 +105,10 @@ def test_a_short_crossing_segment_inside_the_pairing_distance_is_not_an_opposite
     stub = segment("Stub", [(500, -30), (500, 30)])          # every sample is within 40 m, but it runs at 90 degrees
     _, ids = roads_of(main, stub)
     assert ids[0] != ids[1]
+
+
+def test_a_segment_alongside_for_only_a_small_share_of_its_length_is_not_paired():
+    east = segment("East", [(0, 0), (1000, 0)])
+    west = segment("Diverging", [(1000, 20), (800, 20), (300, 400)])      # antiparallel for 200 m, then leaves
+    _, ids = roads_of(east, west)
+    assert ids[0] != ids[1]
