@@ -20,7 +20,6 @@ from here_error.models import HereSegment
 @dataclass(frozen=True)
 class Road:
     road_id: str
-    label: str
     segment_keys: tuple[str, ...]
 
 
@@ -72,7 +71,7 @@ def _alongside(a: HereSegment, b: HereSegment) -> bool:
         if (pr.distance_m <= params.ROAD_PAIR_M and not pr.clamped_start and not pr.clamped_end
                 and angle_between_deg(float(piece_b[kk]), pr.bearing_deg) > params.ROAD_ANTIPARALLEL_DEG):
             near += 1
-    return near / len(pts) >= params.ROAD_PAIR_SHARE
+    return near / len(pts) >= params.ROAD_PAIR_SHARE and near * params.ROAD_SAMPLE_M >= params.ROAD_PAIR_MIN_OVERLAP_M
 
 
 def build_roads(segments) -> Roads:
@@ -105,15 +104,18 @@ def build_roads(segments) -> Roads:
     roads, by_segment = [], {}
     for n, root in enumerate(sorted(groups), start=1):
         members = groups[root]
-        road = Road(f"R{n:02d}", _label(f"R{n:02d}", [segs[k] for k in members]), tuple(members))
+        road = Road(f"R{n:02d}", tuple(members))
         roads.append(road)
         for k in members:
             by_segment[k] = road
     return Roads(tuple(roads), by_segment)
 
 
-def _label(road_id: str, members: list[HereSegment]) -> str:
+def describe(road_id: str, members: list[HereSegment]) -> str:
     """A label made of geometry, never of one segment's description.
+
+    `members` are the segments the label speaks for; the caller passes those that carry analysed
+    passes, because the join rule also chains ramps and side roads onto the main line.
 
     A HERE description names the cross street at the end of its segment, so it does not name the
     road driven. The label gives the number of directed segments, the length of shape, the axis

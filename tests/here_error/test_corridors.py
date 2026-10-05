@@ -66,13 +66,14 @@ def test_label_is_geometry_never_a_lone_description():
     r1, _ = roads_of(a, b, west)
     r2, _ = roads_of(west, b, a)
     (road,) = r1.roads
-    assert road.road_id == "R01" and r2.roads[0].label == road.label            # independent of input order
-    assert road.label.startswith("R01: 3 directed segments, 2.6 km of shape, bearing about 90/270 degrees")
-    assert "segments ending at Short St ... " in road.label                      # first segment in chain order
-    assert road.label not in {"Short St", "Long Ave", "Opposite Rd"}
-    assert "corridor" not in road.label
-    single, _ = roads_of(segment("Only St", [(0, 0), (500, 0)]))
-    assert single.roads[0].label.endswith("segment ending at Only St") and single.roads[0].label != "Only St"
+    assert road.road_id == "R01" and r2.roads[0].segment_keys == road.segment_keys     # independent of input order
+    label = corridors.describe(road.road_id, [a, b, west])
+    assert label == corridors.describe(road.road_id, [west, b, a])
+    assert label.startswith("R01: 3 directed segments, 2.6 km of shape, bearing about 90/270 degrees")
+    assert "segments ending at Short St ... " in label                           # first segment in chain order
+    assert label not in {"Short St", "Long Ave", "Opposite Rd"} and "corridor" not in label
+    one = corridors.describe("R02", [segment("Only St", [(0, 0), (500, 0)])])
+    assert one.endswith("segment ending at Only St") and one != "Only St"
 
 
 def test_ids_are_stable_across_input_order():
@@ -96,8 +97,7 @@ def test_assembly_stamps_every_pass_with_its_road(tmp_path):
 
 
 def test_label_names_an_empty_description():
-    r, _ = roads_of(segment("", [(0, 0), (500, 0)]))
-    assert r.roads[0].label.endswith("segment ending at (unnamed)")
+    assert corridors.describe("R01", [segment("", [(0, 0), (500, 0)])]).endswith("segment ending at (unnamed)")
 
 
 def test_a_short_crossing_segment_inside_the_pairing_distance_is_not_an_opposite_carriageway():
@@ -112,3 +112,59 @@ def test_a_segment_alongside_for_only_a_small_share_of_its_length_is_not_paired(
     west = segment("Diverging", [(1000, 20), (800, 20), (300, 400)])      # antiparallel for 200 m, then leaves
     _, ids = roads_of(east, west)
     assert ids[0] != ids[1]
+
+
+def test_a_99_m_stub_is_not_paired_with_a_cross_street_it_crosses():
+    # Cross street at bearing 55 degrees; a 99 m stub at bearing 272 degrees crossing it: every stub sample
+    # is within 40 m of the cross street and the bearings are 143 degrees apart, but the overlap is under 200 m.
+    import math
+
+    d = (math.sin(math.radians(55)), math.cos(math.radians(55)))
+    cross = segment("Cross", [(-600 * d[0], -600 * d[1]), (600 * d[0], 600 * d[1])])
+    s = (math.sin(math.radians(272)), math.cos(math.radians(272)))
+    stub = segment("Stub", [(49.5 * -s[0], 49.5 * -s[1]), (49.5 * s[0], 49.5 * s[1])])
+    _, ids = roads_of(cross, stub)
+    assert ids[0] != ids[1]
+    long_stub = segment("Long", [(300 * -s[0], 300 * -s[1]), (300 * s[0], 300 * s[1])])
+    # A long one that stays near the cross street for 200 m or more would pair; this one leaves at an angle.
+    assert roads_of(cross, long_stub)[1][0] != roads_of(cross, long_stub)[1][1]
+
+
+def test_opposite_carriageways_overlapping_200_m_or_more_are_paired():
+    east = segment("E", [(0, 0), (260, 0)])
+    west = segment("W", [(260, 20), (0, 20)])
+    assert len(set(roads_of(east, west)[1])) == 1
+    east2 = segment("E", [(0, 0), (150, 0)])
+    west2 = segment("W", [(150, 20), (0, 20)])
+    assert len(set(roads_of(east2, west2)[1])) == 2
+
+
+def test_join_is_found_whichever_segment_key_sorts_first():
+    # The first segment's key ("Z...") sorts after the next segment's ("A..."), so the pair is met as (A, Z) in the loop.
+    first = segment("Zebra", [(0, 0), (500, 0)])
+    nxt = segment("Aardvark", [(500, 0), (1000, 0)])
+    assert first.key > nxt.key
+    assert len(set(roads_of(first, nxt)[1])) == 1
+
+
+def test_a_road_is_described_by_the_segments_that_carry_analysed_passes():
+    from dataclasses import replace
+
+    from here_error import pipeline
+    from here_error.models import Pass, PassTimes
+    from here_fixtures import fix
+
+    main = segment("Main", [(0, 0), (1000, 0)])
+    ramp = segment("Ramp", [(1000, 0), (1100, 30)])            # chained on by the join rule, never driven
+    roads = corridors.build_roads([main, ramp])
+    assert len(roads.roads) == 1
+    p = Pass("p1", "r", main.key, "Main", 2, (fix(0, 0, 0), fix(60, 600, 0)), 0.0, 600.0, False, 600.0, 600.0, None)
+    t = PassTimes("p1", 0, 0.0, 0.0, True, 60.0, 60.0, 40.0, 0.0, -0.3, 1.0, 0.9, 0.0, 60.0, None, None, None, None, None, None, None)
+    (out,) = pipeline.label_roads([p], [t], roads, {main.key: main, ramp.key: ramp})
+    assert out.road_id == "R01"
+    assert out.road_label.startswith("R01: 1 directed segment, 1.0 km of shape")         # not 2 segments / 1.1 km
+    assert out.road_label.endswith("segment ending at Main")
+    # With no analysed pass the road is described by the segments its found passes lie on.
+    t2 = replace(t, exclusion="no_reading")
+    (out2,) = pipeline.label_roads([p], [t2], roads, {main.key: main, ramp.key: ramp})
+    assert "1 directed segment" in out2.road_label

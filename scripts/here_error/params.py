@@ -29,6 +29,8 @@ ROAD_JOIN_TURN_DEG = 30.0
 ROAD_PAIR_M = 40.0
 #: ...for at least this share of the shorter segment's length, sampled every ROAD_SAMPLE_M metres...
 ROAD_PAIR_SHARE = 0.8
+#: ...and over at least this many metres, so a short stub at a junction is not paired with a cross street...
+ROAD_PAIR_MIN_OVERLAP_M = 200.0
 ROAD_SAMPLE_M = 20.0
 #: ...heading opposite ways: the bearings differ by more than this many degrees.
 ROAD_ANTIPARALLEL_DEG = 135.0

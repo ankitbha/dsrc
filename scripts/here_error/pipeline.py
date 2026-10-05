@@ -86,12 +86,31 @@ def assemble(data_dir: Path) -> Assembly:
             passes.append(p)
             times.append(compute_pass_times(p, cat[p.segment_key].shape_length_m, readings, all_readings))
     roads = corridors.build_roads(e.segment for c in catalogues.values() for e in c.values())
-    passes = [replace(p, road_id=roads.by_segment[p.segment_key].road_id,
-                      road_label=roads.by_segment[p.segment_key].label) for p in passes]
+    passes = label_roads(passes, times, roads, {k: e.segment for c in catalogues.values() for k, e in c.items()})
     asm = Assembly(runs, tuple(passes), tuple(times), catalogues, StretchResult((), 0, 0.0),
                    v4_summary(times), (), roads)
     stretches = build_stretches(asm.analysed)
     return Assembly(asm.runs, asm.passes, asm.times, asm.catalogues, stretches, asm.v4, (), roads)
+
+
+def label_roads(passes, times, roads: corridors.Roads, segments: dict) -> list[Pass]:
+    """Stamp each pass with its road id and a label that describes the road by the segments carrying analysed passes.
+
+    The join rule also chains ramps and side roads onto the main line, so describing a road by every
+    segment it reaches would describe more road than was driven. A road with no analysed pass is
+    described by the segments of its passes that were found.
+    """
+    analysed = {t.pass_id for t in times if t.exclusion is None}
+    by_road: dict[str, dict[str, None]] = {}
+    fallback: dict[str, dict[str, None]] = {}
+    for p in passes:
+        rid = roads.by_segment[p.segment_key].road_id
+        fallback.setdefault(rid, {})[p.segment_key] = None
+        if p.pass_id in analysed:
+            by_road.setdefault(rid, {})[p.segment_key] = None
+    labels = {rid: corridors.describe(rid, [segments[k] for k in (by_road.get(rid) or fallback[rid])]) for rid in fallback}
+    return [replace(p, road_id=roads.by_segment[p.segment_key].road_id,
+                    road_label=labels[roads.by_segment[p.segment_key].road_id]) for p in passes]
 
 
 def exclusion_counts(asm: Assembly) -> dict[str, int]:
