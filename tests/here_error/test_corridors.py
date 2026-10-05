@@ -126,7 +126,8 @@ def test_a_99_m_stub_is_not_paired_with_a_cross_street_it_crosses():
     _, ids = roads_of(cross, stub)
     assert ids[0] != ids[1]
     long_stub = segment("Long", [(300 * -s[0], 300 * -s[1]), (300 * s[0], 300 * s[1])])
-    # A long one that stays near the cross street for 200 m or more would pair; this one leaves at an angle.
+    # A 600 m segment on the same line is not paired either: it crosses at 37 degrees, so only 7 of its 31 samples
+    # (about 140 m) lie within 40 m of the cross street.
     assert roads_of(cross, long_stub)[1][0] != roads_of(cross, long_stub)[1][1]
 
 

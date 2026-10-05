@@ -103,11 +103,12 @@ def test_shuffled_pairing_needs_20_minutes_and_takes_the_nearest():
     bodies = [body_with(i, t, 10.0)[0] for i, t in enumerate([0.0, 100.0, 1500.0, 3000.0, 4500.0])]
     seg = body_with(0, 0, 1)[1]
     readings = ht.index_readings(bodies)[seg.key]
-    # Pass at 3000..3060: candidates at distance 1500 (seq 2), 1500 (seq 4 -> 4500-3060=1440), 2900, 2900.
+    # Pass at 3000..3060: seq 0 is 3000 s before it, seq 1 2900 s, seq 2 1500 s, seq 4 1440 s after it,
+    # and seq 3, at its first fix, is 0 s away.
     r = ht.select_shuffled(readings, 3000.0, 3060.0)
     assert r.seq == 4          # 1440 s away, nearer than seq 2 at 1500 s
-    assert ht.select_shuffled(readings, 100.0, 160.0).seq == 2      # 1340 s after, vs 3000 at 2840
-    assert ht.select_shuffled(readings[:2], 50.0, 60.0) is None     # nothing 1200 s away
+    assert ht.select_shuffled(readings, 100.0, 160.0).seq == 2      # seq 2 is 1340 s after the pass, seq 3 2840 s
+    assert ht.select_shuffled(readings[:2], 50.0, 60.0) is None     # nothing at least 1200 s away
 
 
 def test_compute_pass_times_end_to_end_and_v4():
@@ -156,7 +157,8 @@ def test_matching_exclusion_carries_through():
 
 def test_sub_segments_keep_their_order_along_the_shape():
     # 300 / 400 / 300 m at 10 / 20 / 5 m/s. A matched portion of 100 to 850 m crosses:
-    # 200 m at 10 (20 s), 400 m at 20 (20 s), 150 m at 5 (30 s) = 70 s. Reversed order would give 10 + 20 + 60... differently.
+    # 200 m at 10 (20 s), 400 m at 20 (20 s), 150 m at 5 (30 s) = 70 s. With the sub-segments laid in
+    # reverse order the same portion would take 200/5 + 400/20 + 150/10 = 75 s.
     seg = sub_segment()
     assert ht.travel_time_s(seg, 1000.0, 100, 850, free_flow=False) == pytest.approx(70.0, rel=1e-3)
     # free flow 15 / 25 / 10 m/s: 200/15 + 400/25 + 150/10
@@ -197,7 +199,7 @@ def test_reading_age_is_measured_from_the_first_fix():
 
 def test_jam_factor_is_weighted_by_matched_metres():
     seg = sub_segment()
-    # 100 m of jam 3 and 500 m of jam 1 over a 100..600 style portion: (200*3 + 300*1)/500 for 100..600? no: see below.
+    # The portion 100..600 m covers 200 m of the first sub-segment (jam 3) and 300 m of the second (jam 1).
     assert ht.matched_jam_factor(seg, 1000.0, 100, 600) == pytest.approx((200 * 3 + 300 * 1) / 500)
 
 

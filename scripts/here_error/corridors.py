@@ -53,7 +53,8 @@ def _densify(xy: np.ndarray, step: float) -> np.ndarray:
 
 
 def _alongside(a: HereSegment, b: HereSegment) -> bool:
-    """Opposite carriageways: most of the shorter segment's length runs within ROAD_PAIR_M of the other, heading the other way."""
+    """Opposite carriageways: the shorter segment runs within ROAD_PAIR_M of the other, heading the other way,
+    for at least ROAD_PAIR_SHARE of its samples and at least ROAD_PAIR_MIN_OVERLAP_M."""
     f = LocalFrame(float(np.mean(a.lat)), a.lon[0])
     xa, xb = f.to_xy(a.lat, a.lon), f.to_xy(b.lat, b.lon)
     short, long_ = (xa, xb) if polyline_length(xa) <= polyline_length(xb) else (xb, xa)

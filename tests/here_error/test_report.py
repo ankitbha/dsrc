@@ -106,7 +106,7 @@ def test_conditions_come_from_frames_inside_the_pass():
 
 
 def test_dusk_recall_below_threshold_uses_daylight_frames_only():
-    # Pass straddles dusk: frames before it have 1 vehicle, after it 9.
+    # The pass straddles dusk: frames before dusk have 1 vehicle, frames after it 9.
     asm = make_asm([spec(1, "A", DUSK - 50, dur=100)], n_frames=400)
     dets = {"run_t": [FrameDetections("run_t", f.pos, f.frame_id, f.capture_utc_s, 1 if f.capture_utc_s < DUSK else 9, True, 1.0)
                       for f in asm.runs[0].frames]}

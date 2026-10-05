@@ -45,6 +45,7 @@ def test_thirds_split_by_value():
 
 
 def test_median_half_width_matches_the_plan_example():
+    # Standard deviation 0.25 over 18 roads: 1.96 * 1.2533 * 0.25 / sqrt(18) = 0.1448.
     assert stats.median_half_width(0.25, 18) == pytest.approx(0.145, abs=0.002)
 
 

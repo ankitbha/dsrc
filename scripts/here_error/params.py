@@ -78,7 +78,7 @@ ROUTE_MATCH_SHARE = 0.9
 ROUTE_LENGTH_TOL = 0.15
 #: Largest number of uncached HERE calls one invocation may make.
 HERE_CALL_BUDGET = 80
-#: Stage-5 driver offset uses passes below these leader share, stopped share and HERE jam factor.
+#: The Stage 5 driver offset uses only passes below this leader share, this stopped share and this HERE jam factor.
 OFFSET_MAX_LEADER_SHARE = 0.2
 OFFSET_MAX_STOPPED_SHARE = 0.05
 OFFSET_MAX_JAM = 2.0

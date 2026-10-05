@@ -44,6 +44,6 @@ def wall_to_utc(wall_s: float, offset: ClockOffset) -> float:
 
 
 def is_after_dusk(utc_s: float) -> bool:
-    """Whether a time is at or after the local daylight/dark split used everywhere."""
+    """Whether a time is at or after DUSK_SPLIT_LOCAL in LOCAL_TZ, the one daylight/dark split the labels and the report use."""
     t = dt.datetime.fromtimestamp(utc_s, ZoneInfo(params.LOCAL_TZ))
     return (t.hour, t.minute) >= params.DUSK_SPLIT_LOCAL

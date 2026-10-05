@@ -1,4 +1,4 @@
-"""Stages 4, 5 and 7: conditions, driver offset, and the summary with its headline table.
+"""Stages 4, 5 and 7: conditions, driver offset, and the summary, which holds the headline table and the Stage 6 routing results.
 
 A summary never presents a headline from partial inputs without saying so. Every input that is
 missing or incomplete (detections for every frame, the scored labels, the routing results) is

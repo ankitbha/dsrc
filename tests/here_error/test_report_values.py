@@ -202,15 +202,17 @@ def test_driver_offset_uses_moving_time_and_filters_with_stopped_share_and_mean_
 
     aps = [p(0, 0), p(1, 4), p(2, 5), p(3, 30), p(4, 0, jam=2.0)]
     asm = asm_of(aps)
-    # Leader on every second frame: a mean of about 0.5 per pass, a max of 1.
+    # No frame has a leader, so the stopped share and the jam factor decide which passes qualify.
     dets = detections_for(asm, leader=False)
     rows = report.pass_rows(report.ReportInputs(asm, dets, None, None, []))
     off = report.driver_offset(rows)
-    # Passes 0 and 1 qualify (stopped share 0 and 0.04; 5 percent and 0.30 do not, jam 2.0 does not).
+    # Passes 0 and 1 qualify, with stopped shares 0 and 0.04. Passes 2 and 3 have stopped shares 0.05 and 0.30,
+    # at or above the 0.05 limit, and pass 4 has jam factor 2.0, at the 2.0 limit.
     assert off.n_passes == 2
     # Pass 0: moving 100 s over 1000 m against 125 s free flow: 1.25 - 1 = +25%. Pass 1: moving 96 s: 1.30208 - 1.
     exp = np.median([1000 / 100 / (1000 / 125) - 1, 1000 / 96 / (1000 / 125) - 1])
     assert off.offset == pytest.approx(exp)
+    # Leader on every second frame: each pass's leader share is the mean over its frames, about 0.5, not the maximum of 1.
     half = [FrameDetections("run_t", f.pos, f.frame_id, f.capture_utc_s, 1, f.pos % 2 == 0, 1.0) for f in asm.runs[0].frames]
     mixed = report.pass_rows(report.ReportInputs(asm, {"run_t": half}, None, None, []))
     assert 0.3 < mixed[0].leader_share < 0.7                      # a mean, not 1.0
@@ -436,7 +438,7 @@ def test_removing_a_negative_driver_offset_moves_the_median_as_printed():
     asm = asm_of(aps)
     text, _ = render(aps, detections=detections_for(asm, leader=False))
     assert "over 6 open-road passes: -16.7%" in text
-    # Unadjusted error 0.0%; observed removed of the offset: 150 * (1 - 1/6) = 125 s, so HERE (150 s) is +20.0% long.
+    # Unadjusted error 0.0%. With the offset removed the observed time is 150 * (1 - 1/6) = 125 s, which HERE's 150 s exceeds by 20.0%.
     assert "removing the driver offset moves the median signed error from +0.0% to +20.0%" in text
     assert "upper bound" not in text
 
