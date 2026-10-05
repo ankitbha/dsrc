@@ -244,3 +244,14 @@ def test_uncapped_time_equals_capped_time_when_the_body_has_no_uncapped_field():
     idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0)])
     t = ht.compute_pass_times(p, 1000.0, idx, idx)
     assert t.here_uncapped_s == pytest.approx(t.here_s)
+
+
+def test_unusable_uncapped_speed_falls_back_to_the_capped_time_not_free_flow():
+    from dataclasses import replace
+
+    seg = replace(segment("Plain", EAST, speed=10.0, free=20.0), speed_uncapped_mps=0.0)
+    p = make_pass(seg, c0=200.0, c1=700.0)
+    idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0)])
+    t = ht.compute_pass_times(p, 1000.0, idx, idx)
+    assert t.here_s == pytest.approx(50.0) and t.free_flow_s == pytest.approx(25.0)
+    assert t.here_uncapped_s == pytest.approx(50.0)

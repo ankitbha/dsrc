@@ -515,7 +515,9 @@ def test_uncapped_rows_are_pinned_in_both_interval_columns():
 
 
 def test_uncapped_stretch_rows_use_the_stretch_uncapped_time():
-    aps = stretch_aps()
+    aps = [mk(a.p.pass_id and int(a.p.pass_id.split("-")[1]), a.p.road_id, a.p.segment_key, a.p.first_utc_s - T0 + T0, 100,
+              a.t.here_s, 50, 100, None, None, matched=a.p.matched_m, unc=a.t.here_s + 20 + 7 * int(a.p.pass_id.split("-")[1]))
+           for a in stretch_aps()]
     text, _ = render(aps)
     asm = asm_of(aps)
     st = asm.stretch_result.stretches
@@ -524,6 +526,7 @@ def test_uncapped_stretch_rows_use_the_stretch_uncapped_time():
     own = stats.cluster_bootstrap_median(vals, [s.stretch_id for s in st])
     road = stats.cluster_bootstrap_median(vals, EXPECTED_STRETCH_ROADS)
     assert cells[1] == f"{100 * np.median(vals):+.1f}%"
+    assert cells[1] != table_cells(text, "Stretch: (HERE time")[1]
     assert cells[2] == f"{100 * road.lo:+.1f}% to {100 * road.hi:+.1f}%" and cells[3] == f"{100 * own.lo:+.1f}% to {100 * own.hi:+.1f}%"
     d = [abs(s.uncapped_error) - abs(s.free_flow_error) for s in st]
     assert table_cells(text, "Stretch, sensitivity: abs(HERE uncapped")[1] == f"{100 * np.median(d):+.1f} pp"
