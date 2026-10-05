@@ -98,3 +98,10 @@ def test_assembly_stamps_every_pass_with_its_road(tmp_path):
 def test_label_names_an_empty_description():
     r, _ = roads_of(segment("", [(0, 0), (500, 0)]))
     assert r.roads[0].label.endswith("segment ending at (unnamed)")
+
+
+def test_a_short_crossing_segment_inside_the_pairing_distance_is_not_an_opposite_carriageway():
+    main = segment("Main", [(0, 0), (1000, 0)])
+    stub = segment("Stub", [(500, -30), (500, 30)])          # every sample is within 40 m, but it runs at 90 degrees
+    _, ids = roads_of(main, stub)
+    assert ids[0] != ids[1]
