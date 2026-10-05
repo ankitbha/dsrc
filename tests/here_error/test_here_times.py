@@ -1,0 +1,143 @@
+import pytest
+
+from here_fixtures import fix, make_body, road, segment
+from here_error import here_times as ht
+from here_error import load
+from here_error.models import Pass
+
+EAST = [(0, 0), (500, 0), (1000, 0)]
+SUBS = [
+    {"length": 300.0, "speed": 10.0, "freeFlow": 15.0, "jamFactor": 3.0},
+    {"length": 400.0, "speed": 20.0, "freeFlow": 25.0, "jamFactor": 1.0},
+    {"length": 300.0, "speed": 5.0, "freeFlow": 10.0, "jamFactor": 7.0},
+]
+
+
+def sub_segment(**kw):
+    return load.parse_segment(road("Main St", EAST, subs=SUBS, speed=12.0, free=18.0, **kw))
+
+
+def make_pass(seg, c0=200.0, c1=800.0, t0=1000.0, t1=1060.0, speeds=(10.0, 10.0), key=None, run="run_t", pid="t-001"):
+    fixes = (fix(t0, c0, 0, speed=speeds[0]), fix(t1, c1, 0, speed=speeds[1]))
+    return Pass(pid, run, seg.key, seg.description, 2, fixes, c0, c1, False, c1 - c0, c1 - c0, None)
+
+
+def test_sub_segment_integration_matches_hand_calculation():
+    seg = sub_segment()
+    shape = 1000.0
+    # 200..800 crosses: 100 m at 10, 400 m at 20, 100 m at 5 -> 10 + 20 + 20 = 50 s.
+    assert ht.travel_time_s(seg, shape, 200, 800, free_flow=False) == pytest.approx(50.0, rel=1e-3)
+    # free flow: 100/15 + 400/25 + 100/10
+    assert ht.travel_time_s(seg, shape, 200, 800, free_flow=True) == pytest.approx(100 / 15 + 16 + 10, rel=1e-3)
+    # jam factor weighted by metres: (100*3 + 400*1 + 100*7) / 600
+    assert ht.matched_jam_factor(seg, shape, 200, 800) == pytest.approx(1400 / 600, rel=1e-3)
+
+
+def test_sub_segment_boundaries_scale_to_the_shape_length():
+    seg = sub_segment()
+    # The sub-segment lengths sum to 1000 while the shape is 2000 m: boundaries double.
+    assert ht.travel_time_s(seg, 2000.0, 0, 2000, free_flow=False) == pytest.approx(600 / 10 + 800 / 20 + 600 / 5)
+
+
+def test_fallback_to_segment_speed_without_sub_segments():
+    seg = segment("Plain", EAST, speed=10.0, free=20.0)
+    assert ht.travel_time_s(seg, 1000.0, 200, 700, free_flow=False) == pytest.approx(50.0)
+    assert ht.travel_time_s(seg, 1000.0, 200, 700, free_flow=True) == pytest.approx(25.0)
+
+
+def test_no_speed_gives_none():
+    r = road("NoSpeed", EAST)
+    del r["currentFlow"]["speed"]
+    seg = load.parse_segment(r)
+    assert ht.travel_time_s(seg, 1000.0, 0, 500, free_flow=False) is None
+
+
+def test_signed_error_direction():
+    assert ht.signed_error(120.0, 100.0) == pytest.approx(0.2)   # HERE longer than the car
+    assert ht.signed_error(80.0, 100.0) == pytest.approx(-0.2)
+
+
+def test_stopped_seconds():
+    seg = segment("S", EAST)
+    fixes = tuple(fix(i, 100 + i, 0, speed=0.0 if 2 <= i < 5 else 8.0) for i in range(10))
+    p = Pass("x", "r", seg.key, "S", 2, fixes, 100, 109, False, 9, 9, None)
+    assert ht.stopped_seconds(p) == 3.0
+
+
+def body_with(seq, data_t, speed, resp=None):
+    seg = segment("Main St", EAST, speed=speed, free=20.0)
+    return make_body("run_t", seq, [seg], data_t, resp), seg
+
+
+def test_reading_selection_rules():
+    bodies = [body_with(0, 900.0, 10.0)[0], body_with(1, 960.0, 20.0)[0], body_with(2, 1030.0, 30.0)[0]]
+    seg = body_with(0, 0, 1)[1]
+    readings = ht.index_readings(bodies)[seg.key]
+    first, last = 1000.0, 1060.0
+    # Primary: latest data time at or before the first fix.
+    r, why = ht.select_primary(readings, first)
+    assert r.seq == 1 and why is None
+    # Exactly at the first fix counts as at-or-before.
+    assert ht.select_primary(readings, 960.0)[0].seq == 1
+    # Too old: the latest is more than 300 s before the pass.
+    r, why = ht.select_primary(readings, 1400.0 + 160.0)
+    assert r is None and why == "reading_too_old"
+    # None: every reading is after the pass.
+    r, why = ht.select_primary(readings, 800.0)
+    assert r is None and why == "no_reading"
+    # Sensitivity: nearest data time to the midpoint (1030) is body 2 even though it is after the start.
+    assert ht.select_sensitivity(readings, (first + last) / 2).seq == 2
+
+
+def test_shuffled_pairing_needs_20_minutes_and_takes_the_nearest():
+    bodies = [body_with(i, t, 10.0)[0] for i, t in enumerate([0.0, 100.0, 1500.0, 3000.0, 4500.0])]
+    seg = body_with(0, 0, 1)[1]
+    readings = ht.index_readings(bodies)[seg.key]
+    # Pass at 3000..3060: candidates at distance 1500 (seq 2), 1500 (seq 4 -> 4500-3060=1440), 2900, 2900.
+    r = ht.select_shuffled(readings, 3000.0, 3060.0)
+    assert r.seq == 4          # 1440 s away, nearer than seq 2 at 1500 s
+    assert ht.select_shuffled(readings, 100.0, 160.0).seq == 2      # 1340 s after, vs 3000 at 2840
+    assert ht.select_shuffled(readings[:2], 50.0, 60.0) is None     # nothing 1200 s away
+
+
+def test_compute_pass_times_end_to_end_and_v4():
+    seg = sub_segment()
+    p = make_pass(seg)
+    bodies = [make_body("run_t", 0, [seg], 900.0, 940.0), make_body("run_t", 1, [seg], 5000.0, 5040.0)]
+    idx = ht.index_readings(bodies)
+    t = ht.compute_pass_times(p, 1000.0, idx, idx)
+    assert t.exclusion is None
+    assert t.reading_seq == 0 and t.reading_age_s == 100.0
+    assert t.reading_arrived_before_start is True
+    assert t.here_s == pytest.approx(50.0, rel=1e-3)
+    assert t.observed_s == 60.0
+    assert t.signed_error == pytest.approx(-10 / 60, rel=1e-3)       # HERE shorter than the car
+    assert t.free_flow_error == pytest.approx((100 / 15 + 26 - 60) / 60, rel=1e-3)
+    assert t.shuffled_seq == 1                                       # 3940 s later
+    v4 = ht.v4_summary([t])
+    assert v4.n == 1 and v4.median_abs_real == pytest.approx(abs(t.signed_error))
+
+
+def test_pass_with_no_reading_is_excluded_with_reason():
+    seg = sub_segment()
+    p = make_pass(seg, t0=100.0, t1=160.0)
+    idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0)])
+    t = ht.compute_pass_times(p, 1000.0, idx, idx)
+    assert t.exclusion == "no_reading" and t.signed_error is None
+
+
+def test_reading_without_speed_is_excluded():
+    r = road("Main St", EAST)
+    del r["currentFlow"]["speed"]
+    seg = load.parse_segment(r)
+    p = make_pass(seg)
+    idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0)])
+    assert ht.compute_pass_times(p, 1000.0, idx, idx).exclusion == "reading_without_speed"
+
+
+def test_matching_exclusion_carries_through():
+    seg = sub_segment()
+    p = make_pass(seg)
+    p = Pass(**{**p.__dict__, "exclusion": "v3_failed"})
+    idx = ht.index_readings([make_body("run_t", 0, [seg], 900.0)])
+    assert ht.compute_pass_times(p, 1000.0, idx, idx).exclusion == "v3_failed"
