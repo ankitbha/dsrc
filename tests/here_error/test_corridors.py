@@ -168,3 +168,30 @@ def test_a_road_is_described_by_the_segments_that_carry_analysed_passes():
     t2 = replace(t, exclusion="no_reading")
     (out2,) = pipeline.label_roads([p], [t2], roads, {main.key: main, ramp.key: ramp})
     assert "1 directed segment" in out2.road_label
+
+
+def test_join_uses_the_last_piece_of_the_first_segment():
+    # The first segment runs east then turns north; the second continues north. Its first piece alone (east) would
+    # make the joint a 90 degree turn.
+    bent = segment("Bent", [(0, 0), (400, 0), (400, 300)])
+    north = segment("North", [(400, 300), (400, 800)])
+    assert len(set(roads_of(bent, north)[1])) == 1
+    sharp = segment("Sharp", [(400, 300), (900, 300)])        # east again: a 90 degree turn from the last piece
+    assert len(set(roads_of(bent, sharp)[1])) == 2
+
+
+def test_an_excluded_pass_on_another_segment_does_not_enter_the_label():
+    from here_error import pipeline
+    from here_error.models import Pass, PassTimes
+    from here_fixtures import fix
+
+    main = segment("Main", [(0, 0), (1000, 0)])
+    side = segment("Side", [(1000, 0), (1500, 0)])
+    roads = corridors.build_roads([main, side])
+    p1 = Pass("p1", "r", main.key, "Main", 2, (fix(0, 0, 0), fix(60, 600, 0)), 0.0, 600.0, False, 600.0, 600.0, None)
+    p2 = Pass("p2", "r", side.key, "Side", 2, (fix(100, 1000, 0), fix(110, 1100, 0)), 0.0, 100.0, False, 100.0, 100.0, "shorter_than_min")
+    ok = PassTimes("p1", 0, 0.0, 0.0, True, 60.0, 60.0, 40.0, 0.0, -0.3, 1.0, 0.9, 0.0, 60.0, None, None, None, None, None, None, None)
+    bad = PassTimes("p2", None, None, None, None, 10.0, None, None, None, None, None, None, 0.0, 10.0, None, None, None, None, None, None, "shorter_than_min")
+    out = pipeline.label_roads([p1, p2], [ok, bad], roads, {main.key: main, side.key: side})
+    assert [o.road_label for o in out][0] == [o.road_label for o in out][1]
+    assert "1 directed segment, 1.0 km of shape" in out[0].road_label and out[0].road_label.endswith("segment ending at Main")

@@ -87,3 +87,9 @@ def test_export_writes_images_and_blank_template(tmp_path):
     assert img.shape == (1280, 720, 3)
     rows = list(csv.reader(t.open()))
     assert rows[0] == list(labels.COLUMNS) and rows[1] == ["run_a:11", "", "", ""]
+
+
+def test_a_byte_order_mark_from_excel_is_accepted(tmp_path):
+    p = tmp_path / "l.csv"
+    p.write_bytes(b"\xef\xbb\xbf" + b"frame_key,n_vehicles_moving,n_vehicles_parked,leader_present\r\nr:1,2,1,yes\r\n")
+    assert labels.read_labels(p) == [labels.LabelRow("r:1", 2, 1, True)]

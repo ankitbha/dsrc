@@ -438,8 +438,8 @@ def stage5(rows: list[PassRow], camera_note: str | None) -> list[str]:
     out.append(f"- Median signed error of HERE time without removing the offset: {pct(float(np.median(raw_v)))} "
                f"({_interval_text(raw_v, roads, 'physical roads')}); "
                f"with the offset removed from the observed time (stopped time + moving time x (1 + offset)): "
-               f"{pct(float(np.median(adj)))} ({_interval_text(adj, roads, 'physical roads')}). With one driver the offset is an estimate, not a correction; "
-               f"without it the first figure is an upper bound on HERE's error.")
+               f"{pct(float(np.median(adj)))} ({_interval_text(adj, roads, 'physical roads')}). With one driver the offset is an estimate, not a correction: "
+               f"removing the driver offset moves the median signed error from {pct(float(np.median(raw_v)))} to {pct(float(np.median(adj)))}.")
     return out
 
 
@@ -495,12 +495,27 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
              "Intervals are 95% percentile intervals from a bootstrap that resamples physical roads (built from segment geometry, not from "
              "HERE's descriptions, which name the cross street at a segment's end), or directed segments, or whole stretches, as each column says.")
     L.append("")
+    by_id = {p.pass_id: p for p in asm.passes}
+    pass_roads = [r.road_id for r in rows]
+    stretch_road_ids = {stretch_road(st, by_id) for st in asm.stretch_result.stretches}
+    largest = max((pass_roads.count(r) for r in set(pass_roads)), default=0)
+    L.append("## Limits")
+    L.append(f"One driver, one car, one evening (2026-09-08, 17:08 to 19:32 EDT). The {len(rows)} analysed passes lie on "
+             f"{len(set(pass_roads))} physical roads; the largest holds {largest} of them. HERE Traffic Flow speeds are HERE's input to "
+             "routing, not its routing output; only the routing section measures routing travel time, and its past departure times get "
+             "HERE's typical traffic for that weekday and hour.")
+    L.append("")
     L.append("## Headline table")
     if reasons:
         L.append("Printed while the report is INCOMPLETE. These rows use only GPS and HERE data, which are present; "
                  "the rows that need the missing inputs say so below.")
         L.append("")
-    L += headline(rows, asm.stretch_result.stretches, {p.pass_id: p for p in asm.passes})
+    L += headline(rows, asm.stretch_result.stretches, by_id)
+    L.append("")
+    L.append("The second interval column treats each directed segment, or each stretch, as independent. Segments along one road at one time "
+             "share HERE's behaviour and the evening's traffic, so that column understates the uncertainty. "
+             f"A stretch belongs to the road holding most of its matched metres, so the stretch rows count {len(stretch_road_ids)} physical roads "
+             f"while the pass rows count {len(set(pass_roads))}.")
     L.append("")
     L += per_road_table(rows)
     L.append("")
@@ -537,7 +552,6 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     L.append("")
     L.append("## Stage 6: HERE Routing v8")
     L.append("A past departure time makes HERE use typical traffic for that weekday and clock time, not the traffic recorded that day.")
-    by_id = {p.pass_id: p for p in asm.passes}
     L += routing_section(inputs, by_id, {st.stretch_id: stretch_road(st, by_id) for st in asm.stretch_result.stretches})
     L.append("")
     L.append("## Gates and exclusions")

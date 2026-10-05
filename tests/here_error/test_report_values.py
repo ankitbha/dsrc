@@ -411,3 +411,51 @@ def test_repeated_visit_sentence_names_the_segment_by_its_end_and_gives_the_road
     aps = [mk(0, "R9", "s1", T0, 100, 110, 70, 100, None, None), mk(1, "R9", "s1", T0 + 377, 100, 120, 70, 100, None, None)]
     (line,) = report.repeated_visits(report.pass_rows(report.ReportInputs(asm_of(aps), {}, None, None, [])))
     assert "the directed segment ending at desc s1, road R9, 1000 m matched" in line
+
+
+def test_passes_csv_carries_the_catalogue_size_of_each_road(tmp_path):
+    import csv
+
+    from here_error import corridors
+    from here_fixtures import segment
+
+    segs = [segment("A", [(0, 0), (300, 0)]), segment("B", [(300, 0), (600, 0)]), segment("C", [(600, 0), (900, 0)])]
+    roads = corridors.build_roads(segs)
+    assert len(roads.roads) == 1
+    aps = [mk(0, roads.roads[0].road_id, segs[0].key, T0, 100, 110, 70, 100, None, None)]
+    a = asm_of(aps)
+    a = Assembly(a.runs, a.passes, a.times, a.catalogues, a.stretch_result, a.v4, (), roads)
+    report.write_passes_csv(a, report.pass_rows(report.ReportInputs(a, {}, None, None, [])), tmp_path / "p.csv")
+    (row,) = list(csv.DictReader((tmp_path / "p.csv").open()))
+    assert row["road_catalogue_segments"] == "3"
+
+
+def test_removing_a_negative_driver_offset_moves_the_median_as_printed():
+    # Moving 1000 m in 150 s against 125 s free flow: offset -16.67 percent (the car is slower than free flow).
+    aps = [mk(i, f"R{i}", f"s{i}", T0 + 300 * i, 150, 150, 125, 150, None, None) for i in range(6)]
+    asm = asm_of(aps)
+    text, _ = render(aps, detections=detections_for(asm, leader=False))
+    assert "over 6 open-road passes: -16.7%" in text
+    # Unadjusted error 0.0%; observed removed of the offset: 150 * (1 - 1/6) = 125 s, so HERE (150 s) is +20.0% long.
+    assert "removing the driver offset moves the median signed error from +0.0% to +20.0%" in text
+    assert "upper bound" not in text
+
+
+def test_summary_states_limits_and_the_two_column_and_stretch_rules():
+    text, _ = render(APS)
+    assert "## Limits" in text
+    assert "One driver, one car, one evening (2026-09-08, 17:08 to 19:32 EDT)." in text
+    assert "The 7 analysed passes lie on 6 physical roads; the largest holds 2 of them." in text
+    assert ("HERE Traffic Flow speeds are HERE's input to routing, not its routing output; only the routing section measures "
+            "routing travel time, and its past departure times get HERE's typical traffic for that weekday and hour.") in text
+    assert text.index("## Limits") < text.index("## Headline table")
+    assert ("The second interval column treats each directed segment, or each stretch, as independent. Segments along one road "
+            "at one time share HERE's behaviour and the evening's traffic, so that column understates the uncertainty.") in text
+    assert ("A stretch belongs to the road holding most of its matched metres, so the stretch rows count 0 physical roads "
+            "while the pass rows count 6.") in text
+
+
+def test_limits_numbers_are_computed_from_the_passes():
+    aps = [mk(i, "RA" if i < 5 else "RB", f"s{i}", T0 + 300 * i, 100, 110, 70, 100, None, None) for i in range(8)]
+    text, _ = render(aps)
+    assert "The 8 analysed passes lie on 2 physical roads; the largest holds 5 of them." in text

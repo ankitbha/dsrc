@@ -84,7 +84,7 @@ def _parse_bool(text: str) -> bool:
 
 def read_labels(path: Path | str) -> list[LabelRow]:
     """Refuses a blank cell, a repeated frame or a header that is not the template's."""
-    with Path(path).open(newline="") as fh:
+    with Path(path).open(newline="", encoding="utf-8-sig") as fh:      # Excel writes a byte-order mark
         reader = csv.DictReader(fh)
         if tuple(reader.fieldnames or ()) != COLUMNS:
             raise LabelError(f"label file columns must be {COLUMNS}")
