@@ -160,7 +160,7 @@ def _interval_text(values, clusters, unit: str, fmt=pct) -> str:
 
 
 ROAD_COL = "95% interval resampling physical roads"
-SEGMENT_COL = "95% interval, treats each directed segment as independent"
+SEGMENT_COL = "95% interval, treats each directed segment (passes) or stretch (stretches) as independent"
 
 
 def _row(label, values, roads, segs, n_unit, fmt=pct):
@@ -172,19 +172,32 @@ def _row(label, values, roads, segs, n_unit, fmt=pct):
             f"| {len(values)} {n_unit} on {len(set(roads))} physical roads and {len(set(segs))} directed segments |")
 
 
-def _stretch_row(label, values, ids, fmt=pct):
+def _stretch_row(label, values, ids, stretch_roads, fmt=pct):
+    """Stretch values in the same columns as passes.
+
+    A stretch carries the road of each of its passes, so one spanning two roads carries both. The
+    road column counts the distinct roads over all stretches and, when there are enough, resamples
+    stretches grouped by the set of roads they carry. The second column resamples each stretch alone.
+    """
     if not len(values):
         return f"| {label} | {NOT_COMPUTED}: no data | | | |"
-    return (f"| {label} (interval resamples whole stretches) | {fmt(float(np.median(values)))} "
-            f"| {_interval_text(values, ids, 'stretches', fmt)} | n/a | {len(values)} stretches |")
+    n_roads = len(set().union(*stretch_roads))
+    if n_roads < params.MIN_N_FOR_INTERVAL:
+        road_cell = f"not resolvable: {n_roads} {_SINGULAR['physical roads'] if n_roads == 1 else 'physical roads'}"
+    else:
+        ci = stats.cluster_bootstrap_median(values, ["+".join(sorted(r)) for r in stretch_roads])
+        road_cell = f"{fmt(ci.lo)} to {fmt(ci.hi)}"
+    return (f"| {label} | {fmt(float(np.median(values)))} | {road_cell} "
+            f"| {_interval_text(values, ids, 'stretches', fmt)} | {len(values)} stretches on {n_roads} physical roads |")
 
 
-def headline(rows: list[PassRow], stretches) -> list[str]:
+def headline(rows: list[PassRow], stretches, passes_by_id: dict) -> list[str]:
     def col(f, pick=lambda r: True):
         sel = [r for r in rows if pick(r)]
         return [f(r) for r in sel], [r.road_id for r in sel], [r.segment_key for r in sel]
 
     sids = [s.stretch_id for s in stretches]
+    sroads = [{passes_by_id[pid].road_id for pid in s.pass_ids} for s in stretches]
     out = [f"| Quantity compared | Median | {ROAD_COL} | {SEGMENT_COL} | n |", "|---|---|---|---|---|"]
     out.append(_row("Pass: (HERE time - observed time) / observed time, HERE reading with the latest data time before the pass",
                     *col(lambda r: r.a.t.signed_error), "passes"))
@@ -196,10 +209,10 @@ def headline(rows: list[PassRow], stretches) -> list[str]:
                     *col(lambda r: r.a.t.sensitivity_signed_error, lambda r: r.a.t.sensitivity_signed_error is not None), "passes"))
     out.append(_row("Pass, sensitivity: latest reading that had also arrived before the pass began",
                     *col(lambda r: r.a.t.arrived_signed_error, lambda r: r.a.t.arrived_signed_error is not None), "passes"))
-    out.append(_stretch_row("Stretch: (HERE time - observed time) / observed time", [s.signed_error for s in stretches], sids))
-    out.append(_stretch_row("Stretch: (free-flow time - observed time) / observed time", [s.free_flow_error for s in stretches], sids))
+    out.append(_stretch_row("Stretch: (HERE time - observed time) / observed time", [s.signed_error for s in stretches], sids, sroads))
+    out.append(_stretch_row("Stretch: (free-flow time - observed time) / observed time", [s.free_flow_error for s in stretches], sids, sroads))
     out.append(_stretch_row("Stretch: abs(HERE error) - abs(free-flow error), in percentage points",
-                            [abs(s.signed_error) - abs(s.free_flow_error) for s in stretches], sids, pp))
+                            [abs(s.signed_error) - abs(s.free_flow_error) for s in stretches], sids, sroads, pp))
     return out
 
 
@@ -208,7 +221,7 @@ def per_road_table(rows: list[PassRow]) -> list[str]:
     if not rows:
         return []
     out = ["Per physical road:", "",
-           "| Road | Label (description of its longest segment) | Passes | Directed segments | Median HERE error | Median free-flow error |",
+           "| Road | Geometry (a segment's description names the cross street at its end, not the road) | Passes | Directed segments | Median HERE error | Median free-flow error |",
            "|---|---|---|---|---|---|"]
     for rid in sorted({r.road_id for r in rows}):
         sel = [r for r in rows if r.road_id == rid]
@@ -461,7 +474,7 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
         L.append("Printed while the report is INCOMPLETE. These rows use only GPS and HERE data, which are present; "
                  "the rows that need the missing inputs say so below.")
         L.append("")
-    L += headline(rows, asm.stretch_result.stretches)
+    L += headline(rows, asm.stretch_result.stretches, {p.pass_id: p for p in asm.passes})
     L.append("")
     L += per_road_table(rows)
     L.append("")

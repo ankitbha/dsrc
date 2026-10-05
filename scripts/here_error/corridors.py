@@ -105,9 +105,39 @@ def build_roads(segments) -> Roads:
     roads, by_segment = [], {}
     for n, root in enumerate(sorted(groups), start=1):
         members = groups[root]
-        longest = max(members, key=lambda k: segs[k].stated_length_m)
-        road = Road(f"R{n:02d}", f"{segs[longest].description} corridor", tuple(members))
+        road = Road(f"R{n:02d}", _label(f"R{n:02d}", [segs[k] for k in members]), tuple(members))
         roads.append(road)
         for k in members:
             by_segment[k] = road
     return Roads(tuple(roads), by_segment)
+
+
+def _label(road_id: str, members: list[HereSegment]) -> str:
+    """A label made of geometry, never of one segment's description.
+
+    A HERE description names the cross street at the end of its segment, so it does not name the
+    road driven. The label gives the number of directed segments, the length of shape, the axis
+    bearing, and the descriptions of the segments at the two ends of the road in chain order,
+    introduced as segments *ending at* those streets.
+    """
+    f = LocalFrame(float(np.mean([s.lat[0] for s in members])), members[0].lon[0])
+    # Axis: length-weighted mean of the doubled bearing, so opposite carriageways reinforce each other.
+    sx = sy = 0.0
+    total = 0.0
+    for s in members:
+        xy = f.to_xy(s.lat, s.lon)
+        d = np.diff(xy, axis=0)
+        for (dx, dy) in d:
+            length = math.hypot(dx, dy)
+            ang = 2 * math.atan2(dx, dy)
+            sx += length * math.sin(ang)
+            sy += length * math.cos(ang)
+        total += polyline_length(xy)
+    axis = (math.degrees(math.atan2(sx, sy)) / 2.0) % 180.0
+    ux, uy = math.sin(math.radians(axis)), math.cos(math.radians(axis))
+    along = lambda s: float(np.dot(np.mean(f.to_xy(s.lat, s.lon), axis=0), (ux, uy)))
+    ordered = sorted(members, key=along)
+    first, last = ordered[0].description, ordered[-1].description
+    ends = f"segment ending at {first}" if len(members) == 1 else f"segments ending at {first} ... {last}"
+    return (f"{road_id}: {len(members)} directed segment{'s' if len(members) != 1 else ''}, {total / 1000:.1f} km of shape, "
+            f"bearing about {axis:.0f}/{(axis + 180) % 360:.0f} degrees, {ends}")

@@ -96,7 +96,7 @@ def test_interval_columns_resample_roads_and_segments_separately():
     seg = stats.cluster_bootstrap_median(he, [a.p.segment_key for a in APS])
     assert cells[2] == f"{100 * road.lo:+.1f}% to {100 * road.hi:+.1f}%"
     assert cells[3] == f"{100 * seg.lo:+.1f}% to {100 * seg.hi:+.1f}%"
-    assert "treats each directed segment as independent" in text and "resampling physical roads" in text
+    assert "treats each directed segment (passes) or stretch (stretches) as independent" in text and "resampling physical roads" in text
     assert "6 physical roads and 7 directed segments" in cells[4]
 
 
@@ -255,3 +255,38 @@ def test_routing_headline_excludes_routes_off_the_path_and_counts_them():
     line = next(l for l in text.splitlines() if l.startswith("- pass: median of (HERE routing"))
     assert "over 5 routes: +30.0%" in line and "2 routes excluded" in line
     assert "not resolvable" in line or "to" in line
+
+
+def stretch_aps(roads):
+    """Each stretch is two 1200 m passes 50 s apart, on the given roads (one road id per pass)."""
+    out, t = [], T0
+    for k, (r1, r2) in enumerate(roads):
+        out.append(mk(2 * k, r1, f"s{2 * k}", t, 100, 150, 50, 100, None, None, matched=1200.0))
+        out.append(mk(2 * k + 1, r2, f"s{2 * k + 1}", t + 150, 100, 130 + 10 * k, 50, 100, None, None, matched=1200.0))
+        t += 600
+    return out
+
+
+def test_stretch_rows_use_the_road_rule_and_the_independent_column():
+    few = stretch_aps([("R1", "R1"), ("R1", "R2"), ("R2", "R2"), ("R1", "R1")])
+    cells = table_cells(render(few)[0], "Stretch: (HERE time")
+    assert cells[2] == "not resolvable: 2 physical roads"        # a stretch spanning R1 and R2 carries both
+    assert cells[3] == "not resolvable: 4 stretches"             # the independent column holds the stretch-level interval
+    assert cells[4] == "4 stretches on 2 physical roads"
+    many = stretch_aps([("R1", "R1"), ("R2", "R2"), ("R3", "R3"), ("R4", "R4"), ("R5", "R5"), ("R1", "R2")])
+    text, _ = render(many)
+    cells = table_cells(text, "Stretch: (HERE time")
+    asm = asm_of(many)
+    st = asm.stretch_result.stretches
+    labels = ["+".join(sorted({{a.p.pass_id: a.p.road_id for a in many}[pid] for pid in s.pass_ids})) for s in st]
+    road = stats.cluster_bootstrap_median([s.signed_error for s in st], labels)
+    indep = stats.cluster_bootstrap_median([s.signed_error for s in st], [s.stretch_id for s in st])
+    assert cells[2] == f"{100 * road.lo:+.1f}% to {100 * road.hi:+.1f}%"
+    assert cells[3] == f"{100 * indep.lo:+.1f}% to {100 * indep.hi:+.1f}%"
+
+
+def test_no_printed_road_label_is_a_lone_description():
+    text, _ = render()
+    for ap in APS:
+        assert ap.p.road_label != ap.p.description
+    assert "(a segment's description names the cross street at its end, not the road)" in text

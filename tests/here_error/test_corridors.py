@@ -59,13 +59,26 @@ def test_same_direction_parallel_road_is_not_merged():
     assert ids[0] != ids[1]
 
 
-def test_label_is_the_longest_members_description_and_ids_are_stable():
-    a = segment("Short", [(0, 0), (300, 0)])
-    b = segment("Long", [(300, 0), (1300, 0)])
-    r1, _ = roads_of(a, b)
-    r2, _ = roads_of(b, a)
-    assert r1.roads[0].label == "Long corridor"
-    assert [x.road_id for x in r1.roads] == [x.road_id for x in r2.roads] == ["R01"]
+def test_label_is_geometry_never_a_lone_description():
+    a = segment("Short St", [(0, 0), (300, 0)])
+    b = segment("Long Ave", [(300, 0), (1300, 0)])
+    west = segment("Opposite Rd", [(1300, 20), (0, 20)])
+    r1, _ = roads_of(a, b, west)
+    r2, _ = roads_of(west, b, a)
+    (road,) = r1.roads
+    assert road.road_id == "R01" and r2.roads[0].label == road.label            # independent of input order
+    assert road.label.startswith("R01: 3 directed segments, 2.6 km of shape, bearing about 90/270 degrees")
+    assert "segments ending at Short St ... " in road.label                      # first segment in chain order
+    assert road.label not in {"Short St", "Long Ave", "Opposite Rd"}
+    assert "corridor" not in road.label
+    single, _ = roads_of(segment("Only St", [(0, 0), (500, 0)]))
+    assert single.roads[0].label.endswith("segment ending at Only St") and single.roads[0].label != "Only St"
+
+
+def test_ids_are_stable_across_input_order():
+    a = segment("A", [(0, 0), (300, 0)])
+    b = segment("B", [(5000, 0), (5300, 0)])
+    assert [x.road_id for x in roads_of(a, b)[0].roads] == [x.road_id for x in roads_of(b, a)[0].roads] == ["R01", "R02"]
 
 
 def test_assembly_stamps_every_pass_with_its_road(tmp_path):
