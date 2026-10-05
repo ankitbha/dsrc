@@ -363,8 +363,8 @@ def repeated_visits(rows: list[PassRow]) -> list[str]:
     rep = {k: v for k, v in segment_visits(rows).items() if len(v) >= 2}
     if len(rep) < 2:
         found = ", ".join(f"{v[0].rows[0].a.p.description}, {v[0].matched_m:.0f} m matched" for v in rep.values())
-        return [f"- Repeated passes: {NOT_COMPUTED}: {len(rep)} directed segment{'s' if len(rep) != 1 else ''} driven twice or more "
-                f"more than {params.STRETCH_MAX_GAP_S:.0f} s apart" + (f" ({found})" if found else "")
+        return [f"- Repeated passes: {NOT_COMPUTED}: {len(rep)} directed segment{'s' if len(rep) != 1 else ''} driven at least twice "
+                f"with the drives more than {params.STRETCH_MAX_GAP_S:.0f} s apart" + (f" ({found})" if found else "")
                 + "; at least 2 are needed for a spread."]
     dev_err, dev_spd, dof = [], [], 0
     for visits in rep.values():
@@ -373,7 +373,7 @@ def repeated_visits(rows: list[PassRow]) -> list[str]:
         dev_err += [v.signed_error - m_e for v in visits]
         dev_spd += [(v.here_speed - m_s) / m_s for v in visits]
         dof += len(visits) - 1
-    return [f"- Repeated passes: {len(rep)} directed segments were driven twice or more more than {params.STRETCH_MAX_GAP_S:.0f} s apart "
+    return [f"- Repeated passes: {len(rep)} directed segments were driven at least twice with the drives more than {params.STRETCH_MAX_GAP_S:.0f} s apart "
             f"({sum(len(v) for v in rep.values())} drives). Within-segment standard deviation of the signed error of HERE time: "
             f"{100 * np.sqrt(np.sum(np.square(dev_err)) / dof):.1f} percentage points; within-segment standard deviation of HERE's mean speed over the "
             f"matched portion: {100 * np.sqrt(np.sum(np.square(dev_spd)) / dof):.1f}% of the segment's mean HERE speed."]
