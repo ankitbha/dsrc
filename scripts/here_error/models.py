@@ -188,6 +188,8 @@ class RouteRequest:
     matched_m: float
     fix_lat: tuple[float, ...] = field(repr=False)
     fix_lon: tuple[float, ...] = field(repr=False)
+    origin_heading_deg: float | None = None
+    dest_heading_deg: float | None = None
 
 
 @dataclass(frozen=True)

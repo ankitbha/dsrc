@@ -38,13 +38,19 @@ def scrub(text: str, key: str | None) -> str:
     return text.replace(key, "***") if key else text
 
 
+def _place(lat: float, lon: float, heading_deg: float | None) -> str:
+    """A route end point; the course makes HERE place it on the carriageway being driven."""
+    text = f"{lat:.6f},{lon:.6f}"
+    return text if heading_deg is None else f"{text};course={int(round(heading_deg)) % 360}"
+
+
 def request_params(req: RouteRequest) -> dict:
     """Query parameters without the key: these are what the cache is keyed on."""
     departure = dt.datetime.fromtimestamp(req.departure_utc_s, ZoneInfo(params.LOCAL_TZ))
     return {
         "transportMode": "car",
-        "origin": f"{req.origin_lat:.6f},{req.origin_lon:.6f}",
-        "destination": f"{req.dest_lat:.6f},{req.dest_lon:.6f}",
+        "origin": _place(req.origin_lat, req.origin_lon, req.origin_heading_deg),
+        "destination": _place(req.dest_lat, req.dest_lon, req.dest_heading_deg),
         "departureTime": departure.isoformat(timespec="seconds"),
         "return": "summary,polyline",
     }
@@ -64,7 +70,7 @@ def default_fetch(url: str, query: dict) -> dict:
     try:
         resp = requests.get(url, params=query, timeout=30)
         if resp.status_code >= 400:
-            failure = f"HERE routing returned HTTP {resp.status_code}: {scrub(resp.text[:200], key)}"
+            failure = f"HERE routing returned HTTP {resp.status_code}: {scrub(resp.text, key)[:200]}"
         else:
             body = resp.json()
     except requests.RequestException as exc:
@@ -190,6 +196,7 @@ def request_for_fixes(request_id: str, kind: str, run: str, fixes, observed_s: f
         origin_lat=fixes[0].lat, origin_lon=fixes[0].lon, dest_lat=fixes[-1].lat, dest_lon=fixes[-1].lon,
         departure_utc_s=fixes[0].utc_s, observed_s=observed_s, matched_m=driven,
         fix_lat=tuple(lat.tolist()), fix_lon=tuple(lon.tolist()),
+        origin_heading_deg=fixes[0].heading_deg, dest_heading_deg=fixes[-1].heading_deg,
     )
 
 

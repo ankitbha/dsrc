@@ -38,6 +38,23 @@ def test_request_parameters():
     assert q["origin"].count(",") == 1
 
 
+def test_course_is_appended_from_the_first_and_last_fix_headings():
+    fixes = [fix(1788901800, 0, 0, heading=44.6), fix(1788901810, 500, 0, heading=90.0), fix(1788901820, 1000, 0, heading=359.6)]
+    q = routing.request_params(routing.request_for_fixes("p", "pass", "r", fixes, 20.0))
+    assert q["origin"].endswith(";course=45") and q["destination"].endswith(";course=0")
+    assert q["origin"].count(";") == 1
+    fixes[0] = fix(1788901800, 0, 0, heading=None)
+    q = routing.request_params(routing.request_for_fixes("p", "pass", "r", fixes, 20.0))
+    assert ";course" not in q["origin"] and ";course=0" in q["destination"]
+
+
+def test_course_changes_the_cache_key(tmp_path):
+    a = make_request()
+    b = routing.request_for_fixes("p1", "pass", "run_t", [fix(1788901800 + i * 10, i * 100, 0, heading=h) for i, h in
+                                                          zip(range(11), [200.0] + [90.0] * 10)], 100.0)
+    assert routing.cache_file(tmp_path, routing.request_params(a)) != routing.cache_file(tmp_path, routing.request_params(b))
+
+
 def test_call_is_made_once_and_cached(tmp_path):
     calls = []
 
@@ -136,3 +153,15 @@ def test_route_much_longer_than_the_path_fails_the_check():
 def test_no_route_raises():
     with pytest.raises(RoutingError, match="no route"):
         routing.evaluate(make_request(), {"routes": []})
+
+
+def test_key_straddling_character_200_of_an_error_body_is_scrubbed(monkeypatch):
+    class Resp:
+        status_code = 500
+        text = "x" * 190 + KEY + "y" * 50          # the key spans characters 190 to 204
+
+    monkeypatch.setattr(requests, "get", lambda url, params, timeout: Resp())
+    with pytest.raises(RoutingError) as ei:
+        routing.default_fetch(routing.ROUTER_URL, {"apiKey": KEY})
+    msg = str(ei.value)
+    assert KEY not in msg and "SECRET" not in msg and "KEY-123" not in msg
