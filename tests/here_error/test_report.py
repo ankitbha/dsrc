@@ -75,7 +75,7 @@ def test_complete_inputs_give_a_complete_headline_with_directions():
     errs = [0.05 * (i - 5) for i in range(12)]
     assert f"{100 * np.median(errs):+.1f}%" in text
     assert "Measured standard deviation of the per-pass signed error" in text
-    assert "Pass: |HERE error| - |free-flow error|, in percentage points" in text
+    assert "Pass: abs(HERE error) - abs(free-flow error), in percentage points" in text
 
 
 def test_missing_detections_marks_incomplete_and_skips_camera_sections():

@@ -160,12 +160,12 @@ def headline(rows: list[PassRow], stretches) -> list[str]:
         "|---|---|---|---|",
         _row("Pass: (HERE time - observed time) / observed time, HERE reading with the latest data time before the pass", _ci(he, roads), "passes"),
         _row("Pass: (free-flow time - observed time) / observed time", _ci(ff, roads), "passes"),
-        _row("Pass: |HERE error| - |free-flow error|, in percentage points; negative means HERE's live speed is closer to the observed time", _ci(diff, roads), "passes", pp),
+        _row("Pass: abs(HERE error) - abs(free-flow error), in percentage points; negative means HERE's live speed is closer to the observed time", _ci(diff, roads), "passes", pp),
         _row("Pass, sensitivity: HERE reading with data time nearest the pass midpoint", _ci(sens, sens_roads), "passes"),
         _row("Pass, sensitivity: latest reading that had also arrived before the pass began", _ci(arr, arr_roads), "passes"),
         _row("Stretch: (HERE time - observed time) / observed time", _ci([s.signed_error for s in stretches], sids), "stretches"),
         _row("Stretch: (free-flow time - observed time) / observed time", _ci([s.free_flow_error for s in stretches], sids), "stretches"),
-        _row("Stretch: |HERE error| - |free-flow error|, in percentage points", _ci([abs(s.signed_error) - abs(s.free_flow_error) for s in stretches], sids), "stretches", pp),
+        _row("Stretch: abs(HERE error) - abs(free-flow error), in percentage points", _ci([abs(s.signed_error) - abs(s.free_flow_error) for s in stretches], sids), "stretches", pp),
     ]
     return out
 
@@ -327,6 +327,7 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     if reasons:
         L.append("Printed while the report is INCOMPLETE. These rows use only GPS and HERE data, which are present; "
                  "the rows that need the missing inputs say so below.")
+        L.append("")
     L += headline(rows, asm.stretch_result.stretches)
     L.append("")
     sd = float(np.std([r.a.t.signed_error for r in rows], ddof=1)) if len(rows) > 1 else float("nan")
