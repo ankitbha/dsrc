@@ -362,7 +362,7 @@ def repeated_visits(rows: list[PassRow]) -> list[str]:
     """Spread between separate drives over the same directed segment, against the spread of HERE's reading."""
     rep = {k: v for k, v in segment_visits(rows).items() if len(v) >= 2}
     if len(rep) < 2:
-        found = ", ".join(f"{rows_[0].rows[0].a.p.description} ({k.split('|')[1]} m)" for k, rows_ in rep.items())
+        found = ", ".join(f"{v[0].rows[0].a.p.description}, {v[0].matched_m:.0f} m matched" for v in rep.values())
         return [f"- Repeated passes: {NOT_COMPUTED}: {len(rep)} directed segment{'s' if len(rep) != 1 else ''} driven twice or more "
                 f"more than {params.STRETCH_MAX_GAP_S:.0f} s apart" + (f" ({found})" if found else "")
                 + "; at least 2 are needed for a spread."]
@@ -482,9 +482,9 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
         L.append(f"Over {v4.n} passes with a reading of the same segment at least {params.SHUFFLE_MIN_S:.0f} s away: median abs(signed error) "
                  f"{pct(v4.median_abs_real, False)} with the real reading, {pct(v4.median_abs_shuffled, False)} with the shuffled reading. "
                  f"If the second does not exceed the first, this sample cannot resolve HERE's real-time signal.")
-        L += v4_rows(rows)
     else:
         L.append(f"{NOT_COMPUTED}: no pass has a reading of its segment at least {params.SHUFFLE_MIN_S:.0f} s away.")
+    L += v4_rows(rows)
     L.append("")
     L.append("## Stage 4: signed error by condition")
     if daylight_only(inputs):
