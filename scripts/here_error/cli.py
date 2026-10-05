@@ -176,17 +176,26 @@ def cmd_routing(args) -> int:
     return 0
 
 
+def _waiver_reason(text: str) -> str:
+    if not text.strip():
+        raise argparse.ArgumentTypeError("the reason for waiving gate V6 must not be empty")
+    return text.strip()
+
+
 def cmd_report(args) -> int:
     asm = _assemble(args)
     out = args.out_dir
-    out.mkdir(parents=True, exist_ok=True)
     scores_path, routing_path = out / "label_scores.json", out / "routing.csv"
+    if args.labels_waived is not None and scores_path.exists():
+        raise SystemExit(f"--labels-waived contradicts {scores_path}: scored labels mean gate V6 was run; remove one of them")
+    out.mkdir(parents=True, exist_ok=True)
     dets = _detections(out, asm)
     inputs = report.ReportInputs(
         asm, dets,
         report.read_label_scores(scores_path) if scores_path.exists() else None,
         routing.read_csv(routing_path) if routing_path.exists() else None,
         pipeline.route_requests(asm),
+        labels_waived=args.labels_waived,
     )
     extra = [p for p in [scores_path, routing_path] + [out / f"detections_{r.run}.jsonl" for r in asm.runs] if p.exists()]
     prov = _prov(args, asm.input_files() + extra)
@@ -229,7 +238,10 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("routing")
     r.add_argument("--dry-run", action="store_true", help="list the calls and make none")
     r.set_defaults(fn=cmd_routing)
-    sub.add_parser("report").set_defaults(fn=cmd_report)
+    rp = sub.add_parser("report")
+    rp.add_argument("--labels-waived", type=_waiver_reason, default=None, metavar="REASON",
+                    help="record that gate V6 was not run, with the reason; refused when label_scores.json exists")
+    rp.set_defaults(fn=cmd_report)
     return ap
 
 

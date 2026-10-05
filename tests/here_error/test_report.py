@@ -150,3 +150,49 @@ def test_csv_outputs_are_written(tmp_path):
     got = list(csv.DictReader((tmp_path / "p.csv").open()))
     assert len(got) == 12 and got[0]["pass_id"] == "t-000" and float(got[0]["signed_error"]) == pytest.approx(-0.25)
     assert got[0]["mean_vehicles"] == "2.0"
+
+
+WAIVER = "no hand labelling will be done"
+STAGE4_WAIVED = ("Gate V6 was not run: the detector's counts were not checked against hand labels (" + WAIVER + "). "
+                 "Camera conditions use every frame as the detector reported it, so a detector that misses vehicles at dusk would bias the dark rows.")
+LIMITS_WAIVED = "Vehicle counts come from the detector without a check against hand labels; parked vehicles are counted, and how many there are is not measured."
+
+
+def test_waiver_removes_only_the_labels_reason():
+    asm = make_asm(SPECS)
+    unwaived = report.incomplete_reasons(inputs_for(asm, label_scores=None, routing=None))
+    waived = report.incomplete_reasons(inputs_for(asm, label_scores=None, routing=None, labels_waived=WAIVER))
+    assert any("labels" in r for r in unwaived)
+    assert not any("labels" in r for r in waived)
+    assert waived == [r for r in unwaived if "labels" not in r]
+    assert any("routing results are missing" in r for r in waived)
+
+
+def test_waiver_with_complete_inputs_is_complete_and_adds_three_sentences():
+    asm = make_asm(SPECS)
+    text, reasons = report.render(inputs_for(asm, label_scores=None, labels_waived=WAIVER), PROV)
+    assert reasons == []
+    assert "**STATUS: COMPLETE.**" in text
+    assert STAGE4_WAIVED in text
+    assert LIMITS_WAIVED in text
+    assert f"- V6: not run ({WAIVER})." in text
+    assert "Gate V6 is not scored" not in text
+    assert "dusk recall is below 0.7" not in text
+    assert report.daylight_only(inputs_for(asm, label_scores=None, labels_waived=WAIVER)) is False
+
+
+def test_waiver_and_scored_labels_contradict():
+    asm = make_asm(SPECS)
+    with pytest.raises(ValueError, match="contradict"):
+        inputs_for(asm, labels_waived=WAIVER)
+
+
+def test_without_a_waiver_the_report_is_unchanged():
+    asm = make_asm(SPECS)
+    text, reasons = report.render(inputs_for(asm, label_scores=None), PROV)
+    assert "detector labels (gate V6) are not scored" in reasons
+    assert "Gate V6 is not scored, so camera conditions are provisional." in text
+    assert "Gate V6 was not run" not in text and "V6: not run" not in text
+    assert "without a check against hand labels" not in text
+    scored, reasons = report.render(inputs_for(asm), PROV)
+    assert reasons == [] and "V6 before_dusk" in scored and "not run" not in scored.split("## Gates and exclusions")[1]

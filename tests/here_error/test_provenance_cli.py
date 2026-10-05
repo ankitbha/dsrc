@@ -79,3 +79,44 @@ def test_report_exits_nonzero_and_says_incomplete(monkeypatch, tmp_path, capsys)
     assert capsys.readouterr().out.startswith("STATUS: INCOMPLETE")
     text = (tmp_path / "summary.md").read_text()
     assert "**STATUS: INCOMPLETE.**" in text
+
+
+def _patch_report(monkeypatch):
+    asm = make_asm(SPECS)
+    monkeypatch.setattr(pipeline, "assemble", lambda d: asm)
+    monkeypatch.setattr(pipeline.Assembly, "input_files", lambda self: [])
+    monkeypatch.setattr(provenance, "_git_commit", lambda root: "deadbeef")
+    monkeypatch.setattr(provenance, "_git_is_dirty", lambda root: False)
+
+
+@pytest.mark.parametrize("reason", ["", "   "])
+def test_empty_waiver_reason_is_refused(monkeypatch, tmp_path, reason):
+    _patch_report(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--out-dir", str(tmp_path), "report", "--labels-waived", reason])
+    assert e.value.code != 0
+    assert not (tmp_path / "summary.md").exists()
+
+
+def test_waiver_with_existing_label_scores_is_refused(monkeypatch, tmp_path):
+    _patch_report(monkeypatch)
+    (tmp_path / "label_scores.json").write_text("[]")
+    with pytest.raises(SystemExit, match="contradicts"):
+        cli.main(["--out-dir", str(tmp_path), "report", "--labels-waived", "no labelling"])
+    assert not (tmp_path / "summary.md").exists()
+
+
+def test_report_with_waiver_drops_only_the_labels_reason(monkeypatch, tmp_path, capsys):
+    _patch_report(monkeypatch)
+    rc = cli.main(["--out-dir", str(tmp_path), "report", "--labels-waived", "no labelling"])
+    out = capsys.readouterr().out
+    assert rc == 3                                   # routing and detections are still missing
+    assert "gate V6" not in out.split("# HERE")[0]
+    assert "routing results are missing" in out
+    assert "- V6: not run (no labelling)." in (tmp_path / "summary.md").read_text()
+
+
+def test_waiver_reason_is_stored_without_surrounding_whitespace(monkeypatch, tmp_path):
+    _patch_report(monkeypatch)
+    cli.main(["--out-dir", str(tmp_path), "report", "--labels-waived", "  no labelling \n"])
+    assert "- V6: not run (no labelling)." in (tmp_path / "summary.md").read_text()

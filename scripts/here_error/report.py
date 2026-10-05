@@ -32,6 +32,11 @@ class ReportInputs:
     label_scores: list[HalfScore] | None
     routing: list[RouteResult] | None
     requests: list[RouteRequest]
+    labels_waived: str | None = None
+
+    def __post_init__(self):
+        if self.labels_waived is not None and self.label_scores is not None:
+            raise ValueError("label scores and a gate V6 waiver contradict each other: scored labels mean the gate was run")
 
 
 @dataclass(frozen=True)
@@ -101,7 +106,7 @@ def valid_routes(inputs: ReportInputs) -> list[RouteResult]:
 
 def incomplete_reasons(inputs: ReportInputs) -> list[str]:
     reasons = camera_coverage(inputs)
-    if inputs.label_scores is None:
+    if inputs.label_scores is None and inputs.labels_waived is None:
         reasons.append("detector labels (gate V6) are not scored")
     if inputs.routing is None:
         reasons.append("routing results are missing")
@@ -549,6 +554,8 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
              "routing, not its routing output; only the routing section measures routing travel time, and its past departure times get "
              "HERE's typical traffic for that weekday and hour. "
              f"The daylight/dark split is a fixed local time, {params.DUSK_SPLIT_LOCAL[0]:02d}:{params.DUSK_SPLIT_LOCAL[1]:02d}, chosen for this drive.")
+    if inputs.labels_waived is not None:
+        L.append("Vehicle counts come from the detector without a check against hand labels; parked vehicles are counted, and how many there are is not measured.")
     L.append("")
     L.append("## Headline table")
     if reasons:
@@ -590,6 +597,9 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     L.append("## Stage 4: signed error by condition")
     if daylight_only(inputs):
         L.append("Gate V6: dusk recall is below 0.7, so camera conditions use daylight frames only.")
+    elif inputs.labels_waived is not None:
+        L.append(f"Gate V6 was not run: the detector's counts were not checked against hand labels ({inputs.labels_waived}). "
+                 "Camera conditions use every frame as the detector reported it, so a detector that misses vehicles at dusk would bias the dark rows.")
     elif inputs.label_scores is None:
         L.append("Gate V6 is not scored, so camera conditions are provisional.")
     L += stage4(rows, camera_note)
@@ -621,6 +631,8 @@ def render(inputs: ReportInputs, prov: Provenance) -> tuple[str, list[str]]:
     L.append(f"- Analysed passes whose primary reading had not yet arrived at the pass's first fix: {arrived_late} of {len(rows)}.")
     sr = asm.stretch_result
     L.append(f"- Stretches {len(sr.stretches)}; passes dropped from stretches {sr.dropped_passes} ({sr.dropped_m:.0f} m).")
+    if inputs.labels_waived is not None:
+        L.append(f"- V6: not run ({inputs.labels_waived}).")
     if inputs.label_scores:
         for s in inputs.label_scores:
             f = lambda x: "n/a" if x is None else f"{x:.2f}"
