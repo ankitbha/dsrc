@@ -137,7 +137,7 @@ def _label(road_id: str, members: list[HereSegment]) -> str:
     ux, uy = math.sin(math.radians(axis)), math.cos(math.radians(axis))
     along = lambda s: float(np.dot(np.mean(f.to_xy(s.lat, s.lon), axis=0), (ux, uy)))
     ordered = sorted(members, key=along)
-    first, last = ordered[0].description, ordered[-1].description
+    first, last = ordered[0].description or "(unnamed)", ordered[-1].description or "(unnamed)"
     ends = f"segment ending at {first}" if len(members) == 1 else f"segments ending at {first} ... {last}"
     return (f"{road_id}: {len(members)} directed segment{'s' if len(members) != 1 else ''}, {total / 1000:.1f} km of shape, "
             f"bearing about {axis:.0f}/{(axis + 180) % 360:.0f} degrees, {ends}")

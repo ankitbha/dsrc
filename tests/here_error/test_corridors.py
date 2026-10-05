@@ -93,3 +93,8 @@ def test_assembly_stamps_every_pass_with_its_road(tmp_path):
     roads = corridors.build_roads(e.segment for e in cat.values())
     assert len(passes) == 2
     assert {roads.by_segment[p.segment_key].road_id for p in passes} == {"R01"}
+
+
+def test_label_names_an_empty_description():
+    r, _ = roads_of(segment("", [(0, 0), (500, 0)]))
+    assert r.roads[0].label.endswith("segment ending at (unnamed)")
