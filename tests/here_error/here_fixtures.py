@@ -53,3 +53,46 @@ def write_run(root: Path, run: str, phone_lines, index, bodies, video_ids):
     phone = root / "phone.jsonl"
     phone.write_text("\n".join(phone_lines) + "\n")
     return d, phone
+
+
+# ---- planar helpers: build roads in metres and convert to latitude/longitude --------------
+import math  # noqa: E402
+
+from here_error import load  # noqa: E402
+from here_error.models import GpsFix, HereBody  # noqa: E402
+
+LAT0, LON0 = 40.0, -74.0
+R = 6371000.0
+
+
+def to_latlon(x, y):
+    return LAT0 + math.degrees(y / R), LON0 + math.degrees(x / (R * math.cos(math.radians(LAT0))))
+
+
+def road(desc, xy_points, stated_length=None, **kw):
+    """A HERE flow result for a polyline given in metres east/north of (LAT0, LON0)."""
+    pts = [to_latlon(x, y) for x, y in xy_points]
+    length = stated_length
+    if length is None:
+        length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(xy_points, xy_points[1:]))
+    return result(desc, round(length), pts, **kw)
+
+
+def segment(desc, xy_points, **kw):
+    return load.parse_segment(road(desc, xy_points, **kw))
+
+
+def make_body(run, seq, segments, data_time_s, response_utc_s=None):
+    return HereBody(run, seq, f"here/{seq:06d}.json", data_time_s,
+                    data_time_s + 60 if response_utc_s is None else response_utc_s, LAT0, LON0, tuple(segments))
+
+
+def fix(t, x, y, speed=10.0, heading=90.0):
+    lat, lon = to_latlon(x, y)
+    return GpsFix(utc_s=float(t), wall_s=float(t) + 1.2, lat=lat, lon=lon, speed_mps=speed, heading_deg=heading)
+
+
+def drive_east(t0, x0, x1, step=10.0, speed=10.0, y=0.0):
+    """One fix per second moving east from x0 to x1 inclusive."""
+    n = int(round((x1 - x0) / step))
+    return [fix(t0 + i, x0 + i * step, y, speed=speed, heading=90.0) for i in range(n + 1)]
