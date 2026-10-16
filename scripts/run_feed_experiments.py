@@ -587,27 +587,39 @@ def _load_trace(record: dict) -> list[dict] | None:
 
 
 def pilot_decision(no_control_trace: list[dict], here_trace: list[dict], cap: float,
-                   t_0: float = 1500.0, until: float = 3000.0) -> dict[str, Any]:
-    """Plan section 5's pilot rule for scenario (b).
+                   v_jam: float | None, t_0: float = 1500.0,
+                   hold: float = HOLD_S) -> dict[str, Any]:
+    """Plan section 5's pilot rule for scenario (b), as Amendment 1 (A5) states it.
 
-    The burst breaks no control down if its served flow over [t_0, until] is below the
-    3,650 veh/h background and its pending count at `until` exceeds that at `t_0`. The
-    controlled arm must reach held + pending = 0 before the cap.
+    No control breaks down if it has a jam spell (any segment below `v_jam`, the network
+    threshold) lasting at least `hold` after `t_0`. The controlled arm must drain under
+    the A3 rule before the cap. The fall-backs are the plan's. Served flow and pending,
+    the criterion A5 replaced, are recorded for reference only.
     """
+    import numpy as np
+
+    from src.sumo.drain import drain_time, jam_indicator, spells
+
     def at(trace, t):
         return next((s for s in trace if s["t"] >= t), trace[-1])
 
-    start, end = at(no_control_trace, t_0), at(no_control_trace, until)
+    start, end = at(no_control_trace, t_0), at(no_control_trace, 2 * t_0)
     served = (end["arrived"] - start["arrived"]) * 3600.0 / (end["t"] - start["t"])
-    breaks = served < 3650.0 and end["pending"] > start["pending"]
-    cleared = next((s["t"] for s in here_trace if s["t"] > t_0
-                    and s["held"] + s["pending"] == 0), None)
-    controlled_drains = cleared is not None and cleared <= cap
+    if v_jam is None:
+        return {"action": "no network threshold: run block D's sustained episodes first",
+                "breaks_no_control_down": None, "controlled_drains_before_cap": None,
+                "served_flow_no_control": served}
+    times = np.array([s["t"] for s in no_control_trace], float)
+    spacing = float(np.median(np.diff(times)))
+    jammed = jam_indicator(no_control_trace, v_jam).any(axis=1) & (times > t_0) & (times <= cap)
+    lengths = [last - first + spacing for first, last in spells(jammed, times)]
+    breaks = any(length >= hold for length in lengths)
+    drain, drained = drain_time(here_trace, t_0, hold, cap, v_jam)
     if not breaks:
         action = ("rebuild mainz_burst with a 6,000 veh/h burst and a 16,000 s cap: "
                   "--demand-burst 900 1500 0.333333 --duration-s 16000 "
                   "--demand-duration-s 16000, and repeat the pilot once")
-    elif not controlled_drains:
+    elif not drained:
         action = ("rebuild mainz_burst with a 3,600 veh/h background: "
                   "--demand-scale 0.2, and repeat the pilot once")
     else:
@@ -615,10 +627,12 @@ def pilot_decision(no_control_trace: list[dict], here_trace: list[dict], cap: fl
     if action != "keep the scenario":
         action += ("; move results/feed/D.jsonl and outputs/feed/traces/D away first, "
                    "since the pilot's episodes are of the old scenario")
-    return {"served_flow_no_control": served, "pending_at_t0": start["pending"],
-            "pending_at_until": end["pending"], "breaks_no_control_down": breaks,
-            "controlled_clears_at": cleared, "controlled_drains_before_cap": controlled_drains,
-            "action": action}
+    return {"v_jam": v_jam, "hold_s": hold, "t_0": t_0,
+            "longest_jam_spell_after_t0_s": max(lengths, default=0.0),
+            "breaks_no_control_down": breaks,
+            "controlled_drain_s": drain, "controlled_drains_before_cap": drained,
+            "served_flow_no_control": served, "pending_at_t0": start["pending"],
+            "pending_at_2t0": end["pending"], "action": action}
 
 
 def network_threshold(episodes: list[dict]) -> dict[str, Any] | None:
@@ -952,7 +966,9 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             continue
         specs = block_specs(block, context)
         if block == "D" and args.pilot:
-            specs = [s for s in specs if s.scenario == "mainz_burst" and s.seed == SMOKE_SEED]
+            # The sustained episodes the network threshold needs, then seed 16 of (b).
+            specs = ([s for s in specs if s.scenario == "mainz"]
+                     + [s for s in specs if s.scenario == "mainz_burst" and s.seed == SMOKE_SEED])
         if block == "E":
             specs = _with_baselines(specs, context, traces_dir)
         if args.smoke:
@@ -973,8 +989,11 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             pilot = [r for r in episodes if r["scenario"] == "mainz_burst"
                      and r["seed"] == SMOKE_SEED]
             traces = {r["arm"]: _load_trace(r) for r in pilot}
+            network = network_threshold(episodes)
             decision = pilot_decision(traces["no_control"], traces["here"],
-                                      DRAIN["mainz_burst"]["cap_s"])
+                                      DRAIN["mainz_burst"]["cap_s"],
+                                      network["pooled"]["v_jam"] if network else None,
+                                      DRAIN["mainz_burst"]["t_0"])
             _write_json(results_dir / "D_pilot.json", decision)
             print(f"pilot: {decision['action']}")
         summarize(block, results_dir, traces_dir, context)

@@ -146,17 +146,46 @@ class TestHeaderAndSpecs:
 
 
 class TestSummaries:
-    def test_the_pilot_rule(self):
-        def trace(rows):
-            return [{"t": t, "arrived": a, "pending": p, "held": h} for t, a, p, h in rows]
+    @staticmethod
+    def _pilot_trace(jam_from=None, jam_to=None, end=12000, pending_until=0):
+        return [{"t": float(t), "arrived": t, "held": 0,
+                 "pending": 1 if t < pending_until else 0, "count": [3, 3],
+                 "speed_kmh": [10.0 if jam_from is not None and jam_from <= t < jam_to
+                               else 50.0, 50.0]}
+                for t in range(10, end + 1, 10)]
 
-        broken = trace([(1500, 1000, 50, 0), (3000, 2400, 300, 0)])  # 3,360 veh/h, growing
-        drains = trace([(1500, 1000, 0, 20), (2000, 1500, 0, 0)])
-        assert rfe.pilot_decision(broken, drains, 12000.0)["action"] == "keep the scenario"
-        healthy = trace([(1500, 1000, 50, 0), (3000, 2600, 10, 0)])
-        assert "6,000" in rfe.pilot_decision(healthy, drains, 12000.0)["action"]
-        stuck = trace([(1500, 1000, 0, 20), (2000, 1500, 3, 0)])
-        assert "3,600" in rfe.pilot_decision(broken, stuck, 12000.0)["action"]
+    def test_the_pilot_rule_reads_a_jam_spell_of_h_after_t0(self):
+        drains = self._pilot_trace(1000, 1600)
+        broken = self._pilot_trace(1680, 9000)
+        decision = rfe.pilot_decision(broken, drains, 12000.0, 20.0)
+        assert decision["breaks_no_control_down"] is True
+        assert decision["controlled_drains_before_cap"] is True
+        assert decision["action"] == "keep the scenario"
+
+    def test_a_spell_shorter_than_h_is_not_a_breakdown(self):
+        brief = self._pilot_trace(2000, 2110)  # 11 samples, 110 s
+        decision = rfe.pilot_decision(brief, self._pilot_trace(), 12000.0, 20.0)
+        assert decision["breaks_no_control_down"] is False
+        assert "6,000" in decision["action"]
+
+    def test_a_jam_before_t0_only_is_not_a_breakdown(self):
+        early = self._pilot_trace(600, 1500)
+        assert rfe.pilot_decision(early, self._pilot_trace(), 12000.0, 20.0)[
+            "breaks_no_control_down"] is False
+
+    def test_a_controlled_arm_that_jams_again_does_not_drain(self):
+        broken = self._pilot_trace(1680, 9000)
+        relapse = self._pilot_trace(8000, 9000)
+        decision = rfe.pilot_decision(broken, relapse, 12000.0, 20.0)
+        assert decision["controlled_drains_before_cap"] is True  # clear at the end
+        stuck = self._pilot_trace(1500, 12001)
+        decision = rfe.pilot_decision(broken, stuck, 12000.0, 20.0)
+        assert decision["controlled_drains_before_cap"] is False
+        assert "3,600" in decision["action"]
+
+    def test_no_threshold_no_decision(self):
+        decision = rfe.pilot_decision(self._pilot_trace(), self._pilot_trace(), 12000.0, None)
+        assert decision["breaks_no_control_down"] is None
 
     def test_the_origin_fit_and_its_quadratic_term(self):
         linear = [(x, 2.0 * x) for x in (0.1, 0.25, 0.5, 0.75) for _ in range(3)]
