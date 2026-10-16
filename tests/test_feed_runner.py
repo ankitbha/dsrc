@@ -103,7 +103,8 @@ class TestHeaderAndSpecs:
     def test_the_header_carries_versions_and_digests(self):
         context = rfe.Context(seeds=(16, 17))
         context.feed = rfe.load_feed_parameters(ARTEFACT, None, allow_placeholder=True)
-        record = rfe.header("A", context, rfe.DEFAULT_CHECKPOINT, ["x"])
+        record = rfe.header("A", context,
+                            REPO_ROOT / "results" / "checkpoints" / "mainz_here_best.pt", ["x"])
         assert record["sumo_version"].startswith("Eclipse SUMO sumo")
         assert record["libsumo_version"]
         assert len(record["checkpoint"]["sha256"]) == 64

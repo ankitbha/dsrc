@@ -196,3 +196,38 @@ def test_the_module_never_reads_the_reward_density():
     source = Path(drain.__file__).read_text()
     assert "DENSITY_CRITICAL" not in source
     assert "densities(" not in source
+
+
+class TestLaterSpells:
+    """Amendment 1, A3: a later spell of at least H undoes an earlier drain."""
+
+    def test_clear_at_t0_then_jammed_with_pending_to_the_cap_is_censored(self):
+        trace = _trace(9000, jam_from=1400, jam_until=9001, pending_until=9001)
+        for sample in trace:
+            if sample["t"] < 1400:
+                sample["pending"] = 0
+        assert drain_time(trace, 1200.0, 120.0, 9000.0, 20.0) == (7800.0, False)
+
+    def test_a_later_spell_shorter_than_h_does_not_censor(self):
+        trace = _trace(9000, jam_from=5000, jam_until=5100)  # 10 samples, 100 s
+        assert drain_time(trace, 1200.0, 120.0, 9000.0, 20.0) == (120.0, True)
+
+    def test_a_later_spell_of_h_moves_the_drain_past_it(self):
+        trace = _trace(9000, jam_from=5000, jam_until=5120)  # 12 samples, 120 s
+        # Last jammed sample 5,110 s; the first clear [t_d - 120, t_d] ends at 5,240 s.
+        assert drain_time(trace, 1200.0, 120.0, 9000.0, 20.0) == (5240.0 - 1200.0, True)
+
+    def test_a_later_waiting_spell_counts_like_a_jam(self):
+        trace = _trace(9000)
+        for sample in trace:
+            if 6000 <= sample["t"] < 6200:
+                sample["held"] = 2
+        t, drained = drain_time(trace, 1200.0, 120.0, 9000.0, 20.0)
+        assert drained and t == 6200.0 - 1200.0
+
+    def test_spells_are_runs_of_consecutive_samples(self):
+        from src.sumo.drain import spells
+
+        flags = np.array([0, 1, 1, 0, 1, 0, 0, 1, 1, 1], bool)
+        times = np.arange(10.0, 101.0, 10.0)
+        assert spells(flags, times) == [(20.0, 30.0), (50.0, 50.0), (80.0, 100.0)]

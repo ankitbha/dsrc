@@ -5,7 +5,10 @@ space-mean speed and count, plus the gate's held count and SUMO's pending count)
 segment is jammed at a sample when it holds a vehicle and its space-mean speed is below
 `v_jam`. The network has drained at `t_d` when no segment was jammed at any sample in
 `[t_d - H, t_d]` and nothing is waiting outside it: held at the gate and pending in SUMO
-are both zero (plan decision D9).
+are both zero (plan decision D9), and, after `t_d` up to the cap, no jam spell and no
+waiting spell lasting at least `H` begins (plan Amendment 1, A3). Without that last
+condition a run that is clear when the clock starts and jams a few minutes later counts
+as drained at `t_0 + H`.
 
 The jam threshold is a SPEED, fitted to the speed distribution of the uncontrolled
 runs: `v_jam = (s1 + s2) / 4` from a three-piece linear fit to the empirical CDF of the
@@ -98,11 +101,44 @@ def _times(trace: Sequence[dict]) -> np.ndarray:
     return np.array([s["t"] for s in trace], dtype=float)
 
 
+def spells(flags: np.ndarray, times: np.ndarray) -> list[tuple[float, float]]:
+    """`(first, last)` sample time of every run of consecutive flagged samples."""
+    out, start = [], None
+    for flag, t in zip(flags, times):
+        if flag and start is None:
+            start = t
+        if not flag and start is not None:
+            out.append((start, previous))
+            start = None
+        previous = t
+    if start is not None:
+        out.append((start, previous))
+    return out
+
+
+def long_spell_starts(trace: Sequence[dict], H: float, cap: float,
+                      v_jam: float | np.ndarray) -> list[float]:
+    """Start times of the jam spells (any segment jammed) and waiting spells (held +
+    pending > 0) that last at least `H`, counted up to the cap.
+
+    A spell of `n` consecutive samples at spacing `dt` lasts `n dt`.
+    """
+    times = _times(trace)
+    spacing = float(np.median(np.diff(times))) if len(times) > 1 else 0.0
+    inside = times <= cap
+    jammed = jam_indicator(trace, v_jam).any(axis=1) & inside
+    waiting = (np.array([s["held"] + s["pending"] for s in trace]) > 0) & inside
+    return sorted(start for flags in (jammed, waiting)
+                  for start, last in spells(flags, times)
+                  if last - start + spacing >= H)
+
+
 def drain_time(trace: Sequence[dict], t_0: float, H: float, cap: float,
                v_jam: float | np.ndarray) -> tuple[float, bool]:
     """`(t_d - t_0, True)` for the first sample `t_d >= t_0 + H` with no jammed segment
-    on `[t_d - H, t_d]` and zero held and pending at `t_d`; `(cap - t_0, False)` if no
-    such sample exists by the cap.
+    on `[t_d - H, t_d]`, zero held and pending at `t_d`, and no jam or waiting spell of
+    at least `H` starting after `t_d` up to the cap; `(cap - t_0, False)` if no such
+    sample exists by the cap.
     """
     times = _times(trace)
     if times[-1] < cap:
@@ -110,12 +146,15 @@ def drain_time(trace: Sequence[dict], t_0: float, H: float, cap: float,
     jammed_any = jam_indicator(trace, v_jam).any(axis=1)
     waiting = np.array([s["held"] + s["pending"] for s in trace]) > 0
     jam_times = times[jammed_any]
+    later = long_spell_starts(trace, H, cap, v_jam)
     for index, t_d in enumerate(times):
         if t_d < t_0 + H or t_d > cap:
             continue
         if waiting[index]:
             continue
         if np.any((jam_times >= t_d - H) & (jam_times <= t_d)):
+            continue
+        if any(start > t_d for start in later):
             continue
         return float(t_d - t_0), True
     return float(cap - t_0), False
