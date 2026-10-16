@@ -929,3 +929,123 @@ delay at the polling preview's `L_bar`) does not reach it. `m = 4` gives `D = 4 
 reported mean. Block L becomes `m` in {0, 2, 4} on B9 and I_exit for the lookahead, the plan alone
 and the best model: 90 more episodes, about 45 minutes. Figure 3's lag axis is 0, 1, 2, 4. The
 cut order of section 8.2 is unchanged, and `m = 4` is cut after `m = 0`.
+
+## Pause state (2026-10-16, about 15:20 EDT; orchestrator, at the author's `pause`)
+
+### The blocking unknown
+
+**Whether block G passes:** does the oracle correction (true local occupancy, rule of section 5.4)
+reduce jams below the plan alone on training seeds 1-5, on B9 and I_exit, under the pass rule of
+section 8.1? Every later block, the paper's pitch and the rewrite depend on it. The planning pilot
+(appendix A4, simplified oracle, seeds 1-3, placeholder lag) met the pass rule on both scenarios,
+but block G itself has not run. It needs steps S4 to S6, S10 and S12 built, then about 5 minutes of
+compute. **Open decision for the author:** run block G as soon as those steps exist, before the
+validator rounds (a no-go then stops the program before the validation cost is spent), or keep
+the plan's order (all validation first). The orchestrator recommends running it early, on training
+seeds only, and re-running it after validation if any validator fix touches the code it uses.
+
+### Where everything stopped
+
+- Branch `jam-avoidance` in `/Users/ankit_nash/Desktop/ankit_summer_2026/dsrc` (no worktree),
+  branched from `feed-agreement` at `d699ac2`. Nothing is pushed.
+- Committed: the plan (`70b9237`), Amendment 1 (`394e3cd`), and the implementer's steps S1
+  (`2abab94`, demand files), S2 (`3ae9f72`, incidents) and S3 (`68e425b`, lane pass and
+  visibility). The implementer (Opus) stopped at the pause after S3 with nothing uncommitted;
+  its stopping point is the next subsection.
+- Uncommitted and not this program's: everything under `paper/` (the author's edits plus the
+  earlier 6-page feed-agreement rewrite; the old version is in `paper/icra_version/`). The author
+  commented out `\appendix` and `\input{appendix}` in `paper/main_extended.tex` at 08:28; left as is.
+- Validator: never started. Findings file `plans/2026-10-16-jam-avoidance-validation.md` does not
+  exist yet. Validation rounds used: 0 of 3.
+- Experiments: none run. `results/jam/` does not exist yet.
+- Agent briefs and the paper outline: `plans/2026-10-16-jam-avoidance-briefs.md` (copied out of the
+  session scratchpad; the scratchpad is not needed to resume).
+
+### The implementer's stopping point (its report, 2026-10-16 15:20)
+
+- **Done and committed:** S1 (three demand files; departures 7,144, 7,468 and 7,594;
+  `mainz.net.xml` sha256 unchanged), S2 (`MainzEnv.schedule_incident`, `incident_report`;
+  incident vehicles excluded from edge counts and speeds, `segment_state`, the feed snapshot,
+  `_segment_vehicles`, arrivals, `pending()` and `running()`, and kept on the lanes for cameras),
+  S3 (`src/sumo/sensing.py`: `LaneSnapshot`, `successors`, `CandidateTable`, `occluded`,
+  `closed_form_occluded`, `visible_candidates`).
+- **Tests:** `tests/test_jam_scenarios.py` 18 passed, `tests/test_jam_incidents.py` 12 passed,
+  `tests/test_jam_visibility.py` 17 passed; `test_feed_env` 24, `test_feed_episode` 22 and
+  `test_mainz_port` 12 still pass. `tests/test_feed_builder.py::test_burst_rates_are_3650_then_5000_then_3650`
+  fails, and also fails on an archive of `394e3cd`: it asserts the 3,650 veh/h background that the
+  previous program's Amendment 2 (B4) replaced with 3,572 veh/h. Not this program's defect; it needs
+  its expected rate updated.
+- **Not started:** S4 to S14, and Amendment 1 (block L `m` in {0, 2, 4}, `fig_lag` axis 0, 1, 2,
+  4), which lands in S12 and S13. Resume at S4: `CameraModel`, `OracleSensor`, `LocalEstimate`,
+  `TrendTracker` in `src/sumo/sensing.py`, tests in a new `tests/test_jam_camera.py`.
+- **Where the plan could not be built as written (for the validator to check):**
+  1. SUMO inserts a stopped incident vehicle only when its spot is clear: insertion came 0 to
+     15.5 s after the 900 s request on three seeds of both blocks, with zero collisions. The
+     incident therefore stands on [insertion, 1,200) s, not exactly [900, 1,200) s;
+     `incident_report()` records the insertion time and the sanity test asserts insertion within
+     30 s. Attack point 12 and the S2 sanity test are to be read with this.
+  2. The closed-form occlusion rules of section 1.2 are sufficient but not necessary (the own-lane
+     leader and a closer same-lane vehicle can together cover half of an interval when neither does
+     alone), so "the closed-form rules equal the interval computation on 1,000 random scenes" is
+     false. Production uses the general interval rule; the tests check that the vectorised table
+     equals the general rule on 1,000 scenes and that every disagreement with the closed form is the
+     combined case.
+  3. The field-of-view bound is 360/800 = 0.45 (the plan's 0.449 is tan(24.2 deg) rounded).
+- **Choices later steps depend on:** the lane pass also scans each segment edge's route successor,
+  because the I_exit incident stands on `exit_road`, which belongs to no segment (the planning
+  pilot's oracle scanned segment edges only); "visible lanes" are the offsets -1, 0, +1 that exist
+  on the ego's own edge; an incident is removed from an edge's mean speed by
+  `(mean x count - incident speeds) / (count - incidents)`, because SUMO's edge mean speed is not
+  the plain mean of vehicle speeds (they differed by up to 8.3 m/s).
+
+### Polling (the feed's update process)
+
+- The afternoon session (`outputs/feed/polling/afternoon_20261016`, 5 s per area, NJ 40.3525 N
+  -74.6239 W and Mainz 49.9312 N 8.3091 E, 500 m circles) was left to reach its own 6,900 s end
+  at about 15:20, because `scripts/poll_here_feed.py` has no signal handling and an interrupt
+  would skip its footer line. Its footer records the requests sent (cap 2,762).
+- A preview analysis on the first 1,187 lines (orchestrator, 14:40, not an artefact of record):
+  NJ 78 versions, `L_bar` 84.0 s, `L_low` 33.9 s, `g_min` 28 s; Mainz 50 versions, `L_bar`
+  89.5 s, `L_low` 39.4 s, `g_min` 60 s. The analysis script ran without error on this session's
+  format.
+- **The night session (22:00, 6,900 s) was cancelled by the pause.** The author approved at most
+  5,760 requests in total on the HERE key that is shared with Nash production; the night session
+  may use at most 5,760 minus the afternoon footer's `sent`. To run it:
+  `.venv/bin/python scripts/poll_here_feed.py --session-id night_<date> --duration-s 6900 --max-requests <remaining> --budget-confirmed`
+  from the repository root, with `caffeinate -i -w <pid>` alongside. The orchestrator decision at
+  commit makes the experiments independent of the night session.
+- Nothing is committed from `outputs/feed/polling/` (gitignored outputs).
+
+### Still to do from the previous program (independent of this plan)
+
+The polling analysis and the block A re-run on the measured process. Not started; the job that
+would have run them was cancelled while it was still waiting for the poller. Commands, in order,
+from the repository root:
+
+1. `.venv/bin/python scripts/analyze_feed_process.py --polling outputs/feed/polling/afternoon_20261016 --out results/jam/feed_process_afternoon.json`
+   (this file is also the artefact blocks G to K replay, per the orchestrator decision at commit).
+2. Block A runs from a frozen copy of the feed-agreement code, so they cannot collide with this
+   program's edits: `M=<any empty directory>; git archive d699ac2 | tar -x -C $M; ln -s $PWD/.venv $M/.venv;
+   mkdir -p $M/results/feed_measured; cp results/jam/feed_process_afternoon.json $M/results/feed_measured/feed_process.json`, then in `$M`:
+   `.venv/bin/python scripts/run_feed_experiments.py --block A --checkpoint results/checkpoints/mainz_here_best.pt --feed-artefact results/feed_measured/feed_process.json --results-dir results/feed_measured --traces-dir outputs/feed_measured/traces`
+   (the default session, the one with the most versions, which is NJ), and the same with
+   `--feed-session afternoon_20261016_mainz --results-dir results/feed_measured_mainz --traces-dir outputs/feed_measured_mainz/traces`
+   as a recorded sensitivity. 150 episodes each, about 15 minutes each. The run of record
+   (`results/feed/A.jsonl`) is the placeholder run; copy the new results into the repository
+   under a new directory, never over it.
+
+### Task order to resume
+
+1. Confirm the afternoon footer and the request count; decide whether to run the night session.
+2. Build `results/jam/feed_process_afternoon.json` (command 1 above).
+3. Resume the implementer from its recorded stopping point with the implementer brief in
+   `plans/2026-10-16-jam-avoidance-briefs.md`, steps S4 to S14 (plus whatever of the in-progress
+   step it left uncommitted), Amendment 1 included.
+4. The open decision above on block G's timing.
+5. Validator rounds 1 to 3 (Opus, kept alive), with the validator brief in the briefs file.
+   Confirm every finding before sending fixes.
+6. Experiments in the order of section 8.1 on the artefact from step 2, session
+   `afternoon_20261016_mainz`.
+7. The paper rewrite from the outline in the briefs file: three arms (no control, the
+   network-wide feed lookahead, the best model from `S_summary.json`).
+8. The block A re-runs (commands above), whenever compute is free.
