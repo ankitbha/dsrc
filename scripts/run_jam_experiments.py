@@ -75,6 +75,8 @@ DEFAULT_FEED_SESSION = "afternoon_20261016_mainz"
 DEFAULT_CHECKPOINT = REPO_ROOT / "results" / "checkpoints" / "mainz_here_best.pt"
 DEFAULT_CAMERA = REPO_ROOT / "results" / "jam" / "camera_error_model.json"
 DEFAULT_PREDICTOR = REPO_ROOT / "results" / "jam" / "onset_predictor.json"
+#: Block T's DAgger round runs the round-1 model (section 5.5).
+ROUND1_PREDICTOR = REPO_ROOT / "results" / "jam" / "onset_predictor_round1.json"
 DEFAULT_WEIGHTS_RECORD = REPO_ROOT / "results" / "jam" / "weights.json"
 SMOKE_SEED = 1
 SMOKE_DURATION_S = 600.0
@@ -730,7 +732,7 @@ def summarize_s(episodes: list[dict], context: Context) -> dict[str, Any]:
     from src.analysis.jam_metrics import SELECTION_SCENARIOS, criterion_c
 
     outside = sorted({r["seed"] for r in episodes} - set(SELECTION_SEEDS))
-    if outside:
+    if outside and not context.smoke:
         raise SystemExit(f"the selection reads seeds 11-15 only; block S has records on "
                          f"{outside}")
     J: dict[str, dict[str, dict[int, float]]] = {}
@@ -796,8 +798,13 @@ def summarize_s(episodes: list[dict], context: Context) -> dict[str, Any]:
             return {"theta": float(variant[2:])}
         return {}
 
+    if context.smoke:
+        # A smoke run's seeds are not selection seeds: nothing is selected from them.
+        look = rule = learned = best = None
     return {
         "block": "S", "criterion": "C (plan section 5.7)", "seeds": sorted({r["seed"] for r in episodes}),
+        "smoke_note": ("smoke run: candidates computed, nothing selected" if context.smoke
+                       else None),
         "scenarios": scenarios, "candidates": candidates, "excluded": excluded,
         "selected": {"lookahead": params(look) or None, "rule": params(rule) or None,
                      "learned": params(learned) or None},
@@ -866,8 +873,8 @@ def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]
         summary = summarize_g(episodes)
     elif block == "S":
         summary = summarize_s(episodes, context)
-    elif block == "T":
-        summary = {"block": "T", "rows": _rows(episodes),
+    elif block in ("T", "T_dagger"):
+        summary = {"block": block, "rows": _rows(episodes),
                    "samples_files": sorted(r["samples_file"] for r in episodes
                                            if r.get("samples_file"))}
     else:
@@ -972,19 +979,27 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
     for block in args.block:
         if block in ("M", "L", "P", "K"):
             selection_path = context.selection_path or results_dir / "S_summary.json"
-            if args.smoke and not selection_path.exists():
+            if args.smoke:
+                # Never a real selection: a smoke run of block S selects nothing.
                 context.selection = smoke_selection()
             elif not args.summarize_only:
                 context.selection = read_selection(
                     selection_path, feed_sha=context.feed["artefact_sha256"],
                     camera_sha=_sha256(context.camera_model),
                     predictor_sha=_sha256(context.predictor))
+        dagger = args.dagger and block == "T"
+        # The DAgger round runs a predictor that round 1 did not, so it is its own JSONL:
+        # one identity per file.
+        name = "T_dagger" if dagger else block
+        block_context = context
+        if dagger and args.predictor == str(DEFAULT_PREDICTOR):
+            block_context = replace(context, predictor=ROUND1_PREDICTOR)
         if args.summarize_only:
-            summarize(block, results_dir, context)
-            print(f"wrote {results_dir / f'{block}_summary.json'}")
+            summarize(name, results_dir, block_context)
+            print(f"wrote {results_dir / f'{name}_summary.json'}")
             continue
         specs = block_specs(block, args.seeds, context.selection, grid=args.g_grid,
-                            dagger=args.dagger, smoke=args.smoke)
+                            dagger=dagger, smoke=args.smoke)
         if args.smoke:
             specs = smoke_subset(specs)
         if not specs:
@@ -998,16 +1013,16 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             model = emc._build_and_load(context.checkpoint, emc.CHECKPOINT_FEATURES["here"],
                                         emc._num_segments(FILE_SETS["mainz"]))
         factory = run_episode_factory or episode_runner
-        record = header(block, context, specs, argv if argv is not None else sys.argv)
-        result = run_block(block, specs, factory(model, context), results_dir=results_dir,
+        record = header(block, block_context, specs, argv if argv is not None else sys.argv)
+        result = run_block(name, specs, factory(model, block_context), results_dir=results_dir,
                            traces_dir=traces_dir, header_record=record,
                            resume=args.resume, pause_file=pause_file,
-                           training_dir=context.training_dir)
+                           training_dir=block_context.training_dir)
         if result["status"] == "paused":
             return 0
-        summary = summarize(block, results_dir, context)
-        print(f"block {block}: ran {len(result['ran'])}, skipped {len(result['skipped'])}; "
-              f"wrote {results_dir / f'{block}_summary.json'}"
+        summary = summarize(name, results_dir, block_context)
+        print(f"block {name}: ran {len(result['ran'])}, skipped {len(result['skipped'])}; "
+              f"wrote {results_dir / f'{name}_summary.json'}"
               + (f"; decision: {summary['decision']}" if block == "G" else ""))
     return 0
 

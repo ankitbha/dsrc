@@ -219,11 +219,15 @@ def fit(X: np.ndarray, y: np.ndarray, Xv: np.ndarray, yv: np.ndarray) -> Predict
         fitted[kind], losses[kind], weights[kind] = _train(kind, Xs.astype(np.float32), y,
                                                            Xvs.astype(np.float32), yv)
     # A nan loss (no validation sample) never wins; with both nan the logistic is kept.
-    kind = min(losses, key=lambda k: (math.isnan(losses[k]), losses[k]))
+    kind = min(losses, key=lambda k: (not math.isfinite(losses[k]), losses[k]))
     return Predictor(kind, fitted[kind], mean.astype(np.float32), scale, losses[kind], losses,
                      {"train": int(y.sum()), "validation": int(yv.sum())},
                      {"train": int(len(y)), "validation": int(len(yv))},
                      {"pos_weight": weights[kind]})
+
+
+def _finite(value):
+    return float(value) if value is not None and math.isfinite(value) else None
 
 
 def save(model: Predictor, card_path: Path, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -240,7 +244,9 @@ def save(model: Predictor, card_path: Path, extra: dict[str, Any] | None = None)
         "label": (f"a jam spell of at least {HOLD_S:g} s starts on the own segment or the "
                   f"next downstream one within (t, t + {HORIZON_S:g} s]; samples whose own "
                   "segment is jammed at t are dropped"),
-        "validation_log_loss": model.validation_log_loss, "candidates": model.candidates,
+        # A loss that is not finite (no validation sample) is written as null.
+        "validation_log_loss": _finite(model.validation_log_loss),
+        "candidates": {k: _finite(v) for k, v in model.candidates.items()},
         "positives": model.positives, "samples": model.samples,
         "pos_weight": model.card.get("pos_weight"), "hidden": HIDDEN,
         "weights_file": weights_path.name,

@@ -7,6 +7,7 @@ file in its own process.
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -397,3 +398,24 @@ def test_the_exit_block_is_seen_as_a_candidate_and_its_metrics_compute(model):
     metrics = episode_metrics(out["trace"], v_jam=v_jam, start_s=900.0, end_s=1200.0,
                               cap=1300.0)
     assert metrics["jam_time_min"] > 0.0
+
+
+@pytest.mark.parametrize("m", [0.0, 2.0, 4.0])
+def test_each_lag_multiplier_switches_at_its_own_delay(model, m):
+    """Block L's levels (Amendment 1): `T_k + m L_bar + P_q`, and at m = 0 the stamp."""
+    feed = FeedSetting(MEASURED, MAINZ_SESSION, m=m)
+    out = je.run_jam_episode(model, 1, "B9", JamArm("plan"), feed=feed, duration_s=600.0,
+                             window_start_s=300.0, sense=False)
+    params = feed.parameters()
+    assert out["feed"]["m"] == m
+    assert out["feed"]["replay"]["lag_multiplier"] == m
+    switches = out["switches_by_version"]
+    assert switches
+    for entry in switches.values():
+        if m == 0.0:
+            assert out["feed"]["rule"] == "synchronous"
+            assert entry["first_tick"] == entry["last_tick"] == math.ceil(entry["T_k"] - 1e-9)
+        else:
+            D = params["D"]
+            assert D == pytest.approx(m * params["L_bar"] + 10.0)
+            assert entry["T_k"] + D - 1.0 <= entry["first_tick"] <= entry["T_k"] + D + 11.0
