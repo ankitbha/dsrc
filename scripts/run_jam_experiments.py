@@ -81,6 +81,8 @@ DEFAULT_WEIGHTS_RECORD = REPO_ROOT / "results" / "jam" / "weights.json"
 SMOKE_SEED = 1
 SMOKE_DURATION_S = 600.0
 SMOKE_GUARD = {"results": "results/jam", "traces": "outputs/jam/traces"}
+#: Section 4.3's precursor baseline.
+BASELINE_LEADS: tuple[float, float] = (600.0, 900.0)
 #: Section 4.2 and J21.
 PERTURBATIONS = ("B5", "B7.5", "B9", "I_exit", "I_mid")
 TRAINING_SCENARIOS = ("B5", "B7.5", "B9", "I_exit", "I_mid", "BG")
@@ -420,9 +422,22 @@ class Context:
         return out
 
 
+#: Plan section 1.5: in these blocks the no-control arm senses passively on every vehicle
+#: (block M's no-control episodes give the camera's view of uncontrolled jams, `W_cam`).
+PASSIVE_SENSING_BLOCKS: tuple[str, ...] = ("M", "T")
+CAMERA_ARMS: tuple[str, ...] = ("take_the_slower", "rule", "learned")
+
+
+def uses_camera(spec: Spec) -> bool:
+    """Whether an episode gets the camera: a camera arm, a sampling episode, or a no-control
+    episode where section 1.5 requires passive sensing. Decided per spec, so it does not
+    depend on which episode a run reaches first (validation R2-6)."""
+    return (spec.arm in CAMERA_ARMS or spec.sample_fraction > 0
+            or (spec.arm == "no_control" and spec.block in PASSIVE_SENSING_BLOCKS))
+
+
 def needs_camera(specs: Sequence[Spec]) -> bool:
-    return any(s.arm in ("take_the_slower", "rule", "learned") or s.sample_fraction > 0
-               for s in specs)
+    return any(uses_camera(s) for s in specs)
 
 
 def needs_predictor(specs: Sequence[Spec]) -> bool:
@@ -601,7 +616,7 @@ def episode_runner(model, context: Context) -> EpisodeFn:
     def run(spec: Spec) -> dict[str, Any]:
         nonlocal camera, predictor
         arm = spec.jam_arm()
-        if (spec.arm in ("take_the_slower", "rule", "learned") or spec.sample_fraction > 0):
+        if uses_camera(spec):
             if camera is None:
                 from src.sumo.sensing import CameraModel
 
@@ -620,7 +635,7 @@ def episode_runner(model, context: Context) -> EpisodeFn:
                            allow_placeholder=context.allow_placeholder)
         scenario = JAM_SCENARIOS[spec.scenario]
         spec_camera = None
-        if camera is not None:
+        if uses_camera(spec):
             spec_camera = camera.with_bias(spec.bias).with_pair_sigma(
                 camera.pair_sigma_log * spec.pair_sigma_scale)
         result = run_jam_episode(
@@ -912,8 +927,13 @@ def summarize_eval(block: str, episodes: list[dict]) -> dict[str, Any]:
     return {"block": block, "rows": rows}
 
 
-def write_leads(episodes: list[dict], results_dir: Path) -> dict[str, Any]:
-    """`leads.json` from block M's no-control episodes (section 4.3 and 6.2)."""
+def write_leads(episodes: list[dict], results_dir: Path,
+                baseline: tuple[float, float] | None = None,
+                start_s: float | None = None) -> dict[str, Any]:
+    """`leads.json` from block M's no-control episodes (section 4.3 and 6.2).
+
+    `baseline` and `start_s` default to section 4.3's [600, 900) s and each scenario's clock
+    start; a smoke run, which ends at 600 s, passes its own."""
     from src.analysis.jam_metrics import leads, load_v_jam, max_ramp, speed_density_break
     from src.sumo.jam_episode import SCENARIOS as JAM_SCENARIOS
 
@@ -927,7 +947,8 @@ def write_leads(episodes: list[dict], results_dir: Path) -> dict[str, Any]:
             s45.append(trace)
             continue
         scenario = JAM_SCENARIOS[r["scenario"]]
-        lead = leads(trace, v_jam, scenario.start_s, r["duration_s"])
+        lead = leads(trace, v_jam, scenario.start_s if start_s is None else start_s,
+                     r["duration_s"], baseline=baseline or BASELINE_LEADS)
         ramp = (max_ramp(trace, lead["segment"], lead["onset"]) if lead["onset"] is not None
                 else None)
         per.append({"scenario": r["scenario"], "seed": r["seed"], **lead, "ramp": ramp})
@@ -953,8 +974,10 @@ def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]
                                            if r.get("samples_file"))}
     else:
         summary = summarize_eval(block, episodes)
-        if block == "M" and not context.smoke:
-            summary["leads"] = write_leads(episodes, results_dir)
+        if block == "M":
+            summary["leads"] = (write_leads(episodes, results_dir, baseline=(300.0, 450.0),
+                                            start_s=450.0)
+                                if context.smoke else write_leads(episodes, results_dir))
     seeds_by_arm: dict[str, set] = {}
     for r in episodes:
         seeds_by_arm.setdefault(f"{r['arm']}/{r['variant']}/{r['scenario']}", set()).add(r["seed"])

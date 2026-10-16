@@ -170,6 +170,14 @@ class TestLeads:
         assert leads["onset"] == 1400.0
         assert leads["W_feed"] is None and leads["W_cam"] is None
 
+    def test_the_leads_say_whether_the_camera_s_estimate_was_traced(self):
+        with_camera = self._lead_trace()
+        assert jm.leads(with_camera, V, 900.0, 1790.0)["k_hat_available"] is True
+        without = [{**sample, "k_hat_mean": [None] * 12} for sample in with_camera]
+        out = jm.leads(without, V, 900.0, 1790.0)
+        assert out["k_hat_available"] is False and out["W_cam"] is None
+        assert jm.leads(trace_from({}, n=60, t0=600.0), V, 900.0, 1190.0)["k_hat_available"] is False
+
     def test_no_onset_gives_no_leads(self):
         trace = trace_from({}, n=60, t0=600.0)
         assert jm.leads(trace, V, 900.0, 1190.0)["onset"] is None

@@ -80,6 +80,40 @@ class TestSpecs:
         assert (seen[0].bias, seen[0].pair_sigma_log) == (0.8, 0.28)
         assert (seen[1].bias, seen[1].pair_sigma_log) == (1.0, pytest.approx(0.14))
 
+    def test_the_camera_goes_to_the_episodes_that_need_it_in_any_order(self, tmp_path,
+                                                                        monkeypatch):
+        # Validation R2-6: block M's no-control episodes sense passively (section 1.5);
+        # they come first in the block, and the camera was loaded only by a camera arm.
+        import src.sumo.jam_episode as je
+
+        path = tmp_path / "camera.json"
+        path.write_text(json.dumps({
+            "schema": "camera_error_model/1", "bin_m": 10.0, "sumo_table": "0.20",
+            "tables": {"0.20": {"detection": {"p": [0.9]}, "distance_noise": {"sigma_ema_m": [0.5]},
+                                "closing_rate_noise": {"sigma_v_mps": [0.2]},
+                                "confidence": {"values": [[0.9]]}, "R_max_m": 10.0}}}))
+        given = {}
+
+        def fake_episode(model, seed, scenario, arm, **kwargs):
+            given.setdefault(arm.arm, set()).add(kwargs["camera"] is not None)
+            trace = [{"t": float(t), "speed_kmh": [50.0] * 12, "count": [1] * 12,
+                      "held": 0, "pending": 0} for t in range(0, 7210, 10)]
+            return {"trace": trace}
+
+        monkeypatch.setattr(je, "run_jam_episode", fake_episode)
+        specs = [s for s in rje.block_specs("M", selection=SELECTION, oracle_window=60.0)
+                 if s.seed == 16 and s.arm != "learned"]
+        for order in (specs, list(reversed(specs))):
+            given.clear()
+            runner = rje.episode_runner(None, rje.Context(camera_model=path))
+            for spec in order:
+                runner(spec)
+            assert given == {"no_control": {True}, "lookahead": {False}, "plan": {False},
+                             "take_the_slower": {True}, "rule": {True}, "oracle": {False}}
+        assert rje.needs_camera([s for s in specs if s.arm == "no_control"])
+        s_no_control = [s for s in rje.block_specs("S") if s.arm == "no_control"]
+        assert not rje.needs_camera(s_no_control)
+
     def test_k_is_empty_when_the_best_model_reads_no_camera(self):
         plan_best = rje.Selection(4.0, 0.1, 0.45, "plan", {})
         assert rje.block_specs("K", selection=plan_best) == []
@@ -423,6 +457,29 @@ class TestBlockGRule:
 
 
 # ----------------------------------------------------------------- SUMO sanity
+
+
+SMOKE_CAMERA = REPO_ROOT / "outputs/jam/smoke/camera_error_model.json"
+SMOKE_PREDICTOR = REPO_ROOT / "outputs/jam/smoke/results/onset_predictor.json"
+
+
+@pytest.mark.skipif(not (SMOKE_CAMERA.exists() and SMOKE_PREDICTOR.exists()),
+                    reason="the S8 and S11 smoke artefacts have not been written")
+def test_block_m_smoke_senses_passively_in_no_control(tmp_path):
+    results = tmp_path / "results"
+    assert rje.main(["--block", "M", "--smoke", "--camera-model", str(SMOKE_CAMERA),
+                     "--predictor", str(SMOKE_PREDICTOR), "--results-dir", str(results),
+                     "--traces-dir", str(tmp_path / "traces")]) == 0
+    _, episodes = rje.read_block(results, "M")
+    no_control = [e for e in episodes if e["arm"] == "no_control"]
+    assert no_control and all(e["camera_model"] is not None for e in no_control)
+    for e in no_control:
+        trace = json.loads(Path(e["trace_file"]).read_text())["trace"]
+        assert any(v is not None for sample in trace if sample["t"] >= 300.0
+                   for v in sample["k_hat_mean"])
+    leads = json.loads((results / "leads.json").read_text())
+    assert leads["episodes"] and all(entry["k_hat_available"] for entry in leads["episodes"])
+    assert all("W_cam" in entry for entry in leads["episodes"])
 
 
 def test_block_g_smoke_runs_end_to_end(tmp_path):

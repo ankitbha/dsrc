@@ -152,8 +152,12 @@ def leads(trace: Sequence[dict], v_jam: float, t_start: float, cap: float,
     30 s. None where the precursor never appears before onset.
     """
     first = onset(trace, v_jam, t_start, cap, H)
+    # Whether the trace carries the camera's estimate at all: without it W_cam cannot be
+    # computed whatever happens (validation R2-6).
+    k_hat_available = any(v is not None for sample in trace
+                          for v in (sample.get("k_hat_mean") or []))
     out: dict[str, Any] = {"onset": None, "segment": None, "W_feed": None, "W_cam": None,
-                           "W_true": None}
+                           "W_true": None, "k_hat_available": k_hat_available}
     if first is None:
         return out
     out.update(onset=first.t, segment=first.segment)
