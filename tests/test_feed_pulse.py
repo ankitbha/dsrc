@@ -78,3 +78,30 @@ def test_a_pulse_of_20_adds_exactly_20_vehicles_and_follows_the_floor_rule():
     assert record["controlled"] == sum(pulsed["controlled"].values())
     # Every pulse vehicle seen entered on the site's first edge.
     assert pulsed["first_edges"] and set(pulsed["first_edges"].values()) == {"505"}
+
+
+def test_pulsed_and_unpulsed_runs_are_identical_until_the_pulse_departs():
+    """Amendment 1, A8 (R1-8): the pulse must not change the run before it leaves."""
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import evaluate_mainz_checkpoints as emc
+
+    from src.sumo.feed_episode import Mode, run_feed_episode
+
+    model = emc.load_arm_model("here", Path(__file__).resolve().parents[1] / "results"
+                               / "checkpoints", 12).model
+    base = run_feed_episode(model, 16, "mainz", Mode.published(), duration_s=1500.0)
+    pulsed = run_feed_episode(model, 16, "mainz", Mode.published(), duration_s=1500.0,
+                              pulse={"site": 7, "n": 20, "start_s": 1200.0,
+                                     "duration_s": 60.0})
+    fields = ("speed_kmh", "density", "count", "held", "pending", "running", "arrived")
+    before = [(a, b) for a, b in zip(base["trace"], pulsed["trace"]) if a["t"] <= 1200.0]
+    assert len(before) == 120
+    for a, b in before:
+        assert a["t"] == b["t"]
+        assert all(a[f] == b[f] for f in fields), a["t"]
+    # And the pulse does arrive in the run afterwards.
+    after = [(a, b) for a, b in zip(base["trace"], pulsed["trace"]) if a["t"] > 1200.0]
+    assert any(a["count"] != b["count"] for a, b in after)
+    assert pulsed["pulse"]["departs"][0] == 1201.5

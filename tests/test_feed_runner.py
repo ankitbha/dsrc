@@ -360,14 +360,23 @@ class TestSummariesOnSyntheticTraces:
                                  "held_at_entry": 50})
         (results_dir / "E.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in baselines))
+        # One pulsed run ends with a vehicle mid-teleport (accounted), one is one short.
+        episodes[0].update(arrived=2039, in_teleport=1)
+        episodes[1].update(arrived=2039, in_teleport=0)
         summary = rfe.summarize_e(episodes, traces_dir, results_dir)
         level = summary["levels"]["1"]
         assert level["seeds_used"] == [16, 17, 18]
         assert np.allclose(level["a_hat"], 0.02, rtol=0.1)
         assert level["rho_UCB"] >= level["rho_hat"]
         assert summary["p_min"]["p_min"] == 1.0
-        assert summary["inserted_difference"] == {"checked": 36, "mismatched": [],
-                                                  "without_baseline": 0}
+        assert summary["inserted_difference"] == {
+            "checked": 36, "without_baseline": 0,
+            "mismatched": [{"key": episodes[1]["key"], "difference": 59}]}
+        floor = level["noise_floor"]
+        assert floor["noise_samples"] == 3 * 12 * 12 * 11  # seeds x sites x segments x samples
+        assert floor["peak_self_deviation_mean"] == pytest.approx(0.05)
+        assert floor["resolved"] is True
+        assert summary["regression_window"].startswith("from the injection's end")
         assert (results_dir / "certificate.json").exists()
 
     def test_block_a_records_the_lemma_condition_and_does_not_claim_zero_when_it_fails(self):
@@ -460,3 +469,9 @@ class TestBlockB:
                                                    "config": {"actuation": "max_speed"}}])
         assert check["same_checkpoint"] is False
         assert rfe.REFERENCE_EVALUATION.name == "mainz_paired_seeds_cap.jsonl"
+
+
+def test_the_regression_starts_when_the_injection_ends():
+    record = {"pulse": [7, 60, 1200.0, 60.0]}
+    assert rfe._regression_window(record) == (1260.0, 1800.0)
+    assert rfe._pulse_start(record) == 1200.0

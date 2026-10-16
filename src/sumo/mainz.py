@@ -190,6 +190,8 @@ class MainzEnv:
         # Under `max_speed`, each capped vehicle's own maximum speed before its first
         # cap, which `release` restores.
         self._capped: dict[str, float] = {}
+        # Pulse vehicles not yet handed to SUMO, in departure order.
+        self._pulse_queue: list[dict[str, Any]] = []
         # Summed over every step since `reset`: vehicles SUMO reports colliding, and
         # teleports started (all of them collision teleports, since jam teleports are
         # off). `_in_teleport` holds the vehicles whose teleport has not ended.
@@ -222,6 +224,7 @@ class MainzEnv:
         self.collision_teleports = 0
         self._in_teleport = set()
         self._capped = {}
+        self._pulse_queue = []
         self._load_controlled()  # drops any pulse a previous episode appended
         self._load_schedule()
         self._load_static()
@@ -338,9 +341,13 @@ class MainzEnv:
         vehicle does not run the policy on the unsimulated link above the entry either,
         so it is handed to SUMO at its departure time without the density check.
         """
+        now = float(_sumo.simulation.getTime())
+        while self._pulse_queue and self._pulse_queue[0]["depart"] <= now:
+            vehicle = self._pulse_queue.pop(0)
+            _sumo.vehicle.add(vehicle["id"], vehicle["route"], typeID=vehicle["type"],
+                              depart="now", departLane="best", departSpeed="max")
         if not self._schedule:
             return
-        now = float(_sumo.simulation.getTime())
         for entry, queued in self._schedule.items():
             free, freed = self._free[entry], self._freed[entry]
             while freed < len(free) and free[freed]["depart"] <= now:
@@ -551,12 +558,14 @@ class MainzEnv:
 
         They ride the suffix of the longest route through the site from the site's first
         edge to the exit (`pulse_route`), added as its own route, and depart at
-        `start_s + h/2 + j h` with `h = duration_s / n`, the builder's spacing. SUMO
-        inserts them on its own terms; the entry gate does not apply, since they are a
-        perturbation inside the network rather than demand at its boundary. Vehicle `j`
-        is `pulse_{site}_{j}` and takes the departure position after the schedule's
-        last, so the floor rule continues over it. `seed` is recorded only: the pulse
-        is deterministic.
+        `start_s + h/2 + j h` with `h = duration_s / n`, the builder's spacing. Each is
+        handed to SUMO at the first step at or after its own departure (plan Amendment
+        1, A8): handing all of them over at once, with future departure times, changed
+        the simulation from that instant on, 900 s before the first one left. The entry
+        gate does not apply, since they are a perturbation inside the network rather
+        than demand at its boundary. Vehicle `j` is `pulse_{site}_{j}` and takes the
+        departure position after the schedule's last, so the floor rule continues over
+        it. `seed` is recorded only: the pulse is deterministic.
         """
         if n <= 0 or duration_s <= 0.0:
             raise ValueError("a pulse needs at least one vehicle and a positive duration")
@@ -576,11 +585,12 @@ class MainzEnv:
             if is_controlled:
                 self._controlled_ids.add(vehicle)
                 controlled += 1
-            depart = start_s + headway / 2.0 + j * headway
-            _sumo.vehicle.add(vehicle, route_id, typeID="av" if is_controlled else "human",
-                              depart=f"{depart:.2f}", departLane="best", departSpeed="max")
+            depart = round(start_s + headway / 2.0 + j * headway, 2)
+            self._pulse_queue.append({"id": vehicle, "route": route_id, "depart": depart,
+                                      "type": "av" if is_controlled else "human"})
             ids.append(vehicle)
-            departs.append(round(depart, 2))
+            departs.append(depart)
+        self._pulse_queue.sort(key=lambda row: row["depart"])
         return {"site": site, "n": n, "start_s": start_s, "duration_s": duration_s,
                 "seed": seed, "source_route": source, "route_edges": edges, "ids": ids,
                 "departs": departs, "controlled": controlled,

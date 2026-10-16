@@ -76,7 +76,11 @@ HOLD_S = 120.0
 HOLD_SENSITIVITIES = (60.0, 300.0)
 PULSE_START_S = 1200.0
 PULSE_DURATION_S = 60.0
-DEVIATION_WINDOW = (1200.0, 1800.0)
+#: The regression window ends here and starts when the injection ends (Amendment 1,
+#: A8), so the 60 s in which the increments are driven by the input are left out.
+DEVIATION_END_S = 1800.0
+#: The noise floor: deviations after the regression window, where the pulse has left.
+NOISE_WINDOW = (1800.0, 2500.0)
 SMOKE_SEED = 16
 SMOKE_DURATION_S = 600.0
 
@@ -782,7 +786,7 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
     rho_by_level: dict[float, float | None] = {}
     missing = []
     for p in sorted(by_level, reverse=True):
-        seed_runs, size_checks = {}, []
+        seed_runs, peaks, noise = {}, [], []
         for seed, sites in sorted(by_level[p].items()):
             base, base_path = baseline_trace(p, seed)
             if base is None:
@@ -793,9 +797,15 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
             runs = []
             for site in range(12):
                 trace = _load_trace(sites[site])
-                runs.append(deviations(trace, base, *DEVIATION_WINDOW))
+                runs.append(deviations(trace, base, *_regression_window(sites[site])))
+                response = deviations(trace, base, _pulse_start(sites[site]), DEVIATION_END_S)
+                peaks.append(float(response[:, site].max()))
+                tail = [s for s in trace if NOISE_WINDOW[0] <= s["t"] <= NOISE_WINDOW[1]]
+                if tail:
+                    noise.extend(deviations(trace, base, *NOISE_WINDOW).ravel().tolist())
             seed_runs[seed] = runs
         entry: dict[str, Any] = {"seeds_used": sorted(seed_runs)}
+        entry["noise_floor"] = _noise_floor(peaks, noise)
         if len(seed_runs) >= 2:
             entry.update(estimate_level(seed_runs))
             rho_by_level[p] = entry["rho_UCB"]
@@ -811,8 +821,9 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
                 large = by_level.get(p, {}).get(seed, {}).get(site)
                 if large is None:
                     continue
-                y60 = deviations(_load_trace(large), base, *DEVIATION_WINDOW)
-                y30 = deviations(_load_trace(record), base, *DEVIATION_WINDOW)
+                window = (_pulse_start(record), DEVIATION_END_S)
+                y60 = deviations(_load_trace(large), base, *window)
+                y30 = deviations(_load_trace(record), base, *window)
                 ratios.append({"seed": seed, "site": site,
                                "ratio": linearity_ratio(y60, y30, site)})
         entry["linearity"] = ratios
@@ -823,14 +834,47 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
     summary = {"block": "E", "levels": levels, "missing_baselines": missing,
                "inserted_difference": inserted,
                "p_min": min_penetration(rho_by_level) if rho_by_level else None,
-               "window_s": list(DEVIATION_WINDOW)}
+               "regression_window": "from the injection's end to "
+                                    f"{DEVIATION_END_S:g} s",
+               "noise_window_s": list(NOISE_WINDOW)}
     _write_json(results_dir / "certificate.json", summary)
     return summary
 
 
+def _pulse_start(record: dict) -> float:
+    return float(record["pulse"][2])
+
+
+def _regression_window(record: dict) -> tuple[float, float]:
+    """From the injection's end (start + duration) to `DEVIATION_END_S`."""
+    _, _, start, duration = record["pulse"]
+    return float(start) + float(duration), DEVIATION_END_S
+
+
+def _noise_floor(peaks: list[float], noise: list[float]) -> dict[str, Any]:
+    """The deviation a pulse leaves once it has gone, against the response it causes.
+
+    `noise` is every segment's deviation over `NOISE_WINDOW` (a single inserted vehicle
+    changes the realisation after it departs, so this is not zero); `peaks` is each
+    pulse's largest self-deviation from its start to `DEVIATION_END_S`. The response is
+    resolved when the mean peak exceeds the noise's 95th percentile.
+    """
+    import numpy as np
+
+    if not noise or not peaks:
+        return {"note": "no pulse ran to the noise window"}
+    p95 = float(np.percentile(noise, 95))
+    return {"noise_mean": float(np.mean(noise)), "noise_p95": p95,
+            "noise_samples": len(noise), "peak_self_deviation_mean": float(np.mean(peaks)),
+            "resolved": bool(np.mean(peaks) > p95),
+            "rule": "mean peak self-deviation > 95th percentile of the noise"}
+
+
 def _accounted(record: dict) -> int:
+    """Every vehicle handed to SUMO or held for it: arrived, running, pending, held, and
+    (Amendment 1, A8) in a teleport, which no other count includes."""
     return (record["arrived"] + record["running"] + record["pending"]
-            + record["held_at_entry"])
+            + record["held_at_entry"] + record.get("in_teleport", 0))
 
 
 def _inserted_differences(episodes: list[dict], results_dir: Path) -> dict[str, Any]:
