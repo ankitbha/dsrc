@@ -158,8 +158,13 @@ def test_one_600_s_training_episode_under_the_cap(tmp_path):
     assert result["train_seeds"] == list(range(1, 11))
     assert result["validation_seeds"] == list(range(11, 16))
     assert result["test_seeds"] == list(range(16, 21))
-    assert result["commit"] and len(result["commit"]) == 40
-    assert isinstance(result["dirty"], bool)
+    if (REPO_ROOT / ".git").exists():
+        assert result["commit"] and len(result["commit"]) == 40
+        assert isinstance(result["dirty"], bool)
+    else:
+        # Amendment 3, C5: a `git archive` copy has no commit to record; the field says
+        # so rather than the test failing for a reason unrelated to the code.
+        assert result["commit"] is None and result["dirty"] is None
     assert result["checkpoint_sha256"] == hashlib.sha256(
         (tmp_path / "mainz_here_cap_best.pt").read_bytes()).hexdigest()
     text = log.read_text()
