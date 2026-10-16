@@ -1124,3 +1124,15 @@ orchestrator reproduced R1-1 and R1-2 before accepting them.
   and 4. Figure 3's caption and the paper say so.
 - **R1-6** (the block header records the feed at `m = 1`; each episode carries its own `m` and `D`)
   is not fixed.
+
+**O-1, all six drives (block F detector pass at `f0aeaf8`, 640 px, the horizon-fit filters).** Fitted
+camera height on all usable boxes / on boxes within 15% of the width of the centre column:
+`155910` (0.20 s frames) 0.70 / 0.89 m; `161422` (0.67 s) 0.50 / 0.40 m; `170849` (0.67 s)
+0.93 / 1.01 m; `173809` (0.20 s) 0.92 / 0.93 m; `183538` (0.20 s, 91 boxes) 1.36 / 1.54 m;
+`190548` (0.20 s, 10,706 boxes) 0.94 / 1.05 m. On the four drives with more than 2,000 usable boxes
+other than `161422`, the centre-box height is 0.89 to 1.05 m; `161422` is the outlier and is in the
+0.67 s group, which the SUMO camera table does not use. The width-prior decision stands because its
+scale does not depend on any of these fits; for centre boxes it agrees in expectation with the
+ground-plane distance at the fitted height, so the two error models are expected to differ little
+on the 0.20 s group. The detector pass took 1,528 s for 18,818 frames (every indexed frame with a
+tick) at 640 and 1,280 px; its raw boxes are reused by the rebuilt detections.
