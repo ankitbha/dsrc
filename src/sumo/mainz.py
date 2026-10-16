@@ -452,6 +452,38 @@ class MainzEnv:
                     if self.controlled(vehicle):
                         _sumo.vehicle.setSpeed(vehicle, target_mps)
 
+    def controlled_on_segments(self) -> list[tuple[str, str, int]]:
+        """`(vehicle, edge, segment index)` for every controlled vehicle on a segment edge.
+
+        In the order `_command` visits them, so a caller that writes in this order
+        writes in the same order `step()` does. Vehicles crossing a junction are on an
+        internal edge and are not listed, exactly as `_command` does not reach them.
+        """
+        found = []
+        for index, segment in enumerate(self.segments):
+            for edge in segment:
+                for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
+                    if self.controlled(vehicle):
+                        found.append((vehicle, edge, index))
+        return found
+
+    def time_s(self) -> float:
+        return float(_sumo.simulation.getTime())
+
+    def running(self) -> int:
+        return int(_sumo.vehicle.getIDCount())
+
+    def position(self, vehicle_id: str) -> int:
+        """The vehicle's position in the departure order (pulses continue it)."""
+        if self._index is None:
+            raise KeyError("this env has no schedule, so no departure order")
+        return self._index[vehicle_id]
+
+    @property
+    def schedule_size(self) -> int:
+        """Positions taken in the departure order, pulses included."""
+        return len(self._index) if self._index is not None else 0
+
     def command_vehicles(self, mapping: dict[str, float],
                          edge_of: dict[str, str] | None = None) -> int:
         """Write `fraction * free-flow speed of the vehicle's edge` to the listed vehicles.
