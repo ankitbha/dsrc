@@ -297,3 +297,224 @@ def horizon_fit(boxes: Iterable[Box], frame_height: int = UPRIGHT_SHAPE[0],
     return {"source": "fit", "horizon_y_px": float(horizon), "camera_height_m": float(height),
             "boxes": len(xs), "residual_mad_px": float(np.median(np.abs(residual))),
             "plausible_height": bool(0.8 <= height <= 2.5)}
+
+
+# ------------------------------------------------------------- the error tables
+
+
+#: Section 2.3: 10 m bins of EMA distance, to the estimator's 120 m maximum range.
+BIN_M: float = 10.0
+N_BINS: int = 12
+#: `R_max` is the largest bin with at least this many observations and this rate.
+R_MAX_MIN_OBSERVATIONS: int = 50
+R_MAX_MIN_P: float = 0.2
+NOISE_WINDOW: int = 5
+SLOPE_WINDOW: int = 8
+MAD_SCALE: float = 1.4826
+#: A drive whose median frame gap is below this is in the 0.20 s group.
+INTERVAL_SPLIT_S: float = 0.4
+
+
+def _bin(d: float, bin_m: float = BIN_M, n_bins: int = N_BINS) -> int | None:
+    if d is None or not np.isfinite(d) or d < 0:
+        return None
+    index = int(d // bin_m)
+    return index if index < n_bins else None
+
+
+def _tracks(records: Iterable[dict]) -> dict[tuple, list[dict]]:
+    """Detections grouped by `(run, track_id)`, in time order."""
+    out: dict[tuple, list[dict]] = {}
+    for r in records:
+        if r.get("type") == "det":
+            out.setdefault((r.get("run"), r["track_id"]), []).append(r)
+    for rows in out.values():
+        rows.sort(key=lambda r: r["t"])
+    return out
+
+
+def _frame_times_by_run(records: Iterable[dict]) -> dict[Any, np.ndarray]:
+    out: dict[Any, list[float]] = {}
+    for r in records:
+        if r.get("type") == "frame":
+            out.setdefault(r.get("run"), []).append(float(r["t"]))
+    return {run: np.array(sorted(ts)) for run, ts in out.items()}
+
+
+def detection_rate_table(records: Sequence[dict]) -> dict[str, list]:
+    """Per bin, detected and missed frames of the tracks the tracker held.
+
+    For a track with at least 3 detections every frame strictly between its first and
+    last detection is an opportunity; the first and last are detections by construction
+    and would bias the rate up, so they are not counted. A missed frame takes the distance
+    interpolated linearly in time between the detections around it. A vehicle never
+    detected is invisible here, and
+    the tracker's 10-frame maximum age splits longer gaps, so `p` is the detection rate of a
+    vehicle the tracker holds.
+    """
+    detected = [0] * N_BINS
+    missed = [0] * N_BINS
+    frames = _frame_times_by_run(records)
+    for (run, _), rows in _tracks(records).items():
+        if len(rows) < 3:
+            continue
+        times = np.array([r["t"] for r in rows])
+        dist = np.array([r["ema_m"] for r in rows])
+        for d in dist[1:-1]:
+            b = _bin(d)
+            if b is not None:
+                detected[b] += 1
+        seen = set(np.round(times, 6))
+        all_frames = frames.get(run, np.array([]))
+        between = all_frames[(all_frames > times[0]) & (all_frames < times[-1])]
+        for t in between:
+            if round(float(t), 6) in seen:
+                continue
+            b = _bin(float(np.interp(t, times, dist)))
+            if b is not None:
+                missed[b] += 1
+    opportunities = [d + m for d, m in zip(detected, missed)]
+    return {"detected": detected, "missed": missed, "opportunities": opportunities,
+            "p": [d / n if n else None for d, n in zip(detected, opportunities)]}
+
+
+def _local_residuals(t: np.ndarray, d: np.ndarray,
+                     window: int = NOISE_WINDOW) -> list[tuple[int, float]]:
+    """`(centre index, standardised residual)` for every window of `window` consecutive
+    values that are all finite: the centre's residual about the window's least-squares
+    line divided by `sqrt(1 - h)`, `h` the centre's leverage, so that it has the noise's
+    variance (an unscaled centre residual of a 5-point line has 0.8 of it)."""
+    out = []
+    half = window // 2
+    for i in range(half, len(d) - half):
+        tt, dd = t[i - half:i + half + 1], d[i - half:i + half + 1]
+        if not np.all(np.isfinite(dd)):
+            continue
+        tc = tt - tt.mean()
+        sxx = float((tc * tc).sum())
+        if sxx <= 0:
+            continue
+        slope = float((tc * (dd - dd.mean())).sum() / sxx)
+        fitted = dd.mean() + slope * tc[half]
+        leverage = 1.0 / window + tc[half] ** 2 / sxx
+        out.append((i, float((d[i] - fitted) / np.sqrt(1.0 - leverage))))
+    return out
+
+
+def _mad_sigma(values: list[float]) -> float | None:
+    if not values:
+        return None
+    v = np.asarray(values)
+    return float(MAD_SCALE * np.median(np.abs(v - np.median(v))))
+
+
+def distance_noise_table(records: Sequence[dict]) -> dict[str, list]:
+    """Per bin of EMA distance, `1.4826 MAD` of the raw ground-plane and of the EMA
+    distances' residuals about a local linear fit over 5 consecutive detections."""
+    raw: list[list[float]] = [[] for _ in range(N_BINS)]
+    ema: list[list[float]] = [[] for _ in range(N_BINS)]
+    for rows in _tracks(records).values():
+        t = np.array([r["t"] for r in rows])
+        e = np.array([r["ema_m"] for r in rows], dtype=float)
+        g = np.array([np.nan if r.get("raw_ground_m") is None else r["raw_ground_m"]
+                      for r in rows], dtype=float)
+        for target, series in ((ema, e), (raw, g)):
+            for centre, residual in _local_residuals(t, series):
+                b = _bin(e[centre])
+                if b is not None:
+                    target[b].append(residual)
+    return {"n_raw": [len(v) for v in raw], "sigma_raw_m": [_mad_sigma(v) for v in raw],
+            "n_ema": [len(v) for v in ema], "sigma_ema_m": [_mad_sigma(v) for v in ema]}
+
+
+def closing_rate_noise_table(records: Sequence[dict]) -> dict[str, list]:
+    """Per bin, `1.4826 x median |difference of successive window slopes| / sqrt(2)`.
+
+    The closing rate of a track is the least-squares slope of its EMA distance over
+    non-overlapping windows of 8 detections; a pair of successive windows is binned at the
+    mean of their mean distances. Real relative acceleration between windows also enters
+    the difference, so this bounds the estimator's noise from above.
+    """
+    diffs: list[list[float]] = [[] for _ in range(N_BINS)]
+    for rows in _tracks(records).values():
+        t = np.array([r["t"] for r in rows])
+        e = np.array([r["ema_m"] for r in rows], dtype=float)
+        slopes, means = [], []
+        for start in range(0, len(e) - SLOPE_WINDOW + 1, SLOPE_WINDOW):
+            tt, ee = t[start:start + SLOPE_WINDOW], e[start:start + SLOPE_WINDOW]
+            tc = tt - tt.mean()
+            sxx = float((tc * tc).sum())
+            if sxx <= 0:
+                continue
+            slopes.append(float((tc * (ee - ee.mean())).sum() / sxx))
+            means.append(float(ee.mean()))
+        for k in range(1, len(slopes)):
+            b = _bin((means[k] + means[k - 1]) / 2.0)
+            if b is not None:
+                diffs[b].append(slopes[k] - slopes[k - 1])
+    sigma = [None if not v else float(MAD_SCALE * np.median(np.abs(v)) / np.sqrt(2.0))
+             for v in diffs]
+    return {"n": [len(v) for v in diffs], "sigma_v_mps": sigma}
+
+
+def confidence_table(records: Sequence[dict]) -> dict[str, list]:
+    """Every detection's confidence, by bin of EMA distance, stored whole for resampling."""
+    values: list[list[float]] = [[] for _ in range(N_BINS)]
+    for r in records:
+        if r.get("type") == "det":
+            b = _bin(r["ema_m"])
+            if b is not None:
+                values[b].append(round(float(r["conf"]), 4))
+    return {"n": [len(v) for v in values], "values": values}
+
+
+def bias_ratio_table(records: Sequence[dict]) -> dict[str, list]:
+    """Per bin, the median ratio of ground-plane to width-prior distance. Both scale with
+    `fx`, so this checks the horizon and height fit against the 1.8 m car prior, not the
+    absolute scale."""
+    ratios: list[list[float]] = [[] for _ in range(N_BINS)]
+    for r in records:
+        if r.get("type") == "det" and r.get("raw_ground_m") and r.get("width_prior_m"):
+            b = _bin(r["ema_m"])
+            if b is not None:
+                ratios[b].append(float(r["raw_ground_m"]) / float(r["width_prior_m"]))
+    return {"n": [len(v) for v in ratios],
+            "median": [float(np.median(v)) if v else None for v in ratios]}
+
+
+def first_detection_table(records: Sequence[dict]) -> dict[str, Any]:
+    """First-detection EMA distances of the tracks whose distance decreases over their life."""
+    first = []
+    for rows in _tracks(records).values():
+        if len(rows) >= 2 and rows[-1]["ema_m"] < rows[0]["ema_m"]:
+            first.append(float(rows[0]["ema_m"]))
+    hist = np.histogram(first, bins=N_BINS, range=(0.0, BIN_M * N_BINS))[0].tolist()
+    return {"n": len(first), "median_m": float(np.median(first)) if first else None,
+            "p90_m": float(np.percentile(first, 90)) if first else None, "histogram": hist}
+
+
+def r_max(detection: dict[str, list], bin_m: float = BIN_M) -> float | None:
+    """The upper edge of the largest bin with at least 50 observations and `p >= 0.2`."""
+    best = None
+    for b, (n, p) in enumerate(zip(detection["opportunities"], detection["p"])):
+        if n >= R_MAX_MIN_OBSERVATIONS and p is not None and p >= R_MAX_MIN_P:
+            best = b
+    return None if best is None else (best + 1) * bin_m
+
+
+def interval_group(times: Sequence[float]) -> str:
+    """"0.20" or "0.67": the drive's frame-interval group by its median gap."""
+    gaps = np.diff(np.asarray(sorted(times), dtype=float))
+    return "0.20" if len(gaps) and float(np.median(gaps)) < INTERVAL_SPLIT_S else "0.67"
+
+
+def error_tables(records: Sequence[dict]) -> dict[str, Any]:
+    """Every table of section 2.3 for one group of drives' records."""
+    detection = detection_rate_table(records)
+    return {
+        "bins_m": [[b * BIN_M, (b + 1) * BIN_M] for b in range(N_BINS)],
+        "detection": detection, "distance_noise": distance_noise_table(records),
+        "closing_rate_noise": closing_rate_noise_table(records),
+        "confidence": confidence_table(records), "bias_ratio": bias_ratio_table(records),
+        "first_detection": first_detection_table(records), "R_max_m": r_max(detection),
+    }

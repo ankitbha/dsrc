@@ -473,7 +473,9 @@ class CameraModel:
             bin_m=float(artefact["bin_m"]), p=column(t["detection"]["p"]),
             sigma_m=column(t["distance_noise"]["sigma_ema_m"]),
             sigma_v_mps=column(t["closing_rate_noise"]["sigma_v_mps"]),
-            confidences=[v or [math.nan] for v in t["confidence"]["values"]],
+            # A bin without a detection draws from every bin's confidences.
+            confidences=[v or [c for b in t["confidence"]["values"] for c in b] or [math.nan]
+                         for v in t["confidence"]["values"]],
             R_max=float(t["R_max_m"] or 0.0), bias=bias,
             source={"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
                     "table": name})
