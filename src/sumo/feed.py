@@ -88,22 +88,30 @@ class FeedProcess:
                       end_s: float) -> "FeedProcess":
         """Replay a session's recorded `(gap, L_up)` pairs from a seeded start index.
 
-        `T_1 = start_s` and `T_{k+1} = T_k + gap_k`; version `k` carries lag `L_up_k`.
-        The start index is `default_rng(seed).integers(n)` over the session's `n` pairs,
-        and the sequence wraps around until it covers `end_s`. The artefact's sha256,
-        the session, the start index and the artefact's placeholder flag travel in
-        `meta` so every run that reads the artefact can record them.
+        `T_{k+1} = T_k + gap_k`; version `k` carries lag `L_up_k`. The start index is
+        `default_rng(seed).integers(n)` over the session's `n` pairs, and the sequence
+        wraps around until it covers `end_s`. `T_1` is `start_s`, moved forward to the
+        recorded stamp's second of the minute when the sequence carries it (a third
+        element per pair), so simulation time modulo 60 is the replayed stamps' wall
+        clock second and a fixed-phase `psi` read from the artefact means the same
+        second in the simulation. The artefact's sha256, the session, the start index
+        and the artefact's placeholder flag travel in `meta` so every run that reads
+        the artefact can record them.
         """
         path = Path(path)
         artefact = json.loads(path.read_text())
         sessions = artefact["sessions"]
         if session not in sessions:
             raise KeyError(f"{path} has no session {session!r}; it has {sorted(sessions)}")
-        pairs = [(float(gap), float(lag)) for gap, lag in sessions[session]["sequence"]]
+        sequence = sessions[session]["sequence"]
+        pairs = [(float(item[0]), float(item[1])) for item in sequence]
         if not pairs:
             raise ValueError(f"session {session!r} in {path} has no (gap, lag) pairs")
         start = int(np.random.default_rng(seed).integers(len(pairs)))
-        publish, lag = [float(start_s)], []
+        first = float(start_s)
+        if len(sequence[start]) > 2 and sequence[start][2] is not None:
+            first += (float(sequence[start][2]) - first) % 60.0
+        publish, lag = [first], []
         step = 0
         while True:
             gap, version_lag = pairs[(start + step) % len(pairs)]

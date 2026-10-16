@@ -278,3 +278,34 @@ def test_inject_stale_60_equals_applying_the_previous_decision_vector(model):
     assert stale["arrived"] == direct["arrived"]
     assert stale["flow"] == direct["flow_veh_per_h"]
     assert stale["held_at_entry"] == direct["held_at_entry"]
+
+
+ARTEFACT = REPO_ROOT / "results" / "feed" / "feed_process.json"
+
+
+def _placeholder(end_s: float) -> tuple[FeedProcess, dict]:
+    artefact = json.loads(ARTEFACT.read_text())
+    session = artefact["primary"]["default_session"]
+    feed = FeedProcess.from_artefact(ARTEFACT, session, 16, 60.0, end_s)
+    return feed, artefact["sessions"][session]
+
+
+def test_version_keyed_on_the_placeholder_has_zero_disagreement_at_1200_s(model):
+    feed, session = _placeholder(1300.0)
+    assert feed.meta["placeholder"] is True
+    # The replayed windows are at least 16.7 s long, so P_q = 10 s meets part (a).
+    assert session["min_availability_gap"] >= 10.0
+    result = run_feed_episode(model, 16, "mainz",
+                              Mode.version_keyed(10.0, session["L_bar"] + 10.0),
+                              feed_process=feed, duration_s=1200.0)
+    assert result["delta_mean"] == 0.0
+    assert result["delta_samples"] > 200
+    assert result["feed"]["artefact_sha256"] == feed.meta["artefact_sha256"]
+
+
+def test_no_rule_60_on_the_placeholder_disagrees_above_fifteen_percent(model):
+    feed, _ = _placeholder(1300.0)
+    result = run_feed_episode(model, 16, "mainz", Mode.no_rule(60.0), feed_process=feed,
+                              duration_s=1200.0)
+    assert result["delta_mean"] > 0.15
+    assert result["command_delta_mean"] <= result["delta_mean"]
