@@ -245,7 +245,7 @@ def make_mode(spec: Spec):
     from src.sumo.feed_episode import Mode
 
     arm, args = spec.arm, spec.mode_args
-    if arm in ("published", "here", "penetration", "pulse60", "pulse30", "baseline"):
+    if arm in ("published", "here", "penetration", "pulse60", "pulse30", "pulse1", "baseline"):
         return Mode.published()
     if arm == "no_control":
         return Mode.no_control()

@@ -160,6 +160,16 @@ class TestHeaderAndSpecs:
         assert lists == {tuple(range(16, 31))}
         assert len({s.key for s in specs}) == len(specs)
 
+    @pytest.mark.parametrize("block", rfe.BLOCKS)
+    def test_every_spec_of_every_block_has_a_mode(self, block):
+        # Block E's one-vehicle null arm reached a full run with no mode and crashed it
+        # after 1,155 episodes; building every spec's mode catches that before a run.
+        context = rfe.Context()
+        if block == "A":
+            context.feed = rfe.load_feed_parameters(ARTEFACT, None, allow_placeholder=True)
+        for spec in rfe.block_specs(block, context):
+            assert rfe.make_mode(spec) is not None, spec.key
+
     def test_the_matrix_sizes(self):
         context = rfe.Context()
         context.feed = rfe.load_feed_parameters(ARTEFACT, None, allow_placeholder=True)
