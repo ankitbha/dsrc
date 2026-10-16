@@ -1,0 +1,852 @@
+{
+ "run_id": "2d3987cc4e6b440799c8cb47980215b3",
+ "commit": "f96a798679f94ad720d0b860ed819b0740514a78",
+ "dirty": true,
+ "commit_unavailable_reason": null,
+ "provenance_end": {
+  "commit": "f96a798679f94ad720d0b860ed819b0740514a78",
+  "dirty": true,
+  "commit_unavailable_reason": null
+ },
+ "tree_unchanged_during_run": true,
+ "config": {
+  "seeds": [
+   16,
+   17,
+   18,
+   19,
+   20,
+   21,
+   22,
+   23,
+   24,
+   25,
+   26,
+   27,
+   28,
+   29,
+   30
+  ],
+  "duration_s": 2500.0,
+  "step_length_s": 0.5,
+  "window_start_s": 900.0,
+  "warmup_s": 300.0,
+  "demand_veh_per_h": 4500.0,
+  "demand_unavailable_reason": null,
+  "scheduled_departures": 3124,
+  "departures_within_episode": 3124,
+  "scenario": "mainz",
+  "action_set": "SPEED_ACTION_FRACTIONS",
+  "actuation": "max_speed",
+  "checkpoint_suffix": "_cap",
+  "checkpoints": {
+   "here": {
+    "path": "/Users/ankit_nash/Desktop/ankit_summer_2026/dsrc/results/checkpoints/mainz_here_cap_best.pt",
+    "sha256": "eb858382fa45eb59b682a9a5e8fb72884c49e97de3ebec4e693cd6b0c4b21aea",
+    "modification": null
+   },
+   "src": {
+    "path": "/Users/ankit_nash/Desktop/ankit_summer_2026/dsrc/results/checkpoints/mainz_src_cap_best.pt",
+    "sha256": "79b06f7c14dcfd01766f2dc27270e3a88d581cc743dd9ca51d1e983d68c032d4",
+    "modification": null
+   },
+   "zeroed_head": {
+    "path": "/Users/ankit_nash/Desktop/ankit_summer_2026/dsrc/results/checkpoints/mainz_here_cap_best.pt",
+    "sha256": "eb858382fa45eb59b682a9a5e8fb72884c49e97de3ebec4e693cd6b0c4b21aea",
+    "modification": "stack[2] weight and bias zeroed after loading (plan section 8 falsification arm)"
+   }
+  },
+  "gate_entries": {
+   "no_control": false,
+   "here": true,
+   "src": true,
+   "zeroed_head": true
+  }
+ },
+ "per_seed": {
+  "no_control": {
+   "16": {
+    "flow": 3722.222222222222,
+    "arrived": 2022.0,
+    "return": 124.62904697656631,
+    "mean_speed_kmh": 46.5764045715332,
+    "space_mean_speed_kmh": 44.5611867178741,
+    "mean_vehicles": 827.2222222222222,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "17": {
+    "flow": 3553.3333333333335,
+    "arrived": 1944.0,
+    "return": 26.172571539878845,
+    "mean_speed_kmh": 46.35163497924805,
+    "space_mean_speed_kmh": 41.48513850809485,
+    "mean_vehicles": 880.0,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "18": {
+    "flow": 3564.4444444444443,
+    "arrived": 1958.0,
+    "return": 88.6849296092987,
+    "mean_speed_kmh": 44.12727355957031,
+    "space_mean_speed_kmh": 42.85933681966055,
+    "mean_vehicles": 851.3703703703703,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "19": {
+    "flow": 3555.5555555555557,
+    "arrived": 1934.0,
+    "return": 18.8871568441391,
+    "mean_speed_kmh": 44.91940689086914,
+    "space_mean_speed_kmh": 42.84652065218832,
+    "mean_vehicles": 854.4814814814815,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "20": {
+    "flow": 3444.4444444444443,
+    "arrived": 1896.0,
+    "return": 16.956847727298737,
+    "mean_speed_kmh": 45.234989166259766,
+    "space_mean_speed_kmh": 41.62652055207257,
+    "mean_vehicles": 877.1111111111111,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "21": {
+    "flow": 3466.6666666666665,
+    "arrived": 1905.0,
+    "return": -0.08593034744262695,
+    "mean_speed_kmh": 44.2059211730957,
+    "space_mean_speed_kmh": 41.41995396061876,
+    "mean_vehicles": 877.7037037037037,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "22": {
+    "flow": 3520.0,
+    "arrived": 1935.0,
+    "return": 67.8079383969307,
+    "mean_speed_kmh": 44.307926177978516,
+    "space_mean_speed_kmh": 41.833592242509,
+    "mean_vehicles": 870.3333333333334,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "23": {
+    "flow": 3573.3333333333335,
+    "arrived": 1953.0,
+    "return": 17.56544715166092,
+    "mean_speed_kmh": 44.37217712402344,
+    "space_mean_speed_kmh": 41.929631311076584,
+    "mean_vehicles": 871.4074074074074,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "24": {
+    "flow": 3608.8888888888887,
+    "arrived": 1976.0,
+    "return": 55.06827026605606,
+    "mean_speed_kmh": 44.4896240234375,
+    "space_mean_speed_kmh": 43.017567245935844,
+    "mean_vehicles": 852.7407407407408,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "25": {
+    "flow": 3368.8888888888887,
+    "arrived": 1873.0,
+    "return": -34.19224852323532,
+    "mean_speed_kmh": 43.411895751953125,
+    "space_mean_speed_kmh": 40.80910325846294,
+    "mean_vehicles": 891.074074074074,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "26": {
+    "flow": 3453.3333333333335,
+    "arrived": 1908.0,
+    "return": 25.74050772190094,
+    "mean_speed_kmh": 45.22513198852539,
+    "space_mean_speed_kmh": 41.19390614256916,
+    "mean_vehicles": 882.5185185185185,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "27": {
+    "flow": 3555.5555555555557,
+    "arrived": 1949.0,
+    "return": 70.237528860569,
+    "mean_speed_kmh": 44.17656326293945,
+    "space_mean_speed_kmh": 42.808447402402415,
+    "mean_vehicles": 855.8518518518518,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "28": {
+    "flow": 3617.777777777778,
+    "arrived": 1974.0,
+    "return": 71.71053153276443,
+    "mean_speed_kmh": 46.21502685546875,
+    "space_mean_speed_kmh": 43.34339136322603,
+    "mean_vehicles": 844.7407407407408,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "29": {
+    "flow": 3488.8888888888887,
+    "arrived": 1929.0,
+    "return": 75.13337588310242,
+    "mean_speed_kmh": 44.15431594848633,
+    "space_mean_speed_kmh": 41.67296517437779,
+    "mean_vehicles": 873.925925925926,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   },
+   "30": {
+    "flow": 3531.1111111111113,
+    "arrived": 1944.0,
+    "return": 52.823277592659,
+    "mean_speed_kmh": 43.38813400268555,
+    "space_mean_speed_kmh": 42.87137721176963,
+    "mean_vehicles": 851.1111111111111,
+    "held_at_entry": 0.0,
+    "colliding_vehicles": 0.0,
+    "collision_teleports": 0.0
+   }
+  },
+  "here": {
+   "16": {
+    "flow": 3513.3333333333335,
+    "arrived": 1834,
+    "return": 171.43414306640625,
+    "mean_speed_kmh": 36.27354431152344,
+    "space_mean_speed_kmh": 36.787804277510695,
+    "mean_vehicles": 997.4444444444445,
+    "held_at_entry": 33,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "17": {
+    "flow": 3397.777777777778,
+    "arrived": 1788,
+    "return": 138.2442626953125,
+    "mean_speed_kmh": 33.634376525878906,
+    "space_mean_speed_kmh": 36.41921264223161,
+    "mean_vehicles": 1001.1111111111111,
+    "held_at_entry": 38,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "18": {
+    "flow": 3473.3333333333335,
+    "arrived": 1816,
+    "return": 112.08870697021484,
+    "mean_speed_kmh": 36.1884651184082,
+    "space_mean_speed_kmh": 36.12819917754202,
+    "mean_vehicles": 1013.1481481481482,
+    "held_at_entry": 29,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "19": {
+    "flow": 3451.1111111111113,
+    "arrived": 1809,
+    "return": 129.3245086669922,
+    "mean_speed_kmh": 37.481231689453125,
+    "space_mean_speed_kmh": 36.69267440527938,
+    "mean_vehicles": 995.3333333333334,
+    "held_at_entry": 32,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "20": {
+    "flow": 3480.0,
+    "arrived": 1830,
+    "return": 140.75917053222656,
+    "mean_speed_kmh": 36.360408782958984,
+    "space_mean_speed_kmh": 36.97190928403293,
+    "mean_vehicles": 990.925925925926,
+    "held_at_entry": 37,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "21": {
+    "flow": 3513.3333333333335,
+    "arrived": 1836,
+    "return": 131.49850463867188,
+    "mean_speed_kmh": 36.24959945678711,
+    "space_mean_speed_kmh": 37.1600966664392,
+    "mean_vehicles": 991.074074074074,
+    "held_at_entry": 37,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "22": {
+    "flow": 3571.1111111111113,
+    "arrived": 1866,
+    "return": 173.9796600341797,
+    "mean_speed_kmh": 36.24591064453125,
+    "space_mean_speed_kmh": 37.33717286255025,
+    "mean_vehicles": 983.2962962962963,
+    "held_at_entry": 27,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "23": {
+    "flow": 3564.4444444444443,
+    "arrived": 1862,
+    "return": 206.63720703125,
+    "mean_speed_kmh": 37.35769271850586,
+    "space_mean_speed_kmh": 36.96536966392267,
+    "mean_vehicles": 994.8888888888889,
+    "held_at_entry": 34,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "24": {
+    "flow": 3442.222222222222,
+    "arrived": 1807,
+    "return": 121.63179016113281,
+    "mean_speed_kmh": 36.71745300292969,
+    "space_mean_speed_kmh": 36.48824172906236,
+    "mean_vehicles": 1003.074074074074,
+    "held_at_entry": 45,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "25": {
+    "flow": 3428.8888888888887,
+    "arrived": 1799,
+    "return": 105.1911392211914,
+    "mean_speed_kmh": 35.2719841003418,
+    "space_mean_speed_kmh": 36.55946346799772,
+    "mean_vehicles": 1001.6666666666666,
+    "held_at_entry": 31,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "26": {
+    "flow": 3453.3333333333335,
+    "arrived": 1814,
+    "return": 123.06330871582031,
+    "mean_speed_kmh": 35.224708557128906,
+    "space_mean_speed_kmh": 36.69849634295634,
+    "mean_vehicles": 998.5925925925926,
+    "held_at_entry": 30,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "27": {
+    "flow": 3442.222222222222,
+    "arrived": 1806,
+    "return": 113.65821838378906,
+    "mean_speed_kmh": 37.059669494628906,
+    "space_mean_speed_kmh": 36.239230631208684,
+    "mean_vehicles": 1005.1481481481482,
+    "held_at_entry": 48,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "28": {
+    "flow": 3497.777777777778,
+    "arrived": 1831,
+    "return": 147.862548828125,
+    "mean_speed_kmh": 36.55598449707031,
+    "space_mean_speed_kmh": 36.95917500570134,
+    "mean_vehicles": 993.7777777777778,
+    "held_at_entry": 36,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "29": {
+    "flow": 3566.6666666666665,
+    "arrived": 1864,
+    "return": 156.7038116455078,
+    "mean_speed_kmh": 36.01787185668945,
+    "space_mean_speed_kmh": 37.206396997987945,
+    "mean_vehicles": 988.8148148148148,
+    "held_at_entry": 34,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "30": {
+    "flow": 3535.5555555555557,
+    "arrived": 1844,
+    "return": 113.37284851074219,
+    "mean_speed_kmh": 35.982666015625,
+    "space_mean_speed_kmh": 37.1195185757955,
+    "mean_vehicles": 990.074074074074,
+    "held_at_entry": 36,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   }
+  },
+  "src": {
+   "16": {
+    "flow": 3348.8888888888887,
+    "arrived": 1716,
+    "return": 157.7760772705078,
+    "mean_speed_kmh": 31.243423461914062,
+    "space_mean_speed_kmh": 33.055282216087036,
+    "mean_vehicles": 1089.4444444444443,
+    "held_at_entry": 61,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "17": {
+    "flow": 3422.222222222222,
+    "arrived": 1747,
+    "return": 200.5529022216797,
+    "mean_speed_kmh": 31.659029006958008,
+    "space_mean_speed_kmh": 33.26932413432236,
+    "mean_vehicles": 1083.888888888889,
+    "held_at_entry": 55,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "18": {
+    "flow": 3433.3333333333335,
+    "arrived": 1753,
+    "return": 184.23162841796875,
+    "mean_speed_kmh": 31.961448669433594,
+    "space_mean_speed_kmh": 33.17220496246855,
+    "mean_vehicles": 1086.3703703703704,
+    "held_at_entry": 57,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "19": {
+    "flow": 3328.8888888888887,
+    "arrived": 1706,
+    "return": 164.55157470703125,
+    "mean_speed_kmh": 31.750486373901367,
+    "space_mean_speed_kmh": 32.864955964572715,
+    "mean_vehicles": 1094.6296296296296,
+    "held_at_entry": 57,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "20": {
+    "flow": 3333.3333333333335,
+    "arrived": 1708,
+    "return": 157.32354736328125,
+    "mean_speed_kmh": 32.59716033935547,
+    "space_mean_speed_kmh": 32.77549409053063,
+    "mean_vehicles": 1097.2592592592594,
+    "held_at_entry": 64,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "21": {
+    "flow": 3426.6666666666665,
+    "arrived": 1746,
+    "return": 209.36038208007812,
+    "mean_speed_kmh": 32.211708068847656,
+    "space_mean_speed_kmh": 33.33488967808672,
+    "mean_vehicles": 1084.6666666666667,
+    "held_at_entry": 61,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "22": {
+    "flow": 3395.5555555555557,
+    "arrived": 1737,
+    "return": 216.83990478515625,
+    "mean_speed_kmh": 31.945642471313477,
+    "space_mean_speed_kmh": 33.16465802883479,
+    "mean_vehicles": 1089.6666666666667,
+    "held_at_entry": 58,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "23": {
+    "flow": 3331.1111111111113,
+    "arrived": 1704,
+    "return": 156.13131713867188,
+    "mean_speed_kmh": 31.57432746887207,
+    "space_mean_speed_kmh": 32.81090381316388,
+    "mean_vehicles": 1097.888888888889,
+    "held_at_entry": 60,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "24": {
+    "flow": 3375.5555555555557,
+    "arrived": 1728,
+    "return": 165.93649291992188,
+    "mean_speed_kmh": 32.8859748840332,
+    "space_mean_speed_kmh": 32.95041785496568,
+    "mean_vehicles": 1092.4814814814815,
+    "held_at_entry": 58,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "25": {
+    "flow": 3422.222222222222,
+    "arrived": 1751,
+    "return": 218.21937561035156,
+    "mean_speed_kmh": 32.77556228637695,
+    "space_mean_speed_kmh": 33.31327810834721,
+    "mean_vehicles": 1083.6296296296296,
+    "held_at_entry": 61,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "26": {
+    "flow": 3393.3333333333335,
+    "arrived": 1734,
+    "return": 216.7916259765625,
+    "mean_speed_kmh": 33.395042419433594,
+    "space_mean_speed_kmh": 32.986381278817205,
+    "mean_vehicles": 1091.9259259259259,
+    "held_at_entry": 53,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "27": {
+    "flow": 3315.5555555555557,
+    "arrived": 1697,
+    "return": 149.7344970703125,
+    "mean_speed_kmh": 31.787872314453125,
+    "space_mean_speed_kmh": 32.94198164318836,
+    "mean_vehicles": 1093.851851851852,
+    "held_at_entry": 61,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "28": {
+    "flow": 3340.0,
+    "arrived": 1712,
+    "return": 182.17254638671875,
+    "mean_speed_kmh": 31.767732620239258,
+    "space_mean_speed_kmh": 32.89547236165698,
+    "mean_vehicles": 1093.2222222222222,
+    "held_at_entry": 59,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "29": {
+    "flow": 3271.1111111111113,
+    "arrived": 1673,
+    "return": 122.07002258300781,
+    "mean_speed_kmh": 32.87602615356445,
+    "space_mean_speed_kmh": 32.416306871906286,
+    "mean_vehicles": 1105.4444444444443,
+    "held_at_entry": 55,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "30": {
+    "flow": 3391.1111111111113,
+    "arrived": 1735,
+    "return": 201.18887329101562,
+    "mean_speed_kmh": 31.3752498626709,
+    "space_mean_speed_kmh": 33.20891972297348,
+    "mean_vehicles": 1089.148148148148,
+    "held_at_entry": 59,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   }
+  },
+  "zeroed_head": {
+   "16": {
+    "flow": 2760.0,
+    "arrived": 1401,
+    "return": 1.600813388824463,
+    "mean_speed_kmh": 27.607892990112305,
+    "space_mean_speed_kmh": 28.17770276761114,
+    "mean_vehicles": 1249.3333333333333,
+    "held_at_entry": 76,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "17": {
+    "flow": 2737.777777777778,
+    "arrived": 1399,
+    "return": -39.736541748046875,
+    "mean_speed_kmh": 28.35746192932129,
+    "space_mean_speed_kmh": 28.09198413320468,
+    "mean_vehicles": 1252.4074074074074,
+    "held_at_entry": 76,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "18": {
+    "flow": 2740.0,
+    "arrived": 1403,
+    "return": -23.426776885986328,
+    "mean_speed_kmh": 27.40297508239746,
+    "space_mean_speed_kmh": 28.139023538162377,
+    "mean_vehicles": 1250.3703703703704,
+    "held_at_entry": 77,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "19": {
+    "flow": 2737.777777777778,
+    "arrived": 1399,
+    "return": -6.919013977050781,
+    "mean_speed_kmh": 27.910612106323242,
+    "space_mean_speed_kmh": 28.126318503320746,
+    "mean_vehicles": 1249.4814814814815,
+    "held_at_entry": 75,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "20": {
+    "flow": 2713.3333333333335,
+    "arrived": 1388,
+    "return": -24.899045944213867,
+    "mean_speed_kmh": 28.11604118347168,
+    "space_mean_speed_kmh": 27.910160897261942,
+    "mean_vehicles": 1256.5185185185185,
+    "held_at_entry": 72,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "21": {
+    "flow": 2760.0,
+    "arrived": 1404,
+    "return": -23.717639923095703,
+    "mean_speed_kmh": 27.735883712768555,
+    "space_mean_speed_kmh": 28.22076111023724,
+    "mean_vehicles": 1248.6666666666667,
+    "held_at_entry": 81,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "22": {
+    "flow": 2760.0,
+    "arrived": 1407,
+    "return": -23.57586669921875,
+    "mean_speed_kmh": 28.440383911132812,
+    "space_mean_speed_kmh": 28.26060255267368,
+    "mean_vehicles": 1247.3333333333333,
+    "held_at_entry": 72,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "23": {
+    "flow": 2726.6666666666665,
+    "arrived": 1394,
+    "return": -56.69893264770508,
+    "mean_speed_kmh": 27.3686466217041,
+    "space_mean_speed_kmh": 27.98826398671389,
+    "mean_vehicles": 1254.037037037037,
+    "held_at_entry": 83,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "24": {
+    "flow": 2720.0,
+    "arrived": 1390,
+    "return": -48.74557113647461,
+    "mean_speed_kmh": 27.72795295715332,
+    "space_mean_speed_kmh": 27.983361401989622,
+    "mean_vehicles": 1253.888888888889,
+    "held_at_entry": 81,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "25": {
+    "flow": 2753.3333333333335,
+    "arrived": 1411,
+    "return": 2.886265754699707,
+    "mean_speed_kmh": 27.994873046875,
+    "space_mean_speed_kmh": 28.286250622215224,
+    "mean_vehicles": 1248.1851851851852,
+    "held_at_entry": 74,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "26": {
+    "flow": 2717.777777777778,
+    "arrived": 1387,
+    "return": -7.051998615264893,
+    "mean_speed_kmh": 27.238527297973633,
+    "space_mean_speed_kmh": 28.02783027309321,
+    "mean_vehicles": 1251.7407407407406,
+    "held_at_entry": 88,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "27": {
+    "flow": 2717.777777777778,
+    "arrived": 1387,
+    "return": -6.807692527770996,
+    "mean_speed_kmh": 27.767751693725586,
+    "space_mean_speed_kmh": 28.055032296553865,
+    "mean_vehicles": 1252.5555555555557,
+    "held_at_entry": 75,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "28": {
+    "flow": 2780.0,
+    "arrived": 1420,
+    "return": 11.284242630004883,
+    "mean_speed_kmh": 28.420961380004883,
+    "space_mean_speed_kmh": 28.362444003314955,
+    "mean_vehicles": 1243.0,
+    "held_at_entry": 77,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "29": {
+    "flow": 2737.777777777778,
+    "arrived": 1396,
+    "return": -14.049555778503418,
+    "mean_speed_kmh": 28.433347702026367,
+    "space_mean_speed_kmh": 28.06083822556847,
+    "mean_vehicles": 1253.962962962963,
+    "held_at_entry": 73,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   },
+   "30": {
+    "flow": 2717.777777777778,
+    "arrived": 1386,
+    "return": -15.231017112731934,
+    "mean_speed_kmh": 27.908384323120117,
+    "space_mean_speed_kmh": 27.957428374031785,
+    "mean_vehicles": 1252.4074074074074,
+    "held_at_entry": 83,
+    "colliding_vehicles": 0,
+    "collision_teleports": 0
+   }
+  }
+ },
+ "arms": {
+  "no_control": {
+   "flow_mean": 3534.962962962963,
+   "flow_2se": 43.72640429185471,
+   "return_mean": 45.142616748809814,
+   "arrived_mean": 1940.0,
+   "mean_speed_kmh_mean": 44.743761698404946,
+   "space_mean_speed_kmh_mean": 42.2852425708559,
+   "mean_vehicles_mean": 864.1061728395063,
+   "held_at_entry_mean": 0.0
+  },
+  "here": {
+   "flow_mean": 3488.7407407407404,
+   "flow_2se": 28.02691799807991,
+   "return_mean": 139.02998860677084,
+   "arrived_mean": 1827.0666666666666,
+   "mean_speed_kmh_mean": 36.17477111816406,
+   "space_mean_speed_kmh_mean": 36.782197448681245,
+   "mean_vehicles_mean": 996.558024691358,
+   "held_at_entry_mean": 35.13333333333333
+  },
+  "src": {
+   "flow_mean": 3368.5925925925926,
+   "flow_2se": 25.054876084280814,
+   "return_mean": 180.19205118815105,
+   "arrived_mean": 1723.1333333333334,
+   "mean_speed_kmh_mean": 32.120445760091144,
+   "space_mean_speed_kmh_mean": 33.01069804866146,
+   "mean_vehicles_mean": 1091.567901234568,
+   "held_at_entry_mean": 58.6
+  },
+  "zeroed_head": {
+   "flow_mean": 2738.6666666666665,
+   "flow_2se": 10.45288412813037,
+   "return_mean": -18.339222081502278,
+   "arrived_mean": 1398.1333333333334,
+   "mean_speed_kmh_mean": 27.895446395874025,
+   "space_mean_speed_kmh_mean": 28.10986684573019,
+   "mean_vehicles_mean": 1250.925925925926,
+   "held_at_entry_mean": 77.53333333333333
+  }
+ },
+ "paired": {
+  "here": {
+   "n": 15,
+   "differences": [
+    -208.8888888888887,
+    -155.55555555555566,
+    -91.11111111111086,
+    -104.44444444444434,
+    35.55555555555566,
+    46.66666666666697,
+    51.11111111111131,
+    -8.888888888889142,
+    -166.66666666666652,
+    60.0,
+    0.0,
+    -113.33333333333348,
+    -120.0,
+    77.77777777777783,
+    4.444444444444343
+   ],
+   "gain": -46.22222222222217,
+   "two_se": 48.95464553261504,
+   "resolved": false,
+   "percent": -1.3075730271153752
+  },
+  "src": {
+   "n": 15,
+   "differences": [
+    -373.3333333333335,
+    -131.1111111111113,
+    -131.11111111111086,
+    -226.66666666666697,
+    -111.11111111111086,
+    -40.0,
+    -124.44444444444434,
+    -242.22222222222217,
+    -233.33333333333303,
+    53.333333333333485,
+    -60.0,
+    -240.0,
+    -277.7777777777778,
+    -217.77777777777737,
+    -140.0
+   ],
+   "gain": -166.37037037037032,
+   "two_se": 55.33096047553141,
+   "resolved": true,
+   "percent": -4.70642470977746
+  },
+  "zeroed_head": {
+   "n": 15,
+   "differences": [
+    -962.2222222222222,
+    -815.5555555555557,
+    -824.4444444444443,
+    -817.7777777777778,
+    -731.1111111111109,
+    -706.6666666666665,
+    -760.0,
+    -846.666666666667,
+    -888.8888888888887,
+    -615.5555555555552,
+    -735.5555555555557,
+    -837.7777777777778,
+    -837.7777777777778,
+    -751.1111111111109,
+    -813.3333333333335
+   ],
+   "gain": -796.2962962962962,
+   "two_se": 42.761065472700466,
+   "resolved": true,
+   "percent": -22.526298143413936
+  }
+ }
+}
