@@ -35,6 +35,14 @@ GRID_KMH: float = 0.5
 #: A per-segment fit with `s2 < SEPARATION * s1` has no separated jam mode and falls
 #: back to the pooled threshold.
 SEPARATION: float = 1.5
+#: A fit with `s2 >= REFUSAL_RATIO * s1` is refused (plan Amendment 1, A4). The 2023
+#: paper takes `(s1 + s2) / 4` as the threshold because, with `s2 <= 3 s1`, it lies
+#: below `s1`; a pool that is mostly jam (the surge scenario after its demand stops)
+#: puts the knots at 3.5 and 25 km/h and the threshold above `s1`.
+REFUSAL_RATIO: float = 3.0
+#: Amendment 1, A4: the primary threshold is fitted on the sustained scenario's
+#: published and no-control episodes over this window, a normal-operation pool.
+NETWORK_WINDOW_S: tuple[float, float] = (300.0, 2500.0)
 
 
 class CdfFit(NamedTuple):
@@ -243,39 +251,52 @@ def _pooled_speeds(traces: Sequence[Sequence[dict]], t_from: float, cap: float,
     return pooled
 
 
-def thresholds_from_traces(traces: Sequence[Sequence[dict]], t_0: float,
-                           cap: float) -> dict[str, Any]:
-    """The three thresholds of plan D10 from a scenario's no-control traces.
+def refusal_reason(fit: CdfFit) -> str | None:
+    """Why a fit cannot give a threshold, or None when it can."""
+    if fit.s2 >= REFUSAL_RATIO * fit.s1:
+        return (f"s2 = {fit.s2:g} >= {REFUSAL_RATIO:g} s1 = {REFUSAL_RATIO * fit.s1:g}: "
+                "(s1 + s2)/4 would not lie below s1")
+    return None
 
-    Samples from `t_0 - 600 s` to the cap, segments holding at least one vehicle.
-    Pooled fit; per-segment fits that fall back to the pooled threshold when
-    `s2 < 1.5 s1` or the segment has too few samples to fit; the fixed 30 km/h.
+
+def threshold_entry(speeds: Sequence[float]) -> dict[str, Any]:
+    """A fit and its threshold, or the fit and its recorded refusal."""
+    try:
+        fit = fit_three_piece_cdf(speeds)
+    except ValueError as error:
+        return {"s1": None, "s2": None, "residual": None, "v_jam": None,
+                "refused": True, "reason": str(error), "samples": len(speeds)}
+    reason = refusal_reason(fit)
+    return {"s1": fit.s1, "s2": fit.s2, "residual": fit.residual,
+            "v_jam": None if reason else jam_threshold(fit), "refused": reason is not None,
+            "reason": reason, "samples": len(speeds)}
+
+
+def thresholds_from_traces(traces: Sequence[Sequence[dict]], t_from: float, t_to: float,
+                           fallback_v_jam: float | None = None) -> dict[str, Any]:
+    """A pooled threshold and per-segment thresholds from `traces` on `[t_from, t_to]`.
+
+    Segments holding at least one vehicle. The pooled fit is refused when
+    `s2 >= 3 s1`. A segment's own fit is used unless it is refused, has `s2 < 1.5 s1`
+    (no separated jam mode) or cannot be fitted; then the segment falls back to
+    `fallback_v_jam`, or to the pooled threshold when no fallback is given.
     """
-    t_from = t_0 - 600.0
-    pooled_speeds = _pooled_speeds(traces, t_from, cap)
-    fit = fit_three_piece_cdf(pooled_speeds)
-    pooled = {"s1": fit.s1, "s2": fit.s2, "residual": fit.residual,
-              "v_jam": jam_threshold(fit)}
+    pooled_speeds = _pooled_speeds(traces, t_from, t_to)
+    pooled = threshold_entry(pooled_speeds)
+    fallback = fallback_v_jam if fallback_v_jam is not None else pooled["v_jam"]
     segments = len(traces[0][0]["speed_kmh"])
     per_segment = []
     for e in range(segments):
-        speeds = _pooled_speeds(traces, t_from, cap, e)
-        entry: dict[str, Any] = {"segment": e, "samples": len(speeds)}
-        try:
-            seg_fit = fit_three_piece_cdf(speeds)
-        except ValueError:
-            seg_fit = None
-        if seg_fit is None or seg_fit.s2 < SEPARATION * seg_fit.s1:
-            entry.update(fallback=True, v_jam=pooled["v_jam"],
-                         s1=seg_fit.s1 if seg_fit else None,
-                         s2=seg_fit.s2 if seg_fit else None,
-                         residual=seg_fit.residual if seg_fit else None)
+        entry = {"segment": e, **threshold_entry(_pooled_speeds(traces, t_from, t_to, e))}
+        weak = (entry["s1"] is not None and not entry["refused"]
+                and entry["s2"] < SEPARATION * entry["s1"])
+        if entry["refused"] or weak:
+            entry.update(fallback=True, own_v_jam=entry["v_jam"], v_jam=fallback)
         else:
-            entry.update(fallback=False, v_jam=jam_threshold(seg_fit), s1=seg_fit.s1,
-                         s2=seg_fit.s2, residual=seg_fit.residual)
+            entry["fallback"] = False
         per_segment.append(entry)
-    return {"t_from": t_from, "cap": cap, "samples": len(pooled_speeds), "pooled": pooled,
-            "per_segment": per_segment, "fixed_kmh": FIXED_THRESHOLD_KMH}
+    return {"t_from": t_from, "t_to": t_to, "samples": len(pooled_speeds),
+            "pooled": pooled, "per_segment": per_segment, "fixed_kmh": FIXED_THRESHOLD_KMH}
 
 
 def drain_summary(per_seed: dict[str, dict[int, tuple[float, bool]]],

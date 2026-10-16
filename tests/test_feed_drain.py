@@ -165,14 +165,16 @@ class TestThresholds:
                                             float(rng.normal(12 if jam else 50, 3)), None],
                               "held": 0, "pending": 0})
             traces.append(trace)
-        out = thresholds_from_traces(traces, 1200.0, 9000.0)
+        out = thresholds_from_traces(traces, 600.0, 9000.0)
         assert out["fixed_kmh"] == 30.0
         pooled = out["pooled"]
         assert pooled["v_jam"] == pytest.approx((pooled["s1"] + pooled["s2"]) / 4.0)
         assert 10.0 < pooled["v_jam"] < 25.0
         assert len(out["per_segment"]) == 3
+        assert pooled["refused"] is False
         # Segment 2 never has a vehicle, so it falls back to the pooled threshold.
         assert out["per_segment"][2]["fallback"] is True
+        assert out["per_segment"][2]["refused"] is True
         assert out["per_segment"][2]["v_jam"] == pooled["v_jam"]
         assert out["samples"] == 3 * 2 * len(range(600, 9001, 10))
 
@@ -231,3 +233,53 @@ class TestLaterSpells:
         flags = np.array([0, 1, 1, 0, 1, 0, 0, 1, 1, 1], bool)
         times = np.arange(10.0, 101.0, 10.0)
         assert spells(flags, times) == [(20.0, 30.0), (50.0, 50.0), (80.0, 100.0)]
+
+
+
+class TestRefusal:
+    """Amendment 1, A4: a fit with s2 >= 3 s1 gives no threshold, and says why."""
+
+    def test_the_surge_like_pool_is_refused(self):
+        from src.sumo.drain import threshold_entry
+
+        rng = np.random.default_rng(4)
+        # Mostly stopped and crawling traffic: the pool of the surge scenario after its
+        # demand stops, whose fit has knots at 3.5 and 25.0 km/h.
+        speeds = np.concatenate([rng.uniform(0.0, 3.5, 3500), rng.uniform(3.5, 25.0, 4500),
+                                 rng.uniform(25.0, 40.0, 2000)])
+        entry = threshold_entry(speeds)
+        assert abs(entry["s1"] - 3.5) <= 0.5 and abs(entry["s2"] - 25.0) <= 1.0
+        assert entry["refused"] is True and entry["v_jam"] is None
+        assert "3 s1" in entry["reason"]
+
+    def test_the_boundary_is_refused_and_below_it_accepted(self):
+        from src.sumo.drain import CdfFit, refusal_reason
+
+        assert refusal_reason(CdfFit(10.0, 30.0, 0.0)) is not None
+        assert refusal_reason(CdfFit(10.0, 29.5, 0.0)) is None
+        assert refusal_reason(CdfFit(30.0, 51.0, 0.0)) is None
+
+    def test_a_segment_with_s2_under_1_5_s1_falls_back(self, monkeypatch):
+        from src.sumo.drain import CdfFit
+
+        # Every pool fits to knots 10 and 12 km/h: s2 / s1 = 1.2, no separated jam mode.
+        monkeypatch.setattr(drain, "fit_three_piece_cdf", lambda speeds: CdfFit(10.0, 12.0, 0.0))
+        trace = [{"t": 10.0, "speed_kmh": [40.0, 40.0], "count": [1, 1], "held": 0,
+                  "pending": 0}]
+        out = thresholds_from_traces([trace], 0.0, 100.0, fallback_v_jam=17.0)
+        assert out["pooled"]["v_jam"] == pytest.approx(5.5)
+        assert all(e["fallback"] is True and e["v_jam"] == 17.0 for e in out["per_segment"])
+        assert all(e["own_v_jam"] == pytest.approx(5.5) for e in out["per_segment"])
+
+    def test_a_refused_segment_falls_back_and_a_good_one_keeps_its_own(self, monkeypatch):
+        from src.sumo.drain import CdfFit
+
+        fits = iter([CdfFit(30.0, 51.0, 0.0), CdfFit(3.5, 25.0, 0.0), CdfFit(28.0, 50.0, 0.0)])
+        monkeypatch.setattr(drain, "fit_three_piece_cdf", lambda speeds: next(fits))
+        trace = [{"t": 10.0, "speed_kmh": [40.0, 40.0], "count": [1, 1], "held": 0,
+                  "pending": 0}]
+        out = thresholds_from_traces([trace], 0.0, 100.0)
+        assert out["pooled"]["v_jam"] == pytest.approx(20.25)
+        refused, good = out["per_segment"]
+        assert refused["refused"] is True and refused["v_jam"] == pytest.approx(20.25)
+        assert good["fallback"] is False and good["v_jam"] == pytest.approx(19.5)

@@ -85,6 +85,16 @@ def d_summary(tmp_path_factory):
             path.write_text(json.dumps({"trace": trace}))
             episodes.append({"arm": arm, "seed": seed, "scenario": "mainz_surge",
                              "duration_s": 3000.0, "trace_file": str(path), "flow": 1.0})
+    # The sustained episodes the network threshold is fitted on (Amendment 1, A4).
+    rng = np.random.default_rng(3)
+    for arm in ("no_control", "here"):
+        trace = [{"t": float(t), "count": [3] * 12, "held": 0, "pending": 0, "arrived": t,
+                  "speed_kmh": [float(rng.normal(25 if rng.random() < 0.25 else 52, 3))
+                                for _ in range(12)]} for t in range(10, 2521, 10)]
+        path = tmp / f"{arm}_mainz.json"
+        path.write_text(json.dumps({"trace": trace}))
+        episodes.append({"arm": arm, "seed": 16, "scenario": "mainz", "duration_s": 2500.0,
+                         "trace_file": str(path), "flow": 1.0})
     return rfe.summarize_d(episodes)
 
 
@@ -192,3 +202,9 @@ def test_the_script_holds_no_result_literal():
     source = (REPO_ROOT / "scripts" / "figures" / "feed_figures.py").read_text()
     for literal in ("3751", "62.8", "109.7", "67.08", "0.25)", "1562"):
         assert literal not in source
+
+
+def test_without_a_network_threshold_the_drain_figure_draws_the_fixed_rule(d_summary):
+    stripped = json.loads(json.dumps(d_summary))
+    stripped["scenarios"]["mainz_surge"]["primary"] = None
+    assert ff.fig_drain(stripped)["mainz_surge"]["rule"] == "fixed_30/H120"

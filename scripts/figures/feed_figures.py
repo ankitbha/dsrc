@@ -193,7 +193,9 @@ def fig_drain(d_summary: dict, rule: str | None = None) -> dict[str, Any]:
     for scenario, entry in d_summary.get("scenarios", {}).items():
         if "drain" not in entry:
             continue
-        key = rule or entry["primary"]
+        # Without a network threshold (refused, or not yet fitted) the fixed 30 km/h rule
+        # is drawn, and the panel says so.
+        key = rule or entry.get("primary") or "fixed_30/H120"
         result = entry["drain"][key]
         panel: dict[str, Any] = {"rule": key, "cap_minus_t0": entry["cap_s"] - entry["t_0"]}
         for arm, data in result["arms"].items():

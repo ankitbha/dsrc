@@ -142,7 +142,7 @@ class TestHeaderAndSpecs:
         context = rfe.Context()
         context.feed = rfe.load_feed_parameters(ARTEFACT, None, allow_placeholder=True)
         sizes = {b: len(rfe.block_specs(b, context)) for b in rfe.BLOCKS}
-        assert sizes == {"A": 150, "B": 135, "C": 60, "D": 60, "E": 1080}
+        assert sizes == {"A": 150, "B": 135, "C": 60, "D": 90, "E": 1080}
 
 
 class TestSummaries:
@@ -211,11 +211,27 @@ def _write_trace(path: Path, trace: list[dict]) -> str:
 
 
 class TestSummariesOnSyntheticTraces:
-    def test_block_d_fits_thresholds_and_reports_drain_under_every_rule(self, tmp_path):
+    @staticmethod
+    def _sustained(tmp_path, rng):
+        """Sustained-scenario traces: free flow near 50 km/h, slow spells near 25."""
+        episodes = []
+        for arm in ("no_control", "here"):
+            for seed in (16, 17):
+                trace = [{"t": float(t), "count": [3] * 12, "held": 0, "pending": 0,
+                          "arrived": t,
+                          "speed_kmh": [float(rng.normal(25 if rng.random() < 0.25 else 52, 3))
+                                        for _ in range(12)]}
+                         for t in range(10, 2521, 10)]
+                path = _write_trace(tmp_path / "t" / f"{arm}_mainz_{seed}.json", trace)
+                episodes.append({"arm": arm, "seed": seed, "scenario": "mainz",
+                                 "duration_s": 2500.0, "trace_file": path, "flow": 1.0})
+        return episodes
+
+    def test_block_d_uses_the_network_threshold_and_reports_every_rule(self, tmp_path):
         import numpy as np
 
         rng = np.random.default_rng(5)
-        episodes = []
+        episodes = self._sustained(tmp_path, rng)
         for arm, jam_until in (("no_control", 2600), ("here", 1500)):
             for seed in (16, 17):
                 trace = []
@@ -228,26 +244,56 @@ class TestSummariesOnSyntheticTraces:
                 episodes.append({"arm": arm, "seed": seed, "scenario": "mainz_surge",
                                  "duration_s": 3000.0, "trace_file": path, "flow": 1.0})
         summary = rfe.summarize_d(episodes, results_dir=tmp_path)
+        network = summary["network_threshold"]
+        assert network["episodes"] == 4 and network["t_from"] == 300.0
+        assert network["t_to"] == 2500.0
+        assert network["pooled"]["refused"] is False
+        v_network = network["pooled"]["v_jam"]
+        assert 15.0 < v_network < 30.0
         entry = summary["scenarios"]["mainz_surge"]
         assert entry["t_0"] == 1200.0 and entry["cap_s"] == 3000.0
+        assert entry["primary"] == "network/H120"
+        assert entry["rules"]["network"] == v_network
+        assert set(entry["drain"]) == {f"{r}/H{h}" for r in
+                                       ("network", "network_per_segment", "scenario",
+                                        "fixed_30") for h in (120, 60, 300)}
         written = json.loads((tmp_path / "drain_thresholds.json").read_text())
-        assert written["mainz_surge"] == entry["thresholds"]
-        assert set(entry["drain"]) == {f"{r}/H{h}" for r in ("pooled", "per_segment", "fixed_30")
-                                       for h in (120, 60, 300)}
-        assert entry["primary"] == "pooled/H120"
-        pooled = entry["thresholds"]["pooled"]
-        assert pooled["v_jam"] == (pooled["s1"] + pooled["s2"]) / 4.0
-        # With the jam mode holding two thirds of the samples the fit's knees bracket
-        # the jam mode itself (9.5 and 14.5 km/h), so the pooled threshold is 6 km/h
-        # and finds no jam here; the fixed 30 km/h threshold does.
-        fixed = entry["drain"]["fixed_30/H120"]
-        # Jams end at 2,600 s without control and 1,500 s with it, plus the 120 s hold.
-        assert fixed["arms"]["no_control"]["per_seed"][0]["time_s"] == 2600 + 120 - 1200
-        assert fixed["arms"]["here"]["per_seed"][0]["time_s"] == 1500 + 120 - 1200
-        assert fixed["arms"]["here"]["fraction_drained"] == 1.0
-        assert fixed["paired"]["here"]["differences"] == [-1100.0, -1100.0]
-        assert entry["drain"]["pooled/H120"]["arms"]["no_control"]["per_seed"][0][
+        assert written["network"]["pooled"]["v_jam"] == v_network
+        assert written["scenarios"]["mainz_surge"] == entry["scenario_threshold"]
+        # Jams (12 km/h) end at 2,600 s without control and 1,500 s with it; the
+        # last jammed samples are 2,590 and 1,490, plus the 120 s hold and one sample.
+        primary = entry["drain"]["network/H120"]
+        assert primary["arms"]["no_control"]["per_seed"][0]["time_s"] == 2720 - 1200
+        assert primary["arms"]["here"]["per_seed"][0]["time_s"] == 1620 - 1200
+        assert primary["arms"]["here"]["fraction_drained"] == 1.0
+        assert primary["paired"]["here"]["differences"] == [-1100.0, -1100.0]
+        # The scenario's own pool is the jam itself: its knots bracket the jam mode,
+        # so its threshold finds no jam (A4's reason for the network threshold).
+        assert entry["drain"]["scenario/H120"]["arms"]["no_control"]["per_seed"][0][
             "time_s"] == 120.0
+        # Each hold sensitivity is computed with its own H (mutant R5).
+        assert entry["drain"]["network/H60"]["arms"]["here"]["per_seed"][0]["time_s"] == \
+            1560 - 1200
+        assert entry["drain"]["network/H300"]["arms"]["here"]["per_seed"][0]["time_s"] == \
+            1800 - 1200
+
+    def test_a_refused_network_fit_leaves_no_primary_and_says_why(self, tmp_path):
+        import numpy as np
+
+        rng = np.random.default_rng(6)
+        episodes = []
+        for arm in ("no_control", "here"):
+            speeds = np.concatenate([rng.uniform(0, 3.5, 300), rng.uniform(3.5, 25, 400),
+                                     rng.uniform(25, 40, 200)])
+            trace = [{"t": float(10 * (i + 30)), "count": [3] * 12, "held": 0, "pending": 0,
+                      "arrived": i, "speed_kmh": [float(speeds[i % len(speeds)])] * 12}
+                     for i in range(220)]
+            path = _write_trace(tmp_path / f"{arm}.json", trace)
+            episodes.append({"arm": arm, "seed": 16, "scenario": "mainz", "duration_s": 2500.0,
+                             "trace_file": path, "flow": 1.0})
+        summary = rfe.summarize_d(episodes)
+        assert summary["network_threshold"]["pooled"]["refused"] is True
+        assert "refused" in summary["primary_unavailable_reason"]
 
     def test_block_e_estimates_the_certificate_and_checks_the_pulse_size(self, tmp_path):
         import numpy as np

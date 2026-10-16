@@ -189,6 +189,10 @@ def block_specs(block: str, context: Context) -> list[Spec]:
             cap = SMOKE_DURATION_S if context.smoke else setting["cap_s"]
             for arm in ("no_control", "here"):
                 arms.append((arm, scenario, {"scenario": scenario, "duration_s": cap}))
+        # Amendment 1, A4: the sustained scenario's episodes that the network-level
+        # jam threshold is fitted on, both arms.
+        for arm in ("no_control", "here"):
+            arms.append((arm, "mainz", {"scenario": "mainz"}))
     elif block == "E":
         specs = []
         for size, seed_list in ((60, seeds), (30, tuple(s for s in seeds
@@ -617,13 +621,37 @@ def pilot_decision(no_control_trace: list[dict], here_trace: list[dict], cap: fl
             "action": action}
 
 
+def network_threshold(episodes: list[dict]) -> dict[str, Any] | None:
+    """Amendment 1, A4: one threshold for the whole network, fitted on the sustained
+    scenario's `here` (published) and `no_control` episodes from 300 to 2,500 s."""
+    from src.sumo.drain import NETWORK_WINDOW_S, thresholds_from_traces
+
+    traces = [t for t in (_load_trace(r) for r in episodes if r["scenario"] == "mainz"
+                          and r["arm"] in ("here", "no_control")) if t]
+    if not traces:
+        return None
+    fit = thresholds_from_traces(traces, *NETWORK_WINDOW_S)
+    fit["episodes"] = len(traces)
+    return fit
+
+
 def summarize_d(episodes, smoke: bool = False,
                 results_dir: Path | None = None) -> dict[str, Any]:
+    import numpy as np
+
     from src.sumo.drain import (
         drain_summary, drain_time, jam_segment_minutes, onset, thresholds_from_traces,
     )
 
-    out: dict[str, Any] = {"block": "D", "scenarios": {}}
+    network = network_threshold(episodes)
+    primary_v = network["pooled"]["v_jam"] if network else None
+    out: dict[str, Any] = {
+        "block": "D", "scenarios": {},
+        "network_threshold": network,
+        "primary_unavailable_reason": (
+            None if primary_v is not None else
+            "no sustained-scenario episode to fit the network threshold on" if network is None
+            else f"the network fit is refused: {network['pooled']['reason']}")}
     for scenario, setting in DRAIN.items():
         records = [r for r in episodes if r["scenario"] == scenario]
         if not records:
@@ -639,18 +667,21 @@ def summarize_d(episodes, smoke: bool = False,
                                  for r in records]
             out["scenarios"][scenario] = entry
             continue
+        rules: dict[str, Any] = {}
+        if primary_v is not None:
+            rules["network"] = primary_v
+            per_segment = [e["v_jam"] for e in network["per_segment"]]
+            if all(v is not None for v in per_segment):
+                rules["network_per_segment"] = per_segment
         no_control = [traces[k] for k in traces if k[0] == "no_control" and traces[k]]
-        if not no_control:
-            entry["note"] = "no no_control trace to fit the jam threshold on"
-            out["scenarios"][scenario] = entry
-            continue
-        thresholds = thresholds_from_traces(no_control, t_0, cap)
-        entry["thresholds"] = thresholds
-        rules = {"pooled": thresholds["pooled"]["v_jam"],
-                 "per_segment": [s["v_jam"] for s in thresholds["per_segment"]],
-                 "fixed_30": thresholds["fixed_kmh"]}
-        import numpy as np
-
+        if no_control:
+            # The plan's original per-scenario fit, now a sensitivity (A4).
+            scenario_fit = thresholds_from_traces(no_control, t_0 - 600.0, cap)
+            entry["scenario_threshold"] = scenario_fit
+            if scenario_fit["pooled"]["v_jam"] is not None:
+                rules["scenario"] = scenario_fit["pooled"]["v_jam"]
+        rules["fixed_30"] = 30.0
+        entry["rules"] = {name: v for name, v in rules.items()}
         results: dict[str, Any] = {}
         for rule, v_jam in rules.items():
             v = np.asarray(v_jam, float)
@@ -668,12 +699,13 @@ def summarize_d(episodes, smoke: bool = False,
                 results[f"{rule}/H{hold:g}"] = {**drain_summary(per_seed, cap - t_0),
                                                 "per_episode": extra}
         entry["drain"] = results
-        entry["primary"] = f"pooled/H{HOLD_S:g}"
+        entry["primary"] = f"network/H{HOLD_S:g}" if primary_v is not None else None
         out["scenarios"][scenario] = entry
     if results_dir is not None:
-        _write_json(results_dir / "drain_thresholds.json",
-                    {name: entry["thresholds"] for name, entry in out["scenarios"].items()
-                     if "thresholds" in entry})
+        _write_json(results_dir / "drain_thresholds.json", {
+            "network": network,
+            "scenarios": {name: entry.get("scenario_threshold")
+                          for name, entry in out["scenarios"].items()}})
     return out
 
 
