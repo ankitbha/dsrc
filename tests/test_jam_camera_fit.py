@@ -256,11 +256,11 @@ class TestCrossResolution:
 
 
 class TestPersistentRatioSpread:
-    def _tracks(self, sigma, n_tracks=400, off_centre=False, short=False, seed=1):
+    def _tracks(self, sigma, n_tracks=400, off_centre=False, short=False, seed=1, scale=1.0):
         rng = np.random.default_rng(seed)
         records = []
         for track in range(n_tracks):
-            ratio = float(np.exp(sigma * rng.standard_normal()))
+            ratio = scale * float(np.exp(sigma * rng.standard_normal()))
             centre = 600.0 if off_centre else 360.0
             for k in range(5 if short else 12):
                 wp = 30.0 + k
@@ -275,6 +275,15 @@ class TestPersistentRatioSpread:
         assert out["tracks"] == 2000
         assert out["relative_spread"] == pytest.approx(0.2, rel=0.1)
         assert out["median_ratio"] == pytest.approx(1.0, abs=0.05)
+
+    def test_the_spread_is_relative_to_the_median_ratio(self):
+        # The same 0.2 log-spread around a median ratio of 1.5: the relative spread stays
+        # 0.2 while the absolute MAD is the median ratio times it.
+        out = ce.persistent_ratio_spread(self._tracks(0.2, n_tracks=2000, scale=1.5))
+        assert out["median_ratio"] == pytest.approx(1.5, rel=0.03)
+        assert out["relative_spread"] == pytest.approx(0.2, rel=0.1)
+        assert out["mad_ratio"] == pytest.approx(out["median_ratio"] * out["relative_spread"])
+        assert out["mad_ratio"] > 0.25
 
     def test_off_centre_boxes_and_short_tracks_are_left_out(self):
         assert ce.persistent_ratio_spread(self._tracks(0.2, off_centre=True))["tracks"] == 0

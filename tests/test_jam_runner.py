@@ -602,6 +602,14 @@ class TestSelectionProvenance:
         assert summary["predictor_sha256"] == hashlib.sha256(b"predictor").hexdigest()
         assert summary["feed_artefact_sha256"] == "f"
 
+    def test_summarize_s_writes_the_header_identity_not_the_files_given(self, tmp_path):
+        camera, predictor = self._files(tmp_path, "other camera", "other predictor")
+        context = rje.Context(camera_model=camera, predictor=predictor)
+        context.feed = {"artefact_sha256": "f"}
+        out = rje.summarize_s(_s_records(), context, ("k", "f", "c" * 64, "p" * 64))
+        assert out["camera_model_sha256"] == "c" * 64 and out["predictor_sha256"] == "p" * 64
+        assert out["feed_artefact_sha256"] == "f"
+
     def test_a_camera_model_changed_since_block_s_is_refused(self, tmp_path):
         camera, predictor = self._files(tmp_path, "camera refitted", "predictor")
         self._block(tmp_path, hashlib.sha256(b"camera").hexdigest(),

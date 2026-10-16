@@ -290,6 +290,25 @@ def _first_step_down(env, vehicle="v0"):
     return min((t for t, v, f in env.writes if v == vehicle and f < 1.0), default=None)
 
 
+def test_the_episode_seed_sets_each_pair_s_distance_factor():
+    # Amendment 3 (R2-4): with no other camera error, two episode seeds on one scene differ
+    # only by the pair factors, so the engine must hand the camera its own seed.
+    camera = CameraModel.from_tables(bin_m=10.0, p=np.ones(8), sigma_m=np.zeros(8),
+                                     sigma_v_mps=np.zeros(8), confidences=[np.array([0.8])] * 8,
+                                     R_max=80.0).with_pair_sigma(0.3)
+    k_hat = {}
+    for seed in (1, 2):
+        env = FakeEnv(lambda t: [("v0", 0)])
+        mode = Mode("rule", VersionKeyed(10.0, 20.0), name="vk")
+        engine = JamEngine(env, lambda x: [2, 2], mode, FEED, seed=seed, control_start_s=0.0,
+                           window_start_s=0.0, trace_every_s=10.0, end_s=700.0,
+                           decision_instants=[], record_trace=False, arm=JamArm("plan"),
+                           sense=True, camera=camera, snapshot_source=_leaders(lambda t: 3))
+        _drive(engine, env, 10)
+        k_hat[seed] = float(engine._sensed["k_hat"][0])
+    assert k_hat[1] != k_hat[2]
+
+
 class TestOracleInputs:
     def test_the_oracle_fires_through_its_trend_before_the_static_trigger(self):
         # One more leader every 5 s from 65 s: k_true = 0.01875 n, rising 0.00375 /s. With
