@@ -680,3 +680,65 @@ class TestSelectionRules:
         assert params[("learned", "th0.6")]["theta"] == 0.6
         assert params[("rule", "m0.2")]["m_on"] == 0.2
         assert params[("lookahead", "J6")]["J_th"] == 6.0
+
+
+class TestPredictorCamera:
+    """Validation R3-1: the learned arm runs only with the camera its predictor learned on."""
+
+    def _files(self, tmp_path, card_camera_sha):
+        import numpy as np
+
+        from src.rl import onset_predictor as op
+
+        camera = tmp_path / "camera.json"
+        camera.write_text(json.dumps({
+            "schema": "camera_error_model/1", "bin_m": 10.0, "sumo_table": "0.20",
+            "tables": {"0.20": {"detection": {"p": [0.9]}, "distance_noise": {"sigma_ema_m": [0.5]},
+                                "closing_rate_noise": {"sigma_v_mps": [0.2]},
+                                "confidence": {"values": [[0.9]]}, "R_max_m": 10.0}}}))
+        sha = hashlib.sha256(camera.read_bytes()).hexdigest()
+        card = tmp_path / "onset_predictor.json"
+        X = np.zeros((20, len(op.FEATURES)))
+        model = op.fit(X, np.zeros(20, dtype=int), X[:5], np.zeros(5, dtype=int))
+        op.save(model, card, extra={"camera_model_sha256": sha if card_camera_sha is None
+                                    else card_camera_sha})
+        return camera, card, sha
+
+    def _runner(self, monkeypatch, camera, card):
+        import src.sumo.jam_episode as je
+
+        ran = []
+
+        def fake_episode(model, seed, scenario, arm, **kwargs):
+            ran.append(arm.arm)
+            trace = [{"t": float(t), "speed_kmh": [50.0] * 12, "count": [1] * 12,
+                      "held": 0, "pending": 0} for t in range(0, 3610, 10)]
+            return {"trace": trace}
+
+        monkeypatch.setattr(je, "run_jam_episode", fake_episode)
+        return rje.episode_runner(None, rje.Context(camera_model=camera, predictor=card)), ran
+
+    def test_a_card_trained_on_another_camera_is_refused(self, tmp_path, monkeypatch):
+        camera, card, sha = self._files(tmp_path, "other")
+        runner, ran = self._runner(monkeypatch, camera, card)
+        spec = next(s for s in rje.block_specs("S") if s.arm == "learned")
+        with pytest.raises(SystemExit) as refusal:
+            runner(spec)
+        assert "other" in str(refusal.value) and sha in str(refusal.value)
+        assert ran == []
+
+    def test_a_card_trained_on_this_camera_runs(self, tmp_path, monkeypatch):
+        camera, card, _ = self._files(tmp_path, None)
+        runner, ran = self._runner(monkeypatch, camera, card)
+        runner(next(s for s in rje.block_specs("S") if s.arm == "learned"))
+        assert ran == ["learned"]
+
+    def test_the_dagger_round_refuses_a_round_1_card_from_another_camera(self, tmp_path,
+                                                                          monkeypatch):
+        camera, card, _ = self._files(tmp_path, "other")
+        runner, ran = self._runner(monkeypatch, camera, card)
+        spec = rje.block_specs("T", dagger=True)[0]
+        assert spec.arm == "learned" and spec.sample_fraction > 0
+        with pytest.raises(SystemExit):
+            runner(spec)
+        assert ran == []

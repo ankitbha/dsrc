@@ -635,6 +635,15 @@ def episode_runner(model, context: Context) -> EpisodeFn:
                 raise SystemExit(f"{spec.key} runs the learned arm; {context.predictor} does not "
                                  "exist (run block T and train_onset_predictor.py first)")
             predictor = load(context.predictor)
+        if spec.arm == "learned" and uses_camera(spec):
+            # Validation R3-1: the predictor's features are camera features, so it runs only
+            # with the camera model it was trained on (block T's DAgger round included).
+            trained = predictor.card.get("camera_model_sha256")
+            running = (camera.source or {}).get("sha256")
+            if trained != running:
+                raise SystemExit(f"{spec.key}: the predictor {context.predictor} was trained on "
+                                 f"camera model {trained}, but this run's camera "
+                                 f"{context.camera_model} is {running}")
         feed = FeedSetting(context.feed_artefact, context.feed_session, m=spec.m,
                            allow_placeholder=context.allow_placeholder)
         scenario = JAM_SCENARIOS[spec.scenario]
