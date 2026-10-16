@@ -192,6 +192,7 @@ class MainzEnv:
         ])
         self._running = True
         self.arrived_total = 0
+        self._load_controlled()  # drops any pulse a previous episode appended
         self._load_schedule()
         self._load_static()
         self._previous = [set() for _ in self.segments]
@@ -483,6 +484,55 @@ class MainzEnv:
     def schedule_size(self) -> int:
         """Positions taken in the departure order, pulses included."""
         return len(self._index) if self._index is not None else 0
+
+    def pulse_route(self, site: int) -> tuple[str, list[str]]:
+        """The route a pulse at `site` rides: `(source route id, edges to the exit)`."""
+        from src.analysis.gains import load_routes, pulse_sites
+
+        chosen = pulse_sites(self.segments, load_routes(self.route_file))[site]
+        return chosen["route"], chosen["suffix"]
+
+    def inject_pulse(self, site: int, n: int, start_s: float, duration_s: float,
+                     seed: int) -> dict[str, Any]:
+        """Add `n` vehicles at super-segment `site`, evenly over `[start_s, start_s +
+        duration_s)`, for the gain certificate.
+
+        They ride the suffix of the longest route through the site from the site's first
+        edge to the exit (`pulse_route`), added as its own route, and depart at
+        `start_s + h/2 + j h` with `h = duration_s / n`, the builder's spacing. SUMO
+        inserts them on its own terms; the entry gate does not apply, since they are a
+        perturbation inside the network rather than demand at its boundary. Vehicle `j`
+        is `pulse_{site}_{j}` and takes the departure position after the schedule's
+        last, so the floor rule continues over it. `seed` is recorded only: the pulse
+        is deterministic.
+        """
+        if n <= 0 or duration_s <= 0.0:
+            raise ValueError("a pulse needs at least one vehicle and a positive duration")
+        if self._index is None:
+            raise ValueError("a pulse needs the schedule's departure order")
+        source, edges = self.pulse_route(site)
+        route_id = f"pulse_route_{site}"
+        _sumo.route.add(route_id, edges)
+        headway = duration_s / n
+        first_position = len(self._index)
+        ids, departs, controlled = [], [], 0
+        for j in range(n):
+            vehicle = f"pulse_{site}_{j}"
+            position = first_position + j
+            self._index[vehicle] = position
+            is_controlled = controlled_index(position, self.penetration)
+            if is_controlled:
+                self._controlled_ids.add(vehicle)
+                controlled += 1
+            depart = start_s + headway / 2.0 + j * headway
+            _sumo.vehicle.add(vehicle, route_id, typeID="av" if is_controlled else "human",
+                              depart=f"{depart:.2f}", departLane="best", departSpeed="max")
+            ids.append(vehicle)
+            departs.append(round(depart, 2))
+        return {"site": site, "n": n, "start_s": start_s, "duration_s": duration_s,
+                "seed": seed, "source_route": source, "route_edges": edges, "ids": ids,
+                "departs": departs, "controlled": controlled,
+                "first_position": first_position}
 
     def command_vehicles(self, mapping: dict[str, float],
                          edge_of: dict[str, str] | None = None) -> int:
