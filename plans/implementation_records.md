@@ -4428,3 +4428,58 @@ would have failed is absent rather than wrong.
 
 ---
 
+
+## M. Jam-avoidance program: smoke runs (2026-10-16)
+
+These runs check that every entry point of the jam-avoidance plan
+(`plans/2026-10-16-jam-avoidance-plan.md`, step S14) runs end to end on its real inputs.
+They are not experiments: each block ran one 600 s episode per arm on training seed 1,
+into `outputs/jam/smoke/` (gitignored). No threshold, model or arm was selected from
+them, and their values are not results.
+
+**Inputs.**
+- The plan: `results/checkpoints/mainz_here_best.pt` (sha256 `941ac210…`), frozen.
+- The feed process: the measured artefact `results/jam/feed_process_afternoon.json`
+  (sha256 `8f5430bf…`, not a placeholder), session `afternoon_20261016_mainz`.
+  `L_bar` is 89.49 s, so `D = 99.49 s` at `m = 1`.
+- The detector: the official `yolov8n.pt` from Ultralytics release v8.4.0, fetched once
+  into `outputs/models/` (sha256 `f59b3d83…`, recorded in `results/jam/weights.json`).
+- The camera model and the onset predictor: each built by the smoke steps before it.
+  Both runs were on the code at commit `02df187`.
+
+| step | command (from the repository root) | wall | what it showed |
+|---|---|---|---|
+| S7 frames | `scripts/process_drive_frames.py --runs run_20260908_190548 --imgsz 640 --limit 50 --start-pos 4000 --out-dir outputs/jam/smoke/frames` | 3.2 s | 50 frames, 148 boxes, 120 tracked records; frame times from ticks, 0.20 s apart; 31.4 ms per frame |
+| S8 fit | `scripts/fit_camera_model.py --frames-dir outputs/jam/smoke/frames --sensitivity-imgsz --out outputs/jam/smoke/camera_error_model.json` | 0.1 s | every table present; only the 0-10 m bin has 50 observations, so this artefact's `R_max` is 10 m |
+| S9 cases | `scripts/drive_lead_cases.py --out outputs/jam/smoke/drive_lead_cases.json --frames-dir outputs/jam/smoke/frames` | 0.5 s | the plan's two events: Scudders Mill Rd (3.8 to 8.1, received 533 s after the first GPS fix, 39 m away) and CR-610/Deans Ln (3.2 to 8.1, 719 s, 23 m) |
+| G | `scripts/run_jam_experiments.py --block G --smoke` | 2.4 s | oracle and plan alone on B9 |
+| T | `... --block T --smoke --camera-model <smoke camera>` | 1.6 s | the plan alone with 5% feature sampling: 1,118 samples |
+| S11 round 1 | `scripts/train_onset_predictor.py --round 1 --results-dir outputs/jam/smoke/results --smoke` | 1.0 s | a model card and weights |
+| T DAgger | `... --block T --dagger --smoke --camera-model <smoke camera> --predictor <round-1 card>` | 1.8 s | the learned arm active at threshold 0.5, into `T_dagger.jsonl` |
+| S11 round 2 | `... --round 2 ... --smoke` | 1.0 s | refit on 2,236 samples |
+| S | `... --block S --smoke --camera-model ... --predictor ...` | 5.7 s | six arms; the summary selects nothing, because seed 1 is not a selection seed |
+| M | `... --block M --smoke ...` | 6.4 s | seven arms, with the stand-in thresholds a smoke run uses |
+| L | `... --block L --smoke ...` | 3.3 s | the lookahead, the plan and the stand-in best model, each at `m = 0`; `m = 2` and `m = 4` are covered by `tests/test_jam_episode.py` |
+| P | `... --block P --smoke ...` | 2.3 s | the plan and the stand-in best model at penetration 0.75 |
+| K | `... --block K --smoke ...` | 1.7 s | the stand-in best model at camera bias 0.8 |
+
+**Counters.**
+- Collisions: in every controlled smoke episode of every block, zero colliding vehicles,
+  zero collision teleports and zero writes above the plan.
+- Write read-back: smoke runs read `setMaxSpeed` back after every stepped-down write,
+  127,000 checks in all, and none differed from the written cap.
+- Cost: one episode took 0.63 to 0.92 s. The sensing pass averaged at most 3.3 ms in any
+  episode.
+
+**What the smokes do not show.**
+- The 50-frame camera model is not the error model: its 10 m range and its 0.50 m camera
+  height come from 51 usable boxes, and the fit flags that height as implausible against
+  the configured 1.25 m.
+- The smoke predictor saw no positive label and no validation seed, because no jam forms
+  in 600 s. Early stopping therefore ended its training after 15 epochs with every
+  probability near 0.4, and the learned arm was active on every vehicle-tick at the
+  0.3 threshold.
+- Block G's "decision" on a 600 s smoke compares two zero jam times, because the
+  episodes end before the 900 s perturbation.
+
+---
