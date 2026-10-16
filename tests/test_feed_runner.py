@@ -670,14 +670,20 @@ def test_the_drain_artefact_lists_drained_runs_ending_in_an_open_spell(tmp_path)
     for arm in ("no_control", "here"):
         for seed in (16, 17):
             trace = [{"t": float(t), "count": [3] * 12, "held": 0, "pending": 0, "arrived": t,
-                      "speed_kmh": [10.0 if (600 <= t < 1500 or (arm == "here" and seed == 17
-                                                                and t >= 2960)) else 50.0]
+                      "speed_kmh": [10.0 if (600 <= t < 1500
+                                             or (arm == "here" and seed == 17 and t >= 2960)
+                                             or (arm == "no_control" and seed == 17
+                                                 and t >= 1600)) else 50.0]
                       * 12} for t in range(10, 3001, 10)]
             path = _write_trace(tmp_path / f"{arm}_{seed}.json", trace)
             episodes.append({"arm": arm, "seed": seed, "scenario": "mainz_surge",
                              "duration_s": 3000.0, "trace_file": path, "flow": 1.0})
     summary = rfe.summarize_d(episodes)
     fixed = summary["scenarios"]["mainz_surge"]["drain"]["fixed_30/H120"]
+    # no_control/17 also ends inside a spell, a long one, so it never drained and is
+    # not listed.
+    assert fixed["per_episode"]["no_control/17"]["open_spell_at_cap"] is not None
+    assert [r["drained"] for r in fixed["arms"]["no_control"]["per_seed"]] == [True, False]
     assert fixed["drained_ending_in_open_spell"] == ["here/17"]
     assert fixed["per_episode"]["here/17"]["open_spell_at_cap"]["jam"]["length_s"] == 50.0
     assert all(row["drained"] for row in fixed["arms"]["here"]["per_seed"])
