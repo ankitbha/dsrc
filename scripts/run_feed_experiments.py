@@ -897,6 +897,21 @@ def summarize_d(episodes, smoke: bool = False,
     return out
 
 
+def require_identical_before(pulsed: list[dict], base: list[dict], start: float, key: str,
+                             base_path: str | None) -> None:
+    """Refuse a pulsed/baseline pair whose traces differ at any sample before `start`."""
+    before_pulsed = [s for s in pulsed if s["t"] < start]
+    before_base = [s for s in base if s["t"] < start]
+    if [s["t"] for s in before_pulsed] != [s["t"] for s in before_base]:
+        raise SystemExit(f"{key} and its baseline {base_path} do not share their samples "
+                         f"before the pulse at {start:g} s")
+    for a, b in zip(before_pulsed, before_base):
+        if a != b:
+            raise SystemExit(f"{key} differs from its baseline {base_path} at {a['t']:g} s, "
+                             f"before the pulse at {start:g} s: the baseline is not the "
+                             "same run; block E is not summarised")
+
+
 def site_resolution(pulse_peaks: dict[int, list[float]],
                     null_peaks: dict[int, list[float]]) -> dict[str, Any]:
     """Amendment 2, B2: which sites' pulse response stands above its own null.
@@ -955,6 +970,20 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
         by_arm[record["arm"]].setdefault(record["penetration"], {}).setdefault(
             record["seed"], {})[site] = record
     by_level, small, nulls = by_arm["pulse60"], by_arm["pulse30"], by_arm["pulse1"]
+    # Amendment 3, C3: a pulsed run and its unperturbed baseline are the same run until
+    # the pulse starts (A8), so any difference before it means the baseline came from
+    # another checkpoint, actuation or scenario. Every pair is checked before use.
+    pairs_checked = 0
+    for arm_runs in by_arm.values():
+        for p, seeds in arm_runs.items():
+            for seed, sites in seeds.items():
+                base, base_path = baseline_trace(p, seed)
+                if base is None:
+                    continue
+                for site, record in sites.items():
+                    require_identical_before(_load_trace(record), base, _pulse_start(record),
+                                             record["key"], base_path)
+                    pairs_checked += 1
     levels: dict[str, Any] = {}
     rho_by_level: dict[float, float | None] = {}
     missing = []
@@ -1028,6 +1057,7 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
     inserted = _inserted_differences(episodes, results_dir)
     summary = {"block": "E", "levels": levels, "missing_baselines": missing,
                "inserted_difference": inserted,
+               "baseline_pairs_checked": pairs_checked,
                "p_min": min_penetration(rho_by_level) if rho_by_level else None,
                "resolution_rule": (f"a site is resolved when the 60-vehicle pulses' mean "
                                    f"peak self-deviation exceeds the 95th percentile of its "

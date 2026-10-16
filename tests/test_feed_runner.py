@@ -425,6 +425,30 @@ class TestSummariesOnSyntheticTraces:
         assert summary["regression_window"].startswith("from the injection's end")
         assert (results_dir / "certificate.json").exists()
 
+    def test_every_pulsed_run_is_checked_against_its_baseline_before_the_pulse(self, tmp_path):
+        episodes, traces_dir, results_dir = self._block_e(tmp_path)
+        summary = rfe.summarize_e(episodes, traces_dir, results_dir)
+        assert summary["baseline_pairs_checked"] == 72  # 36 sixty-vehicle + 36 null runs
+
+    @pytest.mark.parametrize("arm_index", [0, 1])  # a 60-vehicle run, a null run
+    def test_a_pair_that_differs_before_the_pulse_is_refused(self, tmp_path, arm_index):
+        """Amendment 3, C3: the baseline is not the same run."""
+        episodes, traces_dir, results_dir = self._block_e(tmp_path)
+        path = Path(episodes[arm_index]["trace_file"])
+        data = json.loads(path.read_text())
+        data["trace"][5]["density"][3] += 1e-6  # t = 1,150 s
+        path.write_text(json.dumps(data))
+        with pytest.raises(SystemExit, match="at 1150 s, before the pulse at 1200 s"):
+            rfe.summarize_e(episodes, traces_dir, results_dir)
+
+    def test_a_difference_after_the_pulse_start_is_allowed(self, tmp_path):
+        episodes, traces_dir, results_dir = self._block_e(tmp_path)
+        path = Path(episodes[1]["trace_file"])
+        data = json.loads(path.read_text())
+        data["trace"][10]["density"][3] += 1e-6  # t = 1,200 s, the pulse start
+        path.write_text(json.dumps(data))
+        assert rfe.summarize_e(episodes, traces_dir, results_dir)["baseline_pairs_checked"] == 72
+
     def test_a_level_with_nine_resolved_sites_reports_no_certificate(self, tmp_path):
         """Amendment 2, B2: fewer than 10 of 12 resolved, no certificate and no p_min."""
         episodes, traces_dir, results_dir = self._block_e(
