@@ -56,7 +56,8 @@ from train_mainz_src import SCENARIOS  # noqa: E402
 BLOCKS = ("A", "B", "C", "D", "E")
 DEFAULT_SEEDS = tuple(range(16, 31))
 DEFAULT_ARTEFACT = REPO_ROOT / "results" / "feed" / "feed_process.json"
-DEFAULT_CHECKPOINT = REPO_ROOT / "results" / "checkpoints" / "mainz_here_best.pt"
+#: Amendment 1: every block uses the `here` checkpoint retrained under the cap.
+DEFAULT_CHECKPOINT = REPO_ROOT / "results" / "checkpoints" / "mainz_here_cap_best.pt"
 COMMITTED_EVALUATION = REPO_ROOT / "results" / "evaluation" / "mainz_paired_seeds.jsonl"
 P_Q = 10.0
 D_OFFSETS = (-20.0, -5.0, 0.0, 5.0, 10.0)
@@ -904,8 +905,12 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
         if run_episode_factory is None:
             import evaluate_mainz_checkpoints as emc
 
-            model = emc.load_arm_model("here", checkpoint.parent,
-                                       emc._num_segments(SCENARIOS["mainz"])).model
+            if not checkpoint.exists():
+                raise SystemExit(f"{checkpoint} does not exist: run Amendment 1's retraining "
+                                 "(scripts/train_mainz_src.py --save-as "
+                                 "results/checkpoints/mainz_here_cap) or pass --checkpoint")
+            model = emc._build_and_load(checkpoint, emc.CHECKPOINT_FEATURES["here"],
+                                        emc._num_segments(SCENARIOS["mainz"]))
             run_episode_factory = episode_runner
     for block in args.block:
         if args.summarize_only:

@@ -4,6 +4,17 @@
     .venv/bin/python scripts/evaluate_mainz_checkpoints.py \\
         > results/evaluation/mainz_paired_seeds.log
 
+Plan Amendment 1 re-runs the four arms on the retrained checkpoints under the
+maximum-speed cap, into new files beside the committed ones:
+
+    .venv/bin/python scripts/evaluate_mainz_checkpoints.py \\
+        --arms no_control here src zeroed_head --checkpoint-suffix _cap \\
+        --out-name mainz_paired_seeds_cap > results/evaluation/mainz_paired_seeds_cap.log
+
+An existing evaluation is never replaced unless `--overwrite` is passed. The committed
+`mainz_paired_seeds.*` were produced with the legacy `setSpeed` actuation
+(`--actuation set_speed` reproduces them).
+
 Reads `results/checkpoints/mainz_{here,src}_best.pt` and never writes them. For each
 arm and each seed it runs one episode, then reports the paired gain over no control:
 each seed is one traffic realisation that every arm ran, so the seed's contribution
@@ -135,6 +146,11 @@ def _build_and_load(checkpoint_path: Path, features: tuple[str, ...],
     return model
 
 
+def _actuation_kwargs(actuation: str) -> dict:
+    """`{}` for the default cap, so the default call is the one the tests' doubles take."""
+    return {} if actuation == "max_speed" else {"actuation": actuation}
+
+
 def _checkpoint_name_for_arm(name: str) -> str:
     """The checkpoint file's own name for `name`: `zeroed_head` has no checkpoint of
     its own and reads `ZEROED_HEAD_BASE_ARM`'s file instead, so it can never drift
@@ -143,8 +159,9 @@ def _checkpoint_name_for_arm(name: str) -> str:
     return ZEROED_HEAD_BASE_ARM if name == "zeroed_head" else name
 
 
-def checkpoint_path_for_arm(name: str, checkpoint_dir: Path) -> Path:
-    return checkpoint_dir / f"mainz_{_checkpoint_name_for_arm(name)}_best.pt"
+def checkpoint_path_for_arm(name: str, checkpoint_dir: Path, suffix: str = "") -> Path:
+    """`mainz_{arm}{suffix}_best.pt`; the suffix `_cap` names Amendment 1's retraining."""
+    return checkpoint_dir / f"mainz_{_checkpoint_name_for_arm(name)}{suffix}_best.pt"
 
 
 def _file_sha256(path: Path) -> str:
@@ -179,7 +196,8 @@ class LoadedArm:
     modification: str | None = None
 
 
-def load_arm_model(name: str, checkpoint_dir: Path, num_segments: int) -> LoadedArm:
+def load_arm_model(name: str, checkpoint_dir: Path, num_segments: int,
+                   suffix: str = "") -> LoadedArm:
     """Bind a trained arm's checkpoint, feature tuple, path and digest, and load it.
 
     `zeroed_head` loads `ZEROED_HEAD_BASE_ARM`'s checkpoint and then zeros its
@@ -196,7 +214,7 @@ def load_arm_model(name: str, checkpoint_dir: Path, num_segments: int) -> Loaded
     if checkpoint_name not in CHECKPOINT_FEATURES:
         raise ValueError(f"{name!r} has no checkpoint; only here/src are trained arms")
     features = CHECKPOINT_FEATURES[checkpoint_name]
-    checkpoint_path = checkpoint_path_for_arm(name, checkpoint_dir)
+    checkpoint_path = checkpoint_path_for_arm(name, checkpoint_dir, suffix)
     model = _build_and_load(checkpoint_path, features, num_segments)
     modification = None
     if name == "zeroed_head":
@@ -525,7 +543,8 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
         duration_s: float = DEFAULT_DURATION_S,
         window_start_s: float = DEFAULT_WINDOW_START_S,
         checkpoint_dir: Path, out_dir: Path, scenario: str = "mainz",
-        provenance_start: dict | None = None) -> dict:
+        provenance_start: dict | None = None, checkpoint_suffix: str = "",
+        out_name: str = "mainz_paired_seeds", actuation: str = "max_speed") -> dict:
     """Run every (arm, seed) episode once, sequentially, and write both artifacts.
 
     Sequential and strictly one environment at a time: `libsumo` is process-global
@@ -551,7 +570,9 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
     for name in arms:
         if name == "no_control":
             continue
-        loaded = load_arm_model(name, checkpoint_dir, num_segments)
+        loaded = (load_arm_model(name, checkpoint_dir, num_segments) if not checkpoint_suffix
+                  else load_arm_model(name, checkpoint_dir, num_segments,
+                                      suffix=checkpoint_suffix))
         assert loaded.name == name, (
             f"load_arm_model({name!r}, ...) returned a LoadedArm bound to "
             f"{loaded.name!r}; its model, features, checkpoint path and sha256 all "
@@ -578,13 +599,15 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
         "departures_within_episode": _departures_within_episode(paths, duration_s),
         "scenario": scenario,
         "action_set": "SPEED_ACTION_FRACTIONS",
+        "actuation": actuation,
+        "checkpoint_suffix": checkpoint_suffix,
         "checkpoints": checkpoints_used,
         "gate_entries": {name: gate_for_arm(name) for name in arms},
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    jsonl_path = out_dir / "mainz_paired_seeds.jsonl"
-    partial_jsonl_path = out_dir / "mainz_paired_seeds.jsonl.partial"
+    jsonl_path = out_dir / f"{out_name}.jsonl"
+    partial_jsonl_path = out_dir / f"{out_name}.jsonl.partial"
     per_seed: dict[str, dict[int, dict]] = {name: {} for name in arms}
 
     with partial_jsonl_path.open("w") as handle:
@@ -599,12 +622,14 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
                     # built. HERE_FEATURES is passed because the parameter is
                     # positional, not because it does anything here.
                     metrics = evaluate_no_control((seed,), HERE_FEATURES, duration_s,
-                                                 step_length, window_start_s, paths)
+                                                 step_length, window_start_s, paths,
+                                                 **_actuation_kwargs(actuation))
                 else:
                     loaded = loaded_arms[name]
                     metrics = run_episode(loaded.model, seed, loaded.features,
                                           duration_s, 0.0, None, step_length,
-                                          window_start_s, gate_for_arm(name), paths)
+                                          window_start_s, gate_for_arm(name), paths,
+                                          **_actuation_kwargs(actuation))
                 record = _episode_record(name, seed, metrics)
                 per_seed[name][seed] = _compact_metrics(metrics)
                 handle.write(json.dumps(record) + "\n")
@@ -635,8 +660,8 @@ def run(*, arms: tuple[str, ...] = DEFAULT_ARMS, seeds: tuple[int, ...] = DEFAUL
     # left completely untouched rather than paired with this run's summary, or with
     # no summary at all -- a narrower re-run must not be able to make a wider
     # previous run's JSONL disappear until its own replacement is actually done (F4).
-    summary_path = out_dir / "mainz_paired_seeds.json"
-    tmp_path = out_dir / "mainz_paired_seeds.json.tmp"
+    summary_path = out_dir / f"{out_name}.json"
+    tmp_path = out_dir / f"{out_name}.json.tmp"
     tmp_path.write_text(json.dumps(summary, indent=1))
     tmp_path.rename(summary_path)
     partial_jsonl_path.rename(jsonl_path)
@@ -683,7 +708,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="flow is counted only from here; the ramp-up before it "
                              "is excluded from every reported rate")
     parser.add_argument("--checkpoint-dir", default="results/checkpoints")
+    parser.add_argument("--checkpoint-suffix", default="",
+                        help="read mainz_{arm}SUFFIX_best.pt; _cap for Amendment 1's "
+                             "retrained checkpoints")
     parser.add_argument("--out", default="results/evaluation")
+    parser.add_argument("--out-name", default="mainz_paired_seeds",
+                        help="write OUT_NAME.json and OUT_NAME.jsonl; "
+                             "mainz_paired_seeds_cap for Amendment 1's evaluation")
+    parser.add_argument("--actuation", choices=("max_speed", "set_speed"),
+                        default="max_speed",
+                        help="max_speed caps each controlled vehicle's maximum speed "
+                             "(Amendment 1); set_speed is the legacy actuation the "
+                             "committed rows were produced with")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="replace an existing OUT_NAME.json/.jsonl; without it an "
+                             "existing evaluation is never replaced")
     return parser
 
 
@@ -696,6 +735,11 @@ def main(argv: list[str] | None = None) -> int:
     # should fail here rather than after 45 episodes have already run (F5, F6).
     _validate_no_duplicates(arms=tuple(args.arms), seeds=tuple(args.seeds))
     _validate_seed_count(tuple(args.seeds))
+    existing = [str(out_dir / f"{args.out_name}{ext}") for ext in (".json", ".jsonl")
+                if (out_dir / f"{args.out_name}{ext}").exists()]
+    if existing and not args.overwrite:
+        raise SystemExit(f"refusing to replace {existing}: pass --out-name for a new "
+                         "evaluation, or --overwrite to replace it")
 
     # Sampled once and passed into `run()` below, rather than each calling
     # `_provenance()` independently: two reads moments apart are not guaranteed to
@@ -718,7 +762,9 @@ def main(argv: list[str] | None = None) -> int:
                   step_length=args.step_length, duration_s=args.duration_s,
                   window_start_s=args.window_start_s, checkpoint_dir=checkpoint_dir,
                   provenance_start=provenance_start,
-                  out_dir=out_dir, scenario=args.scenario)
+                  out_dir=out_dir, scenario=args.scenario,
+                  checkpoint_suffix=args.checkpoint_suffix, out_name=args.out_name,
+                  actuation=args.actuation)
     elapsed = time.time() - started
 
     print()
@@ -731,8 +777,8 @@ def main(argv: list[str] | None = None) -> int:
               f"+/- {stats['two_se']:.1f} veh/h ({stats['percent']:+.1f}%) -- {status}")
 
     commit_display = summary["commit"][:12] if summary["commit"] else "unavailable"
-    print(f"\nwrote {out_dir / 'mainz_paired_seeds.json'} and "
-          f"{out_dir / 'mainz_paired_seeds.jsonl'} in {elapsed:.0f}s, at commit "
+    print(f"\nwrote {out_dir / (args.out_name + '.json')} and "
+          f"{out_dir / (args.out_name + '.jsonl')} in {elapsed:.0f}s, at commit "
           f"{commit_display}")
     return 0
 

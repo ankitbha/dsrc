@@ -168,8 +168,11 @@ class TestSummaries:
 
 @pytest.mark.parametrize("block", rfe.BLOCKS)
 def test_one_600_s_episode_of_each_block_writes_a_line_a_trace_and_a_summary(block, tmp_path):
+    # The cap checkpoints do not exist until Amendment 1's retraining has run; the smoke
+    # only proves the entry point, so it reads the committed checkpoint.
     argv = ["--block", block, "--smoke", "--results-dir", str(tmp_path / "results"),
-            "--traces-dir", str(tmp_path / "traces")]
+            "--traces-dir", str(tmp_path / "traces"),
+            "--checkpoint", str(REPO_ROOT / "results" / "checkpoints" / "mainz_here_best.pt")]
     if block == "A":
         argv.append("--allow-placeholder")
     assert rfe.main(argv) == 0
@@ -331,3 +334,11 @@ def test_no_control_episodes_are_not_counted_as_controlled():
     assert counts["controlled_episodes_with_collisions"] == 0
     assert counts["controlled_episodes"] == 1
     assert counts["actuations"] == ["unrecorded"]
+
+
+def test_the_default_checkpoint_is_the_cap_one_and_a_missing_one_is_refused(tmp_path):
+    assert rfe.DEFAULT_CHECKPOINT.name == "mainz_here_cap_best.pt"
+    with pytest.raises(SystemExit, match="does not exist"):
+        rfe.main(["--block", "C", "--smoke", "--results-dir", str(tmp_path / "r"),
+                  "--traces-dir", str(tmp_path / "t"),
+                  "--checkpoint", str(tmp_path / "missing_best.pt")])
