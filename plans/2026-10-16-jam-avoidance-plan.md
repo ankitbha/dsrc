@@ -916,3 +916,16 @@ Recorded by the orchestrator before implementation, so that no stage stops to as
   for this program only). Open item 1 is reported to the author with the results.
 - **Models:** the implementer and the validator both run on Opus, as the author asked for the
   previous program.
+
+## Amendment 1 (2026-10-16, during implementation; orchestrator)
+
+**Block L adds the lag multiplier `m = 4`.** Wang et al. (TRR 2018, arXiv 1711.02688) measured
+the latency of three commercial GPS-probe speed feeds against Bluetooth re-identification on
+freeways in three states: the time from a speed change on the road to its appearance in the vendor
+data had a mean of 4.4 minutes and a standard deviation of 2.3 minutes. That latency is upstream of
+the publication-to-receipt lag the polling measures, so the plan's `m = 2` (about 180 s of total
+delay at the polling preview's `L_bar`) does not reach it. `m = 4` gives `D = 4 L_bar + P_q`, about
+350 s, which is the content age a vehicle acts on if the feed's aggregation latency is near the
+reported mean. Block L becomes `m` in {0, 2, 4} on B9 and I_exit for the lookahead, the plan alone
+and the best model: 90 more episodes, about 45 minutes. Figure 3's lag axis is 0, 1, 2, 4. The
+cut order of section 8.2 is unchanged, and `m = 4` is cut after `m = 0`.
