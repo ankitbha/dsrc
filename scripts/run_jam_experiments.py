@@ -342,8 +342,12 @@ def read_selection(path: Path, *, feed_sha: str | None, camera_sha: str | None,
     raw = Path(path).read_bytes()
     data = json.loads(raw)
     seeds = sorted(set(data.get("seeds") or []))
-    if not seeds or set(seeds) - set(SELECTION_SEEDS):
-        raise SystemExit(f"{path} lists seeds {seeds}; a selection reads seeds 11-15 only")
+    if seeds != list(SELECTION_SEEDS):
+        raise SystemExit(f"{path} lists seeds {seeds}; a selection is made on seeds 11-15, "
+                         "all of them (validation R2-1)")
+    if not data.get("best"):
+        raise SystemExit(f"{path} selected no best model ({data.get('decision')}); blocks M "
+                         "to K need a complete block S")
     for name, expected, recorded in (("feed artefact", feed_sha, data.get("feed_artefact_sha256")),
                                      ("camera model", camera_sha, data.get("camera_model_sha256")),
                                      ("predictor", predictor_sha, data.get("predictor_sha256"))):
@@ -814,14 +818,47 @@ def summarize_g(episodes: list[dict]) -> dict[str, Any]:
             "decision": decision}
 
 
-def summarize_s(episodes: list[dict], context: Context) -> dict[str, Any]:
-    """Criterion C over the selection seeds only (section 5.7)."""
+def _s_missing(episodes: list[dict]) -> dict[str, list[int]]:
+    """Per `arm/variant/scenario` of block S, the seeds 11-15 without a record."""
+    have: dict[str, set[int]] = {}
+    for r in episodes:
+        have.setdefault(f"{r['arm']}/{r['variant']}/{r['scenario']}", set()).add(r["seed"])
+    missing = {}
+    for spec in block_specs("S"):
+        cell = f"{spec.arm}/{spec.variant}/{spec.scenario}"
+        if spec.seed not in have.get(cell, set()):
+            missing.setdefault(cell, []).append(spec.seed)
+    return missing
+
+
+def summarize_s(episodes: list[dict], context: Context,
+                identity: tuple | None = None) -> dict[str, Any]:
+    """Criterion C over the selection seeds only (section 5.7).
+
+    Nothing is selected unless no control, the plan and every candidate have all of seeds
+    11-15 on all six scenarios (validation R2-1); the decision then says which cells are
+    missing. The provenance hashes are the ones block S's episodes ran under, its headers'
+    `identity` (validation R2-2).
+    """
     from src.analysis.jam_metrics import SELECTION_SCENARIOS, criterion_c
 
     outside = sorted({r["seed"] for r in episodes} - set(SELECTION_SEEDS))
     if outside and not context.smoke:
         raise SystemExit(f"the selection reads seeds 11-15 only; block S has records on "
                          f"{outside}")
+    provenance = {"feed_artefact_sha256": identity[1] if identity else None,
+                  "camera_model_sha256": identity[2] if identity else None,
+                  "predictor_sha256": identity[3] if identity else None}
+    missing = _s_missing(episodes)
+    if missing:
+        return {"block": "S", "criterion": "C (plan section 5.7)",
+                "decision": (f"incomplete: {len(missing)} arm-scenario cells lack seeds of "
+                             "11-15; nothing is selected"),
+                "missing": missing, "seeds": sorted({r["seed"] for r in episodes}),
+                "candidates": {}, "excluded": {},
+                "selected": {"lookahead": None, "rule": None, "learned": None}, "best": None,
+                "smoke_note": ("smoke run: nothing is selected" if context.smoke else None),
+                **provenance}
     J: dict[str, dict[str, dict[int, float]]] = {}
     for r in episodes:
         name = r["arm"] if r["variant"] == "-" else f"{r['arm']}/{r['variant']}"
@@ -887,22 +924,17 @@ def summarize_s(episodes: list[dict], context: Context) -> dict[str, Any]:
             return {"theta": float(variant[2:])}
         return {}
 
-    if context.smoke:
-        # A smoke run's seeds are not selection seeds: nothing is selected from them.
-        look = rule = learned = best = None
     return {
         "block": "S", "criterion": "C (plan section 5.7)", "seeds": sorted({r["seed"] for r in episodes}),
-        "smoke_note": ("smoke run: candidates computed, nothing selected" if context.smoke
-                       else None),
+
         "scenarios": scenarios, "candidates": candidates, "excluded": excluded,
         "selected": {"lookahead": params(look) or None, "rule": params(rule) or None,
                      "learned": params(learned) or None},
         "best": ({"arm": best.split("/")[0], "params": params(best), "name": best,
                   "C": pool[best]["C"]} if best else None),
         "tie_rule": f"within {C_TIE} of the lowest C, the highest BG served flow",
-        "feed_artefact_sha256": context.feed.get("artefact_sha256"),
-        "camera_model_sha256": _sha256(context.camera_model),
-        "predictor_sha256": _sha256(context.predictor),
+        "decision": "selected" if best else "selected nothing: no candidate qualifies",
+        "missing": {}, **provenance,
     }
 
 
@@ -967,7 +999,16 @@ def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]
     if block == "G":
         summary = summarize_g(episodes)
     elif block == "S":
-        summary = summarize_s(episodes, context)
+        identity = header_identity(headers[-1]) if headers else None
+        if identity is not None:
+            # Validation R2-2: the summary is the selection block S's episodes made, so the
+            # camera model and predictor given now must be the ones they ran.
+            for name, recorded, present in (("camera model", identity[2], context.camera_model),
+                                            ("predictor", identity[3], context.predictor)):
+                if recorded is not None and recorded != _sha256(present):
+                    raise SystemExit(f"block S ran {name} {recorded}; {present} has "
+                                     f"{_sha256(present)}. Summarise with the files it ran.")
+        summary = summarize_s(episodes, context, identity)
     elif block in ("T", "T_dagger"):
         summary = {"block": block, "rows": _rows(episodes),
                    "samples_files": sorted(r["samples_file"] for r in episodes

@@ -511,3 +511,102 @@ def test_block_g_smoke_runs_end_to_end(tmp_path):
         assert trace["trace"] and trace["write_log"]
         assert e["jam"]["cap_s"] == 600.0
     assert headers[0]["camera_model"] is None
+
+
+def _s_records(jam=None, bg_flow=None, collide=None, above=None, seeds=None, drop=None):
+    """One record for every block S spec (seeds 11-15, six scenarios), as summarize_s reads
+    them. `jam(name)` gives a candidate's jam time on [900, 3600] s; no control 40, plan 20."""
+    jam = jam or (lambda name: 19.5)
+    out = []
+    for s in rje.block_specs("S", seeds=seeds):
+        name = s.arm if s.variant == "-" else f"{s.arm}/{s.variant}"
+        if drop and drop(s):
+            continue
+        j = {"no_control": 40.0, "plan": 20.0}.get(name, jam(name))
+        flow = (bg_flow or {}).get(name, 3000.0) if s.scenario == "BG" else 3000.0
+        out.append({"arm": s.arm, "variant": s.variant, "scenario": s.scenario, "seed": s.seed,
+                    "flow": flow, "active_share": 0.1, "return": 1.0,
+                    "jam": {"jam_time_min_900_3600": j, "jam_time_min": j, "prevented": False,
+                            "onset_s": 1000.0, "start_s": 900.0, "cap_s": 3600.0,
+                            "held_min": 0.0, "pending_min": 0.0, "drained": True,
+                            "drain_s": 1.0},
+                    "colliding_vehicles": 1 if collide == name and s.seed == 13 else 0,
+                    "collision_teleports": 0,
+                    "writes_above_plan": 1 if above == name and s.seed == 12 else 0})
+    return out
+
+
+class TestSelectionCompleteness:
+    """Validation R2-1: block S selects only on seeds 11-15 of every arm on all six scenarios."""
+
+    def _ctx(self):
+        context = rje.Context(camera_model=None, predictor=None)
+        context.feed = {"artefact_sha256": "f"}
+        return context
+
+    def test_complete_data_selects(self):
+        out = rje.summarize_s(_s_records(), self._ctx())
+        assert out["decision"] == "selected" and out["best"] is not None
+
+    def test_a_seed_subset_selects_nothing(self):
+        out = rje.summarize_s(_s_records(seeds=[11, 12]), self._ctx())
+        assert out["decision"].startswith("incomplete") and out["best"] is None
+        assert out["selected"] == {"lookahead": None, "rule": None, "learned": None}
+        assert "plan/-/B5" in out["missing"] and out["missing"]["plan/-/B5"] == [13, 14, 15]
+
+    def test_a_missing_scenario_selects_nothing(self):
+        out = rje.summarize_s(_s_records(drop=lambda s: s.scenario == "I_mid"), self._ctx())
+        assert out["decision"].startswith("incomplete") and out["best"] is None
+        assert out["missing"]["no_control/-/I_mid"] == [11, 12, 13, 14, 15]
+
+    def test_a_candidate_missing_from_one_scenario_selects_nothing(self):
+        out = rje.summarize_s(_s_records(drop=lambda s: s.arm == "rule" and s.scenario == "B5"),
+                              self._ctx())
+        assert out["best"] is None and out["missing"]["rule/m0.1/B5"] == [11, 12, 13, 14, 15]
+
+    def test_read_selection_needs_seeds_11_to_15_and_a_best(self, tmp_path):
+        with pytest.raises(SystemExit):
+            rje.read_selection(_selection_file(tmp_path, seeds=[11, 12, 13, 14]), feed_sha="f",
+                               camera_sha="c", predictor_sha="p")
+        with pytest.raises(SystemExit):
+            rje.read_selection(_selection_file(tmp_path, best=None), feed_sha="f",
+                               camera_sha="c", predictor_sha="p")
+
+
+class TestSelectionProvenance:
+    """Validation R2-2: S_summary.json takes its hashes from block S's own headers."""
+
+    def _block(self, tmp_path, camera_sha, predictor_sha):
+        header = {"type": "header", "checkpoint": {"sha256": "k"},
+                  "feed_artefact": {"artefact_sha256": "f"},
+                  "camera_model": {"sha256": camera_sha}, "predictor": {"sha256": predictor_sha},
+                  "config": {"smoke": False}}
+        lines = [json.dumps(header)] + [json.dumps({"type": "episode", "key": f"k{n}", **r})
+                                        for n, r in enumerate(_s_records())]
+        (tmp_path / "S.jsonl").write_text("\n".join(lines) + "\n")
+
+    def _files(self, tmp_path, camera_text, predictor_text):
+        camera, predictor = tmp_path / "cam.json", tmp_path / "pred.json"
+        camera.write_text(camera_text)
+        predictor.write_text(predictor_text)
+        return camera, predictor
+
+    def test_the_summary_records_the_hashes_block_s_ran_under(self, tmp_path):
+        camera, predictor = self._files(tmp_path, "camera", "predictor")
+        self._block(tmp_path, hashlib.sha256(b"camera").hexdigest(),
+                    hashlib.sha256(b"predictor").hexdigest())
+        context = rje.Context(camera_model=camera, predictor=predictor)
+        context.feed = {"artefact_sha256": "f"}
+        summary = rje.summarize("S", tmp_path, context)
+        assert summary["camera_model_sha256"] == hashlib.sha256(b"camera").hexdigest()
+        assert summary["predictor_sha256"] == hashlib.sha256(b"predictor").hexdigest()
+        assert summary["feed_artefact_sha256"] == "f"
+
+    def test_a_camera_model_changed_since_block_s_is_refused(self, tmp_path):
+        camera, predictor = self._files(tmp_path, "camera refitted", "predictor")
+        self._block(tmp_path, hashlib.sha256(b"camera").hexdigest(),
+                    hashlib.sha256(b"predictor").hexdigest())
+        context = rje.Context(camera_model=camera, predictor=predictor)
+        context.feed = {"artefact_sha256": "f"}
+        with pytest.raises(SystemExit):
+            rje.summarize("S", tmp_path, context)
