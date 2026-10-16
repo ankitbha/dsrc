@@ -9,7 +9,8 @@ maximum-speed cap, into new files beside the committed ones:
 
     .venv/bin/python scripts/evaluate_mainz_checkpoints.py \\
         --arms no_control here src zeroed_head --checkpoint-suffix _cap \\
-        --out-name mainz_paired_seeds_cap > results/evaluation/mainz_paired_seeds_cap.log
+        --out-name mainz_paired_seeds_cap \\
+        --log results/evaluation/mainz_paired_seeds_cap.log
 
 An existing evaluation is never replaced unless `--overwrite` is passed. The committed
 `mainz_paired_seeds.*` were produced with the legacy `setSpeed` actuation
@@ -720,6 +721,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="max_speed caps each controlled vehicle's maximum speed "
                              "(Amendment 1); set_speed is the legacy actuation the "
                              "committed rows were produced with")
+    parser.add_argument("--log", default=None,
+                        help="append everything printed to this file, opened only after "
+                             "the refusal to replace an existing evaluation")
     parser.add_argument("--overwrite", action="store_true",
                         help="replace an existing OUT_NAME.json/.jsonl; without it an "
                              "existing evaluation is never replaced")
@@ -740,6 +744,37 @@ def main(argv: list[str] | None = None) -> int:
     if existing and not args.overwrite:
         raise SystemExit(f"refusing to replace {existing}: pass --out-name for a new "
                          "evaluation, or --overwrite to replace it")
+    if args.log is None:
+        return _evaluate(args, out_dir, checkpoint_dir)
+    # Opened only now, after the refusal: a shell `>` would have truncated it already.
+    log_path = Path(args.log) if Path(args.log).is_absolute() else REPO_ROOT / args.log
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a") as log:
+        original = sys.stdout
+        sys.stdout = _Tee(original, log)
+        try:
+            return _evaluate(args, out_dir, checkpoint_dir)
+        finally:
+            sys.stdout = original
+
+
+class _Tee:
+    """Write to the terminal and the log at once."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+def _evaluate(args, out_dir: Path, checkpoint_dir: Path) -> int:
 
     # Sampled once and passed into `run()` below, rather than each calling
     # `_provenance()` independently: two reads moments apart are not guaranteed to

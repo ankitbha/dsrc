@@ -123,14 +123,47 @@ class TestTheCapEvaluation:
         assert _digests() == before
 
 
+class TestLogs:
+    """Amendment 2, B3: a refused run leaves an existing log exactly as it was."""
+
+    def test_a_refused_training_run_does_not_touch_its_log(self, tmp_path):
+        (tmp_path / "mainz_here_cap_best.pt").write_bytes(b"committed")
+        log = tmp_path / "mainz_here_cap_training.log"
+        log.write_text("the earlier run's output\n")
+        with pytest.raises(SystemExit, match="refusing to overwrite"):
+            tms.main(["--save-as", str(tmp_path / "mainz_here_cap"), "--log", str(log)])
+        assert log.read_text() == "the earlier run's output\n"
+
+    def test_a_refused_evaluation_does_not_touch_its_log(self, tmp_path):
+        (tmp_path / "mainz_paired_seeds_cap.json").write_text("{}")
+        log = tmp_path / "mainz_paired_seeds_cap.log"
+        log.write_text("kept\n")
+        with pytest.raises(SystemExit, match="refusing to replace"):
+            emc.main(["--out", str(tmp_path), "--out-name", "mainz_paired_seeds_cap",
+                      "--log", str(log)])
+        assert log.read_text() == "kept\n"
+
+
 def test_one_600_s_training_episode_under_the_cap(tmp_path):
     before = _digests()
     prefix = tmp_path / "mainz_here_cap"
+    log = tmp_path / "mainz_here_cap_training.log"
+    log.write_text("earlier\n")
     assert tms.main(["--features", "here", "--episodes", "1", "--duration-s", "600",
                      "--step-length", "0.5", "--window-start-s", "900",
-                     "--save-as", str(prefix)]) == 0
+                     "--save-as", str(prefix), "--log", str(log)]) == 0
     result = json.loads((tmp_path / "mainz_here_cap_result.json").read_text())
     assert (tmp_path / "mainz_here_cap_best.pt").exists()
+    # Amendment 2, B3: the seed split, the tree and the saved file's digest.
+    assert result["train_seeds"] == list(range(1, 11))
+    assert result["validation_seeds"] == list(range(11, 16))
+    assert result["test_seeds"] == list(range(16, 21))
+    assert result["commit"] and len(result["commit"]) == 40
+    assert isinstance(result["dirty"], bool)
+    assert result["checkpoint_sha256"] == hashlib.sha256(
+        (tmp_path / "mainz_here_cap_best.pt").read_bytes()).hexdigest()
+    text = log.read_text()
+    assert text.startswith("earlier\n") and "best checkpoint: episode 0" in text
     assert result["actuation"] == "max_speed"
     assert result["config"]["episodes"] == 1 and result["config"]["step_length_s"] == 0.5
     assert result["test"]["colliding_vehicles"] == 0

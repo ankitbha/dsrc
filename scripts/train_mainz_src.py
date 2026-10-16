@@ -15,14 +15,17 @@ Since plan Amendment 1 advice is applied as a maximum-speed cap (`--actuation
 max_speed`, the default). The retraining under it uses the published protocol and
 writes beside, never over, the committed checkpoints:
 
-    .venv/bin/python scripts/train_mainz_src.py --features here --episodes 80 \
-        --duration-s 2500 --step-length 0.5 --window-start-s 900 \
-        --save-as results/checkpoints/mainz_here_cap \
-        > results/checkpoints/mainz_here_cap_training.log
+    .venv/bin/python scripts/train_mainz_src.py --features here --episodes 80 \\
+        --duration-s 2500 --step-length 0.5 --window-start-s 900 \\
+        --save-as results/checkpoints/mainz_here_cap \\
+        --log results/checkpoints/mainz_here_cap_training.log
 
 and the same with `--features src --save-as results/checkpoints/mainz_src_cap`.
 `--save-as P` writes `P_best.pt` and `P_result.json` and refuses to start if either
-exists.
+exists. `--log` appends the run's output to the log only after that check, so a
+refused run leaves an existing log as it was (a shell `>` would truncate it first).
+The result file records the seed split, the git commit and dirty flag, and the saved
+checkpoint's sha256 (plan Amendment 2, B3).
 """
 from __future__ import annotations
 
@@ -193,12 +196,59 @@ def main(argv: list[str] | None = None) -> int:
                         help="max_speed caps each controlled vehicle's maximum speed "
                              "(plan Amendment 1); set_speed is the legacy actuation, under "
                              "which controlled vehicles collide")
+    parser.add_argument("--log", default=None,
+                        help="append everything printed to this file, opened only after "
+                             "--save-as has been checked")
     args = parser.parse_args(argv)
 
     features = HERE_FEATURES if args.features == "here" else SRC_FEATURES
     best_path, result_path = output_paths(args.out, args.features, args.save_as)
     best_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.log is None:
+        return _train(args, argv, features, best_path, result_path)
+    log_path = Path(args.log) if Path(args.log).is_absolute() else REPO_ROOT / args.log
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a") as log:
+        original = sys.stdout
+        sys.stdout = _Tee(original, log)
+        try:
+            return _train(args, argv, features, best_path, result_path)
+        finally:
+            sys.stdout = original
+
+
+class _Tee:
+    """Write to the terminal and the log at once."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+def _provenance() -> dict:
+    """Git commit and dirty flag of the tree the run trained from (None when unknown)."""
+    scripts = str(Path(__file__).resolve().parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from record_deployed_commit import _git_commit, _git_is_dirty
+
+    commit = _git_commit(REPO_ROOT)
+    return {"commit": commit, "dirty": _git_is_dirty(REPO_ROOT) if commit else None}
+
+
+def _train(args, argv, features, best_path: Path, result_path: Path) -> int:
+    import hashlib
+
     actuation = args.actuation
+    provenance = _provenance()
 
     gate = not args.no_gate_entries
     paths = SCENARIOS[args.scenario]
@@ -272,6 +322,10 @@ def main(argv: list[str] | None = None) -> int:
 
     result_path.write_text(json.dumps(
         {"scenario": args.scenario, "features": args.features, "actuation": actuation,
+         "train_seeds": list(TRAIN_SEEDS), "validation_seeds": list(VALIDATION_SEEDS),
+         "test_seeds": list(TEST_SEEDS),
+         "commit": provenance["commit"], "dirty": provenance["dirty"],
+         "checkpoint_sha256": hashlib.sha256(best_path.read_bytes()).hexdigest(),
          "command": list(argv) if argv is not None else sys.argv,
          "config": {"episodes": args.episodes, "duration_s": args.duration_s,
                     "step_length_s": args.step_length,
