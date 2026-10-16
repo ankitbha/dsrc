@@ -253,3 +253,38 @@ class TestCrossResolution:
         records = _records(5, frames_per_track=10)
         tables = ce.error_tables(records, "width_prior")
         assert tables["detection"]["source"] == "held_track"
+
+
+class TestPersistentRatioSpread:
+    def _tracks(self, sigma, n_tracks=400, off_centre=False, short=False, seed=1):
+        rng = np.random.default_rng(seed)
+        records = []
+        for track in range(n_tracks):
+            ratio = float(np.exp(sigma * rng.standard_normal()))
+            centre = 600.0 if off_centre else 360.0
+            for k in range(5 if short else 12):
+                wp = 30.0 + k
+                records.append({"type": "det", "run": "r", "track_id": track, "t": 0.2 * k,
+                                "frame_id": k, "box": [centre - 20, 800.0, centre + 20, 830.0],
+                                "width_prior_m": wp, "raw_ground_m": ratio * wp,
+                                "ema_wp_m": wp})
+        return records
+
+    def test_the_spread_of_per_track_ratios_is_measured_back(self):
+        out = ce.persistent_ratio_spread(self._tracks(0.2, n_tracks=2000))
+        assert out["tracks"] == 2000
+        assert out["relative_spread"] == pytest.approx(0.2, rel=0.1)
+        assert out["median_ratio"] == pytest.approx(1.0, abs=0.05)
+
+    def test_off_centre_boxes_and_short_tracks_are_left_out(self):
+        assert ce.persistent_ratio_spread(self._tracks(0.2, off_centre=True))["tracks"] == 0
+        assert ce.persistent_ratio_spread(self._tracks(0.2, short=True))["tracks"] == 0
+        assert ce.persistent_ratio_spread([])["relative_spread"] is None
+
+    def test_per_drive_values_are_kept(self):
+        records = self._tracks(0.1, n_tracks=100)
+        for r in self._tracks(0.4, n_tracks=100, seed=2):
+            records.append({**r, "run": "s"})
+        out = ce.persistent_ratio_spread(records)
+        assert set(out["per_drive"]) == {"r", "s"}
+        assert out["per_drive"]["r"]["relative_spread"] < out["per_drive"]["s"]["relative_spread"]

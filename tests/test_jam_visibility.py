@@ -134,6 +134,15 @@ class TestScenes:
         assert c.y[0] == pytest.approx(3.2)
 
 
+class TestSnapshotLimits:
+    def test_an_edge_longer_than_a_lane_block_is_refused(self):
+        # Lanes are packed into 100 km blocks of one sort key; a longer edge would let two
+        # lanes' positions collide, so it is refused rather than read wrongly.
+        geometry = {"A": EdgeGeometry(lanes=1, length_m=4.0e6, widths=(W,))}
+        with pytest.raises(ValueError):
+            LaneSnapshot.from_vehicles([], geometry, {}, t=0.0)
+
+
 class TestOcclusionRules:
     def test_general_computation_on_hand_cases(self):
         # Own lane: the nearer leader covers all of the farther one.

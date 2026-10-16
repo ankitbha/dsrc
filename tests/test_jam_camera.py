@@ -321,3 +321,82 @@ def test_camera_estimates_differ_from_the_truth_and_occlusion_lowers_them():
     assert len(regular) > 100
     assert all(differs[v] for v in regular)
     assert np.mean(without_occ) > np.mean(with_occ)
+
+
+class TestPersistentPairError:
+    """Amendment 3 (R2-4): one log-normal distance factor per (ego, leader) pair."""
+
+    def _scene(self, gap_by_leader: dict[str, float]):
+        vehicles = [vehicle("ego", 1, 100.0)]
+        for k, (vid, gap) in enumerate(gap_by_leader.items()):
+            vehicles.append(vehicle(vid, k % 3, 100.0 + gap + L))
+        return table_for(vehicles, [Ego("ego", "A", 1, 100.0)], R=100.0)
+
+    def test_the_factor_is_constant_over_a_pair_s_life(self):
+        cam = model().with_pair_sigma(0.3)
+        ratios = []
+        for gap in (60.0, 45.0, 30.0, 15.0):  # the leader closes in over four ticks
+            table = self._scene({"lead": gap})
+            det = cam.observe(table, np.random.default_rng(0), seed=7)
+            ratios.append(det.d_hat[0] / table.d[0])
+        assert max(ratios) - min(ratios) < 1e-12 and abs(ratios[0] - 1.0) > 1e-3
+
+    def test_the_factor_differs_across_pairs_and_seeds_and_repeats_within_a_seed(self):
+        cam = model().with_pair_sigma(0.3)
+        table = self._scene({"a": 20.0, "b": 40.0, "c": 60.0})
+        first = cam.observe(table, np.random.default_rng(0), seed=7).d_hat / table.d
+        again = cam.observe(table, np.random.default_rng(9), seed=7).d_hat / table.d
+        other = cam.observe(table, np.random.default_rng(0), seed=8).d_hat / table.d
+        assert len(set(np.round(first, 12))) == 3
+        np.testing.assert_allclose(first, again)
+        assert not np.allclose(first, other)
+
+    def test_the_factor_has_the_configured_spread_over_many_pairs(self):
+        # 3,000 pairs, each alone on its own one-lane edge.
+        cam = model(R_max=100.0).with_pair_sigma(0.25)
+        egos, vehicles, geometry = [], [], {}
+        for k in range(3000):
+            edge = f"E{k}"
+            geometry[edge] = EdgeGeometry(lanes=1, length_m=200.0, widths=(W,))
+            vehicles += [vehicle(f"e{k}", 0, 10.0, edge=edge),
+                         vehicle(f"l{k}", 0, 10.0 + 30.0 + L, edge=edge)]
+            egos.append(Ego(f"e{k}", edge, 0, 10.0))
+        snap = LaneSnapshot.from_vehicles(vehicles, geometry, {}, t=0.0)
+        table = CandidateTable.build(snap, egos, 100.0)
+        det = cam.observe(table, np.random.default_rng(0), seed=3)
+        assert det.detected.all() and len(det.d_hat) == 3000
+        logs = np.log(det.d_hat / table.d)
+        assert np.std(logs) == pytest.approx(0.25, rel=0.05)
+        assert abs(np.mean(logs)) < 0.02
+
+    def test_a_zero_spread_leaves_the_distance_as_it_was(self):
+        table = self._scene({"a": 20.0, "b": 40.0})
+        plain = model().observe(table, np.random.default_rng(0))
+        zero = model().with_pair_sigma(0.0).observe(table, np.random.default_rng(0), seed=5)
+        np.testing.assert_array_equal(plain.d_hat, zero.d_hat)
+        assert plain.d_hat.tolist() == table.d.tolist()
+
+    def test_bias_and_factor_multiply(self):
+        table = self._scene({"a": 40.0})
+        f = model().with_pair_sigma(0.3).observe(table, np.random.default_rng(0), seed=1).d_hat[0]
+        fb = model(bias=1.25).with_pair_sigma(0.3).observe(table, np.random.default_rng(0),
+                                                           seed=1).d_hat[0]
+        assert fb == pytest.approx(1.25 * f)
+
+    def test_a_positive_spread_needs_the_episode_seed(self):
+        with pytest.raises(ValueError):
+            model().with_pair_sigma(0.2).observe(self._scene({"a": 20.0}),
+                                                 np.random.default_rng(0))
+
+    def test_from_artefact_reads_the_stored_spread_and_allows_an_override(self, tmp_path):
+        artefact = {
+            "schema": "camera_error_model/1", "bin_m": 10.0, "sumo_table": "0.20",
+            "tables": {"0.20": {
+                "detection": {"p": [0.9]}, "distance_noise": {"sigma_ema_m": [0.5]},
+                "closing_rate_noise": {"sigma_v_mps": [0.2]},
+                "confidence": {"values": [[0.9]]}, "R_max_m": 10.0,
+                "persistent_error": {"relative_spread": 0.27}}}}
+        path = tmp_path / "camera.json"
+        path.write_text(json.dumps(artefact))
+        assert CameraModel.from_artefact(path).pair_sigma_log == 0.27
+        assert CameraModel.from_artefact(path, pair_sigma_log=0.1).pair_sigma_log == 0.1

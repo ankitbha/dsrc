@@ -603,6 +603,56 @@ def cross_resolution_table(reference: Iterable[dict], target_boxes: Mapping[tupl
             "p": [d / n if n else None for d, n in zip(detected, opportunities)]}
 
 
+#: Amendment 3 (R2-4): the tracks whose ground-plane / width-prior ratio is measured.
+RATIO_MIN_DETECTIONS: int = 10
+RATIO_CENTRE_FRACTION: float = 0.15
+
+
+def persistent_ratio_spread(records: Iterable[dict], frame_width: int = UPRIGHT_SHAPE[1]
+                            ) -> dict[str, Any]:
+    """The between-track spread of the ground-plane to width-prior distance ratio, as the
+    validator measured it (round 2, R2-4).
+
+    Per track, the median of `raw_ground_m / width_prior_m` over its detections whose box
+    centre lies within 15% of the frame width of the centre column, for tracks with at least
+    10 such detections; the spread is `1.4826 MAD` of those medians relative to their median.
+    It contains both estimators' per-vehicle errors, so as the spread of the width prior's
+    own it is an upper bound.
+    """
+    by_track: dict[tuple, list[float]] = {}
+    for r in records:
+        if r.get("type") != "det" or r.get("ema_wp_m") is None:
+            continue
+        box = r.get("box")
+        if not (r.get("raw_ground_m") and r.get("width_prior_m") and box):
+            continue
+        if abs((box[0] + box[2]) / 2.0 - frame_width / 2.0) >= RATIO_CENTRE_FRACTION * frame_width:
+            continue
+        by_track.setdefault((r.get("run"), r["track_id"]), []).append(
+            float(r["raw_ground_m"]) / float(r["width_prior_m"]))
+
+    def spread(medians: list[float]) -> dict[str, Any]:
+        if not medians:
+            return {"tracks": 0, "median_ratio": None, "mad_ratio": None,
+                    "relative_spread": None}
+        m = np.asarray(medians)
+        centre = float(np.median(m))
+        mad = float(MAD_SCALE * np.median(np.abs(m - centre)))
+        return {"tracks": len(m), "median_ratio": centre, "mad_ratio": mad,
+                "relative_spread": mad / centre if centre else None}
+
+    medians = {key: float(np.median(v)) for key, v in by_track.items()
+               if len(v) >= RATIO_MIN_DETECTIONS}
+    runs = sorted({run for run, _ in medians}, key=str)
+    return {**spread(list(medians.values())),
+            "per_drive": {run: spread([v for (r, _), v in medians.items() if r == run])
+                          for run in runs},
+            "rule": (f"per track, the median ground-plane / width-prior ratio over detections "
+                     f"within {RATIO_CENTRE_FRACTION:g} of the frame width of the centre "
+                     f"column, tracks with at least {RATIO_MIN_DETECTIONS}; 1.4826 MAD of "
+                     "the medians over their median")}
+
+
 def error_tables(records: Sequence[dict], method: str = PRIMARY_METHOD,
                  reference: Sequence[dict] | None = None,
                  raw_boxes: Mapping[tuple, list] | None = None) -> dict[str, Any]:
@@ -642,4 +692,5 @@ def error_tables(records: Sequence[dict], method: str = PRIMARY_METHOD,
         "confidence": confidence_table(records, distance),
         "bias_ratio": bias_ratio_table(records, distance),
         "first_detection": first_detection_table(records, distance), "R_max_m": r_max(detection),
+        "persistent_error": persistent_ratio_spread(records),
     }

@@ -148,12 +148,19 @@ def main(argv: list[str] | None = None) -> int:
         "sensitivity": {str(size): tables_for(frames_dir, size)
                         for size in args.sensitivity_imgsz},
     }
+    # Amendment 3 (R2-4): the SUMO camera's persistent pair spread is this group's.
+    artefact["pair_sigma_log"] = artefact["tables"][SUMO_TABLE]["persistent_error"]["relative_spread"]
+    artefact["pair_sigma_note"] = (
+        "sigma_log of the persistent per-(ego, leader) distance factor: the relative 1.4826 MAD "
+        "of per-track median ground-plane / width-prior ratios on the 0.20 s drives; it holds "
+        "both estimators' per-vehicle errors, so it is an upper bound on the width prior's")
     out = resolve(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(artefact, indent=1))
     table = artefact["tables"][SUMO_TABLE]
     print(f"wrote {out}: groups {sorted(artefact['tables'])}, SUMO table R_max "
-          f"{table['R_max_m']} m from {sum(table['detection']['opportunities'])} opportunities")
+          f"{table['R_max_m']} m from {sum(table['detection']['opportunities'])} opportunities, "
+          f"pair sigma_log {artefact['pair_sigma_log']}")
     return 0
 
 

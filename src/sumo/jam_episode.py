@@ -292,7 +292,8 @@ class JamEngine(FeedEngine):
         s_true = self._trend_true.update(ids, t, k_true_arm)
         est = s_hat = v_slope = None
         if self.camera is not None:
-            est = estimate(table, self.camera.observe(table, self._rng_camera), self.camera.R_eff)
+            est = estimate(table, self.camera.observe(table, self._rng_camera, seed=self.seed),
+                           self.camera.R_eff)
             s_hat = self._trend_k.update(ids, t, est.k_hat)
             v_slope = self._trend_speed.update(ids, t, est.mean_speed)
         if len(table.vehicle):
@@ -475,6 +476,8 @@ class JamEngine(FeedEngine):
             "sensor": self.arm.sensor,
             "camera_model": (self.camera.source if self.camera is not None else None),
             "camera_bias": (self.camera.bias if self.camera is not None else None),
+            "camera_pair_sigma_log": (self.camera.pair_sigma_log if self.camera is not None
+                                      else None),
             "correction": (self.correction.describe() if self.correction is not None
                            else self.lookahead.describe() if self.lookahead is not None
                            else None),

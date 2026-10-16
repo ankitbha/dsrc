@@ -32,13 +32,53 @@ class TestSpecs:
         # Amendment 1: m in {0, 2, 4} for the lookahead, the plan and the best model.
         assert len(rje.block_specs("L", selection=SELECTION)) == 3 * 3 * 2 * 15
         assert len(rje.block_specs("P", selection=SELECTION)) == 120
-        assert len(rje.block_specs("K", selection=SELECTION)) == 60
+        # Two biases at the stored pair spread, and half the spread at b = 1 (Amendment 3).
+        assert len(rje.block_specs("K", selection=SELECTION)) == 90
 
     def test_block_l_runs_the_three_lag_levels(self):
         specs = rje.block_specs("L", selection=SELECTION)
         assert sorted({s.m for s in specs}) == [0.0, 2.0, 4.0]
         assert {s.arm for s in specs} == {"lookahead", "plan", "rule"}
         assert {s.scenario for s in specs} == {"B9", "I_exit"}
+
+    def test_block_k_runs_half_the_stored_pair_spread(self):
+        specs = rje.block_specs("K", selection=SELECTION)
+        cells = {(s.bias, s.pair_sigma_scale) for s in specs}
+        assert cells == {(0.8, 1.0), (1.25, 1.0), (1.0, 0.5)}
+        half = [s for s in specs if s.pair_sigma_scale == 0.5]
+        assert len(half) == 30 and {s.scenario for s in half} == {"B9", "I_exit"}
+        assert all(s.arm == "rule" and s.variant.endswith("_ps0.5") for s in half)
+
+    def test_the_episode_runner_hands_each_spec_its_bias_and_pair_spread(self, tmp_path,
+                                                                         monkeypatch):
+        import src.sumo.jam_episode as je
+
+        artefact = {"schema": "camera_error_model/1", "bin_m": 10.0, "sumo_table": "0.20",
+                    "method": "width_prior",
+                    "tables": {"0.20": {"detection": {"p": [0.9]},
+                                        "distance_noise": {"sigma_ema_m": [0.5]},
+                                        "closing_rate_noise": {"sigma_v_mps": [0.2]},
+                                        "confidence": {"values": [[0.9]]}, "R_max_m": 10.0,
+                                        "persistent_error": {"relative_spread": 0.28}}}}
+        path = tmp_path / "camera.json"
+        path.write_text(json.dumps(artefact))
+        seen = []
+
+        def fake_episode(model, seed, scenario, arm, **kwargs):
+            seen.append(kwargs["camera"])
+            trace = [{"t": float(t), "speed_kmh": [50.0] * 12, "count": [1] * 12,
+                      "held": 0, "pending": 0} for t in range(0, 3610, 10)]
+            return {"trace": trace}
+
+        monkeypatch.setattr(je, "run_jam_episode", fake_episode)
+        context = rje.Context(camera_model=path)
+        runner = rje.episode_runner(None, context)
+        specs = rje.block_specs("K", selection=SELECTION)
+        for spec in (next(s for s in specs if s.bias == 0.8),
+                     next(s for s in specs if s.pair_sigma_scale == 0.5)):
+            runner(spec)
+        assert (seen[0].bias, seen[0].pair_sigma_log) == (0.8, 0.28)
+        assert (seen[1].bias, seen[1].pair_sigma_log) == (1.0, pytest.approx(0.14))
 
     def test_k_is_empty_when_the_best_model_reads_no_camera(self):
         plan_best = rje.Selection(4.0, 0.1, 0.45, "plan", {})

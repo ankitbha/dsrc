@@ -20,9 +20,12 @@ there. A successor lane whose offset is not one of them is not scanned for that 
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import lru_cache
+from statistics import NormalDist
 from typing import Any
 
 import numpy as np
@@ -39,6 +42,7 @@ FOV_HALF_TAN: float = HALF_WIDTH_PX / FX_PX
 DEPLOYED_RANGE_M: float = 80.0
 #: Camera draws are `default_rng(seed + CAMERA_SEED_OFFSET)` (plan J33).
 CAMERA_SEED_OFFSET: int = 5000
+_STANDARD_NORMAL = NormalDist()
 LANE_OFFSETS: tuple[int, ...] = (-1, 0, 1)
 
 # Rows of the global sort key are `lane_key * _SPAN + _PAD + back`; `_PAD` keeps a query
@@ -89,6 +93,10 @@ class LaneSnapshot:
         self.t = float(t)
         self.geometry = dict(geometry)
         self.successor = dict(successor)
+        too_long = [e for e, g in self.geometry.items() if g.length_m > _SPAN - 2.0 * _PAD]
+        if too_long:
+            raise ValueError(f"edges {too_long[:3]} exceed the {(_SPAN - 2 * _PAD) / 1000:g} km a "
+                             "lane's block of the sort key holds")
         self.lane_keys: dict[tuple[str, int], int] = {}
         for edge in sorted(self.geometry):
             for lane in range(self.geometry[edge].lanes):
@@ -440,6 +448,9 @@ class CameraModel:
     detection_loss: bool = True
     noise: bool = True
     source: dict[str, Any] | None = None
+    #: Amendment 3 (R2-4): the log-spread of a persistent per-(ego, leader) distance
+    #: factor; 0 turns it off.
+    pair_sigma_log: float = 0.0
 
     @classmethod
     def from_tables(cls, *, bin_m: float, p, sigma_m, sigma_v_mps, confidences, R_max: float,
@@ -453,9 +464,12 @@ class CameraModel:
                    source=source)
 
     @classmethod
-    def from_artefact(cls, path, bias: float = 1.0, table: str | None = None) -> "CameraModel":
+    def from_artefact(cls, path, bias: float = 1.0, table: str | None = None,
+                      pair_sigma_log: float | None = None) -> "CameraModel":
         """Read `results/jam/camera_error_model.json` (written by `fit_camera_model.py`):
-        its SUMO table (`sumo_table`, the 0.20 s drives) unless `table` names another."""
+        its SUMO table (`sumo_table`, the 0.20 s drives) unless `table` names another. The
+        persistent pair factor's spread is the table's stored `persistent_error` spread
+        unless `pair_sigma_log` overrides it."""
         import hashlib
         import json
         from pathlib import Path
@@ -469,7 +483,9 @@ class CameraModel:
         def column(values):
             return [math.nan if v is None else float(v) for v in values]
 
-        return cls.from_tables(
+        stored = (t.get("persistent_error") or {}).get("relative_spread")
+        spread = float(pair_sigma_log if pair_sigma_log is not None else (stored or 0.0))
+        model = cls.from_tables(
             bin_m=float(artefact["bin_m"]), p=column(t["detection"]["p"]),
             sigma_m=column(t["distance_noise"]["sigma_ema_m"]),
             sigma_v_mps=column(t["closing_rate_noise"]["sigma_v_mps"]),
@@ -478,7 +494,9 @@ class CameraModel:
                          for v in t["confidence"]["values"]],
             R_max=float(t["R_max_m"] or 0.0), bias=bias,
             source={"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
-                    "table": name, "method": artefact.get("method", t.get("method"))})
+                    "table": name, "method": artefact.get("method", t.get("method")),
+                    "stored_pair_sigma_log": stored})
+        return model.with_pair_sigma(spread)
 
     def with_switches(self, **switches: bool) -> "CameraModel":
         from dataclasses import replace
@@ -489,6 +507,13 @@ class CameraModel:
         from dataclasses import replace
 
         return replace(self, bias=float(bias))
+
+    def with_pair_sigma(self, sigma_log: float) -> "CameraModel":
+        from dataclasses import replace
+
+        if sigma_log < 0.0:
+            raise ValueError(f"a spread cannot be negative, got {sigma_log}")
+        return replace(self, pair_sigma_log=float(sigma_log))
 
     @property
     def R_eff(self) -> float:
@@ -514,13 +539,19 @@ class CameraModel:
     def sigma_v_at(self, d: np.ndarray) -> np.ndarray:
         return self._interp(self.sigma_v_mps, d)
 
-    def observe(self, table: CandidateTable, rng: np.random.Generator) -> Detections:
+    def observe(self, table: CandidateTable, rng: np.random.Generator,
+                seed: int | None = None) -> Detections:
         """One tick of the camera for every ego of `table`.
 
         Draws are made for the rows the camera could see (in view, not hidden unless
         occlusion is off, within `R_max`), in the table's order (ego id, then gap), four
-        per row: detection, distance noise, speed noise, confidence index.
+        per row: detection, distance noise, speed noise, confidence index. With a positive
+        `pair_sigma_log`, each (ego, leader) pair's reported distance also carries the
+        persistent factor `pair_factor(seed, ego, leader)`, so `seed` (the episode's) is
+        required; the factor multiplies with `b`.
         """
+        if self.pair_sigma_log > 0.0 and seed is None:
+            raise ValueError("a persistent pair factor needs the episode seed")
         n = len(table.d)
         seeable = (table.in_fov & (~table.occluded if self.occlusion else True)
                    & (table.d <= self.R_max))
@@ -538,7 +569,13 @@ class CameraModel:
         v_hat = np.full(n, np.nan)
         conf = np.full(n, np.nan)
         scale = 1.0 if self.noise else 0.0
-        reported = np.maximum(self.bias * d + scale * self.sigma_at(d) * z_d, 0.0)
+        factor = np.ones(len(rows))
+        if self.pair_sigma_log > 0.0 and len(rows):
+            egos = table.ego_ids
+            ids = table.snapshot.ids
+            factor = np.array([pair_factor(int(seed), egos[e], ids[v], self.pair_sigma_log)
+                               for e, v in zip(table.ego[rows], table.vehicle[rows])])
+        reported = np.maximum(self.bias * factor * d + scale * self.sigma_at(d) * z_d, 0.0)
         speed = table.speed[rows] + scale * self.sigma_v_at(d) * z_v
         bins = self._bin(d)
         drawn = np.array([self.confidences[b][min(int(u * len(self.confidences[b])),
@@ -548,6 +585,23 @@ class CameraModel:
         v_hat[rows[hit]] = speed[hit]
         conf[rows[hit]] = drawn[hit]
         return Detections(detected, d_hat, v_hat, conf)
+
+
+@lru_cache(maxsize=1 << 20)
+def _pair_z(seed: int, ego: str, leader: str) -> float:
+    """A standard normal fixed by `(seed, ego, leader)`, from a stable hash (not Python's
+    salted `hash`), so a pair keeps its value for the whole episode and across processes."""
+    digest = hashlib.blake2b(f"{seed}|{ego}|{leader}".encode(), digest_size=8).digest()
+    u = (int.from_bytes(digest, "big") + 0.5) / 2.0 ** 64
+    return _STANDARD_NORMAL.inv_cdf(u)
+
+
+def pair_factor(seed: int, ego: str, leader: str, sigma_log: float) -> float:
+    """Amendment 3 (R2-4): the persistent log-normal distance factor of one (ego, leader)
+    pair in one episode, `exp(sigma_log z)`. It stands for the per-vehicle scale error of a
+    monocular estimator (a vehicle's true width against the class prior, its angle of
+    view), constant while the pair lasts."""
+    return math.exp(sigma_log * _pair_z(seed, ego, leader)) if sigma_log > 0.0 else 1.0
 
 
 @dataclass(frozen=True)

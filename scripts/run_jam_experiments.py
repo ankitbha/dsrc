@@ -96,6 +96,8 @@ G_BASE = {"tau_l": 10.0, "m_on": 0.1}
 LAGS_L = (0.0, 2.0, 4.0)  # Amendment 1
 PENETRATIONS_P = (0.75, 0.5)
 BIASES_K = (0.8, 1.25)
+#: Amendment 3 (R2-4): block K also runs the best model at half the stored pair spread.
+PAIR_SIGMA_SCALES_K = (0.5,)
 SAMPLE_FRACTION = 0.05
 DAGGER_THETA = 0.5
 WIDE_R = 200.0
@@ -119,6 +121,9 @@ class Spec:
     bias: float = 1.0
     params: tuple = ()           # sorted (name, value) pairs of the arm's parameters
     sample_fraction: float = 0.0
+    #: Block K (Amendment 3, R2-4): the camera's persistent pair spread as a share of the
+    #: camera model's stored one.
+    pair_sigma_scale: float = 1.0
 
     @property
     def key(self) -> str:
@@ -209,7 +214,9 @@ def arm_list(block: str, selection: Selection | None, grid: bool = False,
     if block == "K":
         if not selection.best_reads_camera:
             return []
-        return [(best[0], best[1], {"bias": b}) for b in BIASES_K]
+        return ([(best[0], best[1], {"bias": b}) for b in BIASES_K]
+                + [(best[0], best[1], {"bias": 1.0, "pair_sigma_scale": scale})
+                   for scale in PAIR_SIGMA_SCALES_K])
     raise ValueError(f"unknown block {block}")
 
 
@@ -261,6 +268,8 @@ def block_specs(block: str, seeds: Sequence[int] | None = None,
             variant += f"_p{extra['penetration']:g}"
         if "bias" in extra:
             variant += f"_b{extra['bias']:g}"
+        if "pair_sigma_scale" in extra:
+            variant += f"_ps{extra['pair_sigma_scale']:g}"
         if dagger:
             variant += "_dagger"
         for scenario in _scenarios(block):
@@ -271,7 +280,8 @@ def block_specs(block: str, seeds: Sequence[int] | None = None,
                                   penetration=extra.get("penetration", 1.0),
                                   bias=extra.get("bias", 1.0),
                                   params=tuple(sorted(params.items())),
-                                  sample_fraction=extra.get("sample_fraction", 0.0)))
+                                  sample_fraction=extra.get("sample_fraction", 0.0),
+                                  pair_sigma_scale=extra.get("pair_sigma_scale", 1.0)))
         if block == "M" and arm == "oracle":
             wide = {**params, "oracle_R": WIDE_R}
             for scenario in ("B9", "I_exit"):
@@ -536,6 +546,7 @@ def run_block(block: str, specs: Sequence[Spec], run_episode: EpisodeFn, *,
                       "variant": spec.variant, "scenario": spec.scenario, "seed": spec.seed,
                       "duration_s": spec.duration_s, "m": spec.m,
                       "penetration": spec.penetration, "bias": spec.bias,
+                      "pair_sigma_scale": spec.pair_sigma_scale,
                       "params": dict(spec.params), "wall_s": wall,
                       "trace_file": str(trace_path),
                       "samples_file": str(samples_path) if samples_path else None,
@@ -584,10 +595,13 @@ def episode_runner(model, context: Context) -> EpisodeFn:
         feed = FeedSetting(context.feed_artefact, context.feed_session, m=spec.m,
                            allow_placeholder=context.allow_placeholder)
         scenario = JAM_SCENARIOS[spec.scenario]
+        spec_camera = None
+        if camera is not None:
+            spec_camera = camera.with_bias(spec.bias).with_pair_sigma(
+                camera.pair_sigma_log * spec.pair_sigma_scale)
         result = run_jam_episode(
             model, spec.seed, scenario, arm, feed=feed, duration_s=spec.duration_s,
-            penetration=spec.penetration,
-            camera=(camera.with_bias(spec.bias) if camera is not None else None),
+            penetration=spec.penetration, camera=spec_camera,
             predictor=predictor, step_length_s=context.step_length_s,
             window_start_s=context.window_start_s, write_log=context.write_log,
             check_max_speed=context.check_max_speed, sample_fraction=spec.sample_fraction)
