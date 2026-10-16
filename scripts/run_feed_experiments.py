@@ -745,7 +745,8 @@ def summarize_d(episodes, smoke: bool = False,
     import numpy as np
 
     from src.sumo.drain import (
-        drain_summary, drain_time, jam_segment_minutes, onset, thresholds_from_traces,
+        drain_summary, drain_time, jam_segment_minutes, onset, open_spell_at_cap,
+        thresholds_from_traces,
     )
 
     network = network_threshold(episodes)
@@ -800,9 +801,18 @@ def summarize_d(episodes, smoke: bool = False,
                     extra[f"{arm}/{seed}"] = {
                         "onset": onset(trace, setting["onset_from"], v),
                         "jam_segment_minutes": jam_segment_minutes(trace, v,
-                                                                   setting["onset_from"], cap)}
+                                                                   setting["onset_from"], cap),
+                        "open_spell_at_cap": open_spell_at_cap(trace, cap, v)}
+                # Amendment 2, B5: drained runs whose trace ends inside a spell (shorter
+                # than H, or it would have undone the drain) still open at the cap.
+                open_and_drained = sorted(
+                    key for key, values in extra.items()
+                    if values["open_spell_at_cap"] is not None
+                    and per_seed[key.split("/")[0]][int(key.split("/")[1])][1])
                 results[f"{rule}/H{hold:g}"] = {**drain_summary(per_seed, cap - t_0),
-                                                "per_episode": extra}
+                                                "per_episode": extra,
+                                                "drained_ending_in_open_spell":
+                                                    open_and_drained}
         entry["drain"] = results
         entry["primary"] = f"network/H{HOLD_S:g}" if primary_v is not None else None
         out["scenarios"][scenario] = entry

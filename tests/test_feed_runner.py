@@ -316,6 +316,9 @@ class TestSummariesOnSyntheticTraces:
         # so its threshold finds no jam (A4's reason for the network threshold).
         assert entry["drain"]["scenario/H120"]["arms"]["no_control"]["per_seed"][0][
             "time_s"] == 120.0
+        # Amendment 2, B5: which drained runs end inside a spell still open at the cap.
+        assert primary["drained_ending_in_open_spell"] == []
+        assert all("open_spell_at_cap" in v for v in primary["per_episode"].values())
         # Each hold sensitivity is computed with its own H (mutant R5).
         assert entry["drain"]["network/H60"]["arms"]["here"]["per_seed"][0]["time_s"] == \
             1560 - 1200
@@ -659,3 +662,22 @@ class TestSiteResolution:
         assert len(nulls) == 300
         assert sorted({s.seed for s in nulls}) == [16, 17, 18, 19, 20]
         assert {s.pulse[1] for s in nulls} == {1}
+
+
+def test_the_drain_artefact_lists_drained_runs_ending_in_an_open_spell(tmp_path):
+    """Amendment 2, B5, through the runner's summary."""
+    episodes = []
+    for arm in ("no_control", "here"):
+        for seed in (16, 17):
+            trace = [{"t": float(t), "count": [3] * 12, "held": 0, "pending": 0, "arrived": t,
+                      "speed_kmh": [10.0 if (600 <= t < 1500 or (arm == "here" and seed == 17
+                                                                and t >= 2960)) else 50.0]
+                      * 12} for t in range(10, 3001, 10)]
+            path = _write_trace(tmp_path / f"{arm}_{seed}.json", trace)
+            episodes.append({"arm": arm, "seed": seed, "scenario": "mainz_surge",
+                             "duration_s": 3000.0, "trace_file": path, "flow": 1.0})
+    summary = rfe.summarize_d(episodes)
+    fixed = summary["scenarios"]["mainz_surge"]["drain"]["fixed_30/H120"]
+    assert fixed["drained_ending_in_open_spell"] == ["here/17"]
+    assert fixed["per_episode"]["here/17"]["open_spell_at_cap"]["jam"]["length_s"] == 50.0
+    assert all(row["drained"] for row in fixed["arms"]["here"]["per_seed"])

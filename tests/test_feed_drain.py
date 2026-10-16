@@ -283,3 +283,31 @@ class TestRefusal:
         refused, good = out["per_segment"]
         assert refused["refused"] is True and refused["v_jam"] == pytest.approx(20.25)
         assert good["fallback"] is False and good["v_jam"] == pytest.approx(19.5)
+
+
+class TestOpenSpells:
+    """Amendment 2, B5: a drained run may end inside a short spell open at the cap."""
+
+    def test_a_short_jam_at_the_cap_is_reported_and_does_not_undo_the_drain(self):
+        from src.sumo.drain import open_spell_at_cap
+
+        trace = _trace(9000, jam_from=2000, jam_until=2100)
+        for sample in trace:
+            if sample["t"] >= 8950:
+                sample["speed_kmh"][1] = 8.0  # 6 samples, 60 s, still jammed at 9,000 s
+        # Both later spells are shorter than H, so the drain stands at t_0 + H.
+        assert drain_time(trace, 1200.0, 120.0, 9000.0, 20.0) == (120.0, True)
+        spell = open_spell_at_cap(trace, 9000.0, 20.0)
+        assert spell == {"kinds": ["jam"], "at": 9000.0,
+                         "jam": {"start": 8950.0, "length_s": 60.0}}
+
+    def test_a_waiting_spell_at_the_cap_and_a_clear_end(self):
+        from src.sumo.drain import open_spell_at_cap
+
+        trace = _trace(9000, held_until=0)
+        assert open_spell_at_cap(trace, 9000.0, 20.0) is None
+        for sample in trace:
+            if sample["t"] >= 8990:
+                sample["pending"] = 2
+        assert open_spell_at_cap(trace, 9000.0, 20.0)["waiting"] == {"start": 8990.0,
+                                                                     "length_s": 20.0}

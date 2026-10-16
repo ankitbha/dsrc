@@ -141,6 +141,33 @@ def long_spell_starts(trace: Sequence[dict], H: float, cap: float,
                   if last - start + spacing >= H)
 
 
+def open_spell_at_cap(trace: Sequence[dict], cap: float,
+                      v_jam: float | np.ndarray) -> dict[str, Any] | None:
+    """The jam or waiting spell the run is still inside at its last sample up to the cap.
+
+    A spell open at the cap counts in `drain_time` with its observed length only, so a
+    run can be drained and still end inside a short spell; this says so (plan Amendment
+    2, B5). None when the last sample is neither jammed nor waiting.
+    """
+    times = _times(trace)
+    inside = times <= cap
+    if not inside.any():
+        return None
+    spacing = float(np.median(np.diff(times))) if len(times) > 1 else 0.0
+    last = float(times[inside][-1])
+    jammed = jam_indicator(trace, v_jam).any(axis=1) & inside
+    waiting = (np.array([s["held"] + s["pending"] for s in trace]) > 0) & inside
+    open_spells = {}
+    for kind, flags in (("jam", jammed), ("waiting", waiting)):
+        for start, end in spells(flags, times):
+            if end == last:
+                open_spells[kind] = {"start": float(start),
+                                     "length_s": float(end - start + spacing)}
+    if not open_spells:
+        return None
+    return {"kinds": sorted(open_spells), "at": last, **open_spells}
+
+
 def drain_time(trace: Sequence[dict], t_0: float, H: float, cap: float,
                v_jam: float | np.ndarray) -> tuple[float, bool]:
     """`(t_d - t_0, True)` for the first sample `t_d >= t_0 + H` with no jammed segment
