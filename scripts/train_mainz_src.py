@@ -75,6 +75,15 @@ SCENARIOS = {
                     "segments": "data/mainz/mainz_segments.json",
                     "schedule": "data/mainz/mainz_burst_schedule.json"},
 }
+# The jam program's demands (plan 2026-10-16 section 4.2): a 3,572 veh/h background for
+# 7,200 s, alone and with a 7,500 or 9,000 veh/h burst on [900, 1,200) s.
+for _name in ("mainz_bg", "mainz_b7500", "mainz_b9000"):
+    SCENARIOS[_name] = {"net": "data/mainz/mainz.net.xml",
+                        "routes": f"data/mainz/{_name}.rou.xml",
+                        "gated_routes": f"data/mainz/{_name}_routes.rou.xml",
+                        "segments": "data/mainz/mainz_segments.json",
+                        "schedule": f"data/mainz/{_name}_schedule.json"}
+del _name
 
 
 def make_env(paths, *, seed, duration_s, features, step_length, gate_entries,
