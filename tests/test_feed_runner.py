@@ -387,7 +387,9 @@ class TestSummariesOnSyntheticTraces:
                     for s in (16, 17)]
         episodes += [{"arm": "version_keyed", "variant": "D+0", "seed": s, "flow": 3690.0 + s,
                       "delta_mean": 0.01} for s in (16, 17)]
+        episodes[-1]["feed"] = {"wraps": 2}
         summary = rfe.summarize_a(episodes, [], context)
+        assert summary["replays_wrapped"] == 1
         condition = summary["lemma_condition"]
         assert condition["g_min"] == feed["g_min"] and condition["P_q"] == 10.0
         # The drive brackets give J far above 16 s, so part (a) is not claimed.

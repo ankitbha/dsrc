@@ -72,27 +72,56 @@ class TestTheProcess:
         with pytest.raises(ValueError):
             FeedProcess.synthetic([60.0, 60.0], [1.0, 1.0])
 
-    def test_from_artefact_replays_the_gaps_in_order_from_the_seeded_start(self, tmp_path):
-        sequence = [[60.0, 40.0], [26.0, 45.5], [34.0, 50.0], [60.0, 42.0], [120.0, 33.0]]
+    @staticmethod
+    def _session(tmp_path, gaps, lags, first_phase=36.0):
+        """A recorded session whose phases follow its gaps, as real stamps do."""
+        phases, phase = [], first_phase
+        for gap in gaps:
+            phases.append(phase)
+            phase = (phase + gap) % 60.0
+        sequence = [[g, l, p] for g, l, p in zip(gaps, lags, phases)]
         path = tmp_path / "feed_process.json"
-        path.write_text(json.dumps({"placeholder": True, "source": "test",
+        path.write_text(json.dumps({"placeholder": False, "source": "test",
                                     "sessions": {"s": {"sequence": sequence}}}))
+        return path, sequence
+
+    def test_from_artefact_replays_the_gaps_in_order_without_wrapping(self, tmp_path):
+        gaps = [60.0, 26.0, 34.0, 60.0, 60.0, 120.0, 60.0, 26.0, 34.0, 60.0] * 3
+        lags = [40.0 + (i % 7) for i in range(len(gaps))]
+        path, sequence = self._session(tmp_path, gaps, lags)
+        n, horizon = len(sequence), 1000.0
         starts = set()
-        for seed in range(12):
-            feed = FeedProcess.from_artefact(path, "s", seed, 5.0, 1000.0)
+        for seed in range(15):
+            feed = FeedProcess.from_artefact(path, "s", seed, 5.0, horizon)
             start = feed.meta["start_index"]
-            assert start == int(np.random.default_rng(seed).integers(5))
+            covering = [j for j in range(n)
+                        if 5.0 + (sequence[j][2] - 5.0) % 60 + sum(gaps[j:]) > horizon]
+            assert start == covering[int(np.random.default_rng(seed).integers(len(covering)))]
+            assert feed.meta["wraps"] == 0
+            assert start + feed.count <= n  # never past the last recorded pair
             starts.add(start)
-            assert feed.publish_s[0] == 5.0
-            expected_gaps = [sequence[(start + j) % 5][0] for j in range(len(feed.gaps()))]
-            expected_lags = [sequence[(start + j) % 5][1] for j in range(feed.count)]
-            assert list(feed.gaps()) == expected_gaps
-            assert list(feed.lag_s) == expected_lags
-            assert feed.publish_s[-1] <= 1000.0 < feed.publish_s[-1] + sequence[
-                (start + feed.count - 1) % 5][0]
-            assert feed.meta["placeholder"] is True
+            assert list(feed.gaps()) == gaps[start:start + feed.count - 1]
+            assert list(feed.lag_s) == lags[start:start + feed.count]
+            assert feed.publish_s[-1] <= horizon < feed.publish_s[-1] + gaps[start + feed.count - 1]
+            # Amendment 1, A9 (and mutant F9): every replayed stamp keeps its recorded
+            # second of the minute.
+            assert [t % 60 for t in feed.publish_s] == \
+                [sequence[start + k][2] for k in range(feed.count)]
             assert len(feed.meta["artefact_sha256"]) == 64
         assert len(starts) > 1
+
+    def test_a_session_too_short_is_refused_unless_wrapping_is_allowed(self, tmp_path):
+        gaps = [60.0, 26.0, 34.0, 60.0, 120.0]
+        path, sequence = self._session(tmp_path, gaps, [40.0, 45.5, 50.0, 42.0, 33.0])
+        with pytest.raises(ValueError, match="too short"):
+            FeedProcess.from_artefact(path, "s", 3, 5.0, 1000.0)
+        feed = FeedProcess.from_artefact(path, "s", 3, 5.0, 1000.0, allow_wrap=True)
+        assert feed.meta["wraps"] >= 2
+        start = feed.meta["start_index"]
+        # Across every wrap the gap is lengthened to the next pair's recorded second.
+        assert [t % 60 for t in feed.publish_s] == \
+            [sequence[(start + k) % 5][2] for k in range(feed.count)]
+        assert list(feed.lag_s) == [sequence[(start + k) % 5][1] for k in range(feed.count)]
 
     def test_an_unknown_session_names_the_ones_present(self, tmp_path):
         path = tmp_path / "f.json"

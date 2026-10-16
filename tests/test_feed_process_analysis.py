@@ -173,11 +173,17 @@ class TestTheDriveLogs:
         artefact = afp.write_artefact(path, drive=drive, polling=None)
         assert artefact["placeholder"] is True
         assert artefact["primary"]["default_session"] == "drive_run_20260908_170849"
-        feed = FeedProcess.from_artefact(path, "drive_run_20260908_170849", 16, 60.0, 2600.0)
-        assert feed.meta["placeholder"] is True
-        recorded = [s[0] for s in artefact["sessions"]["drive_run_20260908_170849"]["sequence"]]
-        assert set(feed.gaps()) <= set(recorded)
-        # The replay keeps the stamps' second of the minute.
+        session = "drive_run_20260908_170849"
+        sequence = artefact["sessions"][session]["sequence"]
+        # The placeholder session's 29 gaps span 1,526 s, shorter than an episode:
+        # it replays only with wrapping allowed, and keeps every stamp's second.
+        with pytest.raises(ValueError, match="too short"):
+            FeedProcess.from_artefact(path, session, 16, 60.0, 2600.0)
+        feed = FeedProcess.from_artefact(path, session, 16, 60.0, 2600.0, allow_wrap=True)
+        assert feed.meta["placeholder"] is True and feed.meta["wraps"] >= 1
         start = feed.meta["start_index"]
-        phase = artefact["sessions"]["drive_run_20260908_170849"]["sequence"][start][2]
-        assert feed.publish_s[0] % 60 == phase
+        assert [t % 60 for t in feed.publish_s] == \
+            [sequence[(start + k) % len(sequence)][2] for k in range(feed.count)]
+        # A 1,240 s horizon fits inside the session and does not wrap.
+        short = FeedProcess.from_artefact(path, session, 16, 60.0, 1300.0)
+        assert short.meta["wraps"] == 0

@@ -85,18 +85,23 @@ class FeedProcess:
 
     @classmethod
     def from_artefact(cls, path: Path, session: str, seed: int, start_s: float,
-                      end_s: float) -> "FeedProcess":
+                      end_s: float, allow_wrap: bool = False) -> "FeedProcess":
         """Replay a session's recorded `(gap, L_up)` pairs from a seeded start index.
 
-        `T_{k+1} = T_k + gap_k`; version `k` carries lag `L_up_k`. The start index is
-        `default_rng(seed).integers(n)` over the session's `n` pairs, and the sequence
-        wraps around until it covers `end_s`. `T_1` is `start_s`, moved forward to the
-        recorded stamp's second of the minute when the sequence carries it (a third
-        element per pair), so simulation time modulo 60 is the replayed stamps' wall
-        clock second and a fixed-phase `psi` read from the artefact means the same
-        second in the simulation. The artefact's sha256, the session, the start index
-        and the artefact's placeholder flag travel in `meta` so every run that reads
-        the artefact can record them.
+        `T_{k+1} = T_k + gap_k`; version `k` carries lag `L_up_k`. `T_1` is `start_s`,
+        moved forward to the recorded stamp's second of the minute when the sequence
+        carries it (a third element per pair), so simulation time modulo 60 is the
+        replayed stamps' wall-clock second and a fixed-phase `psi` read from the artefact
+        means the same second in the simulation.
+
+        The replay never wraps (plan Amendment 1, A9): the start index is drawn by
+        `default_rng(seed)` from the indices whose remaining pairs cover `end_s`. A
+        session too short for any start is refused, unless `allow_wrap` (the drive-log
+        placeholder, which is shorter than one episode); then the start is drawn from
+        all indices, and at each wrap the gap is lengthened to the next pair's recorded
+        second of the minute, so every replayed stamp keeps its own. The artefact's
+        sha256, the session, the start index, the number of wraps and the artefact's
+        placeholder flag travel in `meta` so every run that reads it can record them.
         """
         path = Path(path)
         artefact = json.loads(path.read_text())
@@ -105,24 +110,50 @@ class FeedProcess:
             raise KeyError(f"{path} has no session {session!r}; it has {sorted(sessions)}")
         sequence = sessions[session]["sequence"]
         pairs = [(float(item[0]), float(item[1])) for item in sequence]
-        if not pairs:
+        phases = [(float(item[2]) if len(item) > 2 and item[2] is not None else None)
+                  for item in sequence]
+        n = len(pairs)
+        if not n:
             raise ValueError(f"session {session!r} in {path} has no (gap, lag) pairs")
-        start = int(np.random.default_rng(seed).integers(len(pairs)))
-        first = float(start_s)
-        if len(sequence[start]) > 2 and sequence[start][2] is not None:
-            first += (float(sequence[start][2]) - first) % 60.0
-        publish, lag = [first], []
-        step = 0
+
+        def first_stamp(index: int) -> float:
+            first = float(start_s)
+            if phases[index] is not None:
+                first += (phases[index] - first) % 60.0
+            return first
+
+        covering = [j for j in range(n)
+                    if first_stamp(j) + sum(gap for gap, _ in pairs[j:]) > end_s]
+        rng = np.random.default_rng(seed)
+        if covering:
+            start = covering[int(rng.integers(len(covering)))]
+        elif allow_wrap:
+            start = int(rng.integers(n))
+        else:
+            raise ValueError(f"session {session!r} spans {sum(g for g, _ in pairs):g} s of "
+                             f"gaps, too short to replay [{start_s:g}, {end_s:g}] s "
+                             "without wrapping")
+        publish, lag = [first_stamp(start)], []
+        step = wraps = 0
         while True:
-            gap, version_lag = pairs[(start + step) % len(pairs)]
+            index = (start + step) % n
+            gap, version_lag = pairs[index]
             lag.append(version_lag)
-            if publish[-1] + gap > end_s:
+            following = (index + 1) % n
+            next_stamp = publish[-1] + gap
+            if following == 0:
+                if phases[following] is not None:
+                    next_stamp += (phases[following] - next_stamp) % 60.0
+            if next_stamp > end_s:
                 break
-            publish.append(publish[-1] + gap)
+            if following == 0:
+                wraps += 1
+            publish.append(next_stamp)
             step += 1
         return cls(np.asarray(publish), np.asarray(lag), "artefact", {
             "artefact": str(path), "artefact_sha256": _sha256(path), "session": session,
-            "start_index": start, "pairs": len(pairs),
+            "start_index": start, "pairs": n, "wraps": wraps,
+            "covering_starts": len(covering),
             "placeholder": bool(artefact.get("placeholder", False)),
             "artefact_source": artefact.get("source"),
         })

@@ -399,9 +399,14 @@ def episode_runner(model, context: Context) -> EpisodeFn:
         mode = make_mode(spec)
         feed = None
         if mode.kind == "rule":
+            # Amendment 1, A9: the replay never wraps; only the drive-log placeholder,
+            # shorter than an episode and run only under --allow-placeholder, may, with
+            # each wrap restoring the recorded second of the minute.
             feed = FeedProcess.from_artefact(Path(context.feed["artefact"]),
                                              context.feed["session"], spec.seed,
-                                             context.start_s, spec.duration_s + 180.0)
+                                             context.start_s, spec.duration_s + 180.0,
+                                             allow_wrap=bool(context.feed["placeholder"]
+                                                             and context.allow_placeholder))
         pulse = None
         if spec.pulse:
             site, n, start, duration = spec.pulse
@@ -554,6 +559,8 @@ def summarize_a(episodes, headers, context: Context) -> dict[str, Any]:
         "block": "A", "rows": rows, "lemma": lemma,
         "feed": feed,
         "placeholder": feed.get("placeholder"),
+        # Amendment 1, A9: only a placeholder replay may wrap; the count is reported.
+        "replays_wrapped": sum(1 for r in episodes if (r.get("feed") or {}).get("wraps")),
         "lemma_condition": {
             "g_min": feed.get("g_min"), "P_q": feed.get("P_q"),
             "J_measured": feed.get("J_measured"), "J_simulated": feed.get("J_simulated"),
