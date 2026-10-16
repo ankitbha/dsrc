@@ -195,6 +195,7 @@ def estimate_level(seed_runs: Mapping[int, Sequence[np.ndarray]], dt: float = 10
                                   "a lower bound on some a_e is at or below zero"),
         "rho_UCB_bonferroni": rho_upper_bound(bonferroni["a_lcb"], bonferroni["b_ucb"]),
         "bonferroni_level": bonferroni["level"],
+        "t_bonferroni": bonferroni["t"],
         "per_seed": {str(s): {"a": a.tolist(), "B": B.tolist()} for s, (a, B) in zip(seeds, fits)},
     }
 

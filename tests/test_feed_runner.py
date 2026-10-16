@@ -477,3 +477,19 @@ def test_the_regression_starts_when_the_injection_ends():
     record = {"pulse": [7, 60, 1200.0, 60.0]}
     assert rfe._regression_window(record) == (1260.0, 1800.0)
     assert rfe._pulse_start(record) == 1200.0
+
+
+class TestR114Runner:
+    """Amendment 1, A10: mutants R6 (the drain clocks) and R8 (penetration axis)."""
+
+    def test_the_drain_scenarios_are_the_plan_s(self):
+        assert rfe.DRAIN == {
+            "mainz_surge": {"cap_s": 9000.0, "t_0": 1200.0, "onset_from": 0.0},
+            "mainz_burst": {"cap_s": 12000.0, "t_0": 1500.0, "onset_from": 900.0}}
+
+    def test_penetration_losses_are_placed_at_one_minus_p(self):
+        references = {"here": {16: 3750.0, 17: 3760.0}, "no_control": {16: 3700.0, 17: 3710.0}}
+        episodes = [{"arm": "penetration", "variant": "p0.25", "seed": s, "flow": f}
+                    for s, f in ((16, 3600.0), (17, 3640.0))]
+        summary = rfe.summarize_c(episodes, references)
+        assert sorted(summary["loss_points_one_minus_p"]) == [(0.75, 120.0), (0.75, 150.0)]

@@ -118,6 +118,15 @@ class TestScheduleModes:
         _drive(engine, env, 210)
         assert [t for t, *_ in env.writes] == [80.0, 200.0]
 
+    def test_the_age_under_version_keyed_is_the_time_since_the_stamp(self):
+        """Mutant E4: every vehicle applies a_k on [T_k + 20, T_{k+1} + 20), so its age
+        runs 20..79 s and averages 49.5 s over whole cycles."""
+        env = FakeEnv(lambda t: [("v0", 0), ("v1", 1)])
+        engine = _engine(env, Mode.version_keyed(P_q=10.0, D=20.0), self.feed,
+                         window=200.0)
+        _drive(engine, env, 559)
+        assert engine.summary()["age_mean_s"] == pytest.approx(49.5)
+
     def test_published_switches_everyone_at_the_decision_instants(self):
         env = FakeEnv(lambda t: [(f"v{i}", i % 2) for i in range(5)])
         decisions = [300.0 + 60.0 * m for m in range(5)]

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from src.analysis.gains import (
-    confidence_bounds, deviations, fit_gains, linearity_ratio, load_routes,
+    confidence_bounds, deviations, estimate_level, fit_gains, linearity_ratio, load_routes,
     min_penetration, pulse_sites, rho_point, rho_upper_bound, spectral_radius, t_quantile,
 )
 
@@ -173,3 +173,32 @@ class TestPulseSites:
         sites = pulse_sites(segments, load_routes(DATA / "mainz_routes.rou.xml"))
         assert sites[7]["route"] == "r277"
         assert sites[7]["edge"] == "505"
+
+
+class TestR114:
+    """Amendment 1, A10: tests that kill the round-1 survivors in this module."""
+
+    def test_a_growing_self_response_gives_a_negative_a_and_no_certificate(self):
+        """Mutant G4: a = |coef_ee| / dt would issue a certificate here."""
+        rng = np.random.default_rng(11)
+        a, B = _system(rng)
+        a[3] = -0.004  # segment 3's own deviation grows
+        seed_runs = {seed: [_simulate(a, B, site, noise=1e-5, rng=rng) for site in range(12)]
+                     for seed in range(5)}
+        level = estimate_level(seed_runs)
+        assert level["a_hat"][3] < 0
+        assert level["a_LCB"][3] < 0
+        assert level["rho_UCB"] is None and level["certificate"] is False
+        assert level["no_certificate_reason"]
+
+    def test_the_bonferroni_bound_uses_the_bonferroni_quantile(self):
+        """Mutant G7: the Bonferroni bound computed at the 95% level."""
+        rng = np.random.default_rng(12)
+        a, B = _system(rng)
+        seed_runs = {seed: [_simulate(a, B, site, noise=1e-4, rng=rng) for site in range(12)]
+                     for seed in range(15)}
+        level = estimate_level(seed_runs)
+        assert level["t_bonferroni"] == pytest.approx(t_quantile(1 - 0.05 / 144, 14))
+        assert level["t_bonferroni"] == pytest.approx(4.3283, abs=1e-4)
+        assert level["t"] == pytest.approx(t_quantile(0.95, 14))
+        assert level["rho_UCB_bonferroni"] > level["rho_UCB"]

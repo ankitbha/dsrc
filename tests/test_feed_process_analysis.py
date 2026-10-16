@@ -187,3 +187,32 @@ class TestTheDriveLogs:
         # A 1,240 s horizon fits inside the session and does not wrap.
         short = FeedProcess.from_artefact(path, session, 16, 60.0, 1300.0)
         assert short.meta["wraps"] == 0
+
+
+class TestR114:
+    """Amendment 1, A10: mutants A3, A6 (send versus receipt) and A4 (window gaps)."""
+
+    def test_a_round_trip_puts_l_up_at_the_receipt_and_l_lo_at_the_previous_send(self):
+        pubs = _publications([60, 60])
+        queries = np.arange(BASE + 40.0, BASE + 260.0, 5.0)
+        records = _records(pubs, 45.0, queries, rtt=0.4)
+        out = afp.analyze_records(records)["nj"]
+        for version in out["per_version"][1:]:
+            T = version["T"]
+            first = min(q for q in queries if q >= T + 45.0)
+            assert version["L_up"] == pytest.approx(first + 0.4 - T, abs=1e-6)
+            assert version["L_lo"] == pytest.approx(first - 5.0 - T, abs=1e-6)
+        assert out["L_bar"] == pytest.approx(max(v["L_up"] for v in out["per_version"]))
+
+    def test_the_smallest_availability_window_includes_the_lag_change(self):
+        stamps = [BASE + 36.0, BASE + 62.0]  # a 26 s gap
+        records = []
+        for seq, (q, stamp) in enumerate([(stamps[0] + 40.0, stamps[0]),
+                                          (stamps[1] + 30.0, stamps[1])]):
+            records.append({"type": "request", "seq": seq, "area": "nj", "t_send_wall": q,
+                            "t_recv_wall": q, "status": 200, "sourceUpdated": _stamp(stamp),
+                            "rtt_s": 0.0, "Age": "0"})
+        out = afp.analyze_records(records)["nj"]
+        assert [v["L_up"] for v in out["per_version"]] == pytest.approx([40.0, 30.0])
+        # 26 s gap + 30 s lag - 40 s lag: version 1 is returned for 16 s only.
+        assert out["min_availability_gap"] == pytest.approx(16.0)
