@@ -198,6 +198,11 @@ class MainzEnv:
         self.colliding_vehicles = 0
         self.collision_teleports = 0
         self._in_teleport: set[str] = set()
+        # Incidents (`schedule_incident`): their specs, their ids, and the ones standing on
+        # the road now, by edge.
+        self._incidents: list[dict[str, Any]] = []
+        self._incident_ids: set[str] = set()
+        self._incidents_on_road: dict[str, str] = {}
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -225,7 +230,8 @@ class MainzEnv:
         self._in_teleport = set()
         self._capped = {}
         self._pulse_queue = []
-        self._load_controlled()  # drops any pulse a previous episode appended
+        self._incidents, self._incident_ids, self._incidents_on_road = [], set(), {}
+        self._load_controlled()  # drops any pulse or incident a previous episode appended
         self._load_schedule()
         self._load_static()
         self._previous = [set() for _ in self.segments]
@@ -342,6 +348,8 @@ class MainzEnv:
         so it is handed to SUMO at its departure time without the density check.
         """
         now = float(_sumo.simulation.getTime())
+        if self._incidents:
+            self._place_incidents(now)
         while self._pulse_queue and self._pulse_queue[0]["depart"] <= now:
             vehicle = self._pulse_queue.pop(0)
             _sumo.vehicle.add(vehicle["id"], vehicle["route"], typeID=vehicle["type"],
@@ -382,8 +390,79 @@ class MainzEnv:
 
         With `--max-depart-delay -1` such a vehicle waits rather than being dropped, so
         it is latent demand outside the simulated road, like a vehicle held at the gate.
+        An incident vehicle waiting for its spot is not demand and is not counted.
         """
-        return len(_sumo.simulation.getPendingVehicles())
+        pending = _sumo.simulation.getPendingVehicles()
+        if not self._incident_ids:
+            return len(pending)
+        return sum(1 for vehicle in pending if vehicle not in self._incident_ids)
+
+    # ---------------------------------------------------------------- incidents
+
+    def schedule_incident(self, edge: str, lanes: list[int], pos_m: float, start_s: float,
+                          duration_s: float) -> list[str]:
+        """Block `lanes` of `edge` at `pos_m` on `[start_s, start_s + duration_s)` (plan
+        section 4.5), with one stopped vehicle per lane.
+
+        Call after `reset`, which clears every incident. Vehicle `k` is `incident_<k>`,
+        type `human`, on a one-edge route; it is requested at the first step at or after
+        `start_s` with `departLane`, `departPos` and `departSpeed=0` and given a stop at
+        `pos_m` for `duration_s`, and removed at the first step at or after `start_s +
+        duration_s`. SUMO inserts it only once the spot is clear, which was 0 to 15.5 s
+        after the request on the plan's two blocks (three seeds each); `incident_report`
+        records the instant it actually entered. Its ids take the next departure
+        positions as uncontrolled vehicles. It is excluded from edge counts and speeds,
+        the segment state, the feed snapshot, arrivals, pending and running, and stays
+        visible to anything reading the lanes, as a stopped vehicle on the road.
+        """
+        if not lanes or duration_s <= 0.0:
+            raise ValueError("an incident needs at least one lane and a positive duration")
+        ids = []
+        for lane in lanes:
+            vehicle = f"incident_{len(self._incidents)}"
+            if self._index is not None:
+                self._index[vehicle] = len(self._index)
+            self._incidents.append({
+                "id": vehicle, "edge": edge, "lane": int(lane), "pos_m": float(pos_m),
+                "start_s": float(start_s), "end_s": float(start_s) + float(duration_s),
+                "duration_s": float(duration_s), "requested_s": None, "inserted_s": None,
+                "removed_s": None})
+            self._incident_ids.add(vehicle)
+            ids.append(vehicle)
+        return ids
+
+    def _place_incidents(self, now: float) -> None:
+        for incident in self._incidents:
+            vehicle = incident["id"]
+            if incident["requested_s"] is None and now >= incident["start_s"]:
+                route = f"incident_route_{vehicle}"
+                _sumo.route.add(route, [incident["edge"]])
+                _sumo.vehicle.add(vehicle, route, typeID="human", depart="now",
+                                  departLane=str(incident["lane"]),
+                                  departPos=str(incident["pos_m"]), departSpeed="0")
+                _sumo.vehicle.setStop(vehicle, incident["edge"], pos=incident["pos_m"],
+                                      laneIndex=incident["lane"],
+                                      duration=incident["duration_s"])
+                incident["requested_s"] = now
+            elif (incident["requested_s"] is not None and incident["removed_s"] is None
+                  and now >= incident["end_s"]):
+                _sumo.vehicle.remove(vehicle)
+                self._incidents_on_road.pop(vehicle, None)
+                incident["removed_s"] = now
+
+    def _note_inserted_incidents(self) -> None:
+        departed = _sumo.simulation.getDepartedIDList()
+        if not departed:
+            return
+        for incident in self._incidents:
+            vehicle = incident["id"]
+            if incident["inserted_s"] is None and vehicle in departed:
+                incident["inserted_s"] = float(_sumo.vehicle.getDeparture(vehicle))
+                self._incidents_on_road[vehicle] = incident["edge"]
+
+    def incident_report(self) -> list[dict[str, Any]]:
+        """Every scheduled incident with its requested, inserted and removed instants."""
+        return [dict(incident) for incident in self._incidents]
 
     def _load_static(self) -> None:
         """Lane count, length and free-flow speed per edge, read once from the map."""
@@ -420,7 +499,12 @@ class MainzEnv:
         """One simulation step: admit, step, and count arrivals, collisions and teleports."""
         self._admit()
         _sumo.simulationStep()
-        self.arrived_total += int(_sumo.simulation.getArrivedNumber())
+        if self._incidents:
+            self._note_inserted_incidents()
+            self.arrived_total += sum(1 for vehicle in _sumo.simulation.getArrivedIDList()
+                                      if vehicle not in self._incident_ids)
+        else:
+            self.arrived_total += int(_sumo.simulation.getArrivedNumber())
         self.colliding_vehicles += int(_sumo.simulation.getCollidingVehiclesNumber())
         starting = _sumo.simulation.getStartingTeleportIDList()
         self.collision_teleports += len(starting)
@@ -531,7 +615,8 @@ class MainzEnv:
         return float(_sumo.simulation.getTime())
 
     def running(self) -> int:
-        return int(_sumo.vehicle.getIDCount())
+        """Vehicles in the network, incident vehicles standing on the road excluded."""
+        return int(_sumo.vehicle.getIDCount()) - len(self._incidents_on_road)
 
     def position(self, vehicle_id: str) -> int:
         """The vehicle's position in the departure order (pulses continue it)."""
@@ -630,13 +715,37 @@ class MainzEnv:
 
     # ------------------------------------------------------------------- state
 
+    def _edge_reading(self, edge: str, blocked: dict[str, list[str]]) -> tuple[int, float]:
+        """`(count, mean speed in m/s)` of the edge's traffic, incident vehicles removed.
+
+        SUMO's edge mean includes an incident vehicle's zero, so it is taken back out:
+        `(mean * count - sum of incident speeds) / (count - incidents)`. An edge with no
+        incident is read exactly as SUMO reports it.
+        """
+        count = int(_sumo.edge.getLastStepVehicleNumber(edge))
+        speed_mps = float(_sumo.edge.getLastStepMeanSpeed(edge))
+        incidents = blocked.get(edge)
+        if not incidents:
+            return count, speed_mps
+        remaining = count - len(incidents)
+        if remaining <= 0:
+            return 0, 0.0
+        removed = sum(float(_sumo.vehicle.getSpeed(v)) for v in incidents)
+        return remaining, (speed_mps * count - removed) / remaining
+
+    def _blocked_edges(self) -> dict[str, list[str]]:
+        blocked: dict[str, list[str]] = {}
+        for vehicle, edge in self._incidents_on_road.items():
+            blocked.setdefault(edge, []).append(vehicle)
+        return blocked
+
     def _per_edge(self) -> dict[str, dict[str, float]]:
         values: dict[str, dict[str, float]] = {}
+        blocked = self._blocked_edges()
         for segment in self.segments:
             for edge in segment:
                 static = self._static[edge]
-                count = int(_sumo.edge.getLastStepVehicleNumber(edge))
-                speed_mps = float(_sumo.edge.getLastStepMeanSpeed(edge))
+                count, speed_mps = self._edge_reading(edge, blocked)
                 lane_metres = static["length_m"] * static["lanes"]
                 values[edge] = {
                     "count": float(count),
@@ -657,10 +766,13 @@ class MainzEnv:
         return values
 
     def _segment_vehicles(self) -> list[set[str]]:
-        return [
+        present = [
             {v for edge in segment for v in _sumo.edge.getLastStepVehicleIDs(edge)}
             for segment in self.segments
         ]
+        if self._incidents_on_road:
+            present = [vehicles - self._incident_ids for vehicles in present]
+        return present
 
     def _mean_gap(self, vehicles: set[str]) -> float:
         """Mean gap to the leader, SRC's `FollowDistGr` averaged over the segment.
@@ -788,8 +900,8 @@ class MainzEnv:
         return self._vehicle_weight / self._samples if self._samples else 0.0
 
     def metrics(self) -> dict[str, Any]:
-        running = int(_sumo.vehicle.getIDCount())
-        waiting = len(_sumo.simulation.getPendingVehicles())
+        running = self.running()
+        waiting = self.pending()
         speed = float(np.nan_to_num(_nanmean(list(self.speeds_kmh()))))
         density = np.nan_to_num(self.densities())
         return {
