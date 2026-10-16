@@ -390,7 +390,8 @@ def test_the_exit_block_is_seen_as_a_candidate_and_its_metrics_compute(model):
     out = je.run_jam_episode(model, 1, "I_exit", JamArm("oracle", m_on=0.1, oracle_R=200.0),
                              feed=feed, duration_s=1300.0, check_max_speed=True)
     incident = out["incidents"][0]
-    assert 900.0 <= incident["inserted_s"] <= 930.0 and incident["removed_s"] == 1200.0
+    assert 900.0 <= incident["inserted_s"] <= 930.0
+    assert incident["removed_s"] == incident["inserted_s"] + 300.0 and incident["standing_s"] == 300.0
     assert out["incident_candidate_rows"] > 0
     assert out["colliding_vehicles"] == 0 and out["collision_teleports"] == 0
     assert out["writes_above_plan"] == 0 and out["max_speed_mismatched"] == 0

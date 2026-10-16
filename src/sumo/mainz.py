@@ -409,10 +409,12 @@ class MainzEnv:
         Call after `reset`, which clears every incident. Vehicle `k` is `incident_<k>`,
         type `human`, on a one-edge route; it is requested at the first step at or after
         `start_s` with `departLane`, `departPos` and `departSpeed=0` and given a stop at
-        `pos_m` for `duration_s`, and removed at the first step at or after `start_s +
-        duration_s`. SUMO inserts it only once the spot is clear, which was 0 to 15.5 s
-        after the request on the plan's two blocks (three seeds each); `incident_report`
-        records the instant it actually entered. Its ids take the next departure
+        `pos_m` for `duration_s`. SUMO inserts it only once the spot is clear, which was 0
+        to 15.5 s after the request on the plan's two blocks (three seeds each), so it is
+        removed at the first step at or after its own insertion plus `duration_s` and
+        every arm of a seed faces a block of the same length (validation R1-2); a request
+        never inserted by `start_s + duration_s` is withdrawn then. `incident_report`
+        records the request, insertion and removal instants and the standing length. Its ids take the next departure
         positions as uncontrolled vehicles. It is excluded from edge counts and speeds,
         the segment state, the feed snapshot, arrivals, pending and running, and stays
         visible to anything reading the lanes, as a stopped vehicle on the road.
@@ -428,7 +430,7 @@ class MainzEnv:
                 "id": vehicle, "edge": edge, "lane": int(lane), "pos_m": float(pos_m),
                 "start_s": float(start_s), "end_s": float(start_s) + float(duration_s),
                 "duration_s": float(duration_s), "requested_s": None, "inserted_s": None,
-                "removed_s": None})
+                "removed_s": None, "standing_s": None, "never_inserted": None})
             self._incident_ids.add(vehicle)
             self._incident_lane[vehicle] = int(lane)
             ids.append(vehicle)
@@ -447,11 +449,19 @@ class MainzEnv:
                                       laneIndex=incident["lane"],
                                       duration=incident["duration_s"])
                 incident["requested_s"] = now
-            elif (incident["requested_s"] is not None and incident["removed_s"] is None
-                  and now >= incident["end_s"]):
-                _sumo.vehicle.remove(vehicle)
-                self._incidents_on_road.pop(vehicle, None)
-                incident["removed_s"] = now
+            elif incident["requested_s"] is not None and incident["removed_s"] is None:
+                inserted = incident["inserted_s"]
+                # The block stands `duration_s` from its own insertion, so every arm of a
+                # seed faces a block of the same length (validation R1-2). A request SUMO
+                # never found room for is withdrawn at the end of its window.
+                due = (inserted + incident["duration_s"] if inserted is not None
+                       else incident["end_s"])
+                if now >= due - 1e-9:
+                    _sumo.vehicle.remove(vehicle)
+                    self._incidents_on_road.pop(vehicle, None)
+                    incident["removed_s"] = now
+                    incident["never_inserted"] = inserted is None
+                    incident["standing_s"] = (now - inserted) if inserted is not None else 0.0
 
     def _note_inserted_incidents(self) -> None:
         departed = _sumo.simulation.getDepartedIDList()

@@ -155,7 +155,7 @@ class TestScheduling:
         assert [env.position(v) for v in ids] == [before, before + 1]
         assert not any(env.controlled(v) for v in ids)
 
-    def test_added_at_the_first_step_at_or_after_the_start_and_removed_at_the_end(self, fake):
+    def test_added_at_the_first_step_at_or_after_the_start(self, fake):
         env = _env(fake)
         env.schedule_incident("14", [1], 600.0, 900.0, 300.0)
         fake.time = 899.5
@@ -172,15 +172,46 @@ class TestScheduling:
         stops = [c for c in fake.calls if c[0] == "setStop"]
         assert stops[0][2][:2] == ("incident_0", "14")
         assert stops[0][3] == {"pos": 600.0, "laneIndex": 1, "duration": 300.0}
+
+    def test_a_late_insertion_is_removed_at_its_own_insertion_plus_the_duration(self, fake):
+        # SUMO found room at 911.5 s: the block stands 300 s from then, to 1,211.5 s, not
+        # to 1,200 s (validation R1-2: a fixed end gave each arm its own block length).
+        env = _env(fake)
+        ids = env.schedule_incident("14", [1], 600.0, 900.0, 300.0)
+        fake.time = 900.0
+        env._admit()
+        fake.time = 911.5
+        env._admit()
+        fake.departed = ids
+        env._step()  # inserted in the step at 911.5 s
+        fake.departed = []
+        for t in (1200.0, 1211.0):
+            fake.time = t
+            env._admit()
+        assert not [c for c in fake.calls if c[0] == "remove"]
+        fake.time = 1211.5
+        env._admit()
+        removes = [c for c in fake.calls if c[0] == "remove"]
+        assert [(c[1], c[2][0]) for c in removes] == [(1211.5, "incident_0")]
+        report = env.incident_report()[0]
+        assert report["inserted_s"] == 911.5 and report["removed_s"] == 1211.5
+        assert report["standing_s"] == 300.0
+        env._admit()
+        assert len([c for c in fake.calls if c[0] == "remove"]) == 1
+
+    def test_a_request_never_inserted_is_withdrawn_at_the_end_of_its_window(self, fake):
+        env = _env(fake)
+        env.schedule_incident("14", [1], 600.0, 900.0, 300.0)
+        fake.time = 900.0
+        env._admit()
         fake.time = 1199.5
         env._admit()
         assert not [c for c in fake.calls if c[0] == "remove"]
         fake.time = 1200.0
         env._admit()
-        removes = [c for c in fake.calls if c[0] == "remove"]
-        assert [(c[1], c[2][0]) for c in removes] == [(1200.0, "incident_0")]
-        env._admit()
-        assert len([c for c in fake.calls if c[0] == "remove"]) == 1
+        assert [c[2][0] for c in fake.calls if c[0] == "remove"] == ["incident_0"]
+        report = env.incident_report()[0]
+        assert report["never_inserted"] is True and report["standing_s"] == 0.0
 
     def test_the_report_records_insertion_and_removal(self, fake):
         env = _env(fake)
@@ -190,7 +221,8 @@ class TestScheduling:
         report = env.incident_report()
         assert [r["id"] for r in report] == ids
         assert report[0]["inserted_s"] == 900.0
-        assert report[0]["removed_s"] == 1200.0
+        assert report[0]["removed_s"] == 1200.0 and report[0]["standing_s"] == 300.0
+        assert report[0]["never_inserted"] is False
         assert report[0]["edge"] == "14" and report[0]["lane"] == 0
 
     def test_a_bad_spec_is_refused(self, fake):
@@ -334,7 +366,7 @@ def _run_bg(seed: int, incident: dict | None, until: float = 1300.0):
     return seen, arrived_at, speeds, report, metrics
 
 
-def test_the_exit_block_stands_stopped_until_its_end_and_jams_segment_11():
+def test_the_exit_block_stands_stopped_for_its_duration_and_jams_segment_11():
     seen, arrived, speeds, report, metrics = _run_bg(1, I_EXIT)
     base_seen, base_arrived, _, _, _ = _run_bg(1, None)
     assert report[0]["inserted_s"] is not None
@@ -343,13 +375,16 @@ def test_the_exit_block_stands_stopped_until_its_end_and_jams_segment_11():
     # after the request on three seeds); the request is at 900 s.
     assert 900.0 <= inserted <= 930.0
     times = [t for t, *_ in seen]
+    # The block stands its full 300 s from its own insertion (validation R1-2): on the
+    # road from the step after insertion to the step it is removed in, 600 steps.
+    removed = report[0]["removed_s"]
+    assert removed == inserted + 300.0 and report[0]["standing_s"] == 300.0
     assert min(times) == inserted + 0.5
-    assert max(times) == 1200.0
-    assert len(times) == int(round((1200.0 - inserted) / 0.5))
+    assert max(times) == removed
+    assert len(times) == int(round(300.0 / 0.5))
     assert all(speed == 0.0 for _, _, speed, _, _ in seen)
     assert {lane for *_, lane, _ in seen} == {"exit_road_0"}
     assert {pos for *_, pos in seen} == {100.0}
-    assert report[0]["removed_s"] == 1200.0
     # Nothing before the block differs.
     assert {t: n for t, n in arrived.items() if t <= 900.0} == {
         t: n for t, n in base_arrived.items() if t <= 900.0}
