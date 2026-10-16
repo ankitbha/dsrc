@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import math
 import sys
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -550,16 +550,94 @@ def interval_group(times: Sequence[float]) -> str:
     return "0.20" if len(gaps) and float(np.median(gaps)) < INTERVAL_SPLIT_S else "0.67"
 
 
-def error_tables(records: Sequence[dict], method: str = PRIMARY_METHOD) -> dict[str, Any]:
+#: Amendment 3 (R2-3): a 640 px detection of a vehicle the 1,280 px tracker holds is a box of
+#: the 640 px tracker overlapping it by at least this IoU in the same frame.
+CROSS_IOU: float = 0.3
+CROSS_IOU_LOOSE: float = 0.1
+
+
+def _iou(a: Sequence[float], b: Sequence[float]) -> float:
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def tracked_boxes(records: Iterable[dict]) -> dict[tuple, list]:
+    """`(run, frame_id) -> boxes` of a pass's tracked detections."""
+    out: dict[tuple, list] = {}
+    for r in records:
+        if r.get("type") == "det":
+            out.setdefault((r.get("run"), r["frame_id"]), []).append(r["box"])
+    return out
+
+
+def cross_resolution_table(reference: Iterable[dict], target_boxes: Mapping[tuple, list],
+                           iou_min: float = CROSS_IOU,
+                           distance: str = _WP["distance"]) -> dict[str, Any]:
+    """Amendment 3 (R2-3): of the reference pass's (1,280 px) tracked detections in each
+    frame, the share that has a target-pass (640 px) box in the same frame with IoU at least
+    `iou_min`, binned by the reference's own `distance`.
+
+    A vehicle the 1,280 px tracker holds is taken as there; the share is an upper bound on
+    the 640 px detector's unconditional rate, because vehicles the 1,280 px pass misses are
+    not in the denominator.
+    """
+    detected = [0] * N_BINS
+    missed = [0] * N_BINS
+    for r in reference:
+        if r.get("type") != "det" or r.get(distance) is None:
+            continue
+        b = _bin(r[distance])
+        if b is None:
+            continue
+        boxes = target_boxes.get((r.get("run"), r["frame_id"]), [])
+        if any(_iou(r["box"], box) >= iou_min for box in boxes):
+            detected[b] += 1
+        else:
+            missed[b] += 1
+    opportunities = [d + m for d, m in zip(detected, missed)]
+    return {"source": "cross_resolution", "iou_min": iou_min, "binned_by": distance,
+            "detected": detected, "missed": missed, "opportunities": opportunities,
+            "p": [d / n if n else None for d, n in zip(detected, opportunities)]}
+
+
+def error_tables(records: Sequence[dict], method: str = PRIMARY_METHOD,
+                 reference: Sequence[dict] | None = None,
+                 raw_boxes: Mapping[tuple, list] | None = None) -> dict[str, Any]:
     """Every table of section 2.3 for one group of drives' records, binned by and measured
-    on one distance method (`METHODS`)."""
+    on one distance method (`METHODS`).
+
+    With `reference` (the same drives' 1,280 px records) the detection rate is Amendment 3's
+    cross-resolution share at IoU 0.3, binned by the reference's distance, and `R_max` is
+    section 1.2's rule on it; the held-track rate of these records, the IoU 0.1 share and
+    (with `raw_boxes`) the share against the 640 px raw boxes are kept as alternatives.
+    Without one, the detection rate is the held-track rate. Distance noise, closing-rate
+    noise and confidence are always these records' own.
+    """
     keys = METHODS[method]
     distance, raw = keys["distance"], keys["raw"]
-    detection = detection_rate_table(records, distance)
+    held = {"source": "held_track", **detection_rate_table(records, distance)}
+    alternatives: dict[str, Any] = {}
+    if reference is not None:
+        target = tracked_boxes(records)
+        detection = cross_resolution_table(reference, target, CROSS_IOU, distance)
+        alternatives = {
+            "held_track": held,
+            "cross_resolution_iou0.1": cross_resolution_table(reference, target,
+                                                              CROSS_IOU_LOOSE, distance)}
+        if raw_boxes is not None:
+            alternatives["cross_resolution_raw_iou0.3"] = cross_resolution_table(
+                reference, raw_boxes, CROSS_IOU, distance)
+    else:
+        detection = held
     return {
         "method": method, "distance_key": distance, "raw_key": raw,
         "bins_m": [[b * BIN_M, (b + 1) * BIN_M] for b in range(N_BINS)],
-        "detection": detection, "distance_noise": distance_noise_table(records, distance, raw),
+        "detection": detection, "detection_alternatives": alternatives,
+        "R_max_alternatives": {name: r_max(table) for name, table in alternatives.items()},
+        "distance_noise": distance_noise_table(records, distance, raw),
         "closing_rate_noise": closing_rate_noise_table(records, distance),
         "confidence": confidence_table(records, distance),
         "bias_ratio": bias_ratio_table(records, distance),

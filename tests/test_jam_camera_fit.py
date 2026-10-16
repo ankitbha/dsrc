@@ -162,8 +162,10 @@ class TestGrouping:
 SMOKE = REPO_ROOT / "outputs" / "jam" / "smoke" / "frames"
 
 
-@pytest.mark.skipif(not (SMOKE / "run_20260908_190548" / "detections_640.jsonl").exists(),
-                    reason="the S7 frame smoke has not run")
+@pytest.mark.skipif(not all((SMOKE / "run_20260908_190548" / name).exists()
+                            for name in ("detections_640.jsonl", "detections_1280.jsonl",
+                                         "raw_640.jsonl")),
+                    reason="the S7 frame smoke at 640 and 1,280 px has not run")
 def test_the_50_frame_records_give_a_parseable_artefact_with_every_table(tmp_path):
     import fit_camera_model as fcm
 
@@ -185,5 +187,69 @@ def test_the_50_frame_records_give_a_parseable_artefact_with_every_table(tmp_pat
     assert table["drives"] == ["run_20260908_190548"]
     # The records carry the width-prior distance, so the tables are not empty.
     assert sum(table["detection"]["opportunities"]) > 0 and sum(table["confidence"]["n"]) > 0
+    # The primary detection rate is the cross-resolution share against 1,280 px.
+    assert table["detection"]["source"] == "cross_resolution"
+    assert {"held_track", "cross_resolution_iou0.1"} <= set(table["detection_alternatives"])
     assert artefact["inputs"][0]["sha256"]
     assert CameraModel.from_artefact(out).source["method"] == "width_prior"
+
+
+def _two_resolution(n_frames=400):
+    """Planted: 1,280 px vehicles at 25 m (bin 2) and 55 m (bin 5) in every frame. A 640 px
+    tracked box matches the 25 m vehicle in every second frame (share 0.5). For the 55 m one
+    it matches in one frame of four, and in another one of four a shifted box overlaps it
+    with IoU about 0.2 (shares 0.25 at IoU >= 0.3, 0.5 at IoU >= 0.1). The 640 px
+    distances read 10% short, as the validator measured, and do not set the bin."""
+    near, far = [300.0, 800.0, 340.0, 830.0], [400.0, 700.0, 420.0, 715.0]
+    shifted = [413.0, 700.0, 433.0, 715.0]  # 7 px of 20 overlap: IoU 7/33 = 0.21
+    reference, target, raw = [], [], {}
+    for k in range(n_frames):
+        for track, (box, d) in enumerate(((near, 25.0), (far, 55.0))):
+            reference.append({"type": "det", "run": "r", "frame_id": k, "t": 0.2 * k,
+                              "track_id": track, "box": box, "ema_wp_m": d, "ema_gp_m": d})
+        boxes = []
+        if k % 2 == 0:
+            boxes.append(near)
+        if k % 4 == 0:
+            boxes.append(far)
+        elif k % 4 == 1:
+            boxes.append(shifted)
+        for track, box in enumerate(boxes):
+            target.append({"type": "det", "run": "r", "frame_id": k, "t": 0.2 * k,
+                           "track_id": 10 + track, "box": box, "ema_wp_m": 0.9 * 40.0,
+                           "ema_gp_m": 0.9 * 40.0, "conf": 0.8, "width_prior_m": 36.0,
+                           "raw_ground_m": 36.0})
+        # The raw boxes hold every tracked box plus the far vehicle in every frame.
+        raw[("r", k)] = boxes + [far]
+    return reference, target, raw
+
+
+class TestCrossResolution:
+    def test_the_planted_shares_are_measured_back_and_binned_by_the_reference(self):
+        reference, target, _ = _two_resolution()
+        table = ce.cross_resolution_table(reference, ce.tracked_boxes(target), iou_min=0.3)
+        assert table["opportunities"][2] == 400 and table["opportunities"][5] == 400
+        assert table["p"][2] == pytest.approx(0.5) and table["p"][5] == pytest.approx(0.25)
+        assert table["opportunities"][3] == 0  # the 640 px distance (36 m) sets no bin
+        loose = ce.cross_resolution_table(reference, ce.tracked_boxes(target), iou_min=0.1)
+        assert loose["p"][5] == pytest.approx(0.5) and loose["p"][2] == pytest.approx(0.5)
+
+    def test_the_primary_detection_table_is_the_cross_resolution_share(self):
+        reference, target, raw = _two_resolution()
+        records = target + [{"type": "frame", "run": "r", "frame_id": k, "t": 0.2 * k}
+                            for k in range(400)]
+        tables = ce.error_tables(records, "width_prior", reference=reference, raw_boxes=raw)
+        assert tables["detection"]["p"][5] == pytest.approx(0.25)
+        assert tables["detection"]["source"] == "cross_resolution"
+        alternatives = tables["detection_alternatives"]
+        assert alternatives["cross_resolution_iou0.1"]["p"][5] == pytest.approx(0.5)
+        assert alternatives["cross_resolution_raw_iou0.3"]["p"][5] == pytest.approx(1.0)
+        assert "held_track" in alternatives
+        # R_max by section 1.2: the largest bin with 50 observations and p >= 0.2.
+        assert tables["R_max_m"] == 60.0
+        assert tables["R_max_alternatives"]["held_track"] == ce.r_max(alternatives["held_track"])
+
+    def test_without_a_reference_the_table_is_the_held_track_rate(self):
+        records = _records(5, frames_per_track=10)
+        tables = ce.error_tables(records, "width_prior")
+        assert tables["detection"]["source"] == "held_track"

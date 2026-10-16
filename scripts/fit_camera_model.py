@@ -46,8 +46,22 @@ def load_records(path: Path, run: str) -> tuple[dict, list[dict]]:
     return header, records
 
 
-def tables_for(frames_dir: Path, imgsz: int) -> dict:
+def raw_boxes(path: Path, run: str) -> dict[tuple, list]:
+    """`(run, frame_id) -> boxes` of a drive's raw detector output."""
+    out: dict[tuple, list] = {}
+    for line in path.read_text().splitlines():
+        row = json.loads(line)
+        if row.get("type") == "frame":
+            out[(run, row["frame_id"])] = [b[:4] for b in row["boxes"]]
+    return out
+
+
+def tables_for(frames_dir: Path, imgsz: int, reference_imgsz: int | None = None) -> dict:
+    """The tables of `imgsz`'s records per frame-interval group. With `reference_imgsz`,
+    the detection rate is the cross-resolution share against that pass (Amendment 3)."""
     groups: dict[str, list[dict]] = {}
+    references: dict[str, list[dict]] = {}
+    raws: dict[str, dict[tuple, list]] = {}
     runs, inputs, weights = {}, [], set()
     for run_dir in sorted(p for p in frames_dir.iterdir() if p.is_dir()):
         path = run_dir / f"detections_{imgsz}.jsonl"
@@ -61,19 +75,36 @@ def tables_for(frames_dir: Path, imgsz: int) -> dict:
         runs[run_dir.name] = {"group": group, "frames": len(times), "horizon": header.get("horizon"),
                               "detections": sum(1 for r in records if r["type"] == "det")}
         inputs.append({"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()})
+        if reference_imgsz is not None:
+            ref_path = run_dir / f"detections_{reference_imgsz}.jsonl"
+            raw_path = run_dir / f"raw_{imgsz}.jsonl"
+            if not ref_path.exists() or not raw_path.exists():
+                raise SystemExit(f"the cross-resolution detection rate needs {ref_path.name} and "
+                                 f"{raw_path.name} in {run_dir}")
+            ref_header, ref_records = load_records(ref_path, run_dir.name)
+            weights.add(ref_header.get("weights_sha256"))
+            references.setdefault(group, []).extend(ref_records)
+            raws.setdefault(group, {}).update(raw_boxes(raw_path, run_dir.name))
+            runs[run_dir.name]["reference_detections"] = sum(
+                1 for r in ref_records if r["type"] == "det")
+            for extra in (ref_path, raw_path):
+                inputs.append({"path": str(extra),
+                               "sha256": hashlib.sha256(extra.read_bytes()).hexdigest()})
     if not inputs:
         raise SystemExit(f"no detections_{imgsz}.jsonl under {frames_dir}")
     if len(weights) != 1:
-        raise SystemExit(f"the {imgsz} px records ran different weights: {sorted(weights, key=str)}")
+        raise SystemExit(f"the records ran different weights: {sorted(weights, key=str)}")
+
     def build(method):
-        return {group: {**ce.error_tables(records, method),
+        return {group: {**ce.error_tables(records, method, reference=references.get(group),
+                                          raw_boxes=raws.get(group)),
                         "drives": sorted(r for r, v in runs.items() if v["group"] == group)}
                 for group, records in sorted(groups.items())}
 
     alternatives = {m: {"tables": build(m)} for m in ce.METHODS if m != ce.PRIMARY_METHOD}
     return {"method": ce.PRIMARY_METHOD, "tables": build(ce.PRIMARY_METHOD),
             "alternative": alternatives, "runs": runs, "inputs": inputs,
-            "weights_sha256": weights.pop()}
+            "reference_imgsz": reference_imgsz, "weights_sha256": weights.pop()}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,6 +112,9 @@ def main(argv: list[str] | None = None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--frames-dir", default="outputs/jam/frames")
     parser.add_argument("--imgsz", type=int, default=640)
+    parser.add_argument("--reference-imgsz", type=int, default=1280,
+                        help="the pass whose tracked vehicles the detection rate is measured "
+                             "against (Amendment 3, R2-3)")
     parser.add_argument("--sensitivity-imgsz", type=int, nargs="*", default=[1280])
     parser.add_argument("--out", default="results/jam/camera_error_model.json")
     args = parser.parse_args(argv)
@@ -90,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         return candidate if candidate.is_absolute() else REPO_ROOT / candidate
 
     frames_dir = resolve(args.frames_dir)
-    primary = tables_for(frames_dir, args.imgsz)
+    primary = tables_for(frames_dir, args.imgsz, reference_imgsz=args.reference_imgsz)
     if SUMO_TABLE not in primary["tables"]:
         raise SystemExit(f"no drive in {frames_dir} has 0.20 s frames; the SUMO table needs one")
     artefact = {
@@ -101,6 +135,13 @@ def main(argv: list[str] | None = None) -> int:
                         "only); the ground-plane tables, whose scale follows each drive's "
                         "fitted camera height (0.40 to 0.89 m against the configured 1.25 m), "
                         "are recorded under 'alternative'"),
+        "detection_note": (f"p(d) is the share of the {args.reference_imgsz} px tracker's "
+                           f"vehicles with a {args.imgsz} px tracked box at IoU >= "
+                           f"{ce.CROSS_IOU:g} in the same frame, binned by the "
+                           f"{args.reference_imgsz} px distance (Amendment 3, R2-3); the "
+                           "held-track rate and the IoU 0.1 and raw-box shares are under "
+                           "detection_alternatives. The sensitivity tables use the held-track "
+                           "rate, having no higher-resolution reference"),
         "distance_scale_note": ("fx was never recorded; the absolute scale is swept as a "
                                 "multiplicative bias b in {0.8, 1.0, 1.25} (plan section 2.3)"),
         **primary,
