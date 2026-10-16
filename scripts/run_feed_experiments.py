@@ -69,6 +69,10 @@ STALENESS = (30.0, 60.0, 120.0, 180.0, 300.0)
 PENETRATIONS = (0.75, 0.5, 0.25, 0.1)
 CERTIFICATE_LEVELS = (1.0, 0.75, 0.5, 0.25, 0.1)
 LINEARITY_SEEDS = (16, 17, 18)
+#: Amendment 2, B2: the one-vehicle null pulses run on these seeds, every site and level,
+#: and a level's certificate needs this many of its 12 sites resolved above their null.
+NULL_SEEDS = (16, 17, 18, 19, 20)
+RESOLVED_SITES_REQUIRED = 10
 #: Plan D12 and D13: drain scenarios, their caps and the instant the clock starts.
 DRAIN = {"mainz_surge": {"cap_s": 9000.0, "t_0": 1200.0, "onset_from": 0.0},
          "mainz_burst": {"cap_s": 12000.0, "t_0": 1500.0, "onset_from": 900.0}}
@@ -205,8 +209,9 @@ def block_specs(block: str, context: Context) -> list[Spec]:
             arms.append((arm, "mainz", {"scenario": "mainz"}))
     elif block == "E":
         specs = []
-        for size, seed_list in ((60, seeds), (30, tuple(s for s in seeds
-                                                        if s in LINEARITY_SEEDS))):
+        for size, seed_list in ((60, seeds),
+                                (30, tuple(s for s in seeds if s in LINEARITY_SEEDS)),
+                                (1, tuple(s for s in seeds if s in NULL_SEEDS))):
             for p in CERTIFICATE_LEVELS:
                 for site in range(12):
                     for seed in seed_list:
@@ -809,6 +814,36 @@ def summarize_d(episodes, smoke: bool = False,
     return out
 
 
+def site_resolution(pulse_peaks: dict[int, list[float]],
+                    null_peaks: dict[int, list[float]]) -> dict[str, Any]:
+    """Amendment 2, B2: which sites' pulse response stands above its own null.
+
+    For each site, the statistic is the peak self-deviation at the pulsed segment from
+    the pulse's start to `DEVIATION_END_S`; the null is that statistic on a one-vehicle
+    pulse at the same site and level. A site is resolved when the 60-vehicle pulses'
+    mean peak exceeds the 95th percentile of its null peaks. A site with no null run
+    or no pulse run is not resolved.
+    """
+    import numpy as np
+
+    sites = []
+    for site in range(12):
+        pulses, nulls = pulse_peaks.get(site, []), null_peaks.get(site, [])
+        entry: dict[str, Any] = {"site": site, "pulse_runs": len(pulses), "null_runs": len(nulls)}
+        if pulses and nulls:
+            mean = float(np.mean(pulses))
+            p95 = float(np.percentile(nulls, 95))
+            entry.update(pulse_peak_mean=mean, null_peak_p95=p95, resolved=bool(mean > p95))
+        else:
+            entry.update(pulse_peak_mean=None, null_peak_p95=None, resolved=False)
+        sites.append(entry)
+    resolved = sum(1 for e in sites if e["resolved"])
+    return {"sites": sites, "resolved": resolved, "required": RESOLVED_SITES_REQUIRED,
+            "available": resolved >= RESOLVED_SITES_REQUIRED,
+            "status": ("available" if resolved >= RESOLVED_SITES_REQUIRED else
+                       f"unavailable ({resolved} of 12 sites resolved)")}
+
+
 def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]:
     from src.analysis.gains import deviations, estimate_level, linearity_ratio, min_penetration
 
@@ -824,43 +859,70 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
                 return json.loads(path.read_text())["trace"], str(path)
         return None, None
 
-    by_level: dict[float, dict[int, dict[int, dict]]] = {}
-    small: dict[float, dict[int, dict[int, dict]]] = {}
+    def peak_self(record: dict, base: list[dict], site: int) -> float:
+        response = deviations(_load_trace(record), base, _pulse_start(record), DEVIATION_END_S)
+        return float(response[:, site].max())
+
+    by_arm: dict[str, dict[float, dict[int, dict[int, dict]]]] = {
+        "pulse60": {}, "pulse30": {}, "pulse1": {}}
     for record in episodes:
-        if not record["arm"].startswith("pulse"):
+        if record["arm"] not in by_arm:
             continue
         site = int(record["pulse"][0])
-        target = by_level if record["arm"] == "pulse60" else small
-        target.setdefault(record["penetration"], {}).setdefault(record["seed"], {})[site] = record
+        by_arm[record["arm"]].setdefault(record["penetration"], {}).setdefault(
+            record["seed"], {})[site] = record
+    by_level, small, nulls = by_arm["pulse60"], by_arm["pulse30"], by_arm["pulse1"]
     levels: dict[str, Any] = {}
     rho_by_level: dict[float, float | None] = {}
     missing = []
     for p in sorted(by_level, reverse=True):
         seed_runs, peaks, noise = {}, [], []
+        pulse_peaks: dict[int, list[float]] = {}
+        null_peaks: dict[int, list[float]] = {}
         for seed, sites in sorted(by_level[p].items()):
             base, base_path = baseline_trace(p, seed)
             if base is None:
                 missing.append(f"p{p:g}/seed{seed}")
                 continue
+            for site, record in sites.items():
+                pulse_peaks.setdefault(site, []).append(peak_self(record, base, site))
             if len(sites) < 12:
                 continue
             runs = []
             for site in range(12):
                 trace = _load_trace(sites[site])
                 runs.append(deviations(trace, base, *_regression_window(sites[site])))
-                response = deviations(trace, base, _pulse_start(sites[site]), DEVIATION_END_S)
-                peaks.append(float(response[:, site].max()))
+                peaks.append(pulse_peaks[site][-1])
                 tail = [s for s in trace if NOISE_WINDOW[0] <= s["t"] <= NOISE_WINDOW[1]]
                 if tail:
                     noise.extend(deviations(trace, base, *NOISE_WINDOW).ravel().tolist())
             seed_runs[seed] = runs
-        entry: dict[str, Any] = {"seeds_used": sorted(seed_runs)}
+        for seed, sites in sorted(nulls.get(p, {}).items()):
+            base, _ = baseline_trace(p, seed)
+            if base is None:
+                missing.append(f"p{p:g}/seed{seed} (null)")
+                continue
+            for site, record in sites.items():
+                null_peaks.setdefault(site, []).append(peak_self(record, base, site))
+        resolution = site_resolution(pulse_peaks, null_peaks)
+        entry: dict[str, Any] = {"seeds_used": sorted(seed_runs), "sites": resolution,
+                                 "certificate_status": resolution["status"]}
+        # Informational since Amendment 2: pooled over segments, so not like for like.
         entry["noise_floor"] = _noise_floor(peaks, noise)
         if len(seed_runs) >= 2:
-            entry.update(estimate_level(seed_runs))
-            rho_by_level[p] = entry["rho_UCB"]
+            estimate = estimate_level(seed_runs)
+            if resolution["available"]:
+                entry.update(estimate)
+                rho_by_level[p] = entry["rho_UCB"]
+            else:
+                # The bound is not reported where the responses are not resolved; the
+                # estimate is kept for inspection under its own key.
+                entry.update(certificate=False, rho_UCB=None, rho_hat=None,
+                             estimate_unresolved=estimate)
+                rho_by_level[p] = None
         else:
-            entry["note"] = "fewer than two complete seeds: no bound"
+            entry.update(note="fewer than two complete seeds: no bound", certificate=False,
+                         certificate_status="unavailable (fewer than two complete seeds)")
             rho_by_level[p] = None
         ratios = []
         for seed, sites in sorted(small.get(p, {}).items()):
@@ -884,6 +946,10 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
     summary = {"block": "E", "levels": levels, "missing_baselines": missing,
                "inserted_difference": inserted,
                "p_min": min_penetration(rho_by_level) if rho_by_level else None,
+               "resolution_rule": (f"a site is resolved when the 60-vehicle pulses' mean "
+                                   f"peak self-deviation exceeds the 95th percentile of its "
+                                   f"one-vehicle null on seeds {list(NULL_SEEDS)}; a level "
+                                   f"needs {RESOLVED_SITES_REQUIRED} of 12"),
                "regression_window": "from the injection's end to "
                                     f"{DEVIATION_END_S:g} s",
                "noise_window_s": list(NOISE_WINDOW)}

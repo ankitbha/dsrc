@@ -108,9 +108,13 @@ def d_summary(tmp_path_factory):
 @pytest.fixture(scope="module")
 def e_summary(tmp_path_factory):
     return {"block": "E", "levels": {
-        "1": {"rho_hat": 0.4, "rho_UCB": 0.6, "certificate": True},
-        "0.5": {"rho_hat": 0.8, "rho_UCB": 1.3, "certificate": False},
-        "0.25": {"note": "fewer than two complete seeds: no bound"}},
+        "1": {"rho_hat": 0.4, "rho_UCB": 0.6, "certificate": True,
+              "certificate_status": "available", "sites": {"resolved": 12}},
+        "0.5": {"rho_hat": 0.8, "rho_UCB": 1.3, "certificate": False,
+                "certificate_status": "available", "sites": {"resolved": 11}},
+        "0.25": {"rho_hat": None, "rho_UCB": None, "certificate": False,
+                 "certificate_status": "unavailable (7 of 12 sites resolved)",
+                 "sites": {"resolved": 7}}},
         "p_min": {"p_min": 1.0, "first_not_met": 0.5}}
 
 
@@ -193,6 +197,8 @@ class TestTable:
         assert levels[0.5]["flow_gain"] == c_summary["rows"]["penetration/p0.5"][
             "paired_vs_published"]["gain"]
         assert levels[0.25]["rho_UCB"] is None
+        assert levels[0.25]["certificate_status"] == "unavailable (7 of 12 sites resolved)"
+        assert levels[0.25]["sites_resolved"] == 7 and levels[0.25]["p_min"] is False
 
 
 def test_a_missing_artefact_raises(tmp_path):

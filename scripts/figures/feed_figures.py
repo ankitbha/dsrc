@@ -280,6 +280,10 @@ def table_certificate_and_rules(a_summary: dict, c_summary: dict,
                        "flow_gain": 0.0 if p == 1.0 else paired.get("gain"),
                        "rho_hat": entry.get("rho_hat"), "rho_UCB": entry.get("rho_UCB"),
                        "certificate": entry.get("certificate"),
+                       # Amendment 2, B2: "unavailable (k of 12 sites resolved)" where the
+                       # pulse responses do not stand above their one-vehicle null.
+                       "certificate_status": entry.get("certificate_status"),
+                       "sites_resolved": (entry.get("sites") or {}).get("resolved"),
                        "p_min": p_min is not None and p == p_min})
     return {"rules": rules, "penetration": sorted(levels, key=lambda r: -r["penetration"]),
             "placeholder": a_summary.get("placeholder")}

@@ -150,7 +150,7 @@ class TestHeaderAndSpecs:
         for spec in specs:
             by_arm.setdefault((spec.arm, spec.variant, spec.pulse and spec.pulse[1]), []).append(
                 spec.seed)
-        lists = {tuple(v) for (arm, *_), v in by_arm.items() if arm != "pulse30"}
+        lists = {tuple(v) for (arm, *_), v in by_arm.items() if arm not in ("pulse30", "pulse1")}
         assert lists == {tuple(range(16, 31))}
         assert len({s.key for s in specs}) == len(specs)
 
@@ -158,7 +158,7 @@ class TestHeaderAndSpecs:
         context = rfe.Context()
         context.feed = rfe.load_feed_parameters(ARTEFACT, None, allow_placeholder=True)
         sizes = {b: len(rfe.block_specs(b, context)) for b in rfe.BLOCKS}
-        assert sizes == {"A": 150, "B": 135, "C": 60, "D": 90, "E": 1080}
+        assert sizes == {"A": 150, "B": 135, "C": 60, "D": 90, "E": 1380}
 
 
 class TestSummaries:
@@ -340,7 +340,11 @@ class TestSummariesOnSyntheticTraces:
         assert summary["network_threshold"]["pooled"]["refused"] is True
         assert "refused" in summary["primary_unavailable_reason"]
 
-    def test_block_e_estimates_the_certificate_and_checks_the_pulse_size(self, tmp_path):
+    @staticmethod
+    def _block_e(tmp_path, null_peak=lambda site: 0.001):
+        """Three seeds, 12 sites at p = 1: 60-vehicle pulses whose self-deviation starts
+        at 0.05 and decays through a known system, and one-vehicle nulls whose
+        self-deviation peaks at `null_peak(site)`."""
         import numpy as np
 
         traces_dir, results_dir = tmp_path / "traces", tmp_path / "results"
@@ -374,26 +378,56 @@ class TestSummariesOnSyntheticTraces:
                                  "pulse": [site, 60, 1200.0, 60.0], "trace_file": path,
                                  "arrived": 2040, "running": 920, "pending": 0,
                                  "held_at_entry": 50})
+                null = [{"t": float(t), "density": [0.1 + (null_peak(site) if (
+                    e == site and t == 1250) else 0.0) for e in range(12)]} for t in times]
+                path = _write_trace(traces_dir / "E" / f"pulse1_{seed}_{site}.json", null)
+                episodes.append({"key": f"E/pulse1/p1_site{site}/{seed}", "arm": "pulse1",
+                                 "variant": f"p1_site{site}", "seed": seed,
+                                 "penetration": 1.0, "duration_s": 2500.0,
+                                 "pulse": [site, 1, 1200.0, 60.0], "trace_file": path,
+                                 "arrived": 2001, "running": 900, "pending": 0,
+                                 "held_at_entry": 50})
         (results_dir / "E.jsonl").write_text(
             "".join(json.dumps(r) + "\n" for r in baselines))
+        return episodes, traces_dir, results_dir
+
+    def test_block_e_estimates_the_certificate_and_checks_the_pulse_size(self, tmp_path):
+        import numpy as np
+
+        episodes, traces_dir, results_dir = self._block_e(tmp_path)
         # One pulsed run ends with a vehicle mid-teleport (accounted), one is one short.
         episodes[0].update(arrived=2039, in_teleport=1)
-        episodes[1].update(arrived=2039, in_teleport=0)
+        episodes[2].update(arrived=2039, in_teleport=0)
         summary = rfe.summarize_e(episodes, traces_dir, results_dir)
         level = summary["levels"]["1"]
         assert level["seeds_used"] == [16, 17, 18]
+        assert level["sites"]["resolved"] == 12
+        assert level["certificate_status"] == "available"
         assert np.allclose(level["a_hat"], 0.02, rtol=0.1)
         assert level["rho_UCB"] >= level["rho_hat"]
         assert summary["p_min"]["p_min"] == 1.0
         assert summary["inserted_difference"] == {
-            "checked": 36, "without_baseline": 0,
-            "mismatched": [{"key": episodes[1]["key"], "difference": 59}]}
+            "checked": 72, "without_baseline": 0,
+            "mismatched": [{"key": episodes[2]["key"], "difference": 59}]}
         floor = level["noise_floor"]
         assert floor["noise_samples"] == 3 * 12 * 12 * 11  # seeds x sites x segments x samples
         assert floor["peak_self_deviation_mean"] == pytest.approx(0.05)
         assert floor["resolved"] is True
         assert summary["regression_window"].startswith("from the injection's end")
         assert (results_dir / "certificate.json").exists()
+
+    def test_a_level_with_nine_resolved_sites_reports_no_certificate(self, tmp_path):
+        """Amendment 2, B2: fewer than 10 of 12 resolved, no certificate and no p_min."""
+        episodes, traces_dir, results_dir = self._block_e(
+            tmp_path, null_peak=lambda site: 0.08 if site in (2, 5, 9) else 0.001)
+        summary = rfe.summarize_e(episodes, traces_dir, results_dir)
+        level = summary["levels"]["1"]
+        assert level["sites"]["resolved"] == 9
+        assert [e["site"] for e in level["sites"]["sites"] if not e["resolved"]] == [2, 5, 9]
+        assert level["certificate_status"] == "unavailable (9 of 12 sites resolved)"
+        assert level["certificate"] is False and level["rho_UCB"] is None
+        assert level["estimate_unresolved"]["rho_UCB"] is not None
+        assert summary["p_min"]["p_min"] is None
 
     def test_block_a_records_the_lemma_condition_and_does_not_claim_zero_when_it_fails(self):
         feed = rfe.load_feed_parameters(ARTEFACT, None, allow_placeholder=True)
@@ -589,3 +623,39 @@ class TestReferenceRefusal:
                      run_episode_factory=lambda model, context: _stub(calls))
         assert calls == []
         assert not (tmp_path / "res" / "B.jsonl").exists()
+
+
+class TestSiteResolution:
+    """Amendment 2, B2: the per-site null and its 95th percentile (and mutant N13)."""
+
+    def test_a_pulse_between_the_null_s_median_and_its_95th_percentile_is_not_resolved(self):
+        nulls = {site: [0.01, 0.01, 0.02, 0.05, 0.09] for site in range(12)}
+        pulses = {site: [0.04, 0.04] for site in range(12)}
+        out = rfe.site_resolution(pulses, nulls)
+        assert out["sites"][0]["null_peak_p95"] == pytest.approx(0.082)
+        assert out["resolved"] == 0 and out["available"] is False
+        assert out["status"] == "unavailable (0 of 12 sites resolved)"
+
+    def test_ten_resolved_sites_are_enough_and_nine_are_not(self):
+        nulls = {site: [0.001] * 5 for site in range(12)}
+        pulses = {site: [0.05] if site < 10 else [0.0005] for site in range(12)}
+        assert rfe.site_resolution(pulses, nulls)["available"] is True
+        pulses[9] = [0.0005]
+        out = rfe.site_resolution(pulses, nulls)
+        assert out["resolved"] == 9 and out["available"] is False
+
+    def test_a_site_without_a_null_run_is_not_resolved(self):
+        out = rfe.site_resolution({0: [0.05]}, {})
+        assert out["sites"][0]["resolved"] is False and out["resolved"] == 0
+
+    def test_the_pooled_noise_floor_uses_its_95th_percentile(self):
+        floor = rfe._noise_floor([60.0, 60.0], [float(v) for v in range(100)])
+        assert floor["noise_p95"] == pytest.approx(94.05)
+        assert floor["resolved"] is False
+
+    def test_block_e_runs_the_one_vehicle_null_on_seeds_16_to_20(self):
+        specs = rfe.block_specs("E", rfe.Context())
+        nulls = [s for s in specs if s.arm == "pulse1"]
+        assert len(nulls) == 300
+        assert sorted({s.seed for s in nulls}) == [16, 17, 18, 19, 20]
+        assert {s.pulse[1] for s in nulls} == {1}
