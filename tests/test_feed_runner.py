@@ -647,6 +647,17 @@ class TestSiteResolution:
         out = rfe.site_resolution(pulses, nulls)
         assert out["resolved"] == 9 and out["available"] is False
 
+    def test_the_mean_of_the_pulse_peaks_is_compared_not_their_maximum(self):
+        """Amendment 3, C1 (mutant V3): mean below the null's p95, maximum above it."""
+        nulls = {site: [0.01, 0.01, 0.01, 0.01, 0.05] for site in range(12)}
+        pulses = {site: [0.01, 0.01, 0.06] for site in range(12)}
+        out = rfe.site_resolution(pulses, nulls)
+        site = out["sites"][0]
+        assert site["null_peak_p95"] == pytest.approx(0.042)
+        assert site["pulse_peak_mean"] == pytest.approx(0.08 / 3)
+        assert max(pulses[0]) > site["null_peak_p95"] > site["pulse_peak_mean"]
+        assert site["resolved"] is False and out["resolved"] == 0
+
     def test_a_site_without_a_null_run_is_not_resolved(self):
         out = rfe.site_resolution({0: [0.05]}, {})
         assert out["sites"][0]["resolved"] is False and out["resolved"] == 0
