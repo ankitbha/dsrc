@@ -28,7 +28,7 @@ class TestSpecs:
         assert len(rje.block_specs("T")) == 60
         assert len(rje.block_specs("T", dagger=True)) == 60
         assert len(rje.block_specs("S")) == 390
-        assert len(rje.block_specs("M", selection=SELECTION)) == 525 + 105 + 105 + 30
+        assert len(rje.block_specs("M", selection=SELECTION, oracle_window=60.0)) == 525 + 105 + 105 + 30
         # Amendment 1: m in {0, 2, 4} for the lookahead, the plan and the best model.
         assert len(rje.block_specs("L", selection=SELECTION)) == 3 * 3 * 2 * 15
         assert len(rje.block_specs("P", selection=SELECTION)) == 120
@@ -90,7 +90,7 @@ class TestSpecs:
         durations = {(s.block, s.scenario): s.duration_s
                      for b in ("G", "S") for s in rje.block_specs(b)}
         assert set(durations.values()) == {3600.0}
-        m = {s.scenario: s.duration_s for s in rje.block_specs("M", selection=SELECTION)}
+        m = {s.scenario: s.duration_s for s in rje.block_specs("M", selection=SELECTION, oracle_window=60.0)}
         assert m == {"B5": 7200.0, "B7.5": 7200.0, "B9": 7200.0, "I_exit": 7200.0,
                      "I_mid": 7200.0, "BG": 3600.0, "S45": 2500.0}
 
@@ -100,25 +100,54 @@ class TestSpecs:
         with pytest.raises(SystemExit):
             rje.block_specs("T", seeds=[11])
         with pytest.raises(SystemExit):
-            rje.block_specs("M", seeds=[15], selection=SELECTION)
+            rje.block_specs("M", seeds=[15], selection=SELECTION, oracle_window=60.0)
         with pytest.raises(SystemExit):
             rje.block_specs("G", seeds=[6])
         assert {s.seed for s in rje.block_specs("G", seeds=[2, 3])} == {2, 3}
 
     def test_arms_share_identical_seed_lists(self):
         for block in ("G", "S", "M"):
-            specs = rje.block_specs(block, selection=SELECTION)
+            specs = rje.block_specs(block, selection=SELECTION, oracle_window=60.0)
             by_arm = {}
             for s in specs:
                 by_arm.setdefault((s.arm, s.variant, s.scenario), set()).add(s.seed)
             assert len({tuple(sorted(v)) for v in by_arm.values()}) == 1
 
     def test_the_oracle_in_m_uses_the_selected_rule_threshold_and_a_wide_variant(self):
-        specs = rje.block_specs("M", selection=SELECTION)
+        specs = rje.block_specs("M", selection=SELECTION, oracle_window=60.0)
         oracle = {s.variant: s for s in specs if s.arm == "oracle"}
-        assert set(oracle) == {"tau10_m0.1", "tau10_m0.1_R200"}
+        assert set(oracle) == {"tau10_m0.1_R60", "tau10_m0.1_R200"}
         assert dict(oracle["tau10_m0.1_R200"].params)["oracle_R"] == 200.0
         assert {s.scenario for s in specs if s.variant == "tau10_m0.1_R200"} == {"B9", "I_exit"}
+
+    def test_from_block_s_on_the_oracle_reads_the_camera_s_window(self):
+        # Amendment 3 (R2-5): min(80 m, R_max), so the oracle and the camera arms see the
+        # same window; oracle_wide stays at 200 m and block G keeps its 80 m oracle.
+        specs = rje.block_specs("M", selection=SELECTION, oracle_window=60.0)
+        windows = {s.variant: dict(s.params)["oracle_R"] for s in specs if s.arm == "oracle"}
+        assert windows == {"tau10_m0.1_R60": 60.0, "tau10_m0.1_R200": 200.0}
+        assert all("oracle_R" not in dict(s.params) for s in rje.block_specs("G")
+                   if s.arm == "oracle")
+        assert {s.jam_arm().oracle_R for s in rje.block_specs("G") if s.arm == "oracle"} == {80.0}
+        with pytest.raises(SystemExit):
+            rje.block_specs("M", selection=SELECTION)
+
+    def test_the_window_is_min_80_m_and_r_max_from_the_camera_model(self, tmp_path):
+        def artefact(r_max):
+            path = tmp_path / f"camera_{r_max:g}.json"
+            path.write_text(json.dumps({
+                "schema": "camera_error_model/1", "bin_m": 10.0, "sumo_table": "0.20",
+                "tables": {"0.20": {"detection": {"p": [0.9] * 12},
+                                    "distance_noise": {"sigma_ema_m": [0.5] * 12},
+                                    "closing_rate_noise": {"sigma_v_mps": [0.2] * 12},
+                                    "confidence": {"values": [[0.9]] * 12},
+                                    "R_max_m": r_max}}}))
+            return path
+
+        assert rje.oracle_window(artefact(60.0)) == 60.0
+        assert rje.oracle_window(artefact(100.0)) == 80.0
+        with pytest.raises(SystemExit):
+            rje.oracle_window(tmp_path / "missing.json")
 
     def test_block_t_samples_features(self):
         assert {s.sample_fraction for s in rje.block_specs("T")} == {0.05}

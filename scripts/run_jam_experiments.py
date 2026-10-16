@@ -180,8 +180,14 @@ class Selection:
 
 
 def arm_list(block: str, selection: Selection | None, grid: bool = False,
-             dagger: bool = False) -> list[tuple[str, dict[str, float], dict[str, Any]]]:
-    """`(arm, params, extra)` for a block; `extra` holds m, penetration, bias, sampling."""
+             dagger: bool = False, oracle_window: float | None = None
+             ) -> list[tuple[str, dict[str, float], dict[str, Any]]]:
+    """`(arm, params, extra)` for a block; `extra` holds m, penetration, bias, sampling.
+
+    From block S on, an oracle arm's window is the camera's effective window `min(80 m,
+    R_max)` (Amendment 3, R2-5), so the gap between the camera arms and the oracle is
+    perception error only; block G's oracle keeps the 80 m it ran with.
+    """
     if block == "G":
         settings = ([{"tau_l": t, "m_on": m} for t in G_TAU for m in M_ON] if grid
                     else [G_BASE])
@@ -204,7 +210,8 @@ def arm_list(block: str, selection: Selection | None, grid: bool = False,
                 ("plan", {}, {}), ("take_the_slower", {}, {}),
                 ("rule", {"m_on": selection.m_on}, {}),
                 ("learned", {"theta": selection.theta}, {}),
-                ("oracle", {"m_on": selection.m_on, "tau_l": 10.0}, {})]
+                ("oracle", {"m_on": selection.m_on, "tau_l": 10.0,
+                            "oracle_R": _window(oracle_window)}, {})]
     if block == "L":
         arms = [("lookahead", {"J_th": selection.J_th}, {}), ("plan", {}, {}), best]
         return [(a, p, {"m": m}) for m in LAGS_L for a, p, _ in _unique(arms)]
@@ -218,6 +225,22 @@ def arm_list(block: str, selection: Selection | None, grid: bool = False,
                 + [(best[0], best[1], {"bias": 1.0, "pair_sigma_scale": scale})
                    for scale in PAIR_SIGMA_SCALES_K])
     raise ValueError(f"unknown block {block}")
+
+
+def _window(oracle_window: float | None) -> float:
+    if oracle_window is None:
+        raise SystemExit("from block S on the oracle reads the camera's effective window "
+                         "min(80 m, R_max); none was given (oracle_window)")
+    return float(oracle_window)
+
+
+def oracle_window(camera_model: Path | None) -> float:
+    """The camera model's `R_eff = min(80 m, R_max)`, the oracle's window from block S on."""
+    from src.sumo.sensing import CameraModel
+
+    if camera_model is None or not Path(camera_model).exists():
+        raise SystemExit(f"the oracle's window is the camera's; {camera_model} does not exist")
+    return float(CameraModel.from_artefact(camera_model).R_eff)
 
 
 def _unique(arms):
@@ -242,7 +265,8 @@ def _scenarios(block: str) -> tuple[str, ...]:
 
 def block_specs(block: str, seeds: Sequence[int] | None = None,
                 selection: Selection | None = None, grid: bool = False,
-                dagger: bool = False, smoke: bool = False) -> list[Spec]:
+                dagger: bool = False, smoke: bool = False,
+                oracle_window: float | None = None) -> list[Spec]:
     """Every episode of a block, arm-major, every arm over the same seed list.
 
     Seeds outside the block's own set are refused, except in a smoke run, which is not
@@ -260,7 +284,7 @@ def block_specs(block: str, seeds: Sequence[int] | None = None,
     if len(set(seeds)) != len(seeds):
         raise SystemExit("duplicate seeds")
     specs: list[Spec] = []
-    for arm, params, extra in arm_list(block, selection, grid, dagger):
+    for arm, params, extra in arm_list(block, selection, grid, dagger, oracle_window):
         variant = _variant(arm, params)
         if "m" in extra:
             variant += f"_lag{extra['m']:g}"
@@ -1048,8 +1072,9 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             summarize(name, results_dir, block_context)
             print(f"wrote {results_dir / f'{name}_summary.json'}")
             continue
+        window = oracle_window(context.camera_model) if block in ("M", "L", "P", "K") else None
         specs = block_specs(block, args.seeds, context.selection, grid=args.g_grid,
-                            dagger=dagger, smoke=args.smoke)
+                            dagger=dagger, smoke=args.smoke, oracle_window=window)
         if args.smoke:
             specs = smoke_subset(specs)
         if not specs:
