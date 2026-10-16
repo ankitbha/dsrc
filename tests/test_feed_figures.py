@@ -20,6 +20,8 @@ import run_feed_experiments as rfe  # noqa: E402
 
 ARTEFACT = REPO_ROOT / "results" / "feed" / "feed_process.json"
 SEEDS = (16, 17, 18)
+PASSING_CHECK = {"source": "fixture", "exists": True, "actuation": "max_speed",
+                 "same_checkpoint": True, "same_actuation": True}
 
 
 @pytest.fixture(scope="module")
@@ -59,7 +61,9 @@ def b_summary():
         for seed in SEEDS:
             episodes.append({"arm": "inject_stale", "variant": f"s{s:g}", "seed": seed,
                              "flow": 3750.0 - 0.2 * s - seed % 2})
-    return rfe.summarize_b(episodes, references)
+    summary = rfe.summarize_b(episodes, references)
+    summary["reference_check"] = PASSING_CHECK
+    return summary
 
 
 @pytest.fixture(scope="module")
@@ -68,7 +72,9 @@ def c_summary():
     episodes = [{"arm": "penetration", "variant": f"p{p:g}", "seed": seed,
                  "flow": 3700.0 + 50.0 * p + seed % 2}
                 for p in (0.75, 0.5, 0.25, 0.1) for seed in SEEDS]
-    return rfe.summarize_c(episodes, references)
+    summary = rfe.summarize_c(episodes, references)
+    summary["reference_check"] = PASSING_CHECK
+    return summary
 
 
 @pytest.fixture(scope="module")
@@ -214,3 +220,22 @@ def test_without_a_network_threshold_the_drain_figure_draws_the_fixed_rule(d_sum
     stripped = json.loads(json.dumps(d_summary))
     stripped["scenarios"]["mainz_surge"]["primary"] = None
     assert ff.fig_drain(stripped)["mainz_surge"]["rule"] == "fixed_30/H120"
+
+
+@pytest.mark.parametrize("failing", ["exists", "same_checkpoint", "same_actuation", "absent"])
+def test_the_figure_and_table_refuse_a_failed_reference_check(failing, a_summary, b_summary,
+                                                             c_summary, e_summary):
+    """Amendment 2, B1."""
+    bad = json.loads(json.dumps(c_summary))
+    if failing == "absent":
+        del bad["reference_check"]
+    else:
+        bad["reference_check"][failing] = False
+    with pytest.raises(ValueError, match="block C"):
+        ff.fig_flow_consequence(b_summary, bad)
+    with pytest.raises(ValueError, match="block C"):
+        ff.table_certificate_and_rules(a_summary, bad, e_summary)
+    bad_b = json.loads(json.dumps(b_summary))
+    bad_b["reference_check"] = bad.get("reference_check", {})
+    with pytest.raises(ValueError, match="block B"):
+        ff.fig_flow_consequence(bad_b, c_summary)

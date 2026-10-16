@@ -124,7 +124,20 @@ def plot_feed_and_rule(series: dict, path: Path) -> Path:
 # --------------------------------------------------------------------- Fig. 2
 
 
+def require_reference(summary: dict, name: str) -> None:
+    """Amendment 2, B1: a block paired against a missing or mismatched reference is not
+    drawn. The summary's `reference_check` must exist and pass on every count."""
+    check = summary.get("reference_check") or {}
+    failed = [key for key in ("exists", "same_checkpoint", "same_actuation")
+              if check.get(key) is not True]
+    if failed:
+        raise ValueError(f"{name} was paired against {check.get('source')!r}, which fails "
+                         f"{failed}; it is not drawn")
+
+
 def fig_flow_consequence(b_summary: dict, c_summary: dict) -> dict[str, Any]:
+    require_reference(b_summary, "block B")
+    require_reference(c_summary, "block C")
     def loss(row):
         paired = row.get("paired_vs_published") or {}
         if "gain" not in paired:
@@ -248,6 +261,7 @@ def plot_drain(series: dict, path: Path) -> Path:
 
 def table_certificate_and_rules(a_summary: dict, c_summary: dict,
                                 e_summary: dict) -> dict[str, Any]:
+    require_reference(c_summary, "block C")
     rules = []
     for key, row in a_summary.get("rows", {}).items():
         paired = row.get("paired_vs_published") or {}

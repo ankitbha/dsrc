@@ -125,12 +125,15 @@ class Context:
     window_start_s: float = 900.0
     #: How advice reaches a vehicle (`src.sumo.mainz.ACTUATIONS`); Amendment 1's cap.
     actuation: str = "max_speed"
+    #: The evaluation blocks B and C pair against (Amendment 2, B1).
+    reference: Path = REFERENCE_EVALUATION
     smoke: bool = False
     feed: dict[str, Any] = field(default_factory=dict)  # block A's parameters
 
     def as_dict(self) -> dict[str, Any]:
         out = asdict(self)
         out["artefact"] = str(self.artefact) if self.artefact else None
+        out["reference"] = str(self.reference)
         return out
 
 
@@ -462,14 +465,50 @@ def committed_references(path: Path = REFERENCE_EVALUATION) -> dict[str, Any]:
 
 
 def _reference_check(references: dict, headers: list[dict]) -> dict[str, Any]:
+    """The reference's identity against the block's, read from the block's last header."""
     block_sha = (headers[-1].get("checkpoint") or {}).get("sha256") if headers else None
     block_actuation = (headers[-1].get("config") or {}).get("actuation") if headers else None
-    return {"source": references.get("source"), "exists": references.get("exists"),
+    return reference_identity(references, block_sha, block_actuation)
+
+
+def reference_identity(references: dict, block_sha: str | None,
+                       block_actuation: str | None) -> dict[str, Any]:
+    """Whether the reference file exists and ran the block's checkpoint and actuation.
+
+    A reference file whose header carries no actuation was written before Amendment 1,
+    so it is read as the legacy `set_speed`.
+    """
+    return {"source": references.get("source"), "exists": bool(references.get("exists")),
             "actuation": references.get("actuation"),
             "same_checkpoint": (block_sha is not None
                                 and block_sha == references.get("here_checkpoint_sha256")),
             "same_actuation": (block_actuation is not None
                                and block_actuation == references.get("actuation"))}
+
+
+def reference_problems(check: dict | None) -> list[str]:
+    """Why a reference check fails, empty when it passes (Amendment 2, B1)."""
+    if not check:
+        return ["no reference check was recorded"]
+    problems = []
+    if not check.get("exists"):
+        problems.append(f"{check.get('source')} does not exist")
+    else:
+        if not check.get("same_actuation"):
+            problems.append(f"its actuation is {check.get('actuation')!r}, not the block's")
+        if not check.get("same_checkpoint"):
+            problems.append("its here checkpoint is not the block's")
+    return problems
+
+
+def require_reference(check: dict, block: str) -> None:
+    """Blocks B and C pair against the reference; refuse when it is not the block's."""
+    problems = reference_problems(check)
+    if problems:
+        raise SystemExit(f"block {block} pairs against {check.get('source')}, but "
+                         + "; ".join(problems) + ". Run Amendment 1's cap evaluation "
+                         "(evaluate_mainz_checkpoints.py --checkpoint-suffix _cap "
+                         "--out-name mainz_paired_seeds_cap) with this checkpoint first.")
 
 
 def _paired(arm: dict[int, float], reference: dict[int, float]) -> dict[str, Any] | None:
@@ -522,6 +561,10 @@ def origin_fit(points: Sequence[tuple[float, float]]) -> dict[str, Any] | None:
     x = np.array([p[0] for p in points], float)
     y = np.array([p[1] for p in points], float)
     slope = float((x * y).sum() / (x * x).sum())
+    if len(np.unique(x)) < 2:
+        # One x value cannot separate a curve from a line.
+        return {"slope": slope, "n": len(points), "quadratic": None,
+                "quadratic_resolved": None}
     design = np.stack([x, x * x], axis=1)
     coefficients, *_ = np.linalg.lstsq(design, y, rcond=None)
     residual = y - design @ coefficients
@@ -924,15 +967,21 @@ def collision_counts(episodes: list[dict]) -> dict[str, Any]:
 def summarize(block: str, results_dir: Path, traces_dir: Path,
               context: Context) -> dict[str, Any]:
     headers, episodes = read_block(results_dir, block)
-    references = committed_references()
+    references = committed_references(context.reference)
+    if block in ("B", "C"):
+        check = _reference_check(references, headers)
+        # Amendment 2, B1: a summary paired against the wrong arm is not built. A smoke
+        # run's summary records the check and is refused by the figure instead.
+        if not context.smoke:
+            require_reference(check, block)
     if block == "A":
         summary = summarize_a(episodes, headers, context)
     elif block == "B":
         summary = summarize_b(episodes, references)
-        summary["reference_check"] = _reference_check(references, headers)
+        summary["reference_check"] = check
     elif block == "C":
         summary = summarize_c(episodes, references)
-        summary["reference_check"] = _reference_check(references, headers)
+        summary["reference_check"] = check
     elif block == "D":
         summary = summarize_d(episodes, context.smoke, results_dir)
         pilot_path = results_dir / "D_pilot.json"
@@ -980,6 +1029,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="simulation time of the replayed process's first stamp, moved "
                              "forward to that stamp's second of the minute")
     parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
+    parser.add_argument("--reference", default=str(REFERENCE_EVALUATION),
+                        help="the evaluation blocks B and C pair against; it must have run "
+                             "the block's checkpoint under the block's actuation")
     parser.add_argument("--actuation", choices=("max_speed", "set_speed"),
                         default="max_speed",
                         help="max_speed caps the vehicle's maximum speed (Amendment 1); "
@@ -1019,7 +1071,8 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
     context = Context(seeds=tuple(args.seeds), duration_s=args.duration_s,
                       artefact=_resolve(args.feed_artefact), session=args.feed_session,
                       allow_placeholder=args.allow_placeholder, start_s=args.start_s,
-                      smoke=args.smoke, actuation=args.actuation)
+                      smoke=args.smoke, actuation=args.actuation,
+                      reference=_resolve(args.reference))
     if args.smoke:
         context.seeds = (SMOKE_SEED,)
         context.duration_s = SMOKE_DURATION_S
@@ -1049,6 +1102,12 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             summarize(block, results_dir, traces_dir, context)
             print(f"wrote {results_dir / f'{block}_summary.json'}")
             continue
+        if block in ("B", "C") and not args.smoke:
+            # Amendment 2, B1: refuse before any episode runs.
+            require_reference(reference_identity(
+                committed_references(context.reference),
+                _sha256(checkpoint) if checkpoint.exists() else None, context.actuation),
+                block)
         specs = block_specs(block, context)
         if block == "D" and args.pilot:
             # The sustained episodes the network threshold needs, then seed 16 of (b).

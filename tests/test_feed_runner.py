@@ -16,6 +16,20 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import run_feed_experiments as rfe  # noqa: E402
 
 ARTEFACT = REPO_ROOT / "results" / "feed" / "feed_process.json"
+COMMITTED_CHECKPOINT = REPO_ROOT / "results" / "checkpoints" / "mainz_here_best.pt"
+
+
+def _write_reference(path: Path, sha: str | None, actuation: str | None = "max_speed",
+                     flows=((16, 3600.0), (17, 3610.0), (18, 3590.0))) -> Path:
+    """An evaluation file in the evaluator's format; `actuation=None` omits the field."""
+    config = {"checkpoints": {"here": {"sha256": sha}}}
+    if actuation is not None:
+        config["actuation"] = actuation
+    lines = [{"type": "header", "config": config}]
+    lines += [{"arm": "here", "seed": seed, "flow": flow} for seed, flow in flows]
+    lines += [{"arm": "no_control", "seed": seed, "flow": flow + 50.0} for seed, flow in flows]
+    path.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    return path
 
 
 def _specs(n_seeds: int = 3) -> list[rfe.Spec]:
@@ -83,8 +97,10 @@ class TestResumeAndPause:
 
     def test_main_exits_zero_when_paused(self, tmp_path):
         (tmp_path / "PAUSE").touch()
+        reference = _write_reference(tmp_path / "ref.jsonl", rfe._sha256(COMMITTED_CHECKPOINT))
         code = rfe.main(["--block", "C", "--seeds", "16", "17", "--results-dir", str(tmp_path),
-                         "--traces-dir", str(tmp_path / "t")],
+                         "--traces-dir", str(tmp_path / "t"), "--reference", str(reference),
+                         "--checkpoint", str(COMMITTED_CHECKPOINT)],
                         run_episode_factory=lambda model, context: _stub([]))
         assert code == 0
         assert json.loads((tmp_path / "C_state.json").read_text())["next_key"] == \
@@ -405,8 +421,11 @@ def test_every_summary_counts_the_controlled_episodes_that_collided(tmp_path):
              "variant": "p0.5", "seed": seed, "flow": 3000.0, "actuation": "max_speed",
              "colliding_vehicles": c, "collision_teleports": t}
             for seed, c, t in ((16, 0, 0), (17, 4, 2), (18, 0, 1))]
-    (tmp_path / "C.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    summary = rfe.summarize("C", tmp_path, tmp_path, rfe.Context())
+    header = {"type": "header", "checkpoint": {"sha256": "abc"},
+              "config": {"actuation": "max_speed"}}
+    (tmp_path / "C.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [header] + rows))
+    reference = _write_reference(tmp_path / "ref.jsonl", "abc")
+    summary = rfe.summarize("C", tmp_path, tmp_path, rfe.Context(reference=reference))
     assert summary["controlled_episodes_with_collisions"] == 2
     assert summary["controlled_episodes"] == 3
     assert summary["colliding_vehicles_total"] == 4
@@ -493,3 +512,80 @@ class TestR114Runner:
                     for s, f in ((16, 3600.0), (17, 3640.0))]
         summary = rfe.summarize_c(episodes, references)
         assert sorted(summary["loss_points_one_minus_p"]) == [(0.75, 120.0), (0.75, 150.0)]
+
+
+class TestReferenceRefusal:
+    """Amendment 2, B1: blocks B and C, their summaries and the figure refuse a reference
+    that is missing or ran another checkpoint or actuation (mutants N10 and N11)."""
+
+    @staticmethod
+    def _block(tmp_path, block="B", sha="abc", actuation="max_speed"):
+        header = {"type": "header", "checkpoint": {"sha256": sha},
+                  "config": {"actuation": actuation}}
+        rows = [{"type": "episode", "key": f"{block}/x/{seed}", "arm": "inject_delta",
+                 "variant": "delta0.1", "seed": seed, "flow": 3500.0,
+                 "previous_fraction_mean": 0.1} for seed in (16, 17, 18)]
+        if block == "C":
+            for row in rows:
+                row.update(arm="penetration", variant="p0.5")
+        (tmp_path / f"{block}.jsonl").write_text(
+            "".join(json.dumps(r) + "\n" for r in [header] + rows))
+
+    @pytest.mark.parametrize("block", ["B", "C"])
+    def test_a_missing_reference_refuses_the_summary(self, tmp_path, block):
+        self._block(tmp_path, block)
+        context = rfe.Context(reference=tmp_path / "missing.jsonl")
+        with pytest.raises(SystemExit, match="does not exist"):
+            rfe.summarize(block, tmp_path, tmp_path, context)
+        assert not (tmp_path / f"{block}_summary.json").exists()
+
+    def test_a_set_speed_reference_refuses(self, tmp_path):
+        self._block(tmp_path)
+        reference = _write_reference(tmp_path / "ref.jsonl", "abc", actuation="set_speed")
+        with pytest.raises(SystemExit, match="actuation is 'set_speed'"):
+            rfe.summarize("B", tmp_path, tmp_path, rfe.Context(reference=reference))
+
+    def test_a_reference_without_an_actuation_field_is_legacy_and_refused(self, tmp_path):
+        self._block(tmp_path)
+        reference = _write_reference(tmp_path / "ref.jsonl", "abc", actuation=None)
+        assert rfe.committed_references(reference)["actuation"] == "set_speed"
+        with pytest.raises(SystemExit, match="actuation"):
+            rfe.summarize("B", tmp_path, tmp_path, rfe.Context(reference=reference))
+
+    def test_a_reference_from_another_checkpoint_refuses(self, tmp_path):
+        self._block(tmp_path, "C")
+        reference = _write_reference(tmp_path / "ref.jsonl", "a-different-sha")
+        with pytest.raises(SystemExit, match="checkpoint is not the block's"):
+            rfe.summarize("C", tmp_path, tmp_path, rfe.Context(reference=reference))
+
+    def test_a_matching_reference_builds_the_summary_and_records_the_check(self, tmp_path):
+        self._block(tmp_path)
+        reference = _write_reference(tmp_path / "ref.jsonl", "abc")
+        summary = rfe.summarize("B", tmp_path, tmp_path, rfe.Context(reference=reference))
+        assert summary["reference_check"]["exists"] is True
+        assert summary["reference_check"]["same_checkpoint"] is True
+        assert summary["reference_check"]["same_actuation"] is True
+        assert summary["rows"]["inject_delta/delta0.1"]["paired_vs_published"]["gain"] == \
+            pytest.approx(-100.0)
+
+    def test_a_smoke_summary_records_a_failing_check_instead_of_refusing(self, tmp_path):
+        self._block(tmp_path)
+        summary = rfe.summarize("B", tmp_path, tmp_path,
+                                rfe.Context(reference=tmp_path / "missing.jsonl", smoke=True))
+        assert rfe.reference_problems(summary["reference_check"])
+
+    @pytest.mark.parametrize("case", ["missing", "set_speed", "no_field", "other_sha"])
+    def test_main_refuses_block_b_before_any_episode(self, tmp_path, case):
+        sha = rfe._sha256(COMMITTED_CHECKPOINT)
+        reference = {"missing": tmp_path / "missing.jsonl",
+                     "set_speed": _write_reference(tmp_path / "r.jsonl", sha, "set_speed"),
+                     "no_field": _write_reference(tmp_path / "r.jsonl", sha, None),
+                     "other_sha": _write_reference(tmp_path / "r.jsonl", "zzz")}[case]
+        calls: list[str] = []
+        with pytest.raises(SystemExit, match="block B pairs against"):
+            rfe.main(["--block", "B", "--seeds", "16", "17", "--results-dir",
+                      str(tmp_path / "res"), "--traces-dir", str(tmp_path / "t"),
+                      "--reference", str(reference), "--checkpoint", str(COMMITTED_CHECKPOINT)],
+                     run_episode_factory=lambda model, context: _stub(calls))
+        assert calls == []
+        assert not (tmp_path / "res" / "B.jsonl").exists()
