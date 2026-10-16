@@ -84,6 +84,11 @@ class TestReports:
         assert dlc.gps_first_stop(track, 100.0, 400.0) == 250.0
         assert dlc.gps_first_stop(TRACK, 100.0, 400.0) is None
 
+    def test_every_stop_onset_in_the_window_is_listed(self):
+        speeds = [15.0 if (t < 150 or 200 <= t < 300) else 2.0 for t in range(400)]
+        track = [dlc.GpsFix(float(t), LAT, LON, v) for t, v in enumerate(speeds)]
+        assert dlc.gps_stop_onsets(track, 100.0, 400.0) == [150.0, 300.0]
+
     def test_camera_density_criterion(self):
         # A queue builds in the own lane and both adjacent lanes from 200 s.
         records = []

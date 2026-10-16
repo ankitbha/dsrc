@@ -133,6 +133,18 @@ def gps_first_stop(track: list[GpsFix], t_from: float, t_to: float) -> float | N
     return None
 
 
+def gps_stop_onsets(track: list[GpsFix], t_from: float, t_to: float) -> list[float]:
+    """Every instant in the window where the speed falls from at least 5 m/s to below it;
+    the first stop in a window can belong to an earlier signal than the event's."""
+    out, previous = [], None
+    for fix in sorted(track, key=lambda f: f.t):
+        if t_from <= fix.t <= t_to and previous is not None:
+            if previous >= STOP_MPS > fix.speed_mps:
+                out.append(fix.t)
+        previous = fix.speed_mps
+    return out
+
+
 def camera_first_report(records: list[dict], track: list[GpsFix], t_from: float,
                         t_to: float) -> dict[str, Any] | None:
     """The first frame in the window where the camera's local density reaches `0.9 k_c`
@@ -241,11 +253,16 @@ def main(argv: list[str] | None = None) -> int:
             window = (received - WINDOW_S, received + WINDOW_S)
             camera = camera_first_report(detections, track, *window)
             stop = gps_first_stop(track, *window)
+            covered = [r["t"] for r in detections
+                       if r.get("type") == "frame" and window[0] <= r["t"] <= window[1]]
             cases.append({
                 "run": run, **asdict(event), "stamp_t": stamp, "first_receipt_t": received,
                 "received_after_first_tick_s": received - first,
                 "stamp_to_receipt_s": received - stamp,
                 "gps_first_below_5mps_t": stop,
+                "gps_stop_onsets_t": gps_stop_onsets(track, *window),
+                "camera_frames_in_window": len(covered),
+                "camera_coverage_t": [min(covered), max(covered)] if covered else None,
                 "camera_first_report": camera,
                 "camera_note": (None if detections else
                                 "no re-processed frame records for this drive"),
