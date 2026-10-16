@@ -351,6 +351,18 @@ class TestPersistentPairError:
         np.testing.assert_allclose(first, again)
         assert not np.allclose(first, other)
 
+    def test_two_egos_behind_one_leader_carry_their_own_factors(self):
+        # The factor belongs to the (ego, leader) pair, not to the leader alone.
+        cam = model().with_pair_sigma(0.3)
+        vehicles = [vehicle("ego1", 0, 100.0), vehicle("ego2", 2, 100.0),
+                    vehicle("lead", 1, 100.0 + 40.0 + L)]
+        table = table_for(vehicles, [Ego("ego1", "A", 0, 100.0), Ego("ego2", "A", 2, 100.0)])
+        det = cam.observe(table, np.random.default_rng(0), seed=7)
+        rows = [k for k in range(len(table.d)) if table.snapshot.ids[table.vehicle[k]] == "lead"]
+        assert len(rows) == 2
+        ratios = det.d_hat[rows] / table.d[rows]
+        assert abs(ratios[0] - ratios[1]) > 1e-6
+
     def test_the_factor_has_the_configured_spread_over_many_pairs(self):
         # 3,000 pairs, each alone on its own one-lane edge.
         cam = model(R_max=100.0).with_pair_sigma(0.25)
