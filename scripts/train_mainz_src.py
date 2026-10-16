@@ -44,6 +44,20 @@ SCENARIOS = {
               "gated_routes": "data/mainz/mainz_routes.rou.xml",
               "segments": "data/mainz/mainz_segments.json",
               "schedule": "data/mainz/mainz_schedule.json"},
+    # The feed program's two drain scenarios: the same network with a different demand,
+    # built by `build_mainz_scenario.py --demand-only` (its docstring has the commands).
+    # `mainz_surge` is the published 18,000 veh/h for 1,200 s; `mainz_burst` is
+    # 3,650 veh/h with a 5,000 veh/h burst on [900, 1,500) s.
+    "mainz_surge": {"net": "data/mainz/mainz.net.xml",
+                    "routes": "data/mainz/mainz_surge.rou.xml",
+                    "gated_routes": "data/mainz/mainz_surge_routes.rou.xml",
+                    "segments": "data/mainz/mainz_segments.json",
+                    "schedule": "data/mainz/mainz_surge_schedule.json"},
+    "mainz_burst": {"net": "data/mainz/mainz.net.xml",
+                    "routes": "data/mainz/mainz_burst.rou.xml",
+                    "gated_routes": "data/mainz/mainz_burst_routes.rou.xml",
+                    "segments": "data/mainz/mainz_segments.json",
+                    "schedule": "data/mainz/mainz_burst_schedule.json"},
 }
 
 

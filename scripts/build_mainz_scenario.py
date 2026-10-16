@@ -6,6 +6,22 @@
 Reads `data/mainz/Mainz20base.inpx` and `data/mainz/rl_links_mainz.txt` and writes
 `mainz.net.xml`, `mainz.rou.xml` and `mainz_segments.json` beside them.
 
+The two drain scenarios of the feed-agreement plan reuse the committed network and
+change only the demand:
+
+    .venv/bin/python scripts/build_mainz_scenario.py --demand-only \\
+        --out-name mainz_surge --duration-s 9000
+    .venv/bin/python scripts/build_mainz_scenario.py --demand-only \\
+        --out-name mainz_burst --duration-s 12000 --demand-duration-s 12000 \\
+        --demand-scale 0.202778 --demand-burst 900 1500 0.277778
+
+The first is the published demand, 18,000 veh/h for 1,200 s and then nothing; the
+second is 3,650 veh/h with a 5,000 veh/h burst on [900, 1,500) s.
+
+`--av-fraction` selects controlled vehicles by `index % round(1 / p) == 0`, which cannot
+express 0.75 (`round(1 / 0.75) == 1` controls every vehicle). The feed program sets
+penetration at run time in `MainzEnv` instead and leaves this flag at 1.0.
+
 Three things about the conversion are decisions rather than mechanics, and each is
 visible in the output so it can be checked:
 
@@ -333,6 +349,31 @@ def rush(volumes: dict[str, list[tuple[float, float, float]]],
     return reshaped
 
 
+def burst(volumes: dict[str, list[tuple[float, float, float]]], start: float, end: float,
+          scale: float, opening: dict[str, float] | None = None,
+          ) -> dict[str, list[tuple[float, float, float]]]:
+    """Replace every entry's rate on `[start, end)` by its opening volume times `scale`.
+
+    The opening volume is the entry's first `.inpx` volume before `--demand-scale`, so
+    `--demand-scale S --demand-burst a b B` gives each entry the opening volume times S
+    outside `[a, b)` and times B inside it. `opening` carries those unscaled volumes;
+    without it each entry's first interval in `volumes` is taken as its opening volume.
+    The intervals outside the burst keep their own rates and are clipped at its edges.
+    """
+    shaped: dict[str, list[tuple[float, float, float]]] = {}
+    for entry, intervals in volumes.items():
+        peak = opening[entry] if opening is not None else intervals[0][2]
+        pieces = []
+        for low, high, rate in intervals:
+            if low < min(high, start):
+                pieces.append((low, min(high, start), rate))
+            if max(low, end) < high:
+                pieces.append((max(low, end), high, rate))
+        pieces.append((start, end, peak * scale))
+        shaped[entry] = sorted(pieces)
+    return shaped
+
+
 def vtype_lines(model: str = "eidm_reaction",
                 junction_block_s: float | None = None) -> list[str]:
     """Vehicle types from a named human-model config.
@@ -378,7 +419,7 @@ def vtype_lines(model: str = "eidm_reaction",
 def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str, float],
                  duration_s: float, av_fraction: float, seed: int,
                  junction_block_s: float | None = None,
-                 human_model: str = "eidm_reaction") -> int:
+                 human_model: str = "eidm_reaction", name: str = "mainz") -> int:
     """One explicit departure per vehicle, evenly spaced, sorted by time.
 
     Explicit vehicles rather than `<flow>` so a vehicle's id encodes whether it is an
@@ -393,6 +434,8 @@ def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str,
       runs where `MainzEnv` grants entry itself.
     * `mainz_schedule.json`, the vehicles that file omits, with the entry link each one
       is waiting at so the gate can be applied per entry.
+
+    `name` replaces the `mainz` stem of the two files written beside `out_path`.
     """
     header = ["<routes>"] + vtype_lines(human_model, junction_block_s)
     for entry, edges in sorted(built.items(), key=lambda kv: int(kv[0])):
@@ -421,13 +464,20 @@ def write_routes(out_path: Path, built: dict[str, list[str]], volumes: dict[str,
                          "depart": round(time, 2), "entry": entry})
     lines.append("</routes>")
     out_path.write_text("\n".join(lines) + "\n")
-    out_path.with_name("mainz_routes.rou.xml").write_text(
+    out_path.with_name(f"{name}_routes.rou.xml").write_text(
         "\n".join(header + ["</routes>"]) + "\n")
-    out_path.with_name("mainz_schedule.json").write_text(json.dumps(schedule))
+    out_path.with_name(f"{name}_schedule.json").write_text(json.dumps(schedule))
     return len(departures)
 
 
-def main() -> int:
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def main(argv: list[str] | None = None, data_dir: Path = DATA) -> int:
+    """Build the scenario into `data_dir` (the committed `data/mainz` by default)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration-s", type=float, default=2500.0,
                         help="episode length; departures are never written past it, so "
@@ -478,31 +528,57 @@ def main() -> int:
     parser.add_argument("--demand-scale", type=float, default=1.0,
                         help="multiply every entry volume, to place the network at a "
                              "chosen point on its flow-density curve")
-    args = parser.parse_args()
+    parser.add_argument("--demand-burst", type=float, nargs=3, default=None,
+                        metavar=("START", "END", "SCALE"),
+                        help="on [START, END) s replace every entry's rate by its "
+                             "opening .inpx volume times SCALE, on top of "
+                             "--demand-duration-s and --demand-scale, which set the "
+                             "rate outside the burst")
+    parser.add_argument("--out-name", default="mainz",
+                        help="write NAME.rou.xml, NAME_routes.rou.xml and "
+                             "NAME_schedule.json beside the shared mainz.net.xml")
+    parser.add_argument("--demand-only", action="store_true",
+                        help="skip netconvert and the exit constraint and reuse "
+                             "mainz.net.xml unchanged; its sha256 is checked before and "
+                             "after, and mainz_segments.json is checked, not rewritten")
+    args = parser.parse_args(argv)
+    if args.demand_burst is not None and args.demand_rush_s is not None:
+        raise SystemExit("--demand-burst and --demand-rush-s each reshape the whole "
+                         "demand; give one of them")
 
-    inpx = DATA / "Mainz20base.inpx"
-    net_file = DATA / "mainz.net.xml"
+    inpx = data_dir / "Mainz20base.inpx"
+    net_file = data_dir / "mainz.net.xml"
     if not inpx.exists():
         raise SystemExit(f"missing {inpx}; see data/mainz in .gitignore for its origin")
 
-    print("building the network")
-    run_netconvert(inpx, net_file)
-    if not args.no_exit_meter:
-        allowed = add_exit_constraint(net_file, args.exit_speed_mps,
-                                      args.exit_green_fraction, args.exit_cycle_s,
-                                      args.exit_lanes)
-        shape = (f"{args.exit_lanes} lanes" if args.exit_lanes else "218's own width")
-        meter = (f", metered at {args.exit_green_fraction:.2f} green"
-                 if args.exit_green_fraction > 0.0 else ", unsignalled")
-        print(f"  exit: {shape}{meter}, at most {allowed:.0f} veh/h")
+    net_sha256 = None
+    if args.demand_only:
+        if not net_file.exists():
+            raise SystemExit(f"--demand-only needs an existing {net_file}")
+        net_sha256 = _file_sha256(net_file)
+        print(f"reusing the network, sha256 {net_sha256[:12]}")
+    else:
+        print("building the network")
+        run_netconvert(inpx, net_file)
+        if not args.no_exit_meter:
+            allowed = add_exit_constraint(net_file, args.exit_speed_mps,
+                                          args.exit_green_fraction, args.exit_cycle_s,
+                                          args.exit_lanes)
+            shape = (f"{args.exit_lanes} lanes" if args.exit_lanes else "218's own width")
+            meter = (f", metered at {args.exit_green_fraction:.2f} green"
+                     if args.exit_green_fraction > 0.0 else ", unsignalled")
+            print(f"  exit: {shape}{meter}, at most {allowed:.0f} veh/h")
     present = edge_ids(net_file)
     links = outgoing(net_file)
     print(f"  {len(present)} named edges")
 
     root = ET.parse(inpx).getroot()
     volumes = demand(root)
+    opening = {entry: intervals[0][2] for entry, intervals in volumes.items()}
 
-    built = routes(root, present, set(volumes), not args.no_exit_meter)
+    # A reused network carries its exit road or it does not; the routes must match it.
+    exit_road = ("exit_road" in present) if args.demand_only else not args.no_exit_meter
+    built = routes(root, present, set(volumes), exit_road)
     for entry, path in sorted(built.items(), key=lambda kv: int(kv[0])):
         breaks = check_connected(path, links)
         status = "ok" if not breaks else f"BREAKS {breaks[:2]}"
@@ -516,6 +592,11 @@ def main() -> int:
     if args.demand_scale != 1.0:
         volumes = {entry: [(a, b, v * args.demand_scale) for a, b, v in intervals]
                    for entry, intervals in volumes.items()}
+    if args.demand_burst is not None:
+        start, end, scale = args.demand_burst
+        volumes = burst(volumes, start, end, scale, opening)
+        peak = sum(opening.values()) * scale
+        print(f"  burst: {peak:g} veh/h on [{start:g}, {end:g}) s")
     if args.demand_rush_s is not None:
         volumes = rush(volumes, args.demand_rush_s)
         peak = sum(max(v for _, _, v in intervals) for intervals in volumes.values())
@@ -527,12 +608,13 @@ def main() -> int:
                        args.duration_s)
         print(f"  demand: {len(volumes)} entries, {opening:g} veh/h until "
               f"{last_end:g} s, then zero")
-    count = write_routes(DATA / "mainz.rou.xml", built, volumes,
+    count = write_routes(data_dir / f"{args.out_name}.rou.xml", built, volumes,
                          args.duration_s, args.av_fraction, args.seed,
-                         args.junction_block_after_s, args.human_model)
+                         args.junction_block_after_s, args.human_model,
+                         name=args.out_name)
     print(f"  {count} vehicle departures over {args.duration_s:g} s")
 
-    groups = eval((DATA / "rl_links_mainz.txt").read_text())
+    groups = eval((data_dir / "rl_links_mainz.txt").read_text())
     segments, dropped = [], []
     for group in groups:
         members: list[str] = []
@@ -543,7 +625,16 @@ def main() -> int:
             else:
                 dropped.append(str(link_no))
         segments.append(members)
-    (DATA / "mainz_segments.json").write_text(json.dumps(segments, indent=1))
+    segment_file = data_dir / "mainz_segments.json"
+    if args.demand_only:
+        # The segments are a function of the network, which this mode does not change,
+        # so the committed file is checked rather than rewritten.
+        if json.loads(segment_file.read_text()) != segments:
+            raise SystemExit(f"{segment_file} does not match the reused network")
+        if _file_sha256(net_file) != net_sha256:
+            raise SystemExit(f"{net_file} changed during a --demand-only build")
+    else:
+        segment_file.write_text(json.dumps(segments, indent=1))
     covered = sum(len(s) for s in segments)
     print(f"  {len(segments)} super-segments over {covered} edges; "
           f"dropped {sorted(set(dropped), key=int)}")
