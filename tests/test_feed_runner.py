@@ -449,6 +449,47 @@ class TestSummariesOnSyntheticTraces:
         path.write_text(json.dumps(data))
         assert rfe.summarize_e(episodes, traces_dir, results_dir)["baseline_pairs_checked"] == 72
 
+    def test_with_ten_resolved_sites_both_fits_are_reported(self, tmp_path):
+        """Amendment 3, C4, on real regressions."""
+        episodes, traces_dir, results_dir = self._block_e(
+            tmp_path, null_peak=lambda site: 0.08 if site in (10, 11) else 0.001)
+        level = rfe.summarize_e(episodes, traces_dir, results_dir)["levels"]["1"]
+        assert level["sites"]["resolved"] == 10
+        assert level["fit_resolved_sites"]["sites"] == list(range(10))
+        assert level["fit_all_sites"]["sites"] == list(range(12))
+        assert level["rho_UCB_resolved_sites"] == level["fit_resolved_sites"]["rho_UCB"]
+        assert level["rho_UCB"] == level["fit_all_sites"]["rho_UCB"]
+        assert level["certificate"] == (level["rho_UCB"] < 1.0
+                                        and level["rho_UCB_resolved_sites"] < 1.0)
+
+    @pytest.mark.parametrize("bounds,certified", [((0.8, 1.2), False), ((1.2, 0.8), False),
+                                                  ((0.8, 0.9), True)])
+    def test_the_certificate_needs_both_upper_bounds_below_one(self, tmp_path, monkeypatch,
+                                                               bounds, certified):
+        import src.analysis.gains as gains
+
+        def fake(seed_runs, dt=10.0, level=0.95):
+            runs = len(next(iter(seed_runs.values())))
+            rho = bounds[0] if runs == 12 else bounds[1]
+            return {"rho_UCB": rho, "rho_hat": rho - 0.1, "certificate": rho < 1.0,
+                    "runs_per_seed": runs}
+
+        monkeypatch.setattr(gains, "estimate_level", fake)
+        episodes, traces_dir, results_dir = self._block_e(
+            tmp_path, null_peak=lambda site: 0.08 if site in (10, 11) else 0.001)
+        summary = rfe.summarize_e(episodes, traces_dir, results_dir)
+        level = summary["levels"]["1"]
+        assert level["fit_resolved_sites"]["runs_per_seed"] == 10
+        assert (level["rho_UCB"], level["rho_UCB_resolved_sites"]) == bounds
+        assert level["certificate"] is certified
+        assert summary["p_min"]["p_min"] == (1.0 if certified else None)
+
+    def test_with_all_twelve_resolved_the_two_fits_are_one(self, tmp_path):
+        episodes, traces_dir, results_dir = self._block_e(tmp_path)
+        level = rfe.summarize_e(episodes, traces_dir, results_dir)["levels"]["1"]
+        assert level["fit_resolved_sites"] == {"same_as_all_sites": True}
+        assert level["rho_UCB_resolved_sites"] == level["rho_UCB"]
+
     def test_a_level_with_nine_resolved_sites_reports_no_certificate(self, tmp_path):
         """Amendment 2, B2: fewer than 10 of 12 resolved, no certificate and no p_min."""
         episodes, traces_dir, results_dir = self._block_e(

@@ -1025,7 +1025,28 @@ def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]
             estimate = estimate_level(seed_runs)
             if resolution["available"]:
                 entry.update(estimate)
-                rho_by_level[p] = entry["rho_UCB"]
+                resolved_sites = [e["site"] for e in resolution["sites"] if e["resolved"]]
+                if len(resolved_sites) < 12:
+                    # Amendment 3, C4: the pooled regression also stacks the unresolved
+                    # sites' runs, which moved rho_hat by about 10% on a seed-16 probe.
+                    # Fit again on the resolved sites alone; certify only if both do.
+                    resolved = estimate_level({seed: [runs[site] for site in resolved_sites]
+                                               for seed, runs in seed_runs.items()})
+                    bounds = (estimate["rho_UCB"], resolved["rho_UCB"])
+                    entry.update(
+                        fit_resolved_sites={"sites": resolved_sites, **resolved},
+                        rho_UCB_resolved_sites=resolved["rho_UCB"],
+                        rho_hat_resolved_sites=resolved["rho_hat"],
+                        certificate=all(b is not None and b < 1.0 for b in bounds))
+                    rho_by_level[p] = (None if None in bounds else max(bounds))
+                else:
+                    entry.update(rho_UCB_resolved_sites=entry["rho_UCB"],
+                                 rho_hat_resolved_sites=entry["rho_hat"],
+                                 fit_resolved_sites={"same_as_all_sites": True})
+                    rho_by_level[p] = entry["rho_UCB"]
+                entry["fit_all_sites"] = {"sites": list(range(12)),
+                                          "rho_UCB": estimate["rho_UCB"],
+                                          "rho_hat": estimate["rho_hat"]}
             else:
                 # The bound is not reported where the responses are not resolved; the
                 # estimate is kept for inspection under its own key.

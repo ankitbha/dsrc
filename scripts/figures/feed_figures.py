@@ -280,6 +280,10 @@ def table_certificate_and_rules(a_summary: dict, c_summary: dict,
         levels.append({"penetration": p,
                        "flow_gain": 0.0 if p == 1.0 else paired.get("gain"),
                        "rho_hat": entry.get("rho_hat"), "rho_UCB": entry.get("rho_UCB"),
+                       # Amendment 3, C4: the fit on the resolved sites alone; the
+                       # certificate needs both upper bounds below 1.
+                       "rho_hat_resolved_sites": entry.get("rho_hat_resolved_sites"),
+                       "rho_UCB_resolved_sites": entry.get("rho_UCB_resolved_sites"),
                        "certificate": entry.get("certificate"),
                        # Amendment 2, B2: "unavailable (k of 12 sites resolved)" where the
                        # pulse responses do not stand above their one-vehicle null.

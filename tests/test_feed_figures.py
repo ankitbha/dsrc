@@ -110,8 +110,10 @@ def d_summary(tmp_path_factory):
 def e_summary(tmp_path_factory):
     return {"block": "E", "levels": {
         "1": {"rho_hat": 0.4, "rho_UCB": 0.6, "certificate": True,
+              "rho_hat_resolved_sites": 0.4, "rho_UCB_resolved_sites": 0.6,
               "certificate_status": "available", "sites": {"resolved": 12}},
-        "0.5": {"rho_hat": 0.8, "rho_UCB": 1.3, "certificate": False,
+        "0.5": {"rho_hat": 0.8, "rho_UCB": 0.9, "certificate": False,
+                "rho_hat_resolved_sites": 0.95, "rho_UCB_resolved_sites": 1.3,
                 "certificate_status": "available", "sites": {"resolved": 11}},
         "0.25": {"rho_hat": None, "rho_UCB": None, "certificate": False,
                  "certificate_status": "unavailable (7 of 12 sites resolved)",
@@ -195,6 +197,9 @@ class TestTable:
         levels = {row["penetration"]: row for row in table["penetration"]}
         assert levels[1.0]["rho_UCB"] == 0.6 and levels[1.0]["p_min"] is True
         assert levels[0.5]["certificate"] is False
+        # Amendment 3, C4: both fits in the table; the resolved-sites one blocks 0.5.
+        assert (levels[0.5]["rho_UCB"], levels[0.5]["rho_UCB_resolved_sites"]) == (0.9, 1.3)
+        assert levels[0.5]["rho_hat_resolved_sites"] == 0.95
         assert levels[0.5]["flow_gain"] == c_summary["rows"]["penetration/p0.5"][
             "paired_vs_published"]["gain"]
         assert levels[0.25]["rho_UCB"] is None
