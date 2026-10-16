@@ -1100,9 +1100,18 @@ orchestrator reproduced R1-1 and R1-2 before accepting them.
   incident vehicle is removed at its own insertion time + 300 s, so both arms of a seed face blocks
   of equal length), R1-4 (tests for the 11 surviving mutants on the block G path, and "incomplete"
   unless all seeds are present), R1-7 (a counter of active ticks on which the plan is above 0.5),
-  and O-1 (orchestrator: fit the horizon and camera height only on boxes whose centre lies within
-  15% of the frame width of the centre column; on `run_20260908_155910` all boxes give 0.70 m and
-  centre boxes 0.89 m, because an obliquely viewed vehicle's box includes part of its side).
+  and O-1 (orchestrator, revised the same hour). The per-drive horizon fit's camera height is
+  0.70 m (all boxes) and 0.89 m (boxes within 15% of the width of the centre column) on
+  `run_20260908_155910`, but 0.50 m and 0.40 m on `run_20260908_161422`, against the configured
+  1.25 m. The centre-box fit therefore does not cure it, and ground-plane distances, which scale
+  with the fitted height, would carry a drive-dependent scale up to a factor of 2, outside the bias
+  sweep. **Revised decision (supersedes section 2.2's distance method for the error model):** the
+  camera error tables are built on the deployment's width-prior distance (fx 800 px and the class
+  width priors; it uses neither the horizon nor the camera height), whose scale is the same on
+  every drive and whose uncertainty (fx 763 to 1,005 px, vehicle widths) the bias sweep `b` in
+  {0.8, 1.25} covers; the ground-plane tables are kept under a separate key as a recorded
+  alternative, and both horizon fits are kept in the headers as diagnostics. Detections can be
+  rebuilt from the saved raw boxes without re-running the detector.
 - **Block G is re-run on the fixed commit before block T,** because R1-1 and R1-2 touch code block
   G uses. The recorded block G (`706f5b5`) stays in the record; the re-run is the gate of record.
 - **R1-3, documented limit.** On I_exit the stopped vehicle stands at least 95.5 m beyond any vehicle
