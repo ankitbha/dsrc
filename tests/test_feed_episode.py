@@ -30,6 +30,7 @@ class FakeEnv:
         self.t = 0.0
         self.writes: list[tuple[float, str, float]] = []
         self.command: dict[str, float] = {}
+        self.edges: dict[tuple[float, str], str | None] = {}
 
     def controlled_on_segments(self):
         return [(vid, f"e{seg}", seg) for vid, seg in self.placement(self.t)]
@@ -43,6 +44,7 @@ class FakeEnv:
         for vid, fraction in mapping.items():
             self.writes.append((self.t, vid, fraction))
             self.command[vid] = fraction
+            self.edges[(self.t, vid)] = edge_of[vid] if edge_of else None
         return len(mapping)
 
     def segment_state(self):
@@ -171,9 +173,8 @@ class TestInjectDelta:
                 assert previous != current
                 assert all(env.command[v] == previous for v in late)
                 assert all(env.command[v] == current for v in fleet if v not in late)
-                # A vehicle late now and on time before keeps its command: no write.
-                twice = late & late_sets[-1]
-                assert len(env.writes) - before == 70 + len(twice)
+                # Amendment 1, A7: every scanned vehicle is written at the decision.
+                assert len(env.writes) - before == 100
                 late_sets.append(late)
             elif t == 300:
                 late_sets.append({v for v, k in engine.applied_versions().items() if k == 0})
@@ -181,6 +182,27 @@ class TestInjectDelta:
         summary = engine.summary()
         assert summary["writes_late"] > 0 and summary["writes_on_time"] > 0
         assert summary["delta_mean"] == pytest.approx(0.3)
+
+
+    def test_at_delta_one_every_vehicle_is_written_the_previous_vector_on_its_edge(self):
+        """Including one that was not on a segment at the previous decision (R1-2)."""
+        def placement(t):
+            on = [("v0", 0), ("v1", 1)]
+            return on + [("v2", 1)] if t >= 330 else on
+
+        env = FakeEnv(placement)
+        decisions = [300.0, 360.0, 420.0]
+        engine = _engine(env, Mode.inject_delta(1.0), None, control=300.0, window=300.0,
+                         decisions=decisions)
+        _drive(engine, env, 430)
+        at_360 = [(v, f) for t, v, f in env.writes if t == 360.0]
+        assert sorted(v for v, _ in at_360) == ["v0", "v1", "v2"]
+        previous = SPEED_ACTION_FRACTIONS[(300 // 60) % 3]  # a_1, from the 300 s snapshot
+        assert all(f == previous for _, f in at_360)
+        assert env.edges[(360.0, "v2")] == "e1" and env.edges[(360.0, "v0")] == "e0"
+        # Nothing is written at 300 s: every vehicle is late and there is no a_0.
+        assert [t for t, *_ in env.writes if t == 300.0] == []
+        assert engine.summary()["writes_late"] == 6
 
 
 class TestInjectStale:

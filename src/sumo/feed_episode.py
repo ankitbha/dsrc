@@ -27,8 +27,8 @@ Modes (plan section 3.3):
   own query phase.
 * `inject_delta(delta)`: at each decision instant a fresh, seeded subset of
   `round(delta * n)` of the `n` controlled vehicles on segments applies `a_{k-1}` for
-  the whole interval and the rest apply `a_k`. A late vehicle that applied `a_{k-1}`
-  over the previous interval is therefore not written; one late twice running is.
+  the whole interval and the rest apply `a_k`. Every scanned vehicle is written at the
+  decision, the late ones `a_{k-1}[e]` on the edge they are on (Amendment 1, A7).
 * `inject_stale(s)`: at each decision instant every vehicle applies the policy's action
   on the snapshot taken `s` seconds earlier, from a ring of snapshots every 10 s. A
   decision with no snapshot that old (before the first one, at 10 s) writes nothing.
@@ -316,12 +316,16 @@ class FeedEngine:
         self.late_draws.append({"t": t, "on_segments": len(scan), "late": size})
         if t < self.control_start_s:
             return
+        # Amendment 1, A7: every scanned vehicle is written its target version's fraction
+        # on the edge it is on now, late or not, as `step()` writes every scanned
+        # vehicle. A late vehicle then differs from an on-time one only where
+        # a_{k-1}[e] != a_k[e]. At the first decision there is no a_0, so a late
+        # vehicle is not written.
         mapping, edges, versions = {}, {}, {}
         for vehicle, edge, segment in scan:
             target = k - 1 if vehicle in self._late else k
-            before = k - 2 if vehicle in self._late_before else k - 1
             versions[vehicle] = target
-            if target != before and target >= 1:
+            if target >= 1:
                 mapping[vehicle] = self._fraction(target, segment)
                 edges[vehicle] = edge
         self._write(t, mapping, edges, versions, late=self._late)
