@@ -876,3 +876,31 @@ fourth validator round, because the author asked for three rounds.
   every failing test. The commit-length assertion in
   `test_one_600_s_training_episode_under_the_cap` is skipped outside a git checkout rather than
   failing.
+
+## Amendment 4 (2026-10-16, at the experiment stage; orchestrator)
+
+**Why.** Under the cap actuation (A1), both retrained checkpoints (A2) lose throughput against no
+control on seeds 16-30 (`results/evaluation/mainz_paired_seeds_cap.json`: `here` -46.2 +/- 49.0
+veh/h, not resolved; `src` -166.4 +/- 55.3 veh/h; every episode 0 collisions), and the `here` cap
+checkpoint, selected at episode 4 by validation return as the published protocol does, outputs
+one constant action vector at every decision (0 changes in 37 decisions on seeds 16 and 17;
+`scratchpad/dsrc_feed/orch/action_variety.py`). Every feed version therefore yields the same
+commands, command-level disagreement is identically 0 in block A, and no agreement rule can
+change anything; blocks A to E on that checkpoint measure a fixed speed plan, not a feedback
+controller. The committed checkpoint `mainz_here_best.pt` changes its action vector 15 to 17
+times per episode, and it is the policy the deployed rig exports
+(`deployment/jetson/policy/dsrc_runtime.py`).
+
+**Changes, superseding A2's "every block uses the `here` cap checkpoint".**
+
+- **D1 Checkpoint.** Every block runs the committed `mainz_here_best.pt` (the deployed policy)
+  under the cap actuation, with `--checkpoint results/checkpoints/mainz_here_best.pt`.
+- **D2 Reference.** The four-arm paired evaluation of the committed checkpoints under the cap
+  actuation is written to `results/evaluation/mainz_paired_seeds_deployed_cap.{json,jsonl}`, and
+  blocks B and C pair against it.
+- **D3 Directories.** Block results go to `results/feed/` and traces to `outputs/feed/traces/`.
+  The runs on the constant cap checkpoint are kept, not deleted, under
+  `results/feed_cap_retrained_constant_plan/` and `outputs/feed/traces_cap_retrained_constant_plan/`.
+- **D4 What the paper reports from A2.** That retraining under the collision-free actuation with
+  the published reward and protocol selects a constant speed plan that does not out-serve no
+  control, with the cap evaluation's numbers. The flow comparison of record is D2's.
