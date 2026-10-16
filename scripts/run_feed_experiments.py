@@ -612,7 +612,8 @@ def pilot_decision(no_control_trace: list[dict], here_trace: list[dict], cap: fl
             "action": action}
 
 
-def summarize_d(episodes, smoke: bool = False) -> dict[str, Any]:
+def summarize_d(episodes, smoke: bool = False,
+                results_dir: Path | None = None) -> dict[str, Any]:
     from src.sumo.drain import (
         drain_summary, drain_time, jam_segment_minutes, onset, thresholds_from_traces,
     )
@@ -664,6 +665,10 @@ def summarize_d(episodes, smoke: bool = False) -> dict[str, Any]:
         entry["drain"] = results
         entry["primary"] = f"pooled/H{HOLD_S:g}"
         out["scenarios"][scenario] = entry
+    if results_dir is not None:
+        _write_json(results_dir / "drain_thresholds.json",
+                    {name: entry["thresholds"] for name, entry in out["scenarios"].items()
+                     if "thresholds" in entry})
     return out
 
 
@@ -779,7 +784,7 @@ def summarize(block: str, results_dir: Path, traces_dir: Path,
     elif block == "C":
         summary = summarize_c(episodes, references)
     elif block == "D":
-        summary = summarize_d(episodes, context.smoke)
+        summary = summarize_d(episodes, context.smoke, results_dir)
         pilot_path = results_dir / "D_pilot.json"
         if pilot_path.exists():
             summary["pilot"] = json.loads(pilot_path.read_text())

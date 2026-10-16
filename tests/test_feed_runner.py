@@ -220,9 +220,11 @@ class TestSummariesOnSyntheticTraces:
                 path = _write_trace(tmp_path / "t" / f"{arm}_{seed}.json", trace)
                 episodes.append({"arm": arm, "seed": seed, "scenario": "mainz_surge",
                                  "duration_s": 3000.0, "trace_file": path, "flow": 1.0})
-        summary = rfe.summarize_d(episodes)
+        summary = rfe.summarize_d(episodes, results_dir=tmp_path)
         entry = summary["scenarios"]["mainz_surge"]
         assert entry["t_0"] == 1200.0 and entry["cap_s"] == 3000.0
+        written = json.loads((tmp_path / "drain_thresholds.json").read_text())
+        assert written["mainz_surge"] == entry["thresholds"]
         assert set(entry["drain"]) == {f"{r}/H{h}" for r in ("pooled", "per_segment", "fixed_30")
                                        for h in (120, 60, 300)}
         assert entry["primary"] == "pooled/H120"
