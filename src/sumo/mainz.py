@@ -18,8 +18,10 @@ gated by local conditions rather than commanded through them.
 """
 from __future__ import annotations
 
+import bisect
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +88,18 @@ def jam_factor(speed_kmh: float, free_flow_kmh: float) -> float:
     return float(min(10.0, max(0.0, 10.0 * (1.0 - speed_kmh / free_flow_kmh))))
 
 
+def controlled_index(index: int, penetration: float) -> bool:
+    """Whether the vehicle at position `index` of the departure schedule runs the policy.
+
+    `floor((i + 1) p) - floor(i p) == 1`. Over the first `n` vehicles this controls
+    exactly `floor(n p)` of them, spread so that two consecutive controlled vehicles are
+    never more than `ceil(1 / p)` positions apart. The builder's `--av-fraction` rule,
+    `i % round(1 / p) == 0`, cannot express 0.75: `round(1 / 0.75)` is 1, so it controls
+    every vehicle.
+    """
+    return math.floor((index + 1) * penetration) - math.floor(index * penetration) == 1
+
+
 class MainzEnv:
     """One SUMO episode on the SRC Mainz network.
 
@@ -111,8 +125,15 @@ class MainzEnv:
         route_file: Path | None = None,
         segment_file: Path | None = None,
         schedule_file: Path | None = None,
+        #: The share of vehicles that run the policy, chosen at run time by
+        #: `controlled_index` over the schedule's departure order. Only controlled
+        #: vehicles are commanded, released or held by the gate.
+        penetration: float = 1.0,
     ) -> None:
+        if not 0.0 <= penetration <= 1.0:
+            raise ValueError(f"penetration must lie in [0, 1], got {penetration}")
         self.seed = seed
+        self.penetration = penetration
         self.duration_s = duration_s
         self.warmup_s = warmup_s
         self.step_length_s = step_length_s
@@ -136,14 +157,28 @@ class MainzEnv:
         self._speed_weight = 0.0
         self._vehicle_weight = 0.0
         self._samples = 0
-        # Per entry link, the vehicles scheduled to start there and how many of them
-        # have been let in. Empty when SUMO is doing the inserting.
+        # Per entry link, the CONTROLLED vehicles scheduled to start there and how many
+        # of them have been let in, and the same for the uncontrolled ones, which the
+        # gate never holds. Empty when SUMO is doing the inserting.
         self._schedule: dict[str, list[dict[str, Any]]] = {}
         self._admitted: dict[str, int] = {}
+        self._departs: dict[str, list[float]] = {}
+        self._free: dict[str, list[dict[str, Any]]] = {}
+        self._freed: dict[str, int] = {}
+        # Schedule position of every vehicle and the set the policy controls. A vehicle
+        # added later (a pulse) is appended with the next free position.
+        self._index: dict[str, int] | None = None
+        self._controlled_ids: set[str] = set()
+        self._load_controlled()
 
     # ----------------------------------------------------------------- lifecycle
 
-    def reset(self) -> np.ndarray:
+    def reset(self, on_warmup_tick: Callable[[float], None] | None = None) -> np.ndarray:
+        """Start SUMO, run the warm-up, open the window and return the first state.
+
+        With `on_warmup_tick` the warm-up runs through `advance_ticks`, which steps the
+        simulation identically and calls back once per second.
+        """
         self.close()
         _sumo.start([
             self._binary(), "-n", str(self.net_file), "-r", str(self.route_file),
@@ -161,7 +196,10 @@ class MainzEnv:
         self._load_static()
         self._previous = [set() for _ in self.segments]
         self._rates = [(0.0, 0.0) for _ in self.segments]
-        self._advance(self.warmup_s)
+        if on_warmup_tick is None:
+            self._advance(self.warmup_s)
+        else:
+            self.advance_ticks(self.warmup_s, on_tick=on_warmup_tick)
         self.mark_window()
         return self.observe()
 
@@ -178,17 +216,54 @@ class MainzEnv:
 
         return checkBinary("sumo")
 
+    def _load_controlled(self) -> None:
+        """Index every scheduled vehicle by departure order and pick the controlled set.
+
+        The schedule rows are written in departure order, so a row's position is its
+        departure index. Without a schedule file every vehicle typed `av` is controlled,
+        which is what the env did before penetration was a run-time setting.
+        """
+        if not self.schedule_file.exists():
+            self._index, self._controlled_ids = None, set()
+            return
+        rows = json.loads(self.schedule_file.read_text())
+        self._index = {row["id"]: position for position, row in enumerate(rows)}
+        self._controlled_ids = {row["id"] for position, row in enumerate(rows)
+                                if controlled_index(position, self.penetration)}
+
+    def controlled(self, vehicle_id: str) -> bool:
+        """Whether this vehicle runs the policy; an id the env never scheduled is an error."""
+        if vehicle_id in self._controlled_ids:
+            return True
+        if self._index is None:
+            return _sumo.vehicle.getTypeID(vehicle_id) == "av"
+        if vehicle_id in self._index:
+            return False
+        raise KeyError(f"{vehicle_id} is not a vehicle this env scheduled")
+
     def _load_schedule(self) -> None:
-        """Read the vehicles the route file omits, grouped by the entry they start at."""
-        self._schedule, self._admitted = {}, {}
+        """Read the vehicles the route file omits, grouped by the entry they start at.
+
+        Controlled and uncontrolled vehicles are queued separately per entry: the gate
+        holds only the first kind (plan decision D8), so an uncontrolled vehicle is
+        inserted at its departure time and never waits behind a held controlled one.
+        """
+        self._schedule, self._admitted, self._departs = {}, {}, {}
+        self._free, self._freed = {}, {}
         if not self.gate_entries:
             return
         rows = json.loads(self.schedule_file.read_text())
         for row in rows:
-            self._schedule.setdefault(row["entry"], []).append(row)
+            queue = self._schedule if self.controlled(row["id"]) else self._free
+            self._schedule.setdefault(row["entry"], [])
+            self._free.setdefault(row["entry"], [])
+            queue[row["entry"]].append(row)
         for entry, queued in self._schedule.items():
             queued.sort(key=lambda row: row["depart"])
+            self._free[entry].sort(key=lambda row: row["depart"])
+            self._departs[entry] = [row["depart"] for row in queued]
             self._admitted[entry] = 0
+            self._freed[entry] = 0
 
     def _entry_open(self, entry: str) -> bool:
         """Whether the entry link is under the density past which its flow falls."""
@@ -227,11 +302,22 @@ class MainzEnv:
         A vehicle held here has not entered the simulation at all. It is latent demand,
         counted by `metrics` and never discarded. At most one vehicle per entry per
         step is released, so a backlog leaves as a stream rather than as a block.
+
+        At partial penetration the gate holds only controlled vehicles. An uncontrolled
+        vehicle does not run the policy on the unsimulated link above the entry either,
+        so it is handed to SUMO at its departure time without the density check.
         """
         if not self._schedule:
             return
         now = float(_sumo.simulation.getTime())
         for entry, queued in self._schedule.items():
+            free, freed = self._free[entry], self._freed[entry]
+            while freed < len(free) and free[freed]["depart"] <= now:
+                vehicle = free[freed]
+                _sumo.vehicle.add(vehicle["id"], vehicle["route"], typeID=vehicle["type"],
+                                  depart="now", departLane="best", departSpeed="max")
+                freed += 1
+            self._freed[entry] = freed
             index = self._admitted[entry]
             if index >= len(queued) or queued[index]["depart"] > now:
                 continue
@@ -243,14 +329,23 @@ class MainzEnv:
             self._admitted[entry] = index + 1
 
     def held_at_entry(self) -> int:
-        """Vehicles whose departure time has passed but which the gate has not let in."""
+        """Controlled vehicles whose departure time has passed but which the gate has
+        not let in. Uncontrolled vehicles are never held, so they never count here."""
         if not self._schedule:
             return 0
         now = float(_sumo.simulation.getTime())
         return sum(
-            sum(1 for row in queued[self._admitted[entry]:] if row["depart"] <= now)
-            for entry, queued in self._schedule.items()
+            max(0, bisect.bisect_right(self._departs[entry], now) - self._admitted[entry])
+            for entry in self._schedule
         )
+
+    def pending(self) -> int:
+        """Vehicles handed to SUMO that it has not yet found room to insert.
+
+        With `--max-depart-delay -1` such a vehicle waits rather than being dropped, so
+        it is latent demand outside the simulated road, like a vehicle held at the gate.
+        """
+        return len(_sumo.simulation.getPendingVehicles())
 
     def _load_static(self) -> None:
         """Lane count, length and free-flow speed per edge, read once from the map."""
@@ -282,6 +377,34 @@ class MainzEnv:
             self._admit()
             _sumo.simulationStep()
             self.arrived_total += int(_sumo.simulation.getArrivedNumber())
+        self._update_rates()
+        self._accumulate()
+
+    def advance_ticks(self, seconds: float, tick_s: float = 1.0,
+                      on_tick: Callable[[float], None] | None = None) -> None:
+        """`_advance`, calling `on_tick(t)` after every `tick_s` of simulation.
+
+        The simulation steps are the same as `_advance`'s, one `_admit` before each,
+        and the interval ends with the same rate update and window accumulation, so a
+        callback that only reads leaves the episode exactly as `step()` would. The
+        callback is where per-vehicle feed versions take snapshots, switch vehicles at
+        their own instants and record traces.
+        """
+        steps_per_tick = int(round(tick_s / self.step_length_s))
+        if steps_per_tick < 1 or not math.isclose(steps_per_tick * self.step_length_s,
+                                                  tick_s, abs_tol=1e-9):
+            raise ValueError(f"a tick of {tick_s} s is not a whole number of "
+                             f"{self.step_length_s} s steps")
+        ticks = int(round(seconds / tick_s))
+        if not math.isclose(ticks * tick_s, seconds, abs_tol=1e-9):
+            raise ValueError(f"{seconds} s is not a whole number of {tick_s} s ticks")
+        for _ in range(ticks):
+            for _ in range(steps_per_tick):
+                self._admit()
+                _sumo.simulationStep()
+                self.arrived_total += int(_sumo.simulation.getArrivedNumber())
+            if on_tick is not None:
+                on_tick(float(_sumo.simulation.getTime()))
         self._update_rates()
         self._accumulate()
 
@@ -326,15 +449,29 @@ class MainzEnv:
             for edge in segment:
                 target_mps = fraction * self._static[edge]["free_flow_kmh"] / 3.6
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
-                    if _sumo.vehicle.getTypeID(vehicle) == "av":
+                    if self.controlled(vehicle):
                         _sumo.vehicle.setSpeed(vehicle, target_mps)
+
+    def command_vehicles(self, mapping: dict[str, float],
+                         edge_of: dict[str, str] | None = None) -> int:
+        """Write `fraction * free-flow speed of the vehicle's edge` to the listed vehicles.
+
+        Vehicles not listed keep their last command, exactly as a vehicle that changes
+        segment between two `step()` decisions does. `edge_of` gives each vehicle's edge
+        when the caller already has it from an edge scan; otherwise it is read per
+        vehicle. Returns the number of `setSpeed` writes.
+        """
+        for vehicle, fraction in mapping.items():
+            edge = edge_of[vehicle] if edge_of is not None else _sumo.vehicle.getRoadID(vehicle)
+            _sumo.vehicle.setSpeed(vehicle, fraction * self._static[edge]["free_flow_kmh"] / 3.6)
+        return len(mapping)
 
     def release(self) -> None:
         """Hand every controlled vehicle back to the car-following model."""
         for segment in self.segments:
             for edge in segment:
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
-                    if _sumo.vehicle.getTypeID(vehicle) == "av":
+                    if self.controlled(vehicle):
                         _sumo.vehicle.setSpeed(vehicle, -1.0)
 
     # ------------------------------------------------------------------- state
@@ -423,6 +560,28 @@ class MainzEnv:
             dtype=np.float32,
         )
 
+    def segment_state(self) -> dict[str, list[float]]:
+        """Per super-segment: vehicle-weighted space-mean speed, density and count.
+
+        From one `_per_edge` read. The speed is `sum(count * speed) / sum(count)` over the
+        segment's occupied edges, nan for an empty segment; the density is occupancy,
+        `count * VEHICLE_LENGTH_M` over every lane-metre of the segment, zero when
+        empty. This is the state the drain metric and the gain estimate read; it is not
+        the reward's `densities()`, which averages per-edge densities over occupied
+        edges only.
+        """
+        edges = self._per_edge()
+        speed, density, count = [], [], []
+        for segment in self.segments:
+            members = [edges[e] for e in segment]
+            vehicles = sum(m["count"] for m in members)
+            lane_metres = sum(m["length_m"] * m["lanes"] for m in members)
+            speed.append(sum(m["count"] * m["speed_kmh"] for m in members if m["count"])
+                         / vehicles if vehicles else math.nan)
+            density.append(vehicles * VEHICLE_LENGTH_M / lane_metres if lane_metres else 0.0)
+            count.append(int(vehicles))
+        return {"speed_kmh": speed, "density": density, "count": count}
+
     def speeds_kmh(self) -> np.ndarray:
         edges = self._per_edge()
         return np.array(
@@ -486,7 +645,8 @@ class MainzEnv:
             "running": running,
             "waiting_to_enter": waiting,
             "held_at_entry": self.held_at_entry(),
-            "admitted": sum(self._admitted.values()) if self._schedule else -1,
+            "admitted": (sum(self._admitted.values()) + sum(self._freed.values())
+                         if self._schedule else -1),
             # An unweighted mean of segment means, read at this instant. Kept because
             # it is the quantity SRC's reward is built from; it is not a description of
             # how fast the traffic is moving, for which use `space_mean_speed_kmh`.
