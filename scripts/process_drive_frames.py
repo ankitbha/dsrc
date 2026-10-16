@@ -5,15 +5,20 @@
     .venv/bin/python scripts/process_drive_frames.py --imgsz 640 --runs run_20260908_190548 \\
         --limit 50 --start-pos 4000 --out-dir outputs/jam/smoke/frames   # the S7 smoke
 
+    .venv/bin/python scripts/process_drive_frames.py --rebuild-from-raw   # detections only
+
 For each drive and image size, two files under `outputs/jam/frames/<run>/`:
 
 * `raw_<imgsz>.jsonl`: a header (weights sha256, detector settings, ultralytics and torch
   versions, the frame counts: indexed, planned, without a tick, duplicate ids,
   unparseable index lines), then one line per frame with its capture time from the
   matched tick and its boxes `[x1, y1, x2, y2, conf, cls]` on the upright image.
-* `detections_<imgsz>.jsonl`: a header with the drive's horizon and camera-height fit,
-  then the deployment tracker's and distance estimator's output, one `frame` line per
-  frame and one `det` line per tracked vehicle per frame.
+* `detections_<imgsz>.jsonl`: a header with the drive's horizon and camera-height fits
+  (all usable boxes, and the boxes near the centre column as a diagnostic), then the
+  deployment tracker's output, one `frame` line per frame and one `det` line per tracked
+  vehicle per frame, with both of `DistanceEstimator`'s methods: the width prior (`fx`
+  and the class widths only) and the ground plane on the all-box fit.
+  `--rebuild-from-raw` rewrites this file from `raw_<imgsz>.jsonl` without the detector.
 
 The weights are the official Ultralytics `yolov8n.pt`, fetched once into
 `outputs/models/yolov8n.pt` (gitignored). Their sha256 is recorded in
@@ -113,21 +118,70 @@ def process(run: str, imgsz: int, model, weights_sha: str, *, data_dir: Path, ou
                   "versions": _versions(), "detect_ms_mean": 1000 * float(np.mean(walls)) if walls else None}
         handle.write(json.dumps(header) + "\n")
         handle.write("\n".join(lines) + ("\n" if lines else ""))
+    summary = write_detections(target, run, imgsz, weights_sha, detected)
+    return {"run": run, "imgsz": imgsz, "frames": len(detected), **plan.describe(),
+            "boxes": sum(len(f.boxes) for f in detected), **summary,
+            "wall_s": time.perf_counter() - started,
+            "detect_ms_mean": 1000 * float(np.mean(walls)) if walls else None}
+
+
+#: The centre-column band of the diagnostic horizon fit (orchestrator finding O-1).
+CENTRE_FRACTION = 0.15
+
+
+def write_detections(target: Path, run: str, imgsz: int, weights_sha: str,
+                     detected: list, rebuilt: bool = False) -> dict:
+    """`detections_<imgsz>.jsonl` from a drive's boxes: both horizon fits as diagnostics,
+    then the tracker's records with both distance methods.
+
+    The ground-plane estimator uses the all-box fit; the width-prior estimator, whose
+    distances the camera model's primary tables are built on, uses neither fit.
+    """
     fit = ce.horizon_fit(b for f in detected for b in f.boxes)
+    centre = ce.horizon_fit((b for f in detected for b in f.boxes),
+                            centre_fraction=CENTRE_FRACTION)
     records = ce.track_and_measure(detected, fit["horizon_y_px"], fit["camera_height_m"])
     with (target / f"detections_{imgsz}.jsonl").open("w") as handle:
         handle.write(json.dumps({"type": "header", "run": run, "imgsz": imgsz,
                                  "weights_sha256": weights_sha, "horizon": fit,
+                                 "horizon_centre_boxes": centre,
+                                 "ground_plane_uses": "horizon (all usable boxes)",
+                                 "distance_methods": ["width_prior", "ground_plane"],
                                  "fx_px": ce.FX_PX, "cx_px": ce.CX_PX,
                                  "hood_line_y_px": ce.HOOD_LINE_Y_PX,
-                                 "frames": len(detected)}) + "\n")
+                                 "frames": len(detected), "rebuilt_from_raw": rebuilt}) + "\n")
         for record in records:
             handle.write(json.dumps(record) + "\n")
-    return {"run": run, "imgsz": imgsz, "frames": len(detected), **plan.describe(),
-            "boxes": sum(len(f.boxes) for f in detected),
-            "tracked_records": sum(1 for r in records if r["type"] == "det"),
-            "horizon": fit, "wall_s": time.perf_counter() - started,
-            "detect_ms_mean": 1000 * float(np.mean(walls)) if walls else None}
+    return {"tracked_records": sum(1 for r in records if r["type"] == "det"),
+            "horizon": fit, "horizon_centre_boxes": centre}
+
+
+def rebuild(run: str, imgsz: int, weights_sha: str, out_dir: Path) -> dict:
+    """Rewrite `detections_<imgsz>.jsonl` from an existing `raw_<imgsz>.jsonl` without the
+    detector: the raw boxes do not depend on the horizon fit. The raw file must have run
+    the recorded weights."""
+    target = out_dir / run
+    raw_path = target / f"raw_{imgsz}.jsonl"
+    if not raw_path.exists():
+        raise SystemExit(f"{raw_path} does not exist; run the detector first")
+    lines = raw_path.read_text().splitlines()
+    header = json.loads(lines[0])
+    if header.get("weights_sha256") != weights_sha:
+        raise SystemExit(f"{raw_path} ran weights {header.get('weights_sha256')}; the record "
+                         f"names {weights_sha}")
+    detected = []
+    for line in lines[1:]:
+        row = json.loads(line)
+        if row.get("type") != "frame":
+            continue
+        detected.append(ce.FrameDetections(
+            row["frame_id"], row["pos"], row["t"],
+            [(np.asarray(b[:4], dtype=np.float32), float(b[4]), int(b[5])) for b in row["boxes"]]))
+    started = time.perf_counter()
+    summary = write_detections(target, run, imgsz, weights_sha, detected, rebuilt=True)
+    return {"run": run, "imgsz": imgsz, "frames": len(detected),
+            "boxes": sum(len(f.boxes) for f in detected), **summary,
+            "wall_s": time.perf_counter() - started, "detect_ms_mean": None}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -143,30 +197,41 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--weights", default=str(DEFAULT_WEIGHTS))
     parser.add_argument("--weights-record", default=str(DEFAULT_RECORD))
     parser.add_argument("--record-weights", action="store_true")
+    parser.add_argument("--rebuild-from-raw", action="store_true",
+                        help="rewrite detections_<imgsz>.jsonl from the existing raw_<imgsz>.jsonl "
+                             "without running the detector (its weights sha256 is checked)")
     args = parser.parse_args(argv)
 
     def resolve(path: str) -> Path:
         candidate = Path(path)
         return candidate if candidate.is_absolute() else REPO_ROOT / candidate
 
-    weights = resolve(args.weights)
-    sha = check_weights(weights, resolve(args.weights_record), args.record_weights)
-    from ultralytics import YOLO
-
-    model = YOLO(str(weights))
     out_dir = resolve(args.out_dir)
+    if args.rebuild_from_raw:
+        record = resolve(args.weights_record)
+        if not record.exists():
+            raise SystemExit(f"{record} does not exist")
+        sha = json.loads(record.read_text())["sha256"]
+        model = None
+    else:
+        weights = resolve(args.weights)
+        sha = check_weights(weights, resolve(args.weights_record), args.record_weights)
+        from ultralytics import YOLO
+
+        model = YOLO(str(weights))
     summaries = []
     for run in args.runs:
         for imgsz in args.imgsz:
-            summary = process(run, imgsz, model, sha, data_dir=Path(args.data_dir),
-                              out_dir=out_dir, start_pos=args.start_pos, limit=args.limit)
+            summary = (rebuild(run, imgsz, sha, out_dir) if args.rebuild_from_raw else
+                       process(run, imgsz, model, sha, data_dir=Path(args.data_dir),
+                               out_dir=out_dir, start_pos=args.start_pos, limit=args.limit))
             summaries.append(summary)
             print(f"{run} {imgsz} px: {summary['frames']} frames, {summary['boxes']} boxes, "
                   f"{summary['tracked_records']} tracked records, horizon "
                   f"{summary['horizon']['horizon_y_px']:.1f} px ({summary['horizon']['source']}), "
                   f"{summary['detect_ms_mean'] or 0:.1f} ms/frame, {summary['wall_s']:.1f} s",
                   flush=True)
-    (out_dir / "summary.json").write_text(json.dumps(
+    (out_dir / ("summary_rebuilt.json" if args.rebuild_from_raw else "summary.json")).write_text(json.dumps(
         {"weights_sha256": sha, "runs": summaries, "command": argv or sys.argv}, indent=1))
     return 0
 

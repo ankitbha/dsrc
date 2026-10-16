@@ -74,8 +74,8 @@ class TestEvents:
 
 
 def _det(t, track, gap, lateral=0.0, closing=0.0, valid=True):
-    return {"type": "det", "t": t, "track_id": track, "ema_m": gap, "lateral_m": lateral,
-            "closing_rate_mps": closing, "closing_valid": valid}
+    return {"type": "det", "t": t, "track_id": track, "ema_wp_m": gap, "lateral_wp_m": lateral,
+            "closing_wp_mps": closing, "closing_wp_valid": valid}
 
 
 class TestReports:

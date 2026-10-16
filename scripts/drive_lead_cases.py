@@ -150,7 +150,9 @@ def camera_first_report(records: list[dict], track: list[GpsFix], t_from: float,
     """The first frame in the window where the camera's local density reaches `0.9 k_c`
     or the own-lane leader's estimated speed falls below half of its value 30 s earlier.
 
-    Lanes from the lateral offset: own within 1.85 m of the axis, adjacent out to 5.55 m;
+    Distances, lateral offsets and closing rates are the width-prior estimator's, the
+    camera model's primary method. Lanes from the lateral offset: own within 1.85 m of the
+    axis, adjacent out to 5.55 m;
     `k_hat` is the mean over the three lanes of `L/(g + L)` (own lane) and `n L / 80 m`.
     """
     by_frame: dict[float, list[dict]] = {}
@@ -162,20 +164,21 @@ def camera_first_report(records: list[dict], track: list[GpsFix], t_from: float,
     leader_speed: list[tuple[float, float]] = []
     for t in sorted(by_frame):
         rows = by_frame[t]
-        own = [r for r in rows if abs(r["lateral_m"]) < OWN_HALF_WIDTH_M]
-        left = [r for r in rows if -ADJACENT_OUTER_M < r["lateral_m"] <= -OWN_HALF_WIDTH_M
-                and r["ema_m"] <= RANGE_M]
-        right = [r for r in rows if OWN_HALF_WIDTH_M <= r["lateral_m"] < ADJACENT_OUTER_M
-                 and r["ema_m"] <= RANGE_M]
+        rows = [r for r in rows if r.get("ema_wp_m") is not None]
+        own = [r for r in rows if abs(r["lateral_wp_m"]) < OWN_HALF_WIDTH_M]
+        left = [r for r in rows if -ADJACENT_OUTER_M < r["lateral_wp_m"] <= -OWN_HALF_WIDTH_M
+                and r["ema_wp_m"] <= RANGE_M]
+        right = [r for r in rows if OWN_HALF_WIDTH_M <= r["lateral_wp_m"] < ADJACENT_OUTER_M
+                 and r["ema_wp_m"] <= RANGE_M]
         k_own = 0.0
-        leader = min(own, key=lambda r: r["ema_m"]) if own else None
-        if leader is not None and leader["ema_m"] <= RANGE_M:
-            k_own = OCCUPANCY_LENGTH_M / (max(leader["ema_m"], 0.0) + OCCUPANCY_LENGTH_M)
+        leader = min(own, key=lambda r: r["ema_wp_m"]) if own else None
+        if leader is not None and leader["ema_wp_m"] <= RANGE_M:
+            k_own = OCCUPANCY_LENGTH_M / (max(leader["ema_wp_m"], 0.0) + OCCUPANCY_LENGTH_M)
         k_hat = (k_own + (len(left) + len(right)) * OCCUPANCY_LENGTH_M / RANGE_M) / 3.0
         if k_hat >= 0.9 * K_CRITICAL:
             return {"t": t, "criterion": "density", "k_hat": k_hat}
-        if leader is not None and leader.get("closing_valid"):
-            speed = _nearest_fix(track, t).speed_mps + float(leader["closing_rate_mps"])
+        if leader is not None and leader.get("closing_wp_valid"):
+            speed = _nearest_fix(track, t).speed_mps + float(leader["closing_wp_mps"])
             earlier = [s for u, s in leader_speed if u <= t - LEADER_LOOKBACK_S + 1e-9]
             if earlier and speed < 0.5 * earlier[-1]:
                 return {"t": t, "criterion": "leader_speed", "leader_speed_mps": speed,

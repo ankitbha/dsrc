@@ -478,7 +478,7 @@ class CameraModel:
                          for v in t["confidence"]["values"]],
             R_max=float(t["R_max_m"] or 0.0), bias=bias,
             source={"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
-                    "table": name})
+                    "table": name, "method": artefact.get("method", t.get("method"))})
 
     def with_switches(self, **switches: bool) -> "CameraModel":
         from dataclasses import replace

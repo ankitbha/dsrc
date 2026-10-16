@@ -33,12 +33,15 @@ def _records(tracks, frames_per_track=40, miss=None, noise=0.0, seed=0, start=50
             seen = miss is None or not miss(k) or k in (0, frames_per_track - 1)
             if seen:
                 d = start + speed * DT * k
+                # Width prior (primary) and ground plane (alternative), each with its own
+                # noise; the ground plane reads 1/1.1 of the width prior.
                 records.append({"type": "det", "frame_id": frame_id, "t": t,
                                 "track_id": track, "cls": 2, "conf": conf,
-                                "raw_ground_m": d + noise * rng.standard_normal(),
-                                "width_prior_m": d * 1.1,
-                                "ema_m": d + noise * rng.standard_normal(),
-                                "closing_rate_mps": speed, "closing_valid": True})
+                                "width_prior_m": d + noise * rng.standard_normal(),
+                                "ema_wp_m": d + noise * rng.standard_normal(),
+                                "raw_ground_m": d / 1.1 + noise * rng.standard_normal(),
+                                "ema_gp_m": d / 1.1 + noise * rng.standard_normal(),
+                                "closing_wp_mps": speed, "closing_wp_valid": True})
             frame_id += 1
         t0 += DT * frames_per_track + 5.0
     return records
@@ -79,7 +82,7 @@ class TestNoise:
 
     def test_closing_rate_noise_is_the_slope_standard_error(self):
         sigma = 1.0
-        records = _records(200, frames_per_track=48, noise=sigma, seed=5, start=70.0)
+        records = _records(600, frames_per_track=48, noise=sigma, seed=5, start=70.0)
         table = ce.closing_rate_noise_table(records)
         # Eight points 0.2 s apart: SE of the slope = sigma / sqrt(0.04 * 42).
         expected = sigma / np.sqrt(0.04 * 42.0)
@@ -101,6 +104,18 @@ class TestOtherTables:
     def test_bias_ratio_is_ground_over_width_prior(self):
         table = ce.bias_ratio_table(_records(3, frames_per_track=10, start=15.0, speed=0.0))
         assert table["median"][1] == pytest.approx(1 / 1.1)
+
+    def test_the_method_key_picks_the_distance_every_table_reads(self):
+        # Three cars standing at a width-prior 21 m (bin 2) read 21/1.1 = 19.1 m on the
+        # ground plane (bin 1).
+        records = _records(3, frames_per_track=10, start=21.0, speed=0.0)
+        wp = ce.error_tables(records, "width_prior")
+        gp = ce.error_tables(records, "ground_plane")
+        assert wp["method"] == "width_prior" and gp["method"] == "ground_plane"
+        assert wp["confidence"]["n"][2] == 30 and wp["confidence"]["n"][1] == 0
+        assert gp["confidence"]["n"][1] == 30 and gp["confidence"]["n"][2] == 0
+        with pytest.raises(KeyError):
+            ce.error_tables(records, "bogus")
 
     def test_first_detection_of_approaching_tracks(self):
         out = ce.first_detection_table(_records(4, frames_per_track=10, start=60.0))
@@ -159,10 +174,16 @@ def test_the_50_frame_records_give_a_parseable_artefact_with_every_table(tmp_pat
                      "--out", str(out)]) == 0
     artefact = json.loads(out.read_text())
     assert artefact["schema"] == "camera_error_model/1" and artefact["sumo_table"] == "0.20"
+    # The SUMO model reads the width-prior tables; the ground-plane ones are recorded.
+    assert artefact["method"] == "width_prior"
+    assert artefact["tables"]["0.20"]["method"] == "width_prior"
+    assert artefact["alternative"]["ground_plane"]["tables"]["0.20"]["method"] == "ground_plane"
     table = artefact["tables"]["0.20"]
     for key in ("detection", "distance_noise", "closing_rate_noise", "confidence",
                 "first_detection", "bias_ratio", "R_max_m", "bins_m", "drives"):
         assert key in table
     assert table["drives"] == ["run_20260908_190548"]
+    # The records carry the width-prior distance, so the tables are not empty.
+    assert sum(table["detection"]["opportunities"]) > 0 and sum(table["confidence"]["n"]) > 0
     assert artefact["inputs"][0]["sha256"]
-    CameraModel.from_artefact(out)  # loads
+    assert CameraModel.from_artefact(out).source["method"] == "width_prior"

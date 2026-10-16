@@ -9,7 +9,10 @@ Reads `<frames-dir>/<run>/detections_<imgsz>.jsonl` (written by
 `process_drive_frames.py`), groups the drives by frame interval (the 0.20 s drives and the
 0.67 s drives) and writes one table set per group: detection rate, distance noise (raw
 ground-plane and EMA), closing-rate noise, confidences, the ground-plane to width-prior
-ratio, first-detection distances and `R_max`, all in 10 m bins of EMA distance. The SUMO
+ratio, first-detection distances and `R_max`, all in 10 m bins of EMA distance. The primary
+tables (`method`, the SUMO camera model's) are on the width-prior distance, which uses only
+`fx` and the class widths; the same tables on the ground-plane distance are recorded under
+`alternative`, because its scale follows each drive's fitted camera height. The SUMO
 camera model reads the 0.20 s table (`sumo_table`). The 1,280 px records give the same
 tables as a sensitivity. Every input file's sha256 is recorded, and the inputs must share
 one weights sha256.
@@ -62,11 +65,15 @@ def tables_for(frames_dir: Path, imgsz: int) -> dict:
         raise SystemExit(f"no detections_{imgsz}.jsonl under {frames_dir}")
     if len(weights) != 1:
         raise SystemExit(f"the {imgsz} px records ran different weights: {sorted(weights, key=str)}")
-    tables = {}
-    for group, records in sorted(groups.items()):
-        tables[group] = {**ce.error_tables(records),
-                         "drives": sorted(r for r, v in runs.items() if v["group"] == group)}
-    return {"tables": tables, "runs": runs, "inputs": inputs, "weights_sha256": weights.pop()}
+    def build(method):
+        return {group: {**ce.error_tables(records, method),
+                        "drives": sorted(r for r, v in runs.items() if v["group"] == group)}
+                for group, records in sorted(groups.items())}
+
+    alternatives = {m: {"tables": build(m)} for m in ce.METHODS if m != ce.PRIMARY_METHOD}
+    return {"method": ce.PRIMARY_METHOD, "tables": build(ce.PRIMARY_METHOD),
+            "alternative": alternatives, "runs": runs, "inputs": inputs,
+            "weights_sha256": weights.pop()}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,6 +97,10 @@ def main(argv: list[str] | None = None) -> int:
         "schema": "camera_error_model/1", "generated_by": "scripts/fit_camera_model.py",
         "generated_wall": time.time(), "bin_m": ce.BIN_M, "imgsz": args.imgsz,
         "sumo_table": SUMO_TABLE, "fx_px": ce.FX_PX,
+        "method_note": ("primary tables on the width-prior EMA distance (fx and class widths "
+                        "only); the ground-plane tables, whose scale follows each drive's "
+                        "fitted camera height (0.40 to 0.89 m against the configured 1.25 m), "
+                        "are recorded under 'alternative'"),
         "distance_scale_note": ("fx was never recorded; the absolute scale is swept as a "
                                 "multiplicative bias b in {0.8, 1.0, 1.25} (plan section 2.3)"),
         **primary,

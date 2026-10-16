@@ -97,18 +97,57 @@ class TestTrackAndMeasure:
         assert len({r["track_id"] for r in rows}) == 1
         assert rows[-1]["raw_ground_m"] == pytest.approx(30.0, rel=1e-3)
         assert rows[-1]["width_prior_m"] == pytest.approx(30.0, rel=1e-3)
-        assert rows[-1]["ema_m"] > 30.0  # the EMA lags the raw value
-        valid = [r for r in rows if r["closing_valid"]]
-        assert valid and all(r["closing_rate_mps"] < 0 for r in valid)
-        assert valid[-1]["closing_rate_mps"] == pytest.approx(-5.0, rel=0.2)
+        for method in ("wp", "gp"):
+            assert rows[-1][f"ema_{method}_m"] > 30.0  # the EMA lags the raw value
+            valid = [r for r in rows if r[f"closing_{method}_valid"]]
+            assert valid and all(r[f"closing_{method}_mps"] < 0 for r in valid)
+            assert valid[-1][f"closing_{method}_mps"] == pytest.approx(-5.0, rel=0.2)
+        assert rows[-1]["method_gp"] == "ground_plane"
         assert [r["t"] for r in rows] == [f.t for f in frames[1:]]
+
+    def test_the_width_prior_distance_ignores_the_horizon_and_camera_height(self):
+        frames = []
+        for k in range(11):
+            t = 0.2 * k
+            z = 40.0 - 5.0 * t
+            width = 800.0 * 1.8 / z
+            frames.append(ce.FrameDetections(k, k, t, [(_box(400.0, 825.0 + 1000.0 / z, width),
+                                                        0.9, 2)]))
+        a = [r for r in ce.track_and_measure(frames, 825.0, 1.25) if r["type"] == "det"]
+        b = [r for r in ce.track_and_measure(frames, 700.0, 0.5) if r["type"] == "det"]
+        keys = ("width_prior_m", "ema_wp_m", "closing_wp_mps", "closing_wp_valid", "lateral_wp_m")
+        assert [[r[k] for k in keys] for r in a] == [[r[k] for k in keys] for r in b]
+        assert [r["ema_gp_m"] for r in a] != [r["ema_gp_m"] for r in b]
+
+    def test_a_planted_width_prior_noise_is_measured_back(self):
+        # 120 cars approaching from 70 to 30 m over 8 s at 0.2 s frames, each box width
+        # set so its raw width-prior distance carries N(0, 1.5 m); 2 s without a car
+        # between them so the tracker drops each one.
+        rng = np.random.default_rng(4)
+        frames, k, t = [], 0, 0.0
+        for _ in range(120):
+            for step in range(41):
+                z = 70.0 - 1.0 * step + rng.normal(0.0, 1.5)
+                width = 800.0 * 1.8 / z
+                frames.append(ce.FrameDetections(k, k, t, [(_box(360.0, 900.0, width), 0.9, 2)]))
+                k, t = k + 1, t + 0.2
+            for _ in range(10):
+                frames.append(ce.FrameDetections(k, k, t, []))
+                k, t = k + 1, t + 0.2
+        records = ce.track_and_measure(frames, 825.0, 1.25)
+        table = ce.error_tables(records, "width_prior")["distance_noise"]
+        pooled = [s for s, n in zip(table["sigma_raw_m"], table["n_raw"]) if n >= 1000]
+        assert pooled and all(s == pytest.approx(1.5, abs=0.1) for s in pooled), pooled
+        # The EMA is smoother than the raw distance it averages.
+        ema = [s for s, n in zip(table["sigma_ema_m"], table["n_ema"]) if n >= 1000]
+        assert all(e < r for e, r in zip(ema, pooled))
 
     def test_a_box_below_the_hood_line_has_no_ground_plane_distance(self):
         frames = [ce.FrameDetections(k, k, 0.2 * k, [(_box(360.0, 1100.0, 300.0), 0.9, 2)])
                   for k in range(3)]
         rows = [r for r in ce.track_and_measure(frames, 825.0, 1.25) if r["type"] == "det"]
         assert rows and all(r["raw_ground_m"] is None for r in rows)
-        assert all(r["method"] == "width_prior" for r in rows)
+        assert all(r["method_gp"] == "width_prior" for r in rows)
 
     def test_every_frame_is_listed_with_its_tracked_count(self):
         frames = [ce.FrameDetections(k, k, 0.2 * k, []) for k in range(4)]
@@ -117,12 +156,71 @@ class TestTrackAndMeasure:
             (0, 0), (1, 0), (2, 0), (3, 0)]
 
 
+class TestHorizonDiagnostics:
+    def test_the_centre_fit_keeps_boxes_near_the_centre_column(self):
+        # Planted: horizon 825 px, height 1.25 m. Off-centre boxes show a vehicle's side
+        # and are 30% wider, which lowers the slope of an all-box fit.
+        rng = np.random.default_rng(2)
+        boxes = []
+        for z in rng.uniform(8.0, 80.0, 600):
+            centre = rng.choice([360.0, 120.0, 600.0])
+            width = 800.0 * 1.8 / z * (1.0 if centre == 360.0 else 1.3)
+            bottom = 825.0 + 1.25 * 800.0 / z
+            boxes.append((_box(centre, bottom, width), 0.9, 2))
+        centre_fit = ce.horizon_fit(boxes, centre_fraction=0.15)
+        all_fit = ce.horizon_fit(boxes)
+        assert centre_fit["camera_height_m"] == pytest.approx(1.25, abs=0.02)
+        assert all_fit["camera_height_m"] < 1.15
+        assert centre_fit["boxes"] < all_fit["boxes"]
+        assert centre_fit["centre_fraction"] == 0.15
+
+
 class TestHoodFilter:
     def test_boxes_whose_centre_is_below_the_hood_line_are_dropped(self):
         kept = ce.drop_hood_boxes([(np.array([0, 900, 10, 1000], np.float32), 0.9, 2),
                                    (np.array([0, 1000, 10, 1100], np.float32), 0.9, 2)],
                                   hood_line_y=1010.0)
         assert len(kept) == 1 and kept[0][0][1] == 900
+
+
+def _raw_file(directory: Path, sha: str) -> Path:
+    run = directory / "run_x"
+    run.mkdir(parents=True)
+    lines = [json.dumps({"type": "header", "run": "run_x", "imgsz": 640, "weights_sha256": sha})]
+    for k in range(30):
+        t = 0.2 * k
+        z = 40.0 - 5.0 * t
+        width = 800.0 * 1.8 / z
+        box = _box(360.0, 825.0 + 1000.0 / z, width)
+        lines.append(json.dumps({"type": "frame", "frame_id": k, "pos": k, "t": t,
+                                 "boxes": [[*[float(v) for v in box], 0.9, 2]]}))
+    (run / "raw_640.jsonl").write_text("\n".join(lines) + "\n")
+    return run
+
+
+class TestRebuild:
+    def test_detections_are_rebuilt_from_the_raw_boxes_without_the_detector(self, tmp_path):
+        import process_drive_frames as pdf
+
+        sha = json.loads((REPO_ROOT / "results/jam/weights.json").read_text())["sha256"]
+        run = _raw_file(tmp_path, sha)
+        assert pdf.main(["--rebuild-from-raw", "--runs", "run_x", "--imgsz", "640",
+                         "--out-dir", str(tmp_path)]) == 0
+        lines = [json.loads(l) for l in (run / "detections_640.jsonl").read_text().splitlines()]
+        header = lines[0]
+        assert header["rebuilt_from_raw"] is True and header["weights_sha256"] == sha
+        assert {"horizon", "horizon_centre_boxes"} <= set(header)
+        dets = [r for r in lines if r["type"] == "det"]
+        assert dets and {"ema_wp_m", "ema_gp_m"} <= set(dets[0])
+        assert sum(1 for r in lines if r["type"] == "frame") == 30
+
+    def test_a_raw_file_from_other_weights_is_refused(self, tmp_path):
+        import process_drive_frames as pdf
+
+        _raw_file(tmp_path, "0" * 64)
+        with pytest.raises(SystemExit):
+            pdf.main(["--rebuild-from-raw", "--runs", "run_x", "--imgsz", "640",
+                      "--out-dir", str(tmp_path)])
 
 
 # ------------------------------------------------------------------ real smoke
@@ -151,5 +249,8 @@ def test_fifty_real_frames_give_records_timed_by_their_ticks(tmp_path):
     detections = [json.loads(l) for l in (run_dir / "detections_640.jsonl").read_text().splitlines()]
     assert detections[0]["type"] == "header"
     assert detections[0]["horizon"]["source"] in ("fit", "fallback")
+    assert "horizon_centre_boxes" in detections[0]
+    dets = [r for r in detections if r["type"] == "det"]
+    assert dets and all(r["ema_wp_m"] is not None for r in dets)
     assert {r["type"] for r in detections[1:]} <= {"frame", "det"}
     assert sum(1 for r in detections if r["type"] == "frame") == 50
