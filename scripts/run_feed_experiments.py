@@ -127,6 +127,8 @@ class Context:
     #: Flow and disagreement are scored from here; a 600 s smoke scores from the
     #: warm-up's end so its disagreement and age are measured at all.
     window_start_s: float = 900.0
+    #: The simulation step; blocks B and C pair only against a reference run at it.
+    step_length_s: float = 0.5
     #: How advice reaches a vehicle (`src.sumo.mainz.ACTUATIONS`); Amendment 1's cap.
     actuation: str = "max_speed"
     #: The evaluation blocks B and C pair against (Amendment 2, B1).
@@ -353,6 +355,15 @@ def run_block(block: str, specs: Sequence[Spec], run_episode: EpisodeFn, *,
     jsonl = results_dir / f"{block}.jsonl"
     if jsonl.exists() and not resume:
         raise SystemExit(f"{jsonl} exists; pass --resume to continue it, or move it away")
+    identity = header_identity(header_record)
+    if jsonl.exists():
+        # Amendment 3, C2: a block is one checkpoint under one actuation. Resuming it
+        # under another would mix episodes with nothing in the summary to say so.
+        earlier = {header_identity(h) for h in read_block(results_dir, block)[0]}
+        if earlier - {identity}:
+            raise SystemExit(f"refusing to resume {jsonl}: its headers ran checkpoint and "
+                             f"actuation {sorted(earlier, key=str)}, this run "
+                             f"{identity}")
     done = resume_keys(jsonl)
     keys = [spec.key for spec in specs]
     if len(set(keys)) != len(keys):
@@ -384,6 +395,9 @@ def run_block(block: str, specs: Sequence[Spec], run_episode: EpisodeFn, *,
                       "trace_file": str(trace_path),
                       **{("pulse_inserted" if k == "pulse" else k): v
                          for k, v in result.items() if k not in TRACE_FIELDS}}
+            # Amendment 3, C2: every record names the checkpoint and actuation it ran.
+            record["checkpoint_sha256"] = identity[0]
+            record.setdefault("actuation", identity[1])
             handle.write(json.dumps(record, default=float) + "\n")
             handle.flush()
             ran.append(spec.key)
@@ -422,6 +436,7 @@ def episode_runner(model, context: Context) -> EpisodeFn:
         return run_feed_episode(model, spec.seed, spec.scenario, mode, feed_process=feed,
                                 penetration=spec.penetration, duration_s=spec.duration_s,
                                 pulse=pulse, window_start_s=context.window_start_s,
+                                step_length_s=context.step_length_s,
                                 actuation=context.actuation)
 
     return run
@@ -464,45 +479,103 @@ def committed_references(path: Path = REFERENCE_EVALUATION) -> dict[str, Any]:
             out["actuation"] = config.get("actuation", "set_speed")
             out["here_checkpoint_sha256"] = (config.get("checkpoints", {})
                                              .get("here", {}).get("sha256"))
+            # The protocol the blocks must share with it (Amendment 3, C2).
+            out["seeds"] = list(config.get("seeds") or [])
+            out["duration_s"] = config.get("duration_s")
+            out["window_start_s"] = config.get("window_start_s")
+            out["step_length_s"] = config.get("step_length_s")
         elif record.get("arm") in ("here", "no_control"):
             out[record["arm"]][int(record["seed"])] = float(record["flow"])
     return out
 
 
-def _reference_check(references: dict, headers: list[dict]) -> dict[str, Any]:
-    """The reference's identity against the block's, read from the block's last header."""
-    block_sha = (headers[-1].get("checkpoint") or {}).get("sha256") if headers else None
-    block_actuation = (headers[-1].get("config") or {}).get("actuation") if headers else None
-    return reference_identity(references, block_sha, block_actuation)
+def header_identity(header: dict) -> tuple[str | None, str | None]:
+    """`(checkpoint sha256, actuation)` a block header ran."""
+    return ((header.get("checkpoint") or {}).get("sha256"),
+            (header.get("config") or {}).get("actuation"))
+
+
+def require_one_identity(headers: list[dict], episodes: list[dict], block: str) -> None:
+    """Amendment 3, C2: refuse a block whose headers or episode records disagree on the
+    checkpoint sha256 or the actuation."""
+    identities = {header_identity(h) for h in headers}
+    shas = {sha for sha, _ in identities} | {
+        r["checkpoint_sha256"] for r in episodes if r.get("checkpoint_sha256") is not None}
+    actuations = {act for _, act in identities} | {
+        r["actuation"] for r in episodes if r.get("actuation") is not None}
+    if len(identities) > 1 or len(shas) > 1 or len(actuations) > 1:
+        raise SystemExit(f"block {block} mixes checkpoints {sorted(shas, key=str)} or "
+                         f"actuations {sorted(actuations, key=str)}; it is not summarised")
+
+
+def _reference_check(references: dict, headers: list[dict],
+                     episodes: list[dict] | None = None) -> dict[str, Any]:
+    """The reference's identity against the block's, read from the block's last header;
+    the block's seeds are the seeds of its episodes (the header's list without any)."""
+    if not headers:
+        return reference_identity(references, None, None, None)
+    sha, actuation = header_identity(headers[-1])
+    config = headers[-1].get("config") or {}
+    seeds = sorted({r["seed"] for r in episodes or []}) or list(config.get("seeds") or [])
+    protocol = {"seeds": seeds, "duration_s": config.get("duration_s"),
+                "window_start_s": config.get("window_start_s"),
+                "step_length_s": config.get("step_length_s")}
+    return reference_identity(references, sha, actuation, protocol)
 
 
 def reference_identity(references: dict, block_sha: str | None,
-                       block_actuation: str | None) -> dict[str, Any]:
-    """Whether the reference file exists and ran the block's checkpoint and actuation.
+                       block_actuation: str | None,
+                       protocol: dict | None = None) -> dict[str, Any]:
+    """Whether the reference file exists, ran the block's checkpoint and actuation, and
+    (Amendment 3, C2) covers the block's seeds at the block's duration, flow window and
+    step length.
 
     A reference file whose header carries no actuation was written before Amendment 1,
     so it is read as the legacy `set_speed`.
     """
+    protocol = protocol or {}
+
+    def same(key):
+        return (protocol.get(key) is not None and references.get(key) is not None
+                and float(protocol[key]) == float(references[key]))
+
+    block_seeds = set(protocol.get("seeds") or [])
     return {"source": references.get("source"), "exists": bool(references.get("exists")),
             "actuation": references.get("actuation"),
             "same_checkpoint": (block_sha is not None
                                 and block_sha == references.get("here_checkpoint_sha256")),
             "same_actuation": (block_actuation is not None
-                               and block_actuation == references.get("actuation"))}
+                               and block_actuation == references.get("actuation")),
+            "seeds_contained": bool(block_seeds) and block_seeds <= set(
+                references.get("seeds") or []),
+            "same_duration": same("duration_s"), "same_window": same("window_start_s"),
+            "same_step": same("step_length_s"),
+            "reference_protocol": {k: references.get(k) for k in
+                                   ("seeds", "duration_s", "window_start_s", "step_length_s")}}
+
+
+#: Every count a reference check must pass, with the reason a failure gives.
+REFERENCE_CONDITIONS = (
+    ("same_actuation", "its actuation is not the block's"),
+    ("same_checkpoint", "its here checkpoint is not the block's"),
+    ("seeds_contained", "its seeds do not contain the block's"),
+    ("same_duration", "its episode duration is not the block's"),
+    ("same_window", "its flow window is not the block's"),
+    ("same_step", "its step length is not the block's"),
+)
 
 
 def reference_problems(check: dict | None) -> list[str]:
-    """Why a reference check fails, empty when it passes (Amendment 2, B1)."""
+    """Why a reference check fails, empty when it passes (Amendments 2 B1 and 3 C2)."""
     if not check:
         return ["no reference check was recorded"]
-    problems = []
     if not check.get("exists"):
-        problems.append(f"{check.get('source')} does not exist")
-    else:
-        if not check.get("same_actuation"):
-            problems.append(f"its actuation is {check.get('actuation')!r}, not the block's")
-        if not check.get("same_checkpoint"):
-            problems.append("its here checkpoint is not the block's")
+        return [f"{check.get('source')} does not exist"]
+    problems = []
+    for key, reason in REFERENCE_CONDITIONS:
+        if not check.get(key):
+            problems.append(reason if key != "same_actuation" else
+                            f"its actuation is {check.get('actuation')!r}, not the block's")
     return problems
 
 
@@ -1043,9 +1116,10 @@ def collision_counts(episodes: list[dict]) -> dict[str, Any]:
 def summarize(block: str, results_dir: Path, traces_dir: Path,
               context: Context) -> dict[str, Any]:
     headers, episodes = read_block(results_dir, block)
+    require_one_identity(headers, episodes, block)
     references = committed_references(context.reference)
     if block in ("B", "C"):
-        check = _reference_check(references, headers)
+        check = _reference_check(references, headers, episodes)
         # Amendment 2, B1: a summary paired against the wrong arm is not built. A smoke
         # run's summary records the check and is refused by the figure instead.
         if not context.smoke:
@@ -1182,7 +1256,10 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             # Amendment 2, B1: refuse before any episode runs.
             require_reference(reference_identity(
                 committed_references(context.reference),
-                _sha256(checkpoint) if checkpoint.exists() else None, context.actuation),
+                _sha256(checkpoint) if checkpoint.exists() else None, context.actuation,
+                {"seeds": list(context.seeds), "duration_s": context.duration_s,
+                 "window_start_s": context.window_start_s,
+                 "step_length_s": context.step_length_s}),
                 block)
         specs = block_specs(block, context)
         if block == "D" and args.pilot:

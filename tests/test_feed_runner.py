@@ -19,10 +19,16 @@ ARTEFACT = REPO_ROOT / "results" / "feed" / "feed_process.json"
 COMMITTED_CHECKPOINT = REPO_ROOT / "results" / "checkpoints" / "mainz_here_best.pt"
 
 
+#: The blocks' protocol, which a reference must share (Amendment 3, C2).
+PROTOCOL = {"duration_s": 2500.0, "window_start_s": 900.0, "step_length_s": 0.5}
+
+
 def _write_reference(path: Path, sha: str | None, actuation: str | None = "max_speed",
-                     flows=((16, 3600.0), (17, 3610.0), (18, 3590.0))) -> Path:
+                     flows=((16, 3600.0), (17, 3610.0), (18, 3590.0)),
+                     seeds=tuple(range(16, 31)), **protocol) -> Path:
     """An evaluation file in the evaluator's format; `actuation=None` omits the field."""
-    config = {"checkpoints": {"here": {"sha256": sha}}}
+    config = {"checkpoints": {"here": {"sha256": sha}}, "seeds": list(seeds),
+              **PROTOCOL, **protocol}
     if actuation is not None:
         config["actuation"] = actuation
     lines = [{"type": "header", "config": config}]
@@ -459,7 +465,7 @@ def test_every_summary_counts_the_controlled_episodes_that_collided(tmp_path):
              "colliding_vehicles": c, "collision_teleports": t}
             for seed, c, t in ((16, 0, 0), (17, 4, 2), (18, 0, 1))]
     header = {"type": "header", "checkpoint": {"sha256": "abc"},
-              "config": {"actuation": "max_speed"}}
+              "config": {"actuation": "max_speed", **PROTOCOL}}
     (tmp_path / "C.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [header] + rows))
     reference = _write_reference(tmp_path / "ref.jsonl", "abc")
     summary = rfe.summarize("C", tmp_path, tmp_path, rfe.Context(reference=reference))
@@ -558,7 +564,7 @@ class TestReferenceRefusal:
     @staticmethod
     def _block(tmp_path, block="B", sha="abc", actuation="max_speed"):
         header = {"type": "header", "checkpoint": {"sha256": sha},
-                  "config": {"actuation": actuation}}
+                  "config": {"actuation": actuation, **PROTOCOL}}
         rows = [{"type": "episode", "key": f"{block}/x/{seed}", "arm": "inject_delta",
                  "variant": "delta0.1", "seed": seed, "flow": 3500.0,
                  "previous_fraction_mean": 0.1} for seed in (16, 17, 18)]
@@ -698,3 +704,102 @@ def test_the_drain_artefact_lists_drained_runs_ending_in_an_open_spell(tmp_path)
     assert fixed["drained_ending_in_open_spell"] == ["here/17"]
     assert fixed["per_episode"]["here/17"]["open_spell_at_cap"]["jam"]["length_s"] == 50.0
     assert all(row["drained"] for row in fixed["arms"]["here"]["per_seed"])
+
+
+class TestOneIdentityPerBlock:
+    """Amendment 3, C2 (R3-1): a block is one checkpoint under one actuation, and the
+    reference shares its seeds, duration, window and step."""
+
+    @staticmethod
+    def _header(sha="A", actuation="max_speed"):
+        return {"type": "header", "checkpoint": {"sha256": sha},
+                "config": {"actuation": actuation, **PROTOCOL}}
+
+    def test_every_record_carries_the_checkpoint_and_the_actuation(self, tmp_path):
+        rfe.run_block("B", _specs(1)[:1], _stub([]), results_dir=tmp_path,
+                      traces_dir=tmp_path / "t", header_record=self._header())
+        record = [r for r in _jsonl(tmp_path / "B.jsonl") if r["type"] == "episode"][0]
+        assert record["checkpoint_sha256"] == "A" and record["actuation"] == "max_speed"
+
+    @pytest.mark.parametrize("other", [("B", "max_speed"), ("A", "set_speed")])
+    def test_resuming_under_another_checkpoint_or_actuation_is_refused(self, tmp_path, other):
+        specs = _specs()
+        pause = tmp_path / "PAUSE"
+        rfe.run_block("B", specs, _stub([], lambda n: n == 2 and pause.touch()),
+                      results_dir=tmp_path, traces_dir=tmp_path / "t",
+                      header_record=self._header(), pause_file=pause)
+        pause.unlink()
+        calls: list[str] = []
+        with pytest.raises(SystemExit, match="refusing to resume"):
+            rfe.run_block("B", specs, _stub(calls), results_dir=tmp_path,
+                          traces_dir=tmp_path / "t", header_record=self._header(*other),
+                          resume=True)
+        assert calls == []
+        # The same identity resumes.
+        rfe.run_block("B", specs, _stub(calls), results_dir=tmp_path,
+                      traces_dir=tmp_path / "t", header_record=self._header(), resume=True)
+        assert len(calls) == 4
+
+    @pytest.mark.parametrize("block", ["A", "B", "C", "D", "E"])
+    def test_a_jsonl_mixing_checkpoints_is_not_summarised(self, tmp_path, block):
+        rows = [self._header("A"), {"type": "episode", "key": "k1", "arm": "x", "variant": "v",
+                                    "seed": 16, "flow": 1.0, "checkpoint_sha256": "A"},
+                self._header("B"), {"type": "episode", "key": "k2", "arm": "x", "variant": "v",
+                                    "seed": 17, "flow": 1.0, "checkpoint_sha256": "B"}]
+        (tmp_path / f"{block}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        with pytest.raises(SystemExit, match="mixes checkpoints"):
+            rfe.summarize(block, tmp_path, tmp_path, rfe.Context())
+
+    def test_episode_records_that_disagree_with_their_header_are_refused(self):
+        with pytest.raises(SystemExit, match="mixes"):
+            rfe.require_one_identity([self._header("A")],
+                                     [{"checkpoint_sha256": "A", "actuation": "max_speed"},
+                                      {"checkpoint_sha256": "A", "actuation": "set_speed"}], "C")
+        rfe.require_one_identity([self._header("A")],
+                                 [{"checkpoint_sha256": "A", "actuation": "max_speed"}], "C")
+
+    def _summarize_b(self, tmp_path, **reference):
+        rows = [self._header("abc")] + [
+            {"type": "episode", "key": f"B/x/{seed}", "arm": "inject_delta",
+             "variant": "delta0.1", "seed": seed, "flow": 3500.0, "checkpoint_sha256": "abc",
+             "actuation": "max_speed", "previous_fraction_mean": 0.1} for seed in (16, 17, 18)]
+        (tmp_path / "B.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        path = _write_reference(tmp_path / "ref.jsonl", "abc", **reference)
+        return rfe.summarize("B", tmp_path, tmp_path, rfe.Context(reference=path))
+
+    @pytest.mark.parametrize("reference,reason", [
+        ({"seeds": (1, 2, 3), "flows": ((1, 3600.0), (2, 3610.0), (3, 3590.0))},
+         "seeds do not contain"),
+        ({"duration_s": 1200.0}, "duration"),
+        ({"window_start_s": 0.0}, "flow window"),
+        ({"step_length_s": 1.0}, "step length"),
+    ])
+    def test_a_reference_from_another_protocol_is_refused(self, tmp_path, reference, reason):
+        with pytest.raises(SystemExit, match=reason):
+            self._summarize_b(tmp_path, **reference)
+
+    def test_the_matching_protocol_is_accepted_and_recorded(self, tmp_path):
+        summary = self._summarize_b(tmp_path)
+        check = summary["reference_check"]
+        assert all(check[k] is True for k in ("seeds_contained", "same_duration",
+                                              "same_window", "same_step"))
+        assert check["reference_protocol"]["duration_s"] == 2500.0
+
+    def test_main_refuses_a_reference_from_another_protocol_before_any_episode(self, tmp_path):
+        reference = _write_reference(tmp_path / "r.jsonl", rfe._sha256(COMMITTED_CHECKPOINT),
+                                     duration_s=1200.0)
+        calls: list[str] = []
+        with pytest.raises(SystemExit, match="duration"):
+            rfe.main(["--block", "C", "--seeds", "16", "17", "--results-dir",
+                      str(tmp_path / "res"), "--traces-dir", str(tmp_path / "t"),
+                      "--reference", str(reference), "--checkpoint", str(COMMITTED_CHECKPOINT)],
+                     run_episode_factory=lambda model, context: _stub(calls))
+        assert calls == []
+
+    def test_summarize_only_refuses_a_missing_reference(self, tmp_path):
+        rows = [self._header("abc"), {"type": "episode", "key": "B/x/16", "arm": "inject_delta",
+                                      "variant": "delta0.1", "seed": 16, "flow": 1.0}]
+        (tmp_path / "B.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        with pytest.raises(SystemExit, match="does not exist"):
+            rfe.main(["--block", "B", "--summarize-only", "--results-dir", str(tmp_path),
+                      "--traces-dir", str(tmp_path), "--reference", str(tmp_path / "no.jsonl")])

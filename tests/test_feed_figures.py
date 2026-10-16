@@ -21,7 +21,8 @@ import run_feed_experiments as rfe  # noqa: E402
 ARTEFACT = REPO_ROOT / "results" / "feed" / "feed_process.json"
 SEEDS = (16, 17, 18)
 PASSING_CHECK = {"source": "fixture", "exists": True, "actuation": "max_speed",
-                 "same_checkpoint": True, "same_actuation": True}
+                 "same_checkpoint": True, "same_actuation": True, "seeds_contained": True,
+                 "same_duration": True, "same_window": True, "same_step": True}
 
 
 @pytest.fixture(scope="module")
@@ -228,7 +229,9 @@ def test_without_a_network_threshold_the_drain_figure_draws_the_fixed_rule(d_sum
     assert ff.fig_drain(stripped)["mainz_surge"]["rule"] == "fixed_30/H120"
 
 
-@pytest.mark.parametrize("failing", ["exists", "same_checkpoint", "same_actuation", "absent"])
+@pytest.mark.parametrize("failing", ["exists", "same_checkpoint", "same_actuation",
+                                     "seeds_contained", "same_duration", "same_window",
+                                     "same_step", "absent"])
 def test_the_figure_and_table_refuse_a_failed_reference_check(failing, a_summary, b_summary,
                                                              c_summary, e_summary):
     """Amendment 2, B1."""

@@ -128,7 +128,8 @@ def require_reference(summary: dict, name: str) -> None:
     """Amendment 2, B1: a block paired against a missing or mismatched reference is not
     drawn. The summary's `reference_check` must exist and pass on every count."""
     check = summary.get("reference_check") or {}
-    failed = [key for key in ("exists", "same_checkpoint", "same_actuation")
+    failed = [key for key in ("exists", "same_checkpoint", "same_actuation",
+                              "seeds_contained", "same_duration", "same_window", "same_step")
               if check.get(key) is not True]
     if failed:
         raise ValueError(f"{name} was paired against {check.get('source')!r}, which fails "
