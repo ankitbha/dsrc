@@ -1088,3 +1088,30 @@ On I_exit both arms start a jam spell 90 to 130 s after the request time (the in
 inserted 0.0 to 18.0 s after 900 s), so the oracle shortens the jam rather than preventing it, as
 the risk table anticipated. The oracle's correction was active on 36% to 38% of controlled
 vehicle-ticks on B9 and about 20% on I_exit.
+
+## Amendment 2 (2026-10-16, after validation round 1; orchestrator)
+
+Round 1 (findings in `plans/2026-10-16-jam-avoidance-validation.md`) confirmed block G's "go"
+independently: recomputed from the traces, four episodes re-run and reproduced exactly, the oracle's
+input equal to a vehicle-by-vehicle SUMO count, no write above the plan in 596,763 writes. The
+orchestrator reproduced R1-1 and R1-2 before accepting them.
+
+- **Fixes sent to the implementer:** R1-1 (edge speed removes stopped incidents twice), R1-2 (each
+  incident vehicle is removed at its own insertion time + 300 s, so both arms of a seed face blocks
+  of equal length), R1-4 (tests for the 11 surviving mutants on the block G path, and "incomplete"
+  unless all seeds are present), R1-7 (a counter of active ticks on which the plan is above 0.5),
+  and O-1 (orchestrator: fit the horizon and camera height only on boxes whose centre lies within
+  15% of the frame width of the centre column; on `run_20260908_155910` all boxes give 0.70 m and
+  centre boxes 0.89 m, because an obliquely viewed vehicle's box includes part of its side).
+- **Block G is re-run on the fixed commit before block T,** because R1-1 and R1-2 touch code block
+  G uses. The recorded block G (`706f5b5`) stays in the record; the re-run is the gate of record.
+- **R1-3, documented limit.** On I_exit the stopped vehicle stands at least 95.5 m beyond any vehicle
+  on a segment edge, so no 80 m sensor (camera or oracle) ever sees it; the corrections respond only
+  to the queue it causes. `oracle_wide` (200 m) sees it. On I_mid the stopped vehicles are seen.
+  Section 4.5's "visible to cameras" holds only for sensors whose range exceeds 95 m on I_exit.
+- **R1-5, documented limit.** Under the version-keyed rule, `L_bar` is at least every replayed lag,
+  so the whole fleet switches together at `T_k + D` and the lag multiplier acts only through `D`:
+  block L is a sweep of the plan's switch delay, `D` = 0, 99.5, 189.0 and 368.0 s for `m` = 0, 1, 2
+  and 4. Figure 3's caption and the paper say so.
+- **R1-6** (the block header records the feed at `m = 1`; each episode carries its own `m` and `D`)
+  is not fixed.
