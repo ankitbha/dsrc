@@ -820,3 +820,34 @@ collision-free actuation and retrained checkpoints.
   smaller than version-level disagreement because the action vector changes on 8 to 13 of 37
   decisions; the drive-log lower lag bound overstates `L_low` by up to one round trip. Both
   are stated in the paper.
+
+## Amendment 2 (2026-10-15, after validation round 2; orchestrator)
+
+**Why.** Validation round 2 confirmed every round-1 fix and found one blocking gap (R2-2), three
+code gaps (R2-3, R2-4) and one plan-level gap (R2-5); R2-1 was the orchestrator's own staging
+error and is fixed in 5a6c796.
+
+- **B1 Reference refusal (R2-2).** Blocks B and C refuse to run, and their summaries and the
+  figure refuse to build, unless `mainz_paired_seeds_cap.jsonl` exists and its header's
+  actuation and `here` checkpoint sha256 equal the block's. Test the missing, wrong-actuation and
+  wrong-checkpoint cases, including a file without an actuation field.
+- **B2 Pulse null and the certificate gate (R2-3).** For each site and penetration level, the null
+  is the same statistic (the peak self-deviation at the pulsed segment over the same window)
+  computed on a one-vehicle pulse at that site, on seeds 16-20. A site is resolved at a level when
+  the 60-vehicle pulses' mean peak self-deviation exceeds the 95th percentile of its null. The
+  certificate at a level is reported only when at least 10 of the 12 sites are resolved; otherwise
+  it is "unavailable (k of 12 sites resolved)", `p_min` cannot be that level, and Table 1 says
+  so. Block E gains 12 sites x 5 levels x 5 seeds = 300 one-vehicle pulse episodes.
+- **B3 Training provenance (R2-4).** The retraining result file records the train, validation and
+  test seed lists, the git commit and dirty flag, and the saved checkpoint's sha256; the
+  docstring's commands append to the log only after the refusal check, so a refused run does not
+  truncate it.
+- **B4 Scenario (b) band (R2-5).** Before the block D pilot, the orchestrator recomputes the band
+  from `mainz_paired_seeds_cap.jsonl`: the lower end is no control's mean served flow, the upper
+  end the cap `here` arm's. If the band is non-empty, scenario (b)'s background is rebuilt at its
+  midpoint with the existing builder options; if it is empty, scenario (b) runs at 3,650 veh/h and
+  the paper reports that, under the collision-free actuation, the controller does not out-serve no
+  control at this demand, so the scenario cannot separate the arms. That is a result, not a pilot
+  failure.
+- **B5 Open spells (implementer choice 2).** The drain artefact records which drained runs end
+  inside a spell still open at the cap.
