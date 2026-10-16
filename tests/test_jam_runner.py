@@ -280,6 +280,68 @@ class TestBlockGRule:
         with pytest.raises(SystemExit):
             rje.g_pass({"B9": {1: _jam(1.0)}}, {"B9": {2: _jam(1.0)}})
 
+    def test_a_reduction_within_two_standard_errors_does_not_pass(self):
+        # Paired differences with mean -1 and two standard errors of 3.1: below zero, not
+        # below by two standard errors (kills "below by 2 SE" -> "below zero", M31).
+        plan = {"B9": {s: _jam(20.0) for s in range(1, 6)},
+                "I_exit": {s: _jam(20.0) for s in range(1, 6)}}
+        steps = {1: -5.5, 2: -1.0, 3: 3.5, 4: -3.0, 5: 1.0}
+        oracle = {"B9": {s: _jam(20.0 + d) for s, d in steps.items()},
+                  "I_exit": {s: _jam(20.0 + d) for s, d in steps.items()}}
+        out = rje.g_pass(oracle, plan)
+        paired = out["scenarios"]["B9"]["paired_jam_time"]
+        assert paired["mean"] == pytest.approx(-1.0) and paired["two_se"] > 1.0
+        assert not out["scenarios"]["B9"]["below_by_2se"] and not out["passes"]
+
+    def test_one_more_prevented_b9_seed_does_not_pass(self):
+        # Kills a prevention margin of 1 seed (M32).
+        plan = {"B9": {s: _jam(20.0) for s in range(1, 6)},
+                "I_exit": {s: _jam(15.0 + s) for s in range(1, 6)}}
+        oracle = {"B9": {s: _jam(0.0 if s == 1 else 21.0 + s, prevented=s == 1)
+                         for s in range(1, 6)},
+                  "I_exit": {s: _jam(15.0 + s) for s in range(1, 6)}}
+        out = rje.g_pass(oracle, plan)
+        assert out["scenarios"]["B9"]["prevented_oracle"] == 1
+        assert not out["scenarios"]["B9"]["prevention_rule"] and not out["passes"]
+
+    def test_prevention_on_i_exit_alone_does_not_pass(self):
+        # The prevention rule is B9's alone (kills it applying to any scenario, M33).
+        plan = {"B9": {s: _jam(20.0 + s) for s in range(1, 6)},
+                "I_exit": {s: _jam(15.0) for s in range(1, 6)}}
+        oracle = {"B9": {s: _jam(20.0 + s) for s in range(1, 6)},
+                  "I_exit": {s: _jam(0.0 if s <= 3 else 16.0 + 3 * s, prevented=s <= 3)
+                             for s in range(1, 6)}}
+        out = rje.g_pass(oracle, plan)
+        assert out["scenarios"]["I_exit"]["prevented_oracle"] == 3
+        assert not out["scenarios"]["I_exit"]["prevention_rule"] and not out["passes"]
+
+    def _g_records(self, seeds=range(1, 6), scenarios=("B9", "I_exit"),
+                   oracle_minutes=5.0):
+        records = []
+        for arm, variant, minutes in (("plan", "-", 20.0),
+                                      ("oracle", "tau10_m0.1", oracle_minutes)):
+            for scenario in scenarios:
+                for seed in seeds:
+                    records.append({"arm": arm, "variant": variant, "scenario": scenario,
+                                    "seed": seed,
+                                    "jam": _jam(minutes + (0.3 if seed % 2 else -0.3))})
+        return records
+
+    def test_a_complete_base_that_passes_is_go(self):
+        assert rje.summarize_g(self._g_records())["decision"] == "go"
+
+    def test_a_missing_seed_or_scenario_makes_the_decision_incomplete(self):
+        out = rje.summarize_g(self._g_records(seeds=range(1, 5)))
+        assert out["decision"].startswith("incomplete") and out["plan_missing_seeds"]
+        out = rje.summarize_g(self._g_records(scenarios=("B9",)))
+        assert out["decision"].startswith("incomplete")
+        assert out["plan_missing_seeds"] == {"I_exit": [1, 2, 3, 4, 5]}
+        records = [r for r in self._g_records()
+                   if not (r["arm"] == "oracle" and r["seed"] == 5 and r["scenario"] == "B9")]
+        out = rje.summarize_g(records)
+        assert out["decision"].startswith("incomplete: the base oracle setting lacks")
+        assert out["settings"]["tau10_m0.1"]["passes"] is None
+
     def test_the_decision_names_the_grid_after_a_failing_base(self):
         records = []
         for arm, variant, minutes in (("plan", "-", 20.0), ("oracle", "tau10_m0.1", 20.0)):
@@ -307,8 +369,16 @@ def test_block_g_smoke_runs_end_to_end(tmp_path):
     assert summary["feed_artefact"]["session"] == "afternoon_20261016_mainz"
     headers, episodes = rje.read_block(results, "G")
     assert {e["arm"] for e in episodes} == {"oracle", "plan"}
-    assert summary["decision"] != "incomplete: the base oracle setting has not run"
+    # One seed is not block G: no decision is made from it.
+    assert summary["decision"].startswith("incomplete")
     assert {e["sensor"] for e in episodes} == {"oracle", "none"}
+    from src.sumo.jam_episode import SCENARIOS
+
+    for e in episodes:
+        # The metric clock is the scenario's (kills a fixed 300 s, M39) and the threshold
+        # the network fit's 19.0 km/h (kills 30 km/h, M46).
+        assert e["jam"]["start_s"] == SCENARIOS[e["scenario"]].start_s == 900.0
+        assert e["jam"]["v_jam"] == 19.0 and e["jam_30kmh"]["v_jam"] == 30.0
     assert all(e["seed"] == 1 and e["duration_s"] == 600.0 for e in episodes)
     for e in episodes:
         trace = json.loads(Path(e["trace_file"]).read_text())

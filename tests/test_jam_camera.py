@@ -185,6 +185,17 @@ class TestEstimates:
         assert est.k_hat[0] == pytest.approx((0.0 + 2 * 4.5 / 80.0) / 2.0)
         assert np.isnan(est.g_hat[0])
 
+    def test_adjacent_density_uses_the_model_s_own_range(self):
+        # R_max 60 m makes R_eff 60 m: one adjacent detection at 30 m is 4.5/60 of its lane
+        # (kills dividing by a fixed 80 m, M21).
+        cam = model(R_max=60.0)
+        assert cam.R_eff == 60.0
+        table = table_for([vehicle("ego", 1, 100.0), vehicle("adj", 2, 100.0 + 30.0 + L)],
+                          [Ego("ego", "A", 1, 100.0)])
+        est = estimate(table, cam.observe(table, np.random.default_rng(0)), cam.R_eff)
+        assert est.n_hat[0].tolist() == [0, 0, 1]
+        assert est.k_hat[0] == pytest.approx((4.5 / 60.0) / 3.0)
+
     def test_speeds_confidence_and_count(self):
         table = unoccluded_scene()
         est = estimate(table, model(conf=0.7).observe(table, np.random.default_rng(0)), 80.0)
@@ -231,6 +242,17 @@ class TestTrend:
             value = 0.5 if k < 3 else 0.1 + 0.01 * k
             slopes = trend.update(["v"], 5.0 * k, np.array([value]))
         assert slopes[0] == pytest.approx(0.002)
+
+    def test_after_a_gap_only_the_values_of_the_last_30_s_count(self):
+        # Six values 0..25 s, a gap (a junction crossing), then 0.2 at 50 s: the 30 s window
+        # holds 20, 25 and 50 s only (kills a 60 s window, M16, which would take all seven).
+        trend = TrendTracker()
+        for k in range(6):
+            trend.update(["v"], 5.0 * k, np.array([0.1]))
+        slope = trend.update(["v"], 50.0, np.array([0.2]))[0]
+        expected = np.polyfit([20.0, 25.0, 50.0], [0.1, 0.1, 0.2], 1)[0]
+        wider = np.polyfit([0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 50.0], [0.1] * 6 + [0.2], 1)[0]
+        assert slope == pytest.approx(expected) and abs(expected - wider) > 1e-4
 
     def test_vehicles_are_tracked_separately_and_nan_is_skipped(self):
         trend = TrendTracker()

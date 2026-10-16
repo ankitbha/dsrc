@@ -267,6 +267,78 @@ class TestCorrectedWrites:
         assert engine.counter.stepped_down == 0
 
 
+def _leaders(count_at, gap0=6.0, step=6.0, calls=None):
+    """A snapshot source: `v0` on lane 1 of the three-lane `e0` at 100 m, with
+    `count_at(t)` leaders at gaps `gap0 + step j` on lanes `j % 3`. At 80 m over three
+    visible lanes each leader adds 4.5 / 240 = 0.01875 of true occupancy."""
+
+    def source(t):
+        if calls is not None:
+            calls.append(t)
+        vehicles = [{"id": "v0", "edge": "e0", "lane": 1, "front_m": 100.0, "length_m": 4.5,
+                     "speed_mps": 10.0}]
+        for j in range(int(count_at(t))):
+            vehicles.append({"id": f"h{j}", "edge": "e0", "lane": j % 3,
+                             "front_m": 100.0 + gap0 + step * j + 4.5, "length_m": 4.5,
+                             "speed_mps": 5.0})
+        return LaneSnapshot.from_vehicles(vehicles, GEOMETRY, {"e0": "e1"}, t=t)
+
+    return source
+
+
+def _first_step_down(env, vehicle="v0"):
+    return min((t for t, v, f in env.writes if v == vehicle and f < 1.0), default=None)
+
+
+class TestOracleInputs:
+    def test_the_oracle_fires_through_its_trend_before_the_static_trigger(self):
+        # One more leader every 5 s from 65 s: k_true = 0.01875 n, rising 0.00375 /s. With
+        # the 10 s horizon the margin reaches 0.1 at 95 s (k = 0.131 < 0.160); without the
+        # trend it would wait for k >= 0.178 x 0.9 at 105 s (kills s_true x 0, M18).
+        env = FakeEnv(lambda t: [("v0", 0)])
+        engine = _engine(env, JamArm("oracle", m_on=0.1), policy=lambda x: [2, 2],
+                         snapshot_source=_leaders(lambda t: max(0, (t - 60) // 5)))
+        _drive(engine, env, 200)
+        assert _first_step_down(env) == 95.0
+
+    def test_the_oracle_acts_on_the_true_occupancy_itself(self):
+        # Constant scenes either side of the static trigger 0.1602: nine leaders (0.169)
+        # fire at the first tick with a version, eight (0.150) never do (kills an oracle
+        # fed half of k_true, M19).
+        above, below = FakeEnv(lambda t: [("v0", 0)]), FakeEnv(lambda t: [("v0", 0)])
+        for env, n in ((above, 9), (below, 8)):
+            engine = _engine(env, JamArm("oracle", m_on=0.1), policy=lambda x: [2, 2],
+                             snapshot_source=_leaders(lambda t, n=n: n))
+            _drive(engine, env, 200)
+        assert _first_step_down(above) == 80.0
+        assert _first_step_down(below) is None
+
+    def test_sensing_and_decisions_run_every_5_s(self):
+        calls = []
+        env = FakeEnv(lambda t: [("v0", 0)])
+        engine = _engine(env, JamArm("oracle", m_on=0.1), policy=lambda x: [2, 2],
+                         snapshot_source=_leaders(lambda t: 3, calls=calls))
+        _drive(engine, env, 200)
+        # From control start at 0 s; v0 has a version from 80 s, so it is decided on at
+        # the 25 ticks 80, 85, ..., 200 (kills a 10 s cadence, M40).
+        assert calls == [5.0 * k for k in range(1, 41)]
+        assert engine.counter.vehicle_ticks == 25
+        assert engine.jam_summary()["sense_passes"] == 40
+
+    def test_oracle_wide_decides_on_its_200_m_occupancy(self):
+        # 22 leaders between 85 and 190 m: none within 80 m, 0.165 over 200 m and three
+        # lanes. The 200 m oracle fires, the 80 m one never (kills oracle_wide reading
+        # the 80 m k_true, M42).
+        wide, narrow = FakeEnv(lambda t: [("v0", 0)]), FakeEnv(lambda t: [("v0", 0)])
+        for env, R in ((wide, 200.0), (narrow, 80.0)):
+            engine = _engine(env, JamArm("oracle", m_on=0.1, oracle_R=R),
+                             policy=lambda x: [2, 2],
+                             snapshot_source=_leaders(lambda t: 22, gap0=85.0, step=5.0))
+            _drive(engine, env, 200)
+        assert _first_step_down(wide) == 80.0
+        assert _first_step_down(narrow) is None
+
+
 # ----------------------------------------------------------------- SUMO sanity
 
 
@@ -338,6 +410,8 @@ def test_a_600_s_b9_episode_per_arm_has_no_collision_and_no_write_above_the_plan
     assert out["writes_above_plan"] == 0
     assert out["max_speed_mismatched"] == 0
     assert out["arrived"] > 0
+    # Sensing every 5 s from the warm-up's end: 300, 305, ..., 600 s.
+    assert out["sense_passes"] == 61
     if arm != "no_control":
         assert out["feed"]["artefact_sha256"] and out["feed"]["placeholder"] is False
         assert out["feed"]["D"] == pytest.approx(out["feed"]["L_bar"] + 10.0)

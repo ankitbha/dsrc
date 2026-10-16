@@ -125,6 +125,51 @@ class TestLeads:
         assert leads["W_cam"] == 400.0
         assert leads["W_true"] is None  # k_true never departs
 
+    def _ramp_trace(self, speed_at, k_hat_at, k_hat_base=lambda i: 0.05):
+        """Segment 10 only; 10 s samples on [600, 1790]; a 200 s jam spell from 1,400 s."""
+        trace = []
+        for i in range(120):
+            t = 600.0 + 10.0 * i
+            speed = [50.0] * 12
+            k_hat = [0.05] * 12
+            speed[10] = 50.0 if t < 900.0 else speed_at(t)
+            k_hat[10] = k_hat_base(i) if t < 900.0 else k_hat_at(t)
+            if 1400.0 <= t < 1600.0:
+                speed[10] = 10.0
+            trace.append({"t": t, "speed_kmh": speed, "count": [5] * 12, "density": [0.05] * 12,
+                          "held": 0, "pending": 0, "k_hat_mean": k_hat, "k_true_mean": [0.05] * 12})
+        return trace
+
+    def test_the_speed_precursor_is_80_percent_of_the_baseline(self):
+        # Speed falls 1 km/h per 10 s from 49.5 at 900 s to a floor of 30: below 40 (80% of
+        # 50) first at 1,000 s (39.5); below 45 (90%) at 950 s (kills a 90% precursor, M51).
+        trace = self._ramp_trace(lambda t: max(30.0, 49.5 - (t - 900.0) / 10.0),
+                                 lambda t: 0.05)
+        assert jm.leads(trace, V, 900.0, 1790.0)["W_feed"] == 1400.0 - 1000.0
+
+    def test_the_density_precursor_is_three_standard_deviations(self):
+        # Baseline 0.04 / 0.06 alternating (mean 0.05, SD 0.01); from 900 s k_hat rises
+        # 0.001 per 10 s from 0.0505: above 0.08 (3 SD) first at 1,200 s (0.0805), above
+        # 0.07 (2 SD) at 1,100 s (kills a 2 SD precursor, M52).
+        trace = self._ramp_trace(lambda t: 50.0, lambda t: 0.0505 + 0.0001 * (t - 900.0),
+                                 k_hat_base=lambda i: 0.04 if i % 2 else 0.06)
+        assert jm.leads(trace, V, 900.0, 1790.0)["W_cam"] == pytest.approx(1400.0 - 1200.0)
+
+    def test_a_precursor_must_hold_30_s(self):
+        # Below 40 km/h for two samples (20 s) at 1,000 s, then from 1,200 s for good:
+        # the 30 s hold skips the short dip (kills a 20 s hold, M53).
+        trace = self._ramp_trace(lambda t: 35.0 if (1000.0 <= t <= 1010.0 or t >= 1200.0)
+                                 else 50.0, lambda t: 0.05)
+        assert jm.leads(trace, V, 900.0, 1790.0)["W_feed"] == 1400.0 - 1200.0
+
+    def test_a_precursor_only_at_or_after_onset_is_none(self):
+        # Speed stays at baseline until the jam itself, and k_hat rises only after it: no
+        # lead, rather than one of zero or less (kills a search not cut at onset, M60).
+        trace = self._ramp_trace(lambda t: 50.0, lambda t: 0.3 if t >= 1450.0 else 0.05)
+        leads = jm.leads(trace, V, 900.0, 1790.0)
+        assert leads["onset"] == 1400.0
+        assert leads["W_feed"] is None and leads["W_cam"] is None
+
     def test_no_onset_gives_no_leads(self):
         trace = trace_from({}, n=60, t0=600.0)
         assert jm.leads(trace, V, 900.0, 1190.0)["onset"] is None
@@ -141,6 +186,18 @@ class TestTheory:
                                         min_samples=3)
         assert result["k_b"] == pytest.approx(0.10)
 
+    def test_the_break_is_at_95_percent_of_free_flow(self):
+        # Median speed 60 below 0.10, 56 on [0.10, 0.11) (below 57 = 95%, above 54 = 90%),
+        # 50 beyond: k_b is 0.10 at 95% and would be 0.11 at 90% (kills M56).
+        trace = []
+        for i in range(300):
+            k = 0.002 * i
+            speed = 60.0 if k < 0.1 else (56.0 if k < 0.11 else 50.0)
+            trace.append({"t": float(i), "speed_kmh": [speed], "count": [5], "density": [k]})
+        result = jm.speed_density_break([trace], free_flow_kmh=60.0, bin_width=0.01,
+                                        min_samples=3)
+        assert result["k_b"] == pytest.approx(0.10)
+
     def test_max_ramp_is_the_largest_30_s_rise_before_onset(self):
         trace = [{"t": 900.0 + 10.0 * i, "density": [0.05 + (0.003 * i if i < 20 else 0.0)]}
                  for i in range(40)]
@@ -148,6 +205,19 @@ class TestTheory:
         out = jm.max_ramp(trace, segment=0, onset=1090.0)
         assert out["rise"] == pytest.approx(0.009 + 0.02)
         assert out["rate_per_s"] == pytest.approx((0.009 + 0.02) / 30.0)
+
+
+class TestPaired:
+    def test_two_standard_errors_by_hand(self):
+        # Differences 1, 2, 3: mean 2, sample SD 1, so two standard errors are 2 / sqrt(3)
+        # (kills one standard error, M34).
+        paired = jm.Paired.of({1: 3.0, 2: 5.0, 3: 7.0}, {1: 2.0, 2: 3.0, 3: 4.0})
+        assert paired.seeds == [1, 2, 3] and paired.differences == [1.0, 2.0, 3.0]
+        assert paired.mean == pytest.approx(2.0)
+        assert paired.two_se == pytest.approx(2.0 / 3 ** 0.5)
+
+    def test_one_seed_has_no_standard_error(self):
+        assert jm.Paired.of({1: 3.0}, {1: 2.0}).two_se is None
 
 
 class TestCriterionC:
@@ -197,6 +267,8 @@ class TestEpisodeMetrics:
                                             "pending": 0})
         out = jm.episode_metrics(trace, v_jam=19.0, start_s=900.0, end_s=1200.0, cap=2990.0)
         assert out["onset_s"] is None  # the spell is before 900 s
+        # Jam time is counted from the clock start, not from 0 s (kills M30).
+        assert out["jam_time_min"] == 0.0 and out["jam_time_min_900_3600"] == 0.0
         trace = trace_from({5: [(100, 20)]}, n=300, t0=0.0)
         out = jm.episode_metrics(trace, v_jam=19.0, start_s=900.0, end_s=1200.0, cap=2990.0)
         assert out["onset_s"] == 1000.0 and out["onset_segment"] == 5

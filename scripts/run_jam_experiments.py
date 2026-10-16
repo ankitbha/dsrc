@@ -702,7 +702,22 @@ def g_pass(oracle: dict[str, dict[int, dict]], plan: dict[str, dict[int, dict]])
     return {"scenarios": per, "passes": bool(better and not worse)}
 
 
+G_SCENARIOS: tuple[str, ...] = ("B9", "I_exit")
+
+
+def _missing(results: dict[str, dict[int, dict]]) -> dict[str, list[int]]:
+    """Per block G scenario, the seeds 1-5 an arm has not run (empty when complete)."""
+    out = {}
+    for scenario in G_SCENARIOS:
+        absent = sorted(set(BLOCK_SEEDS["G"]) - set(results.get(scenario, {})))
+        if absent:
+            out[scenario] = absent
+    return out
+
+
 def summarize_g(episodes: list[dict]) -> dict[str, Any]:
+    """Section 8.1's decision. A setting is decided only when it and the plan alone have
+    all five seeds on both scenarios; otherwise the decision says what is missing."""
     plan: dict[str, dict[int, dict]] = {}
     oracles: dict[str, dict[str, dict[int, dict]]] = {}
     for r in episodes:
@@ -711,20 +726,38 @@ def summarize_g(episodes: list[dict]) -> dict[str, Any]:
         elif r["arm"] == "oracle":
             oracles.setdefault(r["variant"], {}).setdefault(r["scenario"], {})[r["seed"]] = r["jam"]
     base = _variant("oracle", G_BASE)
-    settings = {variant: g_pass(results, plan) for variant, results in sorted(oracles.items())}
-    passing = sorted(v for v, s in settings.items() if s["passes"])
+    grid = {_variant("oracle", {"tau_l": t, "m_on": m}) for t in G_TAU for m in M_ON}
+    plan_missing = _missing(plan)
+    settings: dict[str, Any] = {}
+    for variant, results in sorted(oracles.items()):
+        missing = _missing(results)
+        if missing or plan_missing:
+            settings[variant] = {"complete": False, "passes": None, "missing_seeds": missing}
+        else:
+            settings[variant] = {"complete": True, **g_pass(results, plan)}
+    passing = sorted(v for v, entry in settings.items() if entry["passes"])
     base_result = settings.get(base)
-    if base_result is None:
+    grid_run = sorted(set(settings) & grid - {base})
+    if plan_missing:
+        decision = f"incomplete: the plan alone lacks seeds {plan_missing}"
+    elif base_result is None:
         decision = "incomplete: the base oracle setting has not run"
+    elif not base_result["complete"]:
+        decision = f"incomplete: the base oracle setting lacks seeds {base_result['missing_seeds']}"
     elif base_result["passes"]:
         decision = "go"
-    elif len(settings) > 1:
-        decision = (f"go on the grid ({', '.join(passing)})" if passing else
-                    "no-go: no oracle setting passes; no camera arm runs (section 8.1)")
-    else:
+    elif not grid_run:
         decision = "base setting fails: run the grid (--g-grid --resume)"
+    elif passing:
+        decision = f"go on the grid ({', '.join(passing)})"
+    elif any(not settings[v]["complete"] for v in grid_run) or set(grid_run) != grid - {base}:
+        incomplete = sorted((grid - {base}) - {v for v in grid_run if settings[v]["complete"]})
+        decision = f"incomplete: grid settings {incomplete} have not run on every seed"
+    else:
+        decision = "no-go: no oracle setting passes; no camera arm runs (section 8.1)"
     return {"block": "G", "base_setting": base, "settings": settings,
-            "passing_settings": passing, "decision": decision}
+            "passing_settings": passing, "plan_missing_seeds": plan_missing,
+            "decision": decision}
 
 
 def summarize_s(episodes: list[dict], context: Context) -> dict[str, Any]:

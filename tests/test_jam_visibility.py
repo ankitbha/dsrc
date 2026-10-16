@@ -95,6 +95,15 @@ class TestScenes:
         assert not bool(c.in_fov[0]) and not bool(c.visible[0])
         assert W / 6.0 > FOV_HALF_TAN
 
+    def test_the_field_of_view_bound_is_360_over_800(self):
+        # At 7 m an adjacent vehicle sits at |y|/d = 0.53: outside 0.45, inside 0.60 (kills
+        # a wider field of view, M25); at 9 m (0.41) it is in view.
+        for gap, inside in ((7.0, False), (9.0, True)):
+            c = visible_candidates(_snapshot([_leader("adj", "A", 2, gap, 100.0)]),
+                                   Ego("ego", "A", 1, 100.0), 80.0)
+            assert bool(c.in_fov[0]) is inside, gap
+        assert FOV_HALF_TAN == pytest.approx(0.45)
+
     def test_candidates_are_limited_to_the_range_and_to_leaders(self):
         # Ego on lane 0 of three: lanes 0 and 1 are in view, lane 2 is two lanes over.
         def vehicle(vid, lane, front):
