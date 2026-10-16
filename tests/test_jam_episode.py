@@ -377,3 +377,23 @@ def test_the_camera_arm_and_the_oracle_trace_differently(smoke):
     assert rule["sensor"] == "camera" and oracle["sensor"] == "oracle"
     assert [s["k_hat_mean"] for s in rule["trace"]] != [s["k_true_mean"] for s in rule["trace"]]
     assert rule["trace"] != oracle["trace"]
+
+
+def test_the_exit_block_is_seen_as_a_candidate_and_its_metrics_compute(model):
+    from src.analysis.jam_metrics import episode_metrics, load_v_jam
+
+    # The block stands 100 m into exit_road, past the end of edge 218 (219.67 m), so its
+    # back is more than 95 m from any vehicle still on a segment edge: outside the 80 m
+    # window, inside oracle_wide's 200 m.
+    feed = FeedSetting(MEASURED, MAINZ_SESSION, m=1.0)
+    out = je.run_jam_episode(model, 1, "I_exit", JamArm("oracle", m_on=0.1, oracle_R=200.0),
+                             feed=feed, duration_s=1300.0, check_max_speed=True)
+    incident = out["incidents"][0]
+    assert 900.0 <= incident["inserted_s"] <= 930.0 and incident["removed_s"] == 1200.0
+    assert out["incident_candidate_rows"] > 0
+    assert out["colliding_vehicles"] == 0 and out["collision_teleports"] == 0
+    assert out["writes_above_plan"] == 0 and out["max_speed_mismatched"] == 0
+    v_jam, _ = load_v_jam()
+    metrics = episode_metrics(out["trace"], v_jam=v_jam, start_s=900.0, end_s=1200.0,
+                              cap=1300.0)
+    assert metrics["jam_time_min"] > 0.0

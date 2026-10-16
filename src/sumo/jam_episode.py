@@ -173,6 +173,8 @@ class _Counter:
     active_ticks: int = 0
     max_speed_checked: int = 0
     max_speed_mismatched: int = 0
+    #: Candidate rows whose leader is an incident vehicle (attack point 12).
+    incident_rows: int = 0
 
 
 @dataclass
@@ -290,6 +292,9 @@ class JamEngine(FeedEngine):
             est = estimate(table, self.camera.observe(table, self._rng_camera), self.camera.R_eff)
             s_hat = self._trend_k.update(ids, t, est.k_hat)
             v_slope = self._trend_speed.update(ids, t, est.mean_speed)
+        if len(table.vehicle):
+            self.counter.incident_rows += sum(1 for v in table.vehicle
+                                              if snap.ids[v].startswith("incident_"))
         self._sensed = {"t": t, "ids": ids, "segments": segments, "k_true": k_true,
                         "k_hat": None if est is None else est.k_hat, "table": table}
         if self.arm.arm in CORRECTED:
@@ -462,7 +467,7 @@ class JamEngine(FeedEngine):
                     for k, v in sorted(self.switch_ticks.items())}
         walls = np.asarray(self.sense_wall_s)
         return {
-            "arm": self.arm.describe(),
+            "arm_spec": self.arm.describe(),
             "sensor": self.arm.sensor,
             "camera_model": (self.camera.source if self.camera is not None else None),
             "camera_bias": (self.camera.bias if self.camera is not None else None),
@@ -475,6 +480,7 @@ class JamEngine(FeedEngine):
             "active_share": (c.active_ticks / c.vehicle_ticks) if c.vehicle_ticks else None,
             "max_speed_checked": c.max_speed_checked,
             "max_speed_mismatched": c.max_speed_mismatched,
+            "incident_candidate_rows": c.incident_rows,
             "sense_passes": len(walls),
             "sense_ms_mean": float(walls.mean() * 1000.0) if len(walls) else None,
             "sense_ms_p95": float(np.percentile(walls, 95) * 1000.0) if len(walls) else None,
