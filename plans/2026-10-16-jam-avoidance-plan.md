@@ -1194,3 +1194,12 @@ them. Decisions:
   with the files present; killing tests for N01-N06, N09, N10, N30, N45-N48 and N72.
 - **R2-7** corrects one round 1 mutant status (M53 killed). **R2-9** is not fixed.
 - The camera model of record is re-fitted after these fixes, and the experiments wait for round 3.
+
+**Camera model of record, re-fitted after Amendment 3 (2026-10-16, 18:05 EDT; orchestrator).** Built
+at `26c9a7f` in a detached worktree from block F's raw boxes (`--rebuild-from-raw`, then
+`fit_camera_model.py`). Detection rate (cross-resolution, IoU >= 0.3, 1,280 px width-prior bins)
+from 0 to 70 m: 0.951, 0.938, 0.788, 0.681, 0.531, 0.318, 0.152, from 43,872 opportunities;
+`R_max` 60 m, so the camera window, and from block S on the oracle's, is 60 m. Persistent per-pair
+distance error: log-normal `sigma_log` 0.308, the relative spread of the per-track median
+ground-plane / width-prior ratio over 201 centre-column tracks with at least 10 detections (per
+drive 0.246 to 0.527). Distance and closing-rate noise unchanged from the previous fit.

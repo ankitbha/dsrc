@@ -1,12 +1,13 @@
 {
  "schema": "camera_error_model/1",
  "generated_by": "scripts/fit_camera_model.py",
- "generated_wall": 1792184665.562069,
+ "generated_wall": 1792187964.6929128,
  "bin_m": 10.0,
  "imgsz": 640,
  "sumo_table": "0.20",
  "fx_px": 800.0,
  "method_note": "primary tables on the width-prior EMA distance (fx and class widths only); the ground-plane tables, whose scale follows each drive's fitted camera height (0.40 to 0.89 m against the configured 1.25 m), are recorded under 'alternative'",
+ "detection_note": "p(d) is the share of the 1280 px tracker's vehicles with a 640 px tracked box at IoU >= 0.3 in the same frame, binned by the 1280 px distance (Amendment 3, R2-3); the held-track rate and the IoU 0.1 and raw-box shares are under detection_alternatives. The sensitivity tables use the held-track rate, having no higher-resolution reference",
  "distance_scale_note": "fx was never recorded; the absolute scale is swept as a multiplicative bias b in {0.8, 1.0, 1.25} (plan section 2.3)",
  "method": "width_prior",
  "tables": {
@@ -65,62 +66,253 @@
     ]
    ],
    "detection": {
+    "source": "cross_resolution",
+    "iou_min": 0.3,
+    "binned_by": "ema_wp_m",
     "detected": [
-     4535,
-     8128,
-     5508,
-     3812,
-     2159,
-     540,
-     96,
-     11,
-     3,
-     0,
+     4610,
+     9234,
+     6181,
+     4304,
+     2724,
+     1154,
+     345,
+     127,
+     28,
+     6,
      0,
      0
     ],
     "missed": [
-     525,
-     2238,
-     1855,
-     1281,
-     882,
-     245,
-     63,
-     8,
-     6,
-     0,
-     0,
-     0
+     236,
+     613,
+     1661,
+     2017,
+     2407,
+     2480,
+     1921,
+     1496,
+     1074,
+     751,
+     393,
+     110
     ],
     "opportunities": [
-     5060,
-     10366,
-     7363,
-     5093,
-     3041,
-     785,
-     159,
-     19,
-     9,
-     0,
-     0,
-     0
+     4846,
+     9847,
+     7842,
+     6321,
+     5131,
+     3634,
+     2266,
+     1623,
+     1102,
+     757,
+     393,
+     110
     ],
     "p": [
-     0.8962450592885376,
-     0.7841018715029906,
-     0.748064647562135,
-     0.7484783035538976,
-     0.7099638276882605,
-     0.6878980891719745,
-     0.6037735849056604,
-     0.5789473684210527,
-     0.3333333333333333,
-     null,
-     null,
-     null
+     0.9513000412711514,
+     0.9377475373210115,
+     0.7881917878092324,
+     0.6809049201075779,
+     0.5308906645877997,
+     0.3175564116675839,
+     0.15225066195939982,
+     0.07825015403573629,
+     0.025408348457350273,
+     0.007926023778071334,
+     0.0,
+     0.0
     ]
+   },
+   "detection_alternatives": {
+    "held_track": {
+     "source": "held_track",
+     "detected": [
+      4535,
+      8128,
+      5508,
+      3812,
+      2159,
+      540,
+      96,
+      11,
+      3,
+      0,
+      0,
+      0
+     ],
+     "missed": [
+      525,
+      2238,
+      1855,
+      1281,
+      882,
+      245,
+      63,
+      8,
+      6,
+      0,
+      0,
+      0
+     ],
+     "opportunities": [
+      5060,
+      10366,
+      7363,
+      5093,
+      3041,
+      785,
+      159,
+      19,
+      9,
+      0,
+      0,
+      0
+     ],
+     "p": [
+      0.8962450592885376,
+      0.7841018715029906,
+      0.748064647562135,
+      0.7484783035538976,
+      0.7099638276882605,
+      0.6878980891719745,
+      0.6037735849056604,
+      0.5789473684210527,
+      0.3333333333333333,
+      null,
+      null,
+      null
+     ]
+    },
+    "cross_resolution_iou0.1": {
+     "source": "cross_resolution",
+     "iou_min": 0.1,
+     "binned_by": "ema_wp_m",
+     "detected": [
+      4626,
+      9289,
+      6400,
+      4437,
+      2874,
+      1271,
+      439,
+      183,
+      48,
+      21,
+      4,
+      1
+     ],
+     "missed": [
+      220,
+      558,
+      1442,
+      1884,
+      2257,
+      2363,
+      1827,
+      1440,
+      1054,
+      736,
+      389,
+      109
+     ],
+     "opportunities": [
+      4846,
+      9847,
+      7842,
+      6321,
+      5131,
+      3634,
+      2266,
+      1623,
+      1102,
+      757,
+      393,
+      110
+     ],
+     "p": [
+      0.9546017333883615,
+      0.9433329948207576,
+      0.816118337158888,
+      0.7019458946369246,
+      0.5601247320210485,
+      0.34975233902036323,
+      0.19373345101500442,
+      0.11275415896487985,
+      0.043557168784029036,
+      0.02774108322324967,
+      0.010178117048346057,
+      0.00909090909090909
+     ]
+    },
+    "cross_resolution_raw_iou0.3": {
+     "source": "cross_resolution",
+     "iou_min": 0.3,
+     "binned_by": "ema_wp_m",
+     "detected": [
+      4632,
+      9446,
+      6625,
+      4648,
+      3034,
+      1366,
+      443,
+      165,
+      41,
+      11,
+      0,
+      0
+     ],
+     "missed": [
+      214,
+      401,
+      1217,
+      1673,
+      2097,
+      2268,
+      1823,
+      1458,
+      1061,
+      746,
+      393,
+      110
+     ],
+     "opportunities": [
+      4846,
+      9847,
+      7842,
+      6321,
+      5131,
+      3634,
+      2266,
+      1623,
+      1102,
+      757,
+      393,
+      110
+     ],
+     "p": [
+      0.9558398679323153,
+      0.9592769371382147,
+      0.8448099974496301,
+      0.7353266888150609,
+      0.5913077372831806,
+      0.375894331315355,
+      0.19549867608120036,
+      0.10166358595194085,
+      0.03720508166969147,
+      0.01453104359313078,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "R_max_alternatives": {
+    "held_track": 70.0,
+    "cross_resolution_iou0.1": 60.0,
+    "cross_resolution_raw_iou0.3": 60.0
    },
    "distance_noise": {
     "n_raw": [
@@ -29542,7 +29734,40 @@
      0
     ]
    },
-   "R_max_m": 70.0,
+   "R_max_m": 60.0,
+   "persistent_error": {
+    "tracks": 201,
+    "median_ratio": 0.934864536670056,
+    "mad_ratio": 0.28825905869138835,
+    "relative_spread": 0.30834313142110803,
+    "per_drive": {
+     "run_20260908_155910": {
+      "tracks": 37,
+      "median_ratio": 0.819735987842303,
+      "mad_ratio": 0.4318075386732929,
+      "relative_spread": 0.5267641595312783
+     },
+     "run_20260908_173809": {
+      "tracks": 34,
+      "median_ratio": 0.9386977954817859,
+      "mad_ratio": 0.2312414354810016,
+      "relative_spread": 0.24634279167803638
+     },
+     "run_20260908_183538": {
+      "tracks": 2,
+      "median_ratio": 0.8575820490655004,
+      "mad_ratio": 0.23906200678531192,
+      "relative_spread": 0.2787628391310379
+     },
+     "run_20260908_190548": {
+      "tracks": 128,
+      "median_ratio": 0.9409266946175883,
+      "mad_ratio": 0.27302726496494933,
+      "relative_spread": 0.290168475957538
+     }
+    },
+    "rule": "per track, the median ground-plane / width-prior ratio over detections within 0.15 of the frame width of the centre column, tracks with at least 10; 1.4826 MAD of the medians over their median"
+   },
    "drives": [
     "run_20260908_155910",
     "run_20260908_173809",
@@ -29605,62 +29830,253 @@
     ]
    ],
    "detection": {
+    "source": "cross_resolution",
+    "iou_min": 0.3,
+    "binned_by": "ema_wp_m",
     "detected": [
-     1599,
-     2677,
-     2377,
-     1659,
-     765,
-     92,
-     3,
-     0,
-     0,
-     0,
+     1812,
+     3381,
+     2870,
+     1976,
+     1282,
+     472,
+     136,
+     19,
+     14,
+     1,
      0,
      0
     ],
     "missed": [
-     397,
-     831,
-     1033,
-     754,
-     384,
-     62,
-     1,
-     0,
-     0,
-     0,
-     0,
-     0
+     42,
+     404,
+     733,
+     941,
+     1188,
+     1242,
+     932,
+     742,
+     396,
+     167,
+     48,
+     12
     ],
     "opportunities": [
-     1996,
-     3508,
-     3410,
-     2413,
-     1149,
-     154,
-     4,
-     0,
-     0,
-     0,
-     0,
-     0
+     1854,
+     3785,
+     3603,
+     2917,
+     2470,
+     1714,
+     1068,
+     761,
+     410,
+     168,
+     48,
+     12
     ],
     "p": [
-     0.8011022044088176,
-     0.7631128848346637,
-     0.6970674486803519,
-     0.6875259013675922,
-     0.6657963446475196,
-     0.5974025974025974,
-     0.75,
-     null,
-     null,
-     null,
-     null,
-     null
+     0.9773462783171522,
+     0.8932628797886394,
+     0.7965584235359423,
+     0.6774082961947206,
+     0.5190283400809717,
+     0.27537922987164526,
+     0.12734082397003746,
+     0.024967148488830485,
+     0.03414634146341464,
+     0.005952380952380952,
+     0.0,
+     0.0
     ]
+   },
+   "detection_alternatives": {
+    "held_track": {
+     "source": "held_track",
+     "detected": [
+      1599,
+      2677,
+      2377,
+      1659,
+      765,
+      92,
+      3,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "missed": [
+      397,
+      831,
+      1033,
+      754,
+      384,
+      62,
+      1,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "opportunities": [
+      1996,
+      3508,
+      3410,
+      2413,
+      1149,
+      154,
+      4,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "p": [
+      0.8011022044088176,
+      0.7631128848346637,
+      0.6970674486803519,
+      0.6875259013675922,
+      0.6657963446475196,
+      0.5974025974025974,
+      0.75,
+      null,
+      null,
+      null,
+      null,
+      null
+     ]
+    },
+    "cross_resolution_iou0.1": {
+     "source": "cross_resolution",
+     "iou_min": 0.1,
+     "binned_by": "ema_wp_m",
+     "detected": [
+      1820,
+      3425,
+      2938,
+      2088,
+      1416,
+      574,
+      201,
+      52,
+      36,
+      9,
+      1,
+      1
+     ],
+     "missed": [
+      34,
+      360,
+      665,
+      829,
+      1054,
+      1140,
+      867,
+      709,
+      374,
+      159,
+      47,
+      11
+     ],
+     "opportunities": [
+      1854,
+      3785,
+      3603,
+      2917,
+      2470,
+      1714,
+      1068,
+      761,
+      410,
+      168,
+      48,
+      12
+     ],
+     "p": [
+      0.9816612729234089,
+      0.904887714663144,
+      0.8154315847904524,
+      0.7158039081247858,
+      0.5732793522267207,
+      0.3348891481913652,
+      0.18820224719101122,
+      0.0683311432325887,
+      0.08780487804878048,
+      0.05357142857142857,
+      0.020833333333333332,
+      0.08333333333333333
+     ]
+    },
+    "cross_resolution_raw_iou0.3": {
+     "source": "cross_resolution",
+     "iou_min": 0.3,
+     "binned_by": "ema_wp_m",
+     "detected": [
+      1840,
+      3546,
+      3123,
+      2195,
+      1505,
+      625,
+      189,
+      50,
+      22,
+      1,
+      0,
+      0
+     ],
+     "missed": [
+      14,
+      239,
+      480,
+      722,
+      965,
+      1089,
+      879,
+      711,
+      388,
+      167,
+      48,
+      12
+     ],
+     "opportunities": [
+      1854,
+      3785,
+      3603,
+      2917,
+      2470,
+      1714,
+      1068,
+      761,
+      410,
+      168,
+      48,
+      12
+     ],
+     "p": [
+      0.9924487594390508,
+      0.9368560105680317,
+      0.8667776852622814,
+      0.7524854302365444,
+      0.6093117408906883,
+      0.3646441073512252,
+      0.17696629213483145,
+      0.0657030223390276,
+      0.05365853658536585,
+      0.005952380952380952,
+      0.0,
+      0.0
+     ]
+    }
+   },
+   "R_max_alternatives": {
+    "held_track": 60.0,
+    "cross_resolution_iou0.1": 60.0,
+    "cross_resolution_raw_iou0.3": 60.0
    },
    "distance_noise": {
     "n_raw": [
@@ -42299,6 +42715,27 @@
     ]
    },
    "R_max_m": 60.0,
+   "persistent_error": {
+    "tracks": 114,
+    "median_ratio": 0.8291711089744223,
+    "mad_ratio": 0.3591235116118694,
+    "relative_spread": 0.4331114624290985,
+    "per_drive": {
+     "run_20260908_161422": {
+      "tracks": 48,
+      "median_ratio": 0.5319965729968502,
+      "mad_ratio": 0.19366783963864678,
+      "relative_spread": 0.36403963760081104
+     },
+     "run_20260908_170849": {
+      "tracks": 66,
+      "median_ratio": 0.9832784475364793,
+      "mad_ratio": 0.23153085504431725,
+      "relative_spread": 0.23546824973576727
+     }
+    },
+    "rule": "per track, the median ground-plane / width-prior ratio over detections within 0.15 of the frame width of the centre column, tracks with at least 10; 1.4826 MAD of the medians over their median"
+   },
    "drives": [
     "run_20260908_161422",
     "run_20260908_170849"
@@ -42363,62 +42800,253 @@
       ]
      ],
      "detection": {
+      "source": "cross_resolution",
+      "iou_min": 0.3,
+      "binned_by": "ema_gp_m",
       "detected": [
-       6476,
-       7347,
-       4363,
-       2783,
-       1814,
-       887,
-       509,
-       309,
-       215,
-       63,
-       23,
-       3
+       6854,
+       8627,
+       5055,
+       3214,
+       2056,
+       1241,
+       727,
+       453,
+       284,
+       125,
+       61,
+       16
       ],
       "missed": [
-       715,
-       2494,
-       1816,
-       963,
-       548,
-       250,
-       164,
-       85,
-       56,
-       10,
-       2,
-       0
+       313,
+       1424,
+       2355,
+       2161,
+       1960,
+       1583,
+       1515,
+       1348,
+       1087,
+       841,
+       486,
+       124
       ],
       "opportunities": [
-       7191,
-       9841,
-       6179,
-       3746,
-       2362,
-       1137,
-       673,
-       394,
-       271,
-       73,
-       25,
-       3
+       7167,
+       10051,
+       7410,
+       5375,
+       4016,
+       2824,
+       2242,
+       1801,
+       1371,
+       966,
+       547,
+       140
       ],
       "p": [
-       0.9005701571408705,
-       0.7465704704806422,
-       0.70610131089173,
-       0.7429257875066738,
-       0.7679932260795935,
-       0.7801231310466139,
-       0.7563150074294205,
-       0.7842639593908629,
-       0.7933579335793358,
-       0.863013698630137,
-       0.92,
-       1.0
+       0.9563276126691782,
+       0.8583225549696548,
+       0.6821862348178138,
+       0.5979534883720931,
+       0.5119521912350598,
+       0.43944759206798867,
+       0.324264049955397,
+       0.2515269294836202,
+       0.20714806710430342,
+       0.12939958592132506,
+       0.11151736745886655,
+       0.11428571428571428
       ]
+     },
+     "detection_alternatives": {
+      "held_track": {
+       "source": "held_track",
+       "detected": [
+        6476,
+        7347,
+        4363,
+        2783,
+        1814,
+        887,
+        509,
+        309,
+        215,
+        63,
+        23,
+        3
+       ],
+       "missed": [
+        715,
+        2494,
+        1816,
+        963,
+        548,
+        250,
+        164,
+        85,
+        56,
+        10,
+        2,
+        0
+       ],
+       "opportunities": [
+        7191,
+        9841,
+        6179,
+        3746,
+        2362,
+        1137,
+        673,
+        394,
+        271,
+        73,
+        25,
+        3
+       ],
+       "p": [
+        0.9005701571408705,
+        0.7465704704806422,
+        0.70610131089173,
+        0.7429257875066738,
+        0.7679932260795935,
+        0.7801231310466139,
+        0.7563150074294205,
+        0.7842639593908629,
+        0.7933579335793358,
+        0.863013698630137,
+        0.92,
+        1.0
+       ]
+      },
+      "cross_resolution_iou0.1": {
+       "source": "cross_resolution",
+       "iou_min": 0.1,
+       "binned_by": "ema_gp_m",
+       "detected": [
+        6881,
+        8849,
+        5226,
+        3318,
+        2166,
+        1310,
+        810,
+        495,
+        309,
+        142,
+        67,
+        20
+       ],
+       "missed": [
+        286,
+        1202,
+        2184,
+        2057,
+        1850,
+        1514,
+        1432,
+        1306,
+        1062,
+        824,
+        480,
+        120
+       ],
+       "opportunities": [
+        7167,
+        10051,
+        7410,
+        5375,
+        4016,
+        2824,
+        2242,
+        1801,
+        1371,
+        966,
+        547,
+        140
+       ],
+       "p": [
+        0.9600948793079391,
+        0.8804099094617451,
+        0.7052631578947368,
+        0.6173023255813953,
+        0.5393426294820717,
+        0.46388101983002833,
+        0.36128456735057984,
+        0.27484730705163796,
+        0.22538293216630198,
+        0.14699792960662525,
+        0.12248628884826325,
+        0.14285714285714285
+       ]
+      },
+      "cross_resolution_raw_iou0.3": {
+       "source": "cross_resolution",
+       "iou_min": 0.3,
+       "binned_by": "ema_gp_m",
+       "detected": [
+        6894,
+        8998,
+        5490,
+        3493,
+        2274,
+        1373,
+        819,
+        520,
+        317,
+        145,
+        70,
+        18
+       ],
+       "missed": [
+        273,
+        1053,
+        1920,
+        1882,
+        1742,
+        1451,
+        1423,
+        1281,
+        1054,
+        821,
+        477,
+        122
+       ],
+       "opportunities": [
+        7167,
+        10051,
+        7410,
+        5375,
+        4016,
+        2824,
+        2242,
+        1801,
+        1371,
+        966,
+        547,
+        140
+       ],
+       "p": [
+        0.9619087484303056,
+        0.8952343050442741,
+        0.7408906882591093,
+        0.649860465116279,
+        0.5662350597609562,
+        0.4861898016997167,
+        0.36529884032114185,
+        0.2887284841754581,
+        0.2312180889861415,
+        0.15010351966873706,
+        0.12797074954296161,
+        0.12857142857142856
+       ]
+      }
+     },
+     "R_max_alternatives": {
+      "held_track": 100.0,
+      "cross_resolution_iou0.1": 90.0,
+      "cross_resolution_raw_iou0.3": 90.0
      },
      "distance_noise": {
       "n_raw": [
@@ -71843,7 +72471,40 @@
        11
       ]
      },
-     "R_max_m": 100.0,
+     "R_max_m": 90.0,
+     "persistent_error": {
+      "tracks": 201,
+      "median_ratio": 0.934864536670056,
+      "mad_ratio": 0.28825905869138835,
+      "relative_spread": 0.30834313142110803,
+      "per_drive": {
+       "run_20260908_155910": {
+        "tracks": 37,
+        "median_ratio": 0.819735987842303,
+        "mad_ratio": 0.4318075386732929,
+        "relative_spread": 0.5267641595312783
+       },
+       "run_20260908_173809": {
+        "tracks": 34,
+        "median_ratio": 0.9386977954817859,
+        "mad_ratio": 0.2312414354810016,
+        "relative_spread": 0.24634279167803638
+       },
+       "run_20260908_183538": {
+        "tracks": 2,
+        "median_ratio": 0.8575820490655004,
+        "mad_ratio": 0.23906200678531192,
+        "relative_spread": 0.2787628391310379
+       },
+       "run_20260908_190548": {
+        "tracks": 128,
+        "median_ratio": 0.9409266946175883,
+        "mad_ratio": 0.27302726496494933,
+        "relative_spread": 0.290168475957538
+       }
+      },
+      "rule": "per track, the median ground-plane / width-prior ratio over detections within 0.15 of the frame width of the centre column, tracks with at least 10; 1.4826 MAD of the medians over their median"
+     },
      "drives": [
       "run_20260908_155910",
       "run_20260908_173809",
@@ -71906,62 +72567,253 @@
       ]
      ],
      "detection": {
+      "source": "cross_resolution",
+      "iou_min": 0.3,
+      "binned_by": "ema_gp_m",
       "detected": [
-       2345,
-       3184,
-       1824,
-       986,
-       449,
+       2760,
+       4179,
+       2337,
+       1253,
+       696,
+       322,
        209,
-       88,
-       45,
+       115,
+       52,
        28,
-       10,
-       4,
-       0
+       8,
+       4
       ],
       "missed": [
-       517,
-       1102,
-       737,
-       513,
-       283,
-       160,
-       81,
-       35,
-       25,
-       6,
-       2,
-       1
+       147,
+       983,
+       1162,
+       910,
+       1028,
+       801,
+       650,
+       503,
+       372,
+       197,
+       72,
+       29
       ],
       "opportunities": [
-       2862,
-       4286,
-       2561,
-       1499,
-       732,
-       369,
-       169,
+       2907,
+       5162,
+       3499,
+       2163,
+       1724,
+       1123,
+       859,
+       618,
+       424,
+       225,
        80,
-       53,
-       16,
-       6,
-       1
+       33
       ],
       "p": [
-       0.8193570929419987,
-       0.7428838077461503,
-       0.7122217883639204,
-       0.6577718478985991,
-       0.6133879781420765,
-       0.5663956639566395,
-       0.5207100591715976,
-       0.5625,
-       0.5283018867924528,
-       0.625,
-       0.6666666666666666,
-       0.0
+       0.9494324045407637,
+       0.8095699341340565,
+       0.6679051157473563,
+       0.5792880258899676,
+       0.4037122969837587,
+       0.2867319679430098,
+       0.24330616996507567,
+       0.18608414239482202,
+       0.12264150943396226,
+       0.12444444444444444,
+       0.1,
+       0.12121212121212122
       ]
+     },
+     "detection_alternatives": {
+      "held_track": {
+       "source": "held_track",
+       "detected": [
+        2345,
+        3184,
+        1824,
+        986,
+        449,
+        209,
+        88,
+        45,
+        28,
+        10,
+        4,
+        0
+       ],
+       "missed": [
+        517,
+        1102,
+        737,
+        513,
+        283,
+        160,
+        81,
+        35,
+        25,
+        6,
+        2,
+        1
+       ],
+       "opportunities": [
+        2862,
+        4286,
+        2561,
+        1499,
+        732,
+        369,
+        169,
+        80,
+        53,
+        16,
+        6,
+        1
+       ],
+       "p": [
+        0.8193570929419987,
+        0.7428838077461503,
+        0.7122217883639204,
+        0.6577718478985991,
+        0.6133879781420765,
+        0.5663956639566395,
+        0.5207100591715976,
+        0.5625,
+        0.5283018867924528,
+        0.625,
+        0.6666666666666666,
+        0.0
+       ]
+      },
+      "cross_resolution_iou0.1": {
+       "source": "cross_resolution",
+       "iou_min": 0.1,
+       "binned_by": "ema_gp_m",
+       "detected": [
+        2780,
+        4307,
+        2418,
+        1344,
+        802,
+        391,
+        255,
+        140,
+        67,
+        42,
+        11,
+        4
+       ],
+       "missed": [
+        127,
+        855,
+        1081,
+        819,
+        922,
+        732,
+        604,
+        478,
+        357,
+        183,
+        69,
+        29
+       ],
+       "opportunities": [
+        2907,
+        5162,
+        3499,
+        2163,
+        1724,
+        1123,
+        859,
+        618,
+        424,
+        225,
+        80,
+        33
+       ],
+       "p": [
+        0.956312349501204,
+        0.8343665246028671,
+        0.6910545870248642,
+        0.6213592233009708,
+        0.4651972157772622,
+        0.3481745325022262,
+        0.2968568102444703,
+        0.22653721682847897,
+        0.1580188679245283,
+        0.18666666666666668,
+        0.1375,
+        0.12121212121212122
+       ]
+      },
+      "cross_resolution_raw_iou0.3": {
+       "source": "cross_resolution",
+       "iou_min": 0.3,
+       "binned_by": "ema_gp_m",
+       "detected": [
+        2826,
+        4478,
+        2566,
+        1420,
+        848,
+        414,
+        268,
+        148,
+        72,
+        37,
+        12,
+        7
+       ],
+       "missed": [
+        81,
+        684,
+        933,
+        743,
+        876,
+        709,
+        591,
+        470,
+        352,
+        188,
+        68,
+        26
+       ],
+       "opportunities": [
+        2907,
+        5162,
+        3499,
+        2163,
+        1724,
+        1123,
+        859,
+        618,
+        424,
+        225,
+        80,
+        33
+       ],
+       "p": [
+        0.9721362229102167,
+        0.8674932196822936,
+        0.7333523863961132,
+        0.6564956079519186,
+        0.4918793503480278,
+        0.3686553873552983,
+        0.3119906868451688,
+        0.23948220064724918,
+        0.16981132075471697,
+        0.16444444444444445,
+        0.15,
+        0.21212121212121213
+       ]
+      }
+     },
+     "R_max_alternatives": {
+      "held_track": 90.0,
+      "cross_resolution_iou0.1": 80.0,
+      "cross_resolution_raw_iou0.3": 80.0
      },
      "distance_noise": {
       "n_raw": [
@@ -84603,7 +85455,28 @@
        3
       ]
      },
-     "R_max_m": 90.0,
+     "R_max_m": 70.0,
+     "persistent_error": {
+      "tracks": 114,
+      "median_ratio": 0.8291711089744223,
+      "mad_ratio": 0.3591235116118694,
+      "relative_spread": 0.4331114624290985,
+      "per_drive": {
+       "run_20260908_161422": {
+        "tracks": 48,
+        "median_ratio": 0.5319965729968502,
+        "mad_ratio": 0.19366783963864678,
+        "relative_spread": 0.36403963760081104
+       },
+       "run_20260908_170849": {
+        "tracks": 66,
+        "median_ratio": 0.9832784475364793,
+        "mad_ratio": 0.23153085504431725,
+        "relative_spread": 0.23546824973576727
+       }
+      },
+      "rule": "per track, the median ground-plane / width-prior ratio over detections within 0.15 of the frame width of the centre column, tracks with at least 10; 1.4826 MAD of the medians over their median"
+     },
      "drives": [
       "run_20260908_161422",
       "run_20260908_170849"
@@ -84625,7 +85498,8 @@
     "plausible_height": false,
     "centre_fraction": null
    },
-   "detections": 6510
+   "detections": 6510,
+   "reference_detections": 9691
   },
   "run_20260908_161422": {
    "group": "0.67",
@@ -84639,7 +85513,8 @@
     "plausible_height": false,
     "centre_fraction": null
    },
-   "detections": 6397
+   "detections": 6397,
+   "reference_detections": 10332
   },
   "run_20260908_170849": {
    "group": "0.67",
@@ -84653,7 +85528,8 @@
     "plausible_height": true,
     "centre_fraction": null
    },
-   "detections": 6064
+   "detections": 6064,
+   "reference_detections": 8485
   },
   "run_20260908_173809": {
    "group": "0.20",
@@ -84667,7 +85543,8 @@
     "plausible_height": true,
     "centre_fraction": null
    },
-   "detections": 3654
+   "detections": 3654,
+   "reference_detections": 4324
   },
   "run_20260908_183538": {
    "group": "0.20",
@@ -84681,7 +85558,8 @@
     "plausible_height": true,
     "centre_fraction": null
    },
-   "detections": 150
+   "detections": 150,
+   "reference_detections": 199
   },
   "run_20260908_190548": {
    "group": "0.20",
@@ -84695,35 +85573,85 @@
     "plausible_height": true,
     "centre_fraction": null
    },
-   "detections": 18930
+   "detections": 18930,
+   "reference_detections": 29696
   }
  },
  "inputs": [
   {
-   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_155910/detections_640.jsonl",
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_155910/detections_640.jsonl",
    "sha256": "0ca10b273b3a4c15d97c5e79292fd65b4ecc2e1f2ccac9ae58de9fa700cce058"
   },
   {
-   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_161422/detections_640.jsonl",
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_155910/detections_1280.jsonl",
+   "sha256": "365906144517acf8b3999d915f7163bc9475e8f489afb316cdf8e8fe69631d31"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_155910/raw_640.jsonl",
+   "sha256": "172070d56d0155e10ea31350ee07063181b64bf355b7cfd86933ef027b766422"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_161422/detections_640.jsonl",
    "sha256": "124a9f8016717d790e62c5f80d551318db45acc1d8434dd0fa65611de9937f8f"
   },
   {
-   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_170849/detections_640.jsonl",
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_161422/detections_1280.jsonl",
+   "sha256": "361a85dceb300c63927c9867386e0b09110121919199386066974fadf87e6876"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_161422/raw_640.jsonl",
+   "sha256": "d6d84326ab777ad8e3b6857d2b113946350658e9473d82c377ba46bd021d432c"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_170849/detections_640.jsonl",
    "sha256": "5ee8c726dbe48627de6172e152951ebbc221b466ba056b6dcc8f17bbfb17a75c"
   },
   {
-   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_173809/detections_640.jsonl",
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_170849/detections_1280.jsonl",
+   "sha256": "f8c6884f9caff2af9b009575639c7b3dc0c2b49726f8aec5a76175a64d579340"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_170849/raw_640.jsonl",
+   "sha256": "c3a5de3bb28f7c574192848398b7e0b528f9ed0152a642bd19f15f5182c9c2ae"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_173809/detections_640.jsonl",
    "sha256": "136f57a89273b595cd278df82c5a435e8e946140cdaf0bcd9fbf1c353b5710c8"
   },
   {
-   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_183538/detections_640.jsonl",
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_173809/detections_1280.jsonl",
+   "sha256": "cfb1ee9f39d4ecd5881727363c2033514fc263dbf85d08a74027b19460ac7e6a"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_173809/raw_640.jsonl",
+   "sha256": "fa90b20c07bac4220af75cc24fb9f629d236fe543cb858840b46150626f07dce"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_183538/detections_640.jsonl",
    "sha256": "c54841ef44785b38910c875f9f5ae30522edc97707031481ceefe3acf2d7c3c2"
   },
   {
-   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_190548/detections_640.jsonl",
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_183538/detections_1280.jsonl",
+   "sha256": "4846e90d3625baac5db67ae5c1f15c112811ccbc98b18dcc238cb742ad7a2ab0"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_183538/raw_640.jsonl",
+   "sha256": "897e22b5e4095f139111d71c3aa7703150999b4d581b33e1bfb63a1c0029f389"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_190548/detections_640.jsonl",
    "sha256": "3e2fb07b6a43418ddfe34ee066dff6c8f94e476613479d96c53b57a2580f190c"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_190548/detections_1280.jsonl",
+   "sha256": "04790145592f6c15e4ee95cbe6335b3edbee4c05efd03b2dd95a8c9273b64395"
+  },
+  {
+   "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_190548/raw_640.jsonl",
+   "sha256": "84fb56fd92e10a7ab29fb86e9cd2abfc220ca69cadf2b9d1f6f820c2a664a7fa"
   }
  ],
+ "reference_imgsz": 1280,
  "weights_sha256": "f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36",
  "sensitivity": {
   "1280": {
@@ -84784,6 +85712,7 @@
       ]
      ],
      "detection": {
+      "source": "held_track",
       "detected": [
        4608,
        8551,
@@ -84841,6 +85770,8 @@
        0.6477272727272727
       ]
      },
+     "detection_alternatives": {},
+     "R_max_alternatives": {},
      "distance_noise": {
       "n_raw": [
        4376,
@@ -128893,6 +129824,39 @@
       ]
      },
      "R_max_m": 120.0,
+     "persistent_error": {
+      "tracks": 355,
+      "median_ratio": 0.8871186417864106,
+      "mad_ratio": 0.2706534306590805,
+      "relative_spread": 0.3050927101633888,
+      "per_drive": {
+       "run_20260908_155910": {
+        "tracks": 88,
+        "median_ratio": 0.6917853735692677,
+        "mad_ratio": 0.24769315076961096,
+        "relative_spread": 0.3580491294455067
+       },
+       "run_20260908_173809": {
+        "tracks": 46,
+        "median_ratio": 0.9643067128831206,
+        "mad_ratio": 0.22752363227693567,
+        "relative_spread": 0.23594529545135792
+       },
+       "run_20260908_183538": {
+        "tracks": 2,
+        "median_ratio": 0.8036307733429532,
+        "mad_ratio": 0.20156679661619378,
+        "relative_spread": 0.25082015684605224
+       },
+       "run_20260908_190548": {
+        "tracks": 219,
+        "median_ratio": 0.9353553181074813,
+        "mad_ratio": 0.24289562883647378,
+        "relative_spread": 0.2596827367464251
+       }
+      },
+      "rule": "per track, the median ground-plane / width-prior ratio over detections within 0.15 of the frame width of the centre column, tracks with at least 10; 1.4826 MAD of the medians over their median"
+     },
      "drives": [
       "run_20260908_155910",
       "run_20260908_173809",
@@ -128955,6 +129919,7 @@
       ]
      ],
      "detection": {
+      "source": "held_track",
       "detected": [
        1597,
        2909,
@@ -129012,6 +129977,8 @@
        1.0
       ]
      },
+     "detection_alternatives": {},
+     "R_max_alternatives": {},
      "distance_noise": {
       "n_raw": [
        1415,
@@ -148002,6 +148969,27 @@
       ]
      },
      "R_max_m": 110.0,
+     "persistent_error": {
+      "tracks": 169,
+      "median_ratio": 0.7438831944072495,
+      "mad_ratio": 0.3378017155060891,
+      "relative_spread": 0.45410585700253736,
+      "per_drive": {
+       "run_20260908_161422": {
+        "tracks": 74,
+        "median_ratio": 0.5026753658365686,
+        "mad_ratio": 0.22471096790966177,
+        "relative_spread": 0.447029998248851
+       },
+       "run_20260908_170849": {
+        "tracks": 95,
+        "median_ratio": 0.9158836970052521,
+        "mad_ratio": 0.2149166326386514,
+        "relative_spread": 0.23465493854883954
+       }
+      },
+      "rule": "per track, the median ground-plane / width-prior ratio over detections within 0.15 of the frame width of the centre column, tracks with at least 10; 1.4826 MAD of the medians over their median"
+     },
      "drives": [
       "run_20260908_161422",
       "run_20260908_170849"
@@ -148066,6 +149054,7 @@
         ]
        ],
        "detection": {
+        "source": "held_track",
         "detected": [
          6579,
          8333,
@@ -148123,6 +149112,8 @@
          0.8068181818181818
         ]
        },
+       "detection_alternatives": {},
+       "R_max_alternatives": {},
        "distance_noise": {
         "n_raw": [
          6077,
@@ -192213,6 +193204,39 @@
         ]
        },
        "R_max_m": 120.0,
+       "persistent_error": {
+        "tracks": 355,
+        "median_ratio": 0.8871186417864106,
+        "mad_ratio": 0.2706534306590805,
+        "relative_spread": 0.3050927101633888,
+        "per_drive": {
+         "run_20260908_155910": {
+          "tracks": 88,
+          "median_ratio": 0.6917853735692677,
+          "mad_ratio": 0.24769315076961096,
+          "relative_spread": 0.3580491294455067
+         },
+         "run_20260908_173809": {
+          "tracks": 46,
+          "median_ratio": 0.9643067128831206,
+          "mad_ratio": 0.22752363227693567,
+          "relative_spread": 0.23594529545135792
+         },
+         "run_20260908_183538": {
+          "tracks": 2,
+          "median_ratio": 0.8036307733429532,
+          "mad_ratio": 0.20156679661619378,
+          "relative_spread": 0.25082015684605224
+         },
+         "run_20260908_190548": {
+          "tracks": 219,
+          "median_ratio": 0.9353553181074813,
+          "mad_ratio": 0.24289562883647378,
+          "relative_spread": 0.2596827367464251
+         }
+        },
+        "rule": "per track, the median ground-plane / width-prior ratio over detections within 0.15 of the frame width of the centre column, tracks with at least 10; 1.4826 MAD of the medians over their median"
+       },
        "drives": [
         "run_20260908_155910",
         "run_20260908_173809",
@@ -192275,6 +193299,7 @@
         ]
        ],
        "detection": {
+        "source": "held_track",
         "detected": [
          2359,
          3902,
@@ -192332,6 +193357,8 @@
          0.8333333333333334
         ]
        },
+       "detection_alternatives": {},
+       "R_max_alternatives": {},
        "distance_noise": {
         "n_raw": [
          1652,
@@ -211329,6 +212356,27 @@
         ]
        },
        "R_max_m": 110.0,
+       "persistent_error": {
+        "tracks": 169,
+        "median_ratio": 0.7438831944072495,
+        "mad_ratio": 0.3378017155060891,
+        "relative_spread": 0.45410585700253736,
+        "per_drive": {
+         "run_20260908_161422": {
+          "tracks": 74,
+          "median_ratio": 0.5026753658365686,
+          "mad_ratio": 0.22471096790966177,
+          "relative_spread": 0.447029998248851
+         },
+         "run_20260908_170849": {
+          "tracks": 95,
+          "median_ratio": 0.9158836970052521,
+          "mad_ratio": 0.2149166326386514,
+          "relative_spread": 0.23465493854883954
+         }
+        },
+        "rule": "per track, the median ground-plane / width-prior ratio over detections within 0.15 of the frame width of the centre column, tracks with at least 10; 1.4826 MAD of the medians over their median"
+       },
        "drives": [
         "run_20260908_161422",
         "run_20260908_170849"
@@ -211425,31 +212473,34 @@
    },
    "inputs": [
     {
-     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_155910/detections_1280.jsonl",
+     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_155910/detections_1280.jsonl",
      "sha256": "365906144517acf8b3999d915f7163bc9475e8f489afb316cdf8e8fe69631d31"
     },
     {
-     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_161422/detections_1280.jsonl",
+     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_161422/detections_1280.jsonl",
      "sha256": "361a85dceb300c63927c9867386e0b09110121919199386066974fadf87e6876"
     },
     {
-     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_170849/detections_1280.jsonl",
+     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_170849/detections_1280.jsonl",
      "sha256": "f8c6884f9caff2af9b009575639c7b3dc0c2b49726f8aec5a76175a64d579340"
     },
     {
-     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_173809/detections_1280.jsonl",
+     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_173809/detections_1280.jsonl",
      "sha256": "cfb1ee9f39d4ecd5881727363c2033514fc263dbf85d08a74027b19460ac7e6a"
     },
     {
-     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_183538/detections_1280.jsonl",
+     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_183538/detections_1280.jsonl",
      "sha256": "4846e90d3625baac5db67ae5c1f15c112811ccbc98b18dcc238cb742ad7a2ab0"
     },
     {
-     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F2_91e6a2b/outputs/jam/frames/run_20260908_190548/detections_1280.jsonl",
+     "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/F3_26c9a7f/outputs/jam/frames/run_20260908_190548/detections_1280.jsonl",
      "sha256": "04790145592f6c15e4ee95cbe6335b3edbee4c05efd03b2dd95a8c9273b64395"
     }
    ],
+   "reference_imgsz": null,
    "weights_sha256": "f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36"
   }
- }
+ },
+ "pair_sigma_log": 0.30834313142110803,
+ "pair_sigma_note": "sigma_log of the persistent per-(ego, leader) distance factor: the relative 1.4826 MAD of per-track median ground-plane / width-prior ratios on the 0.20 s drives; it holds both estimators' per-vehicle errors, so it is an upper bound on the width prior's"
 }
