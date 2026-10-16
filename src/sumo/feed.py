@@ -158,6 +158,14 @@ class FeedProcess:
             "artefact_source": artefact.get("source"),
         })
 
+    def with_lag_multiplier(self, m: float) -> "FeedProcess":
+        """The same stamps with every availability lag multiplied by `m` (jam plan J25:
+        `m = 0` is zero lag, `m = 2` doubles each version's own lag)."""
+        if m < 0.0:
+            raise ValueError(f"a lag multiplier cannot be negative, got {m}")
+        return FeedProcess(self.publish_s.copy(), self.lag_s * float(m), self.source,
+                           {**self.meta, "lag_multiplier": float(m)})
+
     # ----------------------------------------------------------------- queries
 
     @property
