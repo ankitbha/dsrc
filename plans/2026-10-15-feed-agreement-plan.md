@@ -851,3 +851,28 @@ error and is fixed in 5a6c796.
   failure.
 - **B5 Open spells (implementer choice 2).** The drain artefact records which drained runs end
   inside a spell still open at the cap.
+
+## Amendment 3 (2026-10-16, after validation round 3, the last round; orchestrator)
+
+**Why.** Round 3 left the exit criterion unmet by one surviving mutant (R3-4) and named three
+paths by which a wrong number could reach the paper without an error (R3-1, R3-2, R3-3), plus a
+mutation-harness hazard (R3-5). These fixes are verified by the orchestrator in a mirror, not by a
+fourth validator round, because the author asked for three rounds.
+
+- **C1 (R3-4).** A unit test with a site whose 60-vehicle peaks have a mean below its null's 95th
+  percentile and a maximum above it; the site must be unresolved, which kills mutant V3.
+- **C2 (R3-1).** Every block refuses to resume or summarise a JSONL whose headers disagree on
+  checkpoint sha256 or actuation, and every episode record carries the checkpoint sha256 and the
+  actuation. Blocks B and C additionally refuse a reference unless its seeds contain the block's
+  and its duration, flow window and step length equal the block's.
+- **C3 (R3-2).** Block E refuses any pulsed/baseline pair whose traces differ at any sample before
+  the pulse start.
+- **C4 (R3-3).** When the 10-of-12 gate passes with fewer than 12 resolved sites, the gains are also
+  fitted on the resolved sites only, and the certificate is issued only when both upper bounds are
+  below 1; the artefact reports both fits. The paper states that the gains come from a regression
+  pooled over all pulses.
+- **C5 (R3-5).** Any further mutation sweep runs with `PYTHONDONTWRITEBYTECODE=1` and `__pycache__`
+  cleared, runs the test files unmutated first and refuses to start if any fails, and records
+  every failing test. The commit-length assertion in
+  `test_one_600_s_training_episode_under_the_cap` is skipped outside a git checkout rather than
+  failing.
