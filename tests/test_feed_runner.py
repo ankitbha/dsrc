@@ -418,3 +418,45 @@ def test_the_default_checkpoint_is_the_cap_one_and_a_missing_one_is_refused(tmp_
         rfe.main(["--block", "C", "--smoke", "--results-dir", str(tmp_path / "r"),
                   "--traces-dir", str(tmp_path / "t"),
                   "--checkpoint", str(tmp_path / "missing_best.pt")])
+
+
+class TestBlockB:
+    def test_the_fit_uses_the_measured_fraction_and_the_least_squares_slope(self):
+        """Mutants R1 (loss sign) and R4 (slope as sum y / sum x)."""
+        import numpy as np
+
+        references = {"here": {16: 3750.0, 17: 3760.0, 18: 3740.0}, "no_control": {}}
+        measured = {("delta0.1", 16): 0.08, ("delta0.1", 17): 0.11, ("delta0.1", 18): 0.09,
+                    ("delta0.5", 16): 0.42, ("delta0.5", 17): 0.47, ("delta0.5", 18): 0.40}
+        losses = {("delta0.1", 16): 9.0, ("delta0.1", 17): 14.0, ("delta0.1", 18): 7.0,
+                  ("delta0.5", 16): 45.0, ("delta0.5", 17): 52.0, ("delta0.5", 18): 38.0}
+        episodes = [{"arm": "inject_delta", "variant": v, "seed": seed,
+                     "flow": references["here"][seed] - losses[(v, seed)],
+                     "previous_fraction_mean": measured[(v, seed)]}
+                    for (v, seed) in measured]
+        summary = rfe.summarize_b(episodes, references)
+        x = np.array([measured[k] for k in measured])
+        y = np.array([losses[k] for k in measured])
+        assert sorted(summary["loss_points_delta"]) == sorted(zip(x.tolist(), y.tolist()))
+        assert summary["fit_loss_vs_delta"]["slope"] == pytest.approx((x * y).sum() / (x * x).sum())
+        assert summary["fit_loss_vs_delta"]["slope"] > 0  # flow falls, loss is positive
+        assert summary["fit_loss_vs_delta"]["slope"] != pytest.approx(y.sum() / x.sum())
+
+    def test_the_block_runs_at_or_below_one_half(self):
+        assert rfe.DELTAS == (0.05, 0.1, 0.25, 0.5)
+
+    def test_the_reference_is_the_cap_evaluation_and_its_identity_is_checked(self, tmp_path):
+        path = tmp_path / "ref.jsonl"
+        path.write_text(json.dumps({"type": "header", "config": {
+            "actuation": "max_speed", "checkpoints": {"here": {"sha256": "abc"}}}}) + "\n"
+            + json.dumps({"arm": "here", "seed": 16, "flow": 3600.0}) + "\n"
+            + json.dumps({"arm": "no_control", "seed": 16, "flow": 3700.0}) + "\n")
+        references = rfe.committed_references(path)
+        assert references["here"] == {16: 3600.0} and references["no_control"] == {16: 3700.0}
+        check = rfe._reference_check(references, [{"checkpoint": {"sha256": "abc"},
+                                                   "config": {"actuation": "max_speed"}}])
+        assert check["same_checkpoint"] is True and check["same_actuation"] is True
+        check = rfe._reference_check(references, [{"checkpoint": {"sha256": "zzz"},
+                                                   "config": {"actuation": "max_speed"}}])
+        assert check["same_checkpoint"] is False
+        assert rfe.REFERENCE_EVALUATION.name == "mainz_paired_seeds_cap.jsonl"

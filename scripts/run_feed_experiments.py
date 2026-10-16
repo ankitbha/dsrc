@@ -58,10 +58,13 @@ DEFAULT_SEEDS = tuple(range(16, 31))
 DEFAULT_ARTEFACT = REPO_ROOT / "results" / "feed" / "feed_process.json"
 #: Amendment 1: every block uses the `here` checkpoint retrained under the cap.
 DEFAULT_CHECKPOINT = REPO_ROOT / "results" / "checkpoints" / "mainz_here_cap_best.pt"
-COMMITTED_EVALUATION = REPO_ROOT / "results" / "evaluation" / "mainz_paired_seeds.jsonl"
+#: The per-seed reference rows for blocks B and C: Amendment 1's evaluation of the cap
+#: checkpoints under the cap, whose `here` rows the per-tick `published` mode equals.
+REFERENCE_EVALUATION = REPO_ROOT / "results" / "evaluation" / "mainz_paired_seeds_cap.jsonl"
 P_Q = 10.0
 D_OFFSETS = (-20.0, -5.0, 0.0, 5.0, 10.0)
-DELTAS = (0.1, 0.25, 0.5, 0.75)
+#: Amendment 1, A6: at or below one half, so the late vehicles are never the plurality.
+DELTAS = (0.05, 0.1, 0.25, 0.5)
 STALENESS = (30.0, 60.0, 120.0, 180.0, 300.0)
 PENETRATIONS = (0.75, 0.5, 0.25, 0.1)
 CERTIFICATE_LEVELS = (1.0, 0.75, 0.5, 0.25, 0.1)
@@ -428,16 +431,36 @@ def read_block(results_dir: Path, block: str) -> tuple[list[dict], list[dict]]:
     return headers, list(episodes.values())
 
 
-def committed_references(path: Path = COMMITTED_EVALUATION) -> dict[str, dict[int, float]]:
-    """Per-seed flow of the committed `here` (equal to `published`) and `no_control`."""
-    out: dict[str, dict[int, float]] = {"here": {}, "no_control": {}}
+def committed_references(path: Path = REFERENCE_EVALUATION) -> dict[str, Any]:
+    """Per-seed flow of the evaluation's `here` (equal to `published`) and `no_control`
+    rows, with the file, its actuation and its `here` checkpoint digest, so a summary
+    can say whether the reference ran the checkpoint and actuation the block ran."""
+    out: dict[str, Any] = {"here": {}, "no_control": {}, "source": str(path),
+                           "exists": path.exists(), "actuation": None,
+                           "here_checkpoint_sha256": None}
     if not path.exists():
         return out
     for line in path.read_text().splitlines():
         record = json.loads(line)
-        if record.get("arm") in out:
+        if record.get("type") == "header":
+            config = record.get("config", {})
+            out["actuation"] = config.get("actuation", "set_speed")
+            out["here_checkpoint_sha256"] = (config.get("checkpoints", {})
+                                             .get("here", {}).get("sha256"))
+        elif record.get("arm") in ("here", "no_control"):
             out[record["arm"]][int(record["seed"])] = float(record["flow"])
     return out
+
+
+def _reference_check(references: dict, headers: list[dict]) -> dict[str, Any]:
+    block_sha = (headers[-1].get("checkpoint") or {}).get("sha256") if headers else None
+    block_actuation = (headers[-1].get("config") or {}).get("actuation") if headers else None
+    return {"source": references.get("source"), "exists": references.get("exists"),
+            "actuation": references.get("actuation"),
+            "same_checkpoint": (block_sha is not None
+                                and block_sha == references.get("here_checkpoint_sha256")),
+            "same_actuation": (block_actuation is not None
+                               and block_actuation == references.get("actuation"))}
 
 
 def _paired(arm: dict[int, float], reference: dict[int, float]) -> dict[str, Any] | None:
@@ -469,6 +492,7 @@ def _arm_rows(episodes: list[dict]) -> dict[str, Any]:
             "delta_mean": _mean(r.get("delta_mean") for r in records),
             "command_delta_mean": _mean(r.get("command_delta_mean") for r in records),
             "age_mean_s": _mean(r.get("age_mean_s") for r in records),
+            "previous_fraction_mean": _mean(r.get("previous_fraction_mean") for r in records),
             "set_speed_writes_mean": _mean(r.get("set_speed_writes") for r in records),
             "commanded_ids_mean": _mean(r.get("commanded_ids") for r in records),
             "wall_s_mean": _mean(r.get("wall_s") for r in records),
@@ -541,22 +565,29 @@ def summarize_a(episodes, headers, context: Context) -> dict[str, Any]:
 
 
 def summarize_b(episodes, references) -> dict[str, Any]:
+    """Paired flow loss against `published`, by injection.
+
+    Amendment 1, A6: the disagreement axis is the measured, time-averaged fraction of
+    vehicles on the previous snapshot, per episode, not the configured `delta`, and the
+    F1 line is fitted on it.
+    """
     rows = _arm_rows(episodes)
     published = references["here"]
-    delta_points, stale_points = [], []
     for row in rows.values():
         by_seed = {int(s): f for s, f in row["flow_by_seed"].items()}
         row["paired_vs_published"] = _paired(by_seed, published)
-        row["reference"] = "committed here rows (results/evaluation/mainz_paired_seeds.jsonl)"
-        for seed, flow in by_seed.items():
-            if seed not in published:
-                continue
-            loss = published[seed] - flow
-            if row["arm"] == "inject_delta":
-                delta_points.append((float(row["variant"][len("delta"):]), loss))
-            elif row["arm"] == "inject_stale":
-                stale_points.append((float(row["variant"][1:]), loss))
+        row["reference"] = references.get("source")
+    delta_points, stale_points = [], []
+    for record in episodes:
+        if record["seed"] not in published:
+            continue
+        loss = published[record["seed"]] - record["flow"]
+        if record["arm"] == "inject_delta" and record.get("previous_fraction_mean") is not None:
+            delta_points.append((record["previous_fraction_mean"], loss))
+        elif record["arm"] == "inject_stale":
+            stale_points.append((float(record["variant"][1:]), loss))
     return {"block": "B", "rows": rows,
+            "delta_axis": "fraction of vehicles on the previous snapshot (measured)",
             "fit_loss_vs_delta": origin_fit(delta_points),
             "fit_loss_vs_staleness": origin_fit(stale_points),
             "loss_points_delta": delta_points, "loss_points_staleness": stale_points}
@@ -576,7 +607,8 @@ def summarize_c(episodes, references) -> dict[str, Any]:
                 loss_points.append((1.0 - row["penetration"],
                                     references["here"][int(seed)] - flow))
     return {"block": "C", "rows": rows, "loss_points_one_minus_p": loss_points,
-            "references": {"p=1": "committed here rows", "p=0": "committed no_control rows"}}
+            "references": {"p=1": f"here rows of {references.get('source')}",
+                           "p=0": f"no_control rows of {references.get('source')}"}}
 
 
 def _load_trace(record: dict) -> list[dict] | None:
@@ -846,8 +878,10 @@ def summarize(block: str, results_dir: Path, traces_dir: Path,
         summary = summarize_a(episodes, headers, context)
     elif block == "B":
         summary = summarize_b(episodes, references)
+        summary["reference_check"] = _reference_check(references, headers)
     elif block == "C":
         summary = summarize_c(episodes, references)
+        summary["reference_check"] = _reference_check(references, headers)
     elif block == "D":
         summary = summarize_d(episodes, context.smoke, results_dir)
         pilot_path = results_dir / "D_pilot.json"

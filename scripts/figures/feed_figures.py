@@ -13,9 +13,9 @@ functions only draw those series. No number in this file is a result.
   bracket; (b) disagreement against `D - L_bar` for the version-keyed rule: Lemma 1 (b)'s
   cycle average as a line, block A's measured points, and the other rules as horizontal
   marks.
-* Fig. 2: (a) paired throughput loss against injected disagreement, the penetration
-  loss at `1 - p` on the same axis, and the line through the origin; (b) loss against
-  staleness with its line.
+* Fig. 2: (a) paired throughput loss against the measured fraction of vehicles on the
+  previous snapshot, the penetration loss at `1 - p` on the same axis, and the line
+  through the origin; (b) loss against staleness with its line.
 * Fig. 3: Kaplan-Meier drain curves per arm and scenario, censoring marks at the cap,
   fraction drained and median, under the primary threshold.
 * Table 1: block A's rules, and the penetration levels with block C's flow and block E's
@@ -136,8 +136,9 @@ def fig_flow_consequence(b_summary: dict, c_summary: dict) -> dict[str, Any]:
         value, bar = loss(row)
         if value is None:
             continue
-        if row["arm"] == "inject_delta":
-            delta.append((float(row["variant"][len("delta"):]), value, bar))
+        if row["arm"] == "inject_delta" and row.get("previous_fraction_mean") is not None:
+            # Amendment 1, A6: placed at the measured fraction on the previous snapshot.
+            delta.append((row["previous_fraction_mean"], value, bar))
         elif row["arm"] == "inject_stale":
             stale.append((float(row["variant"][1:]), value, bar))
     for row in c_summary.get("rows", {}).values():
@@ -147,6 +148,7 @@ def fig_flow_consequence(b_summary: dict, c_summary: dict) -> dict[str, Any]:
     fit_delta = b_summary.get("fit_loss_vs_delta") or {}
     fit_stale = b_summary.get("fit_loss_vs_staleness") or {}
     return {"panel_a": {"delta": sorted(delta), "penetration": sorted(penetration),
+                        "delta_label": "fraction of vehicles on the previous snapshot",
                         "slope": fit_delta.get("slope"),
                         "quadratic_resolved": fit_delta.get("quadratic_resolved")},
             "panel_b": {"staleness": sorted(stale), "slope": fit_stale.get("slope"),
@@ -161,7 +163,7 @@ def plot_flow_consequence(series: dict, path: Path) -> Path:
 
     fig, (ax_a, ax_b) = plt.subplots(1, 2, figsize=(7.0, 2.6))
     a = series["panel_a"]
-    for points, label in ((a["delta"], "injected disagreement"),
+    for points, label in ((a["delta"], a["delta_label"]),
                           (a["penetration"], "1 - penetration")):
         if points:
             x, y, bar = zip(*points)

@@ -50,10 +50,11 @@ def a_summary():
 def b_summary():
     references = {"here": {s: 3750.0 for s in SEEDS}, "no_control": {s: 3700.0 for s in SEEDS}}
     episodes = []
-    for d in (0.1, 0.25, 0.5, 0.75):
+    for d in (0.05, 0.1, 0.25, 0.5):
         for seed in SEEDS:
             episodes.append({"arm": "inject_delta", "variant": f"delta{d:g}", "seed": seed,
-                             "flow": 3750.0 - 100.0 * d - seed % 2, "delta_mean": 0.9 * d})
+                             "flow": 3750.0 - 100.0 * d - seed % 2, "delta_mean": 0.9 * d,
+                             "previous_fraction_mean": 0.9 * d + 0.001 * seed})
     for s in (30.0, 60.0, 120.0):
         for seed in SEEDS:
             episodes.append({"arm": "inject_stale", "variant": f"s{s:g}", "seed": seed,
@@ -136,10 +137,15 @@ class TestFeedAndRule:
 class TestFlowConsequence:
     def test_the_loss_points_are_the_paired_gains_negated(self, b_summary, c_summary):
         series = ff.fig_flow_consequence(b_summary, c_summary)
+        rows = {row["previous_fraction_mean"]: row for row in b_summary["rows"].values()
+                if row["arm"] == "inject_delta"}
+        assert len(series["panel_a"]["delta"]) == 4
         for x, loss, bar in series["panel_a"]["delta"]:
-            row = b_summary["rows"][f"inject_delta/delta{x:g}"]
+            row = rows[x]  # placed at the measured fraction, not the configured delta
             assert loss == -row["paired_vs_published"]["gain"]
             assert bar == row["paired_vs_published"]["two_se"]
+        assert series["panel_a"]["delta_label"] == \
+            "fraction of vehicles on the previous snapshot"
         for x, loss, bar in series["panel_a"]["penetration"]:
             row = c_summary["rows"][f"penetration/p{1 - x:g}"]
             assert loss == -row["paired_vs_published"]["gain"]

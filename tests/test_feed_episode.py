@@ -128,6 +128,7 @@ class TestScheduleModes:
         assert len(env.writes) == 25
         summary = engine.summary()
         assert summary["delta_mean"] == 0.0
+        assert summary["previous_fraction_mean"] == 0.0
         # Age runs 0..59 s after each decision; the time average is 29.5 s.
         assert summary["age_mean_s"] == pytest.approx(29.5)
 
@@ -182,6 +183,20 @@ class TestInjectDelta:
         summary = engine.summary()
         assert summary["writes_late"] > 0 and summary["writes_on_time"] > 0
         assert summary["delta_mean"] == pytest.approx(0.3)
+        # Amendment 1, A6: the late share on the previous snapshot, every second.
+        assert summary["previous_fraction_mean"] == pytest.approx(0.3)
+
+    @pytest.mark.parametrize("delta", [0.75, 1.0])
+    def test_past_one_half_the_previous_fraction_keeps_growing(self, delta):
+        """The plurality disagreement turns back past one half; the late share does not."""
+        fleet = [f"v{i}" for i in range(100)]
+        env = FakeEnv(lambda t: [(v, i % 2) for i, v in enumerate(fleet)])
+        engine = _engine(env, Mode.inject_delta(delta), None, control=300.0, window=300.0,
+                         decisions=[300.0 + 60.0 * m for m in range(6)])
+        _drive(engine, env, 659)
+        summary = engine.summary()
+        assert summary["previous_fraction_mean"] == pytest.approx(delta)
+        assert summary["delta_mean"] == pytest.approx(1.0 - delta)
 
 
     def test_at_delta_one_every_vehicle_is_written_the_previous_vector_on_its_edge(self):

@@ -201,6 +201,7 @@ class FeedEngine:
         self.delta = _Accumulator()
         self.command_delta = _Accumulator()
         self.age = _Accumulator()
+        self.previous = _Accumulator()
         self.writes = 0
         self.writes_late = 0
         self.writes_on_time = 0
@@ -369,6 +370,7 @@ class FeedEngine:
                 self.delta.add(measured[0])
                 self.command_delta.add(measured[1])
                 self.age.add(measured[2])
+                self.previous.add(measured[3])
             else:
                 self._shared_stats(t)
         if trace_now:
@@ -384,19 +386,39 @@ class FeedEngine:
         self.delta.add(0.0)
         self.command_delta.add(0.0)
         self.age.add(t - self.snapshot_t[version] if version >= 1 else math.nan)
+        self.previous.add(0.0)
+
+    def _reference_version(self, applied: list[int]) -> int:
+        """The version a vehicle on time applies now: the current decision's for the
+        injections, the newest any scanned vehicle applies for a rule."""
+        if self.mode.kind == "inject_delta":
+            return self._interval
+        if self.mode.kind == "inject_stale":
+            return self._global_version
+        return max(applied, default=0)
 
     def _measure(self, t: float, scan, versions: dict[str, int]):
+        """`(disagreement, command disagreement, mean age, previous fraction)` now.
+
+        The previous fraction (Amendment 1, A6) is the share of the scanned vehicles
+        whose applied version is older than `_reference_version`; under
+        `inject_delta` it is the late share, which unlike the plurality disagreement
+        keeps growing past one half.
+        """
         applied = [versions[v] for v, _, _ in scan]
         segments = [s for _, _, s in scan]
         ages = [t - self.snapshot_t[k] for k in applied if k >= 1]
+        reference = self._reference_version(applied)
         return (disagreement(applied),
                 command_disagreement(applied, segments, self.vectors),
-                float(np.mean(ages)) if ages else math.nan)
+                float(np.mean(ages)) if ages else math.nan,
+                (sum(1 for k in applied if k < reference) / len(applied)) if applied
+                else math.nan)
 
     def _record(self, t: float, measured, versions: dict[str, int]) -> None:
         state = self.env.segment_state()
         histogram = Counter(versions.values())
-        delta, command, age = measured if measured else (None, None, None)
+        delta, command, age, previous = measured if measured else (None, None, None, None)
         self.trace.append({
             "t": t,
             "speed_kmh": [None if math.isnan(v) else round(v, 4) for v in state["speed_kmh"]],
@@ -414,6 +436,7 @@ class FeedEngine:
             "delta": _clean(delta),
             "command_delta": _clean(command),
             "age_s": _clean(age),
+            "previous_fraction": _clean(previous),
         })
 
     def summary(self) -> dict[str, Any]:
@@ -421,6 +444,7 @@ class FeedEngine:
             "delta_mean": self.delta.mean,
             "command_delta_mean": self.command_delta.mean,
             "age_mean_s": self.age.mean,
+            "previous_fraction_mean": self.previous.mean,
             "delta_samples": self.delta.count,
             "delta_sampling": "every second" if self.mode.per_tick else
                               "every second, zero by construction; trace scans measured",
