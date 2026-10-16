@@ -1157,3 +1157,40 @@ times are affected.
   first detection median 32.4 m, p90 50.8 m; EMA distance noise 0.05, 0.19, 0.35, 0.59, 0.86, 1.13,
   2.34 m; closing-rate noise 0.30 to 3.65 m/s from 0 to 60 m. Ground-plane over width-prior distance
   is 0.89 to 0.95 from 0 to 60 m. The ground-plane alternative (`R_max` 100 m) is in the artefact.
+
+## Amendment 3 (2026-10-16, after validation round 2; orchestrator)
+
+Round 2 (findings in the validation file) left block G's verdict unchanged and found two defects
+that block experiments. The orchestrator reproduced R2-3 (from `val_logs/cross_resolution.log`) and
+R2-6 (`needs_camera` in `scripts/run_jam_experiments.py` excludes `no_control`) before accepting
+them. Decisions:
+
+- **R2-3, the detection rate (supersedes section 2.3's detection-rate definition).** The rate
+  measured on tracks the 640 px tracker already holds overstates detection at range: of vehicles
+  the 1,280 px tracker holds, the share that also has a 640 px tracked detection in the same frame
+  (IoU >= 0.3) is 0.53, 0.32, 0.15 and 0.08 at 40-50, 50-60, 60-70 and 70-80 m (1,280 px width-prior
+  EMA distance), against the held-track model's 0.71, 0.69 and 0.60 at 40-70 m. `p(d)` is rebuilt
+  from this cross-resolution share, binned by the 1,280 px width-prior distance, and `R_max` is
+  recomputed by section 1.2's rule (expected 60 m). The held-track rate and the IoU 0.1 variant are
+  kept in the artefact as recorded alternatives.
+- **R2-4, persistent per-vehicle distance error.** On the drives the per-track ratio of ground-plane
+  to width-prior distance spreads by 25 to 29% between tracks (1.4826 MAD, relative). The SUMO camera
+  gains a persistent multiplicative factor per (ego, leader) pair, log-normal with `sigma_log` equal
+  to the measured spread of the 0.20 s drives, computed and stored by `fit_camera_model.py`. That
+  spread contains the ground-plane estimator's own per-vehicle error as well, so it is an upper bound
+  on the width-prior's, and the primary camera model is conservative for the camera arms. Block K
+  adds a variant at half the measured spread on B9 and I_exit for the best model (30 episodes).
+- **R2-5, documented limit and one decision.** The width-prior choice stands (the validator attacked
+  it and did not reverse it). The modelled device is not the configured one: the deployment config
+  runs `ground_plane` at a 1.25 m camera height; the paper says so. **Decision:** from block S on,
+  the oracle's window is the camera's effective window `min(80 m, R_max)`, so the gap between the
+  camera arms and the oracle measures perception error only, not range; block G's oracle (80 m) stays
+  in the record as run; `oracle_wide` stays at 200 m.
+- **R2-6 (blocks block M's leads):** no-control episodes in blocks with passive sensing load the
+  camera; the block M smoke asserts `k_hat_mean` is present.
+- **R2-1, R2-2, R2-8 (should fix):** block S selects nothing unless every arm has seeds 11-15 on all
+  six scenarios, and `read_selection` requires seeds 11-15 and a non-null best; `S_summary.json`
+  takes the camera-model and predictor sha256 from the S.jsonl header identity and refuses a mismatch
+  with the files present; killing tests for N01-N06, N09, N10, N30, N45-N48 and N72.
+- **R2-7** corrects one round 1 mutant status (M53 killed). **R2-9** is not fixed.
+- The camera model of record is re-fitted after these fixes, and the experiments wait for round 3.
