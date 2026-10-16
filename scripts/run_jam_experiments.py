@@ -657,6 +657,7 @@ def _rows(episodes: list[dict]) -> dict[str, dict[str, Any]]:
             "km_drain": km_drain.as_dict() if km_drain else None,
             "km_drain_median_s": km_drain.median if km_drain else None,
             "active_share_mean": _mean(r.get("active_share") for r in records),
+            "active_changing_share_mean": _mean(r.get("active_changing_share") for r in records),
             "return_mean": _mean(r.get("return") for r in records),
             "wall_s_mean": _mean(r.get("wall_s") for r in records),
             "by_seed": {str(r["seed"]): {"jam_time_min": r["jam"]["jam_time_min"],
@@ -789,6 +790,8 @@ def summarize_s(episodes: list[dict], context: Context) -> dict[str, Any]:
         candidates[name] = {**result,
                             "bg_flow_mean": _mean(r["flow"] for r in bg),
                             "bg_active_share_mean": _mean(r.get("active_share") for r in bg),
+                            "bg_active_changing_share_mean": _mean(
+                                r.get("active_changing_share") for r in bg),
                             "return_mean": _mean(r.get("return") for r in records),
                             "prevented": {s: sum(1 for r in records if r["scenario"] == s
                                                  and r["jam"]["prevented"]) for s in scenarios},

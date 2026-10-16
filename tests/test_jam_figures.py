@@ -24,7 +24,9 @@ S_SUMMARY = {"selected": {"lookahead": {"J_th": 4.0}, "rule": {"m_on": 0.1},
 
 def _episode(arm, variant, scenario, seed, jam_time, onset, flow=3500.0, active=None):
     return {"arm": arm, "variant": variant, "scenario": scenario, "seed": seed,
-            "flow": flow + seed, "active_share": active, "return": 1.0, "wall_s": 1.0,
+            "flow": flow + seed, "active_share": active,
+            "active_changing_share": None if active is None else active / 2.0,
+            "return": 1.0, "wall_s": 1.0,
             "jam": {"start_s": 900.0, "cap_s": 7200.0, "onset_s": onset,
                     "prevented": onset is None, "jam_time_min": jam_time + seed,
                     "jam_time_min_900_3600": jam_time, "held_min": 2.0, "pending_min": 0.0,
@@ -118,6 +120,9 @@ class TestFigures:
         assert first["held_min"] == row["held_min_mean"]
         bg = {r["arm"]: r for r in table["bg"]}
         assert bg["best model"]["active_share"] == pytest.approx(0.1)
+        # Validation R1-7: the share on which the step-down changes the shown speed.
+        assert bg["best model"]["active_changing_share"] == pytest.approx(0.05)
+        assert m_summary["rows"]["rule/m0.1/BG"]["active_changing_share_mean"] == pytest.approx(0.05)
         assert bg["best model"]["flow_minus_plan"] == pytest.approx(0.0)
 
     def test_the_paper_arms_need_a_selection(self):

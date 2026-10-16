@@ -254,6 +254,7 @@ def table_main(m_summary: dict, s_summary: dict) -> dict[str, Any]:
         if row is None:
             continue
         out["bg"].append({"arm": label, "active_share": row["active_share_mean"],
+                          "active_changing_share": row.get("active_changing_share_mean"),
                           "flow": row["flow_mean"],
                           "flow_minus_plan": (row["flow_mean"] - plan["flow_mean"]
                                               if plan and row["flow_mean"] is not None else None)})

@@ -325,6 +325,22 @@ class TestOracleInputs:
         assert engine.counter.vehicle_ticks == 25
         assert engine.jam_summary()["sense_passes"] == 40
 
+    def test_an_active_tick_on_a_plan_already_at_0_5_changes_nothing_and_is_counted_apart(self):
+        # Validation R1-7: the same dense scene under a plan of 0.5 and of 1.0. Both are
+        # active on every decided tick; only the 1.0 plan's step-down changes the speed.
+        slow, fast = FakeEnv(lambda t: [("v0", 0)]), FakeEnv(lambda t: [("v0", 0)])
+        engines = {}
+        for env, action in ((slow, 0), (fast, 2)):
+            engines[action] = _engine(env, JamArm("oracle", m_on=0.1),
+                                      policy=lambda x, a=action: [a, a],
+                                      snapshot_source=_leaders(lambda t: 12))
+            _drive(engines[action], env, 200)
+        slow_summary, fast_summary = engines[0].jam_summary(), engines[2].jam_summary()
+        assert slow_summary["active_share"] == fast_summary["active_share"] == 1.0
+        assert slow_summary["active_changing_share"] == 0.0
+        assert fast_summary["active_changing_share"] == 1.0
+        assert slow_summary["writes_stepped_down"] == 0
+
     def test_oracle_wide_decides_on_its_200_m_occupancy(self):
         # 22 leaders between 85 and 190 m: none within 80 m, 0.165 over 200 m and three
         # lanes. The 200 m oracle fires, the 80 m one never (kills oracle_wide reading

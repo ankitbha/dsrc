@@ -171,6 +171,9 @@ class _Counter:
     stepped_down: int = 0
     vehicle_ticks: int = 0
     active_ticks: int = 0
+    #: Active ticks on which the plan's fraction is above 0.5, so the step-down changes
+    #: the shown speed (`step_down(0.5) = 0.5`; validation R1-7).
+    active_changing_ticks: int = 0
     max_speed_checked: int = 0
     max_speed_mismatched: int = 0
     #: Candidate rows whose leader is an incident vehicle (attack point 12).
@@ -338,6 +341,7 @@ class JamEngine(FeedEngine):
             self._active[vehicle] = bool(on)
         self.counter.vehicle_ticks += len(vids)
         self.counter.active_ticks += int(np.sum(active))
+        self.counter.active_changing_ticks += int(np.sum(np.asarray(active) & (plan > 0.5 + 1e-9)))
 
     def _sample(self, t, ids, segments, table, est, s_hat, v_slope) -> None:
         """Block T: features of a 5% sample of the sensing vehicles (plan section 5.5)."""
@@ -478,6 +482,8 @@ class JamEngine(FeedEngine):
             "writes_stepped_down": c.stepped_down,
             "corrected_vehicle_ticks": c.vehicle_ticks,
             "active_share": (c.active_ticks / c.vehicle_ticks) if c.vehicle_ticks else None,
+            "active_changing_share": ((c.active_changing_ticks / c.vehicle_ticks)
+                                      if c.vehicle_ticks else None),
             "max_speed_checked": c.max_speed_checked,
             "max_speed_mismatched": c.max_speed_mismatched,
             "incident_candidate_rows": c.incident_rows,
