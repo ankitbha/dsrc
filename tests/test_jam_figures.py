@@ -140,3 +140,15 @@ class TestFigures:
                               m=m_summary, l=l_summary)
         assert all(Path(p).exists() and Path(p).stat().st_size > 0 for p in paths.values())
         assert {Path(p).suffix for p in paths.values()} == {".pdf", ".json"}
+
+
+def test_bg_flow_minus_plan_is_the_arm_s_flow_less_the_plan_s():
+    # A BG row at 3,000 veh/h against the plan's 3,100 is -100 (kills the reversed sign, N72).
+    def row(flow):
+        return {"flow_mean": flow, "active_share_mean": 0.1, "active_changing_share_mean": 0.05}
+
+    m = {"rows": {"plan/-/BG": row(3100.0), "rule/m0.1/BG": row(3000.0),
+                  "no_control/-/BG": row(3200.0), "lookahead/J4/BG": row(3050.0)}}
+    bg = {r["arm"]: r for r in jf.table_main(m, S_SUMMARY)["bg"]}
+    assert bg["best model"]["flow_minus_plan"] == -100.0
+    assert bg["no control"]["flow_minus_plan"] == 100.0

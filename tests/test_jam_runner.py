@@ -610,3 +610,65 @@ class TestSelectionProvenance:
         context.feed = {"artefact_sha256": "f"}
         with pytest.raises(SystemExit):
             rje.summarize("S", tmp_path, context)
+
+
+class TestSelectionRules:
+    """Validation R2-8: section 5.7's choices on complete block S data, through the real
+    summarize_s. No control has 40 jammed segment-minutes and the plan 20 everywhere, so a
+    candidate at J has C = (J - 20) / 40."""
+
+    def _ctx(self):
+        context = rje.Context(camera_model=None, predictor=None)
+        context.feed = {"artefact_sha256": "f"}
+        return context
+
+    def _jam(self, values):
+        return lambda name: values.get(name, 19.5)
+
+    def test_a_tie_within_0_02_goes_to_the_higher_bg_flow(self):
+        # rule/m0.1 at 15.0 (C -0.125) and learned/th0.45 at 15.2 (C -0.12): 0.005 apart,
+        # and the learned arm serves 3,100 veh/h on BG against 3,000 (kills N01 and N02).
+        out = rje.summarize_s(_s_records(jam=self._jam({"rule/m0.1": 15.0, "learned/th0.45": 15.2}),
+                                         bg_flow={"learned/th0.45": 3100.0}), self._ctx())
+        assert out["candidates"]["rule/m0.1"]["C"] == pytest.approx(-0.125)
+        assert out["candidates"]["learned/th0.45"]["C"] == pytest.approx(-0.12)
+        assert out["best"]["name"] == "learned/th0.45"
+        same_flow = rje.summarize_s(_s_records(jam=self._jam({"rule/m0.1": 15.0,
+                                                              "learned/th0.45": 15.2})), self._ctx())
+        assert same_flow["best"]["name"] == "rule/m0.1"
+
+    def test_the_plan_is_best_when_every_correction_is_worse(self):
+        # Every candidate at 25 (C +0.125); the plan's C is 0 (kills N03).
+        out = rje.summarize_s(_s_records(jam=lambda name: 25.0), self._ctx())
+        assert out["best"]["name"] == "plan" and out["best"]["C"] == 0.0
+
+    def test_a_collision_or_a_write_above_the_plan_excludes_a_candidate(self):
+        # rule/m0.1 is the best rule setting; one collision (kills N04) or one write above
+        # the plan (kills N05) removes it, and rule/m0.2 is selected instead.
+        values = {"rule/m0": 18.0, "rule/m0.1": 15.0, "rule/m0.2": 16.0}
+        for kwargs in ({"collide": "rule/m0.1"}, {"above": "rule/m0.1"}):
+            out = rje.summarize_s(_s_records(jam=self._jam(values), **kwargs), self._ctx())
+            assert "rule/m0.1" in out["excluded"]
+            assert out["selected"]["rule"] == {"m_on": 0.2}
+            assert out["best"]["name"] != "rule/m0.1"
+
+    def test_each_grid_selects_its_lowest_c(self):
+        # Three rule settings of distinct C: the lowest wins (kills N06).
+        values = {"rule/m0": 18.0, "rule/m0.1": 15.0, "rule/m0.2": 17.0,
+                  "lookahead/J2": 19.0, "lookahead/J4": 21.0, "lookahead/J6": 18.5,
+                  "learned/th0.3": 22.0, "learned/th0.45": 16.5, "learned/th0.6": 19.0,
+                  "learned/th0.75": 20.0}
+        out = rje.summarize_s(_s_records(jam=self._jam(values)), self._ctx())
+        assert out["selected"] == {"lookahead": {"J_th": 6.0}, "rule": {"m_on": 0.1},
+                                   "learned": {"theta": 0.45}}
+
+    def test_block_m_runs_the_selected_thresholds(self):
+        # Kills block M's oracle at a fixed m_on (N09) and learned arm at a fixed theta (N10).
+        selection = rje.Selection(J_th=6.0, m_on=0.2, theta=0.6, best_arm="rule",
+                                  best_params={"m_on": 0.2})
+        specs = rje.block_specs("M", selection=selection, oracle_window=60.0)
+        params = {(s.arm, s.variant): dict(s.params) for s in specs}
+        assert params[("oracle", "tau10_m0.2_R60")]["m_on"] == 0.2
+        assert params[("learned", "th0.6")]["theta"] == 0.6
+        assert params[("rule", "m0.2")]["m_on"] == 0.2
+        assert params[("lookahead", "J6")]["J_th"] == 6.0

@@ -400,3 +400,21 @@ class TestPersistentPairError:
         path.write_text(json.dumps(artefact))
         assert CameraModel.from_artefact(path).pair_sigma_log == 0.27
         assert CameraModel.from_artefact(path, pair_sigma_log=0.1).pair_sigma_log == 0.1
+
+
+def test_from_artefact_reads_the_0_20_s_table_when_both_groups_are_present(tmp_path):
+    # The SUMO camera is the 0.20 s drives' (kills reading the 0.67 s group, N30).
+    def group(p, r_max, sigma):
+        return {"detection": {"p": [p] * 8}, "distance_noise": {"sigma_ema_m": [sigma] * 8},
+                "closing_rate_noise": {"sigma_v_mps": [0.2] * 8},
+                "confidence": {"values": [[0.9]] * 8}, "R_max_m": r_max}
+
+    path = tmp_path / "camera.json"
+    path.write_text(json.dumps({"schema": "camera_error_model/1", "bin_m": 10.0,
+                                "sumo_table": "0.20",
+                                "tables": {"0.20": group(0.9, 20.0, 0.4),
+                                           "0.67": group(0.3, 60.0, 2.0)}}))
+    cam = CameraModel.from_artefact(path)
+    assert cam.source["table"] == "0.20" and cam.R_max == 20.0
+    assert cam.p_at(np.array([5.0])).tolist() == [0.9]
+    assert cam.sigma_at(np.array([5.0])).tolist() == [0.4]

@@ -161,3 +161,59 @@ def test_two_600_s_block_t_episodes_fit_and_write_a_card(tmp_path):
     assert card["feed_artefact_sha256"] == context.feed["artefact_sha256"]
     predictor = op.load(out)
     assert predictor.predict(np.zeros((3, len(op.FEATURES)))).shape == (3,)
+
+
+class TestFitInternals:
+    def test_the_positive_class_is_weighted_by_negatives_over_positives(self):
+        # A 1-in-10 set: 900 negatives, 100 positives, so pos_weight 9 (kills N45).
+        rng = np.random.default_rng(3)
+        X = rng.normal(size=(1000, len(op.FEATURES)))
+        y = np.zeros(1000, dtype=int)
+        y[::10] = 1
+        model = op.fit(X, y, X[:100], y[:100])
+        assert model.card["pos_weight"] == pytest.approx(9.0)
+
+    def test_the_scaler_is_the_training_mean_and_standard_deviation(self, tmp_path):
+        # Kills fitting on unstandardised features (N46).
+        rng = np.random.default_rng(4)
+        X = rng.normal(loc=5.0, scale=3.0, size=(300, len(op.FEATURES)))
+        y = (X[:, 0] > 5.0).astype(int)
+        card = op.save(op.fit(X, y, X[:50], y[:50]), tmp_path / "card.json")
+        np.testing.assert_allclose(card["scaler"]["mean"], X.mean(axis=0), rtol=1e-5)
+        np.testing.assert_allclose(card["scaler"]["scale"], X.std(axis=0), rtol=1e-5)
+
+
+def test_engine_features_read_the_next_segment_for_its_own_fields():
+    # Own segment 5 and next segment 6 with distinct plan, feed speed and jam factor (kills
+    # reading the own segment for them, N47 and N48).
+    from types import SimpleNamespace
+
+    from src.sumo.sensing import CameraModel, CandidateTable, EdgeGeometry, Ego, LaneSnapshot, estimate
+
+    geometry = {"e5": EdgeGeometry(3, 300.0, (3.75,) * 3), "e6": EdgeGeometry(3, 300.0, (3.75,) * 3)}
+    snap = LaneSnapshot.from_vehicles(
+        [{"id": "ego", "edge": "e5", "lane": 1, "front_m": 100.0, "length_m": 4.5, "speed_mps": 10.0},
+         {"id": "lead", "edge": "e5", "lane": 1, "front_m": 124.5, "length_m": 4.5, "speed_mps": 8.0}],
+        geometry, {"e5": "e6"}, t=100.0)
+    table = CandidateTable.build(snap, [Ego("ego", "e5", 1, 100.0)], 80.0)
+    camera = CameraModel.from_tables(bin_m=10.0, p=np.ones(8), sigma_m=np.zeros(8),
+                                     sigma_v_mps=np.zeros(8), confidences=[np.array([0.7])] * 8,
+                                     R_max=80.0)
+    est = estimate(table, camera.observe(table, np.random.default_rng(0)), camera.R_eff)
+    x = np.zeros((12, 5), dtype=np.float32)
+    x[:, 1] = 60.0
+    x[5] = [40.0, 60.0, 3.3, 3.0, 0.3]
+    x[6] = [25.0, 60.0, 5.8, 2.0, 0.5]
+    vector = [2] * 12
+    vector[6] = 0
+    engine = SimpleNamespace(_segment_of={"e5": 5, "e6": 6}, states={1: x}, vectors={1: vector},
+                             feed=SimpleNamespace(publish_of=lambda k: 60.0))
+    row = op.engine_features(engine, 100.0, np.array([0]), table, est, np.zeros(1), np.zeros(1),
+                             np.array([1]), np.array([5]))[0]
+    f = dict(zip(op.FEATURES, row.tolist()))
+    assert f["plan_fraction_own"] == 1.0 and f["plan_fraction_next"] == 0.5
+    assert f["feed_speed_own_kmh"] == 40.0 and f["feed_speed_next_kmh"] == 25.0
+    assert f["feed_jam_factor_own"] == pytest.approx(3.3) and f["feed_jam_factor_next"] == pytest.approx(5.8)
+    assert f["segment_lanes"] == 3.0 and f["segment_length_km"] == pytest.approx(0.3)
+    assert f["feed_age_s"] == 40.0 and f["remaining_in_segment_m"] == 200.0
+    assert f["g_hat_m"] == pytest.approx(20.0) and f["own_leader_reported_speed_mps"] == 8.0
