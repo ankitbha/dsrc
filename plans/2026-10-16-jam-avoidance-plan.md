@@ -1219,3 +1219,16 @@ training-seed no-control B9 episodes that jam (seeds 2 and 3), the feed's speed 
   DAgger round. The validator round cap (3) is reached, so the orchestrator verifies the fix with the
   validator's named checks (a mismatched-card unit test raises; a matched one does not; block S smoke
   passes with the real card) and a fix-specific mutant.
+
+## The experiment run (started 2026-10-16, 18:14 EDT; orchestrator)
+
+- **R3-1 fix verified by the orchestrator** (the round cap was reached): `c03cca5` refuses a
+  learned-arm spec whose predictor card names another camera model; its three tests pass, the full
+  `test_jam_runner.py` passes (53 passed, 1 skipped), and with the check disabled the two refusal
+  tests fail while the matched-card test passes.
+- **The run:** blocks T, predictor round 1, T DAgger, predictor round 2, S, then M, L, P and K, in
+  one process chain from a clean detached worktree at `c03cca5`, results under the gitignored
+  `outputs/jam/run/` (so a block's own output does not mark later headers dirty; `git status
+  --porcelain` counts untracked files), pause file `outputs/jam/run/PAUSE`. Camera model and feed
+  artefact are the committed ones. The results are copied into `results/jam/` and committed when
+  the chain ends.
