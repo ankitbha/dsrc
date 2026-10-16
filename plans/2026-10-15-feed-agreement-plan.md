@@ -748,3 +748,75 @@ box is 49.908 to 49.964 N, 8.151 to 8.317 E. Drive query centres: `run_20260908_
 torch 2.14.0, pytest 9.1.1, eclipse-sumo/libsumo/traci/sumolib 1.27.1; no scipy, pwlf or
 lifelines. Entry links: 277 and 289 in super-segment 0, 231 and 255 in 2, 140 and 182 in
 5, 293 and 295 in 8; every route runs the chain to segment 11 and the exit.
+
+## Amendment 1 (2026-10-15, after validation round 1; orchestrator)
+
+**Why.** Validation round 1 (`plans/2026-10-15-feed-agreement-validation.md`) found that
+controlled vehicles rear-end stopped vehicles and SUMO teleports the follower (R1-7). The
+orchestrator reproduced it independently (`scratchpad/dsrc_feed/orch/collision_check.py`): on
+seeds 16, 17 and 18 the committed controlled arm has 76, 96 and 113 collision teleports and no
+control has 0; with `--collision.action warn` the controlled arm serves 3,606.7, 3,602.2 and
+3,626.7 veh/h against no control's 3,722.2, 3,553.3 and 3,564.4, so the paired gain on these
+seeds falls from a mean of +159 veh/h to -2 veh/h. Applying the advisory as a maximum-speed
+cap (`setMaxSpeed`, the semantics of Vissim's `DesSpeed`, which SRC used) gives 0 collisions
+and 0 teleports on all three seeds (`orch/maxspeed_check.py`); the existing checkpoint then
+serves 3,635.6, 3,451.1 and 3,606.7 veh/h. The validator's alternative, an EIDM action step of
+0.5 s, removes collisions but changes the human model the capacity drop rests on (no control
+rises to 3,846.7 veh/h on seed 16), so it is not adopted. The committed +230 veh/h result
+therefore depends on collision teleports, and every comparison below is re-based on a
+collision-free actuation and retrained checkpoints.
+
+**Changes, superseding the sections they name.**
+
+- **A1 Actuation (all sections).** Every path that applies an advisory (`MainzEnv._command`,
+  `command_vehicles`, and the feed modes) sets the vehicle's maximum speed with
+  `setMaxSpeed(target)`; `release` restores the vehicle type's maximum speed. `setSpeed` is no
+  longer used to apply advice. Every episode record and every 10 s trace carries the
+  colliding-vehicle count (`simulation.getCollidingVehiclesNumber`, summed over steps) and the
+  collision-teleport count (`simulation.getStartingTeleportNumber`); every block summary
+  reports the number of controlled episodes with a nonzero count. Test: a controlled
+  2,500 s episode on seed 16 under A1 records 0 collisions.
+- **A2 Retraining (scope boundary, section 5).** Both checkpoints are retrained under A1 with
+  `scripts/train_mainz_src.py` and the published protocol: 80 episodes, 2,500 s, step 0.5 s,
+  flow window from 900 s, train seeds 1-10, select on 11-15, all other options at their
+  defaults, `--features here` and `--features src`. The results go to new files
+  (`results/checkpoints/mainz_here_cap_best.pt`, `mainz_src_cap_best.pt`, with their result and
+  log files); the committed checkpoints stay. The four-arm paired evaluation on seeds 16-30 is
+  re-run under A1 into `results/evaluation/mainz_paired_seeds_cap.{json,jsonl}`. Both run at the
+  experiment stage, before any block, and every block uses the `here` cap checkpoint. Attack
+  point 1 becomes: per-tick `published` mode equals the `step()` path under A1 on seeds 16-18
+  exactly. The implementer adds whatever option the evaluator needs to read the cap
+  checkpoints and to write the new evaluation file, and smoke-tests one training episode
+  under A1.
+- **A3 Drain rule (section 3.5, R1-4).** A run is drained at `t_d` only if, in addition to the
+  plan's condition, no later sample up to the cap starts a jam spell or a waiting spell
+  (held + pending > 0) lasting at least `H`; otherwise it is censored at the cap. Test: a
+  trace clear at `t_0` that jams from `t_0 + 200 s` to the cap with pending is censored.
+- **A4 Threshold (section 3.5, D10, R1-5).** The primary `v_jam` is one network-level
+  threshold fitted on the sustained `mainz` scenario's `published` and `no_control` episodes,
+  seeds 16-30, samples 300 to 2,500 s, under A1, and applied to both drain scenarios. Any fit,
+  pooled or per segment, with `s2 >= 3 s1` (the 2023 paper's condition) is refused and the
+  refusal recorded. The per-scenario no-control fit and the fixed 30 km/h remain reported
+  sensitivities. Test: the surge-like pool (knots 3.5 and 25.0 km/h) is refused.
+- **A5 Pilot rule (section 5, R1-6).** No control "breaks down" in scenario (b) if it has a
+  jam spell of at least `H` after `t_0` under A4's threshold. The controlled arm must drain
+  under A3 before the cap. The fall-backs are unchanged.
+- **A6 Block B axis (section 3.3, Fig. 2, D25, R1-3).** The runner records, per second, the
+  fraction of controlled vehicles on segment edges that apply the previous snapshot.
+  `DELTAS = (0.05, 0.1, 0.25, 0.5)`. The F1 fit and Fig. 2(a) use the measured time-averaged
+  fraction on the x-axis, labelled "fraction of vehicles on the previous snapshot".
+- **A7 `inject_delta` writes (section 3.3, R1-2).** At each decision every scanned controlled
+  vehicle is written its target version's fraction on its current edge, late or not.
+- **A8 Pulses (section 3.6, R1-8, R1-9).** Each pulse vehicle is added to SUMO at its own
+  departure tick, so pulsed and unpulsed runs are identical before the pulse (test: identical
+  through 1,200 s). The regression window starts when the injection ends. The certificate
+  artefact reports a noise floor as the validator's R1-8 entry proposes. The pulse-size check
+  counts vehicles in teleport.
+- **A9 Replay (section 3.1, R1-10).** Replay start indices are chosen so the replay never
+  wraps; a test checks that every replayed stamp keeps its recorded second of the minute.
+- **A10 Tests (R1-14).** The tests listed in the validation file's R1-14 entry are added so
+  that the 16 surviving mutants are killed.
+- **A11 Documented limits (R1-11, R1-12).** Command-level disagreement is about 20 times
+  smaller than version-level disagreement because the action vector changes on 8 to 13 of 37
+  decisions; the drive-log lower lag bound overstates `L_low` by up to one round trip. Both
+  are stated in the paper.
