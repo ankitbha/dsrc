@@ -384,3 +384,294 @@ def visible_candidates(snapshot: LaneSnapshot, ego: Ego, R: float) -> EgoCandida
     table = CandidateTable.build(snapshot, [ego], R)
     return EgoCandidates([snapshot.ids[v] for v in table.vehicle], table.d, table.dlane,
                          table.y, table.speed, table.in_fov, table.occluded, table.visible)
+
+
+# ----------------------------------------------------------------- the camera
+
+
+#: The metres of road one vehicle occupies, the same as `mainz.VEHICLE_LENGTH_M`, so the
+#: local density is in the units of the critical occupancy 0.178.
+OCCUPANCY_LENGTH_M: float = 4.5
+
+
+def _fill_by_interpolation(values: np.ndarray, centres: np.ndarray) -> np.ndarray:
+    """Bins without an estimate (nan) take the interpolation of the bins with one; a table
+    with no estimate at all is zero."""
+    values = np.asarray(values, dtype=float)
+    known = ~np.isnan(values)
+    if not known.any():
+        return np.zeros_like(values)
+    return np.interp(centres, centres[known], values[known])
+
+
+@dataclass(frozen=True)
+class Detections:
+    """Per row of a `CandidateTable`: detected, reported gap, reported speed, confidence.
+
+    Rows not detected carry nan in `d_hat`, `v_hat` and `conf`.
+    """
+
+    detected: np.ndarray
+    d_hat: np.ndarray
+    v_hat: np.ndarray
+    conf: np.ndarray
+
+
+@dataclass(frozen=True)
+class CameraModel:
+    """Detection probability, distance noise, speed noise and confidence by distance bin.
+
+    `p_at(d)` is the bin's detection rate and zero beyond `R_max`; `sigma_at(d)` and
+    `sigma_v_at(d)` interpolate the bin values linearly between bin centres, holding the
+    end values beyond them. A detected candidate is reported at `max(b d + eps, 0)` with
+    `eps ~ N(0, sigma(d)^2)` and at speed `v + eta`, `eta ~ N(0, sigma_v(d)^2)`, with a
+    confidence drawn from the drive's confidences in its bin. The three switches turn
+    occlusion, detection loss and noise off one at a time (plan attack point 3).
+    """
+
+    bin_m: float
+    p: np.ndarray
+    sigma_m: np.ndarray
+    sigma_v_mps: np.ndarray
+    confidences: tuple[np.ndarray, ...]
+    R_max: float
+    bias: float = 1.0
+    occlusion: bool = True
+    detection_loss: bool = True
+    noise: bool = True
+    source: dict[str, Any] | None = None
+
+    @classmethod
+    def from_tables(cls, *, bin_m: float, p, sigma_m, sigma_v_mps, confidences, R_max: float,
+                    bias: float = 1.0, source: dict[str, Any] | None = None) -> "CameraModel":
+        p = np.nan_to_num(np.asarray(p, dtype=float), nan=0.0)
+        centres = bin_m * (np.arange(len(p)) + 0.5)
+        sigma = _fill_by_interpolation(np.asarray(sigma_m, dtype=float), centres)
+        sigma_v = _fill_by_interpolation(np.asarray(sigma_v_mps, dtype=float), centres)
+        confs = tuple(np.asarray(c, dtype=float) for c in confidences)
+        return cls(float(bin_m), p, sigma, sigma_v, confs, float(R_max), float(bias),
+                   source=source)
+
+    @classmethod
+    def from_artefact(cls, path, bias: float = 1.0, table: str | None = None) -> "CameraModel":
+        """Read `results/jam/camera_error_model.json` (written by `fit_camera_model.py`):
+        its SUMO table (`sumo_table`, the 0.20 s drives) unless `table` names another."""
+        import hashlib
+        import json
+        from pathlib import Path
+
+        path = Path(path)
+        raw = path.read_bytes()
+        artefact = json.loads(raw)
+        name = table or artefact["sumo_table"]
+        t = artefact["tables"][name]
+
+        def column(values):
+            return [math.nan if v is None else float(v) for v in values]
+
+        return cls.from_tables(
+            bin_m=float(artefact["bin_m"]), p=column(t["detection"]["p"]),
+            sigma_m=column(t["distance_noise"]["sigma_ema_m"]),
+            sigma_v_mps=column(t["closing_rate_noise"]["sigma_v_mps"]),
+            confidences=[v or [math.nan] for v in t["confidence"]["values"]],
+            R_max=float(t["R_max_m"] or 0.0), bias=bias,
+            source={"path": str(path), "sha256": hashlib.sha256(raw).hexdigest(),
+                    "table": name})
+
+    def with_switches(self, **switches: bool) -> "CameraModel":
+        from dataclasses import replace
+
+        return replace(self, **switches)
+
+    def with_bias(self, bias: float) -> "CameraModel":
+        from dataclasses import replace
+
+        return replace(self, bias=float(bias))
+
+    @property
+    def R_eff(self) -> float:
+        """`min(80 m, R_max)`: the range the counts and the density use."""
+        return min(DEPLOYED_RANGE_M, self.R_max)
+
+    def _bin(self, d: np.ndarray) -> np.ndarray:
+        return np.clip((np.asarray(d, dtype=float) // self.bin_m).astype(np.int64), 0,
+                       len(self.p) - 1)
+
+    def p_at(self, d: np.ndarray) -> np.ndarray:
+        d = np.asarray(d, dtype=float)
+        inside = (d <= self.R_max) & (d < self.bin_m * len(self.p))
+        return np.where(inside, self.p[self._bin(d)], 0.0)
+
+    def _interp(self, values: np.ndarray, d: np.ndarray) -> np.ndarray:
+        centres = self.bin_m * (np.arange(len(values)) + 0.5)
+        return np.interp(np.asarray(d, dtype=float), centres, values)
+
+    def sigma_at(self, d: np.ndarray) -> np.ndarray:
+        return self._interp(self.sigma_m, d)
+
+    def sigma_v_at(self, d: np.ndarray) -> np.ndarray:
+        return self._interp(self.sigma_v_mps, d)
+
+    def observe(self, table: CandidateTable, rng: np.random.Generator) -> Detections:
+        """One tick of the camera for every ego of `table`.
+
+        Draws are made for the rows the camera could see (in view, not hidden unless
+        occlusion is off, within `R_max`), in the table's order (ego id, then gap), four
+        per row: detection, distance noise, speed noise, confidence index.
+        """
+        n = len(table.d)
+        seeable = (table.in_fov & (~table.occluded if self.occlusion else True)
+                   & (table.d <= self.R_max))
+        rows = np.flatnonzero(seeable)
+        u = rng.random(len(rows))
+        z_d = rng.standard_normal(len(rows))
+        z_v = rng.standard_normal(len(rows))
+        u_c = rng.random(len(rows))
+        d = table.d[rows]
+        p = self.p_at(d) if self.detection_loss else np.ones(len(rows))
+        hit = u < p
+        detected = np.zeros(n, dtype=bool)
+        detected[rows[hit]] = True
+        d_hat = np.full(n, np.nan)
+        v_hat = np.full(n, np.nan)
+        conf = np.full(n, np.nan)
+        scale = 1.0 if self.noise else 0.0
+        reported = np.maximum(self.bias * d + scale * self.sigma_at(d) * z_d, 0.0)
+        speed = table.speed[rows] + scale * self.sigma_v_at(d) * z_v
+        bins = self._bin(d)
+        drawn = np.array([self.confidences[b][min(int(u * len(self.confidences[b])),
+                                                  len(self.confidences[b]) - 1)]
+                          for b, u in zip(bins, u_c)], dtype=float)
+        d_hat[rows[hit]] = reported[hit]
+        v_hat[rows[hit]] = speed[hit]
+        conf[rows[hit]] = drawn[hit]
+        return Detections(detected, d_hat, v_hat, conf)
+
+
+@dataclass(frozen=True)
+class LocalEstimate:
+    """Per ego (in `CandidateTable.ego_ids` order), what the device computes (section 1.3).
+
+    `n_hat` (n x 3) counts detections within `R_eff` on offsets -1, 0, +1; `g_hat` is the
+    reported gap of the nearest detected own-lane leader (nan if none); `k_hat` is the mean
+    over the visible lanes of `L/(g_hat + L)` (own lane, 0 when no leader within `R_eff`)
+    and `n_hat L / R_eff` (adjacent lanes); `own_speed` and `mean_speed` are reported
+    leader speeds in m/s (nan when nothing is detected); `conf_mean` and `n_det` are the
+    mean confidence and the count of detections within `R_eff`.
+    """
+
+    ego_ids: list[str]
+    lanes_visible: np.ndarray
+    n_hat: np.ndarray
+    g_hat: np.ndarray
+    k_hat: np.ndarray
+    own_speed: np.ndarray
+    mean_speed: np.ndarray
+    conf_mean: np.ndarray
+    n_det: np.ndarray
+
+
+def estimate(table: CandidateTable, detections: Detections, R_eff: float,
+             L: float = OCCUPANCY_LENGTH_M) -> LocalEstimate:
+    n = table.n_egos
+    det = detections.detected
+    in_range = det & (np.nan_to_num(detections.d_hat, nan=np.inf) <= R_eff)
+    column = table.dlane + 1
+    n_hat = np.bincount(table.ego[in_range] * 3 + column[in_range],
+                        minlength=3 * n).reshape(n, 3)
+    # The nearest detected own-lane leader: the first such row of each ego in gap order.
+    own_rows = np.flatnonzero(det & (table.dlane == 0))
+    g_hat = np.full(n, np.nan)
+    own_speed = np.full(n, np.nan)
+    if len(own_rows):
+        first = own_rows[np.unique(table.ego[own_rows], return_index=True)[1]]
+        g_hat[table.ego[first]] = detections.d_hat[first]
+        own_speed[table.ego[first]] = detections.v_hat[first]
+    with np.errstate(invalid="ignore"):
+        k_own = np.where(np.nan_to_num(g_hat, nan=np.inf) <= R_eff,
+                         L / (np.nan_to_num(g_hat, nan=0.0) + L), 0.0)
+    k_side = n_hat[:, [0, 2]] * L / R_eff if R_eff > 0 else np.zeros((n, 2))
+    side_visible = table.lanes_visible[:, [0, 2]]
+    lanes = table.lanes_visible.sum(axis=1)
+    k_hat = (k_own + (k_side * side_visible).sum(axis=1)) / np.maximum(lanes, 1)
+    count_all = np.bincount(table.ego[det], minlength=n)
+    speed_sum = np.bincount(table.ego[det], weights=detections.v_hat[det], minlength=n)
+    count_in = np.bincount(table.ego[in_range], minlength=n)
+    conf_sum = np.bincount(table.ego[in_range], weights=detections.conf[in_range], minlength=n)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean_speed = np.where(count_all > 0, speed_sum / count_all, np.nan)
+        conf_mean = np.where(count_in > 0, conf_sum / count_in, np.nan)
+    return LocalEstimate(list(table.ego_ids), table.lanes_visible, n_hat, g_hat, k_hat,
+                         own_speed, mean_speed, conf_mean, count_in)
+
+
+@dataclass(frozen=True)
+class OracleSensor:
+    """Every candidate on the visible lanes within `R`, at its true distance, with no field
+    of view, occlusion or detection loss (plan section 1.3; `R = 200` is `oracle_wide`)."""
+
+    R: float = DEPLOYED_RANGE_M
+
+    def per_lane_counts(self, table: CandidateTable) -> np.ndarray:
+        keep = table.d <= self.R
+        return np.bincount(table.ego[keep] * 3 + table.dlane[keep] + 1,
+                           minlength=3 * table.n_egos).reshape(table.n_egos, 3)
+
+    def k_true(self, table: CandidateTable, L: float = OCCUPANCY_LENGTH_M) -> np.ndarray:
+        if table.R < self.R:
+            raise ValueError(f"the table reaches {table.R} m, short of the oracle's {self.R} m")
+        lanes = np.maximum(table.lanes_visible.sum(axis=1), 1)
+        return table.counts(self.R) * L / (self.R * lanes)
+
+
+class TrendTracker:
+    """Per vehicle, the least-squares slope of its values over the last `window_s` (at most
+    `max_samples` values); zero with fewer than `min_samples`. Nan values are skipped."""
+
+    def __init__(self, window_s: float = 30.0, max_samples: int = 7,
+                 min_samples: int = 3) -> None:
+        self.window_s = window_s
+        self.max_samples = max_samples
+        self.min_samples = min_samples
+        self._slot: dict[str, int] = {}
+        self._t = np.full((64, max_samples), np.nan)
+        self._v = np.full((64, max_samples), np.nan)
+        self._next = np.zeros(64, dtype=np.int64)
+
+    def _slots(self, ids: Sequence[str]) -> np.ndarray:
+        slots = np.empty(len(ids), dtype=np.int64)
+        for k, vid in enumerate(ids):
+            slot = self._slot.get(vid)
+            if slot is None:
+                slot = self._slot[vid] = len(self._slot)
+                if slot >= len(self._t):
+                    grow = len(self._t)
+                    self._t = np.vstack([self._t, np.full((grow, self.max_samples), np.nan)])
+                    self._v = np.vstack([self._v, np.full((grow, self.max_samples), np.nan)])
+                    self._next = np.concatenate([self._next, np.zeros(grow, dtype=np.int64)])
+            slots[k] = slot
+        return slots
+
+    def update(self, ids: Sequence[str], t: float, values: np.ndarray) -> np.ndarray:
+        if not len(ids):
+            return np.zeros(0)
+        slots = self._slots(ids)
+        position = self._next[slots] % self.max_samples
+        self._t[slots, position] = t
+        self._v[slots, position] = np.asarray(values, dtype=float)
+        self._next[slots] += 1
+        times, vals = self._t[slots], self._v[slots]
+        valid = (times >= t - self.window_s - 1e-6) & ~np.isnan(vals)
+        count = valid.sum(axis=1)
+        w = valid.astype(float)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            t_mean = np.where(count > 0, np.nansum(np.where(valid, times, 0.0), axis=1)
+                              / np.maximum(count, 1), 0.0)
+            v_mean = np.where(count > 0, np.nansum(np.where(valid, vals, 0.0), axis=1)
+                              / np.maximum(count, 1), 0.0)
+            dt = np.where(valid, times - t_mean[:, None], 0.0)
+            dv = np.where(valid, vals - v_mean[:, None], 0.0)
+            sxx = (w * dt * dt).sum(axis=1)
+            slope = np.where((count >= self.min_samples) & (sxx > 0),
+                             (w * dt * dv).sum(axis=1) / np.where(sxx > 0, sxx, 1.0), 0.0)
+        return slope
