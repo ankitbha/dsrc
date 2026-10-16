@@ -1203,3 +1203,19 @@ from 0 to 70 m: 0.951, 0.938, 0.788, 0.681, 0.531, 0.318, 0.152, from 43,872 opp
 distance error: log-normal `sigma_log` 0.308, the relative spread of the per-track median
 ground-plane / width-prior ratio over 201 centre-column tracks with at least 10 detections (per
 drive 0.246 to 0.527). Distance and closing-rate noise unchanged from the previous fit.
+
+## Validation round 3 (2026-10-16, the last round; orchestrator)
+
+Round 3 at `b285f5e` found one SHOULD FIX and nothing that changes a number blocks T to K produce:
+17 new mutants on the round 2 fixes all killed; the camera model of record recomputed from the frames
+and matched; the pooled pair spread 0.308 attacked and kept (alternatives 0.27 to 0.33; block K's
+half spread brackets them); camera, oracle (60 m) and no-control passive sensing wired as Amendment 3
+says; block S end to end on stubs selects by section 5.7 and refuses incomplete data. On two
+training-seed no-control B9 episodes that jam (seeds 2 and 3), the feed's speed warning `W_feed` was
+270 and 220 s and the camera's `W_cam` 460 and 470 s before onset.
+
+- **R3-1 (SHOULD FIX):** nothing compared the predictor card's camera hash with the camera the
+  learned arm runs on. Sent to the implementer: refuse a mismatch in `episode_runner` and in block T's
+  DAgger round. The validator round cap (3) is reached, so the orchestrator verifies the fix with the
+  validator's named checks (a mismatched-card unit test raises; a matched one does not; block S smoke
+  passes with the real card) and a fix-specific mutant.

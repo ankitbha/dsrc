@@ -480,3 +480,61 @@ each mutant.
   seed 16 by `test_a_7200_s_episode_wraps_the_measured_session_and_counts_it` (no simulation),
   and block M's specs were enumerated with a stubbed episode function to trace the camera
   wiring.
+
+## Round 3 (2026-10-16): commit b285f5e; the round 2 fixes and the re-fitted camera model
+
+Audited from an archive mirror of `b285f5e` (`scratchpad/dsrc_jam/mirrors/round3`); every
+Python run with `PYTHONDONTWRITEBYTECODE=1` and `python -B`, mutations with `__pycache__`
+cleared. For each finding the check that would confirm its fix is stated.
+
+### Coverage table (round 3)
+
+| attack point | status | method and result |
+|---|---|---|
+| Each round 2 fix's new code | done | diffs read. 17 new mutants (P01-P17) of the pair factor, its spread, the per-spec camera, the oracle window, block K's half spread, the complete-data rule, the header-identity hashes, `read_selection`, the cross-resolution table and the ratio spread: all killed (`val_logs/mutants_r3.jsonl`). All test files pass in the mirror; the block M smoke test also passes when given the camera of record and a stand-in predictor card |
+| Camera model of record recomputed from the frames | done | cross-resolution p(d) 0.951, 0.938, 0.788, 0.681, 0.531, 0.318, 0.152 (0-70 m) equals the validator's round 2 tracked-box share in every bin; `R_max` 60 m follows section 1.2's rule (60-70 m has p 0.152 < 0.2); stored pair spread 0.308 reproduced from 201 tracks (`val_scripts/pair_spread.py`) |
+| The pooled pair spread, attacked as asked | done, no finding | 0.308 as stored; 0.297 with each drive centred on its own median ratio (log units); 0.329 uncentred in log units; 0.269 to 0.282 without `155910`, whose ground-plane fit is implausible (height 0.70 m, residual MAD 14.5 px). Every alternative lies within 0.04 of 0.308, and block K's half spread (0.154) brackets them all. The stored value is defensible as an upper bound |
+| Camera arms, block M oracle and no-control sensing read the model of record | done | block M, L, P and K specs through the real `episode_runner` with `run_jam_episode` stubbed (`val_scripts/wiring_r3.py`). Camera arms and no control get camera sha `fdf527cd408e`, `R_max` and `R_eff` 60 m, pair sigma 0.3083, bias 1.0 (K: 0.8, 1.25, and 1.0 at sigma 0.1542). The oracle has window 60 m (`tau10_m{m_on}_R60`) and `oracle_wide` 200 m. Plan and lookahead get no camera. Thresholds are the selection's |
+| Leads non-null on a no-control B9 episode that jams | done | block M's episode function on training seeds 2 and 3, 3,600 s (`val_scripts/leads_r3.py`). Seed 2: onset 1,840 s on segment 9, `W_feed` 270 s, `W_cam` 460 s, `W_true` 460 s. Seed 3: onset 1,750 s, `W_feed` 220 s, `W_cam` 470 s. `k_hat_available` True, camera recorded in the episode, wall 12.9 s per 3,600 s (budget 20 s per 7,200 s) |
+| Block S end to end on stub records; M to K read only S_summary.json | done | stub episodes through `run_block`, `header`, `summarize`, `read_selection` and `block_specs("M")` (`val_scripts/block_s_e2e.py`). Complete data: rule/m0.1 has the lowest C (-0.1246); learned/th0.45 (C -0.1171, BG flow 3,100) is within 0.02 and is best; J_th 4, m_on 0.1 and theta 0.45 reach block M, oracle `R60`. One missing cell gives "incomplete", best None, and `read_selection` refuses it. Summarising with another camera file is refused |
+| Block T: seeds, features, card camera hash | done | seeds 1-10 enforced by `block_specs` and `split_seeds` (unchanged since round 2); features unchanged; the card's camera hash is recorded but never checked against the camera in use (R3-1) |
+| Camera model in SUMO, with the pair factor | done | plan-alone B9 seed 2, 1,800 s, passive sensing (`val_logs/camera_in_sumo_r3.log`). Mean k_hat / k_true (80 m) 0.897; occlusion off 0.926, detection loss off 1.086, b 1.25 0.769, b 0.8 1.026. With no pair factor the share of samples at or above 0.9 k_c falls from 0.0237 to 0.0215 |
+| Round 2 survivors | done | N01-N06, N09 (re-targeted at the new oracle line), N10, N30, N45-N48 and N72 all killed. Round 1's M10, M57 and M58 still survive: none changes a reported number in the planned runs (M10 only the unrun `tau_l` 30 s grid; M57 only the censored point's time; M58 equivalent) |
+
+### Findings (round 3)
+
+#### R3-1. SHOULD FIX. Nothing checks that the predictor was trained on the camera model the learned arm runs with
+
+- Location: `scripts/train_onset_predictor.py:124` writes `camera_model_sha256` into the card.
+  Nothing reads it: `src/rl/onset_predictor.py` `load`, `scripts/run_jam_experiments.py`
+  `episode_runner` and `read_selection` do not, nor does any other code (`grep -rn
+  camera_model_sha256 scripts src`).
+- Evidence: block S's header identity carries the camera sha256 and the predictor sha256
+  separately, and `read_selection` compares each with the files block M is given. The
+  predictor's own training camera is never compared with either. Within block T it is held:
+  `train_onset_predictor.py --round 2` refuses T and T_dagger headers with two cameras. But a
+  camera model re-fitted after block T (one was re-fitted today, between rounds 2 and 3) would
+  run the learned arm in blocks S to K on features from a camera it was not trained on, and
+  every provenance check would pass.
+- Proposed fix: in `episode_runner`, when a spec uses both the camera and the predictor, refuse
+  unless `predictor.card["camera_model_sha256"] == camera.source["sha256"]`; the same check in
+  block T's DAgger round for the round-1 card.
+- Check that confirms it: a unit test that builds a card with `camera_model_sha256` "other",
+  runs `episode_runner` on a learned-arm spec with the camera of record and a stubbed
+  `run_jam_episode`, and expects `SystemExit`; and a run of block S's smoke with the card of
+  record that passes.
+
+### Round 3 conclusion
+
+- Counts: BLOCKS 0, SHOULD FIX 1 (R3-1), DOCUMENTED LIMIT 0, NOT WORTH FIXING 0. Every round 2
+  fix does what its finding asked. In particular the camera arms, no control and the block M
+  oracle read the camera model of record at 60 m with the 0.308 pair factor, and a no-control
+  B9 episode that jams yields non-null `W_feed` and `W_cam`. Block S selects as section 5.7
+  says on complete data and refuses incomplete data.
+- Nothing found this round changes block G's verdict or any number blocks T to K will
+  produce, provided the camera model is not re-fitted between block T and block K (R3-1 guards
+  that).
+- Still alive, by decision: R1-6 and R2-9 (not fixed), M10, M57, M58 (no reported number).
+- Not checked: the experiments themselves (none has run). The validator ran no episode on
+  seeds 16-30; block M's specs on those seeds were enumerated only with a stubbed episode
+  function.
