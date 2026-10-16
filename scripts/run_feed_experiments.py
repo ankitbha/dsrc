@@ -112,6 +112,9 @@ class Context:
     start_s: float = 60.0
     P_q: float = P_Q
     pulse_start_s: float = PULSE_START_S
+    #: Flow and disagreement are scored from here; a 600 s smoke scores from the
+    #: warm-up's end so its disagreement and age are measured at all.
+    window_start_s: float = 900.0
     smoke: bool = False
     feed: dict[str, Any] = field(default_factory=dict)  # block A's parameters
 
@@ -390,7 +393,7 @@ def episode_runner(model, context: Context) -> EpisodeFn:
             pulse = {"site": site, "n": n, "start_s": start, "duration_s": duration}
         return run_feed_episode(model, spec.seed, spec.scenario, mode, feed_process=feed,
                                 penetration=spec.penetration, duration_s=spec.duration_s,
-                                pulse=pulse)
+                                pulse=pulse, window_start_s=context.window_start_s)
 
     return run
 
@@ -861,6 +864,7 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
         context.seeds = (SMOKE_SEED,)
         context.duration_s = SMOKE_DURATION_S
         context.pulse_start_s = 400.0
+        context.window_start_s = 300.0
     if len(set(context.seeds)) != len(context.seeds):
         raise SystemExit("duplicate seeds")
     if "A" in args.block:
