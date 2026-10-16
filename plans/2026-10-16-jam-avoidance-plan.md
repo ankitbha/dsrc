@@ -1136,3 +1136,24 @@ scale does not depend on any of these fits; for centre boxes it agrees in expect
 ground-plane distance at the fitted height, so the two error models are expected to differ little
 on the 0.20 s group. The detector pass took 1,528 s for 18,818 frames (every indexed frame with a
 tick) at 640 and 1,280 px; its raw boxes are reused by the rebuilt detections.
+
+## Block G re-run and the camera model of record (2026-10-16, 17:10 EDT; orchestrator)
+
+The laptop slept from 16:34 to 17:02 (clamshell sleep, then a thermal emergency sleep 13 s later);
+running jobs were suspended, not killed, and the simulation is deterministic, so only recorded wall
+times are affected.
+
+- **Block G re-run, the gate of record:** detached worktree at `0b3c186` (R1-1, R1-2, R1-4, R1-7
+  fixed; headers carry the SHA). Decision **go** on the base setting. B9: paired jam time (oracle
+  minus plan) -26.07 +/- 3.89 segment-minutes, no 120 s spell on 4 of 5 seeds against 0 of 5;
+  I_exit: -10.47 +/- 1.43 (the bar narrowed from 3.38 because both arms now face blocks of equal
+  length). Zero collisions, teleports, writes above the plan and read-back mismatches. The first
+  run (`1ede200`, archive) is kept under `results/jam/G_1ede200/`.
+- **Camera model of record:** `results/jam/camera_error_model.json`, built at `91e6a2b` by
+  `process_drive_frames.py --rebuild-from-raw` (block F's detector output at `f0aeaf8`, 18,818
+  frames, reused) and `fit_camera_model.py`; method `width_prior`; SUMO table from the 0.20 s drives
+  `155910`, `173809`, `183538`, `190548`. Detection rate by 10 m bin from 0 to 70 m: 0.90, 0.78,
+  0.75, 0.75, 0.71, 0.69, 0.60; `R_max` 70 m (so the camera window is `min(80, R_max)` = 70 m);
+  first detection median 32.4 m, p90 50.8 m; EMA distance noise 0.05, 0.19, 0.35, 0.59, 0.86, 1.13,
+  2.34 m; closing-rate noise 0.30 to 3.65 m/s from 0 to 60 m. Ground-plane over width-prior distance
+  is 0.89 to 0.95 from 0 to 60 m. The ground-plane alternative (`R_max` 100 m) is in the artefact.

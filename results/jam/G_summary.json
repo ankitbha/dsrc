@@ -3,6 +3,7 @@
  "base_setting": "tau10_m0.1",
  "settings": {
   "tau10_m0.1": {
+   "complete": true,
    "scenarios": {
     "B9": {
      "paired_jam_time": {
@@ -39,14 +40,14 @@
        5
       ],
       "differences": [
-       -4.333333333333334,
-       -9.833333333333332,
-       -11.999999999999998,
-       -12.833333333333334,
-       -13.833333333333336
+       -10.833333333333332,
+       -8.499999999999998,
+       -10.499999999999998,
+       -9.666666666666668,
+       -12.833333333333334
       ],
-      "mean": -10.566666666666666,
-      "two_se": 3.383949040856128
+      "mean": -10.466666666666665,
+      "two_se": 1.431394036905593
      },
      "below_by_2se": true,
      "above_by_2se": false,
@@ -61,6 +62,7 @@
  "passing_settings": [
   "tau10_m0.1"
  ],
+ "plan_missing_seeds": {},
  "decision": "go",
  "episodes": 20,
  "controlled_episodes": 20,
@@ -105,7 +107,7 @@
   "plan:none"
  ],
  "feed_artefact": {
-  "artefact": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/mirrors/G_1ede200/results/jam/feed_process_afternoon.json",
+  "artefact": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/G2_0b3c186/results/jam/feed_process_afternoon.json",
   "artefact_sha256": "8f5430bfc68b51e17d3e437da948ea70795ff4448260f9b7e82ba48db5243f1c",
   "session": "afternoon_20261016_mainz",
   "placeholder": false,
@@ -121,13 +123,13 @@
  "selection": null,
  "headers": [
   {
-   "started_wall": 1792179653.251473,
-   "commit": null,
-   "dirty": null,
-   "sumo_version": "Eclipse SUMO sumo 1.27.1",
+   "started_wall": 1792182741.307328,
+   "commit": "0b3c1860974389e834f62e69a216b9e88a054ca5",
+   "dirty": false,
+   "sumo_version": null,
    "resumed": false
   }
  ],
- "wall_s_total": 297.87417793273926,
+ "wall_s_total": 1923.8578176498413,
  "smoke": false
 }
