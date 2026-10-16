@@ -1049,3 +1049,22 @@ from the repository root:
 7. The paper rewrite from the outline in the briefs file: three arms (no control, the
    network-wide feed lookahead, the best model from `S_summary.json`).
 8. The block A re-runs (commands above), whenever compute is free.
+
+## Resumed (2026-10-16, 15:20 EDT; orchestrator)
+
+- **The afternoon poller did not reach its own end.** The Claude process that ran it exited during
+  the pause, and the poller went with it: the last request was sent at 15:17:33 EDT, 167 s before
+  the 6,900 s end, and the session has no footer. All 2,696 requests returned HTTP 200 and no line
+  is partial. With the dry session's 122, 2,818 of the author's 5,760 requests are spent, leaving
+  2,942.
+- **The measured artefact of record for blocks G to K** is `results/jam/feed_process_afternoon.json`
+  (sha256 prefix `8f5430bfc68b`), built from the afternoon session alone: NJ 179 versions, `L_bar`
+  84.0 s, `L_low` 28.9 s, `J` 55.1 s, `g_min` 28 s; Mainz 113 versions, `L_bar` 89.5 s, `L_low`
+  34.4 s, `J` 55.1 s, `g_min` 60 s. Replayed session: `afternoon_20261016_mainz`.
+- **Block G's timing (the open decision of the pause) is taken by the orchestrator's
+  recommendation:** block G runs as soon as S4, S5, S6, S10 and S12 are committed, from an archive
+  mirror of that commit, on training seeds 1-5 only, before the validator rounds. If a validator fix
+  later touches code block G uses, block G is re-run on the fixed commit before block F.
+- The night session is rescheduled for 22:00 with its cap of 2,762 requests, inside the 2,942 left.
+- The block A re-runs (NJ default session, then Mainz) are running from the archive mirror of
+  `d699ac2`.
