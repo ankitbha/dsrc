@@ -111,7 +111,10 @@ class TestTheDrainScenarios:
         assert len(schedule) == 6000
         assert max(r["depart"] for r in schedule) < 1200.0
 
-    def test_burst_rates_are_3650_then_5000_then_3650(self):
+    def test_burst_rates_are_3572_then_5000_then_3572(self):
+        # The committed file was rebuilt at a 3,572 veh/h background (feed-agreement plan
+        # Amendment 2, B4: --demand-scale 0.198444); it carries 892, 834 and 10,418
+        # departures on the three intervals.
         schedule = json.loads((DATA / "mainz_burst_schedule.json").read_text())
         departs = [r["depart"] for r in schedule]
         before = sum(1 for d in departs if d < 900.0)
@@ -119,9 +122,9 @@ class TestTheDrainScenarios:
         after = sum(1 for d in departs if 1500.0 <= d < 12000.0)
         # Each entry's headway is constant inside an interval, so counts are the rate
         # times the length to within one vehicle per entry (eight entries).
-        assert abs(before - 3650.0 * 900.0 / 3600.0) <= 8
+        assert abs(before - 3572.0 * 900.0 / 3600.0) <= 8
         assert abs(during - 5000.0 * 600.0 / 3600.0) <= 8
-        assert abs(after - 3650.0 * 10500.0 / 3600.0) <= 8
+        assert abs(after - 3572.0 * 10500.0 / 3600.0) <= 8
 
     def test_scenarios_are_registered_beside_the_shared_network(self):
         for name in ("mainz_surge", "mainz_burst"):
