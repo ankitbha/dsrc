@@ -203,6 +203,7 @@ class MainzEnv:
         self._incidents: list[dict[str, Any]] = []
         self._incident_ids: set[str] = set()
         self._incidents_on_road: dict[str, str] = {}
+        self._incident_lane: dict[str, int] = {}
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -231,6 +232,7 @@ class MainzEnv:
         self._capped = {}
         self._pulse_queue = []
         self._incidents, self._incident_ids, self._incidents_on_road = [], set(), {}
+        self._incident_lane = {}
         self._load_controlled()  # drops any pulse or incident a previous episode appended
         self._load_schedule()
         self._load_static()
@@ -428,6 +430,7 @@ class MainzEnv:
                 "duration_s": float(duration_s), "requested_s": None, "inserted_s": None,
                 "removed_s": None})
             self._incident_ids.add(vehicle)
+            self._incident_lane[vehicle] = int(lane)
             ids.append(vehicle)
         return ids
 
@@ -718,20 +721,43 @@ class MainzEnv:
     def _edge_reading(self, edge: str, blocked: dict[str, list[str]]) -> tuple[int, float]:
         """`(count, mean speed in m/s)` of the edge's traffic, incident vehicles removed.
 
-        SUMO's edge mean includes an incident vehicle's zero, so it is taken back out:
-        `(mean * count - sum of incident speeds) / (count - incidents)`. An edge with no
-        incident is read exactly as SUMO reports it.
+        An edge with no incident is read exactly as SUMO reports it. On an edge holding an
+        incident vehicle, SUMO's own estimator is rebuilt from its lanes without it:
+        `sum_l max(n_l, 1) v_l / sum_l max(n_l, 1)`, where `n_l` counts every vehicle on
+        lane `l` and `v_l` is the lane's mean speed, an empty lane reading its speed limit
+        (measured equal to SUMO's edge mean to 5e-15 m/s). A lane without an incident keeps
+        SUMO's own count and mean. A lane with one takes the count and the plain mean
+        speed of its other vehicles, which is what SUMO's lane mean would be without it:
+        on a multi-lane edge SUMO's lane mean already leaves a stopped vehicle out, so
+        removing the incident's zero from the edge mean, as an earlier version did,
+        removed it a second time (validation R1-1); on a one-lane edge it keeps it.
         """
         count = int(_sumo.edge.getLastStepVehicleNumber(edge))
         speed_mps = float(_sumo.edge.getLastStepMeanSpeed(edge))
         incidents = blocked.get(edge)
         if not incidents:
             return count, speed_mps
-        remaining = count - len(incidents)
-        if remaining <= 0:
+        blocked_lanes = {self._incident_lane[v] for v in incidents}
+        weight = total = 0.0
+        vehicles = 0
+        for lane in range(int(self._static[edge]["lanes"])):
+            lane_id = f"{edge}_{lane}"
+            if lane in blocked_lanes:
+                others = [v for v in _sumo.lane.getLastStepVehicleIDs(lane_id)
+                          if v not in self._incident_ids]
+                n = len(others)
+                v_lane = (sum(float(_sumo.vehicle.getSpeed(v)) for v in others) / n if n
+                          else float(_sumo.lane.getMaxSpeed(lane_id)))
+            else:
+                n = int(_sumo.lane.getLastStepVehicleNumber(lane_id))
+                v_lane = float(_sumo.lane.getLastStepMeanSpeed(lane_id))
+            w = max(n, 1)
+            weight += w
+            total += w * v_lane
+            vehicles += n
+        if vehicles == 0:
             return 0, 0.0
-        removed = sum(float(_sumo.vehicle.getSpeed(v)) for v in incidents)
-        return remaining, (speed_mps * count - removed) / remaining
+        return vehicles, total / weight
 
     def _blocked_edges(self) -> dict[str, list[str]]:
         blocked: dict[str, list[str]] = {}
