@@ -1068,3 +1068,23 @@ from the repository root:
 - The night session is rescheduled for 22:00 with its cap of 2,762 requests, inside the 2,942 left.
 - The block A re-runs (NJ default session, then Mainz) are running from the archive mirror of
   `d699ac2`.
+
+## Block G result (2026-10-16, 15:47 EDT; orchestrator)
+
+**Decision: go, on the base setting** (`tau_l` 10 s, `m_on` 0.1); the fallback grid was not needed.
+Run from an archive of commit `1ede200` (the headers record `commit: null` because an archive has
+no `.git`; later blocks run from a detached git worktree so the header carries the SHA), measured
+artefact `results/jam/feed_process_afternoon.json` (sha256 `8f5430bf...`), session
+`afternoon_20261016_mainz`, `L_bar` 89.49 s, `D` 99.49 s, training seeds 1-5, 3,600 s, 20 episodes,
+298 s of wall time. Zero colliding vehicles, zero collision teleports, zero writes above the plan,
+zero `setMaxSpeed` read-back mismatches.
+
+| scenario | plan alone, jammed segment-min | oracle, jammed segment-min | paired difference (oracle - plan) | no 120 s jam spell | served flow, plan / oracle |
+|---|---|---|---|---|---|
+| B9 | 27.5, 29.5, 27.2, 19.2, 31.3 | 0.0, 0.0, 2.2, 0.2, 2.0 | -26.07 +/- 3.89 (2 SE) | plan 0 of 5, oracle 4 of 5 | 3,508-3,572 / 3,688-3,707 veh/h |
+| I_exit | 13.5, 18.3, 20.3, 21.0, 21.2 | 9.2, 8.5, 8.3, 8.2, 7.3 | -10.57 +/- 3.38 (2 SE) | 0 of 5 for both | 3,141-3,321 / 3,351-3,377 veh/h |
+
+On I_exit both arms start a jam spell 90 to 130 s after the request time (the incident vehicle was
+inserted 0.0 to 18.0 s after 900 s), so the oracle shortens the jam rather than preventing it, as
+the risk table anticipated. The oracle's correction was active on 36% to 38% of controlled
+vehicle-ticks on B9 and about 20% on I_exit.
