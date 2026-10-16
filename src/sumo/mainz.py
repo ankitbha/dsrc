@@ -12,9 +12,10 @@ truth. Training is centralized in the simulator and may use privileged informati
 execution reads only what a deployed vehicle can read. The reward is SRC's unchanged.
 
 The action is SRC's too: one speed from {30, 45, 60} km/h per super-segment per 60 s,
-written to every controlled vehicle on that segment as a DESIRED speed. SUMO bounds it
-by the car-following safe speed exactly as Vissim bounds `DesSpeed`, so the advisory is
-gated by local conditions rather than commanded through them.
+written to every controlled vehicle on that segment as its maximum speed (`ACTUATIONS`).
+The car-following model still chooses the speed under that cap, as Vissim does under
+`DesSpeed`, so the advisory is gated by local conditions rather than commanded through
+them.
 """
 from __future__ import annotations
 
@@ -40,6 +41,17 @@ SPEED_ACTIONS_KMH: tuple[float, ...] = (30.0, 45.0, 60.0)
 #: limit -- `inverted_tree` is 108 km/h, where a literal 30/45/60 would be a standing
 #: order to crawl rather than a speed advisory.
 SPEED_ACTION_FRACTIONS: tuple[float, ...] = (0.5, 0.75, 1.0)
+#: How an advisory reaches a controlled vehicle.
+#:
+#: `max_speed` (the default, plan Amendment 1) caps the vehicle's maximum speed with
+#: `setMaxSpeed`, which is what Vissim's `DesSpeed` is: the car-following model keeps
+#: choosing the speed, under the cap, so it still brakes for a stopped leader.
+#: `set_speed` is the actuation every result before the amendment was produced with:
+#: `setSpeed` under EIDM with a 1.0 s action step lets a controlled vehicle run into a
+#: stopped leader, and SUMO resolves the collision by teleporting the follower (76
+#: collision teleports on seed 16 in 2,500 s; none without control). It is kept only so
+#: the committed numbers can be reproduced.
+ACTUATIONS: tuple[str, ...] = ("max_speed", "set_speed")
 #: SRC's `FEEDBACK_STEP`.
 DECISION_INTERVAL_S: float = 60.0
 #: The density past which flow falls on THIS network, measured rather than adopted.
@@ -129,9 +141,14 @@ class MainzEnv:
         #: `controlled_index` over the schedule's departure order. Only controlled
         #: vehicles are commanded, released or held by the gate.
         penetration: float = 1.0,
+        #: One of `ACTUATIONS`.
+        actuation: str = "max_speed",
     ) -> None:
         if not 0.0 <= penetration <= 1.0:
             raise ValueError(f"penetration must lie in [0, 1], got {penetration}")
+        if actuation not in ACTUATIONS:
+            raise ValueError(f"actuation must be one of {ACTUATIONS}, got {actuation!r}")
+        self.actuation = actuation
         self.seed = seed
         self.penetration = penetration
         self.duration_s = duration_s
@@ -170,6 +187,15 @@ class MainzEnv:
         self._index: dict[str, int] | None = None
         self._controlled_ids: set[str] = set()
         self._load_controlled()
+        # Under `max_speed`, each capped vehicle's own maximum speed before its first
+        # cap, which `release` restores.
+        self._capped: dict[str, float] = {}
+        # Summed over every step since `reset`: vehicles SUMO reports colliding, and
+        # teleports started (all of them collision teleports, since jam teleports are
+        # off). `_in_teleport` holds the vehicles whose teleport has not ended.
+        self.colliding_vehicles = 0
+        self.collision_teleports = 0
+        self._in_teleport: set[str] = set()
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -192,6 +218,10 @@ class MainzEnv:
         ])
         self._running = True
         self.arrived_total = 0
+        self.colliding_vehicles = 0
+        self.collision_teleports = 0
+        self._in_teleport = set()
+        self._capped = {}
         self._load_controlled()  # drops any pulse a previous episode appended
         self._load_schedule()
         self._load_static()
@@ -375,11 +405,26 @@ class MainzEnv:
 
     def _advance(self, seconds: float) -> None:
         for _ in range(int(round(seconds / self.step_length_s))):
-            self._admit()
-            _sumo.simulationStep()
-            self.arrived_total += int(_sumo.simulation.getArrivedNumber())
+            self._step()
         self._update_rates()
         self._accumulate()
+
+    def _step(self) -> None:
+        """One simulation step: admit, step, and count arrivals, collisions and teleports."""
+        self._admit()
+        _sumo.simulationStep()
+        self.arrived_total += int(_sumo.simulation.getArrivedNumber())
+        self.colliding_vehicles += int(_sumo.simulation.getCollidingVehiclesNumber())
+        starting = _sumo.simulation.getStartingTeleportIDList()
+        self.collision_teleports += len(starting)
+        if starting or self._in_teleport:
+            self._in_teleport.update(starting)
+            self._in_teleport.difference_update(_sumo.simulation.getEndingTeleportIDList())
+            self._in_teleport.difference_update(_sumo.simulation.getArrivedIDList())
+
+    def in_teleport(self) -> int:
+        """Vehicles whose teleport started and has not ended: in no other count."""
+        return len(self._in_teleport)
 
     def advance_ticks(self, seconds: float, tick_s: float = 1.0,
                       on_tick: Callable[[float], None] | None = None) -> None:
@@ -401,9 +446,7 @@ class MainzEnv:
             raise ValueError(f"{seconds} s is not a whole number of {tick_s} s ticks")
         for _ in range(ticks):
             for _ in range(steps_per_tick):
-                self._admit()
-                _sumo.simulationStep()
-                self.arrived_total += int(_sumo.simulation.getArrivedNumber())
+                self._step()
             if on_tick is not None:
                 on_tick(float(_sumo.simulation.getTime()))
         self._update_rates()
@@ -439,11 +482,11 @@ class MainzEnv:
         self._previous = present
 
     def _command(self, actions: list[int] | np.ndarray) -> None:
-        """Write the advisory to controlled vehicles as a desired speed.
+        """Write the advisory to the controlled vehicles on each segment.
 
-        `setSpeed` is bounded by SUMO's car-following safe speed, so a vehicle whose
-        leader is slower than the advisory follows its leader. That is the local
-        safety gate, and it is the same semantics as Vissim's `DesSpeed`.
+        Under `max_speed` it is the vehicle's maximum speed, so a vehicle whose leader is
+        slower than the advisory follows its leader under the car-following model; that
+        is the local safety gate. See `ACTUATIONS` for the legacy `set_speed`.
         """
         for index, segment in enumerate(self.segments):
             fraction = SPEED_ACTION_FRACTIONS[int(actions[index])]
@@ -451,7 +494,16 @@ class MainzEnv:
                 target_mps = fraction * self._static[edge]["free_flow_kmh"] / 3.6
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
                     if self.controlled(vehicle):
-                        _sumo.vehicle.setSpeed(vehicle, target_mps)
+                        self._apply(vehicle, target_mps)
+
+    def _apply(self, vehicle: str, target_mps: float) -> None:
+        """Apply one advisory to one controlled vehicle under this env's actuation."""
+        if self.actuation == "max_speed":
+            if vehicle not in self._capped:
+                self._capped[vehicle] = float(_sumo.vehicle.getMaxSpeed(vehicle))
+            _sumo.vehicle.setMaxSpeed(vehicle, target_mps)
+        else:
+            _sumo.vehicle.setSpeed(vehicle, target_mps)
 
     def controlled_on_segments(self) -> list[tuple[str, str, int]]:
         """`(vehicle, edge, segment index)` for every controlled vehicle on a segment edge.
@@ -541,19 +593,29 @@ class MainzEnv:
         Vehicles not listed keep their last command, exactly as a vehicle that changes
         segment between two `step()` decisions does. `edge_of` gives each vehicle's edge
         when the caller already has it from an edge scan; otherwise it is read per
-        vehicle. Returns the number of `setSpeed` writes.
+        vehicle. Returns the number of writes.
         """
         for vehicle, fraction in mapping.items():
             edge = edge_of[vehicle] if edge_of is not None else _sumo.vehicle.getRoadID(vehicle)
-            _sumo.vehicle.setSpeed(vehicle, fraction * self._static[edge]["free_flow_kmh"] / 3.6)
+            self._apply(vehicle, fraction * self._static[edge]["free_flow_kmh"] / 3.6)
         return len(mapping)
 
     def release(self) -> None:
-        """Hand every controlled vehicle back to the car-following model."""
+        """Hand every controlled vehicle on a segment back to the car-following model.
+
+        Under `max_speed` a capped vehicle gets back the maximum speed it had before its
+        first cap, its type's; a vehicle never capped is not touched, so a run that never
+        advises, the no-control arm, makes no call at all.
+        """
         for segment in self.segments:
             for edge in segment:
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
-                    if self.controlled(vehicle):
+                    if not self.controlled(vehicle):
+                        continue
+                    if self.actuation == "max_speed":
+                        if vehicle in self._capped:
+                            _sumo.vehicle.setMaxSpeed(vehicle, self._capped.pop(vehicle))
+                    else:
                         _sumo.vehicle.setSpeed(vehicle, -1.0)
 
     # ------------------------------------------------------------------- state
@@ -737,6 +799,10 @@ class MainzEnv:
             "mean_vehicles": self.mean_vehicles(),
             "segments_over_critical": int((density > DENSITY_CRITICAL).sum()),
             "max_density": float(density.max()),
+            "colliding_vehicles": self.colliding_vehicles,
+            "collision_teleports": self.collision_teleports,
+            "in_teleport": self.in_teleport(),
+            "actuation": self.actuation,
         }
 
 

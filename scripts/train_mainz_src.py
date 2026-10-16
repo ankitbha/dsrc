@@ -61,7 +61,8 @@ SCENARIOS = {
 }
 
 
-def make_env(paths, *, seed, duration_s, features, step_length, gate_entries):
+def make_env(paths, *, seed, duration_s, features, step_length, gate_entries,
+             actuation="max_speed"):
     return MainzEnv(
         seed=seed, duration_s=duration_s, features=features,
         step_length_s=step_length, gate_entries=gate_entries,
@@ -69,6 +70,7 @@ def make_env(paths, *, seed, duration_s, features, step_length, gate_entries):
         route_file=REPO_ROOT / paths["gated_routes" if gate_entries else "routes"],
         segment_file=REPO_ROOT / paths["segments"],
         schedule_file=REPO_ROOT / paths["schedule"],
+        actuation=actuation,
     )
 
 
@@ -81,7 +83,7 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
                 duration_s: float, epsilon: float,
                 generator: torch.Generator | None, step_length: float = 1.0,
                 window_start_s: float = 0.0, gate_entries: bool = True,
-                paths=None) -> dict:
+                paths=None, actuation: str = "max_speed") -> dict:
     """One episode. Returns the trajectory and the outcome metrics.
 
     The controller acts from t=0 so it can prevent a jam rather than inherit one, but
@@ -89,7 +91,7 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
     """
     env = make_env(paths or SCENARIOS["mainz"], seed=seed, duration_s=duration_s,
                    features=features, step_length=step_length,
-                   gate_entries=gate_entries)
+                   gate_entries=gate_entries, actuation=actuation)
     states, actions, rewards = [], [], []
     marked = window_start_s <= 0.0
     try:
@@ -121,13 +123,16 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
         "space_mean_speed_kmh": metrics["space_mean_speed_kmh"],
         "mean_vehicles": metrics["mean_vehicles"],
         "held_at_entry": metrics["held_at_entry"],
+        "colliding_vehicles": metrics["colliding_vehicles"],
+        "collision_teleports": metrics["collision_teleports"],
     }
 
 
 def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
-             window_start_s=0.0, gate_entries=True, paths=None) -> dict:
+             window_start_s=0.0, gate_entries=True, paths=None,
+             actuation="max_speed") -> dict:
     runs = [run_episode(model, s, features, duration_s, 0.0, None, step_length,
-                        window_start_s, gate_entries, paths) for s in seeds]
+                        window_start_s, gate_entries, paths, actuation) for s in seeds]
     return {
         "return": statistics.fmean(r["return"] for r in runs),
         "arrived": statistics.fmean(r["arrived"] for r in runs),
@@ -136,6 +141,8 @@ def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
         "space_mean_speed_kmh": statistics.fmean(r["space_mean_speed_kmh"] for r in runs),
         "mean_vehicles": statistics.fmean(r["mean_vehicles"] for r in runs),
         "held_at_entry": statistics.fmean(r["held_at_entry"] for r in runs),
+        "colliding_vehicles": statistics.fmean(r["colliding_vehicles"] for r in runs),
+        "collision_teleports": statistics.fmean(r["collision_teleports"] for r in runs),
     }
 
 
@@ -246,7 +253,7 @@ def main() -> int:
 
 
 def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
-                        window_start_s=0.0, paths=None) -> dict:
+                        window_start_s=0.0, paths=None, actuation="max_speed") -> dict:
     """Every vehicle left to the car-following model, on the same seeds.
 
     NO CONTROL RUNS WITHOUT THE ENTRY GATE, and that is deliberate rather than an
@@ -267,7 +274,8 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
     runs = []
     for seed in seeds:
         env = make_env(paths or SCENARIOS["mainz"], seed=seed, duration_s=duration_s,
-                       features=features, step_length=step_length, gate_entries=False)
+                       features=features, step_length=step_length, gate_entries=False,
+                       actuation=actuation)
         total = 0.0
         marked = window_start_s <= 0.0
         try:
@@ -292,6 +300,8 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
         "space_mean_speed_kmh": statistics.fmean(r["space_mean_speed_kmh"] for r in runs),
         "mean_vehicles": statistics.fmean(r["mean_vehicles"] for r in runs),
         "held_at_entry": statistics.fmean(r["held_at_entry"] for r in runs),
+        "colliding_vehicles": statistics.fmean(r["colliding_vehicles"] for r in runs),
+        "collision_teleports": statistics.fmean(r["collision_teleports"] for r in runs),
     }
 
 

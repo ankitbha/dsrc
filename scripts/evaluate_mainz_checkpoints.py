@@ -101,6 +101,9 @@ EPISODE_FIELDS: tuple[str, ...] = (
     "flow", "arrived", "return", "mean_speed_kmh", "space_mean_speed_kmh",
     "mean_vehicles", "held_at_entry",
 )
+#: Carried when the episode reports them, which every episode since plan Amendment 1
+#: does: the vehicles SUMO reported colliding and the collision teleports.
+OPTIONAL_EPISODE_FIELDS: tuple[str, ...] = ("colliding_vehicles", "collision_teleports")
 
 
 # --------------------------------------------------------------------- checkpoints
@@ -442,7 +445,10 @@ def _compact_metrics(metrics: dict) -> dict:
     tensors `td_loss` trains on -- which this evaluator never trains with and must
     not carry into a JSON file.
     """
-    return {field: metrics[field] for field in EPISODE_FIELDS}
+    compact = {field: metrics[field] for field in EPISODE_FIELDS}
+    compact.update({field: metrics[field] for field in OPTIONAL_EPISODE_FIELDS
+                    if field in metrics})
+    return compact
 
 
 def _episode_record(arm: str, seed: int, metrics: dict) -> dict:

@@ -220,16 +220,45 @@ def model():
     return _here()
 
 
-def test_published_reproduces_the_committed_here_row_on_seed_16(model):
+@pytest.mark.parametrize("seed", [16, 17, 18])
+def test_published_equals_the_step_path_under_the_max_speed_cap(model, seed):
+    """Attack point 1 under Amendment 1: the per-tick path is the `step()` path."""
+    from src.sumo.mainz import HERE_FEATURES
+    from train_mainz_src import SCENARIOS, run_episode
+
+    ticked = run_feed_episode(model, seed, "mainz", Mode.published(), duration_s=2500.0)
+    stepped = run_episode(model, seed, HERE_FEATURES, 2500.0, 0.0, None, 0.5, 900.0, True,
+                          SCENARIOS["mainz"])
+    for field in ("flow", "arrived", "held_at_entry", "return", "mean_vehicles",
+                  "space_mean_speed_kmh", "mean_speed_kmh", "colliding_vehicles",
+                  "collision_teleports"):
+        assert ticked[field] == stepped[field], field
+    assert ticked["actuation"] == "max_speed"
+    assert ticked["delta_mean"] == 0.0
+    assert all(sample["delta"] in (0.0, None) for sample in ticked["trace"])
+    assert ticked["trace"][-1]["t"] == 2520.0
+    assert ticked["trace"][-1]["colliding_vehicles"] == ticked["colliding_vehicles"]
+
+
+def test_a_controlled_2500_s_episode_on_seed_16_under_the_cap_never_collides(model):
     result = run_feed_episode(model, 16, "mainz", Mode.published(), duration_s=2500.0)
+    assert result["colliding_vehicles"] == 0
+    assert result["collision_teleports"] == 0
+    assert result["in_teleport"] == 0
+    assert result["set_speed_writes"] > 10_000
+
+
+def test_the_legacy_set_speed_actuation_reproduces_the_committed_row_and_its_collisions(model):
+    """The committed `here` row (3,751.11 veh/h on seed 16) needed 76 collision teleports."""
+    result = run_feed_episode(model, 16, "mainz", Mode.published(), duration_s=2500.0,
+                              actuation="set_speed")
     assert result["flow"] == pytest.approx(3751.1111111111113, abs=1e-9)
     assert result["arrived"] == 1989
     assert result["held_at_entry"] == 56
     assert result["return"] == 177.89599609375
     assert result["mean_vehicles"] == 896.2592592592592
-    assert result["delta_mean"] == 0.0
-    assert all(sample["delta"] in (0.0, None) for sample in result["trace"])
-    assert result["trace"][-1]["t"] == 2520.0
+    assert result["collision_teleports"] == 76
+    assert result["colliding_vehicles"] == 152
 
 
 def test_no_control_reproduces_the_committed_row_on_seed_16(model):
@@ -239,6 +268,11 @@ def test_no_control_reproduces_the_committed_row_on_seed_16(model):
     assert result["return"] == 124.62904697656631
     assert result["set_speed_writes"] == 0
     assert all(sample["held"] == 0 for sample in result["trace"])
+    assert result["colliding_vehicles"] == 0 and result["collision_teleports"] == 0
+    # The pending term of the drain condition is live: 32 vehicles still wait to be
+    # inserted at the end, and the trace's last sample says so (mutant M4).
+    assert result["pending"] == 32
+    assert result["trace"][-1]["pending"] == 32
 
 
 def test_inject_delta_one_differs_from_published_at_1200_s(model):

@@ -115,6 +115,8 @@ class Context:
     #: Flow and disagreement are scored from here; a 600 s smoke scores from the
     #: warm-up's end so its disagreement and age are measured at all.
     window_start_s: float = 900.0
+    #: How advice reaches a vehicle (`src.sumo.mainz.ACTUATIONS`); Amendment 1's cap.
+    actuation: str = "max_speed"
     smoke: bool = False
     feed: dict[str, Any] = field(default_factory=dict)  # block A's parameters
 
@@ -393,7 +395,8 @@ def episode_runner(model, context: Context) -> EpisodeFn:
             pulse = {"site": site, "n": n, "start_s": start, "duration_s": duration}
         return run_feed_episode(model, spec.seed, spec.scenario, mode, feed_process=feed,
                                 penetration=spec.penetration, duration_s=spec.duration_s,
-                                pulse=pulse, window_start_s=context.window_start_s)
+                                pulse=pulse, window_start_s=context.window_start_s,
+                                actuation=context.actuation)
 
     return run
 
@@ -773,6 +776,20 @@ def _inserted_differences(episodes: list[dict], results_dir: Path) -> dict[str, 
     return {"checked": checked, "mismatched": mismatched, "without_baseline": unmatched}
 
 
+def collision_counts(episodes: list[dict]) -> dict[str, Any]:
+    """Plan Amendment 1: no reported number may silently contain collisions."""
+    controlled = [r for r in episodes if r["arm"] != "no_control"]
+    return {
+        "controlled_episodes_with_collisions": sum(
+            1 for r in controlled
+            if r.get("colliding_vehicles", 0) or r.get("collision_teleports", 0)),
+        "controlled_episodes": len(controlled),
+        "colliding_vehicles_total": sum(r.get("colliding_vehicles", 0) for r in episodes),
+        "collision_teleports_total": sum(r.get("collision_teleports", 0) for r in episodes),
+        "actuations": sorted({r.get("actuation", "unrecorded") for r in episodes}),
+    }
+
+
 def summarize(block: str, results_dir: Path, traces_dir: Path,
               context: Context) -> dict[str, Any]:
     headers, episodes = read_block(results_dir, block)
@@ -797,6 +814,7 @@ def summarize(block: str, results_dir: Path, traces_dir: Path,
         seeds_by_arm.setdefault(f"{record['arm']}/{record['variant']}", set()).add(record["seed"])
     summary.update({
         "episodes": len(episodes),
+        **collision_counts(episodes),
         "seeds_by_arm": {k: sorted(v) for k, v in sorted(seeds_by_arm.items())},
         "identical_seed_lists": len({tuple(sorted(v)) for v in seeds_by_arm.values()}) <= 1,
         "headers": [{k: h.get(k) for k in ("started_wall", "commit", "dirty", "sumo_version",
@@ -829,6 +847,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="simulation time of the replayed process's first stamp, moved "
                              "forward to that stamp's second of the minute")
     parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
+    parser.add_argument("--actuation", choices=("max_speed", "set_speed"),
+                        default="max_speed",
+                        help="max_speed caps the vehicle's maximum speed (Amendment 1); "
+                             "set_speed is the legacy actuation that collides")
     parser.add_argument("--results-dir", default="results/feed")
     parser.add_argument("--traces-dir", default="outputs/feed/traces")
     parser.add_argument("--resume", action="store_true")
@@ -864,7 +886,7 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
     context = Context(seeds=tuple(args.seeds), duration_s=args.duration_s,
                       artefact=_resolve(args.feed_artefact), session=args.feed_session,
                       allow_placeholder=args.allow_placeholder, start_s=args.start_s,
-                      smoke=args.smoke)
+                      smoke=args.smoke, actuation=args.actuation)
     if args.smoke:
         context.seeds = (SMOKE_SEED,)
         context.duration_s = SMOKE_DURATION_S

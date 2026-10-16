@@ -7,12 +7,13 @@ a vehicle when its applied version changes, and records disagreement, snapshot a
 10 s trace.
 
 What a write is, in every mode. A controlled vehicle on a segment edge is written
-`a_k[e] * free-flow speed` at the tick its applied version changes to `k`; a vehicle
-whose version did not change is not written and keeps its last command, and a vehicle on
-a junction or an unsegmented edge at that tick is not written either. That is exactly
-what `MainzEnv.step()` does at a decision instant, so the `published` mode, where every
+`a_k[e] * free-flow speed` at the tick its applied version changes to `k`, through the
+env's actuation (a maximum-speed cap since plan Amendment 1); a vehicle whose version
+did not change is not written and keeps its last command, and a vehicle on a junction
+or an unsegmented edge at that tick is not written either. That is exactly what
+`MainzEnv.step()` does at a decision instant, so the `published` mode, where every
 vehicle's version changes at the decision instants and nowhere else, writes the same
-vehicles the same speeds at the same instants and reproduces the published `here` arm.
+vehicles the same speeds at the same instants and equals the `step()` path.
 Writes start at the warm-up's end (`control_start_s`), when every vehicle on a segment
 is written its current version once; before that the feed is read but nothing is
 commanded, as in the published arm.
@@ -401,6 +402,10 @@ class FeedEngine:
             "pending": self.env.pending(),
             "running": self.env.running(),
             "arrived": self.env.arrived_total,
+            # Cumulative since reset: vehicles reported colliding, and collision
+            # teleports started (plan Amendment 1).
+            "colliding_vehicles": getattr(self.env, "colliding_vehicles", 0),
+            "collision_teleports": getattr(self.env, "collision_teleports", 0),
             "versions": {str(k): n for k, n in sorted(histogram.items())},
             "delta": _clean(delta),
             "command_delta": _clean(command),
@@ -469,7 +474,8 @@ def run_feed_episode(model, seed: int, scenario: str | dict = "mainz",
                      trace_every_s: float = 10.0, pulse: dict | None = None,
                      step_length_s: float = 0.5, window_start_s: float = 900.0,
                      features: tuple[str, ...] = HERE_FEATURES,
-                     record_trace: bool = True) -> dict[str, Any]:
+                     record_trace: bool = True,
+                     actuation: str = "max_speed") -> dict[str, Any]:
     """One episode of `mode`; returns `run_episode`'s metrics plus the feed's.
 
     `pulse`, when given, is `inject_pulse`'s keyword arguments (site, n, start_s,
@@ -492,7 +498,7 @@ def run_feed_episode(model, seed: int, scenario: str | dict = "mainz",
                    route_file=REPO_ROOT / paths["gated_routes" if gate else "routes"],
                    segment_file=REPO_ROOT / paths["segments"],
                    schedule_file=REPO_ROOT / paths["schedule"],
-                   penetration=penetration)
+                   penetration=penetration, actuation=actuation)
     decisions = decision_instants(env.warmup_s, duration_s)
     end_s = decisions[-1] + DECISION_INTERVAL_S if decisions else duration_s
     if mode.kind == "rule" and feed_process is None:
@@ -546,6 +552,10 @@ def run_feed_episode(model, seed: int, scenario: str | dict = "mainz",
         "pending": metrics["waiting_to_enter"],
         "running": metrics["running"],
         "admitted": metrics["admitted"],
+        "actuation": actuation,
+        "colliding_vehicles": metrics["colliding_vehicles"],
+        "collision_teleports": metrics["collision_teleports"],
+        "in_teleport": metrics["in_teleport"],
         "feed": engine.feed.describe() if engine.feed is not None else None,
         "pulse": inserted_pulse,
         **engine.summary(),

@@ -182,6 +182,9 @@ def test_one_600_s_episode_of_each_block_writes_a_line_a_trace_and_a_summary(blo
     assert trace and trace[-1]["t"] >= 600.0
     summary = json.loads((tmp_path / "results" / f"{block}_summary.json").read_text())
     assert summary["episodes"] == 1 and summary["smoke"] is True
+    assert episodes[0]["actuation"] == "max_speed"
+    assert summary["controlled_episodes_with_collisions"] == 0
+    assert "colliding_vehicles" in trace[-1] and "collision_teleports" in trace[-1]
 
 
 def test_a_smoke_run_never_writes_into_the_real_results(tmp_path, monkeypatch):
@@ -305,3 +308,26 @@ class TestSummariesOnSyntheticTraces:
         assert summary["rows"]["version_keyed/D+0"]["paired_vs_published"]["gain"] == -10.0
         assert summary["placeholder"] is True
         assert [row["D_minus_L_bar"] for row in summary["lemma"]] == [-20, -5, 0, 5, 10]
+
+
+def test_every_summary_counts_the_controlled_episodes_that_collided(tmp_path):
+    rows = [{"type": "episode", "key": f"C/penetration/p0.5/{seed}", "arm": "penetration",
+             "variant": "p0.5", "seed": seed, "flow": 3000.0, "actuation": "max_speed",
+             "colliding_vehicles": c, "collision_teleports": t}
+            for seed, c, t in ((16, 0, 0), (17, 4, 2), (18, 0, 1))]
+    (tmp_path / "C.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    summary = rfe.summarize("C", tmp_path, tmp_path, rfe.Context())
+    assert summary["controlled_episodes_with_collisions"] == 2
+    assert summary["controlled_episodes"] == 3
+    assert summary["colliding_vehicles_total"] == 4
+    assert summary["collision_teleports_total"] == 3
+    assert summary["actuations"] == ["max_speed"]
+
+
+def test_no_control_episodes_are_not_counted_as_controlled():
+    counts = rfe.collision_counts([
+        {"arm": "no_control", "colliding_vehicles": 2, "collision_teleports": 1},
+        {"arm": "here", "colliding_vehicles": 0, "collision_teleports": 0}])
+    assert counts["controlled_episodes_with_collisions"] == 0
+    assert counts["controlled_episodes"] == 1
+    assert counts["actuations"] == ["unrecorded"]
