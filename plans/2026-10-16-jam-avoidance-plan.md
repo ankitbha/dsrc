@@ -1279,3 +1279,19 @@ feed-only lookahead on B9:** its jam time fell from 79.0 (D = 0) to 55.1 (99.5 s
 two-layer controller served 160 to 292 veh/h more at every delay. On I_exit both rise with D and the
 two-layer controller is below the lookahead at every delay (-9.9 to -14.2, all resolved). The cause of
 the lookahead's improvement with delay on B9 was not identified.
+
+**Blocks P and K (2026-10-17, to 06:03 EDT, at `c03cca5`; the chain ended with the worktree clean).**
+Block K: 90 episodes, zero collisions. Block P: 120 episodes, **one controlled episode with 2
+colliding vehicles and 1 collision teleport: the plan-alone arm at penetration 0.75, B9, seed 23**
+(jam 106.3 segment-minutes, flow 3,550 veh/h). That arm is not one of the paper's three; every
+two-layer episode in P and K had zero collisions. It breaks the program's zero-collision requirement
+and is an open item for the author: the validator round cap is reached, so it was not diagnosed (the
+mixed fleet at 0.75 is the only place it appears; under `setMaxSpeed` at penetration 1.0, 1,200+
+controlled episodes had none).
+Two-layer controller, paired over seeds 16-30:
+- penetration 0.75 against no control: B9 jam -149.9 +/- 11.7, I_exit -97.9 +/- 14.7 segment-minutes,
+  flow +119 and +112 veh/h; penetration 0.5: **B9 +37.3 +/- 15.2 (worse than no control)**, I_exit
+  +27.9 +/- 27.6 (not resolved), flow -136 and -134 veh/h.
+- camera distance scale against the lookahead: b 0.8, B9 -9.7 +/- 23.8 (not resolved), I_exit
+  -15.3 +/- 1.6; b 1.25, B9 -42.8 +/- 10.0, I_exit -11.1 +/- 1.9; half the pair spread, B9 -32.8 +/-
+  22.5, I_exit -14.4 +/- 2.0; served flow above the lookahead's by 210 to 298 veh/h in every variant.
