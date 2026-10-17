@@ -1,0 +1,992 @@
+{
+ "block": "T_dagger",
+ "rows": {
+  "learned/th0.5_dagger/B5": {
+   "arm": "learned",
+   "variant": "th0.5_dagger",
+   "scenario": "B5",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 10,
+   "km_onset": {
+    "times": [
+     2700.0
+    ],
+    "survival": [
+     1.0
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_onset_median_s": null,
+   "jam_time_min_mean": 4.916666666666666,
+   "jam_time_min_900_3600_mean": 4.916666666666666,
+   "flow_mean": 3553.6,
+   "held_min_mean": 169.7,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 0.2,
+   "km_drain": {
+    "times": [
+     1590.0,
+     1900.0,
+     2100.0
+    ],
+    "survival": [
+     0.9,
+     0.7999999999999999,
+     0.7999999999999999
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_drain_median_s": null,
+   "active_share_mean": 0.10343610023546497,
+   "active_changing_share_mean": 0.0547288936145809,
+   "return_mean": 333.30955963134767,
+   "wall_s_mean": 15.884826898574829,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 9.0,
+     "jam_time_min_900_3600": 9.0,
+     "onset_s": null,
+     "flow": 3464.0,
+     "prevented": true
+    },
+    "2": {
+     "jam_time_min": 0.16666666666666666,
+     "jam_time_min_900_3600": 0.16666666666666666,
+     "onset_s": null,
+     "flow": 3698.6666666666665,
+     "prevented": true
+    },
+    "3": {
+     "jam_time_min": 6.5,
+     "jam_time_min_900_3600": 6.5,
+     "onset_s": null,
+     "flow": 3488.0,
+     "prevented": true
+    },
+    "4": {
+     "jam_time_min": 9.333333333333334,
+     "jam_time_min_900_3600": 9.333333333333334,
+     "onset_s": null,
+     "flow": 3481.3333333333335,
+     "prevented": true
+    },
+    "5": {
+     "jam_time_min": 0.5,
+     "jam_time_min_900_3600": 0.5,
+     "onset_s": null,
+     "flow": 3653.3333333333335,
+     "prevented": true
+    },
+    "6": {
+     "jam_time_min": 7.5,
+     "jam_time_min_900_3600": 7.5,
+     "onset_s": null,
+     "flow": 3472.0,
+     "prevented": true
+    },
+    "7": {
+     "jam_time_min": 1.5,
+     "jam_time_min_900_3600": 1.5,
+     "onset_s": null,
+     "flow": 3697.3333333333335,
+     "prevented": true
+    },
+    "8": {
+     "jam_time_min": 5.666666666666667,
+     "jam_time_min_900_3600": 5.666666666666667,
+     "onset_s": null,
+     "flow": 3474.6666666666665,
+     "prevented": true
+    },
+    "9": {
+     "jam_time_min": 6.0,
+     "jam_time_min_900_3600": 6.0,
+     "onset_s": null,
+     "flow": 3550.6666666666665,
+     "prevented": true
+    },
+    "10": {
+     "jam_time_min": 3.0,
+     "jam_time_min_900_3600": 3.0,
+     "onset_s": null,
+     "flow": 3556.0,
+     "prevented": true
+    }
+   }
+  },
+  "learned/th0.5_dagger/B7.5": {
+   "arm": "learned",
+   "variant": "th0.5_dagger",
+   "scenario": "B7.5",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 3,
+   "km_onset": {
+    "times": [
+     1210.0,
+     1310.0,
+     1380.0,
+     1580.0,
+     1590.0,
+     1800.0,
+     2700.0
+    ],
+    "survival": [
+     0.9,
+     0.7999999999999999,
+     0.7,
+     0.6,
+     0.4,
+     0.30000000000000004,
+     0.30000000000000004
+    ],
+    "median": 1590.0,
+    "n": 10
+   },
+   "km_onset_median_s": 1590.0,
+   "jam_time_min_mean": 14.916666666666666,
+   "jam_time_min_900_3600_mean": 14.916666666666666,
+   "flow_mean": 3528.5333333333338,
+   "held_min_mean": 1396.05,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 0.0,
+   "km_drain": {
+    "times": [
+     2400.0
+    ],
+    "survival": [
+     1.0
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_drain_median_s": null,
+   "active_share_mean": 0.1923436834255055,
+   "active_changing_share_mean": 0.093904469340129,
+   "return_mean": 214.14484329223632,
+   "wall_s_mean": 17.90627977848053,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 30.0,
+     "jam_time_min_900_3600": 30.0,
+     "onset_s": 2110.0,
+     "flow": 3422.6666666666665,
+     "prevented": false
+    },
+    "2": {
+     "jam_time_min": 16.666666666666668,
+     "jam_time_min_900_3600": 16.666666666666668,
+     "onset_s": 2210.0,
+     "flow": 3552.0,
+     "prevented": false
+    },
+    "3": {
+     "jam_time_min": 5.666666666666667,
+     "jam_time_min_900_3600": 5.666666666666667,
+     "onset_s": null,
+     "flow": 3584.0,
+     "prevented": true
+    },
+    "4": {
+     "jam_time_min": 7.5,
+     "jam_time_min_900_3600": 7.5,
+     "onset_s": null,
+     "flow": 3570.6666666666665,
+     "prevented": true
+    },
+    "5": {
+     "jam_time_min": 25.333333333333332,
+     "jam_time_min_900_3600": 25.333333333333332,
+     "onset_s": 2280.0,
+     "flow": 3465.3333333333335,
+     "prevented": false
+    },
+    "6": {
+     "jam_time_min": 9.5,
+     "jam_time_min_900_3600": 9.5,
+     "onset_s": 2490.0,
+     "flow": 3529.3333333333335,
+     "prevented": false
+    },
+    "7": {
+     "jam_time_min": 17.666666666666668,
+     "jam_time_min_900_3600": 17.666666666666668,
+     "onset_s": 2700.0,
+     "flow": 3517.3333333333335,
+     "prevented": false
+    },
+    "8": {
+     "jam_time_min": 15.0,
+     "jam_time_min_900_3600": 15.0,
+     "onset_s": 2490.0,
+     "flow": 3534.6666666666665,
+     "prevented": false
+    },
+    "9": {
+     "jam_time_min": 9.833333333333334,
+     "jam_time_min_900_3600": 9.833333333333334,
+     "onset_s": 2480.0,
+     "flow": 3594.6666666666665,
+     "prevented": false
+    },
+    "10": {
+     "jam_time_min": 12.0,
+     "jam_time_min_900_3600": 12.0,
+     "onset_s": null,
+     "flow": 3514.6666666666665,
+     "prevented": true
+    }
+   }
+  },
+  "learned/th0.5_dagger/B9": {
+   "arm": "learned",
+   "variant": "th0.5_dagger",
+   "scenario": "B9",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 1,
+   "km_onset": {
+    "times": [
+     970.0,
+     1170.0,
+     1230.0,
+     1290.0,
+     1340.0,
+     1360.0,
+     1390.0,
+     1440.0,
+     1580.0,
+     2700.0
+    ],
+    "survival": [
+     0.9,
+     0.7999999999999999,
+     0.7,
+     0.6,
+     0.5,
+     0.4,
+     0.30000000000000004,
+     0.20000000000000004,
+     0.10000000000000002,
+     0.10000000000000002
+    ],
+    "median": 1340.0,
+    "n": 10
+   },
+   "km_onset_median_s": 1340.0,
+   "jam_time_min_mean": 32.11666666666667,
+   "jam_time_min_900_3600_mean": 32.11666666666667,
+   "flow_mean": 3545.4666666666662,
+   "held_min_mean": 2426.2833333333333,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 0.0,
+   "km_drain": {
+    "times": [
+     2400.0
+    ],
+    "survival": [
+     1.0
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_drain_median_s": null,
+   "active_share_mean": 0.25798294954837653,
+   "active_changing_share_mean": 0.11090525024818736,
+   "return_mean": 92.67717113494874,
+   "wall_s_mean": 19.787780857086183,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 18.833333333333332,
+     "jam_time_min_900_3600": 18.833333333333332,
+     "onset_s": 2260.0,
+     "flow": 3617.3333333333335,
+     "prevented": false
+    },
+    "2": {
+     "jam_time_min": 30.166666666666668,
+     "jam_time_min_900_3600": 30.166666666666668,
+     "onset_s": 2290.0,
+     "flow": 3564.0,
+     "prevented": false
+    },
+    "3": {
+     "jam_time_min": 32.666666666666664,
+     "jam_time_min_900_3600": 32.666666666666664,
+     "onset_s": 2130.0,
+     "flow": 3528.0,
+     "prevented": false
+    },
+    "4": {
+     "jam_time_min": 51.166666666666664,
+     "jam_time_min_900_3600": 51.166666666666664,
+     "onset_s": 2070.0,
+     "flow": 3474.6666666666665,
+     "prevented": false
+    },
+    "5": {
+     "jam_time_min": 25.833333333333332,
+     "jam_time_min_900_3600": 25.833333333333332,
+     "onset_s": 2340.0,
+     "flow": 3572.0,
+     "prevented": false
+    },
+    "6": {
+     "jam_time_min": 56.166666666666664,
+     "jam_time_min_900_3600": 56.166666666666664,
+     "onset_s": 1870.0,
+     "flow": 3409.3333333333335,
+     "prevented": false
+    },
+    "7": {
+     "jam_time_min": 42.0,
+     "jam_time_min_900_3600": 42.0,
+     "onset_s": 2190.0,
+     "flow": 3528.0,
+     "prevented": false
+    },
+    "8": {
+     "jam_time_min": 31.166666666666668,
+     "jam_time_min_900_3600": 31.166666666666668,
+     "onset_s": 2240.0,
+     "flow": 3556.0,
+     "prevented": false
+    },
+    "9": {
+     "jam_time_min": 14.0,
+     "jam_time_min_900_3600": 14.0,
+     "onset_s": null,
+     "flow": 3601.3333333333335,
+     "prevented": true
+    },
+    "10": {
+     "jam_time_min": 19.166666666666668,
+     "jam_time_min_900_3600": 19.166666666666668,
+     "onset_s": 2480.0,
+     "flow": 3604.0,
+     "prevented": false
+    }
+   }
+  },
+  "learned/th0.5_dagger/BG": {
+   "arm": "learned",
+   "variant": "th0.5_dagger",
+   "scenario": "BG",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 10,
+   "km_onset": {
+    "times": [
+     2700.0
+    ],
+    "survival": [
+     1.0
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_onset_median_s": null,
+   "jam_time_min_mean": 0.13333333333333333,
+   "jam_time_min_900_3600_mean": 0.13333333333333333,
+   "flow_mean": 3441.2,
+   "held_min_mean": 22.0,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 1.0,
+   "km_drain": {
+    "times": [
+     140.0
+    ],
+    "survival": [
+     0.0
+    ],
+    "median": 140.0,
+    "n": 10
+   },
+   "km_drain_median_s": 140.0,
+   "active_share_mean": 0.02967709274894506,
+   "active_changing_share_mean": 0.02967709274894506,
+   "return_mean": 535.4850189208985,
+   "wall_s_mean": 13.348999714851379,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3482.6666666666665,
+     "prevented": true
+    },
+    "2": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3394.6666666666665,
+     "prevented": true
+    },
+    "3": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3457.3333333333335,
+     "prevented": true
+    },
+    "4": {
+     "jam_time_min": 1.0,
+     "jam_time_min_900_3600": 1.0,
+     "onset_s": null,
+     "flow": 3418.6666666666665,
+     "prevented": true
+    },
+    "5": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3462.6666666666665,
+     "prevented": true
+    },
+    "6": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3484.0,
+     "prevented": true
+    },
+    "7": {
+     "jam_time_min": 0.16666666666666666,
+     "jam_time_min_900_3600": 0.16666666666666666,
+     "onset_s": null,
+     "flow": 3425.3333333333335,
+     "prevented": true
+    },
+    "8": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3476.0,
+     "prevented": true
+    },
+    "9": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3428.0,
+     "prevented": true
+    },
+    "10": {
+     "jam_time_min": 0.16666666666666666,
+     "jam_time_min_900_3600": 0.16666666666666666,
+     "onset_s": null,
+     "flow": 3382.6666666666665,
+     "prevented": true
+    }
+   }
+  },
+  "learned/th0.5_dagger/I_exit": {
+   "arm": "learned",
+   "variant": "th0.5_dagger",
+   "scenario": "I_exit",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 0,
+   "km_onset": {
+    "times": [
+     80.0,
+     100.0,
+     120.0,
+     130.0,
+     150.0,
+     170.0
+    ],
+    "survival": [
+     0.9,
+     0.7000000000000001,
+     0.5000000000000001,
+     0.30000000000000004,
+     0.10000000000000002,
+     0.0
+    ],
+    "median": 130.0,
+    "n": 10
+   },
+   "km_onset_median_s": 130.0,
+   "jam_time_min_mean": 16.8,
+   "jam_time_min_900_3600_mean": 16.8,
+   "flow_mean": 3279.8666666666663,
+   "held_min_mean": 22.0,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 1.0,
+   "km_drain": {
+    "times": [
+     340.0,
+     420.0,
+     470.0,
+     490.0,
+     520.0,
+     590.0,
+     620.0,
+     680.0,
+     1760.0,
+     2030.0
+    ],
+    "survival": [
+     0.9,
+     0.7999999999999999,
+     0.7,
+     0.6,
+     0.5,
+     0.4,
+     0.30000000000000004,
+     0.20000000000000004,
+     0.10000000000000002,
+     0.0
+    ],
+    "median": 520.0,
+    "n": 10
+   },
+   "km_drain_median_s": 520.0,
+   "active_share_mean": 0.07757641302304992,
+   "active_changing_share_mean": 0.06135436165174547,
+   "return_mean": 167.82710952758788,
+   "wall_s_mean": 15.849619364738464,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 14.666666666666666,
+     "jam_time_min_900_3600": 14.666666666666666,
+     "onset_s": 1000.0,
+     "flow": 3312.0,
+     "prevented": false
+    },
+    "2": {
+     "jam_time_min": 19.666666666666668,
+     "jam_time_min_900_3600": 19.666666666666668,
+     "onset_s": 1020.0,
+     "flow": 3196.0,
+     "prevented": false
+    },
+    "3": {
+     "jam_time_min": 12.333333333333334,
+     "jam_time_min_900_3600": 12.333333333333334,
+     "onset_s": 980.0,
+     "flow": 3369.3333333333335,
+     "prevented": false
+    },
+    "4": {
+     "jam_time_min": 21.666666666666668,
+     "jam_time_min_900_3600": 21.666666666666668,
+     "onset_s": 1070.0,
+     "flow": 3237.3333333333335,
+     "prevented": false
+    },
+    "5": {
+     "jam_time_min": 22.5,
+     "jam_time_min_900_3600": 22.5,
+     "onset_s": 1000.0,
+     "flow": 3217.3333333333335,
+     "prevented": false
+    },
+    "6": {
+     "jam_time_min": 23.166666666666668,
+     "jam_time_min_900_3600": 23.166666666666668,
+     "onset_s": 1020.0,
+     "flow": 3173.3333333333335,
+     "prevented": false
+    },
+    "7": {
+     "jam_time_min": 15.833333333333334,
+     "jam_time_min_900_3600": 15.833333333333334,
+     "onset_s": 1050.0,
+     "flow": 3328.0,
+     "prevented": false
+    },
+    "8": {
+     "jam_time_min": 12.5,
+     "jam_time_min_900_3600": 12.5,
+     "onset_s": 1030.0,
+     "flow": 3364.0,
+     "prevented": false
+    },
+    "9": {
+     "jam_time_min": 12.833333333333334,
+     "jam_time_min_900_3600": 12.833333333333334,
+     "onset_s": 1030.0,
+     "flow": 3365.3333333333335,
+     "prevented": false
+    },
+    "10": {
+     "jam_time_min": 12.833333333333334,
+     "jam_time_min_900_3600": 12.833333333333334,
+     "onset_s": 1050.0,
+     "flow": 3236.0,
+     "prevented": false
+    }
+   }
+  },
+  "learned/th0.5_dagger/I_mid": {
+   "arm": "learned",
+   "variant": "th0.5_dagger",
+   "scenario": "I_mid",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 10,
+   "km_onset": {
+    "times": [
+     2700.0
+    ],
+    "survival": [
+     1.0
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_onset_median_s": null,
+   "jam_time_min_mean": 5.95,
+   "jam_time_min_900_3600_mean": 5.95,
+   "flow_mean": 3314.1333333333337,
+   "held_min_mean": 22.0,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 1.0,
+   "km_drain": {
+    "times": [
+     130.0,
+     140.0,
+     150.0,
+     1020.0,
+     1790.0
+    ],
+    "survival": [
+     0.7,
+     0.39999999999999997,
+     0.19999999999999998,
+     0.09999999999999999,
+     0.0
+    ],
+    "median": 140.0,
+    "n": 10
+   },
+   "km_drain_median_s": 140.0,
+   "active_share_mean": 0.0571567203093787,
+   "active_changing_share_mean": 0.04918544563593842,
+   "return_mean": 281.1339584350586,
+   "wall_s_mean": 15.287590980529785,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 6.5,
+     "jam_time_min_900_3600": 6.5,
+     "onset_s": null,
+     "flow": 3250.6666666666665,
+     "prevented": true
+    },
+    "2": {
+     "jam_time_min": 3.6666666666666665,
+     "jam_time_min_900_3600": 3.6666666666666665,
+     "onset_s": null,
+     "flow": 3344.0,
+     "prevented": true
+    },
+    "3": {
+     "jam_time_min": 6.666666666666667,
+     "jam_time_min_900_3600": 6.666666666666667,
+     "onset_s": null,
+     "flow": 3233.3333333333335,
+     "prevented": true
+    },
+    "4": {
+     "jam_time_min": 4.0,
+     "jam_time_min_900_3600": 4.0,
+     "onset_s": null,
+     "flow": 3357.3333333333335,
+     "prevented": true
+    },
+    "5": {
+     "jam_time_min": 1.8333333333333333,
+     "jam_time_min_900_3600": 1.8333333333333333,
+     "onset_s": null,
+     "flow": 3420.0,
+     "prevented": true
+    },
+    "6": {
+     "jam_time_min": 7.833333333333333,
+     "jam_time_min_900_3600": 7.833333333333333,
+     "onset_s": null,
+     "flow": 3282.6666666666665,
+     "prevented": true
+    },
+    "7": {
+     "jam_time_min": 7.333333333333333,
+     "jam_time_min_900_3600": 7.333333333333333,
+     "onset_s": null,
+     "flow": 3296.0,
+     "prevented": true
+    },
+    "8": {
+     "jam_time_min": 10.333333333333334,
+     "jam_time_min_900_3600": 10.333333333333334,
+     "onset_s": null,
+     "flow": 3332.0,
+     "prevented": true
+    },
+    "9": {
+     "jam_time_min": 8.0,
+     "jam_time_min_900_3600": 8.0,
+     "onset_s": null,
+     "flow": 3254.6666666666665,
+     "prevented": true
+    },
+    "10": {
+     "jam_time_min": 3.3333333333333335,
+     "jam_time_min_900_3600": 3.3333333333333335,
+     "onset_s": null,
+     "flow": 3370.6666666666665,
+     "prevented": true
+    }
+   }
+  }
+ },
+ "samples_files": [
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B5_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B7.5_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_B9_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_BG_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_exit_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T_dagger/learned_th0.5_dagger_I_mid_9.json"
+ ],
+ "episodes": 60,
+ "controlled_episodes": 60,
+ "controlled_episodes_with_collisions": 0,
+ "colliding_vehicles_total": 0,
+ "collision_teleports_total": 0,
+ "writes_above_plan_total": 0,
+ "max_speed_mismatched_total": 0,
+ "seeds_by_arm": {
+  "learned/th0.5_dagger/B5": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "learned/th0.5_dagger/B7.5": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "learned/th0.5_dagger/B9": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "learned/th0.5_dagger/BG": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "learned/th0.5_dagger/I_exit": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "learned/th0.5_dagger/I_mid": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ]
+ },
+ "identical_seed_lists": true,
+ "sensors": [
+  "learned:camera"
+ ],
+ "feed_artefact": {
+  "artefact": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/results/jam/feed_process_afternoon.json",
+  "artefact_sha256": "8f5430bfc68b51e17d3e437da948ea70795ff4448260f9b7e82ba48db5243f1c",
+  "session": "afternoon_20261016_mainz",
+  "placeholder": false,
+  "L_bar": 89.49009203910828,
+  "m": 1.0,
+  "P_q": 10.0,
+  "D": 99.49009203910828,
+  "rule": "version_keyed"
+ },
+ "placeholder": false,
+ "camera_model": {
+  "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/results/jam/camera_error_model.json",
+  "sha256": "fdf527cd408ebcbec03af1bcbe845cd3705cc85233a721d0bf09a9f2ac8693d3"
+ },
+ "predictor": {
+  "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/run/onset_predictor_round1.json",
+  "sha256": "bfbc6b1999a4a0615d86efaa705355307ac93ad4a73a4d94862675f50fafb1bf"
+ },
+ "selection": null,
+ "headers": [
+  {
+   "started_wall": 1792189724.4409978,
+   "commit": "c03cca503972987d04c26a3beb61b3080a3996cc",
+   "dirty": false,
+   "sumo_version": null,
+   "resumed": false
+  }
+ ],
+ "wall_s_total": 980.6509759426117,
+ "smoke": false
+}

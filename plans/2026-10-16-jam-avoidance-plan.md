@@ -1232,3 +1232,18 @@ training-seed no-control B9 episodes that jam (seeds 2 and 3), the feed's speed 
   --porcelain` counts untracked files), pause file `outputs/jam/run/PAUSE`. Camera model and feed
   artefact are the committed ones. The results are copied into `results/jam/` and committed when
   the chain ends.
+
+**Blocks T and S (2026-10-16, 18:14 to 20:20 EDT, at `c03cca5`, headers clean).** Block T: 60
+plan-alone episodes with passive camera features, seeds 1-10; the round-1 predictor is the 2x32
+MLP (validation log-loss 0.170 against 0.332 for logistic regression; 1,085,132 training samples,
+1.05% positive); the DAgger round ran 60 more episodes with it active at 0.5, and the round-2
+predictor is again the MLP (validation log-loss 0.225 against 0.361, on the union of 120 episodes;
+not comparable to round 1's because the DAgger states differ). Both cards carry the camera model of
+record's sha256. Block S, 390 episodes on seeds 11-15, zero collisions, teleports, writes above the
+plan and read-back mismatches. Criterion C (jam time minus the plan's, normalised by no control's,
+averaged over B5, B7.5, B9, I_exit, I_mid): rule `m_on` 0 -0.299, rule 0.1 -0.253, rule 0.2
+-0.192, lookahead `J_th` 2 -0.261, `J_th` 4 -0.088, `J_th` 6 +0.427, learned theta 0.75 -0.109
+(0.6 -0.093, 0.45 -0.085, 0.3 +0.006), take-the-slower -0.040, plan 0. **Selected: best model the
+rule correction at `m_on` 0; lookahead `J_th` 2; learned theta 0.75.** Served flow on BG (no
+trigger): plan 3,481, rule 3,372, lookahead J2 2,948, learned 3,484 veh/h; the share of vehicle-ticks
+on which the correction changed the shown speed on BG: rule 0.199, learned 0.010.
