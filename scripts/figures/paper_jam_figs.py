@@ -12,7 +12,8 @@ Reads `results/jam/{M.jsonl,M_summary.json,S_summary.json,leads.json}` and, when
   120 s or more (top) and the jammed segment-minutes, mean and two standard errors over the
   15 evaluation seeds (bottom), for no control, the feed lookahead and the two-layer controller.
 * `fig_lag.pdf` (only with block L): jammed segment-minutes against the plan's switch delay D
-  on the largest burst and the exit block, for the same three arms.
+  on the largest burst and the exit block, for the lookahead and the two-layer controller
+  (no control reads no feed, so D does not apply to it).
 
 The three paper arms are no control, the lookahead at its selected threshold and the best
 model, both read from `S_summary.json`. Colours follow the entity: the camera and the
@@ -178,10 +179,12 @@ def fig_lag(records_l: list[dict], records_m: list[dict], m_summary: dict, arms,
     series = {}
     for ax, s in zip(axes, scenarios):
         for label, arm, variant, colour, marker in arms:
+            if arm == "no_control":
+                # No control reads no feed, so D does not apply; the caption gives its value.
+                continue
             pts = []
             for mult in (0.0, 1.0, 2.0, 4.0):
-                # No control reads no feed, so its jam time does not depend on D.
-                from_m = mult == 1.0 or arm == "no_control"
+                from_m = mult == 1.0
                 src = records_m if from_m else records_l
                 vals = list(_jam_by_seed(src, arm, variant, s, m=None if from_m else mult).values())
                 if not vals:
@@ -197,9 +200,11 @@ def fig_lag(records_l: list[dict], records_m: list[dict], m_summary: dict, arms,
                         capsize=0, markeredgecolor="white", markeredgewidth=0.6, label=label)
         ax.set_title(LABELS[s].replace("\n", " "), fontsize=7.5, color=INK, pad=3)
         ax.set_xlabel("plan's switch delay D (s)")
+        ax.set_xticks([0.0, D1, 2 * lbar + pq, 4 * lbar + pq],
+                      ["0", f"{D1:.0f}", f"{2 * lbar + pq:.0f}", f"{4 * lbar + pq:.0f}"])
         ax.set_ylim(bottom=0)
     axes[0].set_ylabel("jammed segment-min")
-    axes[1].legend(loc="upper left", frameon=False, handlelength=1.2, borderaxespad=0.1)
+    axes[0].legend(loc="upper right", frameon=False, handlelength=1.2, borderaxespad=0.1)
     fig.savefig(out / "fig_lag.pdf")
     fig.savefig(out / "fig_lag.png", dpi=300)
     plt.close(fig)
