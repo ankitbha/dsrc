@@ -1262,3 +1262,20 @@ requests on the shared key: 122 (dry) + 2,696 (afternoon) + 2,760 (night) = 5,57
 
 The longest lag is 10 to 22 s shorter at night than in the afternoon and the median 13 to 15 s
 shorter; the experiments replay the afternoon Mainz session, whose `D` = 99.5 s is the larger.
+
+**Blocks M and L (2026-10-16 20:20 to 2026-10-17 04:13 EDT, at `c03cca5`).** Block M: 765 episodes
+(660 controlled), block L: 270, zero collisions, teleports, writes above the plan and read-back
+mismatches in both. Best model (rule `m_on` 0) against no control and the lookahead (`J_th` 2), paired
+over seeds 16-30: jam time lower than no control's by 69.4 to 166.4 segment-minutes and than the
+lookahead's by 12.1 to 40.8 on all five triggers (all outside two standard errors); served flow higher
+by 81 to 150 veh/h than no control and 223 to 273 than the lookahead; on BG, 176 +/- 11 veh/h below no
+control (lookahead 600 below). No 120 s jam on B5, B7.5, B9, I_exit, I_mid: two-layer 15, 14, 5, 0,
+15 of 15; lookahead 13, 14, 1, 0, 3; no control 0, 0, 0, 0, 1. Warnings on no-control runs: the
+camera ahead of the feed on 41 of 45 burst runs by a median of 230 to 440 s; on I_exit the feed's
+warning was shorter than D on 15 of 15. **Block L does not show the expected degradation of the
+feed-only lookahead on B9:** its jam time fell from 79.0 (D = 0) to 55.1 (99.5 s), 22.0 (189 s) and
+19.4 (368 s) segment-minutes, and the paired two-layer minus lookahead difference is -58.1 +/- 21.1,
+-40.8 +/- 15.0, -4.2 +/- 10.6 and +9.7 +/- 17.4 (not resolved at the two longest delays), while the
+two-layer controller served 160 to 292 veh/h more at every delay. On I_exit both rise with D and the
+two-layer controller is below the lookahead at every delay (-9.9 to -14.2, all resolved). The cause of
+the lookahead's improvement with delay on B9 was not identified.
