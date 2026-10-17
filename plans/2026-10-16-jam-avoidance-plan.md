@@ -1247,3 +1247,18 @@ averaged over B5, B7.5, B9, I_exit, I_mid): rule `m_on` 0 -0.299, rule 0.1 -0.25
 rule correction at `m_on` 0; lookahead `J_th` 2; learned theta 0.75.** Served flow on BG (no
 trigger): plan 3,481, rule 3,372, lookahead J2 2,948, learned 3,484 veh/h; the share of vehicle-ticks
 on which the correction changed the shown speed on BG: rule 0.199, learned 0.010.
+
+**Night polling session (2026-10-16, 22:00:05 to 23:55 EDT; orchestrator).** Scheduled by wall clock
+under `caffeinate -i`; 2,760 requests, footer `stop_reason: duration`, key self-check passed. Total
+requests on the shared key: 122 (dry) + 2,696 (afternoon) + 2,760 (night) = 5,578 of the author's
+5,760. Artefact `results/jam/feed_process_night.json` (night only; not used by any block):
+
+| session | versions | `L_bar` | median `L_up` | `L_low` | `J` | `g_min` |
+|---|---|---|---|---|---|---|
+| afternoon NJ (13:25-15:17 EDT) | 179 | 84.0 s | 52.0 s | 28.9 s | 55.1 s | 28 s |
+| night NJ (22:00-23:55 EDT) | 209 | 62.1 s | 39.1 s | 19.1 s | 43.1 s | 27 s |
+| afternoon Mainz (19:25-21:17 CEST) | 113 | 89.5 s | 59.5 s | 34.4 s | 55.1 s | 60 s |
+| night Mainz (04:00-05:55 CEST) | 116 | 79.6 s | 44.6 s | 24.6 s | 55.0 s | 60 s |
+
+The longest lag is 10 to 22 s shorter at night than in the afternoon and the median 13 to 15 s
+shorter; the experiments replay the afternoon Mainz session, whose `D` = 99.5 s is the larger.
