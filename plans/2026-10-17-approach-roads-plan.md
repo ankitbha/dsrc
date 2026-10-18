@@ -899,3 +899,14 @@ used to hide; the controllers differ there in how long that queue lasts, not in 
 two-layer controller on four of seven scenarios, mainly because the plan and the correction slow vehicles when
 no jam follows (BG +8,177 vehicle-minutes over 105 minutes). The thresholds and the best model were selected
 on the gated boundary and were not re-selected here.
+
+**Paper rewritten on the approach-boundary results (2026-10-18, Ankit's request; `paper/` stays
+uncommitted).** The table, the three figures (`scripts/figures/paper_jam_figs.py --results-dir
+results/jam_approach`, commits 8c014a6 and e597685), the simulation section, the abstract, the
+contribution bullets and the conclusion now quote `results/jam_approach/` only; the gate is no longer
+mentioned. The table's Held column became Time (vehicle-hours in the system minus no control's) and its
+Drained column became Upstream (jam on the approach roads). To keep six pages, three passages were cut:
+the oracle (perception-error) comparison, the drain result after the exit block (15 of 15 seeds under the
+two-layer controller, median 340 s, none under no control) and the jam figure's jam-free panel, which
+repeats the table. The thresholds are stated as selected on the network without approach roads. No
+validation round was run (Ankit stopped validation for dsrc on 2026-10-18).
