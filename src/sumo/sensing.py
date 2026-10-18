@@ -146,8 +146,9 @@ class SnapshotBuilder:
 
     Scans every lane of the env's segment edges and of their route successors, which
     include the unsegmented `153` and `exit_road`, so a vehicle near a segment's end sees
-    across onto them. Geometry is read once; a vehicle's length is read the first time it
-    is seen.
+    across onto them. On the approach boundary the segment edges include the approach
+    edges (`env.all_segments`), whose successors are the next approach edge or the entry
+    link. Geometry is read once; a vehicle's length is read the first time it is seen.
     """
 
     def __init__(self, env, successor: Mapping[str, str]) -> None:
@@ -155,7 +156,8 @@ class SnapshotBuilder:
 
         self._sumo = _sumo
         self.successor = dict(successor)
-        segment_edges = [e for segment in env.segments for e in segment]
+        segments = getattr(env, "all_segments", None) or env.segments
+        segment_edges = [e for segment in segments for e in segment]
         scan = list(dict.fromkeys(segment_edges + [self.successor[e] for e in segment_edges
                                                    if e in self.successor]))
         self.geometry: dict[str, EdgeGeometry] = {}

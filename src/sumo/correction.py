@@ -230,5 +230,19 @@ class LookaheadRule:
         out[hot[segments + 1]] = 0.5
         return out
 
+    def fraction_chain(self, jam: np.ndarray, chain) -> float:
+        """The same rule along an explicit downstream chain (approach plan section 4.3).
+
+        `chain` lists the super-segments a vehicle passes next, in order, and `jam` holds
+        a jam factor for every index in it. 0.5 when the first is at or above `J_th`, 0.75
+        when the second is, 1.0 otherwise. With `chain = [s + 1, ..., 11]` this is
+        `fractions` on the original segments.
+        """
+        if len(chain) >= 1 and float(jam[chain[0]]) >= self.J_th:
+            return 0.5
+        if len(chain) >= 2 and float(jam[chain[1]]) >= self.J_th:
+            return 0.75
+        return 1.0
+
     def describe(self) -> dict[str, Any]:
         return {"kind": "lookahead", "J_th": self.J_th}

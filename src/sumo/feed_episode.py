@@ -184,6 +184,9 @@ class FeedEngine:
                                 for k, t in enumerate(self.decision_instants)}
         self._u = draw_phases(self.seed, getattr(self.env, "schedule_size", 0)
                               + EXTRA_POSITIONS)
+        # The Q-network row each super-segment reads (approach plan section 4.2): the
+        # identity on the original segments, the entry segment's row on an approach.
+        self.plan_row: list[int] = list(getattr(self.env, "plan_row", None) or [])
         self._rng = np.random.default_rng(self.seed + INJECTION_SEED_OFFSET)
         self._vehicles: dict[str, _Vehicle] = {}
         self._shared: tuple[list[int], list[int]] | None = None
@@ -272,8 +275,12 @@ class FeedEngine:
                 else:
                     self.writes_on_time += 1
 
+    def _row(self, segment: int) -> int:
+        """The plan's row for `segment`; a segment past the env's table reads its own."""
+        return self.plan_row[segment] if segment < len(self.plan_row) else segment
+
     def _fraction(self, version: int, segment: int) -> float:
-        return SPEED_ACTION_FRACTIONS[self.vectors[version][segment]]
+        return SPEED_ACTION_FRACTIONS[self.vectors[version][self._row(segment)]]
 
     def _scan_schedule_mode(self, t: float, tick: int, scan) -> dict[str, int]:
         control = t >= self.control_start_s
@@ -406,7 +413,8 @@ class FeedEngine:
         keeps growing past one half.
         """
         applied = [versions[v] for v, _, _ in scan]
-        segments = [s for _, _, s in scan]
+        # An approach vehicle commands its entry segment's row, so it is compared there.
+        segments = [self._row(s) for _, _, s in scan]
         ages = [t - self.snapshot_t[k] for k in applied if k >= 1]
         reference = self._reference_version(applied)
         return (disagreement(applied),

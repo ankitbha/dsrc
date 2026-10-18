@@ -25,6 +25,15 @@ Arms: `no_control`, `lookahead` (J_th), `plan`, `take_the_slower`, `rule` (m_on,
 `learned` (theta), `oracle` (m_on, tau_l, R). The camera draws come from
 `default_rng(seed + 5000)` in ego-id order; feature sampling for block T from
 `default_rng(seed + 6000)`.
+
+**The boundary** (approach plan 2026-10-17). `GATED` is the boundary every result above
+was produced on. `approach_boundary()` runs the same scenario on `mainz_approach.net.xml`:
+every vehicle is inserted by SUMO at the far end of a 3 km road in front of its entry link,
+no arm is gated, and every scenario time is `W` later (`run_jam_episode` adds it in one
+place). The Q-network still reads the original 12 x 5 state; a vehicle on an approach
+super-segment is shown its entry segment's plan (`plan_row`), the lookahead reads the
+approach feed rows along the vehicle's downstream chain, and the camera, the oracle and
+the corrections act on approach vehicles as on any other.
 """
 from __future__ import annotations
 
@@ -45,7 +54,7 @@ from src.sumo.correction import (
 from src.sumo.feed import FeedProcess, Synchronous, VersionKeyed, _sha256
 from src.sumo.feed_episode import FeedEngine, Mode, _scenario_paths, decision_instants
 from src.sumo.mainz import (
-    DECISION_INTERVAL_S, HERE_FEATURES, REPO_ROOT, SPEED_ACTION_FRACTIONS, MainzEnv,
+    DATA, DECISION_INTERVAL_S, HERE_FEATURES, REPO_ROOT, SPEED_ACTION_FRACTIONS, MainzEnv,
 )
 from src.sumo.sensing import (
     CAMERA_SEED_OFFSET, DEPLOYED_RANGE_M, CameraModel, CandidateTable, OracleSensor,
@@ -64,6 +73,56 @@ SAMPLE_SEED_OFFSET: int = 6000
 FEED_START_S: float = 60.0
 #: Publications are replayed this far past the episode's end (plan open item 10).
 FEED_TAIL_S: float = 180.0
+#: The warm-up's end on the gated boundary: control starts and the first decision is here.
+CONTROL_START_S: float = 300.0
+
+
+@dataclass(frozen=True)
+class Boundary:
+    """Where the scenario's demand enters the simulated road (approach plan section 2.4).
+
+    `W` moves every scenario time later; `approach_file` is the approach boundary's
+    metadata, None on the gated boundary.
+    """
+
+    name: str
+    W: float = 0.0
+    approach_file: Path | None = None
+
+    @property
+    def is_approach(self) -> bool:
+        return self.approach_file is not None
+
+    def files(self, name: str) -> str:
+        """The `SCENARIOS` file set a demand runs from on this boundary."""
+        return f"{name}_A" if self.is_approach else name
+
+    def describe(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"name": self.name, "W": self.W,
+                               "approach_file": (str(self.approach_file)
+                                                 if self.approach_file else None)}
+        if self.is_approach:
+            meta = json.loads(Path(self.approach_file).read_text())
+            out.update(approach_sha256=_sha256(Path(self.approach_file)),
+                       length_m=meta["length_m"], segment_m=meta["segment_m"],
+                       T_A=meta["T_A"], net_sha256=meta["net"]["sha256"])
+        return out
+
+
+GATED = Boundary("gated")
+APPROACH_FILE = DATA / "mainz_approach.json"
+
+
+def approach_boundary(path: Path = APPROACH_FILE) -> Boundary:
+    """The approach boundary of `path`, refused unless its `T_A` has been calibrated."""
+    meta = json.loads(Path(path).read_text())
+    if not meta.get("calibrated"):
+        raise SystemExit(f"{path} carries the provisional T_A of the first build pass; run "
+                         "calibrate_approach_travel.py and rebuild with --approach-travel")
+    W = float(meta["W"])
+    if W <= 0.0 or W % 60.0:
+        raise SystemExit(f"{path}: W = {W} s is not a positive multiple of 60 s")
+    return Boundary("approach", W, Path(path))
 
 
 @dataclass(frozen=True)
@@ -152,13 +211,14 @@ class FeedSetting:
                 "D": (float(self.m) * L_bar + self.P_q) if self.m > 0 else None,
                 "rule": "version_keyed" if self.m > 0 else "synchronous"}
 
-    def process(self, seed: int, end_s: float):
+    def process(self, seed: int, end_s: float, start_s: float = FEED_START_S):
         """`(FeedProcess, Rule, parameters)` for one episode: the replay wraps when the
         session is shorter than the episode (plan open item 10), each wrapped stamp keeping
-        its recorded second of the minute."""
+        its recorded second of the minute. `start_s` is the replay's base stamp, moved by
+        `W` on the approach boundary."""
         params = self.parameters()
         feed = FeedProcess.from_artefact(Path(self.artefact), self.session, seed,
-                                         FEED_START_S, end_s, allow_wrap=True)
+                                         start_s, end_s, allow_wrap=True)
         feed = feed.with_lag_multiplier(self.m)
         rule = VersionKeyed(self.P_q, params["D"]) if self.m > 0 else Synchronous()
         return feed, rule, params
@@ -197,6 +257,8 @@ class JamEngine(FeedEngine):
     record_jam: bool = True
     #: For tests: a callable `t -> LaneSnapshot` in place of reading SUMO.
     snapshot_source: Callable[[float], Any] | None = None
+    #: The approach boundary has no gate: every trace sample asserts nothing is held.
+    assert_no_gate: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -229,7 +291,17 @@ class JamEngine(FeedEngine):
         self._trend_true = TrendTracker()
         self._trend_speed = TrendTracker()
         self._builder = None
-        self._segment_of = {e: i for i, segment in enumerate(self.env.segments)
+        # Every super-segment the env scans, the approach ones (12 to 35) included, and the
+        # chain of super-segments a vehicle on each passes next (approach plan 4.1).
+        self._all_segments = list(getattr(self.env, "all_segments", None) or self.env.segments)
+        n = len(self.env.segments)
+        self.downstream: list[list[int]] = [list(c) for c in (
+            getattr(self.env, "downstream", None)
+            or [list(range(s + 1, n)) for s in range(n)])]
+        self.has_approach = bool(getattr(self.env, "approach_segments", None))
+        #: Per feed version, the approach super-segments' feed rows at its snapshot.
+        self.approach_states: dict[int, np.ndarray] = {}
+        self._segment_of = {e: i for i, segment in enumerate(self._all_segments)
                             for e in segment}
         self._sensed: dict[str, Any] | None = None
         self.correction = None
@@ -244,8 +316,23 @@ class JamEngine(FeedEngine):
     # ------------------------------------------------------------- stage 1 hooks
 
     def _snapshot(self, t, version, x, taken_at):
+        shape = np.shape(x)
+        if shape != (len(self.env.segments), len(HERE_FEATURES)):
+            raise ValueError(f"the plan reads {len(self.env.segments)} x {len(HERE_FEATURES)} "
+                             f"states; the snapshot is {shape}")
         super()._snapshot(t, version, x, taken_at)
         self.states[version] = np.asarray(x, dtype=np.float32)
+        if self.has_approach:
+            # Taken at the same tick as `x`, so both describe one instant (approach 4.3).
+            self.approach_states[version] = np.asarray(self.env.observe_approaches(),
+                                                       dtype=np.float32)
+
+    def _jam_factors(self, version: int) -> np.ndarray:
+        """Version `version`'s jam factor on every super-segment the env scans."""
+        jam = self.states[version][:, 2]
+        if self.has_approach:
+            jam = np.concatenate([jam, self.approach_states[version][:, 2]])
+        return jam
 
     def _write(self, t, mapping, edges, versions, late=None):
         """Stage 1 asks for the vehicles whose applied version changed this tick (and for
@@ -335,8 +422,9 @@ class JamEngine(FeedEngine):
             active = self.correction.update(vids, t, features)
         else:  # take_the_slower
             states = np.stack([self.states[int(versions[k])] for k in index])
-            self.correction.correct(vids, t, states, segments[index], est.mean_speed[index],
-                                    plan=plan)
+            # An approach vehicle's re-run replaces its entry segment's row (approach 4.4).
+            rows = np.array([self._row(int(segments[k])) for k in index], dtype=np.int64)
+            self.correction.correct(vids, t, states, rows, est.mean_speed[index], plan=plan)
             active = self.correction.active
         for vehicle, on in zip(vids, active):
             self._active[vehicle] = bool(on)
@@ -381,8 +469,8 @@ class JamEngine(FeedEngine):
             version = record.version
             plan = self._fraction(version, segment)
             if self.lookahead is not None:
-                base = float(self.lookahead.fractions(self.states[version][:, 2],
-                                                      np.array([segment]))[0])
+                base = self.lookahead.fraction_chain(self._jam_factors(version),
+                                                     self.downstream[segment])
                 shown = base
             else:
                 base = plan
@@ -423,7 +511,7 @@ class JamEngine(FeedEngine):
     def _record_jam(self, t: float) -> None:
         env = self.env
         state = env.segment_state()
-        n = len(env.segments)
+        n = len(self._all_segments)
         plan_sum, shown_sum, on_sum, counted = (np.zeros(n) for _ in range(4))
         if self.arm.arm != "no_control" and t >= self.control_start_s:
             for vehicle, _edge, segment in self._last_scan:
@@ -449,12 +537,16 @@ class JamEngine(FeedEngine):
                 k_hat_mean = per_segment(np.bincount(sensed["segments"],
                                                      weights=sensed["k_hat"], minlength=n),
                                          count)
-        self.jam_trace.append({
+        held = env.held_at_entry()
+        if self.assert_no_gate and held != 0:
+            raise AssertionError(f"{held} vehicles held at an entry at {t} s on a boundary "
+                                 "with no gate")
+        sample = {
             "t": t,
             "speed_kmh": [None if math.isnan(v) else round(v, 4) for v in state["speed_kmh"]],
             "density": [round(v, 6) for v in state["density"]],
             "count": state["count"],
-            "held": env.held_at_entry(), "pending": env.pending(), "running": env.running(),
+            "held": held, "pending": env.pending(), "running": env.running(),
             "arrived": env.arrived_total,
             "colliding_vehicles": getattr(env, "colliding_vehicles", 0),
             "collision_teleports": getattr(env, "collision_teleports", 0),
@@ -462,7 +554,12 @@ class JamEngine(FeedEngine):
             "plan_mean": per_segment(plan_sum, counted),
             "shown_mean": per_segment(shown_sum, counted),
             "active_share": per_segment(on_sum, counted),
-        })
+        }
+        if self.has_approach:
+            # Approach plan sections 5.1 and 5.4: vehicles on the approaches, each
+            # approach's queue from its entry and its slow vehicles near the far end.
+            sample.update(env.approach_report())
+        self.jam_trace.append(sample)
 
     def jam_summary(self) -> dict[str, Any]:
         c = self.counter
@@ -502,23 +599,35 @@ class JamEngine(FeedEngine):
 
 
 def _env_for(scenario: JamScenario, *, seed: int, duration_s: float, arm: JamArm,
-             penetration: float, step_length_s: float) -> MainzEnv:
-    paths = _scenario_paths(scenario.files)
-    gate = arm.arm != "no_control"
-    return MainzEnv(seed=seed, duration_s=duration_s, features=HERE_FEATURES,
+             penetration: float, step_length_s: float,
+             boundary: Boundary = GATED) -> MainzEnv:
+    """The env of one episode. On the gated boundary every arm but no control is gated; on
+    the approach boundary no arm is (approach plan section 3): SUMO inserts every vehicle
+    from the full route file at the far end of its approach."""
+    paths = _scenario_paths(boundary.files(scenario.files))
+    gate = arm.arm != "no_control" and not boundary.is_approach
+    approach = None
+    if boundary.is_approach:
+        approach = REPO_ROOT / paths["approach"]
+        if approach.resolve() != Path(boundary.approach_file).resolve():
+            raise ValueError(f"{scenario.name}'s files name {approach}, the boundary "
+                             f"{boundary.approach_file}")
+    return MainzEnv(seed=seed, duration_s=duration_s, warmup_s=CONTROL_START_S + boundary.W,
+                    features=HERE_FEATURES,
                     step_length_s=step_length_s, gate_entries=gate,
                     net_file=REPO_ROOT / paths["net"],
                     route_file=REPO_ROOT / paths["gated_routes" if gate else "routes"],
                     segment_file=REPO_ROOT / paths["segments"],
                     schedule_file=REPO_ROOT / paths["schedule"],
                     # No control senses every vehicle and commands none (plan 1.5).
-                    penetration=1.0 if not gate else penetration, actuation="max_speed")
+                    penetration=1.0 if arm.arm == "no_control" else penetration,
+                    actuation="max_speed", approach_file=approach)
 
 
-def route_successors(scenario: JamScenario) -> dict[str, str]:
+def route_successors(scenario: JamScenario, boundary: Boundary = GATED) -> dict[str, str]:
     from src.analysis.gains import load_routes
 
-    paths = _scenario_paths(scenario.files)
+    paths = _scenario_paths(boundary.files(scenario.files))
     return successors(load_routes(REPO_ROOT / paths["gated_routes"]))
 
 
@@ -528,21 +637,32 @@ def run_jam_episode(model, seed: int, scenario: str | JamScenario, arm: JamArm, 
                     step_length_s: float = 0.5, window_start_s: float = 900.0,
                     sense: bool = True, write_log: bool = False,
                     check_max_speed: bool = False, sample_fraction: float = 0.0,
-                    aligned_feed: bool = False, record_trace: bool = True) -> dict[str, Any]:
+                    aligned_feed: bool = False, record_trace: bool = True,
+                    boundary: Boundary = GATED,
+                    on_engine: Callable[[JamEngine], None] | None = None) -> dict[str, Any]:
     """One episode; returns its outcome, the engine's counters and the 10 s trace.
 
     `aligned_feed` publishes at the env's decision instants with zero lag (the published
     arm, used by the equivalence test) instead of replaying `feed`.
+
+    `duration_s` and `window_start_s` are on the gated clock. `boundary.W` is added here
+    and nowhere else (approach plan section 2.4): to the cap, the window, the warm-up
+    (control start and first decision), the feed replay's base stamp and every incident's
+    request time. The trace stays on SUMO's clock. `on_engine`, when given, is handed the
+    engine once the episode ends (tests and validators read its write path from it).
     """
     import torch
 
     from src.rl.src_q import greedy_actions
 
     scenario = SCENARIOS[scenario] if isinstance(scenario, str) else scenario
-    env = _env_for(scenario, seed=seed, duration_s=duration_s, arm=arm,
-                   penetration=penetration, step_length_s=step_length_s)
-    decisions = decision_instants(env.warmup_s, duration_s)
-    end_s = decisions[-1] + DECISION_INTERVAL_S if decisions else duration_s
+    W = boundary.W
+    cap_s = duration_s + W
+    window_s = window_start_s + W
+    env = _env_for(scenario, seed=seed, duration_s=cap_s, arm=arm,
+                   penetration=penetration, step_length_s=step_length_s, boundary=boundary)
+    decisions = decision_instants(env.warmup_s, cap_s)
+    end_s = decisions[-1] + DECISION_INTERVAL_S if decisions else cap_s
     feed_params = None
     if arm.arm == "no_control":
         mode, process = Mode.no_control(), None
@@ -553,26 +673,28 @@ def run_jam_episode(model, seed: int, scenario: str | JamScenario, arm: JamArm, 
     else:
         if feed is None:
             raise ValueError(f"arm {arm.arm} needs a feed setting")
-        process, rule, feed_params = feed.process(seed, duration_s + FEED_TAIL_S)
+        process, rule, feed_params = feed.process(seed, cap_s + FEED_TAIL_S,
+                                                  start_s=FEED_START_S + W)
         mode = Mode("rule", rule, name=feed_params["rule"])
 
     def policy(x: np.ndarray) -> list[int]:
         return greedy_actions(model, torch.tensor(x, dtype=torch.float)).tolist()
 
     engine = JamEngine(env, policy, mode, process, seed=seed, control_start_s=env.warmup_s,
-                       window_start_s=window_start_s, trace_every_s=float(TRACE_EVERY_S),
+                       window_start_s=window_s, trace_every_s=float(TRACE_EVERY_S),
                        end_s=end_s, decision_instants=decisions, record_trace=False,
-                       record_jam=record_trace, arm=arm, camera=camera, successor=route_successors(scenario),
+                       record_jam=record_trace, arm=arm, camera=camera,
+                       successor=route_successors(scenario, boundary),
                        q_model=model, predictor=predictor, sense=sense,
                        sample_fraction=sample_fraction, write_log=write_log,
-                       check_max_speed=check_max_speed)
+                       check_max_speed=check_max_speed, assert_no_gate=boundary.is_approach)
     rewards, total_no_control = [], 0.0
     started = time.perf_counter()
     try:
         env.reset(on_warmup_tick=engine.on_tick)
         for edge, lanes, pos, start, length in scenario.incidents:
-            env.schedule_incident(edge, list(lanes), pos, start, length)
-        marked = window_start_s <= 0.0
+            env.schedule_incident(edge, list(lanes), pos, start + W, length)
+        marked = window_s <= 0.0
         while True:
             if arm.arm == "no_control":
                 env.release()
@@ -582,20 +704,25 @@ def run_jam_episode(model, seed: int, scenario: str | JamScenario, arm: JamArm, 
                 total_no_control += float(reward.mean())
             else:
                 rewards.append(torch.tensor(reward, dtype=torch.float))
-            if not marked and env.time_s() >= window_start_s:
+            if not marked and env.time_s() >= window_s:
                 env.mark_window()
                 marked = True
-            if env.time_s() >= duration_s:
+            if env.time_s() >= cap_s:
                 break
         metrics = env.metrics()
         incidents = env.incident_report()
     finally:
         env.close()
+    if on_engine is not None:
+        on_engine(engine)
     episode_return = (total_no_control if arm.arm == "no_control"
                       else float(torch.stack(rewards).mean(dim=1).sum()))
+    boundary_fields = ({"boundary": boundary.describe(), "W": W,
+                        "gate_entries": env.gate_entries, "sim_end_s": cap_s}
+                       if boundary.is_approach else {})
     return {
         "scenario": scenario.name, "scenario_spec": scenario.describe(), "seed": seed,
-        "penetration": penetration, "duration_s": duration_s,
+        "penetration": penetration, "duration_s": duration_s, **boundary_fields,
         "flow": metrics["flow_veh_per_h"], "arrived": metrics["arrived"],
         "return": episode_return, "space_mean_speed_kmh": metrics["space_mean_speed_kmh"],
         "held_at_entry": metrics["held_at_entry"], "pending": metrics["waiting_to_enter"],

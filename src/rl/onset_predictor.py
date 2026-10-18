@@ -64,21 +64,44 @@ def _remaining_tail(snapshot, segment_of: dict[str, int]) -> dict[str, float]:
 
 def engine_features(engine, t: float, index: np.ndarray, table, est, s_hat, v_slope,
                     versions: np.ndarray, segments: np.ndarray) -> np.ndarray:
-    """`(len(index), len(FEATURES))` for the egos at rows `index` of a sensing pass."""
+    """`(len(index), len(FEATURES))` for the egos at rows `index` of a sensing pass.
+
+    On the approach boundary (approach plan section 4.4) a vehicle's own super-segment `e`
+    may be an approach one: "next" is the first element of its downstream chain (`e` when
+    the chain is empty, which is `min(e + 1, 11)` on the original segments), the feed's
+    speed and jam factor come from the version's 36-row snapshot, the plan's fractions
+    through `plan_row`, and the segment length and lanes from the snapshot row of the
+    vehicle's own super-segment, which on an approach is its own edge. An engine without
+    these tables reads exactly as before.
+    """
     from src.sumo.mainz import SPEED_ACTION_FRACTIONS
 
     if not hasattr(engine, "_remaining_tail"):
         engine._remaining_tail = _remaining_tail(table.snapshot, engine._segment_of)
     tail = engine._remaining_tail
     geometry = table.snapshot.geometry
+    plan_row = getattr(engine, "plan_row", None) or None
+    downstream = getattr(engine, "downstream", None) or None
+    approach_states = getattr(engine, "approach_states", None) or {}
+    extended: dict[int, np.ndarray] = {}
     rows = []
     for i in np.asarray(index, dtype=np.int64):
         k = int(versions[i])
         e = int(segments[i])
-        nxt = min(e + 1, LAST_SEGMENT)
-        x = engine.states[k]
+        if downstream is None:
+            nxt = min(e + 1, LAST_SEGMENT)
+        else:
+            nxt = downstream[e][0] if downstream[e] else e
+        if k in approach_states:
+            if k not in extended:
+                extended[k] = np.concatenate([engine.states[k], approach_states[k]])
+            x = extended[k]
+        else:
+            x = engine.states[k]
         free_mps = float(x[e, 1]) / 3.6
         vector = engine.vectors[k]
+        own_row = plan_row[e] if plan_row is not None else e
+        next_row = plan_row[nxt] if plan_row is not None else nxt
         edge = table.ego_edges[i]
         g = est.g_hat[i]
         rows.append([
@@ -91,7 +114,7 @@ def engine_features(engine, t: float, index: np.ndarray, table, est, s_hat, v_sl
             0.0 if np.isnan(est.conf_mean[i]) else est.conf_mean[i],
             float(est.n_det[i]),
             t - engine.feed.publish_of(k),
-            SPEED_ACTION_FRACTIONS[vector[e]], SPEED_ACTION_FRACTIONS[vector[nxt]],
+            SPEED_ACTION_FRACTIONS[vector[own_row]], SPEED_ACTION_FRACTIONS[vector[next_row]],
             x[e, 0], x[e, 2], x[nxt, 0], x[nxt, 2], x[e, 4], x[e, 3],
             geometry[edge].length_m - float(table.ego_x[i]) + tail.get(edge, 0.0),
         ])
