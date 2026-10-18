@@ -112,6 +112,48 @@ def controlled_index(index: int, penetration: float) -> bool:
     return math.floor((index + 1) * penetration) - math.floor(index * penetration) == 1
 
 
+#: Approach plan 2026-10-17 section 5.4: a queue member is below this speed, consecutive
+#: members are at most `QUEUE_GAP_M` apart, and a slow vehicle within `NEAR_INSERTION_M` of
+#: a far end is counted on its own.
+QUEUE_SPEED_KMH: float = 19.0
+QUEUE_GAP_M: float = 100.0
+NEAR_INSERTION_M: float = 200.0
+
+
+def contiguous_queue(distances, gap: float = QUEUE_GAP_M) -> float:
+    """The length of the queue standing from the entry link's start (approach plan 5.4).
+
+    `distances` are the slow vehicles' distances upstream of the entry link's start. Walk
+    outward from 0 in order of distance: the queue ends at the first vehicle more than `gap`
+    beyond the previous member (or beyond 0, for the first). Its length is the last
+    member's distance, 0 when there is none. An isolated slow vehicle far up the road is
+    not a queue.
+    """
+    reach = 0.0
+    for distance in sorted(float(d) for d in distances):
+        if distance - reach > gap:
+            break
+        reach = distance
+    return reach
+
+
+def _here_row(members: list[dict[str, float]]) -> dict[str, float]:
+    """A super-segment's HERE-shaped quantities from its edges' readings (`_per_edge`).
+
+    Aggregated with `nanmean`, unweighted by length, as SRC pools its links; an empty edge
+    contributes no speed rather than a zero.
+    """
+    speed = _nanmean([m["speed_kmh"] for m in members])
+    free_flow = _nanmean([m["free_flow_kmh"] for m in members])
+    return {
+        "speed": speed,
+        "free_flow": free_flow,
+        "jam_factor": jam_factor(speed, free_flow),
+        "lanes": _nanmean([m["lanes"] for m in members]),
+        "length_km": sum(m["length_m"] for m in members) / 1000.0,
+    }
+
+
 class MainzEnv:
     """One SUMO episode on the SRC Mainz network.
 
@@ -143,6 +185,11 @@ class MainzEnv:
         penetration: float = 1.0,
         #: One of `ACTUATIONS`.
         actuation: str = "max_speed",
+        #: The approach boundary's metadata (`data/mainz/mainz_approach.json`, approach
+        #: plan 2026-10-17): roads in front of the entry links whose edges become
+        #: super-segments 12 to 35. None is the gated boundary, on which every method
+        #: behaves as it did before the approach roads existed.
+        approach_file: Path | None = None,
     ) -> None:
         if not 0.0 <= penetration <= 1.0:
             raise ValueError(f"penetration must lie in [0, 1], got {penetration}")
@@ -162,6 +209,7 @@ class MainzEnv:
         self.segment_file = segment_file or DATA / "mainz_segments.json"
         self.schedule_file = schedule_file or DATA / "mainz_schedule.json"
         self.segments: list[list[str]] = json.loads(self.segment_file.read_text())
+        self._load_approach(approach_file)
         self._running = False
         self._static: dict[str, dict[str, float]] = {}
         self._previous: list[set[str]] = [set() for _ in self.segments]
@@ -204,6 +252,43 @@ class MainzEnv:
         self._incident_ids: set[str] = set()
         self._incidents_on_road: dict[str, str] = {}
         self._incident_lane: dict[str, int] = {}
+
+    def _load_approach(self, approach_file: Path | None) -> None:
+        """The approach super-segments and the two tables of approach plan section 4.1.
+
+        `plan_row[s]` is the Q-network row super-segment `s` reads (its entry segment for
+        an approach super-segment); `downstream[s]` lists the super-segments a vehicle on
+        `s` passes next. Without an approach file both are the identity on the original
+        segments: `[s]` and `[s + 1, ..., last]`.
+        """
+        self.approach_file = Path(approach_file) if approach_file is not None else None
+        n = len(self.segments)
+        self.approach: dict[str, Any] | None = None
+        self.approach_segments: list[list[str]] = []
+        self.plan_row: list[int] = list(range(n))
+        self.downstream: list[list[int]] = [list(range(s + 1, n)) for s in range(n)]
+        if self.approach_file is not None:
+            if self.gate_entries:
+                raise ValueError("the approach boundary has no entry gate; build the env "
+                                 "with gate_entries=False")
+            meta = json.loads(self.approach_file.read_text())
+            if meta["num_original_segments"] != n:
+                raise ValueError(f"{self.approach_file} extends {meta['num_original_segments']} "
+                                 f"super-segments, this env has {n}")
+            listed = json.loads((REPO_ROOT / meta["segments_file"]).read_text())
+            if listed != meta["approach_segments"]:
+                raise ValueError(f"{meta['segments_file']} does not match {self.approach_file}")
+            self.approach = meta
+            self.approach_segments = [list(s) for s in listed]
+            self.plan_row = [int(r) for r in meta["plan_row"]]
+            self.downstream = [[int(v) for v in chain] for chain in meta["downstream"]]
+        if not len(self.plan_row) == len(self.downstream) == len(self.all_segments):
+            raise ValueError("plan_row and downstream must cover every super-segment")
+
+    @property
+    def all_segments(self) -> list[list[str]]:
+        """The original super-segments and then the approach ones, in index order."""
+        return list(self.segments) + self.approach_segments
 
     # ----------------------------------------------------------------- lifecycle
 
@@ -480,7 +565,7 @@ class MainzEnv:
     def _load_static(self) -> None:
         """Lane count, length and free-flow speed per edge, read once from the map."""
         self._static = {}
-        for segment in list(self.segments) + [list(self._schedule)]:
+        for segment in list(self.all_segments) + [list(self._schedule)]:
             for edge in segment:
                 lanes = int(_sumo.edge.getLaneNumber(edge))
                 length = float(_sumo.lane.getLength(f"{edge}_0"))
@@ -617,7 +702,7 @@ class MainzEnv:
         internal edge and are not listed, exactly as `_command` does not reach them.
         """
         found = []
-        for index, segment in enumerate(self.segments):
+        for index, segment in enumerate(self.all_segments):
             for edge in segment:
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
                     if self.controlled(vehicle):
@@ -715,7 +800,7 @@ class MainzEnv:
         first cap, its type's; a vehicle never capped is not touched, so a run that never
         advises, the no-control arm, makes no call at all.
         """
-        for segment in self.segments:
+        for segment in self.all_segments:
             for edge in segment:
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
                     if not self.controlled(vehicle):
@@ -775,10 +860,12 @@ class MainzEnv:
             blocked.setdefault(edge, []).append(vehicle)
         return blocked
 
-    def _per_edge(self) -> dict[str, dict[str, float]]:
+    def _per_edge(self, segments: list[list[str]] | None = None) -> dict[str, dict[str, float]]:
+        """Per edge of `segments` (the original super-segments by default): count, speed,
+        density, lanes, length and free-flow speed."""
         values: dict[str, dict[str, float]] = {}
         blocked = self._blocked_edges()
-        for segment in self.segments:
+        for segment in (self.segments if segments is None else segments):
             for edge in segment:
                 static = self._static[edge]
                 count, speed_mps = self._edge_reading(edge, blocked)
@@ -836,14 +923,8 @@ class MainzEnv:
         for index, segment in enumerate(self.segments):
             members = [edges[e] for e in segment]
             here = present[index]
-            speed = _nanmean([m["speed_kmh"] for m in members])
-            free_flow = _nanmean([m["free_flow_kmh"] for m in members])
             row = {
-                "speed": speed,
-                "free_flow": free_flow,
-                "jam_factor": jam_factor(speed, free_flow),
-                "lanes": _nanmean([m["lanes"] for m in members]),
-                "length_km": sum(m["length_m"] for m in members) / 1000.0,
+                **_here_row(members),
                 "density": _nanmean([m["density"] for m in members]),
                 # SRC counts a segment's arrivals and departures as the set
                 # difference of the vehicle ids present now and one decision ago.
@@ -853,6 +934,55 @@ class MainzEnv:
             }
             rows.append([row[name] for name in self.features])
         return np.nan_to_num(np.array(rows, dtype=np.float32))
+
+    def observe_approaches(self) -> np.ndarray:
+        """`(approach super-segments, 5)`: `HERE_FEATURES` of each approach super-segment,
+        by `observe()`'s formula (approach plan section 4.3).
+
+        The real feed covers these roads, so the lookahead and the learned arm may read
+        them; the Q-network never does, and `observe()` stays the original segments'.
+        """
+        edges = self._per_edge(self.approach_segments)
+        rows = []
+        for segment in self.approach_segments:
+            row = _here_row([edges[e] for e in segment])
+            rows.append([row[name] for name in HERE_FEATURES])
+        return np.nan_to_num(np.array(rows, dtype=np.float32).reshape(len(rows),
+                                                                     len(HERE_FEATURES)))
+
+    def approach_report(self, v_queue_kmh: float = QUEUE_SPEED_KMH, gap_m: float = QUEUE_GAP_M,
+                        near_m: float = NEAR_INSERTION_M) -> dict[str, Any]:
+        """Vehicles on the approaches, and per approach the queue and the slow vehicles
+        near the far end (approach plan sections 5.1 and 5.4), in entry order.
+
+        A vehicle's distance upstream of its entry link's start is the length of the
+        approach edges after its own plus what remains of its own edge ahead of its front.
+        `queue_m` is `contiguous_queue` of the vehicles below `v_queue_kmh`;
+        `slow_near_insertion` counts those within `near_m` of the far end.
+        """
+        report: dict[str, Any] = {"on_approach": 0, "queue_m": [], "slow_near_insertion": []}
+        if self.approach is None:
+            return report
+        for entry in self.approach["entries"]:
+            edges = self.approach["approach"][entry]["edges"]
+            lengths = [self._static[e]["length_m"] for e in edges]
+            total = sum(lengths)
+            slow, near = [], 0
+            for i, edge in enumerate(edges):
+                after = sum(lengths[i + 1:])
+                for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
+                    if vehicle in self._incident_ids:
+                        continue
+                    report["on_approach"] += 1
+                    if float(_sumo.vehicle.getSpeed(vehicle)) * 3.6 >= v_queue_kmh:
+                        continue
+                    distance = after + lengths[i] - float(_sumo.vehicle.getLanePosition(vehicle))
+                    slow.append(distance)
+                    if total - distance <= near_m + 1e-9:
+                        near += 1
+            report["queue_m"].append(round(contiguous_queue(slow, gap_m), 2))
+            report["slow_near_insertion"].append(near)
+        return report
 
     def densities(self) -> np.ndarray:
         """Per-super-segment density, for the reward. Ground truth, not observable."""
@@ -870,11 +1000,13 @@ class MainzEnv:
         `count * VEHICLE_LENGTH_M` over every lane-metre of the segment, zero when
         empty. This is the state the drain metric and the gain estimate read; it is not
         the reward's `densities()`, which averages per-edge densities over occupied
-        edges only.
+        edges only. On the approach boundary the approach super-segments follow the
+        original ones, so every list has 36 entries.
         """
-        edges = self._per_edge()
+        edges = (self._per_edge(self.all_segments) if self.approach_segments
+                 else self._per_edge())
         speed, density, count = [], [], []
-        for segment in self.segments:
+        for segment in self.all_segments:
             members = [edges[e] for e in segment]
             vehicles = sum(m["count"] for m in members)
             lane_metres = sum(m["length_m"] * m["lanes"] for m in members)
