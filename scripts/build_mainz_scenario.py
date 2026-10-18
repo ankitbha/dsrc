@@ -476,6 +476,260 @@ def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# ------------------------------------------------------------- approach roads
+#
+# Approach plan 2026-10-17 section 1. One straight road in front of each entry link, so
+# that a queue upstream of the network stands on a road instead of waiting off the map.
+
+#: The eight entry links in the order `j` that numbers their approach super-segments.
+APPROACH_ENTRIES: tuple[str, ...] = ("277", "289", "231", "255", "140", "182", "293", "295")
+APPROACH_LENGTH_M: float = 3000.0
+APPROACH_SEGMENT_M: float = 1000.0
+#: The provisional travel time of the first pass (section 2.2), 3,000 m at 16.67 m/s.
+PROVISIONAL_T_A_S: float = 180.0
+APPROACH_NET = "mainz_approach.net.xml"
+APPROACH_META = "mainz_approach.json"
+APPROACH_SEGMENTS = "mainz_approach_segments.json"
+APPROACH_TRAVEL = "mainz_approach_travel.json"
+#: The five demands that get an approach version (section 2.1).
+APPROACH_DEMANDS: tuple[str, ...] = ("mainz_bg", "mainz_b7500", "mainz_b9000", "mainz_burst",
+                                     "mainz")
+
+
+def approach_tables(entries, entry_segment: dict[str, int], edges_per_approach: int,
+                    num_original: int) -> dict:
+    """`plan_row` and `downstream` over all super-segments (section 4.1).
+
+    Approach edge `i` of entry `j` is super-segment `num_original + n j + i`, `n` edges per
+    approach, `i = 0` at the far end. An original segment reads its own Q-network row and
+    is followed by every later original segment; an approach super-segment reads its entry
+    segment's row and is followed by the later edges of its approach, then the entry
+    segment and the original segments after it.
+    """
+    plan_row = list(range(num_original))
+    downstream = [list(range(s + 1, num_original)) for s in range(num_original)]
+    indices = {}
+    for j, entry in enumerate(entries):
+        first = num_original + edges_per_approach * j
+        indices[entry] = list(range(first, first + edges_per_approach))
+        e = entry_segment[entry]
+        for i, s in enumerate(indices[entry]):
+            plan_row.append(e)
+            downstream.append(indices[entry][i + 1:] + list(range(e, num_original)))
+    return {"plan_row": plan_row, "downstream": downstream, "indices": indices}
+
+
+def approach_geometry(net, entries=APPROACH_ENTRIES, length_m: float = APPROACH_LENGTH_M,
+                      segment_m: float = APPROACH_SEGMENT_M, segments=None) -> dict:
+    """Nodes, edges, connections and metadata of the approach roads (section 1.3).
+
+    Pure: `net` needs only sumolib's `getEdge` surface, so a synthetic net tests it. Each
+    approach runs backward from its entry link's start node along the heading of the
+    entry link's first shape segment, as `length_m / segment_m` edges `a<entry>_0` (far
+    end) to `a<entry>_<n-1>`, the last ending at the entry's own start node. Nodes
+    `a<entry>_n<i>` stand `(n - i) segment_m` before that node. Every edge copies the
+    entry link's lane count, per-lane widths and speed limit; lane `i` connects only to
+    lane `i`. `segments` is the original partition (default the committed one), which
+    places each entry in its super-segment.
+    """
+    if length_m <= 0.0 or segment_m <= 0.0:
+        raise ValueError(f"approach length {length_m} and edge length {segment_m} must be "
+                         "positive")
+    count = int(round(length_m / segment_m))
+    if count < 1 or not math.isclose(count * segment_m, length_m, abs_tol=1e-9):
+        raise ValueError(f"{length_m} m is not a whole number of {segment_m} m edges")
+    if segments is None:
+        segments = json.loads((DATA / "mainz_segments.json").read_text())
+    segment_of = {edge: index for index, members in enumerate(segments) for edge in members}
+    nodes, edges, connections, per_entry = [], [], [], {}
+    entry_segment = {}
+    for entry in entries:
+        if entry not in segment_of:
+            raise ValueError(f"entry link {entry} is in no super-segment")
+        entry_segment[entry] = segment_of[entry]
+    tables = approach_tables(entries, entry_segment, count, len(segments))
+    for entry in entries:
+        link = net.getEdge(entry)
+        start = link.getFromNode()
+        x0, y0 = start.getCoord()
+        (px, py), (qx, qy) = link.getShape()[:2]
+        span = math.hypot(qx - px, qy - py)
+        ux, uy = (qx - px) / span, (qy - py) / span
+        widths = [float(lane.getWidth()) for lane in link.getLanes()]
+        lanes = int(link.getLaneNumber())
+        speed = float(link.getSpeed())
+        node_ids = [f"a{entry}_n{i}" for i in range(count)] + [start.getID()]
+        for i in range(count):
+            back = (count - i) * segment_m
+            nodes.append({"id": node_ids[i], "x": x0 - back * ux, "y": y0 - back * uy,
+                          "type": "priority"})
+        names = [f"a{entry}_{i}" for i in range(count)]
+        for i, name in enumerate(names):
+            edges.append({"id": name, "from": node_ids[i], "to": node_ids[i + 1],
+                          "lanes": lanes, "widths": list(widths), "speed": speed,
+                          "priority": 1})
+            following = names[i + 1] if i + 1 < count else entry
+            connections.extend({"from": name, "to": following, "fromLane": k, "toLane": k}
+                               for k in range(lanes))
+        per_entry[entry] = {
+            "j": len(per_entry), "edges": names, "nodes": node_ids[:-1],
+            "entry_node": start.getID(), "lanes": lanes, "widths": widths,
+            "speed_mps": speed, "heading": [ux, uy],
+            "edge_lengths_m": [float(segment_m)] * count,
+            "segments": tables["indices"][entry], "entry_segment": entry_segment[entry]}
+    metadata = {
+        "schema": "mainz_approach/1", "entries": list(entries), "length_m": float(length_m),
+        "segment_m": float(segment_m), "edges_per_approach": count,
+        "num_original_segments": len(segments), "approach": per_entry,
+        "approach_segments": [[name] for entry in entries
+                              for name in per_entry[entry]["edges"]],
+        "plan_row": tables["plan_row"], "downstream": tables["downstream"]}
+    return {"nodes": nodes, "edges": edges, "connections": connections, "metadata": metadata}
+
+
+def approach_patch_xml(geometry: dict) -> tuple[str, str, str]:
+    """The netconvert patch files (nodes, edges, connections) for `approach_geometry`."""
+    nod = "".join(f'<node id="{n["id"]}" x="{n["x"]:.2f}" y="{n["y"]:.2f}" '
+                  f'type="{n["type"]}"/>' for n in geometry["nodes"])
+    edg = "".join(
+        f'<edge id="{e["id"]}" from="{e["from"]}" to="{e["to"]}" numLanes="{e["lanes"]}" '
+        f'speed="{e["speed"]:.3f}" priority="{e["priority"]}">'
+        + "".join(f'<lane index="{k}" width="{w:.2f}"/>' for k, w in enumerate(e["widths"]))
+        + "</edge>" for e in geometry["edges"])
+    con = "".join(f'<connection from="{c["from"]}" to="{c["to"]}" fromLane="{c["fromLane"]}" '
+                  f'toLane="{c["toLane"]}"/>' for c in geometry["connections"])
+    return f"<nodes>{nod}</nodes>", f"<edges>{edg}</edges>", f"<connections>{con}</connections>"
+
+
+def _numbers(text: str | None) -> tuple[float, ...] | None:
+    """A shape or coordinate list as numbers, so "-0.00" and "0.00" compare equal."""
+    if text is None:
+        return None
+    return tuple(float(v) for point in text.split() for v in point.split(","))
+
+
+def _number(text: str | None) -> float | None:
+    return None if text is None else float(text)
+
+
+def _net_tables(path: Path) -> tuple[dict, dict, dict]:
+    root = ET.parse(path).getroot()
+    edges = {}
+    for edge in root.findall("edge"):
+        lanes = tuple(
+            (lane.get("id"), lane.get("index"), float(lane.get("speed")),
+             float(lane.get("length")), _number(lane.get("width")),
+             _numbers(lane.get("shape")), lane.get("allow"), lane.get("disallow"))
+            for lane in edge.findall("lane"))
+        edges[edge.get("id")] = (edge.get("from"), edge.get("to"), edge.get("function"),
+                                 edge.get("priority"), _numbers(edge.get("shape")), lanes)
+    connections = {(c.get("from"), c.get("to"), c.get("fromLane"), c.get("toLane")):
+                   (c.get("via"), c.get("dir"), c.get("state"), c.get("tl"), c.get("linkIndex"))
+                   for c in root.findall("connection")}
+    junctions = {j.get("id"): (j.get("type"), float(j.get("x")), float(j.get("y")),
+                               _numbers(j.get("shape")), j.get("incLanes"), j.get("intLanes"))
+                 for j in root.findall("junction")}
+    return edges, connections, junctions
+
+
+def net_changes(original: Path, patched: Path) -> dict[str, list]:
+    """What of `original` differs in `patched`: edges (lanes, lengths, speeds, widths and
+    shapes compared as numbers), connections, junctions, and anything missing."""
+    a_edges, a_cons, a_junctions = _net_tables(original)
+    b_edges, b_cons, b_junctions = _net_tables(patched)
+    missing = ([f"edge {k}" for k in a_edges if k not in b_edges]
+               + [f"connection {k}" for k in a_cons if k not in b_cons]
+               + [f"junction {k}" for k in a_junctions if k not in b_junctions])
+    return {
+        "edges": sorted(k for k in a_edges if k in b_edges and a_edges[k] != b_edges[k]),
+        "connections": sorted((k for k in a_cons if k in b_cons and a_cons[k] != b_cons[k]),
+                              key=str),
+        "junctions": sorted(k for k in a_junctions
+                            if k in b_junctions and a_junctions[k] != b_junctions[k]),
+        "missing": missing,
+    }
+
+
+def add_approaches(source_net: Path, out_net: Path, length_m: float = APPROACH_LENGTH_M,
+                   segment_m: float = APPROACH_SEGMENT_M) -> dict:
+    """Write `out_net`: `source_net` with the approach roads, by the netconvert patch
+    mechanism `add_exit_constraint` uses, and return the approach metadata.
+
+    The patch inputs are `approach.{nod,edg,con}.xml` beside `out_net`. `source_net` is
+    never written: its sha256 is checked before and after, and the build stops if it
+    changed. The built net must leave every original edge and connection as it was and
+    change only the eight entry start nodes (dead end to priority); otherwise the build
+    stops and removes what it wrote.
+    """
+    import sumolib
+
+    before = _file_sha256(source_net)
+    geometry = approach_geometry(sumolib.net.readNet(str(source_net)), APPROACH_ENTRIES,
+                                 length_m, segment_m,
+                                 json.loads((source_net.parent / "mainz_segments.json")
+                                            .read_text()))
+    directory = out_net.parent
+    nod, edg, con = approach_patch_xml(geometry)
+    (directory / "approach.nod.xml").write_text(nod)
+    (directory / "approach.edg.xml").write_text(edg)
+    (directory / "approach.con.xml").write_text(con)
+    binary = REPO_ROOT / ".venv" / "bin" / "netconvert"
+    result = subprocess.run(
+        [str(binary if binary.exists() else "netconvert"),
+         "--sumo-net-file", str(source_net),
+         "--node-files", str(directory / "approach.nod.xml"),
+         "--edge-files", str(directory / "approach.edg.xml"),
+         "--connection-files", str(directory / "approach.con.xml"),
+         "-o", str(out_net)],
+        capture_output=True, text=True)
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        raise SystemExit("netconvert failed adding the approach roads")
+    if _file_sha256(source_net) != before:
+        raise SystemExit(f"{source_net} changed while the approach roads were built")
+    drop_build_time(out_net)
+    changes = net_changes(source_net, out_net)
+    expected = sorted(f"{entry}-begin" for entry in APPROACH_ENTRIES)
+    if (changes["edges"] or changes["connections"] or changes["missing"]
+            or changes["junctions"] != expected):
+        out_net.unlink()
+        raise SystemExit(f"the approach roads changed the original network: {changes}")
+    built = sumolib.net.readNet(str(out_net))
+    metadata = geometry["metadata"]
+    for entry in APPROACH_ENTRIES:
+        metadata["approach"][entry]["edge_lengths_m"] = [
+            round(float(built.getEdge(name).getLanes()[0].getLength()), 2)
+            for name in metadata["approach"][entry]["edges"]]
+    metadata["net"] = {"path": _repo_relative(out_net), "sha256": _file_sha256(out_net)}
+    metadata["source_net"] = {"path": _repo_relative(source_net), "sha256": before}
+    metadata["changed_junctions"] = changes["junctions"]
+    return metadata
+
+
+def _repo_relative(path: Path) -> str:
+    path = Path(path).resolve()
+    return str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
+
+
+def build_approach(data_dir: Path, length_m: float = APPROACH_LENGTH_M,
+                   segment_m: float = APPROACH_SEGMENT_M, travel: Path | None = None) -> int:
+    """The approach boundary into `data_dir`: net, segments and metadata."""
+    source = data_dir / "mainz.net.xml"
+    segments_before = _file_sha256(data_dir / "mainz_segments.json")
+    metadata = add_approaches(source, data_dir / APPROACH_NET, length_m, segment_m)
+    (data_dir / APPROACH_SEGMENTS).write_text(json.dumps(metadata["approach_segments"],
+                                                         indent=1))
+    metadata["segments_file"] = _repo_relative(data_dir / APPROACH_SEGMENTS)
+    if _file_sha256(data_dir / "mainz_segments.json") != segments_before:
+        raise SystemExit("mainz_segments.json changed during the approach build")
+    (data_dir / APPROACH_META).write_text(json.dumps(metadata, indent=1))
+    lengths = [v for entry in metadata["approach"].values() for v in entry["edge_lengths_m"]]
+    print(f"approach roads: {len(metadata['entries'])} x {metadata['edges_per_approach']} "
+          f"edges of {segment_m:g} m (built {min(lengths):.2f} to {max(lengths):.2f} m); "
+          f"net sha256 {metadata['net']['sha256'][:12]}")
+    return 0
+
+
 def main(argv: list[str] | None = None, data_dir: Path = DATA) -> int:
     """Build the scenario into `data_dir` (the committed `data/mainz` by default)."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -541,7 +795,21 @@ def main(argv: list[str] | None = None, data_dir: Path = DATA) -> int:
                         help="skip netconvert and the exit constraint and reuse "
                              "mainz.net.xml unchanged; its sha256 is checked before and "
                              "after, and mainz_segments.json is checked, not rewritten")
+    parser.add_argument("--approach", action="store_true",
+                        help="build the approach boundary (approach plan section 1): "
+                             "mainz_approach.net.xml from the unchanged mainz.net.xml, its "
+                             "segments and metadata, and the approach demand files. Every "
+                             "other option is ignored")
+    parser.add_argument("--approach-length-m", type=float, default=APPROACH_LENGTH_M)
+    parser.add_argument("--approach-segment-m", type=float, default=APPROACH_SEGMENT_M)
+    parser.add_argument("--approach-travel", default=None,
+                        help="the calibration file (calibrate_approach_travel.py) whose "
+                             "per-entry mean travel times become T_A; without it the "
+                             f"provisional {PROVISIONAL_T_A_S:g} s is used (the first pass)")
     args = parser.parse_args(argv)
+    if args.approach:
+        return build_approach(data_dir, args.approach_length_m, args.approach_segment_m,
+                              Path(args.approach_travel) if args.approach_travel else None)
     if args.demand_burst is not None and args.demand_rush_s is not None:
         raise SystemExit("--demand-burst and --demand-rush-s each reshape the whole "
                          "demand; give one of them")
