@@ -750,3 +750,17 @@ first 30 logged vehicles below 19 km/h within 200 m of a far end were all contro
 8.34 m/s, aged 2.5 to 16.5 s since insertion, and driving at 4.17 to 4.79 m/s; about half had no
 leader within 100 m. A lone capped vehicle in the follower test fell only to 7.67 m/s, so the cap
 transition alone does not explain them. Not diagnosed (open item 9).
+
+## Orchestrator record (2026-10-17)
+
+- **Block Q passed** (worktree at `5cea9d3`, 60 episodes on seeds 1 and 2): no approach-short flag (longest
+  approach queue 767 m on the 2,000 m limit), `pending` 0, zero collisions, teleports, writes above the plan
+  and read-back mismatches.
+- **Validation round 1** (findings in `plans/2026-10-17-approach-roads-validation.md`): no defect in
+  production code; every quantity checked against the real block Q records by independent recomputation;
+  the gated path reproduces every field on seed 3 at both commits. Six SHOULD FIX findings are missing tests
+  (13 surviving mutants); the orchestrator re-ran mutant JE1 and it survives `test_approach_engines.py`.
+- **Decision:** because the round 1 findings are test-only, blocks M, L, P and K start at once from the same
+  clean worktree at `5cea9d3` that produced block Q, while the implementer adds the killing tests in a
+  test-only batch (`src/` and `scripts/` unchanged since `5cea9d3`, checked in round 2). If a new test shows a
+  production defect, the blocks it affects are re-run.
