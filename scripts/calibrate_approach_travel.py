@@ -195,8 +195,10 @@ def run(scenario: str, seed: int, duration_s: float, *, queues: bool = False) ->
         for _ in range(int(round(duration_s / STEP_S))):
             env._step()
             t = env.time_s()
+            # SUMO's own departure time: the step at which it inserted the vehicle. The clock
+            # read after `simulationStep` is one step later.
             for vehicle in _sumo.simulation.getDepartedIDList():
-                inserted[vehicle] = t
+                inserted[vehicle] = float(_sumo.vehicle.getDeparture(vehicle))
             pending[0] = max(pending[0], env.pending())
             if queues and abs(t / TRACE_EVERY_S - round(t / TRACE_EVERY_S)) < 1e-9:
                 report = env.approach_report()

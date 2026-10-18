@@ -140,7 +140,7 @@ def test_the_raw_crossings_reproduce_the_means(travel):
     for entry, stats in travel["entries"].items():
         assert stats["mean_s"] == pytest.approx(statistics.fmean(by_entry[entry]), abs=1e-9)
         assert stats["n"] == len(by_entry[entry])
-    assert travel["pending_max"] == 0
+    assert travel["pending_max"] == 0 and travel["late_insertions"] == 0
     assert travel["colliding_vehicles"] == 0 and travel["collision_teleports"] == 0
 
 

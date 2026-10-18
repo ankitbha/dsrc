@@ -793,7 +793,7 @@
  "calibrated": true,
  "travel": {
   "path": "data/mainz/mainz_approach_travel.json",
-  "sha256": "a4393bfe10882a88677fb1f5bd67d78285bb4da9a7b66f75ea2cd2ceec118db1",
+  "sha256": "57b2480e4c2f05ecf597ee0a13f605e14569319cfb1d96c1e47518c255d7b2c1",
   "seed": 1,
   "statistic": "mean"
  },

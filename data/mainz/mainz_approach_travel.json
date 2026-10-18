@@ -104,11 +104,11 @@
   }
  },
  "never_reached": 12,
- "late_insertions": 6994,
+ "late_insertions": 0,
  "pending_max": 0,
  "colliding_vehicles": 0,
  "collision_teleports": 0,
- "wall_s": 15.423256625013892,
+ "wall_s": 16.00377483299235,
  "vehicles_columns": [
   "id",
   "entry",
