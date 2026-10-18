@@ -706,6 +706,73 @@ def add_approaches(source_net: Path, out_net: Path, length_m: float = APPROACH_L
     return metadata
 
 
+def approach_offset(max_travel_s: float) -> float:
+    """`W = 60 ceil(max T_A / 60)` (section 2.4): every scenario time moves this much later.
+
+    A multiple of 60 s, so the feed replay draws the same start index and every stamp moves
+    by exactly `W`, and the 10 s query period, 5 s sensing tick and 10 s trace stay aligned.
+    """
+    return 60.0 * math.ceil(float(max_travel_s) / 60.0 - 1e-12)
+
+
+def approach_rows(rows, travel_s: dict[str, float], offset_s: float) -> list[dict]:
+    """The schedule on the approach boundary, rows in their original order (section 2.1).
+
+    Each row keeps `id`, `type`, `route` and `entry`; `depart` becomes the far-end
+    departure `depart + W - T_A(entry)` and `entry_time = depart + W` is added. Keeping
+    the order keeps every vehicle's position, which decides whether it is controlled and
+    which query phase it draws. A negative far-end departure is refused.
+    """
+    out = []
+    for row in rows:
+        far = round(row["depart"] + offset_s - travel_s[row["entry"]], 2)
+        if far < 0.0:
+            raise ValueError(f"{row['id']} would leave the far end at {far} s; W = "
+                             f"{offset_s:g} s is too small for T_A = {travel_s[row['entry']]}")
+        out.append({"id": row["id"], "route": row["route"], "type": row["type"],
+                    "depart": far, "entry": row["entry"],
+                    "entry_time": round(row["depart"] + offset_s, 2)})
+    return out
+
+
+_ROUTE_LINE = re.compile(r'^(\s*<route id="([^"]+)" edges=")([^"]*)("/>\s*)$')
+
+
+def write_approach_demand(name: str, travel_s: dict[str, float], offset_s: float,
+                          data_dir: Path = DATA, metadata: dict | None = None) -> int:
+    """`<name>_A_schedule.json`, `<name>_A.rou.xml` and `<name>_A_routes.rou.xml` from the
+    committed `<name>_schedule.json` and `<name>_routes.rou.xml` (section 2.1).
+
+    The route file lists every vehicle sorted by far-end departure, ties in schedule
+    order, with `departSpeed="max"` and `departLane="best"` as before. The routes file
+    keeps the vehicle types line for line and prefixes each route by its entry's approach
+    edges. Returns the number of vehicles.
+    """
+    if metadata is None:
+        metadata = json.loads((data_dir / APPROACH_META).read_text())
+    rows = approach_rows(json.loads((data_dir / f"{name}_schedule.json").read_text()),
+                         travel_s, offset_s)
+    header = []
+    for line in (data_dir / f"{name}_routes.rou.xml").read_text().splitlines():
+        if line.strip() == "</routes>":
+            continue
+        match = _ROUTE_LINE.match(line)
+        if match:
+            edges = match.group(3).split()
+            prefix = metadata["approach"][edges[0]]["edges"]
+            line = f"{match.group(1)}{' '.join(prefix + edges)}{match.group(4)}"
+        header.append(line)
+    order = sorted(range(len(rows)), key=lambda k: (rows[k]["depart"], k))
+    lines = list(header) + [
+        f'  <vehicle id="{rows[k]["id"]}" type="{rows[k]["type"]}" route="{rows[k]["route"]}" '
+        f'depart="{rows[k]["depart"]:.2f}" departSpeed="max" departLane="best"/>'
+        for k in order] + ["</routes>"]
+    (data_dir / f"{name}_A.rou.xml").write_text("\n".join(lines) + "\n")
+    (data_dir / f"{name}_A_routes.rou.xml").write_text("\n".join(header + ["</routes>"]) + "\n")
+    (data_dir / f"{name}_A_schedule.json").write_text(json.dumps(rows))
+    return len(rows)
+
+
 def _repo_relative(path: Path) -> str:
     path = Path(path).resolve()
     return str(path.relative_to(REPO_ROOT)) if path.is_relative_to(REPO_ROOT) else str(path)
@@ -713,20 +780,58 @@ def _repo_relative(path: Path) -> str:
 
 def build_approach(data_dir: Path, length_m: float = APPROACH_LENGTH_M,
                    segment_m: float = APPROACH_SEGMENT_M, travel: Path | None = None) -> int:
-    """The approach boundary into `data_dir`: net, segments and metadata."""
+    """The approach boundary into `data_dir`: net, segments, demand and metadata.
+
+    The two-pass build of section 2.2. Without `travel` every entry gets the provisional
+    `T_A` of 180 s and the metadata says `calibrated: false`; with the calibration file
+    `T_A` is its per-entry mean travel time, which must have been measured on this net.
+    `W` follows from the largest `T_A`. The committed gated files are read, never written:
+    their hashes are checked before and after.
+    """
     source = data_dir / "mainz.net.xml"
-    segments_before = _file_sha256(data_dir / "mainz_segments.json")
+    protected = [data_dir / "mainz_segments.json"] + [
+        data_dir / f"{name}{suffix}" for name in APPROACH_DEMANDS
+        for suffix in (".rou.xml", "_routes.rou.xml", "_schedule.json")]
+    before = {path: _file_sha256(path) for path in protected}
     metadata = add_approaches(source, data_dir / APPROACH_NET, length_m, segment_m)
     (data_dir / APPROACH_SEGMENTS).write_text(json.dumps(metadata["approach_segments"],
                                                          indent=1))
     metadata["segments_file"] = _repo_relative(data_dir / APPROACH_SEGMENTS)
-    if _file_sha256(data_dir / "mainz_segments.json") != segments_before:
-        raise SystemExit("mainz_segments.json changed during the approach build")
+    if travel is None:
+        travel_s = {entry: PROVISIONAL_T_A_S for entry in metadata["entries"]}
+        metadata["calibrated"] = False
+        metadata["travel"] = None
+    else:
+        record = json.loads(Path(travel).read_text())
+        if record["net_sha256"] != metadata["net"]["sha256"]:
+            raise SystemExit(f"{travel} was measured on net {record['net_sha256'][:12]}, "
+                             f"not this one ({metadata['net']['sha256'][:12]})")
+        travel_s = {entry: float(record["entries"][entry]["mean_s"])
+                    for entry in metadata["entries"]}
+        metadata["calibrated"] = True
+        metadata["travel"] = {"path": _repo_relative(Path(travel)),
+                              "sha256": _file_sha256(Path(travel)), "seed": record["seed"],
+                              "statistic": "mean"}
+    offset = approach_offset(max(travel_s.values()))
+    metadata["T_A"] = travel_s
+    metadata["W"] = offset
+    metadata["demand"] = {}
+    for name in APPROACH_DEMANDS:
+        count = write_approach_demand(name, travel_s, offset, data_dir, metadata)
+        for suffix in ("_A.rou.xml", "_A_routes.rou.xml", "_A_schedule.json"):
+            path = data_dir / f"{name}{suffix}"
+            metadata["demand"][path.name] = _file_sha256(path)
+        print(f"  {name}_A: {count} vehicles")
+    changed = [str(path) for path in protected if _file_sha256(path) != before[path]]
+    if changed:
+        raise SystemExit(f"the approach build changed committed files: {changed}")
     (data_dir / APPROACH_META).write_text(json.dumps(metadata, indent=1))
     lengths = [v for entry in metadata["approach"].values() for v in entry["edge_lengths_m"]]
     print(f"approach roads: {len(metadata['entries'])} x {metadata['edges_per_approach']} "
           f"edges of {segment_m:g} m (built {min(lengths):.2f} to {max(lengths):.2f} m); "
-          f"net sha256 {metadata['net']['sha256'][:12]}")
+          f"net sha256 {metadata['net']['sha256'][:12]}; T_A "
+          f"{min(travel_s.values()):.2f} to {max(travel_s.values()):.2f} s "
+          f"({'calibrated' if travel else 'provisional'}), W = {offset:g} s")
     return 0
 
 

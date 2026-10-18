@@ -83,6 +83,19 @@ for _name in ("mainz_bg", "mainz_b7500", "mainz_b9000"):
                         "gated_routes": f"data/mainz/{_name}_routes.rou.xml",
                         "segments": "data/mainz/mainz_segments.json",
                         "schedule": f"data/mainz/{_name}_schedule.json"}
+# The approach boundary (approach plan 2026-10-17 section 2.1): the same five demands on
+# `mainz_approach.net.xml`, every vehicle inserted at the far end of a 3 km road in front of
+# its entry link. `gated_routes` is the routes-only file, read for the route successors;
+# no arm is gated on this boundary. `approach` names the boundary's metadata.
+for _name in ("mainz_bg", "mainz_b7500", "mainz_b9000", "mainz_burst", "mainz"):
+    SCENARIOS[f"{_name}_A"] = {"net": "data/mainz/mainz_approach.net.xml",
+                               "routes": f"data/mainz/{_name}_A.rou.xml",
+                               "gated_routes": f"data/mainz/{_name}_A_routes.rou.xml",
+                               "segments": "data/mainz/mainz_segments.json",
+                               "schedule": f"data/mainz/{_name}_A_schedule.json",
+                               "approach": "data/mainz/mainz_approach.json",
+                               "approach_segments": "data/mainz/mainz_approach_segments.json",
+                               "approach_travel": "data/mainz/mainz_approach_travel.json"}
 del _name
 
 
