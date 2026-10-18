@@ -12,6 +12,13 @@ first spell lasting at least `H = 120 s` that starts at or after the scenario's 
 start; a spell still short of `H` at the cap is not an onset. A run with no onset is
 censored at the cap and kept. Jam time is in jammed segment-minutes. This module reads
 speeds, never the reward's density.
+
+On the approach boundary (approach plan 2026-10-17 section 5) a trace carries 36 columns:
+the original 12 super-segments and the 24 approach ones. `episode_metrics` then runs on a
+column subset (`columns`) with every clock moved by `offset_s` (`W`), and two storage
+measures charge what jam time does not: the approach excess and system excess
+vehicle-minutes. `queue_flags` flags an episode whose approach queue reaches the insertion
+super-segment or whose insertion backlog is ever positive.
 """
 from __future__ import annotations
 
@@ -257,9 +264,43 @@ def criterion_c(J: Mapping[str, Mapping[str, Mapping[int, float]]], arm: str,
             "terms": terms, "excluded_scenarios": excluded}
 
 
+#: Trace fields that hold one value per super-segment.
+PER_SEGMENT_KEYS: tuple[str, ...] = ("speed_kmh", "density", "count", "k_hat_mean",
+                                     "k_true_mean", "plan_mean", "shown_mean", "active_share")
+
+
+def select_columns(trace: Sequence[dict], columns: Sequence[int]) -> list[dict]:
+    """The trace with every per-segment field cut to `columns`, in their order; the other
+    fields (time, held, pending, running, ...) are kept. The input is not changed."""
+    columns = [int(c) for c in columns]
+    out = []
+    for sample in trace:
+        cut = dict(sample)
+        for key in PER_SEGMENT_KEYS:
+            values = sample.get(key)
+            if values is not None:
+                cut[key] = [values[c] for c in columns]
+        out.append(cut)
+    return out
+
+
 def episode_metrics(trace: Sequence[dict], *, v_jam: float, start_s: float, end_s: float,
-                    cap: float, H: float = HOLD_S) -> dict[str, Any]:
-    """Every per-episode jam quantity of section 8.3, from one trace."""
+                    cap: float, H: float = HOLD_S, columns: Sequence[int] | None = None,
+                    offset_s: float = 0.0) -> dict[str, Any]:
+    """Every per-episode jam quantity of section 8.3, from one trace.
+
+    `start_s`, `end_s`, `cap` and the selection window are on the gated clock; `offset_s`
+    (the approach boundary's `W`) moves every one of them, so the returned `start_s`,
+    `end_s`, `cap_s` and `onset_s` are on the trace's (SUMO's) clock and `onset_after_start_s`
+    and `drain_s` stay relative to the scenario's start and end. `columns` restricts every
+    quantity to those super-segments (approach plan section 5.2); drain then requires those
+    to be clear, and held and pending to be zero, as before. Without either argument the
+    result is exactly the gated one.
+    """
+    if columns is not None:
+        trace = select_columns(trace, columns)
+    start_s, end_s, cap = start_s + offset_s, end_s + offset_s, cap + offset_s
+    window = (SELECTION_WINDOW_S[0] + offset_s, min(SELECTION_WINDOW_S[1] + offset_s, cap))
     first = onset(trace, v_jam, start_s, cap, H)
     held, pending = held_minutes(trace, start_s, cap)
     times = _times(trace)
@@ -268,7 +309,7 @@ def episode_metrics(trace: Sequence[dict], *, v_jam: float, start_s: float, end_
         open_spell = _drain.open_spell_at_cap(trace, cap, v_jam)
     else:
         drain_s, drained, open_spell = None, None, None
-    return {
+    out = {
         "v_jam": v_jam, "hold_s": H, "start_s": start_s, "end_s": end_s, "cap_s": cap,
         "onset_s": first.t if first else None,
         "onset_segment": first.segment if first else None,
@@ -276,12 +317,82 @@ def episode_metrics(trace: Sequence[dict], *, v_jam: float, start_s: float, end_
         "first_sample_onset_s": first_sample_onset(trace, v_jam, start_s),
         "prevented": first is None,
         "jam_time_min": jam_time(trace, v_jam, start_s, cap),
-        "jam_time_min_900_3600": jam_time(trace, v_jam, SELECTION_WINDOW_S[0],
-                                          min(SELECTION_WINDOW_S[1], cap)),
+        "jam_time_min_900_3600": jam_time(trace, v_jam, window[0], window[1]),
         "jam_time_min_30kmh": jam_time(trace, FIXED_KMH, start_s, cap),
         "held_min": held, "pending_min": pending,
         "drain_s": drain_s, "drained": drained, "open_spell_at_cap": open_spell,
     }
+    if offset_s or columns is not None:
+        out["offset_s"] = offset_s
+        out["columns"] = None if columns is None else [int(c) for c in columns]
+    return out
+
+
+def free_flow_occupancy(rows: Sequence[Mapping[str, Any]], travel_s: Mapping[str, float],
+                        times: Sequence[float]) -> np.ndarray:
+    """`N_ff(t)` (approach plan section 5.3): the vehicles whose far-end departure is at or
+    before `t` and whose departure plus its entry's `T_A` is after `t`, at each time.
+
+    `rows` is the approach schedule (`depart` is the far-end departure). This is the
+    approaches' occupancy under free flow, and follows from the schedule alone.
+    """
+    departs = np.sort(np.array([float(r["depart"]) for r in rows]))
+    ends = np.sort(np.array([float(r["depart"]) + float(travel_s[r["entry"]]) for r in rows]))
+    t = np.asarray(times, dtype=float)
+    return (np.searchsorted(departs, t, side="right")
+            - np.searchsorted(ends, t, side="right")).astype(np.int64)
+
+
+def _window_integral(trace: Sequence[dict], values: np.ndarray, start: float,
+                     cap: float) -> float:
+    """Sample spacing times the sum of `values` over the samples in `[start, cap]`, in
+    minutes, as `held_minutes` integrates."""
+    times = _times(trace)
+    inside = (times >= start) & (times <= cap)
+    return _spacing(times) * float(np.asarray(values, dtype=float)[inside].sum()) / 60.0
+
+
+def approach_excess_minutes(trace: Sequence[dict], rows: Sequence[Mapping[str, Any]],
+                            travel_s: Mapping[str, float], *, start_s: float, cap: float,
+                            offset_s: float = 0.0) -> float:
+    """The integral over `[start_s + W, cap + W]` of `on_approach(t) - N_ff(t)`, in
+    vehicle-minutes (approach plan section 5.3): the approach boundary's counterpart of the
+    gated boundary's held vehicle-minutes."""
+    times = _times(trace)
+    excess = (np.array([s["on_approach"] for s in trace], dtype=float)
+              - free_flow_occupancy(rows, travel_s, times))
+    return _window_integral(trace, excess, start_s + offset_s, cap + offset_s)
+
+
+def system_excess_minutes(trace: Sequence[dict], *, start_s: float, cap: float,
+                          offset_s: float = 0.0, rows: Sequence[Mapping[str, Any]] | None = None,
+                          travel_s: Mapping[str, float] | None = None) -> float:
+    """The integral over `[start_s + W, cap + W]` of `running + held + pending - N_ff`, in
+    vehicle-minutes (approach plan section 5.3); `N_ff = 0` without a schedule, as on the
+    gated boundary. Demand is the same in every arm of a scenario, so a lower value means
+    fewer vehicle-minutes spent in the network, on the approaches above free flow and
+    waiting to enter."""
+    times = _times(trace)
+    total = np.array([s["running"] + s["held"] + s["pending"] for s in trace], dtype=float)
+    if rows is not None:
+        total = total - free_flow_occupancy(rows, travel_s, times)
+    return _window_integral(trace, total, start_s + offset_s, cap + offset_s)
+
+
+def queue_flags(trace: Sequence[dict], limit_m: float = 2000.0) -> dict[str, Any]:
+    """Approach plan section 5.4: per approach the longest queue and the most slow vehicles
+    near the far end over the trace, the largest insertion backlog, and `approach_short`
+    when any queue exceeds `limit_m` (it reaches the insertion super-segment) or the
+    backlog is ever above zero."""
+    queues = [s["queue_m"] for s in trace if s.get("queue_m") is not None]
+    near = [s["slow_near_insertion"] for s in trace if s.get("slow_near_insertion") is not None]
+    width = len(queues[0]) if queues else 0
+    queue_max = [max(q[j] for q in queues) for j in range(width)]
+    near_max = [max(n[j] for n in near) for j in range(len(near[0]))] if near else []
+    pending_max = max((int(s["pending"]) for s in trace), default=0)
+    return {"queue_max_m": queue_max, "slow_near_insertion_max": near_max,
+            "pending_max": pending_max, "limit_m": float(limit_m),
+            "approach_short": bool(any(v > limit_m for v in queue_max) or pending_max > 0)}
 
 
 @dataclass(frozen=True)
