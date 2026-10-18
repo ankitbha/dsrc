@@ -265,3 +265,25 @@ def test_every_route_visits_the_original_segments_in_increasing_contiguous_order
             if edge in segment_of and (not visited or visited[-1] != segment_of[edge]):
                 visited.append(segment_of[edge])
         assert visited == list(range(visited[0], 12)), (route_id, visited)
+
+
+def test_a_5000_m_rebuild_gives_five_edges_per_approach_and_w_300(tmp_path):
+    """Block Q's fallback (approach plan section 7.1), built into a copy of the data."""
+    import shutil
+
+    names = ["mainz.net.xml", "mainz_segments.json"] + [
+        f"{name}{suffix}" for name in bms.APPROACH_DEMANDS
+        for suffix in (".rou.xml", "_routes.rou.xml", "_schedule.json")]
+    for name in names:
+        shutil.copy(DATA / name, tmp_path / name)
+    assert bms.build_approach(tmp_path, 5000.0, 1000.0) == 0
+    meta = json.loads((tmp_path / "mainz_approach.json").read_text())
+    assert meta["edges_per_approach"] == 5 and len(meta["approach_segments"]) == 40
+    assert meta["approach"]["295"]["segments"] == list(range(12 + 35, 12 + 40))
+    assert meta["T_A"] == {e: 300.0 for e in ENTRIES} and meta["W"] == 300.0
+    assert meta["calibrated"] is False
+    assert len(meta["plan_row"]) == len(meta["downstream"]) == 52
+    lengths = [v for entry in meta["approach"].values() for v in entry["edge_lengths_m"]]
+    assert min(lengths) >= 999.95 and max(lengths) <= 1000.05
+    for name in names:  # the copies of the committed files are left as they were
+        assert (tmp_path / name).read_bytes() == (DATA / name).read_bytes()

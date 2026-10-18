@@ -485,7 +485,8 @@ def _file_sha256(path: Path) -> str:
 APPROACH_ENTRIES: tuple[str, ...] = ("277", "289", "231", "255", "140", "182", "293", "295")
 APPROACH_LENGTH_M: float = 3000.0
 APPROACH_SEGMENT_M: float = 1000.0
-#: The provisional travel time of the first pass (section 2.2), 3,000 m at 16.67 m/s.
+#: The provisional travel time of the first pass (section 2.2), 3,000 m at 16.67 m/s; an
+#: approach of another length scales it (300 s at 5,000 m, the plan's fallback).
 PROVISIONAL_T_A_S: float = 180.0
 APPROACH_NET = "mainz_approach.net.xml"
 APPROACH_META = "mainz_approach.json"
@@ -798,7 +799,8 @@ def build_approach(data_dir: Path, length_m: float = APPROACH_LENGTH_M,
                                                          indent=1))
     metadata["segments_file"] = _repo_relative(data_dir / APPROACH_SEGMENTS)
     if travel is None:
-        travel_s = {entry: PROVISIONAL_T_A_S for entry in metadata["entries"]}
+        provisional = PROVISIONAL_T_A_S * length_m / APPROACH_LENGTH_M
+        travel_s = {entry: provisional for entry in metadata["entries"]}
         metadata["calibrated"] = False
         metadata["travel"] = None
     else:
