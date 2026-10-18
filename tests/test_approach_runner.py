@@ -323,3 +323,16 @@ def test_the_approach_smoke_runs_every_block_end_to_end(tmp_path):
     q = json.loads((results / "Q_summary.json").read_text())
     assert q["qualification"]["passes"] is True
     assert (results / "leads.json").exists()
+
+
+def test_the_approach_boundary_runs_the_committed_models():
+    # Approach plan section 4.5 and attack point 9: nothing is re-selected or refitted.
+    sha = lambda p: hashlib.sha256((REPO_ROOT / p).read_bytes()).hexdigest()
+    assert sha("results/jam/S_summary.json") == rje.APPROACH_SELECTION_SHA256
+    assert sha("results/jam/onset_predictor.json").startswith("3b2256cd")
+    assert sha("results/jam/camera_error_model.json").startswith("fdf527cd")
+    assert sha("results/checkpoints/mainz_here_best.pt").startswith("941ac210")
+    assert sha("results/jam/feed_process_afternoon.json").startswith("8f5430bf")
+    assert rje.DEFAULT_PREDICTOR == REPO_ROOT / "results/jam/onset_predictor.json"
+    assert rje.DEFAULT_CAMERA == REPO_ROOT / "results/jam/camera_error_model.json"
+    assert rje.DEFAULT_CHECKPOINT == REPO_ROOT / "results/checkpoints/mainz_here_best.pt"

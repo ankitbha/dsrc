@@ -4483,3 +4483,114 @@ them, and their values are not results.
   episodes end before the 900 s perturbation.
 
 ---
+
+
+---
+
+
+## N. Approach boundary: build, calibration, checks and smoke runs (2026-10-17)
+
+These runs check that the approach boundary of `plans/2026-10-17-approach-roads-plan.md`
+is built as the plan specifies, that its arrivals keep the schedule, and that every entry
+point runs end to end on its real inputs (step S9). The calibration and the checks use
+training seeds 1 and 2 only. The smoke runs used one 840 s episode per arm on training
+seed 1, into `outputs/jam_approach/smoke/` (gitignored). No threshold, model or arm was
+selected from any of them, and the smoke values are not results. Blocks Q, M, L, P and K
+have not been run.
+
+**The network (step S1).** `scripts/build_mainz_scenario.py --approach` adds three
+1,000 m edges in front of each of the eight entry links to a copy of `mainz.net.xml`
+(sha256 `037de791…`, unchanged by the build) and writes `data/mainz/mainz_approach.net.xml`
+(sha256 `ead3669b…`). The built approach lanes measure 999.99 to 1,000.01 m. Compared as
+numbers, all 414 original edges (193 named, 221 internal) and all 767 original
+connections are unchanged, and the
+only changed junctions are the eight `<entry>-begin` nodes (dead end to priority). A
+rebuild reproduces the net byte for byte.
+
+**The travel time (step S3).** `scripts/calibrate_approach_travel.py --seed 1` ran BG under
+no control for 7,380 s (7,200 s plus the first pass's `W` of 180 s) in 15.4 s. The table
+gives, per entry, the time from the scheduled far-end departure to the first 0.5 s step on
+the entry link. The mean became `T_A`; the largest mean, 194.41 s, gives `W = 240 s`.
+
+| entry | vehicles | mean s | median s | sd s | 5th pct s | 95th pct s |
+|---|---|---|---|---|---|---|
+| 277 | 992 | 190.09 | 182.40 | 13.36 | 180.65 | 218.83 |
+| 289 | 990 | 189.22 | 181.89 | 12.09 | 181.05 | 215.96 |
+| 231 | 594 | 188.38 | 181.12 | 11.86 | 180.55 | 212.02 |
+| 255 | 595 | 194.41 | 190.20 | 14.46 | 180.61 | 222.92 |
+| 140 | 1,189 | 189.65 | 182.36 | 12.98 | 181.05 | 219.22 |
+| 182 | 1,189 | 189.35 | 182.35 | 13.12 | 181.07 | 214.46 |
+| 293 | 790 | 190.01 | 183.00 | 13.24 | 180.61 | 216.47 |
+| 295 | 793 | 189.18 | 181.67 | 13.19 | 180.55 | 216.59 |
+
+12 of the 7,144 vehicles left the far end too late to reach their entry link by 7,380 s.
+SUMO's insertion backlog was 0 at every step, every vehicle was inserted within one
+0.5 s step of its scheduled far-end departure (by SUMO's own departure time), and no
+vehicle collided.
+The means are within 0.4 s of the planner's 1 s pilot (188.70 to 194.67 s).
+
+**The boundary checks (section 6).** `calibrate_approach_travel.py --check --seeds 1 2`
+ran on the rebuilt demand in 44 s and passed both checks on both seeds.
+
+- Arrivals, BG: the mean of (arrival minus scheduled entry time) per entry was -0.84 to
+  +1.35 s on seed 1 and -1.46 to +1.16 s on seed 2, against a tolerance of 3 s; its
+  standard deviation was 12.2 to 14.3 s. In every 300 s window and at every entry the
+  arrival count differed from the scheduled count by at most 4 vehicles (seed 1) and 5
+  vehicles (seed 2). All 6,848 vehicles due by 7,140 s reached their entry links.
+- The burst, B9, window [1,140, 1,440) s: on seed 1 seven entries received 95 to 100% of
+  their scheduled burst arrivals. Entry 255 received all 62, a mean of 40.7 s late (open
+  item 3). Entry 295 received 61 of 83 (-27%) with a queue of up to 200 m on its approach,
+  which exempts it from the 10% tolerance. On seed 2 seven entries received 95 to 102%, and
+  entry 295 received 65 of 83 (-22%) with a queue of up to 183 m; entry 255's mean lag was
+  2.9 s on that seed.
+
+**The gated regression (step S5).** Through the runner's episode function with the
+committed checkpoint, feed artefact, camera model and predictor, the refactored code
+reproduces the committed records `M/rule/m0/B9/16` (3,676.0 veh/h, 6,685 arrivals, 5.6667
+jammed segment-minutes, 1,215,428 writes, active share 0.309509) and `M/no_control/-/B9/16`
+(3,509.14 veh/h, 6,442 arrivals, 185.5 segment-minutes, 6,374.0 pending vehicle-minutes)
+exactly, in every compared field, including the return, the switch table, the incidents
+and both jam-metric dictionaries. Each took about 33 s.
+
+**The smoke runs (step S7).**
+`scripts/run_jam_experiments.py --boundary approach --block Q M L P K --smoke` ran 20
+episodes (Q 7, M 7, L 3, P 2, K 1) in 24.9 s, 1.0 to 1.3 s each, with the committed
+selection (sha256 `5bce02db…`), camera model and predictor.
+
+- Every episode had zero colliding vehicles, zero collision teleports, zero writes above
+  the plan, zero `setMaxSpeed` read-back mismatches, nothing held at any trace sample,
+  `admitted` -1, `gate_entries` False and an insertion backlog of 0; none was flagged
+  approach-short, and block Q's pass rule passed on the smoke.
+- `tests/test_approach_engines.py` runs the same seven block M arms for 840 s on B9 and
+  checks every write: approach vehicles receive writes, each written plan equals
+  `a_k[plan_row]`, each lookahead write recomputes from the version's 36-row snapshot and
+  `downstream`, and the camera arms and the oracle trace estimates on approach
+  super-segments.
+- `scripts/compare_boundaries.py --gated results/jam --approach
+  outputs/jam_approach/smoke/results` ran in 1.5 s and found the gated traces under
+  `outputs/jam/run_c03cca5/traces/` for all 195 gated episodes it needed. Every pair was
+  empty, because the smoke's seed 1 is not one of seeds 16 to 30, and each such seed is
+  listed rather than dropped.
+
+**What the smokes do not show.**
+- The storage measures are 0 in every smoke episode, because the smoke ends at 840 s and
+  their window starts at 1,140 s; they are tested on hand traces only.
+- The per-episode wall time of a 7,200 s episode on this boundary was not measured here;
+  the plan's estimate is 1.15 to 1.23 times the gated block M time.
+- The thresholds and the best model are the gated boundary's selection (section 4.5).
+
+**Commands for the experiment** (from the repository root of a clean worktree):
+
+    .venv/bin/python scripts/run_jam_experiments.py --boundary approach --block Q \
+        --check-max-speed
+    .venv/bin/python scripts/run_jam_experiments.py --boundary approach --block M L P K \
+        --check-max-speed --resume
+    .venv/bin/python scripts/compare_boundaries.py --gated results/jam \
+        --approach results/jam_approach \
+        --gated-traces <main checkout>/outputs/jam/run_c03cca5/traces
+
+Results go to `outputs/jam_approach/run/` (pause file `outputs/jam_approach/run/PAUSE`) and
+traces to `outputs/jam_approach/traces/`; they are copied to `results/jam_approach/` when
+the chain ends. `--resume` is needed only to continue a block whose JSONL already
+exists. The gated traces are gitignored, so a comparison run from a worktree must be
+pointed at the main checkout's copy.
