@@ -790,34 +790,39 @@
   "295-begin"
  ],
  "segments_file": "data/mainz/mainz_approach_segments.json",
- "calibrated": false,
- "travel": null,
- "T_A": {
-  "277": 180.0,
-  "289": 180.0,
-  "231": 180.0,
-  "255": 180.0,
-  "140": 180.0,
-  "182": 180.0,
-  "293": 180.0,
-  "295": 180.0
+ "calibrated": true,
+ "travel": {
+  "path": "data/mainz/mainz_approach_travel.json",
+  "sha256": "a4393bfe10882a88677fb1f5bd67d78285bb4da9a7b66f75ea2cd2ceec118db1",
+  "seed": 1,
+  "statistic": "mean"
  },
- "W": 180.0,
+ "T_A": {
+  "277": 190.08701612903226,
+  "289": 189.2230909090909,
+  "231": 188.3829797979798,
+  "255": 194.408487394958,
+  "140": 189.65015138772077,
+  "182": 189.35108494533222,
+  "293": 190.0112151898734,
+  "295": 189.18195460277428
+ },
+ "W": 240.0,
  "demand": {
-  "mainz_bg_A.rou.xml": "341219a58d3575ad3fb5dc0ee39a03cf0aa6d025e84287438687287ca91b6bf8",
+  "mainz_bg_A.rou.xml": "ba0d0603a2b155d1b85b3fb41662476e3c9168bc4e69fdf8d827ee38960d51b0",
   "mainz_bg_A_routes.rou.xml": "b8340b05602c31f7ce92e47a4ff33877340636848e3d1a76f1e572bc776f5bcd",
-  "mainz_bg_A_schedule.json": "988ed9d7055eac7bc338283f09c3275a76ab658982bfccece3d2053c6aa7fce9",
-  "mainz_b7500_A.rou.xml": "bd6638bafd30dbfddb5188c00dbc58c254ad836afd37518eeb67b9513ce7de0d",
+  "mainz_bg_A_schedule.json": "2ca4721a5d9ffa9971b1655250fd413012a290459834236e07a279c02a856fc0",
+  "mainz_b7500_A.rou.xml": "8727a300059d4139265757b36e6e360c89ccc0d9e59e989b18ea9f69d264a025",
   "mainz_b7500_A_routes.rou.xml": "b8340b05602c31f7ce92e47a4ff33877340636848e3d1a76f1e572bc776f5bcd",
-  "mainz_b7500_A_schedule.json": "60732e5be28a485508664474a605da9af8174c8233790ea79fa347d9ac76e52d",
-  "mainz_b9000_A.rou.xml": "c0ec71000baea75ba667e6e831326bfb3d77728338cd2253bcbf536090e36db0",
+  "mainz_b7500_A_schedule.json": "06b6fffc6f4bb9a59c473ea9fdb0600b1b9e873429a83fbd79aa2f38da60c85b",
+  "mainz_b9000_A.rou.xml": "33e6400a2952d5a188206a315324dda0ecc99b31c632d1985165d482f581d164",
   "mainz_b9000_A_routes.rou.xml": "b8340b05602c31f7ce92e47a4ff33877340636848e3d1a76f1e572bc776f5bcd",
-  "mainz_b9000_A_schedule.json": "5fa7879901819f19c58679d157c3ea91d9e0ea7f04eefbb7dedd67289cd27ab4",
-  "mainz_burst_A.rou.xml": "f7120e2b2c36e1e6e7b7d3c7ed541e99f9c2fd729cc38b1528a1b75dc33d6bc3",
+  "mainz_b9000_A_schedule.json": "c4f07a07794a848f96f09e836815741de9331f66de723b848dd2f2531a5067ae",
+  "mainz_burst_A.rou.xml": "c9699fa13e3f0d7159e11e5050b5fa6231a13c722bdb7def4fca6946150b7fc9",
   "mainz_burst_A_routes.rou.xml": "b8340b05602c31f7ce92e47a4ff33877340636848e3d1a76f1e572bc776f5bcd",
-  "mainz_burst_A_schedule.json": "2c131ae56217370e71d37a5f228989611df2b0aec3effa8e222c2ae6802fb1ab",
-  "mainz_A.rou.xml": "ee6fc732c3911167ac79dfbe96b60592a9abe2c5e86cbb14fd9f51fda1c72d2c",
+  "mainz_burst_A_schedule.json": "cb308d4fb5d4a09fd7a0aba0ee0eee54c5676396b620a38e9dbec43f2e7b4b8f",
+  "mainz_A.rou.xml": "b499b05a8136406e6816b924e58569a2ec6e206b6e714b052538ce7f0991b608",
   "mainz_A_routes.rou.xml": "b8340b05602c31f7ce92e47a4ff33877340636848e3d1a76f1e572bc776f5bcd",
-  "mainz_A_schedule.json": "5e080dc3e79d134503ac07d9fd8d1afc6d0783242d089476791a35b3f571ead2"
+  "mainz_A_schedule.json": "21730a354e8daedbc84d2caf2187710e6d81e95f64b6fbba509f3c8df3357495"
  }
 }
