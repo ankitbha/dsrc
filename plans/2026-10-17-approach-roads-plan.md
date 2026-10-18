@@ -754,7 +754,9 @@ transition alone does not explain them. Not diagnosed (open item 9).
 ## Orchestrator record (2026-10-17)
 
 - **Block Q passed** (worktree at `5cea9d3`, 60 episodes on seeds 1 and 2): no approach-short flag (longest
-  approach queue 767 m on the 2,000 m limit), `pending` 0, zero collisions, teleports, writes above the plan
+  approach queue 832.4 m, `Q/oracle/tau10_m0_R60/B9/1` on approach 182, against the 2,000 m limit;
+  corrected after validation round 2, R2-2: an earlier draft of this record said 767 m, which came from sorting the
+  per-approach queue lists by their first element), `pending` 0, zero collisions, teleports, writes above the plan
   and read-back mismatches.
 - **Validation round 1** (findings in `plans/2026-10-17-approach-roads-validation.md`): no defect in
   production code; every quantity checked against the real block Q records by independent recomputation;
@@ -764,3 +766,9 @@ transition alone does not explain them. Not diagnosed (open item 9).
   clean worktree at `5cea9d3` that produced block Q, while the implementer adds the killing tests in a
   test-only batch (`src/` and `scripts/` unchanged since `5cea9d3`, checked in round 2). If a new test shows a
   production defect, the blocks it affects are re-run.
+
+- **Validation round 2** (6fc1639, tests only; `src/`, `scripts/` and `data/` unchanged since `5cea9d3`): no
+  production finding; all 13 round 1 survivors killed by the new tests; the double flow-window marking opens the
+  window late only under `--smoke` (window at exactly 900 s in all 1,695 committed gated records and at 1,140 s
+  in the 75 approach records then written); R2-1 (leads clock-start and cap shift not pinned by a test; no effect
+  on 22 real traces) not fixed; R2-2 corrected above. The validation cap of two rounds is reached.

@@ -246,3 +246,134 @@ BLOCKS 0, SHOULD FIX 6 (R1-1 to R1-5, R1-7), DOCUMENTED LIMIT 0, NOT WORTH FIXIN
   walls (1.05 to 1.59 times the gated block M means) include contention and are not a measurement
   for the plan's 20% overrun rule.
 - The HERE key was checked only by searching the diff and the Q outputs, not the whole disk.
+
+## Round 2: commit 6fc1639 (tests only since 5cea9d3)
+
+`git diff 5cea9d3 6fc1639 -- src scripts data` is 0 bytes, and a fresh `git archive 6fc1639` mirror
+has `src/` and `scripts/` identical to the round 1 mirror. All eight approach test files pass in the
+round 2 mirror (12, 5, 18, 33, 17, 28, 14 and 50 tests; the seed-16 regression deselected).
+
+### Coverage
+
+| # | check | status | method |
+|---|---|---|---|
+| 1 | Round 1's surviving mutants against 6fc1639 | done | the round 1 harness (`mutate.py`) on a fresh mirror (`approach_mirrors/round2_mut`), `__pycache__` cleared, `PYTHONDONTWRITEBYTECODE=1`, `python -B`; all 14 round 1 survivors |
+| 2 | The double marking of the flow window | done | code path; instrumented `mark_window` on four 1,000 s episodes on training seed 1; window start recovered from the trace for every committed gated record and every approach record so far |
+| 3 | Whether the new tests could pass against a broken implementation | done | read each new test against its target; four further mutants (RJ7 to RJ10) aimed at what the new tests do not pin; effect of the two survivors on real traces |
+
+### 1. The round 1 survivors
+
+All 13 that round 1 asked to be killed are killed, each by the test the implementer named:
+
+| mutant | killed by |
+|---|---|
+| JM2, JM3 | `test_approach_metrics.py::TestColumns::test_the_selection_window_moves_by_the_offset` |
+| JM6, JM7 | `test_approach_metrics.py::TestStorage::test_the_approach_excess_window_moves_by_the_offset` |
+| MZ3 | `test_approach_env.py::TestApproachReport::test_queue_from_the_entry_with_a_100_m_gap` |
+| JE1, JE2 | `test_approach_engines.py::test_the_flow_window_and_the_exit_block_open_w_later` |
+| JE9 | `test_approach_engines.py::test_take_the_slower_re_runs_an_approach_vehicle_on_its_entry_segment_s_row` |
+| RJ1 | `test_approach_runner.py::TestRunnerStorageAndFlags::test_a_queue_reaching_the_insertion_edge_flags_the_episode` |
+| RJ3, RJ4 | `test_approach_runner.py::TestRunnerStorageAndFlags::test_the_storage_measures_use_the_approach_schedule_and_the_shifted_window` |
+| RJ5 | `test_approach_runner.py::TestRunnerStorageAndFlags::test_the_leads_baseline_moves_by_w` |
+| CB1 | `test_compare_boundaries.py::test_the_comparison_pairs_every_quantity_and_lists_the_missing_seed` |
+
+JE6 (R1-6, NOT WORTH FIXING) still survives, as agreed. Results in
+`scratchpad/dsrc_jam/approach_val_r2/mutation_results.json`.
+
+The implementer's departure from R1-1's wording is correct. The assertion R1-1 proposed for the
+840 s smoke, flow equal to `(arrived(840) - arrived(540)) * 3600 / 300`, would fail on the committed
+code, because the smoke's window opens at 600 s, not 540 s (section 2 below). The short I_exit episode
+that replaced it kills both JE1 and JE2.
+
+### 2. The double marking of the flow window
+
+**The mechanism is as the implementer describes.** `MainzEnv.reset()` calls `mark_window()` at the end of
+the warm-up (300 s gated, 540 s approach). `run_jam_episode` then sets `marked = window_s <= 0.0`,
+advances one 60 s decision interval at a time, and calls `mark_window()` again the first time
+`env.time_s() >= window_s`. The second call resets the arrival count and the speed and occupancy
+accumulators, so it decides the window. Decision times are the warm-up end plus multiples of 60 s.
+With `mark_window` instrumented, on training seed 1, B9, plan arm, cap 1,000 s on the gated clock:
+
+| boundary | `window_start_s` | `mark_window` called at (s) | window used |
+|---|---|---|---|
+| gated | 300 (smoke) | 300, 360 | 360 s, 60 s late |
+| gated | 900 | 300, 900 | 900 s |
+| approach | 300 (smoke) | 540, 600 | 600 s, 60 s late |
+| approach | 900 | 540, 1,140 | 1,140 s |
+
+A window is therefore late only when `window_s` is at or before the warm-up end, which in the jam
+runner happens only with `--smoke` (`window_start_s=300.0 if args.smoke else 900.0`). Whenever
+`window_s` is later than the warm-up end it equals `warm-up end + 60 k` (900 = 300 + 600;
+1,140 = 540 + 600), so the loop's mark falls on it exactly.
+
+**It affected no reported number.** For every record I recovered the window start from the trace. That
+is the trace sample time `t` whose `(arrived(end) - arrived(t)) * 3600 / (end - t)` equals the
+record's `flow`, required to match at the expected time and not at the samples 60 s either side
+(`approach_val_r2/window_check.py`):
+
+| records | expected window | match |
+|---|---|---|
+| committed gated `results/jam/` M (765), L (270), P (120), K (90), S (390), T (60), with the gated traces in `outputs/jam/run_c03cca5/traces/` | 900 s | 1,695 of 1,695 |
+| approach block Q (60) and the approach block M records written so far (15), worktree at 5cea9d3 | 1,140 s | 75 of 75 |
+
+`space_mean_speed_kmh` and `mean_vehicles` are reset by the same call, so the same conclusion holds for
+them. Only smoke flows, mean speeds and mean vehicle counts open 60 s late. The smoke records state
+that their values are not results. The behaviour is unchanged from 4f4720a (`marked = window_start_s <= 0.0`
+there too).
+
+### 3. Whether the new tests could pass against a broken implementation
+
+Each new test reaches the branch it names: every one of them kills its mutant, and none depends on a
+fixture that hides the branch. I read the assertions against what they claim:
+
+- The selection-window test places one spell before the shifted window and one inside its shifted end, and
+  pins both the shifted value (24 samples) and the gated value (25), so it fails if either end moves.
+- The approach-excess window test puts excess outside the window at the start (2 vehicles on
+  [900, 1,140)) and inside it at the shifted end (3 on (7,200, 7,440]).
+- The storage test compares the runner with `jam_metrics` called on the `_A` schedule and the
+  calibrated `T_A`. It also guards that the shifted and unshifted values differ by more than 100 and
+  1,000 vehicle-minutes. Two further mutants confirm it pins the inputs: RJ7 (the gated schedule in
+  place of the `_A` one) and RJ8 (the provisional 180 s in place of `T_A`) are both killed.
+- The flow-window test asserts `arrived(1,140) != arrived(900)`, so its flow assertion would see a
+  window opened at 900 s.
+- The take-the-slower test drives `JamEngine._decide` with a recording correction and asserts the
+  rows `[5, 7]` for egos on super-segments 25 and 7.
+- The leads test's speed profile makes the shifted and unshifted baselines give different precursor
+  times (`W_feed` 300 s against 360 s).
+
+Two further mutants survive. Neither changes a number on the real traces:
+
+**R2-1. NOT WORTH FIXING. The leads clock start and cap shifts are not pinned by a test.**
+- Location: `scripts/run_jam_experiments.py:1188-1189` (`start = ... + offset_s`, `cap = r["duration_s"] + offset_s`).
+- Evidence: RJ9 (start not shifted, 900 s) and RJ10 (cap not shifted, 7,200 s) survive all eight
+  approach test files. In `test_the_leads_baseline_moves_by_w` the onset (1,500 s) and the speed
+  precursor (1,200 s) lie inside both windows, so either mutant returns the same values. On 22 real
+  no-control traces (Q B9 and I_exit seeds 1-2, and the 18 approach block M no-control B5 and B7.5
+  traces written so far), recomputing the leads with the start at 900 s, or with the cap at 7,200 s,
+  changes none of onset, segment, `W_feed`, `W_cam` or `W_true`. A number would change only if an onset
+  or a 30 s precursor fell in [900, 1,140) s or in (7,200, 7,440] s.
+- Fix (optional): add to the leads test a speed precursor on [960, 1,140) s and assert `W_feed` is
+  still 300 s.
+
+**R2-2. SHOULD FIX (prose). The plan's orchestrator record misstates block Q's longest approach queue.**
+- Location: `plans/2026-10-17-approach-roads-plan.md`, "Orchestrator record (2026-10-17)", first bullet:
+  "longest approach queue 767 m on the 2,000 m limit".
+- Evidence: the largest `flags.queue_max_m` over the 60 block Q records is 832.39 m
+  (`Q/oracle/tau10_m0_R60/B9/1`, approach 182), then 826.02 m (oracle, I_exit, seed 2), 815.94 m
+  (take-the-slower, I_exit, seed 1) and 783.46 m (take-the-slower, B9, seed 1); `Q_summary.json` gives the
+  same 832.39 m. 767 m is the planning pilot's value for the plan arm on I_exit (appendix A3). The pass
+  verdict does not change.
+- Fix: replace 767 m with 832 m (oracle at 60 m, B9, seed 1, approach 182).
+- Check: `max(max(r["flags"]["queue_max_m"]) for r in Q records)` equals the quoted value.
+
+### Round 2 counts
+
+BLOCKS 0, SHOULD FIX 1 (R2-2, prose), DOCUMENTED LIMIT 0, NOT WORTH FIXING 1 (R2-1). No production-code
+defect: `src/` and `scripts/` are unchanged since 5cea9d3, and nothing in this round requires a re-run of
+blocks M, L, P or K.
+
+### Not checked in round 2
+
+- The committed seed-16 regression and the seed-23 block P case, for the same reason as round 1.
+- The approach blocks M to K beyond the 15 block M records written when this round ran.
+- The walls of the running approach blocks include contention from this round's mutation and SUMO runs.
