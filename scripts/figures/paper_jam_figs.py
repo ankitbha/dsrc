@@ -1,9 +1,13 @@
 """Column-width figures for the jam-avoidance letter, from the committed results only.
 
-    .venv/bin/python scripts/figures/paper_jam_figs.py --out paper/figs
+    .venv/bin/python scripts/figures/paper_jam_figs.py --results-dir results/jam_approach \
+        --out paper/figs
 
-Reads `results/jam/{M.jsonl,M_summary.json,S_summary.json,leads.json}` and, when present,
-`results/jam/{L.jsonl,L_summary.json}`, and writes three PDFs, each with a 300 dpi PNG beside it for checking:
+Reads `{M.jsonl,M_summary.json,leads.json}` and, when present, `L.jsonl` from the results
+directory, and the selection (`S_summary.json`) from `--selection`, which defaults to
+`results/jam/S_summary.json`: the thresholds were selected once, on the gated boundary, and
+the approach results carry no selection of their own. It writes three PDFs, each with a
+300 dpi PNG beside it for checking:
 
 * `fig_warning.pdf`: per trigger, the feed's speed warning and the camera's density warning
   before onset on the first segment to jam (block M's no-control runs), median and
@@ -35,6 +39,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 RESULTS = REPO / "results" / "jam"
+SELECTION = RESULTS / "S_summary.json"
 
 BLUE, ORANGE, GREY = "#2a78d6", "#eb6834", "#8a8a85"
 INK, MUTED = "#2b2b29", "#6b6b66"
@@ -215,13 +220,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--results-dir", default=str(RESULTS))
+    parser.add_argument("--selection", default=str(SELECTION))
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     results, out = Path(args.results_dir), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     _style()
     m_summary = json.loads((results / "M_summary.json").read_text())
-    s_summary = json.loads((results / "S_summary.json").read_text())
+    s_summary = json.loads(Path(args.selection).read_text())
     leads = json.loads((results / "leads.json").read_text())
     records_m = _records(results / "M.jsonl")
     arms = paper_arms(s_summary)
