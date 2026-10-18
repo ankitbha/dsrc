@@ -12,10 +12,11 @@ the approach results carry no selection of their own. It writes three PDFs, each
 * `fig_warning.pdf`: per trigger, the feed's speed warning and the camera's density warning
   before onset on the first segment to jam (block M's no-control runs), median and
   interquartile range, with the plan's switch delay D drawn as a line.
-* `fig_jams.pdf`: per trigger, ordered by no control's median onset, the seeds with no jam of
-  120 s or more (top) and the jammed segment-minutes, mean and two standard errors over the
-  15 evaluation seeds (bottom), for no control, the feed lookahead and the two-layer controller.
-* `fig_lag.pdf` (only with block L): jammed segment-minutes against the plan's switch delay D
+* `fig_jams.pdf`: per trigger, ordered by no control's median onset, the jammed
+  segment-minutes, mean and two standard errors over the 15 evaluation seeds, for no control,
+  the feed lookahead and the two-layer controller. The seeds with no jam of 120 s or more are
+  in the paper's table, so the figure does not repeat them; they stay in the series JSON.
+* `fig_lag.pdf` (only with block L): jammed segment-minutes against the feed delay D
   on the largest burst and the exit block, for the lookahead and the two-layer controller
   (no control reads no feed, so D does not apply to it).
 
@@ -103,7 +104,7 @@ def fig_warning(leads: dict, D: float, out: Path) -> dict:
         feed = sorted(e["W_feed"] for e in eps if e.get("W_feed") is not None)
         cam = sorted(e["W_cam"] for e in eps if e.get("W_cam") is not None)
         series[s] = {"feed": feed, "camera": cam}
-    fig, ax = plt.subplots(figsize=(COLUMN_IN, 1.75))
+    fig, ax = plt.subplots(figsize=(COLUMN_IN, 1.3))
     order = sorted(TRIGGERS, key=lambda s: statistics.median(series[s]["feed"] or [0]))
     for i, s in enumerate(order):
         for dx, key, colour, marker, label in ((-0.12, "feed", ORANGE, "s", "Feed speed warning"),
@@ -142,8 +143,7 @@ def fig_jams(records: list[dict], m_summary: dict, arms, out: Path) -> dict:
     onset = {s: row("no_control", "-", s)["km_onset_median_s"] or 1e9 for s in TRIGGERS}
     order = sorted(TRIGGERS, key=lambda s: onset[s])
     series = {}
-    fig, (top, bottom) = plt.subplots(2, 1, figsize=(COLUMN_IN, 2.9), sharex=True,
-                                      gridspec_kw={"height_ratios": [1, 1.6], "hspace": 0.12})
+    fig, bottom = plt.subplots(figsize=(COLUMN_IN, 1.35))
     width = 0.26
     for j, (label, arm, variant, colour, marker) in enumerate(arms):
         dx = (j - 1) * width
@@ -157,15 +157,11 @@ def fig_jams(records: list[dict], m_summary: dict, arms, out: Path) -> dict:
         series[label] = {"jam_free": dict(zip(order, free)), "jam_mean": dict(zip(order, means)),
                          "jam_2se": dict(zip(order, ses))}
         xs = [i + dx for i in range(len(order))]
-        top.bar(xs, free, width=width - 0.03, color=colour, label=label)
         bottom.errorbar(xs, means, yerr=ses, color=colour, marker=marker, markersize=4.5,
                         linestyle="none", elinewidth=1.2, capsize=0, markeredgecolor="white",
-                        markeredgewidth=0.6)
-    top.set_ylim(0, 15.5)
-    top.set_yticks([0, 5, 10, 15])
-    top.set_ylabel("jam-free seeds\n(of 15)")
-    top.legend(loc="upper left", ncol=3, frameon=False, handlelength=1.0, columnspacing=0.9,
-               borderaxespad=0.1, bbox_to_anchor=(0.0, 1.22))
+                        markeredgewidth=0.6, label=label)
+    bottom.legend(loc="upper right", ncol=1, frameon=False, handlelength=1.0,
+                  borderaxespad=0.1)
     bottom.set_ylabel("jammed segment-min")
     bottom.set_ylim(bottom=0)
     bottom.set_xticks(range(len(order)), [LABELS[s] for s in order])
@@ -180,7 +176,7 @@ def fig_lag(records_l: list[dict], records_m: list[dict], m_summary: dict, arms,
     D1 = float(m_summary["feed_artefact"]["D"])
     lbar, pq = D1 - 10.0, 10.0
     scenarios = ["B9", "I_exit"]
-    fig, axes = plt.subplots(1, 2, figsize=(COLUMN_IN, 1.7), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(COLUMN_IN, 1.4), sharey=False)
     series = {}
     for ax, s in zip(axes, scenarios):
         for label, arm, variant, colour, marker in arms:
@@ -204,11 +200,13 @@ def fig_lag(records_l: list[dict], records_m: list[dict], m_summary: dict, arms,
                         color=colour, marker=marker, markersize=4, linewidth=1.2, elinewidth=1.0,
                         capsize=0, markeredgecolor="white", markeredgewidth=0.6, label=label)
         ax.set_title(LABELS[s].replace("\n", " "), fontsize=7.5, color=INK, pad=3)
-        ax.set_xlabel("plan's switch delay D (s)")
+        ax.set_xlabel("feed delay D (s)")
         ax.set_xticks([0.0, D1, 2 * lbar + pq, 4 * lbar + pq],
                       ["0", f"{D1:.0f}", f"{2 * lbar + pq:.0f}", f"{4 * lbar + pq:.0f}"])
         ax.set_ylim(bottom=0)
     axes[0].set_ylabel("jammed segment-min")
+    # Headroom above the largest error bar, so the legend sits above the data.
+    axes[0].set_ylim(0, axes[0].get_ylim()[1] * 1.3)
     axes[0].legend(loc="upper right", frameon=False, handlelength=1.2, borderaxespad=0.1)
     fig.savefig(out / "fig_lag.pdf")
     fig.savefig(out / "fig_lag.png", dpi=300)
