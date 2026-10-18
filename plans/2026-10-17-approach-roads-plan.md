@@ -772,3 +772,130 @@ transition alone does not explain them. Not diagnosed (open item 9).
   window late only under `--smoke` (window at exactly 900 s in all 1,695 committed gated records and at 1,140 s
   in the 75 approach records then written); R2-1 (leads clock-start and cap shift not pinned by a test; no effect
   on 22 real traces) not fixed; R2-2 corrected above. The validation cap of two rounds is reached.
+
+- **Block P result on the approach boundary** (run in a second clean worktree at `5cea9d3` in parallel with
+  block M, 120 episodes on seeds 16-30, finished 23:22; zero collisions, teleports, approach-short flags and
+  `pending`; longest approach queue 846 m). Each row is paired by seed against no control on the same boundary
+  (no control taken from that boundary's block M); ± is the half-width of a 95% t-interval over 15 seeds; jam
+  time is segment-minutes below 19 km/h.
+
+  | Trigger | Arm | Gated: jam minus no control | Approach: jam minus no control | Approach: flow minus no control |
+  |---|---|---|---|---|
+  | B9 | no control (jam time) | 180.7 | 213.0 | (3,505 veh/h) |
+  | B9 | plan alone, p 0.75 | −46.2 ± 12.7 | −82.9 ± 19.6 | −16 ± 25 |
+  | B9 | two-layer, p 0.75 | −149.9 ± 12.5 | −166.9 ± 29.4 | +83 ± 42 |
+  | B9 | plan alone, p 0.5 | +13.3 ± 16.3 | −22.1 ± 22.6 | −46 ± 23 |
+  | B9 | two-layer, p 0.5 | +37.3 ± 16.3 | +27.2 ± 26.3 | −146 ± 34 |
+  | I_exit | no control (jam time) | 113.1 | 137.1 | (3,342 veh/h) |
+  | I_exit | plan alone, p 0.75 | −60.8 ± 21.4 | −118.7 ± 11.5 | +115 ± 42 |
+  | I_exit | two-layer, p 0.75 | −97.9 ± 15.8 | −125.7 ± 11.5 | +142 ± 15 |
+  | I_exit | plan alone, p 0.5 | −21.1 ± 19.1 | −55.7 ± 18.3 | −38 ± 27 |
+  | I_exit | two-layer, p 0.5 | +27.9 ± 29.6 | −34.5 ± 21.2 | −80 ± 26 |
+
+  Approach-segment jam time differs from no control by at most 2.6 segment-minutes in every row, so the
+  differences above are on the original 12 segments. At penetration 0.5 the camera correction adds jam to the
+  plan alone on the approach boundary: two-layer minus plan alone is +49.4 ± 22.2 on B9 (below the plan on 1 of
+  15 seeds) and +21.3 ± 28.2 on I_exit, with flow 99.9 ± 28.3 and 42.6 ± 35.1 veh/h below the plan alone. At
+  penetration 0.75 the correction removes jam (−84.0 ± 33.6 on B9, −6.9 ± 4.2 on I_exit). The cause of the
+  added jam at 0.5 is not measured.
+- Block P's JSONL, summary and traces were copied into the main run directory at 23:24; the header identity
+  (checkpoint, feed, camera, no predictor, approach net) equals what the main chain builds for block P, so its
+  `--resume` skips all 120 episodes.
+- **Decision (23:28):** blocks L and K started in parallel with block M, L in the block P worktree and K in a
+  new clean worktree, both at `5cea9d3` with the same arguments as the main chain (machine on AC power, 10
+  cores, load 2.3, no thermal warning). Episodes are deterministic, so only recorded wall times change. Each
+  block's JSONL, summary and traces are copied into the main run directory before the chain reaches that block,
+  and its `--resume` skips them. Expected end of all four blocks: about 05:10 instead of about 09:30.
+- **Blocks K and L finished** (K 00:48, 90 episodes; L 02:52, 270 episodes; both at `5cea9d3`, clean, zero
+  collisions, teleports, writes above the plan and approach-short flags) and were copied into the main run
+  directory before the chain reached them. Interim results (seeds 16-30, paired, 95% t half-widths; block M's
+  two-layer, lookahead, plan, take-the-slower and no-control arms complete, learned and oracle still running):
+  - **B9 at the measured delay: the two-layer controller and the lookahead leave the same jam time**, 65.1 and
+    64.3 segment-minutes (+0.7 ± 19.7), where the gated boundary gave 14.4 and 55.1 (−40.8 ± 16.1). On the
+    original 12 segments the two-layer controller leaves 12.6 (gated 14.4); the other 52.4 segment-minutes are
+    on the approach segments. The lookahead leaves 16.3 on the network and 48.0 on the approaches. The lowest
+    commanded speed is 30 km/h, so approach speeds below 19 km/h are queues behind slowed vehicles, which the
+    gate used to hold off the map. The two-layer controller serves 256.9 ± 20.0 veh/h more than the lookahead
+    and 142.0 ± 29.5 veh/h more than no control on B9.
+  - On every other trigger (B5, B7.5, S45, I_mid, I_exit) the two-layer controller leaves less jam than the
+    lookahead (by 0.5 to 10.2 segment-minutes, below on 13 to 15 of 15 seeds) and serves 263 to 456 veh/h more.
+  - Feed delay (L), B9: two-layer minus lookahead is −5.9 ± 22.0 at delay 0, +0.7 ± 19.7 at delay 1, +21.3 ±
+    18.1 at delay 2 and +9.2 ± 15.6 at delay 4; I_exit: −8.7 to −12.5 at every delay, below on 15 of 15 seeds.
+  - Camera errors (K): every variant leaves less jam than no control on both triggers (14 or 15 of 15 seeds);
+    on B9 the jam is 124.8 at distance scale 0.8, 27.4 at 1.25 and 49.8 at pair-noise scale 0.5, against 65.1
+    at scale 1.
+
+## Result on the approach boundary (2026-10-18)
+
+All four blocks finished at `5cea9d3` with a clean tree (M in the main chain, 04:57; L, P and K in parallel
+worktrees, copied in before the chain reached them and skipped by its `--resume`). Across the 1,305
+approach-boundary episodes (Q 60, M 765, L 270, P 120, K 90): zero colliding vehicles, collision teleports,
+writes above the plan, speed read-back mismatches, approach-short flags and episodes ending with `pending` above
+zero; the longest approach queue is 846 m against the 2,000 m limit. Records and summaries are in
+`results/jam_approach/` with `boundary_comparison.json` from `scripts/compare_boundaries.py`; traces are in the
+gitignored `outputs/jam_approach/run_5cea9d3/traces/` (the `trace_file` fields in the JSONL name the run
+worktrees, which were removed after the move). Every difference below is paired by seed within one boundary over
+seeds 16-30, ± is the half-width of a 95% t-interval, and "(k/15)" counts seeds where the first arm is lower.
+Jam time is segment-minutes below 19 km/h over all 36 super-segments on the approach boundary and the 12 on the
+gated boundary. System excess is the integral over the controlled window of vehicles on the network plus
+vehicles waiting to enter, minus the free-flow occupancy of the approaches, in vehicle-minutes; demand is the
+same in every arm of a scenario, so a difference between arms is a difference in vehicle-minutes spent.
+
+**1. Where the jam is.** No control jams more on the approach boundary after the two strongest triggers (B9 213.0
+against 180.7 segment-minutes; I_exit 137.1 against 113.1) and about the same after the others. Every
+controlled arm moves part of the B9 jam onto the approaches, all of it onto `a295_2`, the last kilometre before
+entry link 295 at segment 8: the two-layer controller leaves 12.6 segment-minutes on the network and 52.4 on the
+approaches, the lookahead 16.3 and 48.0, the plan alone 73.7 and 61.5, the oracle 0.4 and 24.1, no control 208.4
+and 4.7. The lowest commanded speed is 30 km/h, so approach speeds below 19 km/h are queues behind slowed
+vehicles; on the gated boundary these vehicles were held off the map. After every other trigger the approach
+part is at most 6.6 segment-minutes in every arm (the learned arm on B7.5; 4.5 or less in the other arms).
+
+**2. The paper's three arms (block M).**
+
+| Trigger | TL − NC jam, gated | TL − NC jam, approach | TL − LK jam, gated | TL − LK jam, approach | TL − LK flow, approach (veh/h) |
+|---|---|---|---|---|---|
+| BG | +0.0 ± 0.0 | +0.1 ± 0.1 | −0.1 ± 0.1 | −0.0 ± 0.1 | +491 ± 47 |
+| B5 | −93.5 ± 10.1 (15/15) | −90.8 ± 13.6 (15/15) | −13.2 ± 2.5 (15/15) | −6.0 ± 3.0 (13/15) | +269 ± 10 |
+| B7.5 | −136.5 ± 11.7 (15/15) | −142.6 ± 10.0 (15/15) | −12.3 ± 4.6 (14/15) | −7.4 ± 4.8 (14/15) | +263 ± 13 |
+| B9 | −166.4 ± 9.1 (15/15) | −148.0 ± 28.3 (15/15) | −40.8 ± 16.1 (14/15) | +0.7 ± 19.7 (7/15) | +257 ± 20 |
+| S45 | −23.4 ± 2.2 (15/15) | −21.3 ± 2.7 (15/15) | −0.8 ± 0.5 (12/15) | −0.5 ± 0.3 (13/15) | +456 ± 44 |
+| I_mid | −69.4 ± 13.2 (15/15) | −68.8 ± 10.8 (15/15) | −12.1 ± 2.9 (15/15) | −9.9 ± 2.1 (15/15) | +286 ± 12 |
+| I_exit | −104.1 ± 15.4 (15/15) | −128.6 ± 11.5 (15/15) | −14.2 ± 2.2 (15/15) | −10.2 ± 2.2 (15/15) | +286 ± 8 |
+
+Served flow, two-layer minus no control, approach boundary: −245 ± 9 veh/h on BG (gated −176 ± 11), +57 to
++142 veh/h after the bursts and incidents, +1 ± 42 on S45.
+
+| Trigger | System excess TL − NC, gated | TL − NC, approach | TL − LK, gated | TL − LK, approach |
+|---|---|---|---|---|
+| BG | +7,056 ± 71 (0/15) | +8,177 ± 118 (0/15) | −3,533 ± 731 (15/15) | −3,809 ± 1,440 (14/15) |
+| B5 | +685 ± 1,431 (6/15) | +5,938 ± 2,186 (1/15) | −22,558 ± 1,144 (15/15) | −26,170 ± 1,245 (15/15) |
+| B7.5 | −1,145 ± 2,164 (10/15) | +808 ± 1,412 (6/15) | −18,417 ± 2,502 (15/15) | −24,557 ± 1,219 (15/15) |
+| B9 | −4,533 ± 2,451 (13/15) | −2,637 ± 3,495 (10/15) | −21,302 ± 2,867 (15/15) | −20,311 ± 3,032 (15/15) |
+| S45 | +2,515 ± 295 (0/15) | +3,155 ± 222 (0/15) | −2,489 ± 203 (15/15) | −333 ± 556 (10/15) |
+| I_mid | +889 ± 2,143 (6/15) | +6,428 ± 2,268 (1/15) | −22,009 ± 964 (15/15) | −28,513 ± 1,537 (15/15) |
+| I_exit | −5,672 ± 2,113 (15/15) | −2,620 ± 1,765 (12/15) | −23,175 ± 859 (15/15) | −28,220 ± 854 (15/15) |
+
+The two-layer controller lowers jam time against no control after every trigger on both boundaries, and lowers
+system excess against the lookahead after every burst and incident on both. Against no control, its system
+excess is higher on BG and S45 on both boundaries, higher on B5 and I_mid on the approach boundary only, lower
+on I_exit on both, and lower on B9 only on the gated boundary (the approach difference is not resolved).
+
+**3. Feed delay (block L), two-layer minus lookahead jam time.** B9: −5.9 ± 22.0 at delay 0, +0.7 ± 19.7 at 1,
++21.3 ± 18.1 at 2 (lookahead lower on 12 of 15 seeds), +9.2 ± 15.6 at 4; gated −58.1, −40.8, −4.2, +9.7. I_exit:
+−8.7 to −12.5 at every delay, 15 of 15 seeds (gated −9.9 to −14.2). The lookahead's B9 jam falls from 74.8 at
+delay 0 to 25.1 at delay 2 on this boundary as on the gated one (79.0 to 22.0).
+
+**4. Camera errors (block K), minus the two-layer controller at scale 1.** B9: +59.7 ± 37.3 at distance scale
+0.8, −37.7 ± 25.4 at 1.25, −15.3 ± 32.0 at pair-noise scale 0.5 (gated +31.0, −2.0, +8.0); I_exit within ±0.9
+of scale 1 in every variant. Every variant leaves less jam than no control on both triggers (14 or 15 of 15).
+
+**5. Penetration (block P)**: recorded above. At 0.5 the two-layer controller is above no control on B9 (+27.2
+± 26.3) and below it on I_exit (−34.5 ± 21.2); the camera correction adds +49.4 ± 22.2 to the plan alone on B9.
+
+**What follows for the controllers (not acted on; the author deferred controller changes).** On B9 the jam
+that remains under the two-layer controller is the metering queue on the approach to entry 295, which the gate
+used to hide; the controllers differ there in how long that queue lasts, not in what happens on the network
+(network part −3.7 ± 8.0 against the lookahead). The total-delay measure ranks no control at or below the
+two-layer controller on four of seven scenarios, mainly because the plan and the correction slow vehicles when
+no jam follows (BG +8,177 vehicle-minutes over 105 minutes). The thresholds and the best model were selected
+on the gated boundary and were not re-selected here.
