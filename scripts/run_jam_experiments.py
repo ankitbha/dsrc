@@ -38,6 +38,22 @@ the JSONL at the end of a run, or alone with `--summarize-only`.
 
 Block F, the frame re-processing, is `scripts/process_drive_frames.py`, not this runner.
 Sequential, one process, one SUMO instance at a time: libsumo is process-global.
+
+**The approach boundary** (approach plan 2026-10-17 section 7), `--boundary approach`:
+
+    .venv/bin/python scripts/run_jam_experiments.py --boundary approach --block Q
+    .venv/bin/python scripts/run_jam_experiments.py --boundary approach --block M L P K
+    .venv/bin/python scripts/run_jam_experiments.py --boundary approach --block Q M L P K --smoke
+
+Every scenario runs from its `_A` files on `mainz_approach.net.xml` with no gate in any arm
+and every time `W` later. Block Q (training seeds 1-2) qualifies the boundary before block
+M; blocks G, T and S are refused, since nothing is re-selected: the thresholds and the best
+model are the committed `results/jam/S_summary.json`, whose sha256 must be
+`APPROACH_SELECTION_SHA256`. Results go to `outputs/jam_approach/run/` (pause file
+`outputs/jam_approach/run/PAUSE`), traces to `outputs/jam_approach/traces/`, a smoke to
+`outputs/jam_approach/smoke/`; nothing is written under `results/jam/`. Each record carries
+the jam metrics over all 36 super-segments (`jam`), the original 12 (`jam_network`) and the
+24 approach ones (`jam_approach`), the two storage measures and the approach-short flag.
 """
 from __future__ import annotations
 
@@ -63,12 +79,29 @@ for _path in (REPO_ROOT, REPO_ROOT / "scripts"):
 from evaluate_mainz_checkpoints import _provenance  # noqa: E402
 from train_mainz_src import SCENARIOS as FILE_SETS  # noqa: E402
 
-BLOCKS = ("G", "T", "S", "M", "L", "P", "K")
+BLOCKS = ("G", "T", "S", "M", "L", "P", "K", "Q")
 BLOCK_SEEDS: dict[str, tuple[int, ...]] = {
     "G": tuple(range(1, 6)), "T": tuple(range(1, 11)), "S": tuple(range(11, 16)),
     "M": tuple(range(16, 31)), "L": tuple(range(16, 31)), "P": tuple(range(16, 31)),
-    "K": tuple(range(16, 31)),
+    "K": tuple(range(16, 31)), "Q": (1, 2),
 }
+#: Blocks that select or train (G, T, S) run on the gated boundary only, and block Q, the
+#: approach boundary's qualification, on the approach boundary only.
+GATED_ONLY_BLOCKS: tuple[str, ...] = ("G", "T", "S")
+APPROACH_ONLY_BLOCKS: tuple[str, ...] = ("Q",)
+#: Blocks that read the thresholds and the best model from a selection.
+SELECTED_BLOCKS: tuple[str, ...] = ("M", "L", "P", "K", "Q")
+#: The committed selection the approach boundary runs (approach plan section 4.5).
+APPROACH_SELECTION = REPO_ROOT / "results" / "jam" / "S_summary.json"
+APPROACH_SELECTION_SHA256 = "5bce02db2330c63ac873c306988c6c961ef59dadb1a9703b65da9f07c016dc05"
+APPROACH_DIRS = {"results": "outputs/jam_approach/run", "traces": "outputs/jam_approach/traces",
+                 "training": "outputs/jam_approach/training"}
+APPROACH_SMOKE_DIRS = {"results": "outputs/jam_approach/smoke/results",
+                       "traces": "outputs/jam_approach/smoke/traces",
+                       "training": "outputs/jam_approach/smoke/training"}
+THRESHOLDS_NOTE = ("The thresholds and the best model were selected on the gated boundary "
+                   "(results/jam/S_summary.json, sha256 5bce02db...); nothing was re-selected "
+                   "on the approach boundary.")
 SELECTION_SEEDS = BLOCK_SEEDS["S"]
 DEFAULT_FEED_ARTEFACT = REPO_ROOT / "results" / "jam" / "feed_process_afternoon.json"
 DEFAULT_FEED_SESSION = "afternoon_20261016_mainz"
@@ -220,6 +253,14 @@ def arm_list(block: str, selection: Selection | None, grid: bool = False,
     if block == "P":
         arms = _unique([("plan", {}, {}), best])
         return [(a, p, {"penetration": pen}) for pen in PENETRATIONS_P for a, p, _ in arms]
+    if block == "Q":
+        # Approach plan section 7.1: every block M arm at full penetration (the oracle at
+        # the camera's window only), the plan and the rule at 0.5, and the lookahead at
+        # zero lag, which held the most vehicles in the network in block L.
+        return (arm_list("M", selection, oracle_window=oracle_window)
+                + [("plan", {}, {"penetration": 0.5}),
+                   ("rule", {"m_on": selection.m_on}, {"penetration": 0.5}),
+                   ("lookahead", {"J_th": selection.J_th}, {"m": 0.0})])
     if block == "K":
         if not selection.best_reads_camera:
             return []
@@ -262,6 +303,8 @@ def _scenarios(block: str) -> tuple[str, ...]:
         return TRAINING_SCENARIOS
     if block == "M":
         return PERTURBATIONS + ("BG", "S45")
+    if block == "Q":
+        return ("B9", "I_exit", "S45")
     return ("B9", "I_exit")
 
 
@@ -336,10 +379,15 @@ def smoke_subset(specs: Sequence[Spec]) -> list[Spec]:
 
 
 def read_selection(path: Path, *, feed_sha: str | None, camera_sha: str | None,
-                   predictor_sha: str | None) -> Selection:
+                   predictor_sha: str | None, required_sha: str | None = None) -> Selection:
     """Blocks M to K's thresholds and best model; refused when the selection ran on
-    another feed artefact, camera model or predictor, or on any seed outside 11-15."""
+    another feed artefact, camera model or predictor, or on any seed outside 11-15, and,
+    with `required_sha` (the approach boundary), when the file is not that one."""
     raw = Path(path).read_bytes()
+    if required_sha is not None and hashlib.sha256(raw).hexdigest() != required_sha:
+        raise SystemExit(f"{path} has sha256 {hashlib.sha256(raw).hexdigest()}; the approach "
+                         f"boundary runs the committed selection {required_sha} and is never "
+                         "re-selected")
     data = json.loads(raw)
     seeds = sorted(set(data.get("seeds") or []))
     if seeds != list(SELECTION_SEEDS):
@@ -418,6 +466,14 @@ class Context:
     training_dir: Path = REPO_ROOT / "outputs" / "jam" / "training"
     selection: Selection | None = None
     feed: dict[str, Any] = field(default_factory=dict)
+    #: "gated" or "approach" (approach plan section 7).
+    boundary: str = "gated"
+    approach_file: Path = REPO_ROOT / "data" / "mainz" / "mainz_approach.json"
+
+    def boundary_object(self):
+        from src.sumo.jam_episode import GATED, approach_boundary
+
+        return approach_boundary(self.approach_file) if self.boundary == "approach" else GATED
 
     def as_dict(self) -> dict[str, Any]:
         out = {k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(self).items()
@@ -428,7 +484,7 @@ class Context:
 
 #: Plan section 1.5: in these blocks the no-control arm senses passively on every vehicle
 #: (block M's no-control episodes give the camera's view of uncontrolled jams, `W_cam`).
-PASSIVE_SENSING_BLOCKS: tuple[str, ...] = ("M", "T")
+PASSIVE_SENSING_BLOCKS: tuple[str, ...] = ("M", "T", "Q")
 CAMERA_ARMS: tuple[str, ...] = ("take_the_slower", "rule", "learned")
 
 
@@ -453,9 +509,10 @@ def header(block: str, context: Context, specs: Sequence[Spec],
     from src.analysis.jam_metrics import THRESHOLDS
     from src.sumo.jam_episode import SCENARIOS as JAM_SCENARIOS
 
+    boundary = context.boundary_object()
     files: dict[str, Any] = {}
     for scenario in sorted({s.scenario for s in specs}):
-        name = JAM_SCENARIOS[scenario].files
+        name = boundary.files(JAM_SCENARIOS[scenario].files)
         for role, relative in FILE_SETS[name].items():
             files[f"{name}:{role}"] = {"path": relative, "sha256": _sha256(REPO_ROOT / relative)}
     camera = context.camera_model if needs_camera(specs) else None
@@ -480,15 +537,37 @@ def header(block: str, context: Context, specs: Sequence[Spec],
                       if context.selection else None),
         "drain_thresholds": {"path": str(THRESHOLDS), "sha256": _sha256(THRESHOLDS)},
         "scenario_files": files, "episodes_planned": len(specs),
+        **(approach_header(boundary) if boundary.is_approach else {}),
     }
 
 
+def approach_header(boundary) -> dict[str, Any]:
+    """What an approach-boundary header adds (approach plan section 7.3)."""
+    meta = json.loads(Path(boundary.approach_file).read_text())
+    data = REPO_ROOT / "data" / "mainz"
+    return {"boundary": boundary.name, "W": boundary.W,
+            "approach": {"file": str(boundary.approach_file),
+                         "approach_sha256": _sha256(boundary.approach_file),
+                         "net": meta["net"]["path"], "net_sha256": _sha256(REPO_ROOT / meta["net"]["path"]),
+                         "segments_sha256": _sha256(REPO_ROOT / meta["segments_file"]),
+                         "travel_sha256": _sha256(data / "mainz_approach_travel.json"),
+                         "length_m": meta["length_m"], "segment_m": meta["segment_m"],
+                         "T_A": meta["T_A"], "W": meta["W"], "calibrated": meta["calibrated"],
+                         "demand": meta["demand"]},
+            "thresholds_note": THRESHOLDS_NOTE}
+
+
 def header_identity(record: dict) -> tuple:
-    """`(checkpoint, feed artefact, camera model, predictor)` sha256 a header ran."""
-    return ((record.get("checkpoint") or {}).get("sha256"),
-            (record.get("feed_artefact") or {}).get("artefact_sha256"),
-            (record.get("camera_model") or {}).get("sha256"),
-            (record.get("predictor") or {}).get("sha256"))
+    """`(checkpoint, feed artefact, camera model, predictor)` sha256 a header ran, and on
+    the approach boundary the approach net's sha256 as a fifth element. A gated header
+    keeps its four, so the committed gated files keep their identity, and a resume never
+    mixes the two boundaries in one JSONL."""
+    identity = ((record.get("checkpoint") or {}).get("sha256"),
+                (record.get("feed_artefact") or {}).get("artefact_sha256"),
+                (record.get("camera_model") or {}).get("sha256"),
+                (record.get("predictor") or {}).get("sha256"))
+    approach = (record.get("approach") or {}).get("net_sha256")
+    return identity + (approach,) if approach else identity
 
 
 # ------------------------------------------------------------------- running
@@ -612,9 +691,10 @@ def run_block(block: str, specs: Sequence[Spec], run_episode: EpisodeFn, *,
 def episode_runner(model, context: Context) -> EpisodeFn:
     from src.analysis.jam_metrics import episode_metrics, load_v_jam
     from src.sumo.jam_episode import SCENARIOS as JAM_SCENARIOS
-    from src.sumo.jam_episode import FeedSetting, run_jam_episode
+    from src.sumo.jam_episode import FeedSetting
 
     v_jam, _ = load_v_jam()
+    boundary = context.boundary_object()
     camera = predictor = None
 
     def run(spec: Spec) -> dict[str, Any]:
@@ -651,12 +731,20 @@ def episode_runner(model, context: Context) -> EpisodeFn:
         if uses_camera(spec):
             spec_camera = camera.with_bias(spec.bias).with_pair_sigma(
                 camera.pair_sigma_log * spec.pair_sigma_scale)
-        result = run_jam_episode(
+        # Looked up at call time, so a test can stand in for the episode.
+        from src.sumo import jam_episode
+
+        kwargs = {"boundary": boundary} if boundary.is_approach else {}
+        result = jam_episode.run_jam_episode(
             model, spec.seed, scenario, arm, feed=feed, duration_s=spec.duration_s,
             penetration=spec.penetration, camera=spec_camera,
             predictor=predictor, step_length_s=context.step_length_s,
             window_start_s=context.window_start_s, write_log=context.write_log,
-            check_max_speed=context.check_max_speed, sample_fraction=spec.sample_fraction)
+            check_max_speed=context.check_max_speed, sample_fraction=spec.sample_fraction,
+            **kwargs)
+        if boundary.is_approach:
+            result.update(approach_metrics(result["trace"], scenario, spec, v_jam, boundary))
+            return result
         result["jam"] = episode_metrics(result["trace"], v_jam=v_jam, start_s=scenario.start_s,
                                         end_s=scenario.end_s, cap=spec.duration_s)
         result["jam_30kmh"] = episode_metrics(result["trace"], v_jam=30.0,
@@ -665,6 +753,45 @@ def episode_runner(model, context: Context) -> EpisodeFn:
         return result
 
     return run
+
+
+_SCHEDULES: dict[str, list[dict]] = {}
+
+
+def approach_metrics(trace: list[dict], scenario, spec: Spec, v_jam: float,
+                     boundary) -> dict[str, Any]:
+    """An approach episode's jam metrics over all 36, the network's 12 and the approach
+    24 super-segments at 19 km/h and 30 km/h, its storage measures and its flag (approach
+    plan sections 5.2 to 5.4). Every clock is the scenario's plus `W`."""
+    from src.analysis.jam_metrics import (
+        approach_excess_minutes, episode_metrics, queue_flags, system_excess_minutes,
+    )
+
+    meta = json.loads(Path(boundary.approach_file).read_text())
+    n = int(meta["num_original_segments"])
+    total = n + len(meta["approach_segments"])
+    parts = {"": None, "_network": list(range(n)), "_approach": list(range(n, total))}
+    out: dict[str, Any] = {}
+    for threshold, prefix in ((v_jam, "jam"), (30.0, "jam_30kmh")):
+        for suffix, columns in parts.items():
+            out[prefix + suffix] = episode_metrics(
+                trace, v_jam=threshold, start_s=scenario.start_s, end_s=scenario.end_s,
+                cap=spec.duration_s, columns=columns, offset_s=boundary.W)
+    schedule_path = REPO_ROOT / FILE_SETS[boundary.files(scenario.files)]["schedule"]
+    if str(schedule_path) not in _SCHEDULES:
+        _SCHEDULES[str(schedule_path)] = json.loads(schedule_path.read_text())
+    rows = _SCHEDULES[str(schedule_path)]
+    out["storage"] = {
+        "approach_excess_min": approach_excess_minutes(
+            trace, rows, meta["T_A"], start_s=scenario.start_s, cap=spec.duration_s,
+            offset_s=boundary.W),
+        "system_excess_min": system_excess_minutes(
+            trace, start_s=scenario.start_s, cap=spec.duration_s, offset_s=boundary.W,
+            rows=rows, travel_s=meta["T_A"]),
+    }
+    out["flags"] = queue_flags(trace, limit_m=float(meta["length_m"]) - float(meta["segment_m"]))
+    out["approach_short"] = out["flags"]["approach_short"]
+    return out
 
 
 # ---------------------------------------------------------------- summaries
@@ -679,6 +806,10 @@ def collision_counts(episodes: list[dict]) -> dict[str, Any]:
     """Every controlled arm must show zero colliding vehicles and collision teleports."""
     controlled = [r for r in episodes if r["arm"] != "no_control"]
     return {
+        # Approach plan section 6: every episode of every arm, no control included.
+        "episodes_with_collisions": sum(
+            1 for r in episodes
+            if r.get("colliding_vehicles", 0) or r.get("collision_teleports", 0)),
         "controlled_episodes": len(controlled),
         "controlled_episodes_with_collisions": sum(
             1 for r in controlled
@@ -732,7 +863,40 @@ def _rows(episodes: list[dict]) -> dict[str, dict[str, Any]]:
                                          "prevented": r["jam"]["prevented"]}
                         for r in records},
         }
+        if all("jam_network" in r for r in records):
+            extra = _approach_row(records)
+            for seed, values in extra.pop("by_seed").items():
+                rows[name]["by_seed"][seed].update(values)
+            rows[name].update(extra)
     return rows
+
+
+def _approach_row(records: list[dict]) -> dict[str, Any]:
+    """An approach row's network and approach parts, storage and flags (section 5)."""
+    out: dict[str, Any] = {}
+    for part in ("network", "approach"):
+        jam = [r[f"jam_{part}"] for r in records]
+        out[f"jam_{part}_time_min_mean"] = _mean(j["jam_time_min"] for j in jam)
+        out[f"jam_{part}_time_min_900_3600_mean"] = _mean(j["jam_time_min_900_3600"]
+                                                          for j in jam)
+        out[f"prevented_{part}"] = sum(1 for j in jam if j["prevented"])
+    out["approach_excess_min_mean"] = _mean(r["storage"]["approach_excess_min"] for r in records)
+    out["system_excess_min_mean"] = _mean(r["storage"]["system_excess_min"] for r in records)
+    out["approach_short_episodes"] = sum(1 for r in records if r["approach_short"])
+    widths = {len(r["flags"]["queue_max_m"]) for r in records}
+    out["queue_max_m"] = ([max(r["flags"]["queue_max_m"][j] for r in records)
+                           for j in range(widths.pop())] if len(widths) == 1 else None)
+    out["pending_max"] = max(r["flags"]["pending_max"] for r in records)
+    out["by_seed"] = {}
+    for r in records:
+        out["by_seed"][str(r["seed"])] = {
+            "jam_network_time_min": r["jam_network"]["jam_time_min"],
+            "jam_approach_time_min": r["jam_approach"]["jam_time_min"],
+            "prevented_network": r["jam_network"]["prevented"],
+            "approach_excess_min": r["storage"]["approach_excess_min"],
+            "system_excess_min": r["storage"]["system_excess_min"],
+            "approach_short": r["approach_short"]}
+    return out
 
 
 def g_pass(oracle: dict[str, dict[int, dict]], plan: dict[str, dict[int, dict]]) -> dict[str, Any]:
@@ -952,11 +1116,12 @@ def summarize_eval(block: str, episodes: list[dict]) -> dict[str, Any]:
     from src.analysis.jam_metrics import Paired
 
     rows = _rows(episodes)
+    approach = any("jam_network" in r for r in episodes)
     for name, row in rows.items():
         base = f"plan/-/{row['scenario']}"
         if block == "L":
             base = f"plan/-_lag{name.split('_lag')[-1].split('/')[0]}/{row['scenario']}"
-        elif block == "P":
+        elif block == "P" or (block == "Q" and "_p" in row["variant"]):
             base = f"plan/-_p{name.split('_p')[-1].split('/')[0]}/{row['scenario']}"
         if base in rows and base != name:
             a = {int(s): v["jam_time_min"] for s, v in row["by_seed"].items()}
@@ -965,20 +1130,52 @@ def summarize_eval(block: str, episodes: list[dict]) -> dict[str, Any]:
             fb = {int(s): v["flow"] for s, v in rows[base]["by_seed"].items()}
             row["paired_jam_time_vs_plan"] = Paired.of(a, b).as_dict()
             row["paired_flow_vs_plan"] = Paired.of(fa, fb).as_dict()
-    return {"block": block, "rows": rows}
+            if approach and "jam_network_time_min_mean" in row:
+                for key, field_name in (("network", "jam_network_time_min"),
+                                        ("system_excess", "system_excess_min")):
+                    pa = {int(s): v[field_name] for s, v in row["by_seed"].items()}
+                    pb = {int(s): v[field_name] for s, v in rows[base]["by_seed"].items()}
+                    row[f"paired_{key}_vs_plan"] = Paired.of(pa, pb).as_dict()
+    out = {"block": block, "rows": rows}
+    if approach:
+        out["approach_short_total"] = sum(1 for r in episodes if r.get("approach_short"))
+        out["thresholds_note"] = THRESHOLDS_NOTE
+    return out
+
+
+def qualification(episodes: list[dict]) -> dict[str, Any]:
+    """Block Q's pass rule (approach plan section 7.1): no episode flagged approach-short
+    and no episode with a collision. It chooses no threshold and no arm."""
+    def key(r):
+        return r.get("key") or f"Q/{r['arm']}/{r['variant']}/{r['scenario']}/{r['seed']}"
+
+    flagged = sorted(key(r) for r in episodes if r.get("approach_short"))
+    collided = sorted(key(r) for r in episodes
+                      if r.get("colliding_vehicles", 0) or r.get("collision_teleports", 0))
+    return {"passes": bool(episodes) and not flagged and not collided, "flagged": flagged,
+            "collisions": collided, "episodes": len(episodes),
+            "on_failure": "rebuild at 5,000 m (--approach-length-m 5000), recalibrate, rerun Q"}
 
 
 def write_leads(episodes: list[dict], results_dir: Path,
                 baseline: tuple[float, float] | None = None,
-                start_s: float | None = None) -> dict[str, Any]:
+                start_s: float | None = None, offset_s: float = 0.0,
+                network_columns: list[int] | None = None) -> dict[str, Any]:
     """`leads.json` from block M's no-control episodes (section 4.3 and 6.2).
 
     `baseline` and `start_s` default to section 4.3's [600, 900) s and each scenario's clock
-    start; a smoke run, which ends at 600 s, passes its own."""
-    from src.analysis.jam_metrics import leads, load_v_jam, max_ramp, speed_density_break
+    start; a smoke run, which ends at 600 s, passes its own. On the approach boundary
+    `offset_s` (`W`) moves the baseline, the clock start and the cap, the leads are taken
+    on the all-segment onset, and `network_columns` adds them on the network's own onset
+    (approach plan section 5.2)."""
+    from src.analysis.jam_metrics import (
+        leads, load_v_jam, max_ramp, select_columns, speed_density_break,
+    )
     from src.sumo.jam_episode import SCENARIOS as JAM_SCENARIOS
 
     v_jam, sha = load_v_jam()
+    base = baseline or BASELINE_LEADS
+    base = (base[0] + offset_s, base[1] + offset_s)
     per, s45 = [], []
     for r in episodes:
         if r["arm"] != "no_control":
@@ -988,13 +1185,26 @@ def write_leads(episodes: list[dict], results_dir: Path,
             s45.append(trace)
             continue
         scenario = JAM_SCENARIOS[r["scenario"]]
-        lead = leads(trace, v_jam, scenario.start_s if start_s is None else start_s,
-                     r["duration_s"], baseline=baseline or BASELINE_LEADS)
+        start = (scenario.start_s if start_s is None else start_s) + offset_s
+        cap = r["duration_s"] + offset_s
+        lead = leads(trace, v_jam, start, cap, baseline=base)
         ramp = (max_ramp(trace, lead["segment"], lead["onset"]) if lead["onset"] is not None
                 else None)
-        per.append({"scenario": r["scenario"], "seed": r["seed"], **lead, "ramp": ramp})
+        entry = {"scenario": r["scenario"], "seed": r["seed"], **lead, "ramp": ramp}
+        if network_columns is not None:
+            network = select_columns(trace, network_columns)
+            lead_n = leads(network, v_jam, start, cap, baseline=base)
+            entry["network"] = {**lead_n, "ramp": (max_ramp(network, lead_n["segment"],
+                                                            lead_n["onset"])
+                                                   if lead_n["onset"] is not None else None)}
+        per.append(entry)
     out = {"v_jam": v_jam, "v_jam_sha256": sha, "episodes": per,
            "speed_density_break": speed_density_break(s45) if s45 else None}
+    if network_columns is not None:
+        out["offset_s"] = offset_s
+        out["speed_density_break_network"] = (
+            speed_density_break([select_columns(t, network_columns) for t in s45])
+            if s45 else None)
     _write_json(results_dir / "leads.json", out)
     return out
 
@@ -1024,10 +1234,16 @@ def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]
                                            if r.get("samples_file"))}
     else:
         summary = summarize_eval(block, episodes)
+        approach = bool(headers) and headers[-1].get("boundary") == "approach"
+        offset = {"offset_s": float(headers[-1]["W"]), "network_columns": list(range(12))} \
+            if approach else {}
         if block == "M":
             summary["leads"] = (write_leads(episodes, results_dir, baseline=(300.0, 450.0),
-                                            start_s=450.0)
-                                if context.smoke else write_leads(episodes, results_dir))
+                                            start_s=450.0, **offset)
+                                if context.smoke else write_leads(episodes, results_dir,
+                                                                  **offset))
+        if block == "Q":
+            summary["qualification"] = qualification(episodes)
     seeds_by_arm: dict[str, set] = {}
     for r in episodes:
         seeds_by_arm.setdefault(f"{r['arm']}/{r['variant']}/{r['scenario']}", set()).add(r["seed"])
@@ -1046,6 +1262,10 @@ def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]
         "wall_s_total": sum(r.get("wall_s", 0.0) for r in episodes),
         "smoke": bool(last.get("config", {}).get("smoke")),
     })
+    if last.get("boundary") == "approach":
+        summary.update({"boundary": "approach", "W": last.get("W"),
+                        "approach": last.get("approach"),
+                        "thresholds_note": THRESHOLDS_NOTE})
     _write_json(results_dir / f"{block}_summary.json", summary)
     return summary
 
@@ -1057,6 +1277,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--block", nargs="+", choices=BLOCKS, required=True)
+    parser.add_argument("--boundary", choices=("gated", "approach"), default="gated",
+                        help="approach: the approach roads of plan 2026-10-17, no gate in any "
+                             "arm, every time W later; blocks Q, M, L, P and K only")
     parser.add_argument("--seeds", type=int, nargs="+", default=None,
                         help="a subset of the block's own seeds (default all of them)")
     parser.add_argument("--feed-artefact", default=str(DEFAULT_FEED_ARTEFACT))
@@ -1068,9 +1291,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--predictor", default=str(DEFAULT_PREDICTOR))
     parser.add_argument("--selection", default=None,
                         help="S_summary.json for blocks M to K (default <results-dir>)")
-    parser.add_argument("--results-dir", default=SMOKE_GUARD["results"])
-    parser.add_argument("--traces-dir", default=SMOKE_GUARD["traces"])
-    parser.add_argument("--training-dir", default="outputs/jam/training")
+    parser.add_argument("--results-dir", default=None,
+                        help=f"default {SMOKE_GUARD['results']}; outputs/jam/smoke/results "
+                             f"with --smoke; {APPROACH_DIRS['results']} on the approach "
+                             "boundary")
+    parser.add_argument("--traces-dir", default=None,
+                        help=f"default {SMOKE_GUARD['traces']}; {APPROACH_DIRS['traces']} on "
+                             "the approach boundary")
+    parser.add_argument("--training-dir", default=None,
+                        help="default outputs/jam/training")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--pause-file", default=None, help="default <results-dir>/PAUSE")
     parser.add_argument("--summarize-only", action="store_true")
@@ -1094,10 +1323,35 @@ def _resolve(path: str | None) -> Path | None:
     return candidate if candidate.is_absolute() else REPO_ROOT / candidate
 
 
-def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
-    from src.sumo.jam_episode import FeedSetting
+def check_block_boundary(block: str, boundary: str) -> None:
+    """Blocks G, T and S select or train and run on the gated boundary only; block Q
+    qualifies the approach boundary and runs on it only (approach plan section 7.1)."""
+    if boundary == "approach" and block in GATED_ONLY_BLOCKS:
+        raise SystemExit(f"block {block} selects or trains on the gated boundary; the approach "
+                         "boundary re-selects nothing (approach plan section 4.5)")
+    if boundary != "approach" and block in APPROACH_ONLY_BLOCKS:
+        raise SystemExit(f"block {block} qualifies the approach boundary; pass "
+                         "--boundary approach")
 
-    args = build_parser().parse_args(argv)
+
+def resolve_directories(args) -> None:
+    """Fill the directory defaults for the boundary and smoke flag, and refuse to write an
+    approach run under `results/jam/`."""
+    if args.boundary == "approach":
+        defaults = APPROACH_SMOKE_DIRS if args.smoke else APPROACH_DIRS
+        args.results_dir = args.results_dir or defaults["results"]
+        args.traces_dir = args.traces_dir or defaults["traces"]
+        args.training_dir = args.training_dir or defaults["training"]
+        guarded = (REPO_ROOT / "results" / "jam").resolve()
+        for path in (args.results_dir, args.traces_dir, args.training_dir):
+            resolved = _resolve(path).resolve()
+            if resolved == guarded or resolved.is_relative_to(guarded):
+                raise SystemExit(f"{path} is under results/jam/; the approach boundary never "
+                                 "writes there (approach plan section 7.3)")
+        return
+    args.results_dir = args.results_dir or SMOKE_GUARD["results"]
+    args.traces_dir = args.traces_dir or SMOKE_GUARD["traces"]
+    args.training_dir = args.training_dir or "outputs/jam/training"
     if args.smoke:
         # A smoke episode must never land in a block's real JSONL, where --resume would
         # take its 600 s result for the experiment's own episode of the same key.
@@ -1107,6 +1361,16 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             args.traces_dir = "outputs/jam/smoke/traces"
         if args.training_dir == "outputs/jam/training":
             args.training_dir = "outputs/jam/smoke/training"
+
+
+def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
+    from src.sumo.jam_episode import FeedSetting
+
+    args = build_parser().parse_args(argv)
+    for block in args.block:
+        check_block_boundary(block, args.boundary)
+    resolve_directories(args)
+    approach = args.boundary == "approach"
     results_dir, traces_dir = _resolve(args.results_dir), _resolve(args.traces_dir)
     pause_file = _resolve(args.pause_file) if args.pause_file else results_dir / "PAUSE"
     context = Context(checkpoint=_resolve(args.checkpoint),
@@ -1118,13 +1382,23 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
                       window_start_s=300.0 if args.smoke else 900.0, smoke=args.smoke,
                       write_log=args.write_log or args.smoke,
                       check_max_speed=args.check_max_speed or args.smoke,
-                      training_dir=_resolve(args.training_dir))
+                      training_dir=_resolve(args.training_dir), boundary=args.boundary)
     context.feed = FeedSetting(context.feed_artefact, context.feed_session,
                                allow_placeholder=context.allow_placeholder).parameters()
+    if approach:
+        context.boundary_object()  # refuses an uncalibrated approach build up front
 
     model = None
     for block in args.block:
-        if block in ("M", "L", "P", "K"):
+        if block in SELECTED_BLOCKS and approach and not args.summarize_only:
+            # The approach boundary re-selects nothing: the committed selection, checked by
+            # its sha256, even in a smoke run.
+            context.selection = read_selection(
+                context.selection_path or APPROACH_SELECTION,
+                feed_sha=context.feed["artefact_sha256"],
+                camera_sha=_sha256(context.camera_model),
+                predictor_sha=_sha256(context.predictor), required_sha=APPROACH_SELECTION_SHA256)
+        elif block in ("M", "L", "P", "K"):
             selection_path = context.selection_path or results_dir / "S_summary.json"
             if args.smoke:
                 # Never a real selection: a smoke run of block S selects nothing.
@@ -1145,7 +1419,7 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             summarize(name, results_dir, block_context)
             print(f"wrote {results_dir / f'{name}_summary.json'}")
             continue
-        window = oracle_window(context.camera_model) if block in ("M", "L", "P", "K") else None
+        window = oracle_window(context.camera_model) if block in SELECTED_BLOCKS else None
         specs = block_specs(block, args.seeds, context.selection, grid=args.g_grid,
                             dagger=dagger, smoke=args.smoke, oracle_window=window)
         if args.smoke:
