@@ -207,6 +207,40 @@ class TestPlanOnApproaches:
             _drive(engine, env, 100)
 
 
+class _RecordingCorrection:
+    """Stands in for take-the-slower: records the rows the engine hands it."""
+
+    def __init__(self):
+        self.rows = None
+        self.active = np.zeros(0, dtype=bool)
+
+    def correct(self, ids, t, states, segments, local_speed_mps, plan=None):
+        self.rows = np.asarray(segments).tolist()
+        self.active = np.zeros(len(ids), dtype=bool)
+
+
+def test_take_the_slower_re_runs_an_approach_vehicle_on_its_entry_segment_s_row():
+    # Validation R1-7 (mutant JE9): decision A15, the re-run replaces row plan_row[s]. An
+    # ego on a140_1 (super-segment 25) is re-run on segment 5's row, not on row 11.
+    from src.sumo.feed_episode import _Vehicle
+    from src.sumo.sensing import CameraModel
+
+    camera = CameraModel.from_tables(bin_m=10.0, p=np.ones(8), sigma_m=np.zeros(8),
+                                     sigma_v_mps=np.zeros(8), confidences=[np.array([0.7])] * 8,
+                                     R_max=80.0)
+    env = FakeEnv(lambda t: [])
+    engine = _engine(env, JamArm("take_the_slower"), _by_segment, camera=camera,
+                     q_model=object())
+    engine.correction = _RecordingCorrection()
+    engine.vectors[1] = _by_segment(None)
+    engine.states[1] = env.observe()
+    engine._vehicles["v1"] = _Vehicle([], [], version=1)
+    engine._vehicles["v2"] = _Vehicle([], [], version=1)
+    est = SimpleNamespace(mean_speed=np.array([5.0, 5.0]))
+    engine._decide(100.0, ["v1", "v2"], np.array([25, 7]), None, est, None, None, None, None)
+    assert engine.correction.rows == [5, 7]
+
+
 def _gated_engine_features(engine, t, index, table, est, s_hat, v_slope, versions, segments):
     """`engine_features` as it was before the approach boundary (commit 5c17f86)."""
     if not hasattr(engine, "_remaining_tail"):
@@ -515,6 +549,23 @@ def test_camera_egos_include_approach_vehicles(approach_smoke, arm):
 def test_the_oracle_senses_approach_vehicles(approach_smoke):
     out, _ = approach_smoke["oracle"]
     assert any(v is not None for s in out["trace"] for v in s["k_true_mean"][12:])
+
+
+def test_the_flow_window_and_the_exit_block_open_w_later(model):
+    # Validation R1-1 (mutants JE1, JE2): on the gated clock the flow window opens at 900 s
+    # and the exit block is requested at 900 s; on the approach boundary both are 240 s
+    # later. The episode ends at the first decision instant past 1,000 + 240 s.
+    out = je.run_jam_episode(model, 1, "I_exit", JamArm("plan"),
+                             feed=je.FeedSetting(MEASURED, SESSION, m=1.0), duration_s=1000.0,
+                             sense=False, boundary=approach_boundary())
+    assert out["incidents"][0]["requested_s"] == 900.0 + 240.0
+    arrived = {s["t"]: s["arrived"] for s in out["trace"]}
+    end = out["trace"][-1]["t"]
+    assert end == 1260.0
+    assert out["flow"] == pytest.approx((arrived[end] - arrived[1140.0]) * 3600.0
+                                        / (end - 1140.0), rel=1e-12)
+    # Opening the window at 900 s instead would count a different number of arrivals.
+    assert arrived[1140.0] != arrived[900.0]
 
 
 def test_feed_stamps_and_decisions_move_by_w(approach_smoke, model):

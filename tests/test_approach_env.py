@@ -178,13 +178,16 @@ class TestApproachReport:
         fake.put("a182_2", "q1", 990.0, 2.0)   # 10 m
         fake.put("a182_2", "q2", 920.0, 5.0)   # 80 m
         fake.put("a182_2", "q3", 840.0, 10.0)  # 160 m
+        # 210 m at 25 km/h: above the 19 km/h queue speed, so not a member, although it is
+        # within 100 m of q3 (validation R1-5, mutant MZ3: a 30 km/h threshold took it in).
+        fake.put("a182_2", "c1", 790.0, 25.0)
         fake.put("a182_2", "f1", 700.0, 50.0)  # 300 m, moving: not in the queue
         fake.put("a182_2", "q4", 600.0, 3.0)   # 400 m, 240 m beyond q3: ends the queue
         fake.put("a182_0", "n1", 150.0, 15.0)  # slow near the far end, 2,850 m
         report = env.approach_report()
         assert report["queue_m"][5] == pytest.approx(160.0)
         assert report["slow_near_insertion"][5] == 1
-        assert report["on_approach"] == 6
+        assert report["on_approach"] == 7
         assert report["queue_m"][:5] == [0.0] * 5 and len(report["queue_m"]) == 8
 
     def test_a_queue_reaching_the_far_edge_is_measured_across_edges(self, fake):

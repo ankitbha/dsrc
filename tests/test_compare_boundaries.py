@@ -92,6 +92,10 @@ def test_the_comparison_pairs_every_quantity_and_lists_the_missing_seed(dirs):
     # Gated system excess from the trace: 1,005 vehicles on [900, 7,200] every 10 s.
     assert row["gated"]["system_excess_min_mean"] == pytest.approx(10.0 * 1005 * 631 / 60.0)
     diff = row["approach_minus_gated"]
+    # Validation R1-4 (mutant CB1): the network part (5 minutes) against the gated jam time
+    # (5 minutes), not the all-segment time (7 minutes, the network plus 2 on the approaches).
+    assert diff["network_jam_time_min"]["differences"] == [0.0, 0.0]
+    assert diff["all_jam_time_min_against_gated"]["differences"] == [2.0, 2.0]
     assert diff["network_jam_time_min"]["seeds"] == [16, 17]
     assert diff["network_jam_time_min"]["seeds_only_gated"] == [18]
     assert diff["flow"]["mean"] == -100.0

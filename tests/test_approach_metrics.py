@@ -83,6 +83,17 @@ class TestColumns:
         assert moved["jam_time_min"] == pytest.approx(26 / 6.0)
         assert moved["drained"] is True and moved["drain_s"] == pytest.approx(120.0)
 
+    def test_the_selection_window_moves_by_the_offset(self):
+        # Validation R1-2 (mutants JM2, JM3): with W = 240 s the window is [1,140, 3,840] s.
+        # A spell on [900, 1,140) s lies before it and one on [3,600, 3,840) s inside it.
+        trace = _trace(lambda t, s: (s == 4 and 900.0 <= t < 1140.0)
+                       or (s == 6 and 3600.0 <= t < 3840.0))
+        out = jm.episode_metrics(trace, v_jam=19.0, start_s=900.0, end_s=1200.0, cap=7200.0,
+                                 offset_s=W)
+        assert out["jam_time_min_900_3600"] == pytest.approx(24 * 10.0 / 60.0)
+        gated = jm.episode_metrics(trace, v_jam=19.0, start_s=900.0, end_s=1200.0, cap=7200.0)
+        assert gated["jam_time_min_900_3600"] == pytest.approx((24 + 1) * 10.0 / 60.0)
+
     def test_without_columns_or_offset_the_result_is_the_gated_one(self):
         trace = _trace(lambda t, s: s == 4 and 1000.0 <= t < 1400.0)
         twelve = jm.select_columns(trace, NETWORK)
@@ -113,6 +124,23 @@ class TestStorage:
         out = jm.approach_excess_minutes(trace, rows, TRAVEL, start_s=900.0, cap=7200.0,
                                          offset_s=W)
         assert out == pytest.approx(10.0 * 2 * 61 / 60.0)
+
+    def test_the_approach_excess_window_moves_by_the_offset(self):
+        # Validation R1-2 (mutants JM6, JM7): with W = 240 s the window is [1,140, 7,440] s.
+        # Two excess vehicles on [900, 1,140) s lie before it; three on (7,200, 7,440] s
+        # lie inside it.
+        rows = [{"id": f"v{k}", "entry": "140", "depart": 1000.0 + 10.0 * k}
+                for k in range(200)]
+        n_ff = lambda t: jm.free_flow_occupancy(rows, TRAVEL, [t])[0]
+
+        def extra(t):
+            excess = 2 if 900.0 <= t < 1140.0 else 3 if 7200.0 < t <= 7440.0 else 0
+            return {"on_approach": int(n_ff(t)) + excess}
+
+        trace = _trace(cap=7440.0, extra=extra)
+        out = jm.approach_excess_minutes(trace, rows, TRAVEL, start_s=900.0, cap=7200.0,
+                                         offset_s=W)
+        assert out == pytest.approx(24 * 3 * 10.0 / 60.0)
 
     def test_system_excess_charges_running_held_and_pending(self):
         trace = _trace(cap=3600.0, extra=lambda t: {"running": 1000, "held": 3, "pending": 2})

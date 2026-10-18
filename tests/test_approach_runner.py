@@ -229,6 +229,83 @@ class TestEpisodeRunner:
         assert rje.episode_runner(None, context)(spec)["approach_short"] is True
 
 
+class TestRunnerStorageAndFlags:
+    """Validation R1-3 and R1-5: the runner's storage arguments, its flag limit and the
+    leads baseline on the approach boundary."""
+
+    def _spec(self):
+        return next(s for s in rje.block_specs("Q", selection=SELECTION, oracle_window=60.0)
+                    if s.arm == "plan" and s.scenario == "B9")
+
+    def test_the_storage_measures_use_the_approach_schedule_and_the_shifted_window(
+            self, monkeypatch):
+        # Mutants RJ3 (approach excess on the gated window) and RJ4 (system excess without
+        # N_ff). The free-flow occupancy of the B9 schedule differs between [900, 1,140) s
+        # and (7,200, 7,440] s, so each mutant changes its number.
+        import src.analysis.jam_metrics as jm
+        import src.sumo.jam_episode as je
+
+        trace = _trace36(7440.0, on=250)
+        monkeypatch.setattr(je, "run_jam_episode", lambda *a, **k: {"trace": trace})
+        context = rje.Context(boundary="approach", camera_model=None, predictor=None)
+        storage = rje.episode_runner(None, context)(self._spec())["storage"]
+        rows = json.loads((DATA / "mainz_b9000_A_schedule.json").read_text())
+        T_A = json.loads((DATA / "mainz_approach.json").read_text())["T_A"]
+        excess = jm.approach_excess_minutes(trace, rows, T_A, start_s=900.0, cap=7200.0,
+                                            offset_s=240.0)
+        system = jm.system_excess_minutes(trace, start_s=900.0, cap=7200.0, offset_s=240.0,
+                                          rows=rows, travel_s=T_A)
+        assert storage["approach_excess_min"] == pytest.approx(excess, rel=1e-12)
+        assert storage["system_excess_min"] == pytest.approx(system, rel=1e-12)
+        unshifted = jm.approach_excess_minutes(trace, rows, T_A, start_s=900.0, cap=7200.0)
+        without_n_ff = jm.system_excess_minutes(trace, start_s=900.0, cap=7200.0,
+                                                offset_s=240.0)
+        assert abs(unshifted - excess) > 100.0 and abs(without_n_ff - system) > 1000.0
+
+    def test_a_queue_reaching_the_insertion_edge_flags_the_episode(self, monkeypatch):
+        # Mutant RJ1: the limit is the approach length minus one edge, 2,000 m, not 3,000 m.
+        import src.sumo.jam_episode as je
+
+        monkeypatch.setattr(je, "run_jam_episode",
+                            lambda *a, **k: {"trace": _trace36(7440.0, queue=2500.0)})
+        context = rje.Context(boundary="approach", camera_model=None, predictor=None)
+        result = rje.episode_runner(None, context)(self._spec())
+        assert result["flags"]["limit_m"] == 2000.0
+        assert result["approach_short"] is True
+
+    def test_the_leads_baseline_moves_by_w(self, tmp_path):
+        # Mutant RJ5. Segment 3 runs at 50 km/h until 900 s and at 30 km/h from 900 s, so
+        # its mean is 50 km/h on [600, 900) s and 34 km/h on [840, 1,140) s. It runs at
+        # 25 km/h from 1,200 s and jams at 10 km/h from 1,500 s. Against the shifted
+        # baseline (80% of 34 = 27.2 km/h) the speed precursor starts at 1,200 s; against the
+        # unshifted one (40 km/h) it would start at the clock start, 1,140 s.
+        def speed(t):
+            if t < 900.0:
+                return 50.0
+            if t < 1200.0:
+                return 30.0
+            if t < 1500.0:
+                return 25.0
+            return 10.0 if t < 1800.0 else 50.0
+
+        trace = []
+        t = 0.0
+        while t <= 7440.0:
+            trace.append({"t": t, "speed_kmh": [speed(t) if s == 3 else 50.0 for s in range(36)],
+                          "density": [0.05] * 36, "count": [1] * 36, "held": 0, "pending": 0,
+                          "k_hat_mean": [None] * 36, "k_true_mean": [None] * 36})
+            t += 10.0
+        path = tmp_path / "trace.json"
+        path.write_text(json.dumps({"trace": trace}))
+        record = {"arm": "no_control", "scenario": "B9", "seed": 1, "duration_s": 7200.0,
+                  "trace_file": str(path)}
+        out = rje.write_leads([record], tmp_path, offset_s=240.0, network_columns=list(range(12)))
+        entry = out["episodes"][0]
+        assert entry["onset"] == 1500.0 and entry["segment"] == 3
+        assert entry["W_feed"] == 300.0
+        assert entry["network"]["onset"] == 1500.0 and entry["network"]["W_feed"] == 300.0
+
+
 def _record(arm, variant, scenario, seed, *, jam_net, jam_app, flagged=False, collide=0,
             system=1000.0):
     def part(minutes, prevented):
