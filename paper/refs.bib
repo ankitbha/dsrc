@@ -1,3 +1,10 @@
+% IEEE style: more than six authors are shortened to the first author and "et al."
+@IEEEtranBSTCTL{IEEEexample:BSTcontrol,
+  CTLuse_forced_etal       = "yes",
+  CTLmax_names_forced_etal = "6",
+  CTLnames_show_etal       = "1"
+}
+
 @article{Yan_2023,
    title={Unified Automatic Control of Vehicular Systems With Reinforcement Learning},
    volume={20},
@@ -138,9 +145,7 @@ series = {SIGMOD '20}
 
 @inproceedings{ghasemi2022real, title={Real-time camera analytics for enhancing traffic intersection safety}, author={Ghasemi, Mahshid and Kleisarchaki, Sofia and Calmant, Thomas and G{\"u}rgen, Levent and Ghaderi, Javad and Kostic, Zoran and Zussman, Gil}, booktitle={Proceedings of the 20th Annual International Conference on Mobile Systems, Applications and Services}, pages={630--631}, year={2022} }
 
-%article{bhardwaj2023understanding, title={Understanding sudden traffic jams: From emergence to impact}, author={Bhardwaj, Ankit and Iyer, Shiva R and Ramesh, Sriram and White, Jerome and Subramanian, Lakshminarayanan}, journal={Development Engineering}, volume={8}, pages={100105}, year={2023}, publisher={Elsevier} }
-
-@article{bhardwaj2023understanding, title={Anonymous Title}, author={Anonymous Authors}, journal={Anonymous Publication}, year={Anonymous Year} }
+@article{bhardwaj2023understanding, title={Understanding sudden traffic jams: From emergence to impact}, author={Bhardwaj, Ankit and Iyer, Shiva R and Ramesh, Sriram and White, Jerome and Subramanian, Lakshminarayanan}, journal={Development Engineering}, volume={8}, pages={100105}, year={2023}, publisher={Elsevier} }
 
 @article{wang2022enabling, title={Enabling edge-cloud video analytics for robotics applications}, author={Wang, Yiding and Wang, Weiyan and Liu, Duowen and Jin, Xin and Jiang, Junchen and Chen, Kai}, journal={IEEE Transactions on Cloud Computing}, volume={11}, number={2}, pages={1500--1513}, year={2022}, publisher={IEEE} }
 
@@ -1704,28 +1709,11 @@ title = {SCOOT and SCATS: A Closer Look into Their Operations}
   note         = {Accessed: 2025-08-24}
 }
 
-% BibTeX has no comment character, and a leading % does not disable an entry.
-% The parser scans for the at-sign and starts an entry wherever it finds one,
-% comment or not. Leaving that character in place below made BibTeX read this
-% block as a real entry, fail on the commented author line with "You're missing
-% a field name", and then reject the live entry underneath as "Repeated entry",
-% which left every field empty in the output. The at-sign is therefore deleted
-% rather than commented out. Restore it to re-enable this version, and delete
-% the anonymous entry below at the same time.
-%
-% inproceedings{self_regulating_cars,
-%     author = {Ankit Bhardwaj and Rohail Asim and Sachin Kumar Chauhan and Yasir Zaki and Lakshmi Subramanian},
-%     title = {Self-Regulating Cars: Automating Traffic Control in Free Flow Road Networks},
-%     booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
-%     year = {2026},
-%     note = {arXiv:2506.11973}
-% }
-
 @inproceedings{self_regulating_cars,
-  author = {Anonymous Authors},
-  booktitle = {Anonymous Publication},
-  title = {Anonymous Title},
-  year = {Anonymous Year}
+  author = {Ankit Bhardwaj and Rohail Asim and Sachin Kumar Chauhan and Yasir Zaki and Lakshmi Subramanian},
+  title = {Self-Regulating Cars: Automating Traffic Control in Free Flow Road Networks},
+  booktitle = {Proceedings of the AAAI Conference on Artificial Intelligence},
+  year = {2026}
 }
 
 @inproceedings{yang2024depth,
@@ -1958,6 +1946,14 @@ title = {SCOOT and SCATS: A Closer Look into Their Operations}
   note         = {Accessed: 2026-09-12}
 }
 
+@misc{auxer2007rating,
+  author       = {Auxer, Gregory A. and Carroll, James F. and Smyth, Brian J.},
+  title        = {Rating that represents the status along a specified driving route},
+  howpublished = {U.S. Patent 7,302,341 B1},
+  month        = nov,
+  year         = {2007}
+}
+
 @article{hall1991capacity,
   author  = {Fred L. Hall and Kwaku Agyemang-Duah},
   title   = {Freeway Capacity Drop and the Definition of Capacity},
@@ -1973,4 +1969,68 @@ title = {SCOOT and SCATS: A Closer Look into Their Operations}
   year         = {2025},
   howpublished = {\url{https://www.nvidia.com/en-us/autonomous-machines/embedded-systems/jetson-orin/}},
   note         = {Accessed: 2026-09-12}
+}
+
+@article{nayyar2013common,
+  author  = {Nayyar, Ashutosh and Mahajan, Aditya and Teneketzis, Demosthenis},
+  title   = {Decentralized Stochastic Control with Partial History Sharing: A Common Information Approach},
+  journal = {IEEE Transactions on Automatic Control},
+  volume  = {58},
+  number  = {7},
+  pages   = {1644--1658},
+  year    = {2013}
+}
+
+@article{dashkovskiy2010smallgain,
+  author  = {Dashkovskiy, Sergey N. and R{\"u}ffer, Bj{\"o}rn S. and Wirth, Fabian R.},
+  title   = {Small Gain Theorems for Large Scale Systems and Construction of {ISS} {Lyapunov} Functions},
+  journal = {SIAM Journal on Control and Optimization},
+  volume  = {48},
+  number  = {6},
+  pages   = {4089--4118},
+  year    = {2010}
+}
+
+@book{horn2012matrix,
+  author    = {Horn, Roger A. and Johnson, Charles R.},
+  title     = {Matrix Analysis},
+  edition   = {2nd},
+  publisher = {Cambridge University Press},
+  year      = {2012}
+}
+
+@article{kaplan1958nonparametric,
+  author  = {Kaplan, Edward L. and Meier, Paul},
+  title   = {Nonparametric Estimation from Incomplete Observations},
+  journal = {Journal of the American Statistical Association},
+  volume  = {53},
+  number  = {282},
+  pages   = {457--481},
+  year    = {1958}
+}
+
+@inproceedings{hegyi2008specialist,
+  title={{SPECIALIST}: A dynamic speed limit control algorithm based on shock wave theory},
+  author={Hegyi, Andreas and Hoogendoorn, Serge P. and Schreuder, Marco and Stoelhorst, Henk and Viti, Francesco},
+  booktitle={Proceedings of the 11th International IEEE Conference on Intelligent Transportation Systems (ITSC)},
+  pages={827--832},
+  year={2008}
+}
+
+@inproceedings{hegyi2013cooperative,
+  title={A cooperative system based variable speed limit control algorithm against jam waves -- an extension of the {SPECIALIST} algorithm},
+  author={Hegyi, Andreas and Netten, Bart and Wang, Meng and Schakel, Wouter and Schreiter, Thomas and Yuan, Yufei and van Arem, Bart and Alkim, Taoufik},
+  booktitle={Proceedings of the 16th International IEEE Conference on Intelligent Transportation Systems (ITSC)},
+  pages={973--978},
+  year={2013}
+}
+
+@article{wang2018latency,
+  title={A cross-vendor and cross-state analysis of the {GPS}-probe data latency},
+  author={Wang, Zhongxiang and Hamedi, Masoud and Sharifi, Elham and Young, Stanley},
+  journal={Transportation Research Record},
+  volume={2672},
+  number={42},
+  pages={180--191},
+  year={2018}
 }

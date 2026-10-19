@@ -74,7 +74,7 @@ def paper_arms(s_summary: dict) -> list[tuple[str, str | None, str, str, str]]:
     best_variant = best["name"].split("/", 1)[1] if "/" in best["name"] else "-"
     return [("No control", "no_control", "-", GREY, "^"),
             ("Feed lookahead", "lookahead", look_variant, ORANGE, "s"),
-            ("Two-layer", best["arm"], best_variant, BLUE, "o")]
+            ("Global-local", best["arm"], best_variant, BLUE, "o")]
 
 
 def _jam_by_seed(records: list[dict], arm: str, variant: str, scenario: str,
