@@ -1276,6 +1276,29 @@ def write_leads(episodes: list[dict], results_dir: Path,
     return out
 
 
+def _n_cells(episodes: list[dict]) -> tuple[dict[str, list[int]], list[str]]:
+    """Block N's `(missing, unexpected)`: per `arm/variant/scenario` of its specs the seeds
+    11-15 without a record, and the cells with records that are not in its specs (validation
+    2026-10-20, finding 2). The specs are built from the rule's `m_on` in the records."""
+    m_on = sorted({float((r.get("params") or {}).get("m_on")) for r in episodes
+                   if r["arm"] == "rule"})
+    if len(m_on) != 1:
+        return {"rule": list(SELECTION_SEEDS)}, [f"rule m_on {m_on}"]
+    stand_in = Selection(J_th=0.0, m_on=m_on[0], theta=0.0, best_arm="rule",
+                         best_params={"m_on": m_on[0]})
+    have: dict[str, set[int]] = {}
+    for r in episodes:
+        have.setdefault(f"{r['arm']}/{r['variant']}/{r['scenario']}", set()).add(r["seed"])
+    missing: dict[str, list[int]] = {}
+    expected = set()
+    for spec in block_specs("N", selection=stand_in):
+        cell = f"{spec.arm}/{spec.variant}/{spec.scenario}"
+        expected.add(cell)
+        if spec.seed not in have.get(cell, set()):
+            missing.setdefault(cell, []).append(spec.seed)
+    return missing, sorted(set(have) - expected)
+
+
 def summarize_n(episodes: list[dict]) -> dict[str, Any]:
     """Block N (2026-10-20): the feed gate's threshold for the rule, from seeds 11-15 only.
 
@@ -1292,10 +1315,14 @@ def summarize_n(episodes: list[dict]) -> dict[str, Any]:
     outside = sorted(set(seeds) - set(SELECTION_SEEDS))
     if outside:
         raise SystemExit(f"block N selects on seeds 11-15; its records hold {outside}")
-    if seeds != list(SELECTION_SEEDS):
-        # A run of some of the seeds (one process per seed) selects nothing until merged.
-        return {"block": "N", "seeds": seeds, "selected": None,
-                "decision": f"incomplete: seeds {seeds} of 11-15"}
+    missing, unexpected = _n_cells(episodes)
+    if missing or unexpected:
+        # A run of some of the seeds (one process per seed), or a block with a cell short,
+        # selects nothing: a missing BG cell alone can change the tie-break.
+        return {"block": "N", "seeds": seeds, "selected": None, "missing": missing,
+                "unexpected": unexpected,
+                "decision": f"incomplete: {sum(len(v) for v in missing.values())} episodes "
+                            f"missing, {len(unexpected)} unexpected cells"}
 
     def name(r: dict) -> str:
         return r["arm"] if r["arm"] in ("no_control", "plan") else f"{r['arm']}/{r['variant']}"

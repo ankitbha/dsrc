@@ -140,10 +140,12 @@ def _n_record(arm, variant, scenario, seed, jam, flow=3400.0, collide=0, params=
 
 
 def _n_block(collide_g1=False):
-    # C(rule m0) = (10 - 50) / 100 = -0.4; C(g1) = -0.395, within C_TIE; C(g2) = -0.2.
-    jams = {"no_control": 100.0, "plan": 50.0, "m0": 10.0, "m0_g1": 10.5, "m0_g2": 30.0}
-    bg_flow = {"no_control": 3570.0, "plan": 3450.0, "m0": 3300.0, "m0_g1": 3400.0,
-               "m0_g2": 3500.0}
+    # C(rule m0) = (10 - 50) / 100 = -0.4; C(g0.5) = -0.398 and C(g1) = -0.395, within
+    # C_TIE; C(g1.5) = -0.2 and C(g2) = -0.1, outside it.
+    jams = {"no_control": 100.0, "plan": 50.0, "m0": 10.0, "m0_g0.5": 10.2, "m0_g1": 10.5,
+            "m0_g1.5": 30.0, "m0_g2": 40.0}
+    bg_flow = {"no_control": 3570.0, "plan": 3450.0, "m0": 3300.0, "m0_g0.5": 3250.0,
+               "m0_g1": 3400.0, "m0_g1.5": 3500.0, "m0_g2": 3550.0}
     records = []
     for scenario in ("B5", "B7.5", "B9", "I_exit", "I_mid", "BG"):
         for seed in range(11, 16):
@@ -151,7 +153,8 @@ def _n_block(collide_g1=False):
                 arm = name if name in ("no_control", "plan") else "rule"
                 variant = "-" if arm != "rule" else name
                 params = ({"m_on": 0.0} if name == "m0" else
-                          {"m_on": 0.0, "gate_J": float(name[-1])} if arm == "rule" else {})
+                          {"m_on": 0.0, "gate_J": float(name.split("_g")[1])} if arm == "rule"
+                          else {})
                 records.append(_n_record(
                     arm, variant, scenario, seed, 0.0 if scenario == "BG" else jam,
                     flow=bg_flow[name] if scenario == "BG" else 3500.0,
@@ -165,7 +168,7 @@ class TestSummaryN:
         summary = rje.summarize_n(_n_block())
         c = {k: v["C"] for k, v in summary["candidates"].items()}
         assert c["rule/m0"] == pytest.approx(-0.4) and c["rule/m0_g1"] == pytest.approx(-0.395)
-        assert c["rule/m0_g2"] == pytest.approx(-0.2)
+        assert c["rule/m0_g1.5"] == pytest.approx(-0.2) and c["rule/m0_g2"] == pytest.approx(-0.1)
         assert summary["selected"] == {"label": "rule/m0_g1", "variant": "m0_g1",
                                        "m_on": 0.0, "gate_J": 1.0}
         assert summary["candidates"]["rule/m0_g1"]["bg_flow_mean"] == 3400.0
@@ -176,6 +179,29 @@ class TestSummaryN:
         assert summary["candidates"]["rule/m0_g1"]["excluded"] is True
         assert summary["selected"]["label"] == "rule/m0"
         assert summary["selected"]["gate_J"] is None
+
+    def test_a_missing_cell_selects_nothing(self):
+        # Validation finding 2: without rule/m0's BG seed 15 its BG flow mean would change
+        # the tie-break; a block with any cell short selects nothing.
+        records = [r for r in _n_block()
+                   if not (r["variant"] == "m0" and r["scenario"] == "BG" and r["seed"] == 15)]
+        summary = rje.summarize_n(records)
+        assert summary["selected"] is None and summary["decision"].startswith("incomplete")
+        assert summary["missing"] == {"rule/m0/BG": [15]}
+
+    def test_a_candidate_missing_from_every_scenario_selects_nothing(self):
+        summary = rje.summarize_n([r for r in _n_block() if r["variant"] != "m0_g2"])
+        assert summary["selected"] is None
+        assert sorted(summary["missing"]) == [f"rule/m0_g2/{s}" for s in
+                                              sorted(("B5", "B7.5", "B9", "BG", "I_exit",
+                                                      "I_mid"))]
+
+    def test_an_unexpected_cell_selects_nothing(self):
+        records = _n_block()
+        records.append({**records[-1], "variant": "m0_g3", "params": {"m_on": 0.0,
+                                                                     "gate_J": 3.0}})
+        summary = rje.summarize_n(records)
+        assert summary["selected"] is None and summary["unexpected"] == ["rule/m0_g3/BG"]
 
     def test_seeds_outside_the_selection_are_refused(self):
         records = _n_block()
@@ -220,6 +246,109 @@ class TestReadGateSelection:
         with pytest.raises(SystemExit):
             rje.main(["--block", "M", "--gate-selection", str(self._write(tmp_path)),
                       "--results-dir", str(tmp_path), "--summarize-only"])
+
+
+def _stub_engine(gate_J):
+    """A jam engine on the fake env of the engine tests, with two feed versions."""
+    import importlib.util
+    from types import SimpleNamespace
+
+    spec = importlib.util.spec_from_file_location(
+        "approach_engine_fakes", REPO_ROOT / "tests" / "test_approach_engines.py")
+    fakes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fakes)
+    env = fakes.FakeEnv(lambda t: [])
+    engine = fakes._engine(env, JamArm("rule", m_on=0.0, gate_J=gate_J), lambda x: [2] * 12,
+                           camera=SimpleNamespace(R_max=60.0))
+    engine.vectors = {1: [2] * 12, 2: [2] * 12}
+    engine.gate_signals = {1: 0.0, 2: 5.0}
+    engine._vehicles = {"a": SimpleNamespace(version=1), "b": SimpleNamespace(version=2)}
+    return engine
+
+
+def _decide(engine):
+    from types import SimpleNamespace
+
+    # Both vehicles see a full road: the rule's margin is below m_on for both.
+    engine._decide(0.0, ["a", "b"], np.array([0, 0]), None,
+                   SimpleNamespace(k_hat=np.array([0.2, 0.2])), np.zeros(2), None, None, None)
+
+
+class TestGatePerVehicle:
+    def test_each_vehicle_s_gate_is_its_own_applied_version_s(self):
+        # Validation finding 1: vehicle a applies version 1 (signal 0), b version 2 (5).
+        engine = _stub_engine(gate_J=1.0)
+        _decide(engine)
+        assert engine._active == {"a": False, "b": True}
+        assert engine._gate_open_ticks == 1
+
+    def test_without_a_gate_the_rule_gets_no_mask(self):
+        # Validation finding 5: gate_J None passes allow=None, so both switch on.
+        engine = _stub_engine(gate_J=None)
+        seen = []
+        update = engine.correction.update
+        engine.correction.update = lambda *a, **k: seen.append(k.get("allow")) or update(*a, **k)
+        _decide(engine)
+        assert seen == [None] and engine._active == {"a": True, "b": True}
+
+
+class TestReaders:
+    def test_the_comparison_reads_the_network_part_of_either_layout(self):
+        # Validation finding 4b.
+        import compare_boundaries as cb
+
+        old = {"jam": {"jam_time_min": 14.0}, "jam_network": {"jam_time_min": 10.0}}
+        new = {"jam": {"jam_time_min": 10.0}, "jam_all": {"jam_time_min": 14.0}}
+        for record in (old, new):
+            assert cb._network(record)["jam_time_min"] == 10.0
+            assert cb._all(record)["jam_time_min"] == 14.0
+
+    def test_the_figures_match_variants_exactly(self):
+        # Validation finding 4d: the gated and ungated rule are different arms.
+        sys.path.insert(0, str(REPO_ROOT / "scripts" / "figures"))
+        import paper_jam_figs as pf
+
+        def record(variant, minutes, m=1.0):
+            return {"arm": "rule", "variant": variant, "scenario": "B9", "seed": 16, "m": m,
+                    "jam": {"jam_time_min": minutes}}
+        records = [record("m0", 1.0), record("m0_g1", 2.0), record("m0_lag0", 3.0, 0.0),
+                   record("m0_g1_lag0", 4.0, 0.0)]
+        assert pf._jam_by_seed(records, "rule", "m0", "B9") == {16: 1.0}
+        assert pf._jam_by_seed(records, "rule", "m0_g1", "B9") == {16: 2.0}
+        assert pf._jam_by_seed(records, "rule", "m0", "B9", m=0.0) == {16: 3.0}
+        assert pf._jam_by_seed(records, "rule", "m0_g1", "B9", m=0.0) == {16: 4.0}
+        with pytest.raises(SystemExit):
+            pf._jam_by_seed(records + [record("m0", 9.0)], "rule", "m0", "B9")
+
+    def test_the_comparison_names_the_gated_rule_after_a_gate_selection(self, tmp_path):
+        # Validation finding 3: after a gate selection the two-layer controller of the
+        # contrasts is the gated rule, not the ungated one beside it in block M.
+        import compare_boundaries as cb
+
+        def part(minutes):
+            return {"jam_time_min": minutes, "prevented": minutes == 0, "pending_min": 0.0,
+                    "held_min": 0.0}
+
+        def episode(arm, variant, minutes):
+            return {"type": "episode", "key": f"M/{arm}/{variant}/B9/16", "arm": arm,
+                    "variant": variant, "scenario": "B9", "seed": 16, "duration_s": 7200.0,
+                    "flow": 3500.0, "jam": part(minutes), "jam_all": part(minutes + 1.0),
+                    "jam_approach": part(1.0), "approach_short": False,
+                    "storage": {"approach_excess_min": 0.0, "system_excess_min": 100.0}}
+        selection = {"best_arm": "rule", "best_params": {"m_on": 0.0}, "J_th": 2.0,
+                     "gate_J": 1.5}
+        gated, approach = tmp_path / "gated", tmp_path / "approach"
+        gated.mkdir(); approach.mkdir()
+        (gated / "M.jsonl").write_text(json.dumps({"type": "header"}) + "\n" + json.dumps(
+            {**episode("rule", "m0", 5.0), "jam": {**part(5.0)}}) + "\n")
+        lines = [{"type": "header", "boundary": "approach", "config": {"selection": selection}},
+                 episode("no_control", "-", 200.0), episode("lookahead", "J2", 16.0),
+                 episode("rule", "m0", 12.0), episode("rule", "m0_g1.5", 3.0)]
+        (approach / "M.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+        out = cb.compare(gated, approach, tmp_path / "no_traces")
+        assert out["contrasts"]["two_layer_controller"] == "rule/m0_g1.5"
+        pair = out["contrasts"]["scenarios"]["B9"]["rule/m0_g1.5 - no_control/-"]
+        assert pair["jam_network_time_min"]["mean"] == -197.0
 
 
 # ----------------------------------------------------------------- SUMO sanity

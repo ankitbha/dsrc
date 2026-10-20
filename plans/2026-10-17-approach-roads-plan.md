@@ -978,3 +978,195 @@ The gated rule's episodes are run fresh into the same JSONLs with `--resume`.
 **Defect found on the way (figure script).** `paper_jam_figs._jam_by_seed` matched variants
 by prefix, so `m0` would also have matched `m0_g...` once both exist. Now exact; on the
 committed approach results the figure series are byte-identical.
+
+## PAUSE STATE (2026-10-20, Ankit's `pause`) — read this first to resume
+
+### The blocking unknown
+
+**Which feed-gate threshold block N selects, and whether any gated rule stays within C_TIE
+(0.02) of the ungated rule's criterion C.** Every remaining step waits on it: the gated runs
+of blocks M, L, P and K take their `gate_J` from block N's summary, and every paper number for
+the global-local controller comes from those runs. If the ungated rule (`rule/m0`) wins the
+selection, the gate is not used and the no-trigger cost stays as measured without it; that
+outcome must be reported to Ankit as a result, not worked around.
+
+How to settle it. All 210 block N episodes are complete (42 per seed). They were run as five
+per-seed processes from a clean detached worktree at `6bbdcdd`. There were 0 collisions,
+0 writes above the plan and 0 episodes with `pending` above 0. The records are in
+`outputs/jam_network/N_seed{11..15}/N.jsonl`. Each per-seed `N_summary.json` correctly says
+"incomplete" and selects nothing.
+
+1. First fix validation finding 2 below. `summarize_n` checks only that the union of seeds is
+   11-15, so a merged file with a missing cell would still select. Make it return
+   `selected: None`, with decision "incomplete", unless the labels are exactly {no_control,
+   plan, rule/m0, rule/m0_g0.5, rule/m0_g1, rule/m0_g1.5, rule/m0_g2}, each with all 6
+   scenarios x 5 seeds. Add a test.
+2. Merge the five parts:
+   `.venv/bin/python -I -B outputs/jam_network/tools/merge_n.py outputs/jam_network/run
+   outputs/jam_network/N_seed11 ... outputs/jam_network/N_seed15`
+   It refuses a duplicate key or a missing seed.
+3. Summarise from the worktree at the fix commit:
+   `run_jam_experiments.py --boundary approach --block N --summarize-only --results-dir
+   <repo>/outputs/jam_network/run`
+   Read `selected` and `candidates` in `outputs/jam_network/run/N_summary.json`. The
+   finding 2 fix changes only the summary code, not what an episode does, so the 210 episodes
+   stay valid.
+
+### Where everything stopped
+
+- Branch `approach-roads`, HEAD `6bbdcdd`, committed locally and **not pushed** (origin is at
+  `08e4c8e`, one commit behind). The `ankitbha/dsrc` repository is public: do not push without
+  Ankit's say.
+- Commit `6bbdcdd` holds every code change:
+  - the gate: `advised_jam_factor`, `gate_signal`, `JamArm.gate_J`, the mask in `_decide`;
+  - network-only metrics, `storage.network_min`, network leads;
+  - block N with `summarize_n`, `read_gate_selection` and `--gate-selection`;
+  - `scripts/rescore_network.py`;
+  - `compare_boundaries.py` reading both record layouts;
+  - exact variant matching in `paper_jam_figs.py`;
+  - tests `tests/test_feed_gate.py` and `tests/test_rescore_network.py`, and an updated
+    `tests/test_approach_runner.py`.
+  All ten touched test files passed, one per process.
+- The clean worktree used for the runs is
+  `/private/tmp/claude-502/.../scratchpad/dsrc_net/worktrees/run_6bbdcdd`. It is registered
+  in `git worktree list`. If it is gone, recreate it with `git worktree prune` and then
+  `git worktree add --detach <path> <commit>` at the fix commit. The runner records
+  `dirty: false` only from a clean tree, so do not symlink `.venv` into it. Run the main
+  repository's `.venv/bin/python` on the worktree's scripts instead.
+- **Re-score done.** The committed `results/jam_approach/{M,L,P,K}.jsonl` were rebuilt on the
+  network into `outputs/jam_network/run/{M,L,P,K}.jsonl`, from traces in
+  `outputs/jam_approach/run_5cea9d3/traces/`.
+  - 1,245 records were re-scored, and every old number came back under its new name.
+  - `outputs/jam_network/run/M_summary.json` and `leads.json` are from a `--summarize-only` of
+    the re-scored block M. They are overwritten when block M is run with the gate.
+- **Not started:** the gated rule's episodes in M (105), L (90), P (60) and K (90), and the copy
+  of the run into `results/jam_network/` with its commit.
+- **Paper (`paper/`, uncommitted, as before; Ankit edits it).** Edited so far, all in
+  `eval_sim.tex`:
+  - the Network paragraph (approach roads are a boundary condition that paces demand; nothing
+    on them is measured);
+  - the Metrics paragraph (jam and travel time on the 12 network super-segments only; the
+    approach roads are not charged; throughput falls if vehicles are held back);
+  - the Fig. 4 caption ("on the network");
+  - the Fig. 5 caption (no control 208.4 and 137.1);
+  - the warning sentence ("43 of 45 runs, by a median of 210 to 480 s").
+  Every other number is still the old one. `paper/figs/*` and `main.pdf` are from the
+  previous figure-legend turn.
+
+### Validation round (the one requested; the validator's report, folded in here)
+
+The validator checked the commit in an isolated git-archive mirror. It found **no MUST FIX**
+(no reported number and no selection is wrong) and five SHOULD FIX findings:
+
+1. **Missing test.** No test pins that each vehicle's gate comes from the version that vehicle
+   applies (`jam_episode.py` `_decide`). The mutants "latest version" and "version 1" survive,
+   because the SUMO tests use `gate_J` 0 and 10.5. Fix: a stub-engine test with
+   `gate_signals = {1: 0.0, 2: 5.0}`, two vehicles on versions 1 and 2, and `gate_J = 1`; only
+   the version-2 vehicle switches on.
+2. **Latent, and must be fixed before the summary (see the blocking unknown).** `summarize_n`
+   selects on an incomplete block. A missing BG cell flips the selection on a stub fixture.
+3. **Latent.** `compare_boundaries.py` (around line 208) names the controller from the header's
+   `best_params`, which carries no `gate_J`, so after a gate selection it compares the ungated
+   rule. No paper number reads `boundary_comparison.json`. Fix: add `gate_J` from
+   `selection.gate_J`.
+4. **Missing tests for four correct code paths:**
+   - (a) the network-only S45 speed-density break in `write_leads`;
+   - (b) the new-layout branch of `_network` in `compare_boundaries.py`;
+   - (c) the storage check and the header sha256 check in `rescore_network.py` (its committed-
+     record test skips in a git-archive tree);
+   - (d) exact variant matching and `--gate-selection` in `paper_jam_figs.py`.
+5. **Missing test** that a `gate_J = None` arm passes `allow=None`. It is correct by reading.
+
+Clean, per the validator:
+- the gate formula (20,000 random draws);
+- the rows and plan used (12 network rows, `vectors[version]`);
+- the mask semantics and the release through the hysteresis;
+- every network-only reader;
+- the full re-score of 1,245 records (`network_min` equals `system_excess - approach_excess`
+  within 2.2e-16);
+- block N's specs and selection rule, and `read_gate_selection`;
+- the arm lists (M 870 = 765 + 105; L, P, K gated only; the oracle ungated);
+- a stub `--resume` on the re-scored JSONLs ran exactly the gated keys;
+- the figure script.
+
+15 mutants were killed.
+
+### What was learned (would otherwise be re-derived)
+
+- **Network-only, the existing ungated results** (re-scored block M, seeds 16-30):
+
+  | Controller | Jam-free (of 75) | Jam time (segment-minutes per run) | Throughput | Travel time |
+  |---|---|---|---|---|
+  | No control | 1 | 130.8 | 3,456 veh/h | 1,622 veh-h |
+  | Lookahead | 46 | 11.6 | −5.4% | +11.9% |
+  | Ungated rule | 51 (50 prevented) | 4.4 | +2.5% | −6.0% |
+
+  - B9: the ungated rule is jam-free on 8 of 15 runs and leaves 12.6 segment-minutes, against
+    13 of 15 and 16.3 for the lookahead; the rule minus the lookahead is −3.7 ± 7.5.
+  - No trigger: the ungated rule loses 245 veh/h (−6.9%) and adds 108 veh-h (+23.2%); plan
+    alone loses 104 veh/h (−2.9%) and adds 53 veh-h (+11.3%).
+- **Travel time on the network no longer charges approach slowing.** Plan alone shows −10.0%
+  travel time against no control over the triggers. This is a property of the measure Ankit
+  asked for (vehicles slowed on an approach road are not counted). Throughput is the measure
+  that would show vehicles being held back. The paper's Metrics paragraph now says this.
+- **50% penetration is unchanged by the measure.** On B9 the ungated rule is +29.5 ± 24.6
+  segment-minutes above no control on the network (2 of 15 seeds below), and +49.1 ± 20.2
+  above plan alone. Ankit's hypothesis that the approach roads caused it is contradicted by
+  this; whether the gate changes it is unmeasured until block P runs with the gate.
+- **Feed delay, B9, network only:**
+  - lookahead 21.4 / 16.3 / 11.5 / 18.3 at D = 0 / 99.5 / 189 / 368 s;
+  - ungated rule 8.6 / 12.6 / 4.9 / 6.8.
+
+  The large fall with delay was on the approaches, as Ankit expected.
+- **Unchanged facts the paper can keep:**
+  - the speed-density sentence (57.5, 55.0 and 35.8 km/h were already network values);
+  - the exit-block statement (`W_feed < D` on 15 of 15 runs);
+  - intro line 19's 137 segment-minutes (no control's I_exit jam has no approach part).
+- **Helpers (durable copies) in `outputs/jam_network/tools/`:**
+  - `run_n.sh` (block N per seed);
+  - `merge_n.py`;
+  - `run_mlpk.sh <worktree>`: M, L, P and K with `--gate-selection outputs/jam_network/run/N_summary.json --resume`,
+    one process per block;
+  - `paper_numbers.py <results dir> <system variant>`: every number the simulation section
+    quotes;
+  - `make_table.py <results dir> <system variant>`: Table II rows with the Upstream column
+    removed and Delay renamed Travel time;
+  - `validator_brief.md`;
+  - `gate_instrument/` (the 60-run feed instrument and the threshold sweeps).
+
+  Run Python with `-I` on files outside the repository.
+
+### Task order to resume
+
+1. Fix validation finding 2 with a test, and the finding 1 test. Optionally fix finding 3 and
+   add the finding 4 and 5 tests. Run those test files (one per process, never `-n`) and commit
+   locally. Create a fresh clean worktree at that commit.
+2. Merge block N, summarise it, and read the selection (the blocking unknown). If `rule/m0`
+   wins, stop and report that to Ankit before running anything more.
+3. Run `run_mlpk.sh <worktree>`: 345 gated episodes, about an hour in four processes. Check the
+   zero-collision, zero-write-above-plan and `pending` 0 counters.
+4. Copy `outputs/jam_network/run/` (JSONLs and summaries) to `results/jam_network/`, and commit
+   the results and a result section in this plan.
+5. Regenerate the figures:
+   `paper_jam_figs.py --results-dir results/jam_network --gate-selection
+   results/jam_network/N_summary.json --out paper/figs`
+6. Update the paper's remaining affected parts only:
+   - **Abstract:** numbers only. Ankit froze its wording; his 2026-10-20 instruction to update
+     the results applies to its numbers.
+   - **Intro paragraph 6** (the results sentence, and "so that queues pushed upstream are
+     counted").
+   - **`controller.tex`:** one sentence describing the gate and its selected threshold.
+   - **Baselines and protocol:** the gate threshold was chosen on the selection seeds with the
+     approach roads.
+   - **Table II (`table_main.tex`):** from `make_table.py`; drop Upstream; caption.
+   - **Sections VI-C, VI-D, VI-E (camera scale, penetration, feed delay) and VI-F (no trigger,
+     replacing "we leave it to future work" with the gate's measured effect).**
+   - **The Network paragraph's controlled-run count** (1,140 plus the gated runs).
+   - **The conclusion's numbers and limitations.** "Moved most of the jam onto an approach
+     road" is no longer measured. State instead that the approach roads are not charged.
+7. Build the paper (it was 7 pages; the 6-page trim is deferred by Ankit). Update the memory
+   `dsrc_jam_avoidance_program.md`, then report.
+
+**Open decisions not taken:** none for Ankit until step 2. One reading was taken without asking:
+the controllers still act on approach vehicles, and only the measurement changed. Ankit may
+want the approach roads to be uncontrolled as well. That would re-run every arm.

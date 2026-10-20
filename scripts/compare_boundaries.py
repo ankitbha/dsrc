@@ -205,7 +205,10 @@ def compare(gated_dir: Path, approach_dir: Path, traces_dir: Path) -> dict[str, 
         }
         if block == "M":
             selection = (a_headers[-1].get("config") or {}).get("selection") or {}
-            best = f"{selection['best_arm']}/{rje._variant(selection['best_arm'], selection['best_params'])}"
+            params = dict(selection["best_params"])
+            if selection["best_arm"] == "rule" and selection.get("gate_J") is not None:
+                params["gate_J"] = selection["gate_J"]  # block N's gate (validation finding 3)
+            best = f"{selection['best_arm']}/{rje._variant(selection['best_arm'], params)}"
             lookahead = f"lookahead/{rje._variant('lookahead', {'J_th': selection['J_th']})}"
             out["contrasts"] = {"two_layer_controller": best, "lookahead": lookahead,
                                 "scenarios": contrasts(a_episodes, best, lookahead)}

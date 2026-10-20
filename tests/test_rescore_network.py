@@ -97,3 +97,24 @@ def test_a_committed_record_re_scores_exactly():
     assert out["storage"]["network_min"] == pytest.approx(
         record["storage"]["system_excess_min"] - record["storage"]["approach_excess_min"],
         rel=1e-9)
+
+
+def test_a_changed_storage_measure_is_refused(tmp_path):
+    # Validation finding 4c: the storage measures must come back unchanged.
+    record, path, boundary, v_jam = _old_record(tmp_path, _trace())
+    record["storage"] = {**record["storage"],
+                         "system_excess_min": record["storage"]["system_excess_min"] + 1.0}
+    with pytest.raises(SystemExit):
+        rn.rescore(record, path, v_jam, boundary)
+
+
+def test_a_header_that_ran_other_approach_metadata_is_refused(tmp_path):
+    # Validation finding 4c: the repository's approach metadata must be the file the run read.
+    source = tmp_path / "source"
+    source.mkdir()
+    header = {"type": "header", "boundary": "approach",
+              "approach": {"approach_sha256": "0" * 64}}
+    (source / "M.jsonl").write_text(json.dumps(header) + "\n")
+    with pytest.raises(SystemExit):
+        rn.rescore_block("M", source, tmp_path / "traces", tmp_path / "out", note={})
+    assert not (tmp_path / "out" / "M.jsonl").exists()
