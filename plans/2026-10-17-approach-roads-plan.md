@@ -1305,3 +1305,18 @@ weights each trigger's jam relative to no control's, and the exit block's relati
 largest term. Making the gated rule the system now would be a choice made after seeing the
 evaluation seeds, and the paper would have to say so. The decision stays Ankit's; the paper
 currently follows his choice (ungated system, gate reported in Section VI-F).
+
+**Paper updated (2026-10-20; `paper/` left uncommitted as before).** Every affected part now
+quotes `results/jam_network`, with the rule without a gate as the system:
+- the abstract's numbers;
+- the intro results sentence;
+- the Network, Metrics and Section VI-B to VI-E text;
+- Table II;
+- Figs. 3 to 5;
+- Section VI-F, which now reports the gate at 0.5 measured on the evaluation seeds and why the
+  selection kept the ungated layer;
+- the gated 50% sentence;
+- the conclusion.
+
+It builds to 7 pages with no errors or undefined references. The run worktrees were removed.
+The pause state above is superseded.
