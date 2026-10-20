@@ -242,6 +242,33 @@ class TestReadGateSelection:
         with pytest.raises(SystemExit):
             rje.read_gate_selection(self._write(tmp_path, **changes), SELECTION)
 
+    def _with_candidates(self, tmp_path, selected_gate):
+        candidates = {"rule/m0": {"gate_J": None}, "rule/m0_g0.5": {"gate_J": 0.5},
+                      "rule/m0_g1": {"gate_J": 1.0}}
+        variant = "m0" if selected_gate is None else f"m0_g{selected_gate:g}"
+        return self._write(tmp_path, candidates=candidates,
+                           selected={"label": f"rule/{variant}", "variant": variant,
+                                     "m_on": 0.0, "gate_J": selected_gate})
+
+    def test_a_candidate_gate_runs_and_is_recorded_as_not_selected(self, tmp_path):
+        # 2026-10-20: block N selected no gate; Ankit asked for gate 0.5 to be evaluated.
+        path = self._with_candidates(tmp_path, None)
+        out = rje.read_gate_selection(path, SELECTION, candidate=0.5)
+        assert out.gate_J == 0.5 and out.gate_selected is False
+        assert rje.read_gate_selection(path, SELECTION).gate_selected is True
+        selected = self._with_candidates(tmp_path, 1.0)
+        assert rje.read_gate_selection(selected, SELECTION, candidate=1.0).gate_selected is True
+
+    def test_a_gate_block_n_did_not_evaluate_is_refused(self, tmp_path):
+        with pytest.raises(SystemExit):
+            rje.read_gate_selection(self._with_candidates(tmp_path, None), SELECTION,
+                                    candidate=0.7)
+
+    def test_a_candidate_without_a_gate_selection_is_refused(self, tmp_path):
+        with pytest.raises(SystemExit):
+            rje.main(["--boundary", "approach", "--block", "M", "--gate-candidate", "0.5",
+                      "--results-dir", str(tmp_path), "--summarize-only"])
+
     def test_the_gated_boundary_refuses_a_gate_selection(self, tmp_path):
         with pytest.raises(SystemExit):
             rje.main(["--block", "M", "--gate-selection", str(self._write(tmp_path)),

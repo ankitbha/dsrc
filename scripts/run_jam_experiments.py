@@ -229,6 +229,9 @@ class Selection:
     gate_J: float | None = None
     gate_path: str | None = None
     gate_sha256: str | None = None
+    #: False when `gate_J` is one of block N's candidates run on Ankit's decision rather than
+    #: the one block N selected (2026-10-20, `--gate-candidate`).
+    gate_selected: bool = True
 
     @property
     def best_reads_camera(self) -> bool:
@@ -439,9 +442,14 @@ def read_selection(path: Path, *, feed_sha: str | None, camera_sha: str | None,
                      path=str(path), sha256=hashlib.sha256(raw).hexdigest())
 
 
-def read_gate_selection(path: Path, selection: Selection) -> Selection:
+def read_gate_selection(path: Path, selection: Selection,
+                        candidate: float | None = None) -> Selection:
     """`selection` with block N's feed gate threshold (2026-10-20). Refused unless block N
-    ran on seeds 11-15, all of them, with the rule's `m_on` of `selection`."""
+    ran on seeds 11-15, all of them, with the rule's `m_on` of `selection`.
+
+    With `candidate`, the gate is that threshold instead of the selected one. It must be one
+    of block N's evaluated candidates, and the selection records `gate_selected` False, so
+    every header says the gate run was not the one block N chose."""
     raw = Path(path).read_bytes()
     data = json.loads(raw)
     seeds = sorted(set(data.get("seeds") or []))
@@ -455,8 +463,17 @@ def read_gate_selection(path: Path, selection: Selection) -> Selection:
         raise SystemExit(f"{path} selected a gate for the rule at m_on {chosen['m_on']}; this "
                          f"selection's rule runs m_on {selection.m_on}")
     gate = chosen.get("gate_J")
+    selected = True
+    if candidate is not None:
+        evaluated = sorted(float(v["gate_J"]) for v in (data.get("candidates") or {}).values()
+                           if v.get("gate_J") is not None)
+        if float(candidate) not in evaluated:
+            raise SystemExit(f"--gate-candidate {candidate} is not one of block N's evaluated "
+                             f"gates {evaluated}")
+        selected = gate is not None and float(gate) == float(candidate)
+        gate = float(candidate)
     return replace(selection, gate_J=None if gate is None else float(gate), gate_path=str(path),
-                   gate_sha256=hashlib.sha256(raw).hexdigest())
+                   gate_sha256=hashlib.sha256(raw).hexdigest(), gate_selected=selected)
 
 
 def smoke_selection() -> Selection:
@@ -587,7 +604,8 @@ def header(block: str, context: Context, specs: Sequence[Spec],
                        "smoke_defaults": context.selection.smoke_defaults,
                        "gate_J": context.selection.gate_J,
                        "gate_path": context.selection.gate_path,
-                       "gate_sha256": context.selection.gate_sha256}
+                       "gate_sha256": context.selection.gate_sha256,
+                       "gate_selected": context.selection.gate_selected}
                       if context.selection else None),
         "drain_thresholds": {"path": str(THRESHOLDS), "sha256": _sha256(THRESHOLDS)},
         "scenario_files": files, "episodes_planned": len(specs),
@@ -1466,6 +1484,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gate-selection", default=None,
                         help="approach boundary: block N's N_summary.json, whose feed gate "
                              "the rule runs in blocks M to K and Q (default: no gate)")
+    parser.add_argument("--gate-candidate", type=float, default=None,
+                        help="with --gate-selection: run this one of block N's evaluated "
+                             "gates instead of the selected one; recorded as not selected")
     parser.add_argument("--results-dir", default=None,
                         help=f"default {SMOKE_GUARD['results']}; outputs/jam/smoke/results "
                              f"with --smoke; {APPROACH_DIRS['results']} on the approach "
@@ -1544,6 +1565,8 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
     args = build_parser().parse_args(argv)
     for block in args.block:
         check_block_boundary(block, args.boundary)
+    if args.gate_candidate is not None and not args.gate_selection:
+        raise SystemExit("--gate-candidate names one of block N's gates; pass --gate-selection")
     if args.gate_selection and args.boundary != "approach":
         raise SystemExit("--gate-selection is block N's feed gate, selected on the approach "
                          "boundary; the gated boundary runs the rule without it")
@@ -1580,7 +1603,8 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
                 predictor_sha=_sha256(context.predictor), required_sha=APPROACH_SELECTION_SHA256)
             if context.gate_selection_path is not None and block != "N":
                 context.selection = read_gate_selection(context.gate_selection_path,
-                                                        context.selection)
+                                                        context.selection,
+                                                        candidate=args.gate_candidate)
         elif block in ("M", "L", "P", "K"):
             selection_path = context.selection_path or results_dir / "S_summary.json"
             if args.smoke:

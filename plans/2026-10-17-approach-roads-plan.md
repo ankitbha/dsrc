@@ -1170,3 +1170,52 @@ Clean, per the validator:
 **Open decisions not taken:** none for Ankit until step 2. One reading was taken without asking:
 the controllers still act on approach vehicles, and only the measurement changed. Ankit may
 want the approach roads to be uncontrolled as well. That would re-run every arm.
+
+## Resumed (2026-10-20): validation fixes, and block N's result
+
+**Validation fixes, commit `bce2d0f`.**
+- Finding 2: `summarize_n` now selects nothing unless every block N spec has a record and no
+  unexpected cell exists.
+- Finding 3: `compare_boundaries` names the gated rule after a gate selection.
+- New tests for findings 1, 4b, 4c, 4d and 5. Eight mutants of the fixed code each fail a new
+  test.
+- Finding 4a (a test of the network-only S45 speed-density break) was not added.
+
+**Block N result.** The five parts were merged into `outputs/jam_network/run/N.jsonl` (210
+episodes; 0 collisions, 0 writes above the plan) and summarised at `bce2d0f`. **The pre-stated
+rule selects the rule without a gate, `rule/m0`.**
+
+| Candidate | C (lower is better) | BG served flow (veh/h) | BG network veh-min | BG share of vehicle-ticks with the shown speed changed |
+|---|---|---|---|---|
+| rule, no gate | −0.1334 | 3,308.3 | 34,469 | 0.153 |
+| gate 0.5 | −0.1132 | 3,432.8 | 31,283 | 0.005 |
+| gate 1.0 | −0.1102 | 3,436.8 | 31,252 | 0.004 |
+| gate 1.5 | −0.0923 | 3,438.1 | 31,269 | 0.003 |
+| gate 2.0 | −0.0775 | 3,442.9 | 31,233 | 0.001 |
+| plan alone (reference) | 0 | 3,442.1 | 31,194 | — |
+| no control (reference) | — | 3,561.1 | 27,978 | — |
+
+- **The tie margin.** The best gated candidate (0.5) is 0.0202 above the lowest C, outside
+  C_TIE = 0.02 by 0.0002, so the BG-flow tie-break never applied.
+- **What the gate does with no trigger.** It removes almost all of the correction's own cost.
+  - Flow: no gate is 252.8 veh/h below no control and 133.8 below plan alone; gate 0.5 is 128.3
+    below no control and 9.3 above plan alone.
+  - Network vehicle-minutes: gate 0.5 is 89 above plan alone; no gate is 3,275 above it.
+- **What it costs after a trigger** (network jam over [900, 3,600] s, mean of 5 seeds, gate 0.5
+  against no gate):
+
+  | Trigger | No gate | Gate 0.5 |
+  |---|---|---|
+  | I_exit | 8.5 | 11.2 |
+  | I_mid | 0.8 | 1.9 |
+  | B5 | 0.0 | 0.7 |
+  | B7.5 | 0.0 | 0.4 |
+  | B9 | 4.9 | 1.5 |
+
+  The largest C term lost is on the exit block (−0.093 without the gate, −0.026 with it). The
+  exit block jams within about 80 s, faster than the feed reports, so a gate that waits for the
+  feed gives back most of the camera's lead there. This is the lag condition acting on the gate
+  itself.
+
+**Decision for Ankit (blocking).** The pre-stated rule rejects the gate he asked for, by 0.0002
+in C. Nothing has been run since.
