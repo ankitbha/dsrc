@@ -11,6 +11,10 @@ and released only after the release condition holds on 2 consecutive ticks.
 
 The lookahead (arm 2) is not a correction: it reads the same feed versions as the plan,
 replaces the plan, and never runs a hysteresis.
+
+The feed gate (2026-10-20) lets the rule switch on only while the vehicle's applied feed
+version reports the network near capacity: `gate_signal(version) >= J_gate`, the largest
+jam factor over the network measured against one step below that version's plan.
 """
 from __future__ import annotations
 
@@ -92,6 +96,29 @@ def rule_margin(k_hat: np.ndarray, s_hat: np.ndarray, k_c: float = DENSITY_CRITI
     return (k_c - np.asarray(k_hat, float) - tau_l * np.maximum(np.asarray(s_hat, float), 0.0)) / k_c
 
 
+def advised_jam_factor(jam: np.ndarray, plan: np.ndarray) -> np.ndarray:
+    """Per super-segment, the feed's jam factor measured against one step below the plan's
+    speed instead of against free flow (2026-10-20 gate).
+
+    The advisory alone can bring a segment down to `step_down(plan) x free flow`, the plan
+    with every vehicle's correction on. The feed's jam factor is `10 (1 - v / v_free)`, so
+    `v / v_free = 1 - J / 10`, and the jam factor against that speed is
+    `10 (1 - (1 - J / 10) / step_down(plan))`, clipped to [0, 10]. It is zero while
+    traffic moves at or above the slowest speed the advisory asks for, so the advisory's
+    own slowing never reads as congestion. An empty segment has `J = 0` and reads zero.
+    """
+    jam = np.asarray(jam, dtype=float)
+    low = np.asarray(step_down(np.asarray(plan, dtype=float)), dtype=float)
+    return np.clip(10.0 * (1.0 - (1.0 - jam / 10.0) / low), 0.0, 10.0)
+
+
+def gate_signal(jam: np.ndarray, plan: np.ndarray) -> float:
+    """The largest `advised_jam_factor` over the network's super-segments: what one feed
+    version says about how close the network is to capacity."""
+    values = advised_jam_factor(jam, plan)
+    return float(values.max()) if values.size else 0.0
+
+
 class RuleCorrection:
     """Arm 5 (and arm 7 when fed true occupancy): on at `M <= m_on`, off at
     `M >= m_on + 0.05` under the hysteresis."""
@@ -104,10 +131,19 @@ class RuleCorrection:
         self.name = name
         self.hysteresis = Hysteresis()
 
-    def update(self, ids: Sequence[str], t: float, k: np.ndarray, s: np.ndarray) -> np.ndarray:
+    def update(self, ids: Sequence[str], t: float, k: np.ndarray, s: np.ndarray,
+               allow: np.ndarray | None = None) -> np.ndarray:
+        """`allow`, when given, is the feed gate per vehicle: where it is False the rule
+        cannot switch on, and a vehicle already on is released as soon as the hysteresis
+        lets it go (at least 30 s on, two release ticks)."""
         margin = rule_margin(k, s, self.k_c, self.tau_l)
-        return self.hysteresis.update(ids, t, margin <= self.m_on + 1e-12,
-                                      margin >= self.m_on + RELEASE_OFFSET - 1e-12)
+        trigger = margin <= self.m_on + 1e-12
+        release = margin >= self.m_on + RELEASE_OFFSET - 1e-12
+        if allow is not None:
+            allow = np.asarray(allow, dtype=bool)
+            trigger = trigger & allow
+            release = release | ~allow
+        return self.hysteresis.update(ids, t, trigger, release)
 
     def describe(self) -> dict[str, Any]:
         return {"kind": self.name, "m_on": self.m_on, "tau_l": self.tau_l, "k_c": self.k_c,

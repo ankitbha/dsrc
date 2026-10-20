@@ -54,6 +54,17 @@ model are the committed `results/jam/S_summary.json`, whose sha256 must be
 `outputs/jam_approach/smoke/`; nothing is written under `results/jam/`. Each record carries
 the jam metrics over all 36 super-segments (`jam`), the original 12 (`jam_network`) and the
 24 approach ones (`jam_approach`), the two storage measures and the approach-short flag.
+
+**The network is what is measured** (2026-10-20). The approach roads are a boundary: they
+pace the demand into the network and are not part of it. On the approach boundary a
+record's `jam` and `jam_30kmh` are over the network's 12 super-segments only, and
+`storage.network_min` is the vehicle-minutes spent on the network; `jam_all` (36) and
+`jam_approach` (24) stay in the record as diagnostics and enter no result. Block N
+(selection seeds 11-15) selects the feed gate's threshold for the rule:
+
+    .venv/bin/python scripts/run_jam_experiments.py --boundary approach --block N
+    .venv/bin/python scripts/run_jam_experiments.py --boundary approach --block M L P K \
+        --gate-selection <results-dir>/N_summary.json
 """
 from __future__ import annotations
 
@@ -79,18 +90,18 @@ for _path in (REPO_ROOT, REPO_ROOT / "scripts"):
 from evaluate_mainz_checkpoints import _provenance  # noqa: E402
 from train_mainz_src import SCENARIOS as FILE_SETS  # noqa: E402
 
-BLOCKS = ("G", "T", "S", "M", "L", "P", "K", "Q")
+BLOCKS = ("G", "T", "S", "M", "L", "P", "K", "Q", "N")
 BLOCK_SEEDS: dict[str, tuple[int, ...]] = {
     "G": tuple(range(1, 6)), "T": tuple(range(1, 11)), "S": tuple(range(11, 16)),
     "M": tuple(range(16, 31)), "L": tuple(range(16, 31)), "P": tuple(range(16, 31)),
-    "K": tuple(range(16, 31)), "Q": (1, 2),
+    "K": tuple(range(16, 31)), "Q": (1, 2), "N": tuple(range(11, 16)),
 }
 #: Blocks that select or train (G, T, S) run on the gated boundary only, and block Q, the
 #: approach boundary's qualification, on the approach boundary only.
 GATED_ONLY_BLOCKS: tuple[str, ...] = ("G", "T", "S")
-APPROACH_ONLY_BLOCKS: tuple[str, ...] = ("Q",)
+APPROACH_ONLY_BLOCKS: tuple[str, ...] = ("Q", "N")
 #: Blocks that read the thresholds and the best model from a selection.
-SELECTED_BLOCKS: tuple[str, ...] = ("M", "L", "P", "K", "Q")
+SELECTED_BLOCKS: tuple[str, ...] = ("M", "L", "P", "K", "Q", "N")
 #: The committed selection the approach boundary runs (approach plan section 4.5).
 APPROACH_SELECTION = REPO_ROOT / "results" / "jam" / "S_summary.json"
 APPROACH_SELECTION_SHA256 = "5bce02db2330c63ac873c306988c6c961ef59dadb1a9703b65da9f07c016dc05"
@@ -101,7 +112,8 @@ APPROACH_SMOKE_DIRS = {"results": "outputs/jam_approach/smoke/results",
                        "training": "outputs/jam_approach/smoke/training"}
 THRESHOLDS_NOTE = ("The thresholds and the best model were selected on the gated boundary "
                    "(results/jam/S_summary.json, sha256 5bce02db...); nothing was re-selected "
-                   "on the approach boundary.")
+                   "on the approach boundary except the rule's feed gate, which block N "
+                   "selects on seeds 11-15 there.")
 SELECTION_SEEDS = BLOCK_SEEDS["S"]
 DEFAULT_FEED_ARTEFACT = REPO_ROOT / "results" / "jam" / "feed_process_afternoon.json"
 DEFAULT_FEED_SESSION = "afternoon_20261016_mainz"
@@ -138,6 +150,10 @@ DAGGER_THETA = 0.5
 WIDE_R = 200.0
 #: Section 5.7: candidates within this C of each other are ordered by BG served flow.
 C_TIE = 0.02
+#: Block N (2026-10-20): the feed gate's thresholds on `gate_signal`, the largest jam
+#: factor over the network against one step below the plan. The rule without a gate is the
+#: fifth candidate.
+GATE_GRID = (0.5, 1.0, 1.5, 2.0)
 
 
 # --------------------------------------------------------------------- specs
@@ -177,7 +193,8 @@ def _variant(arm: str, params: dict[str, float]) -> str:
     if arm == "lookahead":
         return f"J{params['J_th']:g}"
     if arm == "rule":
-        return f"m{params['m_on']:g}"
+        gate = params.get("gate_J")
+        return f"m{params['m_on']:g}" + (f"_g{gate:g}" if gate is not None else "")
     if arm == "learned":
         return f"th{params['theta']:g}"
     if arm == "oracle":
@@ -187,7 +204,7 @@ def _variant(arm: str, params: dict[str, float]) -> str:
 
 
 def _duration(block: str, scenario: str) -> float:
-    if block in ("G", "T", "S"):
+    if block in ("G", "T", "S", "N"):
         return SHORT_S
     if scenario == "BG":
         return SHORT_S
@@ -208,6 +225,10 @@ class Selection:
     path: str | None = None
     sha256: str | None = None
     smoke_defaults: bool = False
+    #: Block N's feed gate threshold for the rule; None runs the rule without a gate.
+    gate_J: float | None = None
+    gate_path: str | None = None
+    gate_sha256: str | None = None
 
     @property
     def best_reads_camera(self) -> bool:
@@ -239,11 +260,19 @@ def arm_list(block: str, selection: Selection | None, grid: bool = False,
                 + [("learned", {"theta": th}, {}) for th in THETA])
     if selection is None:
         raise SystemExit(f"block {block} reads its thresholds from S_summary.json; none given")
-    best = (selection.best_arm, dict(selection.best_params), {})
+    if block == "N":
+        return ([("no_control", {}, {}), ("plan", {}, {}), ("rule", {"m_on": selection.m_on}, {})]
+                + [("rule", {"m_on": selection.m_on, "gate_J": g}, {}) for g in GATE_GRID])
+    best_params = dict(selection.best_params)
+    if selection.best_arm == "rule" and selection.gate_J is not None:
+        best_params["gate_J"] = selection.gate_J
+    best = (selection.best_arm, best_params, {})
     if block == "M":
+        gated = ([("rule", {"m_on": selection.m_on, "gate_J": selection.gate_J}, {})]
+                 if selection.gate_J is not None else [])
         return [("no_control", {}, {}), ("lookahead", {"J_th": selection.J_th}, {}),
                 ("plan", {}, {}), ("take_the_slower", {}, {}),
-                ("rule", {"m_on": selection.m_on}, {}),
+                ("rule", {"m_on": selection.m_on}, {}), *gated,
                 ("learned", {"theta": selection.theta}, {}),
                 ("oracle", {"m_on": selection.m_on, "tau_l": 10.0,
                             "oracle_R": _window(oracle_window)}, {})]
@@ -299,7 +328,7 @@ def _unique(arms):
 def _scenarios(block: str) -> tuple[str, ...]:
     if block in ("G",):
         return ("B9", "I_exit")
-    if block in ("T", "S"):
+    if block in ("T", "S", "N"):
         return TRAINING_SCENARIOS
     if block == "M":
         return PERTURBATIONS + ("BG", "S45")
@@ -410,6 +439,26 @@ def read_selection(path: Path, *, feed_sha: str | None, camera_sha: str | None,
                      path=str(path), sha256=hashlib.sha256(raw).hexdigest())
 
 
+def read_gate_selection(path: Path, selection: Selection) -> Selection:
+    """`selection` with block N's feed gate threshold (2026-10-20). Refused unless block N
+    ran on seeds 11-15, all of them, with the rule's `m_on` of `selection`."""
+    raw = Path(path).read_bytes()
+    data = json.loads(raw)
+    seeds = sorted(set(data.get("seeds") or []))
+    if data.get("block") != "N" or seeds != list(SELECTION_SEEDS):
+        raise SystemExit(f"{path} is not a block N summary on seeds 11-15 (block "
+                         f"{data.get('block')}, seeds {seeds})")
+    chosen = data.get("selected")
+    if not chosen:
+        raise SystemExit(f"{path} selected no gate ({data.get('decision')})")
+    if float(chosen["m_on"]) != float(selection.m_on):
+        raise SystemExit(f"{path} selected a gate for the rule at m_on {chosen['m_on']}; this "
+                         f"selection's rule runs m_on {selection.m_on}")
+    gate = chosen.get("gate_J")
+    return replace(selection, gate_J=None if gate is None else float(gate), gate_path=str(path),
+                   gate_sha256=hashlib.sha256(raw).hexdigest())
+
+
 def smoke_selection() -> Selection:
     """A smoke run's stand-in: each grid's first value and the rule as best. Chooses
     nothing; it exists so blocks M to K can be run end to end before block S has."""
@@ -458,6 +507,8 @@ class Context:
     predictor: Path | None = DEFAULT_PREDICTOR
     weights_record: Path = DEFAULT_WEIGHTS_RECORD
     selection_path: Path | None = None
+    #: Block N's summary, read by blocks M to K and Q on the approach boundary.
+    gate_selection_path: Path | None = None
     step_length_s: float = 0.5
     window_start_s: float = 900.0
     smoke: bool = False
@@ -533,7 +584,10 @@ def header(block: str, context: Context, specs: Sequence[Spec],
                       if predictor else None),
         "weights_sha256": weights,
         "selection": ({"path": context.selection.path, "sha256": context.selection.sha256,
-                       "smoke_defaults": context.selection.smoke_defaults}
+                       "smoke_defaults": context.selection.smoke_defaults,
+                       "gate_J": context.selection.gate_J,
+                       "gate_path": context.selection.gate_path,
+                       "gate_sha256": context.selection.gate_sha256}
                       if context.selection else None),
         "drain_thresholds": {"path": str(THRESHOLDS), "sha256": _sha256(THRESHOLDS)},
         "scenario_files": files, "episodes_planned": len(specs),
@@ -760,17 +814,22 @@ _SCHEDULES: dict[str, list[dict]] = {}
 
 def approach_metrics(trace: list[dict], scenario, spec: Spec, v_jam: float,
                      boundary) -> dict[str, Any]:
-    """An approach episode's jam metrics over all 36, the network's 12 and the approach
-    24 super-segments at 19 km/h and 30 km/h, its storage measures and its flag (approach
-    plan sections 5.2 to 5.4). Every clock is the scenario's plus `W`."""
+    """An approach episode's jam metrics at 19 km/h and 30 km/h, its storage measures and
+    its flag (approach plan sections 5.2 to 5.4). Every clock is the scenario's plus `W`.
+
+    The network is what is measured (2026-10-20): `jam` and `jam_30kmh` are over the
+    network's 12 super-segments, and `storage.network_min` is the vehicle-minutes spent on
+    the network. The approach roads only pace the demand into it; `jam_all` (all 36) and
+    `jam_approach` (the 24 approach super-segments) are kept as diagnostics."""
     from src.analysis.jam_metrics import (
-        approach_excess_minutes, episode_metrics, queue_flags, system_excess_minutes,
+        approach_excess_minutes, episode_metrics, network_minutes, queue_flags,
+        system_excess_minutes,
     )
 
     meta = json.loads(Path(boundary.approach_file).read_text())
     n = int(meta["num_original_segments"])
     total = n + len(meta["approach_segments"])
-    parts = {"": None, "_network": list(range(n)), "_approach": list(range(n, total))}
+    parts = {"": list(range(n)), "_all": None, "_approach": list(range(n, total))}
     out: dict[str, Any] = {}
     for threshold, prefix in ((v_jam, "jam"), (30.0, "jam_30kmh")):
         for suffix, columns in parts.items():
@@ -782,6 +841,8 @@ def approach_metrics(trace: list[dict], scenario, spec: Spec, v_jam: float,
         _SCHEDULES[str(schedule_path)] = json.loads(schedule_path.read_text())
     rows = _SCHEDULES[str(schedule_path)]
     out["storage"] = {
+        "network_min": network_minutes(trace, start_s=scenario.start_s, cap=spec.duration_s,
+                                       offset_s=boundary.W),
         "approach_excess_min": approach_excess_minutes(
             trace, rows, meta["T_A"], start_s=scenario.start_s, cap=spec.duration_s,
             offset_s=boundary.W),
@@ -855,6 +916,7 @@ def _rows(episodes: list[dict]) -> dict[str, dict[str, Any]]:
             "km_drain_median_s": km_drain.median if km_drain else None,
             "active_share_mean": _mean(r.get("active_share") for r in records),
             "active_changing_share_mean": _mean(r.get("active_changing_share") for r in records),
+            "gate_open_share_mean": _mean(r.get("gate_open_share") for r in records),
             "return_mean": _mean(r.get("return") for r in records),
             "wall_s_mean": _mean(r.get("wall_s") for r in records),
             "by_seed": {str(r["seed"]): {"jam_time_min": r["jam"]["jam_time_min"],
@@ -863,7 +925,7 @@ def _rows(episodes: list[dict]) -> dict[str, dict[str, Any]]:
                                          "prevented": r["jam"]["prevented"]}
                         for r in records},
         }
-        if all("jam_network" in r for r in records):
+        if all("jam_approach" in r for r in records):
             extra = _approach_row(records)
             for seed, values in extra.pop("by_seed").items():
                 rows[name]["by_seed"][seed].update(values)
@@ -872,14 +934,16 @@ def _rows(episodes: list[dict]) -> dict[str, dict[str, Any]]:
 
 
 def _approach_row(records: list[dict]) -> dict[str, Any]:
-    """An approach row's network and approach parts, storage and flags (section 5)."""
+    """An approach row's diagnostic parts (all 36 and the approach 24), storage and flags
+    (section 5). The row's own jam fields are the network's (2026-10-20)."""
     out: dict[str, Any] = {}
-    for part in ("network", "approach"):
+    for part in ("all", "approach"):
         jam = [r[f"jam_{part}"] for r in records]
         out[f"jam_{part}_time_min_mean"] = _mean(j["jam_time_min"] for j in jam)
         out[f"jam_{part}_time_min_900_3600_mean"] = _mean(j["jam_time_min_900_3600"]
                                                           for j in jam)
         out[f"prevented_{part}"] = sum(1 for j in jam if j["prevented"])
+    out["network_min_mean"] = _mean(r["storage"]["network_min"] for r in records)
     out["approach_excess_min_mean"] = _mean(r["storage"]["approach_excess_min"] for r in records)
     out["system_excess_min_mean"] = _mean(r["storage"]["system_excess_min"] for r in records)
     out["approach_short_episodes"] = sum(1 for r in records if r["approach_short"])
@@ -890,9 +954,10 @@ def _approach_row(records: list[dict]) -> dict[str, Any]:
     out["by_seed"] = {}
     for r in records:
         out["by_seed"][str(r["seed"])] = {
-            "jam_network_time_min": r["jam_network"]["jam_time_min"],
+            "jam_all_time_min": r["jam_all"]["jam_time_min"],
             "jam_approach_time_min": r["jam_approach"]["jam_time_min"],
-            "prevented_network": r["jam_network"]["prevented"],
+            "prevented_all": r["jam_all"]["prevented"],
+            "network_min": r["storage"]["network_min"],
             "approach_excess_min": r["storage"]["approach_excess_min"],
             "system_excess_min": r["storage"]["system_excess_min"],
             "approach_short": r["approach_short"]}
@@ -1116,7 +1181,7 @@ def summarize_eval(block: str, episodes: list[dict]) -> dict[str, Any]:
     from src.analysis.jam_metrics import Paired
 
     rows = _rows(episodes)
-    approach = any("jam_network" in r for r in episodes)
+    approach = any("jam_approach" in r for r in episodes)
     for name, row in rows.items():
         base = f"plan/-/{row['scenario']}"
         if block == "L":
@@ -1130,8 +1195,8 @@ def summarize_eval(block: str, episodes: list[dict]) -> dict[str, Any]:
             fb = {int(s): v["flow"] for s, v in rows[base]["by_seed"].items()}
             row["paired_jam_time_vs_plan"] = Paired.of(a, b).as_dict()
             row["paired_flow_vs_plan"] = Paired.of(fa, fb).as_dict()
-            if approach and "jam_network_time_min_mean" in row:
-                for key, field_name in (("network", "jam_network_time_min"),
+            if approach and "jam_all_time_min_mean" in row:
+                for key, field_name in (("network_min", "network_min"),
                                         ("system_excess", "system_excess_min")):
                     pa = {int(s): v[field_name] for s, v in row["by_seed"].items()}
                     pb = {int(s): v[field_name] for s, v in rows[base]["by_seed"].items()}
@@ -1165,9 +1230,9 @@ def write_leads(episodes: list[dict], results_dir: Path,
 
     `baseline` and `start_s` default to section 4.3's [600, 900) s and each scenario's clock
     start; a smoke run, which ends at 600 s, passes its own. On the approach boundary
-    `offset_s` (`W`) moves the baseline, the clock start and the cap, the leads are taken
-    on the all-segment onset, and `network_columns` adds them on the network's own onset
-    (approach plan section 5.2)."""
+    `offset_s` (`W`) moves the baseline, the clock start and the cap, and `network_columns`
+    names the network: the leads are taken on the network's own onset (2026-10-20; the
+    approach roads are not measured), and the all-segment onset is kept under `all`."""
     from src.analysis.jam_metrics import (
         leads, load_v_jam, max_ramp, select_columns, speed_density_break,
     )
@@ -1187,26 +1252,104 @@ def write_leads(episodes: list[dict], results_dir: Path,
         scenario = JAM_SCENARIOS[r["scenario"]]
         start = (scenario.start_s if start_s is None else start_s) + offset_s
         cap = r["duration_s"] + offset_s
-        lead = leads(trace, v_jam, start, cap, baseline=base)
-        ramp = (max_ramp(trace, lead["segment"], lead["onset"]) if lead["onset"] is not None
-                else None)
+        measured = (select_columns(trace, network_columns) if network_columns is not None
+                    else trace)
+        lead = leads(measured, v_jam, start, cap, baseline=base)
+        ramp = (max_ramp(measured, lead["segment"], lead["onset"])
+                if lead["onset"] is not None else None)
         entry = {"scenario": r["scenario"], "seed": r["seed"], **lead, "ramp": ramp}
         if network_columns is not None:
-            network = select_columns(trace, network_columns)
-            lead_n = leads(network, v_jam, start, cap, baseline=base)
-            entry["network"] = {**lead_n, "ramp": (max_ramp(network, lead_n["segment"],
-                                                            lead_n["onset"])
-                                                   if lead_n["onset"] is not None else None)}
+            lead_a = leads(trace, v_jam, start, cap, baseline=base)
+            entry["all"] = {**lead_a, "ramp": (max_ramp(trace, lead_a["segment"],
+                                                        lead_a["onset"])
+                                               if lead_a["onset"] is not None else None)}
         per.append(entry)
+    network_s45 = ([select_columns(t, network_columns) for t in s45]
+                   if network_columns is not None else s45)
     out = {"v_jam": v_jam, "v_jam_sha256": sha, "episodes": per,
-           "speed_density_break": speed_density_break(s45) if s45 else None}
+           "speed_density_break": speed_density_break(network_s45) if s45 else None}
     if network_columns is not None:
         out["offset_s"] = offset_s
-        out["speed_density_break_network"] = (
-            speed_density_break([select_columns(t, network_columns) for t in s45])
-            if s45 else None)
+        out["measured_columns"] = list(network_columns)
+        out["speed_density_break_all"] = speed_density_break(s45) if s45 else None
     _write_json(results_dir / "leads.json", out)
     return out
+
+
+def summarize_n(episodes: list[dict]) -> dict[str, Any]:
+    """Block N (2026-10-20): the feed gate's threshold for the rule, from seeds 11-15 only.
+
+    Each candidate, the rule without a gate and the rule at each `GATE_GRID` threshold, gets
+    criterion C (section 5.7) on the network's jam time over [900, 3,600] s. The lowest C
+    wins, and candidates within `C_TIE` of it are ordered by the flow served with no
+    trigger (BG), highest first, as section 5.7 orders the best model; the gate exists to
+    lower the cost when no jam would form. A candidate with any collision, collision
+    teleport or write above the plan is excluded.
+    """
+    from src.analysis.jam_metrics import SELECTION_SCENARIOS, criterion_c
+
+    seeds = sorted({r["seed"] for r in episodes})
+    outside = sorted(set(seeds) - set(SELECTION_SEEDS))
+    if outside:
+        raise SystemExit(f"block N selects on seeds 11-15; its records hold {outside}")
+    if seeds != list(SELECTION_SEEDS):
+        # A run of some of the seeds (one process per seed) selects nothing until merged.
+        return {"block": "N", "seeds": seeds, "selected": None,
+                "decision": f"incomplete: seeds {seeds} of 11-15"}
+
+    def name(r: dict) -> str:
+        return r["arm"] if r["arm"] in ("no_control", "plan") else f"{r['arm']}/{r['variant']}"
+
+    J: dict[str, dict[str, dict[int, float]]] = {}
+    for r in episodes:
+        J.setdefault(r["scenario"], {}).setdefault(name(r), {})[r["seed"]] = \
+            r["jam"]["jam_time_min_900_3600"]
+    by_name: dict[str, list[dict]] = {}
+    for r in episodes:
+        by_name.setdefault(name(r), []).append(r)
+
+    def bg(records: list[dict], key):
+        return _mean(key(r) for r in records if r["scenario"] == "BG")
+
+    candidates: dict[str, dict[str, Any]] = {}
+    for label in sorted(n for n in by_name if n.startswith("rule/")):
+        records = by_name[label]
+        params = dict(records[0].get("params") or {})
+        excluded = any(r.get("colliding_vehicles") or r.get("collision_teleports")
+                       or r.get("writes_above_plan") for r in records)
+        c = criterion_c(J, label, SELECTION_SCENARIOS)
+        candidates[label] = {
+            "variant": records[0]["variant"], "m_on": params.get("m_on"),
+            "gate_J": params.get("gate_J"), "C": c["C"], "terms": c["terms"],
+            "excluded_scenarios": c["excluded_scenarios"], "excluded": excluded,
+            "bg_flow_mean": bg(records, lambda r: r["flow"]),
+            "bg_network_min_mean": bg(records, lambda r: r["storage"]["network_min"]),
+            "bg_active_changing_share_mean": bg(records, lambda r: r.get("active_changing_share")),
+            "bg_gate_open_share_mean": bg(records, lambda r: r.get("gate_open_share")),
+            "prevented": {s: sum(1 for r in records if r["scenario"] == s and r["jam"]["prevented"])
+                          for s in SELECTION_SCENARIOS},
+            "jam_time_min_900_3600_mean": {s: _mean(J[s][label].values())
+                                           for s in SELECTION_SCENARIOS},
+        }
+    reference = {n: {"bg_flow_mean": bg(by_name[n], lambda r: r["flow"]),
+                     "bg_network_min_mean": bg(by_name[n], lambda r: r["storage"]["network_min"]),
+                     "jam_time_min_900_3600_mean": {s: _mean(J[s][n].values())
+                                                    for s in SELECTION_SCENARIOS}}
+                 for n in ("no_control", "plan") if n in by_name}
+    eligible = [n for n, v in candidates.items() if not v["excluded"] and v["C"] is not None]
+    selected, decision = None, "no eligible candidate"
+    if eligible:
+        lowest = min(candidates[n]["C"] for n in eligible)
+        tied = [n for n in eligible if candidates[n]["C"] <= lowest + C_TIE + 1e-12]
+        chosen = max(tied, key=lambda n: (candidates[n]["bg_flow_mean"], -candidates[n]["C"]))
+        selected = {"label": chosen, "variant": candidates[chosen]["variant"],
+                    "m_on": candidates[chosen]["m_on"], "gate_J": candidates[chosen]["gate_J"]}
+        decision = (f"{chosen}: lowest C {lowest:.4f}; within {C_TIE} of it "
+                    f"{sorted(tied)}, ordered by BG served flow")
+    return {"block": "N", "criterion": "C on the network's jam time, ties by BG flow",
+            "seeds": seeds, "gate_grid": list(GATE_GRID), "c_tie": C_TIE,
+            "candidates": candidates, "reference": reference, "selected": selected,
+            "decision": decision}
 
 
 def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]:
@@ -1228,6 +1371,8 @@ def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]
                     raise SystemExit(f"block S ran {name} {recorded}; {present} has "
                                      f"{_sha256(present)}. Summarise with the files it ran.")
         summary = summarize_s(episodes, context, identity)
+    elif block == "N":
+        summary = summarize_n(episodes)
     elif block in ("T", "T_dagger"):
         summary = {"block": block, "rows": _rows(episodes),
                    "samples_files": sorted(r["samples_file"] for r in episodes
@@ -1291,6 +1436,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--predictor", default=str(DEFAULT_PREDICTOR))
     parser.add_argument("--selection", default=None,
                         help="S_summary.json for blocks M to K (default <results-dir>)")
+    parser.add_argument("--gate-selection", default=None,
+                        help="approach boundary: block N's N_summary.json, whose feed gate "
+                             "the rule runs in blocks M to K and Q (default: no gate)")
     parser.add_argument("--results-dir", default=None,
                         help=f"default {SMOKE_GUARD['results']}; outputs/jam/smoke/results "
                              f"with --smoke; {APPROACH_DIRS['results']} on the approach "
@@ -1369,6 +1517,9 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
     args = build_parser().parse_args(argv)
     for block in args.block:
         check_block_boundary(block, args.boundary)
+    if args.gate_selection and args.boundary != "approach":
+        raise SystemExit("--gate-selection is block N's feed gate, selected on the approach "
+                         "boundary; the gated boundary runs the rule without it")
     resolve_directories(args)
     approach = args.boundary == "approach"
     results_dir, traces_dir = _resolve(args.results_dir), _resolve(args.traces_dir)
@@ -1379,6 +1530,8 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
                       camera_model=_resolve(args.camera_model),
                       predictor=_resolve(args.predictor),
                       selection_path=_resolve(args.selection) if args.selection else None,
+                      gate_selection_path=(_resolve(args.gate_selection)
+                                           if args.gate_selection else None),
                       window_start_s=300.0 if args.smoke else 900.0, smoke=args.smoke,
                       write_log=args.write_log or args.smoke,
                       check_max_speed=args.check_max_speed or args.smoke,
@@ -1398,6 +1551,9 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
                 feed_sha=context.feed["artefact_sha256"],
                 camera_sha=_sha256(context.camera_model),
                 predictor_sha=_sha256(context.predictor), required_sha=APPROACH_SELECTION_SHA256)
+            if context.gate_selection_path is not None and block != "N":
+                context.selection = read_gate_selection(context.gate_selection_path,
+                                                        context.selection)
         elif block in ("M", "L", "P", "K"):
             selection_path = context.selection_path or results_dir / "S_summary.json"
             if args.smoke:

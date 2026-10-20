@@ -379,6 +379,17 @@ def system_excess_minutes(trace: Sequence[dict], *, start_s: float, cap: float,
     return _window_integral(trace, total, start_s + offset_s, cap + offset_s)
 
 
+def network_minutes(trace: Sequence[dict], *, start_s: float, cap: float,
+                    offset_s: float = 0.0) -> float:
+    """The integral over `[start_s + W, cap + W]` of the vehicles on the network,
+    `running - on_approach`, in vehicle-minutes (2026-10-20): the network's total travel
+    time over the window. A vehicle on an approach road or waiting to be inserted is not on
+    the network and is not counted. Without `on_approach` (the gated boundary) every
+    running vehicle is on the network."""
+    on_network = np.array([s["running"] - s.get("on_approach", 0) for s in trace], dtype=float)
+    return _window_integral(trace, on_network, start_s + offset_s, cap + offset_s)
+
+
 def queue_flags(trace: Sequence[dict], limit_m: float = 2000.0) -> dict[str, Any]:
     """Approach plan section 5.4: per approach the longest queue and the most slow vehicles
     near the far end over the trace, the largest insertion backlog, and `approach_short`

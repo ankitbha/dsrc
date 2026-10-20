@@ -34,6 +34,13 @@ place). The Q-network still reads the original 12 x 5 state; a vehicle on an app
 super-segment is shown its entry segment's plan (`plan_row`), the lookahead reads the
 approach feed rows along the vehicle's downstream chain, and the camera, the oracle and
 the corrections act on approach vehicles as on any other.
+
+**The feed gate** (2026-10-20). With `JamArm.gate_J` set, the rule (or the oracle) may switch
+a vehicle on only while the feed version that vehicle applies has `gate_signal >= gate_J`:
+the largest jam factor over the network's 12 super-segments, measured against one step
+below that version's plan (`correction.advised_jam_factor`). Every vehicle that applies the
+same version sees the same gate. A vehicle already on when its gate closes is released
+through the rule's hysteresis. `gate_J = None` is the rule every earlier result ran.
 """
 from __future__ import annotations
 
@@ -48,8 +55,8 @@ from typing import Any
 import numpy as np
 
 from src.sumo.correction import (
-    LearnedCorrection, LookaheadRule, RuleCorrection, TakeTheSlower, shown_fraction,
-    step_down,
+    LearnedCorrection, LookaheadRule, RuleCorrection, TakeTheSlower, gate_signal,
+    shown_fraction, step_down,
 )
 from src.sumo.feed import FeedProcess, Synchronous, VersionKeyed, _sha256
 from src.sumo.feed_episode import FeedEngine, Mode, _scenario_paths, decision_instants
@@ -134,6 +141,9 @@ class JamArm:
     theta: float | None = None
     oracle_R: float = DEPLOYED_RANGE_M
     refresh: bool = True
+    #: The feed gate (2026-10-20): the rule may switch on only while the applied version's
+    #: `gate_signal` is at least this. None is no gate, as every earlier result ran.
+    gate_J: float | None = None
 
     def __post_init__(self) -> None:
         if self.arm not in ARMS:
@@ -142,6 +152,8 @@ class JamArm:
         name = needed.get(self.arm)
         if name and getattr(self, name) is None:
             raise ValueError(f"arm {self.arm} needs {name}")
+        if self.gate_J is not None and self.arm not in ("rule", "oracle"):
+            raise ValueError(f"the feed gate acts on the rule's switch; arm {self.arm} has none")
 
     @property
     def sensor(self) -> str:
@@ -301,6 +313,9 @@ class JamEngine(FeedEngine):
         self.has_approach = bool(getattr(self.env, "approach_segments", None))
         #: Per feed version, the approach super-segments' feed rows at its snapshot.
         self.approach_states: dict[int, np.ndarray] = {}
+        #: Per feed version, `gate_signal` over the network's super-segments.
+        self.gate_signals: dict[int, float] = {}
+        self._gate_open_ticks = 0
         self._segment_of = {e: i for i, segment in enumerate(self._all_segments)
                             for e in segment}
         self._sensed: dict[str, Any] | None = None
@@ -322,6 +337,9 @@ class JamEngine(FeedEngine):
                              f"states; the snapshot is {shape}")
         super()._snapshot(t, version, x, taken_at)
         self.states[version] = np.asarray(x, dtype=np.float32)
+        # The network's rows only: the approach roads are a boundary, not the network.
+        plan = np.asarray(SPEED_ACTION_FRACTIONS, dtype=float)[self.vectors[version]]
+        self.gate_signals[version] = gate_signal(np.asarray(x, dtype=float)[:, 2], plan)
         if self.has_approach:
             # Taken at the same tick as `x`, so both describe one instant (approach 4.3).
             self.approach_states[version] = np.asarray(self.env.observe_approaches(),
@@ -410,10 +428,16 @@ class JamEngine(FeedEngine):
         vids = [ids[k] for k in index]
         plan = np.array([self._fraction(int(versions[k]), int(segments[k])) for k in index])
         arm = self.arm.arm
+        allow = None
+        if self.arm.gate_J is not None:
+            allow = np.array([self.gate_signals[int(versions[k])] >= self.arm.gate_J - 1e-12
+                              for k in index], dtype=bool)
+            self._gate_open_ticks += int(allow.sum())
         if arm == "oracle":
-            active = self.correction.update(vids, t, k_true[index], s_true[index])
+            active = self.correction.update(vids, t, k_true[index], s_true[index], allow=allow)
         elif arm == "rule":
-            active = self.correction.update(vids, t, est.k_hat[index], s_hat[index])
+            active = self.correction.update(vids, t, est.k_hat[index], s_hat[index],
+                                            allow=allow)
         elif arm == "learned":
             from src.rl.onset_predictor import engine_features
 
@@ -592,6 +616,11 @@ class JamEngine(FeedEngine):
             "sense_ms_p95": float(np.percentile(walls, 95) * 1000.0) if len(walls) else None,
             "switches_by_version": switches,
             "versions_published": len(self.vectors),
+            "gate_J": self.arm.gate_J,
+            "gate_open_share": ((self._gate_open_ticks / c.vehicle_ticks)
+                                if self.arm.gate_J is not None and c.vehicle_ticks else None),
+            "gate_signal_by_version": {str(k): round(v, 4)
+                                       for k, v in sorted(self.gate_signals.items())},
         }
 
 

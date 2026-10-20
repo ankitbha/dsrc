@@ -208,13 +208,21 @@ class TestEpisodeRunner:
                     if s.arm == "plan" and s.scenario == "B9")
         result = rje.episode_runner(None, context)(spec)
         assert seen["boundary"].W == 240.0 and seen["duration_s"] == 7200.0
-        jam, network, approach = result["jam"], result["jam_network"], result["jam_approach"]
-        assert jam["jam_time_min"] == pytest.approx(network["jam_time_min"]
-                                                    + approach["jam_time_min"])
-        assert network["columns"] == list(range(12)) and jam["offset_s"] == 240.0
-        assert jam["start_s"] == 1140.0 and jam["cap_s"] == 7440.0
-        assert "jam_30kmh_network" in result and "jam_30kmh_approach" in result
-        assert set(result["storage"]) == {"approach_excess_min", "system_excess_min"}
+        # 2026-10-20: the network is what is measured; all 36 and the approach 24 are
+        # diagnostics. Column 3 is on the network, column 20 on an approach road.
+        network, every, approach = result["jam"], result["jam_all"], result["jam_approach"]
+        assert every["jam_time_min"] == pytest.approx(network["jam_time_min"]
+                                                      + approach["jam_time_min"])
+        assert network["jam_time_min"] > 0.0
+        assert network["jam_time_min"] == pytest.approx(approach["jam_time_min"])
+        assert network["columns"] == list(range(12)) and network["offset_s"] == 240.0
+        assert every["columns"] is None and approach["columns"] == list(range(12, 36))
+        assert network["start_s"] == 1140.0 and network["cap_s"] == 7440.0
+        assert "jam_network" not in result
+        assert result["jam_30kmh"]["columns"] == list(range(12))
+        assert "jam_30kmh_all" in result and "jam_30kmh_approach" in result
+        assert set(result["storage"]) == {"network_min", "approach_excess_min",
+                                          "system_excess_min"}
         assert result["flags"]["queue_max_m"][7] == 150.0
         assert result["approach_short"] is False
 
@@ -257,6 +265,9 @@ class TestRunnerStorageAndFlags:
                                           rows=rows, travel_s=T_A)
         assert storage["approach_excess_min"] == pytest.approx(excess, rel=1e-12)
         assert storage["system_excess_min"] == pytest.approx(system, rel=1e-12)
+        # 750 vehicles on the network (1,000 running, 250 on the approaches) at every 10 s
+        # sample of [1,140, 7,440] s: 631 samples x 10 s x 750 / 60.
+        assert storage["network_min"] == pytest.approx(631 * 10.0 * 750.0 / 60.0, rel=1e-12)
         unshifted = jm.approach_excess_minutes(trace, rows, T_A, start_s=900.0, cap=7200.0)
         without_n_ff = jm.system_excess_minutes(trace, start_s=900.0, cap=7200.0,
                                                 offset_s=240.0)
@@ -303,20 +314,49 @@ class TestRunnerStorageAndFlags:
         entry = out["episodes"][0]
         assert entry["onset"] == 1500.0 and entry["segment"] == 3
         assert entry["W_feed"] == 300.0
-        assert entry["network"]["onset"] == 1500.0 and entry["network"]["W_feed"] == 300.0
+        assert entry["all"]["onset"] == 1500.0 and entry["all"]["W_feed"] == 300.0
+        assert out["measured_columns"] == list(range(12))
+
+    def test_the_leads_are_taken_on_the_network_not_an_approach_road(self, tmp_path):
+        # 2026-10-20: an approach super-segment (20) jams at 1,300 s and network segment 3
+        # at 1,600 s. The leads' onset is the network's; the all-segment onset is kept
+        # under `all` only.
+        trace = []
+        t = 0.0
+        while t <= 7440.0:
+            speeds = [50.0] * 36
+            if 1300.0 <= t < 2000.0:
+                speeds[20] = 10.0
+            if 1600.0 <= t < 2000.0:
+                speeds[3] = 10.0
+            trace.append({"t": t, "speed_kmh": speeds, "density": [0.05] * 36,
+                          "count": [1] * 36, "held": 0, "pending": 0,
+                          "k_hat_mean": [None] * 36, "k_true_mean": [None] * 36})
+            t += 10.0
+        path = tmp_path / "trace.json"
+        path.write_text(json.dumps({"trace": trace}))
+        record = {"arm": "no_control", "scenario": "B9", "seed": 1, "duration_s": 7200.0,
+                  "trace_file": str(path)}
+        entry = rje.write_leads([record], tmp_path, offset_s=240.0,
+                                network_columns=list(range(12)))["episodes"][0]
+        assert entry["onset"] == 1600.0 and entry["segment"] == 3
+        assert entry["all"]["onset"] == 1300.0 and entry["all"]["segment"] == 20
 
 
 def _record(arm, variant, scenario, seed, *, jam_net, jam_app, flagged=False, collide=0,
-            system=1000.0):
+            system=1000.0, flow=None, params=None):
     def part(minutes, prevented):
         return {"jam_time_min": minutes, "jam_time_min_900_3600": minutes,
                 "prevented": prevented, "onset_s": None if prevented else 1500.0,
                 "start_s": 1140.0, "cap_s": 7440.0, "held_min": 0.0, "pending_min": 0.0,
                 "drained": True, "drain_s": 300.0}
     return {"arm": arm, "variant": variant, "scenario": scenario, "seed": seed,
-            "flow": 3000.0 + seed, "jam": part(jam_net + jam_app, jam_net + jam_app == 0),
-            "jam_network": part(jam_net, jam_net == 0), "jam_approach": part(jam_app, jam_app == 0),
-            "storage": {"approach_excess_min": 50.0 * seed, "system_excess_min": system + seed},
+            "flow": 3000.0 + seed if flow is None else flow, "params": params or {},
+            "jam": part(jam_net, jam_net == 0),
+            "jam_all": part(jam_net + jam_app, jam_net + jam_app == 0),
+            "jam_approach": part(jam_app, jam_app == 0),
+            "storage": {"network_min": 900.0 + seed, "approach_excess_min": 50.0 * seed,
+                        "system_excess_min": system + seed},
             "flags": {"queue_max_m": [0.0] * 7 + [100.0 * seed], "pending_max": 0,
                       "approach_short": flagged, "limit_m": 2000.0,
                       "slow_near_insertion_max": [0] * 8},
@@ -337,17 +377,21 @@ class TestSummaries:
     def test_a_stub_block_summarises_three_parts_and_counts_flags(self):
         summary = rje.summarize_eval("Q", self._block(flag_seed=2))
         row = summary["rows"]["rule/m0/B9"]
-        assert row["jam_time_min_mean"] == 14.0
-        assert row["jam_network_time_min_mean"] == 10.0
+        assert row["jam_time_min_mean"] == 10.0
+        assert row["jam_all_time_min_mean"] == 14.0
         assert row["jam_approach_time_min_mean"] == 4.0
+        assert row["network_min_mean"] == 901.5
         assert row["approach_excess_min_mean"] == 75.0
         assert row["system_excess_min_mean"] == 1001.5
         assert row["approach_short_episodes"] == 1
         assert row["queue_max_m"] == [0.0] * 7 + [200.0]
-        assert row["by_seed"]["2"]["jam_network_time_min"] == 10.0
+        assert row["by_seed"]["2"]["jam_time_min"] == 10.0
+        assert row["by_seed"]["2"]["jam_all_time_min"] == 14.0
+        assert row["by_seed"]["2"]["network_min"] == 902.0
         assert summary["approach_short_total"] == 1
         assert "gated boundary" in summary["thresholds_note"]
         assert row["paired_system_excess_vs_plan"]["mean"] == 0.0
+        assert row["paired_network_min_vs_plan"]["mean"] == 0.0
 
     def test_the_q_rule_passes_only_without_flags_and_collisions(self):
         assert rje.qualification(self._block())["passes"] is True
@@ -363,10 +407,10 @@ class TestSummaries:
 
     def test_a_gated_summary_has_no_approach_fields(self):
         records = [{k: v for k, v in r.items()
-                    if k not in ("jam_network", "jam_approach", "storage", "flags",
+                    if k not in ("jam_all", "jam_approach", "storage", "flags",
                                  "approach_short", "W")} for r in self._block()]
         summary = rje.summarize_eval("M", records)
-        assert "jam_network_time_min_mean" not in summary["rows"]["plan/-/B9"]
+        assert "jam_all_time_min_mean" not in summary["rows"]["plan/-/B9"]
         assert "approach_short_total" not in summary
 
 

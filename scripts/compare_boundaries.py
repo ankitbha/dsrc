@@ -98,6 +98,17 @@ def gated_system_excess(record: dict, block: str, traces_dir: Path) -> float | N
                                  cap=float(record["duration_s"]))
 
 
+def _all(record: dict) -> dict:
+    """An approach record's all-36 jam metrics: `jam_all` from 2026-10-20, when `jam`
+    became the network's, and `jam` before."""
+    return record["jam_all"] if "jam_all" in record else record["jam"]
+
+
+def _network(record: dict) -> dict:
+    """An approach record's network jam metrics, under either layout."""
+    return record["jam"] if "jam_all" in record else record["jam_network"]
+
+
 def compare_cell(block: str, gated: Mapping[int, dict], approach: Mapping[int, dict],
                  traces_dir: Path) -> dict[str, Any]:
     """One arm, variant and scenario on both boundaries."""
@@ -105,12 +116,12 @@ def compare_cell(block: str, gated: Mapping[int, dict], approach: Mapping[int, d
     g_flow = _values(gated, lambda r: r["flow"])
     g_store = _values(gated, lambda r: r["jam"]["held_min"] + r["jam"]["pending_min"])
     g_system = _values(gated, lambda r: gated_system_excess(r, block, traces_dir))
-    a_all = _values(approach, lambda r: r["jam"]["jam_time_min"])
-    a_net = _values(approach, lambda r: r["jam_network"]["jam_time_min"])
+    a_all = _values(approach, lambda r: _all(r)["jam_time_min"])
+    a_net = _values(approach, lambda r: _network(r)["jam_time_min"])
     a_app = _values(approach, lambda r: r["jam_approach"]["jam_time_min"])
     a_flow = _values(approach, lambda r: r["flow"])
     a_store = _values(approach, lambda r: r["storage"]["approach_excess_min"]
-                      + r["jam"]["pending_min"])
+                      + _all(r)["pending_min"])
     a_system = _values(approach, lambda r: r["storage"]["system_excess_min"])
     return {
         "gated": {"seeds": sorted(gated), "jam_time_min_mean": _mean(g_jam),
@@ -121,9 +132,9 @@ def compare_cell(block: str, gated: Mapping[int, dict], approach: Mapping[int, d
         "approach": {"seeds": sorted(approach), "jam_all_time_min_mean": _mean(a_all),
                      "jam_network_time_min_mean": _mean(a_net),
                      "jam_approach_time_min_mean": _mean(a_app),
-                     "prevented_all": sum(1 for r in approach.values() if r["jam"]["prevented"]),
+                     "prevented_all": sum(1 for r in approach.values() if _all(r)["prevented"]),
                      "prevented_network": sum(1 for r in approach.values()
-                                              if r["jam_network"]["prevented"]),
+                                              if _network(r)["prevented"]),
                      "prevented_approach": sum(1 for r in approach.values()
                                                if r["jam_approach"]["prevented"]),
                      "flow_mean": _mean(a_flow),
@@ -146,8 +157,8 @@ def contrasts(episodes: list[dict], best: str, lookahead: str) -> dict[str, Any]
     controller (`best`, `arm/variant`) minus no control and minus the lookahead, paired
     over seeds."""
     cells = _cells(episodes)
-    metrics = {"jam_all_time_min": lambda r: r["jam"]["jam_time_min"],
-               "jam_network_time_min": lambda r: r["jam_network"]["jam_time_min"],
+    metrics = {"jam_all_time_min": lambda r: _all(r)["jam_time_min"],
+               "jam_network_time_min": lambda r: _network(r)["jam_time_min"],
                "flow": lambda r: r["flow"],
                "system_excess_min": lambda r: r["storage"]["system_excess_min"]}
     out: dict[str, Any] = {}

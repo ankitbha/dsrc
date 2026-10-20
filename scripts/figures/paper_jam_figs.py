@@ -21,7 +21,9 @@ the approach results carry no selection of their own. It writes three PDFs, each
   (no control reads no feed, so D does not apply to it).
 
 The three paper arms are no control, the lookahead at its selected threshold and the best
-model, both read from `S_summary.json`. Colours follow the entity: the camera and the
+model, both read from `S_summary.json`; with `--gate-selection` (block N's `N_summary.json`,
+2026-10-20) the best model is the rule with its selected feed gate. Every jam number is the
+record's `jam`, which on the network-measured results is the network's 12 super-segments. Colours follow the entity: the camera and the
 two-layer controller blue, the feed and the lookahead orange, no control neutral grey.
 """
 
@@ -61,17 +63,33 @@ def _style() -> None:
         "pdf.fonttype": 42, "savefig.bbox": "tight", "savefig.pad_inches": 0.02})
 
 
+def _boxed(legend):
+    """A thin rectangular frame, so the legend reads apart from the data."""
+    frame = legend.get_frame()
+    frame.set_edgecolor(MUTED)
+    frame.set_linewidth(0.6)
+    frame.set_facecolor("white")
+    frame.set_alpha(1.0)
+    return legend
+
+
 def _records(path: Path) -> list[dict]:
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     return [r for r in rows if r.get("type") not in ("header", "footer")]
 
 
-def paper_arms(s_summary: dict) -> list[tuple[str, str | None, str, str, str]]:
+def paper_arms(s_summary: dict, n_summary: dict | None = None
+               ) -> list[tuple[str, str | None, str, str, str]]:
     """(label, arm, variant, colour, marker) for the three arms the paper shows."""
     best = s_summary["best"]
     look = s_summary["selected"]["lookahead"]
     look_variant = f"J{look['J_th']:g}"
     best_variant = best["name"].split("/", 1)[1] if "/" in best["name"] else "-"
+    if n_summary is not None:
+        chosen = n_summary["selected"]
+        if best["arm"] != "rule" or float(chosen["m_on"]) != float(best["params"]["m_on"]):
+            raise SystemExit("the gate selection is for another rule than the best model")
+        best_variant = chosen["variant"]
     return [("No control", "no_control", "-", GREY, "^"),
             ("Feed lookahead", "lookahead", look_variant, ORANGE, "s"),
             ("Global-local", best["arm"], best_variant, BLUE, "o")]
@@ -79,14 +97,18 @@ def paper_arms(s_summary: dict) -> list[tuple[str, str | None, str, str, str]]:
 
 def _jam_by_seed(records: list[dict], arm: str, variant: str, scenario: str,
                  m: float | None = None) -> dict[int, float]:
+    """Jam time by seed for one arm and variant; with `m` (block L), the variant run at that
+    lag multiplier, `<variant>_lag<m>`. Variants match exactly: the rule with and without
+    the feed gate (`m0_g...` and `m0`) are different arms."""
+    want = variant if m is None else f"{variant}_lag{m:g}"
     out = {}
     for r in records:
-        if r["arm"] != arm or r["scenario"] != scenario:
-            continue
-        if variant != "-" and not str(r["variant"]).startswith(variant):
+        if r["arm"] != arm or r["scenario"] != scenario or str(r["variant"]) != want:
             continue
         if m is not None and abs(float(r.get("m", 1.0)) - m) > 1e-9:
             continue
+        if int(r["seed"]) in out:
+            raise SystemExit(f"two records of {arm}/{want}/{scenario}/{r['seed']}")
         out[int(r["seed"])] = float(r["jam"]["jam_time_min"])
     return out
 
@@ -124,7 +146,9 @@ def fig_warning(leads: dict, D: float, out: Path) -> dict:
     ax.set_ylim(5, 4000)
     ax.set_xticks(range(len(order)), [LABELS[s] for s in order])
     ax.set_ylabel("warning before onset (s)")
-    ax.legend(loc="upper left", frameon=False, handletextpad=0.3, borderaxespad=0.2)
+    # Above the plot, so it covers none of the bursts' points.
+    _boxed(ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.03), ncol=2, frameon=True,
+                     fancybox=False, handletextpad=0.3, columnspacing=1.2, borderaxespad=0.0))
     fig.savefig(out / "fig_warning.pdf")
     fig.savefig(out / "fig_warning.png", dpi=300)
     plt.close(fig)
@@ -160,8 +184,8 @@ def fig_jams(records: list[dict], m_summary: dict, arms, out: Path) -> dict:
         bottom.errorbar(xs, means, yerr=ses, color=colour, marker=marker, markersize=4.5,
                         linestyle="none", elinewidth=1.2, capsize=0, markeredgecolor="white",
                         markeredgewidth=0.6, label=label)
-    bottom.legend(loc="upper right", ncol=1, frameon=False, handlelength=1.0,
-                  borderaxespad=0.1)
+    _boxed(bottom.legend(loc="upper right", ncol=1, frameon=True, fancybox=False,
+                         handlelength=1.0, borderaxespad=0.1))
     bottom.set_ylabel("jammed segment-min")
     bottom.set_ylim(bottom=0)
     bottom.set_xticks(range(len(order)), [LABELS[s] for s in order])
@@ -205,9 +229,12 @@ def fig_lag(records_l: list[dict], records_m: list[dict], m_summary: dict, arms,
                       ["0", f"{D1:.0f}", f"{2 * lbar + pq:.0f}", f"{4 * lbar + pq:.0f}"])
         ax.set_ylim(bottom=0)
     axes[0].set_ylabel("jammed segment-min")
-    # Headroom above the largest error bar, so the legend sits above the data.
-    axes[0].set_ylim(0, axes[0].get_ylim()[1] * 1.3)
-    axes[0].legend(loc="upper right", frameon=False, handlelength=1.2, borderaxespad=0.1)
+    # One legend for both panels, above their titles and centred over the pair.
+    left, right = axes[0].get_position().x0, axes[1].get_position().x1
+    handles, labels = axes[0].get_legend_handles_labels()
+    _boxed(fig.legend(handles, labels, loc="lower center", bbox_to_anchor=((left + right) / 2, 1.0),
+                      ncol=2, frameon=True, fancybox=False, handlelength=1.6,
+                      columnspacing=1.2, borderaxespad=0.0))
     fig.savefig(out / "fig_lag.pdf")
     fig.savefig(out / "fig_lag.png", dpi=300)
     plt.close(fig)
@@ -219,6 +246,8 @@ def main(argv: list[str] | None = None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--results-dir", default=str(RESULTS))
     parser.add_argument("--selection", default=str(SELECTION))
+    parser.add_argument("--gate-selection", default=None,
+                        help="block N's N_summary.json: the rule's selected feed gate")
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     results, out = Path(args.results_dir), Path(args.out)
@@ -228,7 +257,9 @@ def main(argv: list[str] | None = None) -> int:
     s_summary = json.loads(Path(args.selection).read_text())
     leads = json.loads((results / "leads.json").read_text())
     records_m = _records(results / "M.jsonl")
-    arms = paper_arms(s_summary)
+    n_summary = (json.loads(Path(args.gate_selection).read_text())
+                 if args.gate_selection else None)
+    arms = paper_arms(s_summary, n_summary)
     D = float(m_summary["feed_artefact"]["D"])
     written = {"warning": fig_warning(leads, D, out),
                "jams": fig_jams(records_m, m_summary, arms, out)}

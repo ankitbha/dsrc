@@ -910,3 +910,71 @@ the oracle (perception-error) comparison, the drain result after the exit block 
 two-layer controller, median 340 s, none under no control) and the jam figure's jam-free panel, which
 repeats the table. The thresholds are stated as selected on the network without approach roads. No
 validation round was run (Ankit stopped validation for dsrc on 2026-10-18).
+
+## The network is measured, and the rule gets a feed gate (2026-10-20)
+
+**Request (Ankit, 2026-10-20).** The approach roads are a boundary condition: they exist to
+pace a burst into the network, because a simulated burst appears out of nowhere and a real
+one cannot. Nothing on them is measured. Separately, implement the paper's proposed remedy for
+the no-trigger cost, "enabling the local layer only when the feed reports the network near
+capacity", re-run the evaluation and update the affected results in the paper only; one
+validation round after the code changes.
+
+**Reading taken without asking.** Only measurement changes on the approach roads. The
+controllers still act on approach vehicles exactly as before (the paper's Network paragraph,
+which Ankit edited the same day, keeps that sentence). Every jam, prevention, onset and
+travel-time number is over the network's 12 super-segments.
+
+**What the committed records already said (seeds 16-30, read-only).**
+
+- Feed delay, B9, network-only jam time (all-segment in brackets): lookahead 21.4, 16.3,
+  11.5, 18.3 at D = 0, 99.5, 189, 368 s (74.8, 64.3, 25.1, 25.8); rule 8.6, 12.6, 4.9, 6.8
+  (69.0, 65.1, 46.3, 35.1). Most of the lookahead's fall with delay was on the approaches.
+- Penetration 0.5, B9: the rule minus no control is +29.5 ± 24.6 segment-minutes on the network
+  (2/15 seeds below), against +27.2 ± 24.5 over all 36. The deficit is on the network; leaving
+  the approaches out of the measure does not remove it.
+
+**The gate's signal, measured before any selection (scratchpad `gate/`, 60 instrumented
+episodes, plan alone and the ungated rule, seeds 11-15, B5, B7.5, B9, I_exit, I_mid, BG, 3,600 s,
+every feed version's 12 x 5 rows and plan kept).**
+
+- The raw feed jam factor cannot be the signal. Under plan alone with no trigger the plan holds
+  segments 3, 7 and 9 at 0.75, so the feed reads them near 45 km/h (J about 2.5), and segment 10
+  (the exit approach) reaches J 3 to 5. Under the ungated rule with no trigger the largest J over
+  the network is at or above 3.5 on 92.9% of versions, because the correction's own slowing
+  enters the feed: a gate on raw J would latch open.
+- The signal used is the largest jam factor over the 12 super-segments measured against one
+  step below that version's plan: `10 (1 - (1 - J/10) / step_down(plan))`, clipped to [0, 10].
+  It is zero while traffic moves at or above the slowest speed the advisory can ask for.
+  Share of BG versions at or above 0.5 / 1.0 / 1.5 / 2.0: plan alone 6.2 / 2.7 / 1.3 / 0.9%;
+  ungated rule 30.7 / 16.9 / 7.1 / 2.7%. Median first time at or above the threshold after the
+  trigger, at the vehicles (publication + D), plan alone, seconds: B5 628 / 808 / 808 / 1,288;
+  B7.5 448 / 688 / 868 / 928; B9 388 / 568 / 628 / 748; I_exit 148 / 148 / 208 / 208; I_mid
+  208 / 268 / 268 / 268.
+
+**Design.** `JamArm.gate_J`: the rule may switch a vehicle on only while the version that
+vehicle applies has `gate_signal >= gate_J`; a vehicle on when its gate closes is released
+through the rule's hysteresis (at least 30 s on, two release ticks). One version gives every
+vehicle the same gate. `gate_J = 0` is the ungated rule exactly, and a gate that never opens
+is plan alone exactly; both are SUMO tests (`tests/test_feed_gate.py`).
+
+**Selection, stated before block N ran.** Block N, approach boundary, seeds 11-15, 3,600 s,
+scenarios B5, B7.5, B9, I_exit, I_mid and BG: no control, plan alone, the rule at m_on 0
+without a gate and at `gate_J` in {0.5, 1.0, 1.5, 2.0}. Criterion C (section 5.7 of the jam
+plan) on the network's jam time over [900, 3,600] s; the lowest C wins, and candidates within
+C_TIE = 0.02 of it are ordered by BG served flow, highest first; a candidate with a collision,
+a collision teleport or a write above the plan is excluded. `m_on` stays 0 and nothing else is
+re-selected.
+
+**Metrics.** On the approach boundary a record's `jam` and `jam_30kmh` are the network's 12;
+`jam_all` and `jam_approach` are diagnostics; `storage.network_min` is the integral of
+`running - on_approach` over the scored window (the network's total travel time).
+`leads.json` takes onsets on the network. `scripts/rescore_network.py` rebuilds the committed
+M, L, P and K records from their traces under these definitions and refuses a record whose old
+numbers do not come back under the new names (all 1,245 must pass). The arms whose code did not
+change are re-scored, not re-simulated: an episode is a deterministic function of its spec.
+The gated rule's episodes are run fresh into the same JSONLs with `--resume`.
+
+**Defect found on the way (figure script).** `paper_jam_figs._jam_by_seed` matched variants
+by prefix, so `m0` would also have matched `m0_g...` once both exist. Now exact; on the
+committed approach results the figure series are byte-identical.
