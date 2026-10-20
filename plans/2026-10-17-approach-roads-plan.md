@@ -1219,3 +1219,89 @@ rule selects the rule without a gate, `rule/m0`.**
 
 **Decision for Ankit (blocking).** The pre-stated rule rejects the gate he asked for, by 0.0002
 in C. Nothing has been run since.
+
+**Ankit's decisions (2026-10-20, after block N).**
+
+1. **Gate.** Keep the pre-stated selection: the paper's system and main results are the
+   rule without a gate, from the re-scored network-only records. The gate at 0.5 (the gated
+   candidate with the lowest C) is run on the evaluation seeds in blocks M (105 episodes) and
+   P (60) and reported in the no-trigger subsection and the penetration sensitivity.
+   - `--gate-candidate 0.5` (commit `a37aedb`) records `gate_selected: false` in every header.
+   - Run with `outputs/jam_network/tools/run_gate_candidate.sh <worktree at a37aedb>`: five
+     parts in `outputs/jam_network/parts/`, each resuming a copy of the re-scored JSONL.
+   - `merge_gate_parts.py outputs/jam_network/run <parts>` appends the new lines.
+2. **Travel time.** Report the network-only figure, with a disclosure in Section VI-E.
+   - Over the triggers the system's network travel time is −97.5 ± 23.7 veh-h per run
+     (−6.0% ± 1.5%) against no control.
+   - Its approach-road time above free flow is +123.9 ± 6.1 veh-h (no control −0.8).
+   - Counted together the difference is +26.4 ± 22.0 veh-h (+1.6% ± 1.4%).
+   - The abstract says "6.0% lower travel time in the network".
+
+**Paper state at this point (`paper/`, uncommitted).**
+- Done: Table II (from `make_table.py`, Upstream column removed, Delay renamed Travel time),
+  Sections VI-A to VI-E for the ungated system, the abstract's numbers, the intro results
+  sentence, the conclusion's first paragraph and its approach-road limitation, and
+  Figs. 3 to 5 regenerated from `outputs/jam_network/run` with
+  `--gate-selection .../N_summary.json`, which selects `m0`.
+- Waiting on the gate runs: Section VI-F (the gate's evaluation-seed result replaces "we leave
+  it to future work"), the gated 50% penetration sentence, the conclusion's no-trigger
+  limitation, and the Network paragraph's collision count.
+
+## Result on the network-measured approach boundary (2026-10-20)
+
+**Provenance.** `results/jam_network/{M,L,P,K,N}.jsonl`, their summaries and `leads.json`.
+- M, L, P and K are the 1,245 committed approach records re-scored on the network (at
+  `6bbdcdd`), plus the gate-0.5 rule's 165 episodes in M (105) and P (60), run at `a37aedb`
+  from clean worktrees with `--gate-candidate 0.5`.
+- N is block N's 210 episodes at `6bbdcdd`, summarised at `bce2d0f` and `a37aedb`.
+- Traces are in the gitignored `outputs/jam_network/traces/` and
+  `outputs/jam_approach/run_5cea9d3/traces/`.
+- Counters: 1,305 controlled evaluation episodes with zero collisions; the 165 gated episodes
+  have zero writes above the plan, zero speed read-back mismatches, zero episodes with
+  `pending` above 0 and no approach-short flag.
+- The figure series from `results/jam_network` are byte-identical to those in `paper/figs/`.
+
+**The paper's system (rule without a gate), seeds 16-30, five triggers, network only.**
+- Jam and prevention: jam-free on 51 of 75 runs, 50 of them prevented. Mean jam time 4.4
+  against no control's 130.8 segment-minutes, a 97% reduction. Less jam than no control on
+  15 of 15 seeds of every trigger.
+- Against the lookahead: −7.2 ± 1.7 segment-minutes.
+- Throughput +2.5% ± 0.3%.
+- Travel time in the network −6.0% ± 1.5%. Counting the approach-road time it is +1.6% ± 1.4%;
+  the system's approach-road time is +123.9 veh-h per run.
+- No trigger: throughput −6.9% and travel time in the network +23.2%.
+
+**The gate at 0.5 on the evaluation seeds (not the selected system).**
+
+| Measure (five triggers) | Ungated | Gate 0.5 |
+|---|---|---|
+| Jam-free (of 75) | 51 | 56 (55 prevented) |
+| Mean jam time (segment-min) | 4.4 | 4.1 |
+| Throughput vs no control | +2.5% | +3.4% ± 0.4% |
+| Network travel time vs no control | −6.0% | −11.3% ± 1.4% |
+| Travel time with approach roads | +1.6% | −4.6% ± 1.3% |
+
+- Gated minus ungated jam per trigger:
+  - B9 −8.4 ± 8.4 (jam-free 14 against 8 of 15);
+  - I_exit +3.6 ± 1.1;
+  - I_mid +1.9 ± 0.8;
+  - B5 +0.7 ± 0.4;
+  - B7.5 +0.9 ± 0.5.
+- No trigger, against no control:
+  - throughput −3.4% (−121 veh/h), against −6.9% ungated and −2.9% for plan alone;
+  - network travel time +12.0%, against +23.2% ungated and +11.3% for plan alone;
+  - the correction changed the shown speed on 1.0% of vehicle-ticks against 15.5%;
+  - the gate was open on 8.1% of vehicle-ticks.
+- 50% penetration, B9, against no control: +13.1 ± 24.3 segment-minutes (within noise), against
+  +29.5 ± 24.6 ungated. Plan alone at 50% is −19.6 ± 21.0, so the gated correction still adds
+  32.7 ± 26.8 to it. I_exit at 50%: −34.1 ± 31.7.
+- 75% penetration: B9 −182.8 ± 14.6 (ungated −166.9); I_exit −123.8 ± 11.4 (ungated −125.8).
+
+**What follows (for Ankit).** On the evaluation seeds the gate at 0.5 is ahead of the
+ungated rule on prevention, throughput, both travel-time measures, the no-trigger cost and 50%
+penetration. It is behind on jam time after the exit block, the mid-network block and the two
+smaller bursts. The pre-stated selection on seeds 11-15 chose the ungated rule because criterion C
+weights each trigger's jam relative to no control's, and the exit block's relative loss was the
+largest term. Making the gated rule the system now would be a choice made after seeing the
+evaluation seeds, and the paper would have to say so. The decision stays Ankit's; the paper
+currently follows his choice (ungated system, gate reported in Section VI-F).
