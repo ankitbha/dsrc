@@ -55,6 +55,38 @@ class TestBlockQ:
         assert all(rje.uses_camera(s) for s in specs if s.arm == "no_control")
 
 
+class TestPenetrationSweep:
+    def test_block_p_runs_the_given_shares_for_the_plan_and_the_best(self):
+        specs = rje.block_specs("P", selection=SELECTION, oracle_window=60.0,
+                                penetrations=(0.55, 0.9))
+        assert len(specs) == 2 * 2 * 2 * 15
+        assert {(s.arm, s.variant, s.penetration) for s in specs} == {
+            ("plan", "-_p0.55", 0.55), ("rule", "m0_p0.55", 0.55),
+            ("plan", "-_p0.9", 0.9), ("rule", "m0_p0.9", 0.9)}
+        assert {s.seed for s in specs} == set(range(16, 31))
+        assert {s.scenario for s in specs} == {"B9", "I_exit"}
+
+    def test_the_gated_best_carries_its_gate_in_the_variant(self):
+        gated = rje.Selection(J_th=2.0, m_on=0.0, theta=0.75, best_arm="rule",
+                              best_params={"m_on": 0.0}, gate_J=0.5, gate_selected=False)
+        specs = rje.block_specs("P", selection=gated, oracle_window=60.0,
+                                penetrations=(0.6,))
+        assert {s.variant for s in specs} == {"-_p0.6", "m0_g0.5_p0.6"}
+
+    def test_without_shares_block_p_keeps_its_two(self):
+        specs = rje.block_specs("P", selection=SELECTION, oracle_window=60.0)
+        assert {s.penetration for s in specs} == set(rje.PENETRATIONS_P)
+
+    @pytest.mark.parametrize("shares", [(1.0,), (0.0,), (0.6, 0.6)])
+    def test_a_share_outside_zero_one_or_repeated_is_refused(self, shares):
+        with pytest.raises(SystemExit):
+            rje.block_specs("P", selection=SELECTION, oracle_window=60.0, penetrations=shares)
+
+    def test_shares_are_refused_for_another_block(self):
+        with pytest.raises(SystemExit):
+            rje.block_specs("M", selection=SELECTION, oracle_window=60.0, penetrations=(0.6,))
+
+
 class TestBoundaryRules:
     @pytest.mark.parametrize("block", ["G", "T", "S"])
     def test_selection_blocks_are_refused_on_the_approach_boundary(self, block):

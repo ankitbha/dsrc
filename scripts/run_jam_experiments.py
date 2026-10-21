@@ -239,7 +239,8 @@ class Selection:
 
 
 def arm_list(block: str, selection: Selection | None, grid: bool = False,
-             dagger: bool = False, oracle_window: float | None = None
+             dagger: bool = False, oracle_window: float | None = None,
+             penetrations: Sequence[float] = PENETRATIONS_P
              ) -> list[tuple[str, dict[str, float], dict[str, Any]]]:
     """`(arm, params, extra)` for a block; `extra` holds m, penetration, bias, sampling.
 
@@ -284,7 +285,7 @@ def arm_list(block: str, selection: Selection | None, grid: bool = False,
         return [(a, p, {"m": m}) for m in LAGS_L for a, p, _ in _unique(arms)]
     if block == "P":
         arms = _unique([("plan", {}, {}), best])
-        return [(a, p, {"penetration": pen}) for pen in PENETRATIONS_P for a, p, _ in arms]
+        return [(a, p, {"penetration": pen}) for pen in penetrations for a, p, _ in arms]
     if block == "Q":
         # Approach plan section 7.1: every block M arm at full penetration (the oracle at
         # the camera's window only), the plan and the rule at 0.5, and the lookahead at
@@ -343,12 +344,20 @@ def _scenarios(block: str) -> tuple[str, ...]:
 def block_specs(block: str, seeds: Sequence[int] | None = None,
                 selection: Selection | None = None, grid: bool = False,
                 dagger: bool = False, smoke: bool = False,
-                oracle_window: float | None = None) -> list[Spec]:
+                oracle_window: float | None = None,
+                penetrations: Sequence[float] | None = None) -> list[Spec]:
     """Every episode of a block, arm-major, every arm over the same seed list.
 
     Seeds outside the block's own set are refused, except in a smoke run, which is not
-    an experiment and runs seed 1 for 600 s.
+    an experiment and runs seed 1 for 600 s. `penetrations` replaces block P's
+    PENETRATIONS_P (the 2026-10-21 sweep) and is refused for any other block.
     """
+    if penetrations is not None:
+        if block != "P":
+            raise SystemExit(f"--penetrations sets block P's shares; block {block} has none")
+        bad = [p for p in penetrations if not 0.0 < p < 1.0]
+        if bad or len(set(penetrations)) != len(penetrations):
+            raise SystemExit(f"penetrations must be distinct and in (0, 1); got {penetrations}")
     allowed = BLOCK_SEEDS[block]
     seeds = tuple(seeds) if seeds is not None else allowed
     if smoke:
@@ -361,7 +370,8 @@ def block_specs(block: str, seeds: Sequence[int] | None = None,
     if len(set(seeds)) != len(seeds):
         raise SystemExit("duplicate seeds")
     specs: list[Spec] = []
-    for arm, params, extra in arm_list(block, selection, grid, dagger, oracle_window):
+    for arm, params, extra in arm_list(block, selection, grid, dagger, oracle_window,
+                                       penetrations=penetrations or PENETRATIONS_P):
         variant = _variant(arm, params)
         if "m" in extra:
             variant += f"_lag{extra['m']:g}"
@@ -1472,6 +1482,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "arm, every time W later; blocks Q, M, L, P and K only")
     parser.add_argument("--seeds", type=int, nargs="+", default=None,
                         help="a subset of the block's own seeds (default all of them)")
+    parser.add_argument("--penetrations", type=float, nargs="+", default=None,
+                        help=f"block P: the shares of vehicles that follow (default "
+                             f"{' '.join(f'{p:g}' for p in PENETRATIONS_P)})")
     parser.add_argument("--feed-artefact", default=str(DEFAULT_FEED_ARTEFACT))
     parser.add_argument("--feed-session", default=DEFAULT_FEED_SESSION)
     parser.add_argument("--allow-placeholder", action="store_true",
@@ -1628,7 +1641,8 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             continue
         window = oracle_window(context.camera_model) if block in SELECTED_BLOCKS else None
         specs = block_specs(block, args.seeds, context.selection, grid=args.g_grid,
-                            dagger=dagger, smoke=args.smoke, oracle_window=window)
+                            dagger=dagger, smoke=args.smoke, oracle_window=window,
+                            penetrations=args.penetrations)
         if args.smoke:
             specs = smoke_subset(specs)
         if not specs:
