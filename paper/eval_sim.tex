@@ -52,9 +52,16 @@ The lookahead served 5.4\% less traffic than no control and added 11.9\% to its 
 \subsection{Sensitivity}
 \label{sec:sens}
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figs/fig_penetration.pdf}
+\caption{Jam time against the share of vehicles that follow the advice, on the largest burst (left) and the exit block (right): jammed segment-minutes on the network, mean and two standard errors over 15 seeds. The feed gate is that of \S~\ref{sec:notrigger}. No control does not depend on the share and is drawn as a dotted line.}
+\label{fig:penetration}
+\end{figure}
+
 \noindent\textbf{Camera distance scale.} We repeated the largest burst and the exit block with every camera distance scaled by 0.8 and by 1.25, since the absolute scale is assumed (\S~\ref{sec:road}). On the exit block it still left 9.2 to 10.6 fewer jammed segment-minutes than the lookahead. On the burst it left 12.9 fewer at 1.25 ($\pm$6.0), but at 0.8, which reads the road as fuller and changed the advised speed on 24\% of vehicle ticks instead of 19\%, it left 25.0 more ($\pm$15.9).
 
-\noindent\textbf{Share of drivers who follow.} With 75\% of vehicles following, the system still left less jam than no control on both triggers. With 50\% it left 29.5 more jammed segment-minutes than no control on the burst ($\pm$24.6), though 34.5 fewer on the exit block ($\pm$19.7). The excess comes from the local layer: with 50\% following, the plan alone left 19.6 fewer than no control on the burst ($\pm$21.0), and adding the correction raised the jam by 49.1 ($\pm$20.2). With the feed gate of \S~\ref{sec:notrigger}, the excess over no control at 50\% fell to 13.1 ($\pm$24.3), within noise.
+\noindent\textbf{Share of drivers who follow.} We varied the share of vehicles that follow the advice from 50\% to 100\% in steps of 5\% on the largest burst and the exit block (Fig.~\ref{fig:penetration}). On the exit block the system left less jam than no control at every share. On the burst it did so from 55\%, by 50.4 segment-minutes ($\pm$34.2), but with 50\% following it left 29.5 more ($\pm$24.6). The excess at 50\% comes from the local layer: the plan alone left 19.6 fewer than no control there ($\pm$21.0), and adding the correction raised the jam by 49.1 ($\pm$20.2). With half the vehicles following, the jam formed on every run, and the correction then slowed the following vehicles in the queue before the exit, so the exit served 100\,veh/h less than under the plan alone. On the burst the correction reduced the jam below the plan alone's from 65\% ($-29.4\pm25.5$), and from 60\% with the feed gate ($-42.9\pm31.7$). From 80\% on, more followers did not reduce the jam further: the system's jam time on the burst stayed between 7.4 and 12.6 segment-minutes, and it was jam-free on 8 to 11 of 15 runs, so four in five vehicles following gave the result of full penetration.
 
 \noindent\textbf{Feed delay.} We varied the feed delay $D$ (Fig.~\ref{fig:lag}): 0, 99.5, 189 and 368\,s, the last close to the probe latency of~\cite{wang2018latency} plus the measured delivery lag. On the exit block, which jams faster than the feed reports, both controllers left more jam at the longest delay than with none, and the system stayed below the lookahead at every delay. On the largest burst the system left less jam than the lookahead at 0, 189 and 368\,s, by 6.6 to 12.7 segment-minutes (at most $\pm$8.7), and the same at the measured delay ($-3.7\pm7.5$); neither controller's jam time there rose or fell steadily with $D$.
 

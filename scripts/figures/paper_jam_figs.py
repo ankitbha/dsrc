@@ -19,6 +19,11 @@ the approach results carry no selection of their own. It writes three PDFs, each
 * `fig_lag.pdf` (only with block L): jammed segment-minutes against the feed delay D
   on the largest burst and the exit block, for the lookahead and the two-layer controller
   (no control reads no feed, so D does not apply to it).
+* `fig_penetration.pdf` (only with block P): jammed segment-minutes against the share of
+  vehicles that follow, on the largest burst and the exit block, for the plan alone, the
+  two-layer controller and, while the controller runs no gate, the rule with Section VI-F's
+  gate; no control is a line. Block P gives 0.5 and 0.75, the sweep in `sweep/p*/P.jsonl`
+  (2026-10-21) the shares between, and block M 1.0.
 
 The three paper arms are no control, the lookahead at its selected threshold and the best
 model, both read from `S_summary.json`; with `--gate-selection` (block N's `N_summary.json`,
@@ -45,6 +50,11 @@ RESULTS = REPO / "results" / "jam"
 SELECTION = RESULTS / "S_summary.json"
 
 BLUE, ORANGE, GREY = "#2a78d6", "#eb6834", "#8a8a85"
+#: The penetration figure's two other series; with blue they pass the CVD check for all pairs.
+GREEN, PINK = "#008300", "#e87ba4"
+#: The feed gate Section VI-F reports: block N's candidate at 0.5, which the selection did not
+#: choose and which ran on the evaluation seeds on Ankit's decision (2026-10-20).
+GATE_SHOWN = 0.5
 INK, MUTED = "#2b2b29", "#6b6b66"
 COLUMN_IN = 3.45
 
@@ -241,6 +251,58 @@ def fig_lag(records_l: list[dict], records_m: list[dict], m_summary: dict, arms,
     return {f"{k[0]}|{k[1]}": v for k, v in series.items()}
 
 
+def fig_penetration(records_p: list[dict], records_m: list[dict], arms, out: Path) -> dict:
+    """Jam time against the share that follows. Every point must hold no control's seeds."""
+    _, nc_arm, nc_variant, _, _ = arms[0]
+    _, best_arm, best_variant, _, _ = arms[2]
+    lines = [("Plan alone", "plan", "-", GREEN, "s", "-"),
+             ("Global-local", best_arm, best_variant, BLUE, "o", "-")]
+    if best_arm == "rule" and "_g" not in best_variant:
+        lines.append(("Global-local with feed gate", "rule", f"{best_variant}_g{GATE_SHOWN:g}",
+                      PINK, "D", (0, (3, 1.5))))
+    shares = sorted({float(r["penetration"]) for r in records_p} | {1.0})
+    fig, axes = plt.subplots(1, 2, figsize=(COLUMN_IN, 1.55))
+    series = {}
+    for ax, s in zip(axes, ("B9", "I_exit")):
+        nc = _jam_by_seed(records_m, nc_arm, nc_variant, s)
+        ax.axhline(statistics.fmean(nc.values()), color=GREY, linewidth=1.0,
+                   linestyle=(0, (1, 1.5)), label="No control")
+        for j, (label, arm, variant, colour, marker, style) in enumerate(lines):
+            pts = []
+            for share in shares:
+                src = records_m if share == 1.0 else records_p
+                by_seed = _jam_by_seed(src, arm, variant if share == 1.0
+                                       else f"{variant}_p{share:g}", s)
+                if set(by_seed) != set(nc):
+                    raise SystemExit(f"{arm}/{variant} at {share:g} on {s} has seeds "
+                                     f"{sorted(by_seed)}, not no control's {sorted(nc)}")
+                pts.append((100 * share, *_mean_2se(list(by_seed.values()))))
+            series[f"{s}|{label}"] = pts
+            dx = (j - (len(lines) - 1) / 2) * 0.9
+            ax.errorbar([p[0] + dx for p in pts], [p[1] for p in pts], yerr=[p[2] for p in pts],
+                        color=colour, marker=marker, markersize=3.2, linewidth=1.1,
+                        linestyle=style, elinewidth=0.8, capsize=0, markeredgecolor="white",
+                        markeredgewidth=0.5, label=label)
+        series[f"{s}|No control"] = statistics.fmean(nc.values())
+        ax.set_title(LABELS[s].replace("\n", " "), fontsize=7.5, color=INK, pad=3)
+        ax.set_xlabel("vehicles following (%)")
+        ax.set_xticks([50, 60, 70, 80, 90, 100])
+        top = max([statistics.fmean(nc.values())]
+                  + [p[1] + p[2] for k, v in series.items() if k.startswith(f"{s}|")
+                     and isinstance(v, list) for p in v])
+        ax.set_ylim(0, 1.08 * top)
+    axes[0].set_ylabel("jammed segment-min")
+    left, right = axes[0].get_position().x0, axes[1].get_position().x1
+    handles, labels = axes[0].get_legend_handles_labels()
+    _boxed(fig.legend(handles, labels, loc="lower center", bbox_to_anchor=((left + right) / 2, 1.0),
+                      ncol=2, frameon=True, fancybox=False, handlelength=1.8,
+                      columnspacing=1.2, borderaxespad=0.0))
+    fig.savefig(out / "fig_penetration.pdf")
+    fig.savefig(out / "fig_penetration.png", dpi=300)
+    plt.close(fig)
+    return series
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -265,6 +327,11 @@ def main(argv: list[str] | None = None) -> int:
                "jams": fig_jams(records_m, m_summary, arms, out)}
     if (results / "L.jsonl").exists():
         written["lag"] = fig_lag(_records(results / "L.jsonl"), records_m, m_summary, arms, out)
+    if (results / "P.jsonl").exists():
+        records_p = _records(results / "P.jsonl")
+        for path in sorted((results / "sweep").glob("p*/P.jsonl")):
+            records_p += _records(path)
+        written["penetration"] = fig_penetration(records_p, records_m, arms, out)
     (out / "paper_jam_figs_series.json").write_text(json.dumps(written, indent=1, default=str))
     print("wrote", ", ".join(sorted(written)), "to", out)
     return 0
