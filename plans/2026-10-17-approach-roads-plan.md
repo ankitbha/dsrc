@@ -1320,3 +1320,77 @@ quotes `results/jam_network`, with the rule without a gate as the system:
 
 It builds to 7 pages with no errors or undefined references. The run worktrees were removed.
 The pause state above is superseded.
+
+## Penetration sweep (2026-10-21, Ankit's request; evaluation only)
+
+**Request.** Run penetrations 0.55 to 0.70 and 0.80 to 0.95 in steps of 0.05, to find the
+lowest penetration at which the advisory leaves less jam than no control, and to check whether
+the jam time falls at every step from 0.75 to 1.0. 0.5, 0.75 and 1.0 are not re-run. Nothing
+is trained or re-selected.
+
+**Setup.**
+- `--penetrations` (commit `3238171`) replaces block P's `PENETRATIONS_P` and is refused for
+  any other block.
+- Arms: plan alone, the ungated rule (block N's selection) and the gate at 0.5
+  (`--gate-candidate 0.5`).
+- Triggers and seeds as block P: B9 and I_exit, seeds 16-30, 7,200 s.
+- 0.5 and 0.75 come from `results/jam_network/P.jsonl`. 1.0 and no control come from
+  `results/jam_network/M.jsonl`.
+- The sweep is 720 episodes, run by `outputs/jam_network/tools/run_sweep.sh` from the clean
+  worktree `../dsrc_sweep_wt` at `3238171`.
+- It runs one process per penetration, each in `outputs/jam_network/sweep/p<pen>/`, with
+  traces in `outputs/jam_network/traces`.
+- Each process runs the ungated arms first, then resumes its own JSONL with the gate.
+- Stop it with `touch outputs/jam_network/sweep/PAUSE`, and restart it with the same script,
+  which resumes.
+- Started 09:37. With 8 in parallel an episode takes about 100 s, so the sweep is expected to
+  take 3 to 3.5 hours.
+- Table: `python3 -I outputs/jam_network/tools/sweep_table.py results/jam_network
+  outputs/jam_network/sweep`. On the existing records it reproduces the reported 0.5, 0.75
+  and 1.0 numbers.
+
+### Result of the sweep (finished 11:52)
+
+All 720 episodes ran at `3238171` on a clean tree, with no collision, teleport, short
+approach road or speed-cap mismatch. Records: `results/jam_network/sweep/p<pen>/`. Four 0.5
+episodes (seed 16, plan alone and ungated rule, both triggers) were re-run at `3238171`; jam,
+flow, network travel time and arrivals are identical to the records in `P.jsonl`, so the sweep
+and the earlier records are comparable.
+
+Jam time on the network in segment-minutes; differences are paired by seed, ± is two standard
+errors. No control leaves 208.4 on B9 and 137.1 on I_exit.
+
+B9, jam time per arm (jam-free runs of 15 in brackets):
+
+| Penetration | Plan alone | Ungated | Gate 0.5 |
+|---|---|---|---|
+| 0.50 | 188.8 (0) | 237.8 (0) | 221.4 (0) |
+| 0.55 | 162.8 (0) | 158.0 (0) | 178.1 (0) |
+| 0.60 | 147.7 (0) | 141.0 (0) | 104.8 (0) |
+| 0.65 | 138.7 (0) | 109.3 (0) | 64.7 (2) |
+| 0.70 | 133.4 (0) | 62.3 (1) | 46.8 (1) |
+| 0.75 | 123.3 (0) | 41.4 (2) | 25.5 (6) |
+| 0.80 | 106.6 (0) | 7.4 (11) | 18.7 (5) |
+| 0.85 | 110.4 (0) | 10.4 (9) | 5.1 (14) |
+| 0.90 | 92.0 (0) | 11.1 (8) | 6.6 (12) |
+| 0.95 | 67.7 (1) | 12.4 (9) | 3.4 (14) |
+| 1.00 | 73.7 (0) | 12.6 (8) | 4.3 (14) |
+
+- **Below no control.** On B9 both corrections are below no control from 0.55: the ungated rule
+  by 50.4 ± 34.2 (11 of 15 seeds) and the gate by 30.3 ± 20.7 (12 of 15). At 0.5 both are
+  above it. On I_exit every arm is below no control at every penetration.
+- **Below plan alone.**
+  - On B9 the gate is below plan alone from 0.60 (−42.9 ± 31.7) and the ungated rule from
+    0.65 (−29.4 ± 25.5), clearly at 0.70 (−71.2 ± 22.0). At 0.55 and 0.60 the ungated rule is
+    within noise of plan alone and is above it on 10 and 5 of 15 seeds.
+  - On I_exit both corrections are within noise of plan alone until 0.70 (ungated
+    −19.3 ± 12.6, gate −21.7 ± 10.1). From 0.75 the ungated rule is 3.6 to 7.5 below plan
+    alone; the gate is 0.4 to 5.3 below, within noise at 0.95 and 1.0.
+- **0.75 to 1.0.**
+  - On B9 the ungated rule falls from 41.4 to 7.4 between 0.75 and 0.80 (−34.0 ± 18.0) and
+    stays between 7.4 and 12.6 up to 1.0; each later step changes it by at most 3.0, against
+    two standard errors of 7.5 to 9.9.
+  - The gate falls to 5.1 at 0.85 (−13.6 ± 8.1 from 0.80) and stays between 3.4 and 6.6.
+  - On I_exit both corrections are between 8 and 13 from 0.75 on, with steps of at most 1.2.
+  - Plan alone keeps falling up to 0.95, so the correction's margin over plan alone on B9
+    shrinks from about −100 at 0.80-0.85 to −55 to −70 at 0.95-1.0.
