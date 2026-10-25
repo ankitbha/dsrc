@@ -148,3 +148,41 @@ serves the most with no trigger.
   the release added (`--release-candidate`, recorded as not selected) at 0.5 and 0.75.
 - Disclosure, as in section 2: the gate at 0.5's evaluation-seed results were seen before the
   floor was written; the gate at 1.0 had not been run on evaluation seeds.
+
+## Evaluation result (2026-10-25, 15:12)
+
+975 episodes at `7378d16` from a clean worktree, merged into `results/jam_network/` (M, L, P,
+K appended; N2 and D new; sweep dirs appended). Every committed record file is an unchanged
+prefix of its replacement. Over all 3,000 controlled evaluation runs: 0 collisions, 0 collision
+teleports, 0 writes above the plan, 0 speed-cap mismatches, no approach-short flag; block D's
+26.8 million driver caps read back with 0 mismatches. Run first at 9 in parallel, then paused
+and resumed at 6 after Ankit asked not to overload the machine (CPU was 99% busy); a watchdog
+logged memory at about 50% free throughout and never paused. Figures regenerate byte-identical
+from `results/jam_network` with `--mechanism-selection results/jam_network/N2_summary.json`.
+
+Ablation (five triggers, 75 runs; `results/jam_network/ablation.json`):
+
+| Arm | Jam-free | Jam | Throughput | Travel time | No trigger |
+|---|---|---|---|---|---|
+| No control | 1 | 130.8 | 3,456 veh/h | 1,622 veh-h | 3,546 veh/h |
+| Feed lookahead | 46 | 11.6 | -5.4% | +11.9% | -20.8% |
+| Plan only | 39 | 22.1 | +2.6% | -10.0% | -2.9% |
+| Camera only (`m0_local`) | 5 | 95.5 | +1.3% | -1.1% | -0.9% |
+| No gate (`m0`) | 51 | 4.4 | +2.5% | -6.0% | -6.9% |
+| **System (`m0_g1`)** | **56** | **3.9** | **+3.9%** | **-12.6%** | **-3.0%** |
+| True occupancy (`tau10_m0_R60_g1`) | 58 | 3.4 | +4.3% | -14.3% | -3.0% |
+
+- Prevented 55 of the 74 runs that jam under no control; exit block 137.1 -> 11.1 (no gate 8.1;
+  gated minus ungated +3.0 +- 0.9). Against the lookahead -7.8 +- 1.3 (less after every trigger).
+- 50% following, B9: +13.0 +- 15.9 over no control (ungated +29.5 +- 24.6), +32.6 +- 17.2 over
+  plan alone. Release candidate `m0_r_g1` at 0.5: +13.1 +- 21.3 against the system on B9,
+  -10.0 +- 24.4 on I_exit; at 0.75 +13.2 +- 21.2 and +0.1 +- 2.7. The release does not reduce the
+  50% deficit.
+- Driver response (block D, `driver_table.json`): B9 system 3.7 (exact) / 11.1 (nominal) / 46.7
+  (lax), I_exit 11.1 / 12.3 / 13.7; below no control on every seed in every setting, below plan
+  alone under the same drivers.
+- Camera scale 0.8 / 1.25: within 1.8 segment-minutes of scale 1, below the lookahead on both
+  triggers (the ungated rule was +25.0 +- 15.9 above it at 0.8 on B9).
+- Feed delay: on B9 at D = 189 and 368 s the system is within noise of the lookahead
+  (+2.9 +- 10.8, -0.8 +- 5.3) and above the ungated rule (14.5 and 17.5 against 4.9 and 6.8): the
+  gate waits for the feed. On I_exit it is below the lookahead at every delay.

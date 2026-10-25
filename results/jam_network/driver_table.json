@@ -1,0 +1,366 @@
+{
+ "B9|ideal|plan": {
+  "jam": 73.74444444444444,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -134.61111111111111,
+   24.4796139495329,
+   15,
+   15
+  ],
+  "flow": 3505.1809523809525
+ },
+ "B9|ideal|system": {
+  "jam": 3.6555555555555554,
+  "free": 14,
+  "n": 15,
+  "vs_nc": [
+   -204.7,
+   11.722686367099296,
+   15,
+   15
+  ],
+  "flow": 3689.942857142857,
+  "vs_plan": [
+   -70.08888888888889,
+   15.424568688426458,
+   15,
+   15
+  ]
+ },
+ "B9|nominal|plan": {
+  "jam": 113.52222222222223,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -94.83333333333334,
+   25.844918037397377,
+   14,
+   15
+  ],
+  "flow": 3506.5142857142855,
+  "vs_ideal": [
+   39.77777777777778,
+   26.10205178877274,
+   2,
+   15
+  ],
+  "driver": {
+   "name": "nominal",
+   "reaction_median_s": 2.0,
+   "reaction_sigma_log": 0.4,
+   "comply_mean": 0.05,
+   "comply_sd": 0.05,
+   "decel_mps2": 1.5,
+   "seed_offset": 7000,
+   "compliance_bounds": [
+    -0.1,
+    0.5
+   ],
+   "changes": 134176,
+   "caps_written": 177776,
+   "caps_checked": 177776,
+   "caps_mismatched": 0
+  }
+ },
+ "B9|nominal|system": {
+  "jam": 11.066666666666666,
+  "free": 10,
+  "n": 15,
+  "vs_nc": [
+   -197.2888888888889,
+   10.540095612482943,
+   15,
+   15
+  ],
+  "flow": 3674.8571428571427,
+  "vs_plan": [
+   -102.45555555555555,
+   24.954932217405613,
+   15,
+   15
+  ],
+  "vs_ideal": [
+   7.4111111111111105,
+   6.9937891317763565,
+   5,
+   15
+  ],
+  "driver": {
+   "name": "nominal",
+   "reaction_median_s": 2.0,
+   "reaction_sigma_log": 0.4,
+   "comply_mean": 0.05,
+   "comply_sd": 0.05,
+   "decel_mps2": 1.5,
+   "seed_offset": 7000,
+   "compliance_bounds": [
+    -0.1,
+    0.5
+   ],
+   "changes": 186037,
+   "caps_written": 272963,
+   "caps_checked": 272963,
+   "caps_mismatched": 0
+  }
+ },
+ "B9|lax|plan": {
+  "jam": 169.26666666666665,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -39.08888888888889,
+   18.499731634451813,
+   14,
+   15
+  ],
+  "flow": 3460.038095238095,
+  "vs_ideal": [
+   95.52222222222223,
+   27.01282992578984,
+   1,
+   15
+  ],
+  "driver": {
+   "name": "lax",
+   "reaction_median_s": 4.0,
+   "reaction_sigma_log": 0.5,
+   "comply_mean": 0.15,
+   "comply_sd": 0.1,
+   "decel_mps2": 1.0,
+   "seed_offset": 7000,
+   "compliance_bounds": [
+    -0.1,
+    0.5
+   ],
+   "changes": 131537,
+   "caps_written": 186807,
+   "caps_checked": 186807,
+   "caps_mismatched": 0
+  }
+ },
+ "B9|lax|system": {
+  "jam": 46.65555555555556,
+  "free": 2,
+  "n": 15,
+  "vs_nc": [
+   -161.7,
+   14.74248799833164,
+   15,
+   15
+  ],
+  "flow": 3608.2666666666664,
+  "vs_plan": [
+   -122.61111111111111,
+   19.318074620796803,
+   15,
+   15
+  ],
+  "vs_ideal": [
+   43.0,
+   13.405558351258433,
+   0,
+   15
+  ],
+  "driver": {
+   "name": "lax",
+   "reaction_median_s": 4.0,
+   "reaction_sigma_log": 0.5,
+   "comply_mean": 0.15,
+   "comply_sd": 0.1,
+   "decel_mps2": 1.0,
+   "seed_offset": 7000,
+   "compliance_bounds": [
+    -0.1,
+    0.5
+   ],
+   "changes": 196805,
+   "caps_written": 339588,
+   "caps_checked": 339588,
+   "caps_mismatched": 0
+  }
+ },
+ "I_exit|ideal|plan": {
+  "jam": 12.1,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -125.03333333333333,
+   10.609978332288911,
+   15,
+   15
+  ],
+  "flow": 3509.447619047619
+ },
+ "I_exit|ideal|system": {
+  "jam": 11.088888888888889,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -126.04444444444444,
+   10.841692338789152,
+   15,
+   15
+  ],
+  "flow": 3481.2190476190476,
+  "vs_plan": [
+   -1.0111111111111108,
+   0.994411190363565,
+   10,
+   15
+  ]
+ },
+ "I_exit|nominal|plan": {
+  "jam": 24.0,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -113.13333333333333,
+   12.76143330093371,
+   15,
+   15
+  ],
+  "flow": 3409.1809523809525,
+  "vs_ideal": [
+   11.9,
+   6.483091561167109,
+   0,
+   15
+  ],
+  "driver": {
+   "name": "nominal",
+   "reaction_median_s": 2.0,
+   "reaction_sigma_log": 0.4,
+   "comply_mean": 0.05,
+   "comply_sd": 0.05,
+   "decel_mps2": 1.5,
+   "seed_offset": 7000,
+   "compliance_bounds": [
+    -0.1,
+    0.5
+   ],
+   "changes": 120734,
+   "caps_written": 151888,
+   "caps_checked": 151888,
+   "caps_mismatched": 0
+  }
+ },
+ "I_exit|nominal|system": {
+  "jam": 12.266666666666667,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -124.86666666666666,
+   10.742744567686639,
+   15,
+   15
+  ],
+  "flow": 3480.304761904762,
+  "vs_plan": [
+   -11.733333333333333,
+   6.468548245326489,
+   14,
+   15
+  ],
+  "vs_ideal": [
+   1.177777777777778,
+   0.796464852346246,
+   5,
+   15
+  ],
+  "driver": {
+   "name": "nominal",
+   "reaction_median_s": 2.0,
+   "reaction_sigma_log": 0.4,
+   "comply_mean": 0.05,
+   "comply_sd": 0.05,
+   "decel_mps2": 1.5,
+   "seed_offset": 7000,
+   "compliance_bounds": [
+    -0.1,
+    0.5
+   ],
+   "changes": 159958,
+   "caps_written": 231109,
+   "caps_checked": 231109,
+   "caps_mismatched": 0
+  }
+ },
+ "I_exit|lax|plan": {
+  "jam": 62.74444444444445,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -74.38888888888889,
+   14.478726107644151,
+   15,
+   15
+  ],
+  "flow": 3313.980952380952,
+  "vs_ideal": [
+   50.644444444444446,
+   9.572218767560571,
+   0,
+   15
+  ],
+  "driver": {
+   "name": "lax",
+   "reaction_median_s": 4.0,
+   "reaction_sigma_log": 0.5,
+   "comply_mean": 0.15,
+   "comply_sd": 0.1,
+   "decel_mps2": 1.0,
+   "seed_offset": 7000,
+   "compliance_bounds": [
+    -0.1,
+    0.5
+   ],
+   "changes": 122881,
+   "caps_written": 177256,
+   "caps_checked": 177256,
+   "caps_mismatched": 0
+  }
+ },
+ "I_exit|lax|system": {
+  "jam": 13.722222222222223,
+  "free": 0,
+  "n": 15,
+  "vs_nc": [
+   -123.41111111111111,
+   10.478340808653472,
+   15,
+   15
+  ],
+  "flow": 3465.4857142857145,
+  "vs_plan": [
+   -49.02222222222222,
+   9.46409906308243,
+   15,
+   15
+  ],
+  "vs_ideal": [
+   2.6333333333333337,
+   1.3786735439329867,
+   3,
+   15
+  ],
+  "driver": {
+   "name": "lax",
+   "reaction_median_s": 4.0,
+   "reaction_sigma_log": 0.5,
+   "comply_mean": 0.15,
+   "comply_sd": 0.1,
+   "decel_mps2": 1.0,
+   "seed_offset": 7000,
+   "compliance_bounds": [
+    -0.1,
+    0.5
+   ],
+   "changes": 156802,
+   "caps_written": 254774,
+   "caps_checked": 254774,
+   "caps_mismatched": 0
+  }
+ }
+}

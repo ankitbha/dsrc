@@ -1,4 +1,4 @@
-"""Column-width figures for the jam-avoidance letter, from the committed results only.
+"""Figures for the jam-avoidance letter, from the committed results only.
 
     .venv/bin/python scripts/figures/paper_jam_figs.py --results-dir results/jam_approach \
         --out paper/figs
@@ -11,23 +11,27 @@ the approach results carry no selection of their own. It writes three PDFs, each
 
 * `fig_warning.pdf`: per trigger, the feed's speed warning and the camera's density warning
   before onset on the first segment to jam (block M's no-control runs), median and
-  interquartile range, with the plan's switch delay D drawn as a line.
+  interquartile range, with the plan's switch delay D drawn as a line. Half a column wide.
 * `fig_jams.pdf`: per trigger, ordered by no control's median onset, the jammed
   segment-minutes, mean and two standard errors over the 15 evaluation seeds, for no control,
   the feed lookahead and the two-layer controller. The seeds with no jam of 120 s or more are
   in the paper's table, so the figure does not repeat them; they stay in the series JSON.
+  Half a column wide, beside `fig_warning.pdf`.
 * `fig_lag.pdf` (only with block L): jammed segment-minutes against the feed delay D
   on the largest burst and the exit block, for the lookahead and the two-layer controller
   (no control reads no feed, so D does not apply to it).
 * `fig_penetration.pdf` (only with block P): jammed segment-minutes against the share of
   vehicles that follow, on the largest burst and the exit block, for the plan alone, the
   two-layer controller and, while the controller runs no gate, the rule with Section VI-F's
-  gate; no control is a line. Block P gives 0.5 and 0.75, the sweep in `sweep/p*/P.jsonl`
+  gate; with `--mechanism-selection` the third line is the rule without its gate instead
+  (the system before block N2). No control is a line. Block P gives 0.5 and 0.75, the sweep in `sweep/p*/P.jsonl`
   (2026-10-21) the shares between, and block M 1.0.
 
 The three paper arms are no control, the lookahead at its selected threshold and the best
 model, both read from `S_summary.json`; with `--gate-selection` (block N's `N_summary.json`,
-2026-10-20) the best model is the rule with its selected feed gate. Every jam number is the
+2026-10-20) the best model is the rule with its selected feed gate, and with
+`--mechanism-selection` (block N2's `N2_summary.json`, 2026-10-25) the rule with its selected
+queue release and gates. Every jam number is the
 record's `jam`, which on the network-measured results is the network's 12 super-segments. Colours follow the entity: the camera and the
 two-layer controller blue, the feed and the lookahead orange, no control neutral grey.
 """
@@ -57,6 +61,8 @@ GREEN, PINK = "#008300", "#e87ba4"
 GATE_SHOWN = 0.5
 INK, MUTED = "#2b2b29", "#6b6b66"
 COLUMN_IN = 3.45
+#: The warning and jam figures sit side by side in one column, so they are drawn at half its width.
+HALF_IN = 1.65
 
 LABELS = {"B5": "Burst\n5,000", "B7.5": "Burst\n7,500", "B9": "Burst\n9,000",
           "I_exit": "Exit\nblock", "I_mid": "Mid\nblock"}
@@ -136,29 +142,32 @@ def fig_warning(leads: dict, D: float, out: Path) -> dict:
         feed = sorted(e["W_feed"] for e in eps if e.get("W_feed") is not None)
         cam = sorted(e["W_cam"] for e in eps if e.get("W_cam") is not None)
         series[s] = {"feed": feed, "camera": cam}
-    fig, ax = plt.subplots(figsize=(COLUMN_IN, 1.3))
+    fig, ax = plt.subplots(figsize=(HALF_IN, 0.78))
     order = sorted(TRIGGERS, key=lambda s: statistics.median(series[s]["feed"] or [0]))
     for i, s in enumerate(order):
-        for dx, key, colour, marker, label in ((-0.12, "feed", ORANGE, "s", "Feed speed warning"),
-                                               (0.12, "camera", BLUE, "o", "Camera density warning")):
+        for dx, key, colour, marker, label in ((-0.15, "feed", ORANGE, "s", "Feed speed"),
+                                               (0.15, "camera", BLUE, "o", "Camera density")):
             v = series[s][key]
             if not v:
                 continue
             q1, med, q3 = statistics.quantiles(v, n=4) if len(v) > 1 else (v[0], v[0], v[0])
-            ax.vlines(i + dx, max(q1, 5), q3, color=colour, linewidth=1.5)
-            ax.plot(i + dx, max(med, 5), marker=marker, color=colour, markersize=5,
-                    markeredgecolor="white", markeredgewidth=0.8,
+            ax.vlines(i + dx, max(q1, 5), q3, color=colour, linewidth=1.2)
+            ax.plot(i + dx, max(med, 5), marker=marker, color=colour, markersize=3.8,
+                    markeredgecolor="white", markeredgewidth=0.6,
                     label=label if i == 0 else None, linestyle="none")
-    ax.axhline(D, color=MUTED, linewidth=0.9, linestyle=(0, (3, 2)))
-    ax.text(0.55, D * 1.12, f"feed delay D = {D:.1f} s", color=MUTED,
-            fontsize=6.5, ha="left", va="bottom")
+    ax.axhline(D, color=MUTED, linewidth=0.8, linestyle=(0, (3, 2)))
+    ax.text(-0.3, D * 1.15, f"D = {D:.1f} s", color=MUTED, fontsize=6, ha="left", va="bottom")
     ax.set_yscale("log")
     ax.set_ylim(5, 4000)
+    ax.set_xlim(-0.45, len(order) - 0.55)
     ax.set_xticks(range(len(order)), [LABELS[s] for s in order])
-    ax.set_ylabel("warning before onset (s)")
-    # Above the plot, so it covers none of the bursts' points.
-    _boxed(ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.03), ncol=2, frameon=True,
-                     fancybox=False, handletextpad=0.3, columnspacing=1.2, borderaxespad=0.0))
+    ax.tick_params(labelsize=6)
+    # Above the plot rather than along it: rotated, the label would be taller than the axes.
+    ax.set_title("warning before onset (s)", loc="left", fontsize=6.5, color=INK, pad=3)
+    # Lower right, below D, where no trigger's warning falls.
+    _boxed(ax.legend(loc="lower right", frameon=True, fancybox=False, fontsize=6,
+                     handletextpad=0.2, handlelength=1.0, borderaxespad=0.15, borderpad=0.3,
+                     labelspacing=0.25))
     fig.savefig(out / "fig_warning.pdf")
     fig.savefig(out / "fig_warning.png", dpi=300)
     plt.close(fig)
@@ -177,8 +186,8 @@ def fig_jams(records: list[dict], m_summary: dict, arms, out: Path) -> dict:
     onset = {s: row("no_control", "-", s)["km_onset_median_s"] or 1e9 for s in TRIGGERS}
     order = sorted(TRIGGERS, key=lambda s: onset[s])
     series = {}
-    fig, bottom = plt.subplots(figsize=(COLUMN_IN, 1.35))
-    width = 0.26
+    fig, bottom = plt.subplots(figsize=(HALF_IN, 0.95))
+    width = 0.27
     for j, (label, arm, variant, colour, marker) in enumerate(arms):
         dx = (j - 1) * width
         free, means, ses = [], [], []
@@ -191,14 +200,21 @@ def fig_jams(records: list[dict], m_summary: dict, arms, out: Path) -> dict:
         series[label] = {"jam_free": dict(zip(order, free)), "jam_mean": dict(zip(order, means)),
                          "jam_2se": dict(zip(order, ses))}
         xs = [i + dx for i in range(len(order))]
-        bottom.errorbar(xs, means, yerr=ses, color=colour, marker=marker, markersize=4.5,
-                        linestyle="none", elinewidth=1.2, capsize=0, markeredgecolor="white",
-                        markeredgewidth=0.6, label=label)
-    _boxed(bottom.legend(loc="upper right", ncol=1, frameon=True, fancybox=False,
-                         handlelength=1.0, borderaxespad=0.1))
-    bottom.set_ylabel("jammed segment-min")
+        bottom.errorbar(xs, means, yerr=ses, color=colour, marker=marker, markersize=3.5,
+                        linestyle="none", elinewidth=1.0, capsize=0, markeredgecolor="white",
+                        markeredgewidth=0.5, label=label)
+    # Above the plot, since inside it would cover a no-control point at this width; reordered
+    # so the rows read no control and the lookahead, then the global-local advisory.
+    handles, labels = bottom.get_legend_handles_labels()
+    _boxed(fig.legend([handles[k] for k in (0, 2, 1)], [labels[k] for k in (0, 2, 1)],
+                      loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2, frameon=True,
+                      fancybox=False, fontsize=6, handlelength=0.8, handletextpad=0.2,
+                      columnspacing=0.8, borderaxespad=0.0, borderpad=0.3, labelspacing=0.2))
+    bottom.set_title("jammed segment-min", loc="left", fontsize=6.5, color=INK, pad=3)
     bottom.set_ylim(bottom=0)
+    bottom.set_xlim(-0.45, len(order) - 0.55)
     bottom.set_xticks(range(len(order)), [LABELS[s] for s in order])
+    bottom.tick_params(labelsize=6)
     fig.savefig(out / "fig_jams.pdf")
     fig.savefig(out / "fig_jams.png", dpi=300)
     plt.close(fig)
@@ -251,17 +267,20 @@ def fig_lag(records_l: list[dict], records_m: list[dict], m_summary: dict, arms,
     return {f"{k[0]}|{k[1]}": v for k, v in series.items()}
 
 
-def fig_penetration(records_p: list[dict], records_m: list[dict], arms, out: Path) -> dict:
+def fig_penetration(records_p: list[dict], records_m: list[dict], arms, out: Path,
+                    earlier_rule: bool = False) -> dict:
     """Jam time against the share that follows. Every point must hold no control's seeds."""
     _, nc_arm, nc_variant, _, _ = arms[0]
     _, best_arm, best_variant, _, _ = arms[2]
     lines = [("Plan alone", "plan", "-", GREEN, "s", "-"),
              ("Global-local", best_arm, best_variant, BLUE, "o", "-")]
-    if best_arm == "rule" and "_g" not in best_variant:
+    if earlier_rule:
+        lines.append(("Global-local, no gate", "rule", "m0", PINK, "D", (0, (3, 1.5))))
+    elif best_arm == "rule" and "_g" not in best_variant:
         lines.append(("Global-local with feed gate", "rule", f"{best_variant}_g{GATE_SHOWN:g}",
                       PINK, "D", (0, (3, 1.5))))
     shares = sorted({float(r["penetration"]) for r in records_p} | {1.0})
-    fig, axes = plt.subplots(1, 2, figsize=(COLUMN_IN, 1.55))
+    fig, axes = plt.subplots(1, 2, figsize=(COLUMN_IN, 1.3))
     series = {}
     for ax, s in zip(axes, ("B9", "I_exit")):
         nc = _jam_by_seed(records_m, nc_arm, nc_variant, s)
@@ -310,6 +329,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--selection", default=str(SELECTION))
     parser.add_argument("--gate-selection", default=None,
                         help="block N's N_summary.json: the rule's selected feed gate")
+    parser.add_argument("--mechanism-selection", default=None,
+                        help="block N2's N2_summary.json: the rule's selected queue release "
+                             "and gates")
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     results, out = Path(args.results_dir), Path(args.out)
@@ -319,8 +341,10 @@ def main(argv: list[str] | None = None) -> int:
     s_summary = json.loads(Path(args.selection).read_text())
     leads = json.loads((results / "leads.json").read_text())
     records_m = _records(results / "M.jsonl")
-    n_summary = (json.loads(Path(args.gate_selection).read_text())
-                 if args.gate_selection else None)
+    if args.gate_selection and args.mechanism_selection:
+        raise SystemExit("--mechanism-selection replaces block N's gate; pass one of them")
+    chosen = args.mechanism_selection or args.gate_selection
+    n_summary = json.loads(Path(chosen).read_text()) if chosen else None
     arms = paper_arms(s_summary, n_summary)
     D = float(m_summary["feed_artefact"]["D"])
     written = {"warning": fig_warning(leads, D, out),
@@ -331,7 +355,9 @@ def main(argv: list[str] | None = None) -> int:
         records_p = _records(results / "P.jsonl")
         for path in sorted((results / "sweep").glob("p*/P.jsonl")):
             records_p += _records(path)
-        written["penetration"] = fig_penetration(records_p, records_m, arms, out)
+        written["penetration"] = fig_penetration(
+            records_p, records_m, arms, out,
+            earlier_rule=bool(args.mechanism_selection) and arms[2][2] != "m0")
     (out / "paper_jam_figs_series.json").write_text(json.dumps(written, indent=1, default=str))
     print("wrote", ", ".join(sorted(written)), "to", out)
     return 0
