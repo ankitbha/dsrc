@@ -271,6 +271,9 @@ class Selection:
     camera_gate: float | None = None
     mechanism_path: str | None = None
     mechanism_sha256: str | None = None
+    #: False when the queue release was added to block N2's selection by
+    #: `--release-candidate` (block P only), so every header says it was not selected.
+    release_selected: bool = True
 
     def mechanism_params(self) -> dict[str, Any]:
         """The selected rule's parameters beyond m_on: feed gate, release, camera gate."""
@@ -713,6 +716,7 @@ def header(block: str, context: Context, specs: Sequence[Spec],
                        "release_discharge": context.selection.release_discharge,
                        "camera_gate": context.selection.camera_gate,
                        "mechanism_path": context.selection.mechanism_path,
+                       "release_selected": context.selection.release_selected,
                        "mechanism_sha256": context.selection.mechanism_sha256}
                       if context.selection else None),
         "drain_thresholds": {"path": str(THRESHOLDS), "sha256": _sha256(THRESHOLDS)},
@@ -1730,6 +1734,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="approach boundary: block N2's N2_summary.json, whose queue "
                              "release, feed gate and camera gate the rule runs in blocks M "
                              "to K and D")
+    parser.add_argument("--release-candidate", action="store_true",
+                        help="block P with --mechanism-selection: add the queue release to the "
+                             "selected system; recorded as not selected")
     parser.add_argument("--gate-candidate", type=float, default=None,
                         help="with --gate-selection: run this one of block N's evaluated "
                              "gates instead of the selected one; recorded as not selected")
@@ -1813,6 +1820,9 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
         check_block_boundary(block, args.boundary)
     if args.gate_candidate is not None and not args.gate_selection:
         raise SystemExit("--gate-candidate names one of block N's gates; pass --gate-selection")
+    if args.release_candidate and (not args.mechanism_selection or args.block != ["P"]):
+        raise SystemExit("--release-candidate adds the queue release to block N2's selection "
+                         "in block P only; pass --mechanism-selection and --block P")
     if args.gate_selection and args.mechanism_selection:
         raise SystemExit("--mechanism-selection replaces block N's gate; pass one of them")
     if args.gate_selection and args.boundary != "approach":
@@ -1858,6 +1868,9 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
             if context.mechanism_selection_path is not None and block not in ("N", "N2"):
                 context.selection = read_mechanism_selection(context.mechanism_selection_path,
                                                              context.selection)
+                if args.release_candidate and not context.selection.release_discharge:
+                    context.selection = replace(context.selection, release_discharge=True,
+                                                release_selected=False)
             elif block == "D":
                 raise SystemExit("block D runs the selected system; pass --mechanism-selection")
         elif block in ("M", "L", "P", "K"):

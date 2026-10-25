@@ -114,3 +114,37 @@ block N's candidates, its existing M and P records stand.
 2. The no-trigger constraint (1% beyond plan alone) is the selection's new rule.
 3. `gate_J` fixed at 0.5; `m_on` stays 0; `tau_l` stays 10 s.
 4. C1 has no gate; C2's parameters are assumed (tier 3) and run at two settings.
+
+## Block N2 result (2026-10-25, 12:20)
+
+240 episodes at `9f2ffb6`, seeds 11-15, 0 collisions, 0 collision teleports, 0 writes above
+the plan. No control and plan alone equal block N's records on every seed. Floor with no
+trigger: 3,406.5 veh/h (plan alone 3,442.1 minus 1% of no control's 3,561.1).
+
+| Candidate | C | BG flow (veh/h) | Meets floor |
+|---|---|---|---|
+| m0_r | -0.1353 | 3,299.7 | no |
+| m0 | -0.1334 | 3,308.3 | no |
+| m0_g0.5_c1 | -0.1279 | 3,365.6 | no |
+| m0_r_g0.5_c0.8 | -0.1263 | 3,317.1 | no |
+| m0_r_g0.5_c1 | -0.1255 | 3,371.7 | no |
+| m0_g0.5 | -0.1132 | 3,432.8 | yes |
+| m0_g0.5_c0.8 | -0.1113 | 3,316.5 | no |
+| m0_g1 | -0.1102 | 3,436.8 | yes |
+| m0_r_g0.5 | -0.1093 | 3,429.3 | yes |
+| m0_g1.5 | -0.0923 | 3,438.1 | yes |
+| m0_g2 | -0.0775 | 3,442.9 | yes |
+
+**Selected: `m0_g1`, the feed gate at 1.0, without the queue release or the camera gate.**
+`m0_g0.5`, `m0_g1` and `m0_r_g0.5` are within C_TIE of the lowest eligible C; the gate at 1.0
+serves the most with no trigger.
+
+- The camera gate fails the floor at both kappa: with no trigger, the camera's occupancy
+  reaches 0.8 or 1.0 k_c often enough to reopen most of the correction's cost (the shown speed
+  changed on 7.3-14.7% of BG vehicle-ticks, against 0.4-0.6% for the feed gates).
+- The queue release changes C by less than C_TIE at full penetration (-0.1353 against -0.1334
+  without a gate, -0.1093 against -0.1132 with the gate at 0.5). It was built for partial
+  compliance, which the selection does not test, so block P also runs the selected system with
+  the release added (`--release-candidate`, recorded as not selected) at 0.5 and 0.75.
+- Disclosure, as in section 2: the gate at 0.5's evaluation-seed results were seen before the
+  floor was written; the gate at 1.0 had not been run on evaluation seeds.

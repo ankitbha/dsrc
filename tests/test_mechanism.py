@@ -273,6 +273,28 @@ class TestMechanismSelection:
         with pytest.raises(SystemExit):
             rje.read_mechanism_selection(self._write(tmp_path, **changes), SELECTION)
 
+    def test_the_release_candidate_runs_in_block_p_only_and_is_recorded(self, tmp_path):
+        seen = {}
+
+        def factory(model, context):
+            seen["selection"] = context.selection
+
+            def run(spec):
+                raise SystemExit("stop after the specs")
+            return run
+        path = self._write(tmp_path, selected={"m_on": 0.0, "gate_J": 1.0,
+                                               "release_discharge": False, "camera_gate": None})
+        base = ["--boundary", "approach", "--mechanism-selection", str(path), "--results-dir",
+                str(tmp_path / "r"), "--traces-dir", str(tmp_path / "t")]
+        with pytest.raises(SystemExit):
+            rje.main(base + ["--block", "M", "--release-candidate"], run_episode_factory=factory)
+        with pytest.raises(SystemExit, match="stop after the specs"):
+            rje.main(base + ["--block", "P", "--release-candidate", "--penetrations", "0.5"],
+                     run_episode_factory=factory)
+        sel = seen["selection"]
+        assert sel.release_discharge and not sel.release_selected and sel.gate_J == 1.0
+        assert rje._variant("rule", {"m_on": 0.0, **sel.mechanism_params()}) == "m0_r_g1"
+
     def test_block_d_needs_the_mechanism_selection(self, tmp_path):
         with pytest.raises(SystemExit):
             rje.main(["--boundary", "approach", "--block", "D", "--results-dir",
