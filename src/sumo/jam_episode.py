@@ -41,6 +41,14 @@ the largest jam factor over the network's 12 super-segments, measured against on
 below that version's plan (`correction.advised_jam_factor`). Every vehicle that applies the
 same version sees the same gate. A vehicle already on when its gate closes is released
 through the rule's hysteresis. `gate_J = None` is the rule every earlier result ran.
+
+**Queue release, camera gate, camera alone, driver response** (plan 2026-10-25). The rule
+and the oracle take `release_discharge` (off while the road ahead is a queue emptying) and
+`camera_gate` (the vehicle's own occupancy also opens its feed gate). `no_plan` runs the rule
+on a plan of 1.0 everywhere, the camera layer alone. `run_jam_episode(driver=...)` puts a
+`DriverResponse` between the write path and SUMO: the shown speed reaches the cap after a
+reaction time, offset by the driver's compliance, and a lower cap is approached at a bounded
+deceleration. Every default is the arm every earlier result ran.
 """
 from __future__ import annotations
 
@@ -58,6 +66,7 @@ from src.sumo.correction import (
     LearnedCorrection, LookaheadRule, RuleCorrection, TakeTheSlower, gate_signal,
     shown_fraction, step_down,
 )
+from src.sumo.driver import DriverResponse, DriverSetting
 from src.sumo.feed import FeedProcess, Synchronous, VersionKeyed, _sha256
 from src.sumo.feed_episode import FeedEngine, Mode, _scenario_paths, decision_instants
 from src.sumo.mainz import (
@@ -144,6 +153,11 @@ class JamArm:
     #: The feed gate (2026-10-20): the rule may switch on only while the applied version's
     #: `gate_signal` is at least this. None is no gate, as every earlier result ran.
     gate_J: float | None = None
+    #: Plan 2026-10-25: the queue release, the camera's share in opening the feed gate
+    #: (kappa, a multiple of k_c), and the rule on a plan of 1.0 (the camera alone).
+    release_discharge: bool = False
+    camera_gate: float | None = None
+    no_plan: bool = False
 
     def __post_init__(self) -> None:
         if self.arm not in ARMS:
@@ -154,6 +168,14 @@ class JamArm:
             raise ValueError(f"arm {self.arm} needs {name}")
         if self.gate_J is not None and self.arm not in ("rule", "oracle"):
             raise ValueError(f"the feed gate acts on the rule's switch; arm {self.arm} has none")
+        if (self.release_discharge or self.camera_gate is not None
+                or self.no_plan) and self.arm not in ("rule", "oracle"):
+            raise ValueError(f"the queue release, the camera gate and no_plan act on the rule; "
+                             f"arm {self.arm} has none")
+        if self.camera_gate is not None and self.gate_J is None:
+            raise ValueError("the camera gate opens the feed gate; give gate_J")
+        if self.no_plan and self.gate_J is not None:
+            raise ValueError("no_plan reads no feed, so it has no feed gate")
 
     @property
     def sensor(self) -> str:
@@ -165,7 +187,13 @@ class JamArm:
         return "none"
 
     def describe(self) -> dict[str, Any]:
-        return {**asdict(self), "sensor": self.sensor}
+        out = {**asdict(self), "sensor": self.sensor}
+        # Left out at their defaults, so every earlier arm describes itself as it did.
+        for name, default in (("release_discharge", False), ("camera_gate", None),
+                              ("no_plan", False)):
+            if out[name] == default:
+                del out[name]
+        return out
 
 
 @dataclass(frozen=True)
@@ -271,6 +299,9 @@ class JamEngine(FeedEngine):
     snapshot_source: Callable[[float], Any] | None = None
     #: The approach boundary has no gate: every trace sample asserts nothing is held.
     assert_no_gate: bool = False
+    #: Plan 2026-10-25 section 4: a driver between the shown speed and the cap; None applies
+    #: the shown speed at once, as every earlier result did.
+    driver: DriverSetting | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -321,12 +352,31 @@ class JamEngine(FeedEngine):
         self._sensed: dict[str, Any] | None = None
         self.correction = None
         if arm.arm in ("rule", "oracle"):
-            self.correction = RuleCorrection(arm.m_on, arm.tau_l, name=arm.arm)
+            self.correction = RuleCorrection(arm.m_on, arm.tau_l, name=arm.arm,
+                                             release_discharge=arm.release_discharge,
+                                             camera_gate=arm.camera_gate)
         elif arm.arm == "learned":
             self.correction = LearnedCorrection(self.predictor, arm.theta)
         elif arm.arm == "take_the_slower":
             self.correction = TakeTheSlower(self.q_model)
         self.lookahead = LookaheadRule(arm.J_th) if arm.arm == "lookahead" else None
+        self.driver_response = None
+        if self.driver is not None:
+            self.driver_response = DriverResponse(self.driver, self.seed, self.env._apply,
+                                                  self._vehicle_speed)
+            self._driver_checked = self._driver_mismatched = 0
+
+    @staticmethod
+    def _vehicle_speed(vehicle: str) -> float:
+        from src.sumo.binding import _sumo
+
+        return float(_sumo.vehicle.getSpeed(vehicle))
+
+    def _fraction(self, version: int, segment: int) -> float:
+        """The plan's fraction, or 1.0 everywhere for the camera layer alone."""
+        if self.arm.no_plan:
+            return 1.0
+        return super()._fraction(version, segment)
 
     # ------------------------------------------------------------- stage 1 hooks
 
@@ -373,6 +423,8 @@ class JamEngine(FeedEngine):
             self._sense(t)
         if self.arm.arm != "no_control" and t >= self.control_start_s:
             self._writes(t, tick)
+            if self.driver_response is not None:
+                self._drive(t)
         if self.record_jam and tick % TRACE_EVERY_S == 0:
             self._record_jam(t)
 
@@ -510,10 +562,27 @@ class JamEngine(FeedEngine):
                 self.counter.stepped_down += 1
             if self.write_log:
                 self.writes_log.append([vehicle, tick, edge, version, plan, shown])
-        if mapping:
+        if mapping and self.driver_response is not None:
+            for vehicle, shown in mapping.items():
+                free = self.env._static[edges[vehicle]]["free_flow_kmh"] / 3.6
+                self.driver_response.submit(t, vehicle, shown * free)
+        elif mapping:
             self.env.command_vehicles(mapping, edges)
             if self.check_max_speed:
                 self._check(mapping, edges)
+
+    def _drive(self, t: float) -> None:
+        """Move every driver one tick; with `check_max_speed`, read each cap back."""
+        present = {vehicle for vehicle, _edge, _segment in self._last_scan}
+        written = self.driver_response.advance(t, present)
+        if self.check_max_speed and written:
+            from src.sumo.binding import _sumo
+
+            for vehicle, cap in written.items():
+                self._driver_checked += 1
+                if not math.isclose(_sumo.vehicle.getMaxSpeed(vehicle), cap,
+                                    rel_tol=1e-9, abs_tol=1e-9):
+                    self._driver_mismatched += 1
 
     def _check(self, mapping: dict[str, float], edges: dict[str, str]) -> None:
         """Read the cap back from SUMO for every stepped-down write (attack point 2)."""
@@ -617,6 +686,12 @@ class JamEngine(FeedEngine):
             "switches_by_version": switches,
             "versions_published": len(self.vectors),
             "gate_J": self.arm.gate_J,
+            "driver": ({**self.driver_response.describe(),
+                        "changes": self.driver_response.changes,
+                        "caps_written": self.driver_response.applied,
+                        "caps_checked": self._driver_checked,
+                        "caps_mismatched": self._driver_mismatched}
+                       if self.driver_response is not None else None),
             "gate_open_share": ((self._gate_open_ticks / c.vehicle_ticks)
                                 if self.arm.gate_J is not None and c.vehicle_ticks else None),
             "gate_signal_by_version": {str(k): round(v, 4)
@@ -668,6 +743,7 @@ def run_jam_episode(model, seed: int, scenario: str | JamScenario, arm: JamArm, 
                     check_max_speed: bool = False, sample_fraction: float = 0.0,
                     aligned_feed: bool = False, record_trace: bool = True,
                     boundary: Boundary = GATED,
+                    driver: DriverSetting | None = None,
                     on_engine: Callable[[JamEngine], None] | None = None) -> dict[str, Any]:
     """One episode; returns its outcome, the engine's counters and the 10 s trace.
 
@@ -716,7 +792,8 @@ def run_jam_episode(model, seed: int, scenario: str | JamScenario, arm: JamArm, 
                        successor=route_successors(scenario, boundary),
                        q_model=model, predictor=predictor, sense=sense,
                        sample_fraction=sample_fraction, write_log=write_log,
-                       check_max_speed=check_max_speed, assert_no_gate=boundary.is_approach)
+                       check_max_speed=check_max_speed, assert_no_gate=boundary.is_approach,
+                       driver=driver)
     rewards, total_no_control = [], 0.0
     started = time.perf_counter()
     try:

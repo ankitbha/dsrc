@@ -90,18 +90,19 @@ for _path in (REPO_ROOT, REPO_ROOT / "scripts"):
 from evaluate_mainz_checkpoints import _provenance  # noqa: E402
 from train_mainz_src import SCENARIOS as FILE_SETS  # noqa: E402
 
-BLOCKS = ("G", "T", "S", "M", "L", "P", "K", "Q", "N")
+BLOCKS = ("G", "T", "S", "M", "L", "P", "K", "Q", "N", "N2", "D")
 BLOCK_SEEDS: dict[str, tuple[int, ...]] = {
     "G": tuple(range(1, 6)), "T": tuple(range(1, 11)), "S": tuple(range(11, 16)),
     "M": tuple(range(16, 31)), "L": tuple(range(16, 31)), "P": tuple(range(16, 31)),
     "K": tuple(range(16, 31)), "Q": (1, 2), "N": tuple(range(11, 16)),
+    "N2": tuple(range(11, 16)), "D": tuple(range(16, 31)),
 }
 #: Blocks that select or train (G, T, S) run on the gated boundary only, and block Q, the
 #: approach boundary's qualification, on the approach boundary only.
 GATED_ONLY_BLOCKS: tuple[str, ...] = ("G", "T", "S")
-APPROACH_ONLY_BLOCKS: tuple[str, ...] = ("Q", "N")
+APPROACH_ONLY_BLOCKS: tuple[str, ...] = ("Q", "N", "N2", "D")
 #: Blocks that read the thresholds and the best model from a selection.
-SELECTED_BLOCKS: tuple[str, ...] = ("M", "L", "P", "K", "Q", "N")
+SELECTED_BLOCKS: tuple[str, ...] = ("M", "L", "P", "K", "Q", "N", "N2", "D")
 #: The committed selection the approach boundary runs (approach plan section 4.5).
 APPROACH_SELECTION = REPO_ROOT / "results" / "jam" / "S_summary.json"
 APPROACH_SELECTION_SHA256 = "5bce02db2330c63ac873c306988c6c961ef59dadb1a9703b65da9f07c016dc05"
@@ -154,6 +155,23 @@ C_TIE = 0.02
 #: factor over the network against one step below the plan. The rule without a gate is the
 #: fifth candidate.
 GATE_GRID = (0.5, 1.0, 1.5, 2.0)
+#: Block N2 (plan 2026-10-25 section 2): the queue release and the camera gate, at the feed
+#: gate block N ranked first among its gated candidates. Each entry is the rule's extra
+#: parameters on top of its m_on.
+N2_GATE_J = 0.5
+MECHANISM_GRID: tuple[dict[str, Any], ...] = (
+    {"release_discharge": True},
+    {"release_discharge": True, "gate_J": N2_GATE_J},
+    {"release_discharge": True, "gate_J": N2_GATE_J, "camera_gate": 1.0},
+    {"release_discharge": True, "gate_J": N2_GATE_J, "camera_gate": 0.8},
+    {"gate_J": N2_GATE_J, "camera_gate": 1.0},
+    {"gate_J": N2_GATE_J, "camera_gate": 0.8},
+)
+#: Block N2's eligibility: with no trigger a candidate serves at least plan alone's flow
+#: minus this share of no control's.
+N2_BG_ALLOWANCE = 0.01
+#: Block D's driver settings (`src.sumo.driver.DRIVERS`).
+DRIVER_SETTINGS = ("nominal", "lax")
 
 
 # --------------------------------------------------------------------- specs
@@ -175,6 +193,9 @@ class Spec:
     #: Block K (Amendment 3, R2-4): the camera's persistent pair spread as a share of the
     #: camera model's stored one.
     pair_sigma_scale: float = 1.0
+    #: Block D (plan 2026-10-25 section 4): a `DRIVERS` setting, or None for the shown
+    #: speed applied at once.
+    driver: str | None = None
 
     @property
     def key(self) -> str:
@@ -189,22 +210,35 @@ class Spec:
         return JamArm(self.arm, **dict(self.params))
 
 
-def _variant(arm: str, params: dict[str, float]) -> str:
+def _mechanism(params: dict[str, Any]) -> str:
+    """The queue release, feed gate, camera gate and camera-alone suffixes, in that order;
+    empty for the rule every earlier result ran."""
+    out = "_r" if params.get("release_discharge") else ""
+    if params.get("gate_J") is not None:
+        out += f"_g{params['gate_J']:g}"
+    if params.get("camera_gate") is not None:
+        out += f"_c{params['camera_gate']:g}"
+    if params.get("no_plan"):
+        out += "_local"
+    return out
+
+
+def _variant(arm: str, params: dict[str, Any]) -> str:
     if arm == "lookahead":
         return f"J{params['J_th']:g}"
     if arm == "rule":
-        gate = params.get("gate_J")
-        return f"m{params['m_on']:g}" + (f"_g{gate:g}" if gate is not None else "")
+        return f"m{params['m_on']:g}" + _mechanism(params)
     if arm == "learned":
         return f"th{params['theta']:g}"
     if arm == "oracle":
         base = f"tau{params.get('tau_l', 10.0):g}_m{params['m_on']:g}"
-        return base + (f"_R{params['oracle_R']:g}" if params.get("oracle_R", 80.0) != 80.0 else "")
+        return (base + (f"_R{params['oracle_R']:g}" if params.get("oracle_R", 80.0) != 80.0 else "")
+                + _mechanism(params))
     return "-"
 
 
 def _duration(block: str, scenario: str) -> float:
-    if block in ("G", "T", "S", "N"):
+    if block in ("G", "T", "S", "N", "N2"):
         return SHORT_S
     if scenario == "BG":
         return SHORT_S
@@ -232,6 +266,22 @@ class Selection:
     #: False when `gate_J` is one of block N's candidates run on Ankit's decision rather than
     #: the one block N selected (2026-10-20, `--gate-candidate`).
     gate_selected: bool = True
+    #: Block N2's selection (plan 2026-10-25): the rule's queue release and camera gate.
+    release_discharge: bool = False
+    camera_gate: float | None = None
+    mechanism_path: str | None = None
+    mechanism_sha256: str | None = None
+
+    def mechanism_params(self) -> dict[str, Any]:
+        """The selected rule's parameters beyond m_on: feed gate, release, camera gate."""
+        out: dict[str, Any] = {}
+        if self.gate_J is not None:
+            out["gate_J"] = self.gate_J
+        if self.release_discharge:
+            out["release_discharge"] = True
+        if self.camera_gate is not None:
+            out["camera_gate"] = self.camera_gate
+        return out
 
     @property
     def best_reads_camera(self) -> bool:
@@ -267,19 +317,33 @@ def arm_list(block: str, selection: Selection | None, grid: bool = False,
     if block == "N":
         return ([("no_control", {}, {}), ("plan", {}, {}), ("rule", {"m_on": selection.m_on}, {})]
                 + [("rule", {"m_on": selection.m_on, "gate_J": g}, {}) for g in GATE_GRID])
+    if block == "N2":
+        return ([("no_control", {}, {}), ("plan", {}, {})]
+                + [("rule", {"m_on": selection.m_on, **extra}, {}) for extra in MECHANISM_GRID])
     best_params = dict(selection.best_params)
-    if selection.best_arm == "rule" and selection.gate_J is not None:
-        best_params["gate_J"] = selection.gate_J
+    if selection.best_arm == "rule":
+        best_params.update(selection.mechanism_params())
     best = (selection.best_arm, best_params, {})
     if block == "M":
         gated = ([("rule", {"m_on": selection.m_on, "gate_J": selection.gate_J}, {})]
-                 if selection.gate_J is not None else [])
-        return [("no_control", {}, {}), ("lookahead", {"J_th": selection.J_th}, {}),
+                 if selection.gate_J is not None and selection.mechanism_path is None else [])
+        oracle = {"m_on": selection.m_on, "tau_l": 10.0, "oracle_R": _window(oracle_window)}
+        arms = [("no_control", {}, {}), ("lookahead", {"J_th": selection.J_th}, {}),
                 ("plan", {}, {}), ("take_the_slower", {}, {}),
                 ("rule", {"m_on": selection.m_on}, {}), *gated,
-                ("learned", {"theta": selection.theta}, {}),
-                ("oracle", {"m_on": selection.m_on, "tau_l": 10.0,
-                            "oracle_R": _window(oracle_window)}, {})]
+                ("learned", {"theta": selection.theta}, {}), ("oracle", oracle, {})]
+        if selection.mechanism_path is not None:
+            # Plan 2026-10-25: the selected system, the same mechanism on true occupancy,
+            # and the camera alone (the system's release, no plan and no gate).
+            local = {"m_on": selection.m_on, "no_plan": True}
+            if selection.release_discharge:
+                local["release_discharge"] = True
+            arms += [best, ("oracle", {**oracle, **selection.mechanism_params()}, {}),
+                     ("rule", local, {})]
+        return _unique(arms)
+    if block == "D":
+        return [(a, p, {"driver": d}) for d in DRIVER_SETTINGS
+                for a, p, _ in _unique([("plan", {}, {}), best])]
     if block == "L":
         arms = [("lookahead", {"J_th": selection.J_th}, {}), ("plan", {}, {}), best]
         return [(a, p, {"m": m}) for m in LAGS_L for a, p, _ in _unique(arms)]
@@ -332,7 +396,7 @@ def _unique(arms):
 def _scenarios(block: str) -> tuple[str, ...]:
     if block in ("G",):
         return ("B9", "I_exit")
-    if block in ("T", "S", "N"):
+    if block in ("T", "S", "N", "N2"):
         return TRAINING_SCENARIOS
     if block == "M":
         return PERTURBATIONS + ("BG", "S45")
@@ -381,6 +445,8 @@ def block_specs(block: str, seeds: Sequence[int] | None = None,
             variant += f"_b{extra['bias']:g}"
         if "pair_sigma_scale" in extra:
             variant += f"_ps{extra['pair_sigma_scale']:g}"
+        if "driver" in extra:
+            variant += f"_drv{extra['driver']}"
         if dagger:
             variant += "_dagger"
         for scenario in _scenarios(block):
@@ -392,8 +458,9 @@ def block_specs(block: str, seeds: Sequence[int] | None = None,
                                   bias=extra.get("bias", 1.0),
                                   params=tuple(sorted(params.items())),
                                   sample_fraction=extra.get("sample_fraction", 0.0),
-                                  pair_sigma_scale=extra.get("pair_sigma_scale", 1.0)))
-        if block == "M" and arm == "oracle":
+                                  pair_sigma_scale=extra.get("pair_sigma_scale", 1.0),
+                                  driver=extra.get("driver")))
+        if block == "M" and arm == "oracle" and not _mechanism(params):
             wide = {**params, "oracle_R": WIDE_R}
             for scenario in ("B9", "I_exit"):
                 for seed in seeds:
@@ -486,6 +553,31 @@ def read_gate_selection(path: Path, selection: Selection,
                    gate_sha256=hashlib.sha256(raw).hexdigest(), gate_selected=selected)
 
 
+def read_mechanism_selection(path: Path, selection: Selection) -> Selection:
+    """`selection` with block N2's choice (plan 2026-10-25): its feed gate, queue release and
+    camera gate replace any block N gate. Refused unless block N2 ran on seeds 11-15 with the
+    rule's `m_on` of `selection` and selected a candidate."""
+    raw = Path(path).read_bytes()
+    data = json.loads(raw)
+    seeds = sorted(set(data.get("seeds") or []))
+    if data.get("block") != "N2" or seeds != list(SELECTION_SEEDS):
+        raise SystemExit(f"{path} is not a block N2 summary on seeds 11-15 (block "
+                         f"{data.get('block')}, seeds {seeds})")
+    chosen = data.get("selected")
+    if not chosen:
+        raise SystemExit(f"{path} selected nothing ({data.get('decision')})")
+    if float(chosen["m_on"]) != float(selection.m_on):
+        raise SystemExit(f"{path} selected the rule at m_on {chosen['m_on']}; this "
+                         f"selection's rule runs m_on {selection.m_on}")
+    gate = chosen.get("gate_J")
+    camera = chosen.get("camera_gate")
+    return replace(selection, gate_J=None if gate is None else float(gate),
+                   gate_path=None, gate_sha256=None, gate_selected=True,
+                   release_discharge=bool(chosen.get("release_discharge")),
+                   camera_gate=None if camera is None else float(camera),
+                   mechanism_path=str(path), mechanism_sha256=hashlib.sha256(raw).hexdigest())
+
+
 def smoke_selection() -> Selection:
     """A smoke run's stand-in: each grid's first value and the rule as best. Chooses
     nothing; it exists so blocks M to K can be run end to end before block S has."""
@@ -536,6 +628,8 @@ class Context:
     selection_path: Path | None = None
     #: Block N's summary, read by blocks M to K and Q on the approach boundary.
     gate_selection_path: Path | None = None
+    #: Block N2's summary (plan 2026-10-25), read by blocks M to K and D.
+    mechanism_selection_path: Path | None = None
     step_length_s: float = 0.5
     window_start_s: float = 900.0
     smoke: bool = False
@@ -615,7 +709,11 @@ def header(block: str, context: Context, specs: Sequence[Spec],
                        "gate_J": context.selection.gate_J,
                        "gate_path": context.selection.gate_path,
                        "gate_sha256": context.selection.gate_sha256,
-                       "gate_selected": context.selection.gate_selected}
+                       "gate_selected": context.selection.gate_selected,
+                       "release_discharge": context.selection.release_discharge,
+                       "camera_gate": context.selection.camera_gate,
+                       "mechanism_path": context.selection.mechanism_path,
+                       "mechanism_sha256": context.selection.mechanism_sha256}
                       if context.selection else None),
         "drain_thresholds": {"path": str(THRESHOLDS), "sha256": _sha256(THRESHOLDS)},
         "scenario_files": files, "episodes_planned": len(specs),
@@ -751,6 +849,7 @@ def run_block(block: str, specs: Sequence[Spec], run_episode: EpisodeFn, *,
                       "duration_s": spec.duration_s, "m": spec.m,
                       "penetration": spec.penetration, "bias": spec.bias,
                       "pair_sigma_scale": spec.pair_sigma_scale,
+                      **({"driver_setting": spec.driver} if spec.driver is not None else {}),
                       "params": dict(spec.params), "wall_s": wall,
                       "trace_file": str(trace_path),
                       "samples_file": str(samples_path) if samples_path else None,
@@ -817,6 +916,10 @@ def episode_runner(model, context: Context) -> EpisodeFn:
         from src.sumo import jam_episode
 
         kwargs = {"boundary": boundary} if boundary.is_approach else {}
+        if spec.driver is not None:
+            from src.sumo.driver import DRIVERS
+
+            kwargs["driver"] = DRIVERS[spec.driver]
         result = jam_episode.run_jam_episode(
             model, spec.seed, scenario, arm, feed=feed, duration_s=spec.duration_s,
             penetration=spec.penetration, camera=spec_camera,
@@ -1216,6 +1319,8 @@ def summarize_eval(block: str, episodes: list[dict]) -> dict[str, Any]:
             base = f"plan/-_lag{name.split('_lag')[-1].split('/')[0]}/{row['scenario']}"
         elif block == "P" or (block == "Q" and "_p" in row["variant"]):
             base = f"plan/-_p{name.split('_p')[-1].split('/')[0]}/{row['scenario']}"
+        elif block == "D":
+            base = f"plan/-_drv{name.split('_drv')[-1].split('/')[0]}/{row['scenario']}"
         if base in rows and base != name:
             a = {int(s): v["jam_time_min"] for s, v in row["by_seed"].items()}
             b = {int(s): v["jam_time_min"] for s, v in rows[base]["by_seed"].items()}
@@ -1407,6 +1512,124 @@ def summarize_n(episodes: list[dict]) -> dict[str, Any]:
             "decision": decision}
 
 
+def _n2_unchanged(n2: list[dict], n: list[dict]) -> list[str]:
+    """Block N2 re-runs no control and plan alone on seeds 11-15; each must equal block N's
+    record of the same cell (jam time, flow, arrivals), or the code change moved the arms
+    that block N's candidates were measured against."""
+    earlier = {(r["arm"], r["scenario"], r["seed"]): r for r in n
+               if r["arm"] in ("no_control", "plan")}
+    differ = []
+    for r in n2:
+        if r["arm"] not in ("no_control", "plan"):
+            continue
+        old = earlier.get((r["arm"], r["scenario"], r["seed"]))
+        if old is None or (old["jam"]["jam_time_min_900_3600"], old["flow"], old["arrived"]) != \
+                (r["jam"]["jam_time_min_900_3600"], r["flow"], r["arrived"]):
+            differ.append(f"{r['arm']}/{r['scenario']}/{r['seed']}")
+    return sorted(differ)
+
+
+def summarize_n2(episodes: list[dict], n_episodes: list[dict]) -> dict[str, Any]:
+    """Block N2 (plan 2026-10-25 section 2): the queue release and camera gate, selected on
+    seeds 11-15 together with block N's candidates.
+
+    A candidate is eligible when it has no collision, collision teleport or write above the
+    plan, and with no trigger serves at least plan alone's flow minus `N2_BG_ALLOWANCE` of
+    no control's. Among eligible candidates the lowest criterion C wins, and those within
+    `C_TIE` of it are ordered by BG flow, highest first. No control and plan alone come from
+    N2's own runs, which must equal block N's.
+    """
+    from src.analysis.jam_metrics import SELECTION_SCENARIOS, criterion_c
+
+    seeds = sorted({r["seed"] for r in episodes})
+    if sorted(set(seeds) - set(SELECTION_SEEDS)):
+        raise SystemExit(f"block N2 selects on seeds 11-15; its records hold {seeds}")
+    m_on = sorted({float((r.get("params") or {}).get("m_on")) for r in episodes + n_episodes
+                   if r["arm"] == "rule"})
+    if len(m_on) != 1:
+        raise SystemExit(f"blocks N and N2 ran the rule at m_on {m_on}; one m_on is selected")
+    stand_in = Selection(J_th=0.0, m_on=m_on[0], theta=0.0, best_arm="rule",
+                         best_params={"m_on": m_on[0]})
+    have = {(r["arm"], r["variant"], r["scenario"], r["seed"]) for r in episodes}
+    missing = sorted(s.key for s in block_specs("N2", selection=stand_in)
+                     if (s.arm, s.variant, s.scenario, s.seed) not in have)
+    n_missing, _ = _n_cells(n_episodes)
+    differ = _n2_unchanged(episodes, n_episodes)
+    if missing or n_missing or differ:
+        return {"block": "N2", "seeds": seeds, "selected": None, "missing": missing,
+                "block_n_missing": n_missing, "differ_from_block_n": differ,
+                "decision": f"incomplete or changed: {len(missing)} N2 episodes missing, "
+                            f"{sum(len(v) for v in n_missing.values())} block N episodes "
+                            f"missing, {len(differ)} reference cells differ from block N"}
+
+    def name(r: dict) -> str:
+        return r["arm"] if r["arm"] in ("no_control", "plan") else f"{r['arm']}/{r['variant']}"
+
+    pool = episodes + [r for r in n_episodes if r["arm"] == "rule"]
+    J: dict[str, dict[str, dict[int, float]]] = {}
+    by_name: dict[str, list[dict]] = {}
+    for r in pool:
+        J.setdefault(r["scenario"], {}).setdefault(name(r), {})[r["seed"]] = \
+            r["jam"]["jam_time_min_900_3600"]
+        by_name.setdefault(name(r), []).append(r)
+
+    def bg(records: list[dict], key):
+        return _mean(key(r) for r in records if r["scenario"] == "BG")
+
+    plan_bg = bg(by_name["plan"], lambda r: r["flow"])
+    nc_bg = bg(by_name["no_control"], lambda r: r["flow"])
+    floor = plan_bg - N2_BG_ALLOWANCE * nc_bg
+    candidates: dict[str, dict[str, Any]] = {}
+    for label in sorted(n for n in by_name if n.startswith("rule/")):
+        records = by_name[label]
+        params = dict(records[0].get("params") or {})
+        excluded = any(r.get("colliding_vehicles") or r.get("collision_teleports")
+                       or r.get("writes_above_plan") for r in records)
+        c = criterion_c(J, label, SELECTION_SCENARIOS)
+        flow = bg(records, lambda r: r["flow"])
+        candidates[label] = {
+            "variant": records[0]["variant"], "block": records[0]["block"],
+            "m_on": params.get("m_on"), "gate_J": params.get("gate_J"),
+            "release_discharge": bool(params.get("release_discharge")),
+            "camera_gate": params.get("camera_gate"),
+            "C": c["C"], "terms": c["terms"], "excluded": excluded,
+            "bg_flow_mean": flow, "meets_bg_floor": flow >= floor - 1e-9,
+            "bg_network_min_mean": bg(records, lambda r: r["storage"]["network_min"]),
+            "bg_active_changing_share_mean": bg(records, lambda r: r.get("active_changing_share")),
+            "prevented": {s: sum(1 for r in records if r["scenario"] == s and r["jam"]["prevented"])
+                          for s in SELECTION_SCENARIOS},
+            "jam_time_min_900_3600_mean": {s: _mean(J[s][label].values())
+                                           for s in SELECTION_SCENARIOS},
+        }
+    reference = {n: {"bg_flow_mean": bg(by_name[n], lambda r: r["flow"]),
+                     "bg_network_min_mean": bg(by_name[n], lambda r: r["storage"]["network_min"]),
+                     "jam_time_min_900_3600_mean": {s: _mean(J[s][n].values())
+                                                    for s in SELECTION_SCENARIOS}}
+                 for n in ("no_control", "plan")}
+    eligible = [n for n, v in candidates.items()
+                if not v["excluded"] and v["C"] is not None and v["meets_bg_floor"]]
+    selected, decision = None, (f"no candidate serves at least {floor:.1f} veh/h with no "
+                                "trigger; nothing selected")
+    if eligible:
+        lowest = min(candidates[n]["C"] for n in eligible)
+        tied = [n for n in eligible if candidates[n]["C"] <= lowest + C_TIE + 1e-12]
+        chosen = max(tied, key=lambda n: (candidates[n]["bg_flow_mean"], -candidates[n]["C"]))
+        v = candidates[chosen]
+        selected = {"label": chosen, "variant": v["variant"], "m_on": v["m_on"],
+                    "gate_J": v["gate_J"], "release_discharge": v["release_discharge"],
+                    "camera_gate": v["camera_gate"]}
+        decision = (f"{chosen}: lowest C {lowest:.4f} among {len(eligible)} candidates at or "
+                    f"above the BG floor {floor:.1f} veh/h; within {C_TIE} of it "
+                    f"{sorted(tied)}, ordered by BG served flow")
+    return {"block": "N2", "criterion": "C on the network's jam time among candidates whose "
+                                        "BG flow is at least plan alone's minus 1% of no "
+                                        "control's; ties by BG flow",
+            "seeds": seeds, "mechanism_grid": [dict(m) for m in MECHANISM_GRID],
+            "bg_floor": floor, "bg_allowance": N2_BG_ALLOWANCE, "c_tie": C_TIE,
+            "candidates": candidates, "reference": reference, "eligible": sorted(eligible),
+            "selected": selected, "decision": decision}
+
+
 def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]:
     headers, episodes = read_block(results_dir, block)
     identities = {header_identity(h) for h in headers}
@@ -1428,6 +1651,12 @@ def summarize(block: str, results_dir: Path, context: Context) -> dict[str, Any]
         summary = summarize_s(episodes, context, identity)
     elif block == "N":
         summary = summarize_n(episodes)
+    elif block == "N2":
+        n_headers, n_episodes = read_block(results_dir, "N")
+        if {header_identity(h) for h in n_headers} - identities:
+            raise SystemExit("block N2 and block N ran different (checkpoint, feed, camera, "
+                             "predictor); block N's candidates cannot join N2's pool")
+        summary = summarize_n2(episodes, n_episodes)
     elif block in ("T", "T_dagger"):
         summary = {"block": block, "rows": _rows(episodes),
                    "samples_files": sorted(r["samples_file"] for r in episodes
@@ -1497,6 +1726,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gate-selection", default=None,
                         help="approach boundary: block N's N_summary.json, whose feed gate "
                              "the rule runs in blocks M to K and Q (default: no gate)")
+    parser.add_argument("--mechanism-selection", default=None,
+                        help="approach boundary: block N2's N2_summary.json, whose queue "
+                             "release, feed gate and camera gate the rule runs in blocks M "
+                             "to K and D")
     parser.add_argument("--gate-candidate", type=float, default=None,
                         help="with --gate-selection: run this one of block N's evaluated "
                              "gates instead of the selected one; recorded as not selected")
@@ -1580,6 +1813,8 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
         check_block_boundary(block, args.boundary)
     if args.gate_candidate is not None and not args.gate_selection:
         raise SystemExit("--gate-candidate names one of block N's gates; pass --gate-selection")
+    if args.gate_selection and args.mechanism_selection:
+        raise SystemExit("--mechanism-selection replaces block N's gate; pass one of them")
     if args.gate_selection and args.boundary != "approach":
         raise SystemExit("--gate-selection is block N's feed gate, selected on the approach "
                          "boundary; the gated boundary runs the rule without it")
@@ -1595,6 +1830,8 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
                       selection_path=_resolve(args.selection) if args.selection else None,
                       gate_selection_path=(_resolve(args.gate_selection)
                                            if args.gate_selection else None),
+                      mechanism_selection_path=(_resolve(args.mechanism_selection)
+                                                if args.mechanism_selection else None),
                       window_start_s=300.0 if args.smoke else 900.0, smoke=args.smoke,
                       write_log=args.write_log or args.smoke,
                       check_max_speed=args.check_max_speed or args.smoke,
@@ -1614,10 +1851,15 @@ def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
                 feed_sha=context.feed["artefact_sha256"],
                 camera_sha=_sha256(context.camera_model),
                 predictor_sha=_sha256(context.predictor), required_sha=APPROACH_SELECTION_SHA256)
-            if context.gate_selection_path is not None and block != "N":
+            if context.gate_selection_path is not None and block not in ("N", "N2"):
                 context.selection = read_gate_selection(context.gate_selection_path,
                                                         context.selection,
                                                         candidate=args.gate_candidate)
+            if context.mechanism_selection_path is not None and block not in ("N", "N2"):
+                context.selection = read_mechanism_selection(context.mechanism_selection_path,
+                                                             context.selection)
+            elif block == "D":
+                raise SystemExit("block D runs the selected system; pass --mechanism-selection")
         elif block in ("M", "L", "P", "K"):
             selection_path = context.selection_path or results_dir / "S_summary.json"
             if args.smoke:

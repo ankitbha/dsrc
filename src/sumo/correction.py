@@ -15,6 +15,12 @@ replaces the plan, and never runs a hysteresis.
 The feed gate (2026-10-20) lets the rule switch on only while the vehicle's applied feed
 version reports the network near capacity: `gate_signal(version) >= J_gate`, the largest
 jam factor over the network measured against one step below that version's plan.
+
+Two additions (plan 2026-10-25 section 1), the conclusion's future-work items. The queue
+release keeps the rule off while the road ahead is discharging, `k >= k_c` with a falling
+trend, so the correction does not slow vehicles leaving a queue that has already formed. The
+camera gate opens a vehicle's feed gate also when its own `k >= kappa k_c`, so a jam that
+forms faster than the feed reports does not wait for the feed.
 """
 from __future__ import annotations
 
@@ -119,35 +125,59 @@ def gate_signal(jam: np.ndarray, plan: np.ndarray) -> float:
     return float(values.max()) if values.size else 0.0
 
 
+def discharging(k_hat: np.ndarray, s_hat: np.ndarray, k_c: float = DENSITY_CRITICAL) -> np.ndarray:
+    """Where the road ahead is a queue that is emptying: occupancy at or above critical and
+    its trend falling (plan 2026-10-25 section 1)."""
+    k = np.asarray(k_hat, dtype=float)
+    s = np.asarray(s_hat, dtype=float)
+    return (k >= k_c - 1e-12) & (s < 0.0)
+
+
 class RuleCorrection:
     """Arm 5 (and arm 7 when fed true occupancy): on at `M <= m_on`, off at
-    `M >= m_on + 0.05` under the hysteresis."""
+    `M >= m_on + 0.05` under the hysteresis. `release_discharge` adds the queue release and
+    `camera_gate` (kappa) lets the vehicle's own occupancy open the feed gate."""
 
     def __init__(self, m_on: float, tau_l: float = TAU_L_S, k_c: float = DENSITY_CRITICAL,
-                 name: str = "rule") -> None:
+                 name: str = "rule", release_discharge: bool = False,
+                 camera_gate: float | None = None) -> None:
         self.m_on = float(m_on)
         self.tau_l = float(tau_l)
         self.k_c = float(k_c)
         self.name = name
+        self.release_discharge = bool(release_discharge)
+        self.camera_gate = None if camera_gate is None else float(camera_gate)
         self.hysteresis = Hysteresis()
 
     def update(self, ids: Sequence[str], t: float, k: np.ndarray, s: np.ndarray,
                allow: np.ndarray | None = None) -> np.ndarray:
         """`allow`, when given, is the feed gate per vehicle: where it is False the rule
         cannot switch on, and a vehicle already on is released as soon as the hysteresis
-        lets it go (at least 30 s on, two release ticks)."""
+        lets it go (at least 30 s on, two release ticks). With `camera_gate` the gate is
+        also open where `k >= camera_gate * k_c`; it has no effect without `allow`."""
         margin = rule_margin(k, s, self.k_c, self.tau_l)
         trigger = margin <= self.m_on + 1e-12
         release = margin >= self.m_on + RELEASE_OFFSET - 1e-12
+        if self.release_discharge:
+            emptying = discharging(k, s, self.k_c)
+            trigger = trigger & ~emptying
+            release = release | emptying
         if allow is not None:
             allow = np.asarray(allow, dtype=bool)
+            if self.camera_gate is not None:
+                allow = allow | (np.asarray(k, dtype=float) >= self.camera_gate * self.k_c - 1e-12)
             trigger = trigger & allow
             release = release | ~allow
         return self.hysteresis.update(ids, t, trigger, release)
 
     def describe(self) -> dict[str, Any]:
-        return {"kind": self.name, "m_on": self.m_on, "tau_l": self.tau_l, "k_c": self.k_c,
-                "release_offset": RELEASE_OFFSET, **self.hysteresis.describe()}
+        out = {"kind": self.name, "m_on": self.m_on, "tau_l": self.tau_l, "k_c": self.k_c,
+               "release_offset": RELEASE_OFFSET, **self.hysteresis.describe()}
+        if self.release_discharge:
+            out["release_discharge"] = True
+        if self.camera_gate is not None:
+            out["camera_gate"] = self.camera_gate
+        return out
 
 
 class LearnedCorrection:
