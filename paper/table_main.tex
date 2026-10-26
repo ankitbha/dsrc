@@ -1,36 +1,22 @@
 \begin{table}[t]
 \centering
-\caption{Results by trigger, mean over evaluation seeds 16--30. Jam-free: runs with no jam on the network (of 15). Jam: jammed segment-minutes on the network. Throughput and Travel time (in the network): for no control, absolute (veh/h, veh-h); for the controllers, the change relative to no control on the same seeds.}
+\caption{Ablation over seeds 16--30: five triggers (75 runs) and no trigger (15 runs). Jam-free: runs with no jam. Jam: jammed segment-minutes per run. Throughput (veh/h) and travel time in the network (veh-h): absolute for no control, otherwise the change against it on the same seeds. No gate and true occupancy: the global-local advisory without its gate, and with the camera replaced by the true occupancy in its window.}
 \label{tab:main}
 \footnotesize
 \setlength{\tabcolsep}{2.2pt}
-\begin{tabular}{@{}llrrrr@{}}
+\begin{tabular}{@{}lrrrrr@{}}
 \toprule
-Trigger & Controller & Jam-free & Jam & Throughput & Travel time \\
+ & \multicolumn{4}{c}{Five triggers} & No trigger \\
+\cmidrule(lr){2-5}\cmidrule(l){6-6}
+Controller & Jam-free & Jam & Throughput & Travel time & Throughput \\
 \midrule
-Burst 5,000 & None & 0 & 91.4 & 3,514 & 1,513 \\
- & Lookahead & 15 & 5.3 & $-6.0$\% & $+18.5$\% \\
- & Global-local & 15 & 0.1 & $+1.6$\% & $-1.0$\% \\
-\addlinespace[1pt]
-Burst 7,500 & None & 0 & 146.9 & 3,513 & 1,683 \\
- & Lookahead & 15 & 7.2 & $-4.8$\% & $+9.6$\% \\
- & Global-local & 15 & 0.1 & $+2.6$\% & $-6.9$\% \\
-\addlinespace[1pt]
-Burst 9,000 & None & 0 & 208.4 & 3,505 & 1,919 \\
- & Lookahead & 13 & 16.3 & $-3.3$\% & $+1.3$\% \\
- & Global-local & 8 & 12.6 & $+4.1$\% & $-11.0$\% \\
-\addlinespace[1pt]
-Exit block & None & 0 & 137.1 & 3,342 & 1,577 \\
- & Lookahead & 0 & 18.4 & $-5.5$\% & $+11.0$\% \\
- & Global-local & 0 & 8.1 & $+3.0$\% & $-9.5$\% \\
-\addlinespace[1pt]
-Mid block & None & 1 & 70.1 & 3,407 & 1,420 \\
- & Lookahead & 3 & 11.0 & $-7.4$\% & $+22.8$\% \\
- & Global-local & 13 & 1.0 & $+1.0$\% & $+0.4$\% \\
-\midrule
-All (of 75) & None & 1 & 130.8 & 3,456 & 1,622 \\
- & Lookahead & 46 & 11.6 & $-5.4$\% & $+11.9$\% \\
- & Global-local & 51 & 4.4 & $+2.5$\% & $-6.0$\% \\
+No control & 1 & 130.8 & 3,456 & 1,622 & 3,546 \\
+Feed lookahead & 46 & 11.6 & $-5.4$\% & $+11.9$\% & $-20.8$\% \\
+Plan only & 39 & 22.1 & $+2.6$\% & $-10.0$\% & $-2.9$\% \\
+Camera only & 5 & 95.5 & $+1.3$\% & $-1.1$\% & $-0.9$\% \\
+No gate & 51 & 4.4 & $+2.5$\% & $-6.0$\% & $-6.9$\% \\
+\textbf{Global-local} & \textbf{56} & \textbf{3.9} & $\mathbf{+3.9}$\% & $\mathbf{-12.6}$\% & $\mathbf{-3.0}$\% \\
+True occupancy & 58 & 3.4 & $+4.3$\% & $-14.3$\% & $-3.0$\% \\
 \bottomrule
 \end{tabular}
 \end{table}
