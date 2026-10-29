@@ -311,11 +311,12 @@ def fig_penetration(records_p: list[dict], records_m: list[dict], arms, out: Pat
                      and isinstance(v, list) for p in v])
         ax.set_ylim(0, 1.08 * top)
     axes[0].set_ylabel("jammed segment-min")
-    left, right = axes[0].get_position().x0, axes[1].get_position().x1
+    # One row, flush with the right panel: centred, it is wider than the panels and widens the figure.
     handles, labels = axes[0].get_legend_handles_labels()
-    _boxed(fig.legend(handles, labels, loc="lower center", bbox_to_anchor=((left + right) / 2, 1.0),
-                      ncol=2, frameon=True, fancybox=False, handlelength=1.8,
-                      columnspacing=1.2, borderaxespad=0.0))
+    _boxed(fig.legend(handles, labels, loc="lower right",
+                      bbox_to_anchor=(axes[1].get_position().x1, 1.0), ncol=4, frameon=True,
+                      fancybox=False, fontsize=6, handlelength=1.2, handletextpad=0.3,
+                      columnspacing=0.6, borderpad=0.3, borderaxespad=0.0))
     fig.savefig(out / "fig_penetration.pdf")
     fig.savefig(out / "fig_penetration.png", dpi=300)
     plt.close(fig)

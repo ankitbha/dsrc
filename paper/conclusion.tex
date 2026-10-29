@@ -1,8 +1,0 @@
-\section{Conclusion and Limitations}
-\label{sec:conclusion}
-
-A commercial probe feed and a dashboard camera, combined in a global-local advisory, let ordinary vehicles prevent jams that the feed alone reports too late: the feed coordinates every vehicle on one network-wide plan without messages and tells the camera's correction when the network is near breakdown, and the camera lowers one vehicle's speed minutes before the feed's speed would warn. In simulation the system, which runs on US\$500 of commodity hardware, prevented the jam in 55 of the 74 triggered runs in which no control jammed and cut jam time by 97\% while serving 3.9\% more traffic than no control; neither layer did this alone.
-
-\noindent\textbf{Limitations.} No driver acted on an advisory, so the traffic results are simulated on one network with assumed driver responses, and with half of the vehicles following, the system left more jam than the plan alone after the largest burst. The gate costs jam after a stopped vehicle that jams the exit faster than the feed reports, and it makes the result depend on the feed's delay. The camera's distance scale is assumed, and the feed's delivery process was measured on one day.
-
-\noindent\textbf{Future work.} We will put the advisory in front of drivers, first on a closed course and then in a small fleet; look for a camera signal that separates a forming jam from ordinary traffic near capacity, so that the gate need not wait for the feed; fit the camera's distance scale against a ranging sensor; and poll the feed over several weeks.
