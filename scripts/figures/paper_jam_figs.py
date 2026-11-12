@@ -63,6 +63,12 @@ INK, MUTED = "#2b2b29", "#6b6b66"
 COLUMN_IN = 3.45
 #: The warning and jam figures sit side by side in one column, so they are drawn at half its width.
 HALF_IN = 1.65
+#: main.tex sets the warning figure to \linewidth by 1.4 in inside a 0.485\columnwidth minipage
+#: (IEEEtran's column is 252 pt), so it is drawn at exactly that size: at any other aspect
+#: ratio LaTeX stretches it, text included, more in one direction than the other.
+WARNING_IN = (0.485 * 252.0 / 72.27, 1.4)
+#: Clearance between the jam figure's legend frame and the axis title under it.
+LEGEND_GAP_PT = 3.0
 
 LABELS = {"B5": "Burst\n5,000", "B7.5": "Burst\n7,500", "B9": "Burst\n9,000",
           "I_exit": "Exit\nblock", "I_mid": "Mid\nblock"}
@@ -142,7 +148,8 @@ def fig_warning(leads: dict, D: float, out: Path) -> dict:
         feed = sorted(e["W_feed"] for e in eps if e.get("W_feed") is not None)
         cam = sorted(e["W_cam"] for e in eps if e.get("W_cam") is not None)
         series[s] = {"feed": feed, "camera": cam}
-    fig, ax = plt.subplots(figsize=(HALF_IN, 0.78))
+    fig, ax = plt.subplots(figsize=WARNING_IN, layout="constrained")
+    fig.get_layout_engine().set(w_pad=0.02, h_pad=0.02)
     order = sorted(TRIGGERS, key=lambda s: statistics.median(series[s]["feed"] or [0]))
     for i, s in enumerate(order):
         for dx, key, colour, marker, label in ((-0.15, "feed", ORANGE, "s", "Feed speed"),
@@ -168,8 +175,9 @@ def fig_warning(leads: dict, D: float, out: Path) -> dict:
     _boxed(ax.legend(loc="lower right", frameon=True, fancybox=False, fontsize=6,
                      handletextpad=0.2, handlelength=1.0, borderaxespad=0.15, borderpad=0.3,
                      labelspacing=0.25))
-    fig.savefig(out / "fig_warning.pdf")
-    fig.savefig(out / "fig_warning.png", dpi=300)
+    # The whole figure rather than the tight box, which would change the size set above.
+    fig.savefig(out / "fig_warning.pdf", bbox_inches=fig.bbox_inches)
+    fig.savefig(out / "fig_warning.png", dpi=300, bbox_inches=fig.bbox_inches)
     plt.close(fig)
     return series
 
@@ -203,14 +211,19 @@ def fig_jams(records: list[dict], m_summary: dict, arms, out: Path) -> dict:
         bottom.errorbar(xs, means, yerr=ses, color=colour, marker=marker, markersize=3.5,
                         linestyle="none", elinewidth=1.0, capsize=0, markeredgecolor="white",
                         markeredgewidth=0.5, label=label)
+    title = bottom.set_title("jammed segment-min", loc="left", fontsize=6.5, color=INK, pad=3)
     # Above the plot, since inside it would cover a no-control point at this width; reordered
-    # so the rows read no control and the lookahead, then the global-local advisory.
+    # so the rows read no control and the lookahead, then the global-local advisory. Anchored
+    # to the title's drawn top, not the figure's edge, which the title reaches.
+    fig.draw_without_rendering()
+    title_top = title.get_window_extent().transformed(fig.transFigure.inverted()).y1
     handles, labels = bottom.get_legend_handles_labels()
     _boxed(fig.legend([handles[k] for k in (0, 2, 1)], [labels[k] for k in (0, 2, 1)],
-                      loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=2, frameon=True,
+                      loc="lower center",
+                      bbox_to_anchor=(0.5, title_top + LEGEND_GAP_PT / 72 / fig.get_figheight()),
+                      ncol=2, frameon=True,
                       fancybox=False, fontsize=6, handlelength=0.8, handletextpad=0.2,
                       columnspacing=0.8, borderaxespad=0.0, borderpad=0.3, labelspacing=0.2))
-    bottom.set_title("jammed segment-min", loc="left", fontsize=6.5, color=INK, pad=3)
     bottom.set_ylim(bottom=0)
     bottom.set_xlim(-0.45, len(order) - 0.55)
     bottom.set_xticks(range(len(order)), [LABELS[s] for s in order])
