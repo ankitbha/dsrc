@@ -1,0 +1,129 @@
+{
+ "schema": "onset_predictor/1",
+ "kind": "mlp",
+ "features": [
+  "k_hat",
+  "s_hat",
+  "n_hat_left",
+  "n_hat_own",
+  "n_hat_right",
+  "visible_lanes",
+  "g_hat_m",
+  "own_leader_reported_speed_mps",
+  "mean_leader_reported_speed_mps",
+  "mean_leader_reported_speed_slope",
+  "mean_confidence",
+  "detections",
+  "feed_age_s",
+  "plan_fraction_own",
+  "plan_fraction_next",
+  "feed_speed_own_kmh",
+  "feed_jam_factor_own",
+  "feed_speed_next_kmh",
+  "feed_jam_factor_next",
+  "segment_length_km",
+  "segment_lanes",
+  "remaining_in_segment_m"
+ ],
+ "denied_tokens": [
+  "ego",
+  "gps",
+  "k_true",
+  "true_",
+  "oracle"
+ ],
+ "scaler": {
+  "mean": [
+   0.07762779295444489,
+   0.00015140738105401397,
+   0.36746129393577576,
+   0.5925620198249817,
+   0.36379629373550415,
+   2.4156222343444824,
+   44.74761962890625,
+   13.263047218322754,
+   12.666452407836914,
+   0.000864181318320334,
+   0.4473242461681366,
+   1.323819637298584,
+   128.4983367919922,
+   0.80219966173172,
+   0.8341224789619446,
+   45.27812576293945,
+   2.4467413425445557,
+   44.55143356323242,
+   2.556382656097412,
+   4.297536849975586,
+   2.883877992630005,
+   695.0103759765625
+  ],
+  "scale": [
+   0.07264278084039688,
+   0.002202254254370928,
+   0.660681962966919,
+   0.491241455078125,
+   0.6409368515014648,
+   0.5807926654815674,
+   30.39942169189453,
+   4.479057788848877,
+   4.350002765655518,
+   0.12647227942943573,
+   0.289812296628952,
+   1.1263790130615234,
+   17.281766891479492,
+   0.18491770327091217,
+   0.18941238522529602,
+   9.895223617553711,
+   1.639153242111206,
+   11.205699920654297,
+   1.8402105569839478,
+   2.3453195095062256,
+   1.0760537385940552,
+   544.2696533203125
+  ]
+ },
+ "label": "a jam spell of at least 120 s starts on the own segment or the next downstream one within (t, t + 120 s]; samples whose own segment is jammed at t are dropped",
+ "validation_log_loss": 0.17046233320847534,
+ "candidates": {
+  "logistic": 0.33235914627796875,
+  "mlp": 0.17046233320847534
+ },
+ "positives": {
+  "train": 11441,
+  "validation": 3380
+ },
+ "samples": {
+  "train": 1085132,
+  "validation": 271019
+ },
+ "pos_weight": 93.84590507822743,
+ "hidden": 32,
+ "weights_file": "onset_predictor_round1.pt",
+ "weights_sha256": "b966371d594fed18d07bbe756f96709984f7a636f19456501b088d4618f638da",
+ "round": 1,
+ "seeds": {
+  "train": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8
+  ],
+  "validation": [
+   9,
+   10
+  ]
+ },
+ "episodes": 60,
+ "sources": [
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/run/T.jsonl"
+ ],
+ "feed_artefact_sha256": "8f5430bfc68b51e17d3e437da948ea70795ff4448260f9b7e82ba48db5243f1c",
+ "camera_model_sha256": "fdf527cd408ebcbec03af1bcbe845cd3705cc85233a721d0bf09a9f2ac8693d3",
+ "v_jam": 19.0,
+ "v_jam_sha256": "df30a8769e15aeecf82a21638500feb198dc843f125d7598f3907bf5a9362c81",
+ "smoke": false
+}

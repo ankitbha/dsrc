@@ -1,0 +1,987 @@
+{
+ "block": "T",
+ "rows": {
+  "plan/-/B5": {
+   "arm": "plan",
+   "variant": "-",
+   "scenario": "B5",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 8,
+   "km_onset": {
+    "times": [
+     1190.0,
+     1840.0,
+     2700.0
+    ],
+    "survival": [
+     0.9,
+     0.7999999999999999,
+     0.7999999999999999
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_onset_median_s": null,
+   "jam_time_min_mean": 4.066666666666666,
+   "jam_time_min_900_3600_mean": 4.066666666666666,
+   "flow_mean": 3575.4666666666662,
+   "held_min_mean": 76.35,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 0.4,
+   "km_drain": {
+    "times": [
+     130.0,
+     1410.0,
+     1860.0,
+     2100.0
+    ],
+    "survival": [
+     0.8,
+     0.7000000000000001,
+     0.6000000000000001,
+     0.6000000000000001
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_drain_median_s": null,
+   "active_share_mean": null,
+   "active_changing_share_mean": null,
+   "return_mean": 341.9430908203125,
+   "wall_s_mean": 12.762153148651123,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 0.8333333333333334,
+     "jam_time_min_900_3600": 0.8333333333333334,
+     "onset_s": null,
+     "flow": 3658.6666666666665,
+     "prevented": true
+    },
+    "2": {
+     "jam_time_min": 1.3333333333333333,
+     "jam_time_min_900_3600": 1.3333333333333333,
+     "onset_s": null,
+     "flow": 3642.6666666666665,
+     "prevented": true
+    },
+    "3": {
+     "jam_time_min": 2.1666666666666665,
+     "jam_time_min_900_3600": 2.1666666666666665,
+     "onset_s": null,
+     "flow": 3682.6666666666665,
+     "prevented": true
+    },
+    "4": {
+     "jam_time_min": 5.666666666666667,
+     "jam_time_min_900_3600": 5.666666666666667,
+     "onset_s": null,
+     "flow": 3470.6666666666665,
+     "prevented": true
+    },
+    "5": {
+     "jam_time_min": 9.166666666666666,
+     "jam_time_min_900_3600": 9.166666666666666,
+     "onset_s": null,
+     "flow": 3481.3333333333335,
+     "prevented": true
+    },
+    "6": {
+     "jam_time_min": 0.8333333333333334,
+     "jam_time_min_900_3600": 0.8333333333333334,
+     "onset_s": null,
+     "flow": 3590.6666666666665,
+     "prevented": true
+    },
+    "7": {
+     "jam_time_min": 10.833333333333334,
+     "jam_time_min_900_3600": 10.833333333333334,
+     "onset_s": 2740.0,
+     "flow": 3445.3333333333335,
+     "prevented": false
+    },
+    "8": {
+     "jam_time_min": 0.8333333333333334,
+     "jam_time_min_900_3600": 0.8333333333333334,
+     "onset_s": null,
+     "flow": 3641.3333333333335,
+     "prevented": true
+    },
+    "9": {
+     "jam_time_min": 1.0,
+     "jam_time_min_900_3600": 1.0,
+     "onset_s": null,
+     "flow": 3664.0,
+     "prevented": true
+    },
+    "10": {
+     "jam_time_min": 8.0,
+     "jam_time_min_900_3600": 8.0,
+     "onset_s": 2090.0,
+     "flow": 3477.3333333333335,
+     "prevented": false
+    }
+   }
+  },
+  "plan/-/B7.5": {
+   "arm": "plan",
+   "variant": "-",
+   "scenario": "B7.5",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 6,
+   "km_onset": {
+    "times": [
+     1400.0,
+     1550.0,
+     2070.0,
+     2550.0,
+     2700.0
+    ],
+    "survival": [
+     0.9,
+     0.7999999999999999,
+     0.7,
+     0.6,
+     0.6
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_onset_median_s": null,
+   "jam_time_min_mean": 9.816666666666666,
+   "jam_time_min_900_3600_mean": 9.816666666666666,
+   "flow_mean": 3550.1333333333337,
+   "held_min_mean": 900.75,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 0.0,
+   "km_drain": {
+    "times": [
+     2400.0
+    ],
+    "survival": [
+     1.0
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_drain_median_s": null,
+   "active_share_mean": null,
+   "active_changing_share_mean": null,
+   "return_mean": 191.35113601684571,
+   "wall_s_mean": 14.465267992019653,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 16.5,
+     "jam_time_min_900_3600": 16.5,
+     "onset_s": 2450.0,
+     "flow": 3502.6666666666665,
+     "prevented": false
+    },
+    "2": {
+     "jam_time_min": 7.666666666666667,
+     "jam_time_min_900_3600": 7.666666666666667,
+     "onset_s": null,
+     "flow": 3520.0,
+     "prevented": true
+    },
+    "3": {
+     "jam_time_min": 9.833333333333334,
+     "jam_time_min_900_3600": 9.833333333333334,
+     "onset_s": null,
+     "flow": 3573.3333333333335,
+     "prevented": true
+    },
+    "4": {
+     "jam_time_min": 7.166666666666667,
+     "jam_time_min_900_3600": 7.166666666666667,
+     "onset_s": null,
+     "flow": 3576.0,
+     "prevented": true
+    },
+    "5": {
+     "jam_time_min": 10.166666666666666,
+     "jam_time_min_900_3600": 10.166666666666666,
+     "onset_s": null,
+     "flow": 3492.0,
+     "prevented": true
+    },
+    "6": {
+     "jam_time_min": 6.5,
+     "jam_time_min_900_3600": 6.5,
+     "onset_s": null,
+     "flow": 3592.0,
+     "prevented": true
+    },
+    "7": {
+     "jam_time_min": 10.333333333333334,
+     "jam_time_min_900_3600": 10.333333333333334,
+     "onset_s": 2300.0,
+     "flow": 3586.6666666666665,
+     "prevented": false
+    },
+    "8": {
+     "jam_time_min": 13.5,
+     "jam_time_min_900_3600": 13.5,
+     "onset_s": 3450.0,
+     "flow": 3509.3333333333335,
+     "prevented": false
+    },
+    "9": {
+     "jam_time_min": 13.666666666666666,
+     "jam_time_min_900_3600": 13.666666666666666,
+     "onset_s": 2970.0,
+     "flow": 3465.3333333333335,
+     "prevented": false
+    },
+    "10": {
+     "jam_time_min": 2.8333333333333335,
+     "jam_time_min_900_3600": 2.8333333333333335,
+     "onset_s": null,
+     "flow": 3684.0,
+     "prevented": true
+    }
+   }
+  },
+  "plan/-/B9": {
+   "arm": "plan",
+   "variant": "-",
+   "scenario": "B9",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 0,
+   "km_onset": {
+    "times": [
+     1200.0,
+     1360.0,
+     1390.0,
+     1450.0,
+     1460.0,
+     1470.0,
+     1480.0,
+     1520.0,
+     1570.0,
+     2180.0
+    ],
+    "survival": [
+     0.9,
+     0.7999999999999999,
+     0.7,
+     0.6,
+     0.5,
+     0.4,
+     0.30000000000000004,
+     0.20000000000000004,
+     0.10000000000000002,
+     0.0
+    ],
+    "median": 1460.0,
+    "n": 10
+   },
+   "km_onset_median_s": 1460.0,
+   "jam_time_min_mean": 26.81666666666667,
+   "jam_time_min_900_3600_mean": 26.81666666666667,
+   "flow_mean": 3527.3333333333335,
+   "held_min_mean": 2100.383333333333,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 0.0,
+   "km_drain": {
+    "times": [
+     2400.0
+    ],
+    "survival": [
+     1.0
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_drain_median_s": null,
+   "active_share_mean": null,
+   "active_changing_share_mean": null,
+   "return_mean": 22.11018772125244,
+   "wall_s_mean": 16.214080572128296,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 27.5,
+     "jam_time_min_900_3600": 27.5,
+     "onset_s": 2350.0,
+     "flow": 3508.0,
+     "prevented": false
+    },
+    "2": {
+     "jam_time_min": 29.5,
+     "jam_time_min_900_3600": 29.5,
+     "onset_s": 2260.0,
+     "flow": 3524.0,
+     "prevented": false
+    },
+    "3": {
+     "jam_time_min": 27.166666666666668,
+     "jam_time_min_900_3600": 27.166666666666668,
+     "onset_s": 2290.0,
+     "flow": 3530.6666666666665,
+     "prevented": false
+    },
+    "4": {
+     "jam_time_min": 19.166666666666668,
+     "jam_time_min_900_3600": 19.166666666666668,
+     "onset_s": 2360.0,
+     "flow": 3572.0,
+     "prevented": false
+    },
+    "5": {
+     "jam_time_min": 31.333333333333332,
+     "jam_time_min_900_3600": 31.333333333333332,
+     "onset_s": 2470.0,
+     "flow": 3509.3333333333335,
+     "prevented": false
+    },
+    "6": {
+     "jam_time_min": 43.5,
+     "jam_time_min_900_3600": 43.5,
+     "onset_s": 2100.0,
+     "flow": 3470.6666666666665,
+     "prevented": false
+    },
+    "7": {
+     "jam_time_min": 22.166666666666668,
+     "jam_time_min_900_3600": 22.166666666666668,
+     "onset_s": 2420.0,
+     "flow": 3578.6666666666665,
+     "prevented": false
+    },
+    "8": {
+     "jam_time_min": 19.666666666666668,
+     "jam_time_min_900_3600": 19.666666666666668,
+     "onset_s": 3080.0,
+     "flow": 3528.0,
+     "prevented": false
+    },
+    "9": {
+     "jam_time_min": 29.333333333333332,
+     "jam_time_min_900_3600": 29.333333333333332,
+     "onset_s": 2380.0,
+     "flow": 3513.3333333333335,
+     "prevented": false
+    },
+    "10": {
+     "jam_time_min": 18.833333333333332,
+     "jam_time_min_900_3600": 18.833333333333332,
+     "onset_s": 2370.0,
+     "flow": 3538.6666666666665,
+     "prevented": false
+    }
+   }
+  },
+  "plan/-/BG": {
+   "arm": "plan",
+   "variant": "-",
+   "scenario": "BG",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 10,
+   "km_onset": {
+    "times": [
+     2700.0
+    ],
+    "survival": [
+     1.0
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_onset_median_s": null,
+   "jam_time_min_mean": 0.0,
+   "jam_time_min_900_3600_mean": 0.0,
+   "flow_mean": 3481.3333333333335,
+   "held_min_mean": 22.0,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 1.0,
+   "km_drain": {
+    "times": [
+     140.0
+    ],
+    "survival": [
+     0.0
+    ],
+    "median": 140.0,
+    "n": 10
+   },
+   "km_drain_median_s": 140.0,
+   "active_share_mean": null,
+   "active_changing_share_mean": null,
+   "return_mean": 564.4515197753906,
+   "wall_s_mean": 10.845107579231263,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3493.3333333333335,
+     "prevented": true
+    },
+    "2": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3477.3333333333335,
+     "prevented": true
+    },
+    "3": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3462.6666666666665,
+     "prevented": true
+    },
+    "4": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3484.0,
+     "prevented": true
+    },
+    "5": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3488.0,
+     "prevented": true
+    },
+    "6": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3481.3333333333335,
+     "prevented": true
+    },
+    "7": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3485.3333333333335,
+     "prevented": true
+    },
+    "8": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3478.6666666666665,
+     "prevented": true
+    },
+    "9": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3497.3333333333335,
+     "prevented": true
+    },
+    "10": {
+     "jam_time_min": 0.0,
+     "jam_time_min_900_3600": 0.0,
+     "onset_s": null,
+     "flow": 3465.3333333333335,
+     "prevented": true
+    }
+   }
+  },
+  "plan/-/I_exit": {
+   "arm": "plan",
+   "variant": "-",
+   "scenario": "I_exit",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 0,
+   "km_onset": {
+    "times": [
+     80.0,
+     90.0,
+     100.0,
+     110.0
+    ],
+    "survival": [
+     0.8,
+     0.6000000000000001,
+     0.30000000000000004,
+     0.0
+    ],
+    "median": 100.0,
+    "n": 10
+   },
+   "km_onset_median_s": 100.0,
+   "jam_time_min_mean": 19.033333333333335,
+   "jam_time_min_900_3600_mean": 19.033333333333335,
+   "flow_mean": 3254.5333333333338,
+   "held_min_mean": 22.0,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 0.9,
+   "km_drain": {
+    "times": [
+     370.0,
+     390.0,
+     450.0,
+     590.0,
+     600.0,
+     700.0,
+     1430.0,
+     1650.0,
+     2400.0
+    ],
+    "survival": [
+     0.8,
+     0.7000000000000001,
+     0.6000000000000001,
+     0.5000000000000001,
+     0.40000000000000013,
+     0.3000000000000001,
+     0.2000000000000001,
+     0.10000000000000005,
+     0.10000000000000005
+    ],
+    "median": 600.0,
+    "n": 10
+   },
+   "km_drain_median_s": 600.0,
+   "active_share_mean": null,
+   "active_changing_share_mean": null,
+   "return_mean": 114.07433109283447,
+   "wall_s_mean": 13.391772174835205,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 20.833333333333332,
+     "jam_time_min_900_3600": 20.833333333333332,
+     "onset_s": 1010.0,
+     "flow": 3257.3333333333335,
+     "prevented": false
+    },
+    "2": {
+     "jam_time_min": 16.833333333333332,
+     "jam_time_min_900_3600": 16.833333333333332,
+     "onset_s": 1000.0,
+     "flow": 3253.3333333333335,
+     "prevented": false
+    },
+    "3": {
+     "jam_time_min": 19.333333333333332,
+     "jam_time_min_900_3600": 19.333333333333332,
+     "onset_s": 990.0,
+     "flow": 3200.0,
+     "prevented": false
+    },
+    "4": {
+     "jam_time_min": 18.166666666666668,
+     "jam_time_min_900_3600": 18.166666666666668,
+     "onset_s": 1010.0,
+     "flow": 3330.6666666666665,
+     "prevented": false
+    },
+    "5": {
+     "jam_time_min": 21.166666666666668,
+     "jam_time_min_900_3600": 21.166666666666668,
+     "onset_s": 990.0,
+     "flow": 3141.3333333333335,
+     "prevented": false
+    },
+    "6": {
+     "jam_time_min": 15.833333333333334,
+     "jam_time_min_900_3600": 15.833333333333334,
+     "onset_s": 980.0,
+     "flow": 3353.3333333333335,
+     "prevented": false
+    },
+    "7": {
+     "jam_time_min": 11.666666666666666,
+     "jam_time_min_900_3600": 11.666666666666666,
+     "onset_s": 1010.0,
+     "flow": 3348.0,
+     "prevented": false
+    },
+    "8": {
+     "jam_time_min": 32.333333333333336,
+     "jam_time_min_900_3600": 32.333333333333336,
+     "onset_s": 980.0,
+     "flow": 3088.0,
+     "prevented": false
+    },
+    "9": {
+     "jam_time_min": 12.666666666666666,
+     "jam_time_min_900_3600": 12.666666666666666,
+     "onset_s": 1000.0,
+     "flow": 3368.0,
+     "prevented": false
+    },
+    "10": {
+     "jam_time_min": 21.5,
+     "jam_time_min_900_3600": 21.5,
+     "onset_s": 1000.0,
+     "flow": 3205.3333333333335,
+     "prevented": false
+    }
+   }
+  },
+  "plan/-/I_mid": {
+   "arm": "plan",
+   "variant": "-",
+   "scenario": "I_mid",
+   "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n": 10,
+   "prevented": 8,
+   "km_onset": {
+    "times": [
+     210.0,
+     1310.0,
+     2700.0
+    ],
+    "survival": [
+     0.9,
+     0.7999999999999999,
+     0.7999999999999999
+    ],
+    "median": null,
+    "n": 10
+   },
+   "km_onset_median_s": null,
+   "jam_time_min_mean": 5.5,
+   "jam_time_min_900_3600_mean": 5.5,
+   "flow_mean": 3330.2666666666664,
+   "held_min_mean": 22.0,
+   "pending_min_mean": 0.0,
+   "fraction_drained": 1.0,
+   "km_drain": {
+    "times": [
+     140.0,
+     150.0,
+     160.0,
+     1320.0
+    ],
+    "survival": [
+     0.7,
+     0.19999999999999998,
+     0.09999999999999999,
+     0.0
+    ],
+    "median": 150.0,
+    "n": 10
+   },
+   "km_drain_median_s": 150.0,
+   "active_share_mean": null,
+   "active_changing_share_mean": null,
+   "return_mean": 349.46817474365236,
+   "wall_s_mean": 12.387666869163514,
+   "by_seed": {
+    "1": {
+     "jam_time_min": 4.5,
+     "jam_time_min_900_3600": 4.5,
+     "onset_s": null,
+     "flow": 3357.3333333333335,
+     "prevented": true
+    },
+    "2": {
+     "jam_time_min": 4.666666666666667,
+     "jam_time_min_900_3600": 4.666666666666667,
+     "onset_s": null,
+     "flow": 3357.3333333333335,
+     "prevented": true
+    },
+    "3": {
+     "jam_time_min": 8.833333333333334,
+     "jam_time_min_900_3600": 8.833333333333334,
+     "onset_s": 2210.0,
+     "flow": 3221.3333333333335,
+     "prevented": false
+    },
+    "4": {
+     "jam_time_min": 4.333333333333333,
+     "jam_time_min_900_3600": 4.333333333333333,
+     "onset_s": null,
+     "flow": 3358.6666666666665,
+     "prevented": true
+    },
+    "5": {
+     "jam_time_min": 1.3333333333333333,
+     "jam_time_min_900_3600": 1.3333333333333333,
+     "onset_s": null,
+     "flow": 3440.0,
+     "prevented": true
+    },
+    "6": {
+     "jam_time_min": 7.333333333333333,
+     "jam_time_min_900_3600": 7.333333333333333,
+     "onset_s": null,
+     "flow": 3236.0,
+     "prevented": true
+    },
+    "7": {
+     "jam_time_min": 5.833333333333333,
+     "jam_time_min_900_3600": 5.833333333333333,
+     "onset_s": null,
+     "flow": 3338.6666666666665,
+     "prevented": true
+    },
+    "8": {
+     "jam_time_min": 6.833333333333333,
+     "jam_time_min_900_3600": 6.833333333333333,
+     "onset_s": 1110.0,
+     "flow": 3266.6666666666665,
+     "prevented": false
+    },
+    "9": {
+     "jam_time_min": 4.166666666666667,
+     "jam_time_min_900_3600": 4.166666666666667,
+     "onset_s": null,
+     "flow": 3430.6666666666665,
+     "prevented": true
+    },
+    "10": {
+     "jam_time_min": 7.166666666666667,
+     "jam_time_min_900_3600": 7.166666666666667,
+     "onset_s": null,
+     "flow": 3296.0,
+     "prevented": true
+    }
+   }
+  }
+ },
+ "samples_files": [
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B5_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B7.5_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_B9_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_BG_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_exit_9.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_1.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_10.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_2.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_3.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_4.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_5.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_6.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_7.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_8.json",
+  "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/outputs/jam/training/T/plan_-_I_mid_9.json"
+ ],
+ "episodes": 60,
+ "controlled_episodes": 60,
+ "controlled_episodes_with_collisions": 0,
+ "colliding_vehicles_total": 0,
+ "collision_teleports_total": 0,
+ "writes_above_plan_total": 0,
+ "max_speed_mismatched_total": 0,
+ "seeds_by_arm": {
+  "plan/-/B5": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "plan/-/B7.5": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "plan/-/B9": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "plan/-/BG": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "plan/-/I_exit": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ],
+  "plan/-/I_mid": [
+   1,
+   2,
+   3,
+   4,
+   5,
+   6,
+   7,
+   8,
+   9,
+   10
+  ]
+ },
+ "identical_seed_lists": true,
+ "sensors": [
+  "plan:none"
+ ],
+ "feed_artefact": {
+  "artefact": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/results/jam/feed_process_afternoon.json",
+  "artefact_sha256": "8f5430bfc68b51e17d3e437da948ea70795ff4448260f9b7e82ba48db5243f1c",
+  "session": "afternoon_20261016_mainz",
+  "placeholder": false,
+  "L_bar": 89.49009203910828,
+  "m": 1.0,
+  "P_q": 10.0,
+  "D": 99.49009203910828,
+  "rule": "version_keyed"
+ },
+ "placeholder": false,
+ "camera_model": {
+  "path": "/private/tmp/claude-502/-Users-ankit-nash-Desktop-ankit-summer-2026/4ea4312b-6fea-47ac-a8f1-821301808d0b/scratchpad/dsrc_jam/worktrees/RUN_c03cca5/results/jam/camera_error_model.json",
+  "sha256": "fdf527cd408ebcbec03af1bcbe845cd3705cc85233a721d0bf09a9f2ac8693d3"
+ },
+ "predictor": null,
+ "selection": null,
+ "headers": [
+  {
+   "started_wall": 1792188884.689022,
+   "commit": "c03cca503972987d04c26a3beb61b3080a3996cc",
+   "dirty": false,
+   "sumo_version": null,
+   "resumed": false
+  }
+ ],
+ "wall_s_total": 800.6604833602905,
+ "smoke": false
+}

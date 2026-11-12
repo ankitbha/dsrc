@@ -1,0 +1,12 @@
+<routes>
+  <vType id="human" carFollowModel="EIDM" minGap="2.5" tau="1.0" actionStepLength="1.0" maxSpeed="16.67"/>
+  <vType id="av" carFollowModel="EIDM" minGap="2.5" tau="1.0" actionStepLength="1.0" maxSpeed="16.67" color="1,0,0"/>
+  <route id="r140" edges="140 502 100 179 108 189 41 157 46 500 14 505 162 138 127 33 36 40 511 201 513 206[0] 206[1] 31 218 exit_road exit_tail"/>
+  <route id="r182" edges="182 111 500 14 505 162 138 127 33 36 40 511 201 513 206[0] 206[1] 31 218 exit_road exit_tail"/>
+  <route id="r231" edges="231 7 169 11 524 187 522 172 521 86 520 193 504 153 42 189 41 157 46 500 14 505 162 138 127 33 36 40 511 201 513 206[0] 206[1] 31 218 exit_road exit_tail"/>
+  <route id="r255" edges="255 16 123 522 172 521 86 520 193 504 153 42 189 41 157 46 500 14 505 162 138 127 33 36 40 511 201 513 206[0] 206[1] 31 218 exit_road exit_tail"/>
+  <route id="r277" edges="277 22 249 60 62 63 525 235 527 147 524 187 522 172 521 86 520 193 504 153 42 189 41 157 46 500 14 505 162 138 127 33 36 40 511 201 513 206[0] 206[1] 31 218 exit_road exit_tail"/>
+  <route id="r289" edges="289 69 243 59 56 53 525 235 527 147 524 187 522 172 521 86 520 193 504 153 42 189 41 157 46 500 14 505 162 138 127 33 36 40 511 201 513 206[0] 206[1] 31 218 exit_road exit_tail"/>
+  <route id="r293" edges="293 64 35 65 511 201 513 206[0] 206[1] 31 218 exit_road exit_tail"/>
+  <route id="r295" edges="295 67 29 4 35 65 511 201 513 206[0] 206[1] 31 218 exit_road exit_tail"/>
+</routes>

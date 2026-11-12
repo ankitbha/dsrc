@@ -1,0 +1,1366 @@
+#!/usr/bin/env python3
+"""Run the feed-agreement experiment blocks A to E, with resume and pause.
+
+    .venv/bin/python scripts/run_feed_experiments.py --block B C D E
+    .venv/bin/python scripts/run_feed_experiments.py --block A            # needs polling
+    .venv/bin/python scripts/run_feed_experiments.py --block A --allow-placeholder
+    .venv/bin/python scripts/run_feed_experiments.py --block D --pilot
+    .venv/bin/python scripts/run_feed_experiments.py --block B --summarize-only
+    .venv/bin/python scripts/run_feed_experiments.py --block A B C D E --smoke
+
+Plan sections 3.7 and 5. Every episode is keyed `(block, arm, variant, seed)`. One
+JSONL per block under `results/feed/{block}.jsonl`, appended and flushed after every
+episode; its traces under `outputs/feed/traces/{block}/`. The summary
+`results/feed/{block}_summary.json` is rebuilt from the JSONL at the end of a run, or
+alone with `--summarize-only`, written whole-then-rename.
+
+* `--resume` skips every key already in the block's JSONL.
+* Between episodes the runner checks the pause file (default `results/feed/PAUSE`).
+  When it exists the runner writes `results/feed/{block}_state.json` naming the next
+  key and exits 0 with `paused before <key>`. Remove the file and re-run with
+  `--resume` to continue.
+* Block A replays the feed-process artefact and refuses a placeholder (the drive logs,
+  before polling exists) unless `--allow-placeholder` is passed; the flag is carried
+  into the header and the summary.
+* `--smoke` runs one episode of each named block on seed 16 for 600 s, into
+  `outputs/feed/smoke/` unless `--results-dir`/`--traces-dir` say otherwise, to prove
+  the entry point runs end to end. It is not an experiment, and it never writes into
+  `results/feed/`, where `--resume` would take its 600 s episode for the real one.
+
+Sequential, one process, one SUMO instance at a time: libsumo is process-global.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import platform
+import statistics
+import subprocess
+import sys
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+for path in (REPO_ROOT, REPO_ROOT / "scripts"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from evaluate_mainz_checkpoints import _provenance, paired_statistics  # noqa: E402
+from train_mainz_src import SCENARIOS  # noqa: E402
+
+BLOCKS = ("A", "B", "C", "D", "E")
+DEFAULT_SEEDS = tuple(range(16, 31))
+DEFAULT_ARTEFACT = REPO_ROOT / "results" / "feed" / "feed_process.json"
+#: Amendment 1: every block uses the `here` checkpoint retrained under the cap.
+DEFAULT_CHECKPOINT = REPO_ROOT / "results" / "checkpoints" / "mainz_here_cap_best.pt"
+#: The per-seed reference rows for blocks B and C: Amendment 1's evaluation of the cap
+#: checkpoints under the cap, whose `here` rows the per-tick `published` mode equals.
+REFERENCE_EVALUATION = REPO_ROOT / "results" / "evaluation" / "mainz_paired_seeds_cap.jsonl"
+P_Q = 10.0
+D_OFFSETS = (-20.0, -5.0, 0.0, 5.0, 10.0)
+#: Amendment 1, A6: at or below one half, so the late vehicles are never the plurality.
+DELTAS = (0.05, 0.1, 0.25, 0.5)
+STALENESS = (30.0, 60.0, 120.0, 180.0, 300.0)
+PENETRATIONS = (0.75, 0.5, 0.25, 0.1)
+CERTIFICATE_LEVELS = (1.0, 0.75, 0.5, 0.25, 0.1)
+LINEARITY_SEEDS = (16, 17, 18)
+#: Amendment 2, B2: the one-vehicle null pulses run on these seeds, every site and level,
+#: and a level's certificate needs this many of its 12 sites resolved above their null.
+NULL_SEEDS = (16, 17, 18, 19, 20)
+RESOLVED_SITES_REQUIRED = 10
+#: Plan D12 and D13: drain scenarios, their caps and the instant the clock starts.
+DRAIN = {"mainz_surge": {"cap_s": 9000.0, "t_0": 1200.0, "onset_from": 0.0},
+         "mainz_burst": {"cap_s": 12000.0, "t_0": 1500.0, "onset_from": 900.0}}
+HOLD_S = 120.0
+HOLD_SENSITIVITIES = (60.0, 300.0)
+PULSE_START_S = 1200.0
+PULSE_DURATION_S = 60.0
+#: The regression window ends here and starts when the injection ends (Amendment 1,
+#: A8), so the 60 s in which the increments are driven by the input are left out.
+DEVIATION_END_S = 1800.0
+#: The noise floor: deviations after the regression window, where the pulse has left.
+NOISE_WINDOW = (1800.0, 2500.0)
+SMOKE_SEED = 16
+SMOKE_DURATION_S = 600.0
+
+
+# --------------------------------------------------------------------- specs
+
+
+@dataclass(frozen=True)
+class Spec:
+    block: str
+    arm: str
+    variant: str
+    seed: int
+    scenario: str = "mainz"
+    penetration: float = 1.0
+    duration_s: float = 2500.0
+    pulse: tuple | None = None          # (site, n, start_s, duration_s)
+    mode_args: tuple = ()
+
+    @property
+    def key(self) -> str:
+        return f"{self.block}/{self.arm}/{self.variant}/{self.seed}"
+
+    def trace_name(self) -> str:
+        return f"{self.arm}_{self.variant}_{self.seed}.json"
+
+
+@dataclass
+class Context:
+    """What the specs and modes of a run depend on, recorded in the header."""
+
+    seeds: tuple[int, ...] = DEFAULT_SEEDS
+    duration_s: float = 2500.0
+    artefact: Path | None = None
+    session: str | None = None
+    allow_placeholder: bool = False
+    start_s: float = 60.0
+    P_q: float = P_Q
+    pulse_start_s: float = PULSE_START_S
+    #: Flow and disagreement are scored from here; a 600 s smoke scores from the
+    #: warm-up's end so its disagreement and age are measured at all.
+    window_start_s: float = 900.0
+    #: The simulation step; blocks B and C pair only against a reference run at it.
+    step_length_s: float = 0.5
+    #: How advice reaches a vehicle (`src.sumo.mainz.ACTUATIONS`); Amendment 1's cap.
+    actuation: str = "max_speed"
+    #: The evaluation blocks B and C pair against (Amendment 2, B1).
+    reference: Path = REFERENCE_EVALUATION
+    smoke: bool = False
+    feed: dict[str, Any] = field(default_factory=dict)  # block A's parameters
+
+    def as_dict(self) -> dict[str, Any]:
+        out = asdict(self)
+        out["artefact"] = str(self.artefact) if self.artefact else None
+        out["reference"] = str(self.reference)
+        return out
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def load_feed_parameters(artefact: Path, session: str | None, allow_placeholder: bool,
+                         P_q: float = P_Q) -> dict[str, Any]:
+    """Block A's lemma and rule parameters, read from the replayed session.
+
+    `L_bar` and `psi*` are the session's own, because the rule arms replay that session's
+    lags exactly: the simulated process's largest lag is its `L_bar`. The measured
+    bracket's `J` and the replay's own lag spread are both recorded, with the lemma's
+    part (a) condition evaluated for each.
+    """
+    data = json.loads(Path(artefact).read_text())
+    if data.get("placeholder") and not allow_placeholder:
+        raise SystemExit(f"{artefact} is a placeholder (source {data.get('primary_source')}); "
+                         "block A replays the polling artefact. Pass --allow-placeholder to "
+                         "run it on the drive-log process anyway.")
+    session = session or data["primary"]["default_session"]
+    s = data["sessions"][session]
+    g_min = s["g_min"]
+    J_measured = s["J"]
+    J_simulated = s["replayed_lag_spread"]
+    return {
+        "artefact": str(artefact), "artefact_sha256": _sha256(artefact),
+        "placeholder": bool(data.get("placeholder")), "session": session,
+        "source": s.get("source"), "L_bar": s["L_bar"], "psi_star": s["psi_star"],
+        "r_bar": s["r_bar"], "r_bar_source": s["r_bar_source"], "g_min": g_min,
+        "J_measured": J_measured, "J_simulated": J_simulated,
+        "min_availability_gap": s.get("min_availability_gap"),
+        "P_q": P_q,
+        "D_offsets": list(D_OFFSETS),
+        "D_values": [s["L_bar"] + offset for offset in D_OFFSETS],
+        "condition_measured": (J_measured is not None and P_q <= g_min - J_measured),
+        "condition_simulated": P_q <= g_min - J_simulated,
+        "no_skip_in_replay": (s.get("min_availability_gap") or 0.0) >= P_q,
+    }
+
+
+def block_specs(block: str, context: Context) -> list[Spec]:
+    """Every episode of a block, arm-major, each arm over the same seed list."""
+    seeds, duration = context.seeds, context.duration_s
+    arms: list[tuple[str, str, dict]] = []
+    if block == "A":
+        feed = context.feed
+        arms = [("published", "-", {}), ("synchronous", "-", {}),
+                ("no_rule", "P60", {"mode_args": (60.0,)}),
+                ("no_rule", "P10", {"mode_args": (10.0,)}),
+                ("fixed_phase", f"psi{feed['psi_star']}",
+                 {"mode_args": (float(feed["psi_star"]), float(feed["r_bar"]))})]
+        arms += [("version_keyed", f"D{offset:+g}", {"mode_args": (context.P_q, D)})
+                 for offset, D in zip(feed["D_offsets"], feed["D_values"])]
+    elif block == "B":
+        arms = [("inject_delta", f"delta{d:g}", {"mode_args": (d,)}) for d in DELTAS]
+        arms += [("inject_stale", f"s{s:g}", {"mode_args": (s,)}) for s in STALENESS]
+    elif block == "C":
+        arms = [("penetration", f"p{p:g}", {"penetration": p}) for p in PENETRATIONS]
+    elif block == "D":
+        for scenario, setting in DRAIN.items():
+            cap = SMOKE_DURATION_S if context.smoke else setting["cap_s"]
+            for arm in ("no_control", "here"):
+                arms.append((arm, scenario, {"scenario": scenario, "duration_s": cap}))
+        # Amendment 1, A4: the sustained scenario's episodes that the network-level
+        # jam threshold is fitted on, both arms.
+        for arm in ("no_control", "here"):
+            arms.append((arm, "mainz", {"scenario": "mainz"}))
+    elif block == "E":
+        specs = []
+        for size, seed_list in ((60, seeds),
+                                (30, tuple(s for s in seeds if s in LINEARITY_SEEDS)),
+                                (1, tuple(s for s in seeds if s in NULL_SEEDS))):
+            for p in CERTIFICATE_LEVELS:
+                for site in range(12):
+                    for seed in seed_list:
+                        specs.append(Spec("E", f"pulse{size}", f"p{p:g}_site{site}", seed,
+                                          penetration=p, duration_s=duration,
+                                          pulse=(site, size, context.pulse_start_s,
+                                                 PULSE_DURATION_S)))
+        return specs
+    else:
+        raise ValueError(f"unknown block {block}")
+    specs = []
+    for arm, variant, extra in arms:
+        for seed in seeds:
+            specs.append(Spec(block, arm, variant, seed,
+                              duration_s=extra.get("duration_s", duration),
+                              scenario=extra.get("scenario", "mainz"),
+                              penetration=extra.get("penetration", 1.0),
+                              mode_args=extra.get("mode_args", ())))
+    return specs
+
+
+def baseline_spec(p: float, seed: int, context: Context) -> Spec:
+    """Block E's unperturbed episode at penetration `p`, when no earlier block has it."""
+    return Spec("E", "baseline", f"p{p:g}", seed, penetration=p,
+                duration_s=context.duration_s)
+
+
+def make_mode(spec: Spec):
+    from src.sumo.feed_episode import Mode
+
+    arm, args = spec.arm, spec.mode_args
+    if arm in ("published", "here", "penetration", "pulse60", "pulse30", "pulse1", "baseline"):
+        return Mode.published()
+    if arm == "no_control":
+        return Mode.no_control()
+    if arm == "synchronous":
+        return Mode.synchronous()
+    if arm == "no_rule":
+        return Mode.no_rule(*args)
+    if arm == "fixed_phase":
+        return Mode.fixed_phase(*args)
+    if arm == "version_keyed":
+        return Mode.version_keyed(*args)
+    if arm == "inject_delta":
+        return Mode.inject_delta(*args)
+    if arm == "inject_stale":
+        return Mode.inject_stale(*args)
+    raise ValueError(f"no mode for arm {arm}")
+
+
+# -------------------------------------------------------------------- header
+
+
+def _sumo_version() -> str | None:
+    binary = REPO_ROOT / ".venv" / "bin" / "sumo"
+    try:
+        result = subprocess.run([str(binary if binary.exists() else "sumo"), "--version"],
+                                capture_output=True, text=True, timeout=30)
+        return (result.stdout or result.stderr).splitlines()[0].strip()
+    except (OSError, subprocess.SubprocessError, IndexError):
+        return None
+
+
+def _libsumo_version() -> str | None:
+    try:
+        import libsumo
+
+        return getattr(libsumo, "__version__", None)
+    except ImportError:
+        return None
+
+
+def header(block: str, context: Context, checkpoint: Path,
+           argv: Sequence[str] | None = None) -> dict[str, Any]:
+    scenarios = sorted(DRAIN) if block == "D" else ["mainz"]
+    scenario_files = {}
+    for name in scenarios:
+        for role, relative in SCENARIOS[name].items():
+            path = REPO_ROOT / relative
+            scenario_files[f"{name}:{role}"] = {"path": relative,
+                                                "sha256": _sha256(path) if path.exists() else None}
+    return {
+        "type": "header", "block": block, "started_wall": time.time(),
+        **_provenance(),
+        "sumo_version": _sumo_version(), "libsumo_version": _libsumo_version(),
+        "python": sys.version.split()[0], "platform": platform.platform(),
+        "command": list(argv) if argv is not None else sys.argv,
+        "config": context.as_dict(),
+        "checkpoint": {"path": str(checkpoint),
+                       "sha256": _sha256(checkpoint) if Path(checkpoint).exists() else None},
+        "feed_artefact": ({"path": context.feed["artefact"],
+                           "sha256": context.feed["artefact_sha256"],
+                           "session": context.feed["session"],
+                           "placeholder": context.feed["placeholder"],
+                           "allow_placeholder": context.allow_placeholder}
+                          if block == "A" else None),
+        "scenario_files": scenario_files,
+    }
+
+
+# ------------------------------------------------------------------- running
+
+
+def resume_keys(jsonl: Path) -> set[str]:
+    if not jsonl.exists():
+        return set()
+    keys = set()
+    for line in jsonl.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue  # a line cut short by a stop mid-write is not a finished episode
+        if record.get("type") == "episode":
+            keys.add(record["key"])
+    return keys
+
+
+def check_pause(pause_file: Path | None) -> bool:
+    return pause_file is not None and Path(pause_file).exists()
+
+
+def _write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(data, indent=1, default=float))
+    temporary.rename(path)
+
+
+EpisodeFn = Callable[[Spec], dict[str, Any]]
+#: Fields of an episode result kept in the trace file rather than the JSONL.
+TRACE_FIELDS = ("trace", "snapshots", "late_draws")
+
+
+def run_block(block: str, specs: Sequence[Spec], run_episode: EpisodeFn, *,
+              results_dir: Path, traces_dir: Path, header_record: dict[str, Any],
+              resume: bool = False, pause_file: Path | None = None) -> dict[str, Any]:
+    """Run the specs not yet in the block's JSONL, one at a time, pausing on request."""
+    results_dir.mkdir(parents=True, exist_ok=True)
+    jsonl = results_dir / f"{block}.jsonl"
+    if jsonl.exists() and not resume:
+        raise SystemExit(f"{jsonl} exists; pass --resume to continue it, or move it away")
+    identity = header_identity(header_record)
+    if jsonl.exists():
+        # Amendment 3, C2: a block is one checkpoint under one actuation. Resuming it
+        # under another would mix episodes with nothing in the summary to say so.
+        earlier = {header_identity(h) for h in read_block(results_dir, block)[0]}
+        if earlier - {identity}:
+            raise SystemExit(f"refusing to resume {jsonl}: its headers ran checkpoint and "
+                             f"actuation {sorted(earlier, key=str)}, this run "
+                             f"{identity}")
+    done = resume_keys(jsonl)
+    keys = [spec.key for spec in specs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate episode keys")
+    ran, skipped = [], [k for k in keys if k in done]
+    with jsonl.open("a") as handle:
+        handle.write(json.dumps({**header_record, "resumed": bool(done)}) + "\n")
+        handle.flush()
+        for spec in specs:
+            if spec.key in done:
+                continue
+            if check_pause(pause_file):
+                state = {"block": block, "next_key": spec.key, "completed": len(done) + len(ran),
+                         "total": len(specs), "paused_wall": time.time()}
+                _write_json(results_dir / f"{block}_state.json", state)
+                print(f"paused before {spec.key}")
+                return {"status": "paused", "next_key": spec.key, "ran": ran,
+                        "skipped": skipped}
+            started = time.time()
+            result = run_episode(spec)
+            wall = time.time() - started
+            trace_path = traces_dir / block / spec.trace_name()
+            _write_json(trace_path, {"key": spec.key,
+                                     **{k: result.get(k) for k in TRACE_FIELDS}})
+            record = {"type": "episode", "key": spec.key, "block": block, "arm": spec.arm,
+                      "variant": spec.variant, "seed": spec.seed, "scenario": spec.scenario,
+                      "penetration": spec.penetration, "duration_s": spec.duration_s,
+                      "pulse": list(spec.pulse) if spec.pulse else None, "wall_s": wall,
+                      "trace_file": str(trace_path),
+                      **{("pulse_inserted" if k == "pulse" else k): v
+                         for k, v in result.items() if k not in TRACE_FIELDS}}
+            # Amendment 3, C2: every record names the checkpoint and actuation it ran.
+            record["checkpoint_sha256"] = identity[0]
+            record.setdefault("actuation", identity[1])
+            handle.write(json.dumps(record, default=float) + "\n")
+            handle.flush()
+            ran.append(spec.key)
+        provenance_end = _provenance()
+        handle.write(json.dumps({
+            "type": "footer", "ended_wall": time.time(), "provenance_end": provenance_end,
+            "tree_unchanged_during_run": (
+                provenance_end.get("commit") == header_record.get("commit")
+                and provenance_end.get("dirty") == header_record.get("dirty"))}) + "\n")
+    state_path = results_dir / f"{block}_state.json"
+    if state_path.exists():
+        state_path.unlink()
+    return {"status": "complete", "ran": ran, "skipped": skipped}
+
+
+def episode_runner(model, context: Context) -> EpisodeFn:
+    from src.sumo.feed import FeedProcess
+    from src.sumo.feed_episode import run_feed_episode
+
+    def run(spec: Spec) -> dict[str, Any]:
+        mode = make_mode(spec)
+        feed = None
+        if mode.kind == "rule":
+            # Amendment 1, A9: the replay never wraps; only the drive-log placeholder,
+            # shorter than an episode and run only under --allow-placeholder, may, with
+            # each wrap restoring the recorded second of the minute.
+            feed = FeedProcess.from_artefact(Path(context.feed["artefact"]),
+                                             context.feed["session"], spec.seed,
+                                             context.start_s, spec.duration_s + 180.0,
+                                             allow_wrap=bool(context.feed["placeholder"]
+                                                             and context.allow_placeholder))
+        pulse = None
+        if spec.pulse:
+            site, n, start, duration = spec.pulse
+            pulse = {"site": site, "n": n, "start_s": start, "duration_s": duration}
+        return run_feed_episode(model, spec.seed, spec.scenario, mode, feed_process=feed,
+                                penetration=spec.penetration, duration_s=spec.duration_s,
+                                pulse=pulse, window_start_s=context.window_start_s,
+                                step_length_s=context.step_length_s,
+                                actuation=context.actuation)
+
+    return run
+
+
+# ---------------------------------------------------------------- summaries
+
+
+def read_block(results_dir: Path, block: str) -> tuple[list[dict], list[dict]]:
+    """`(headers, episodes)`; a later record for the same key replaces an earlier one."""
+    jsonl = results_dir / f"{block}.jsonl"
+    headers, episodes = [], {}
+    if not jsonl.exists():
+        return headers, []
+    for line in jsonl.read_text().splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if record.get("type") == "header":
+            headers.append(record)
+        elif record.get("type") == "episode":
+            episodes[record["key"]] = record
+    return headers, list(episodes.values())
+
+
+def committed_references(path: Path = REFERENCE_EVALUATION) -> dict[str, Any]:
+    """Per-seed flow of the evaluation's `here` (equal to `published`) and `no_control`
+    rows, with the file, its actuation and its `here` checkpoint digest, so a summary
+    can say whether the reference ran the checkpoint and actuation the block ran."""
+    out: dict[str, Any] = {"here": {}, "no_control": {}, "source": str(path),
+                           "exists": path.exists(), "actuation": None,
+                           "here_checkpoint_sha256": None}
+    if not path.exists():
+        return out
+    for line in path.read_text().splitlines():
+        record = json.loads(line)
+        if record.get("type") == "header":
+            config = record.get("config", {})
+            out["actuation"] = config.get("actuation", "set_speed")
+            out["here_checkpoint_sha256"] = (config.get("checkpoints", {})
+                                             .get("here", {}).get("sha256"))
+            # The protocol the blocks must share with it (Amendment 3, C2).
+            out["seeds"] = list(config.get("seeds") or [])
+            out["duration_s"] = config.get("duration_s")
+            out["window_start_s"] = config.get("window_start_s")
+            out["step_length_s"] = config.get("step_length_s")
+        elif record.get("arm") in ("here", "no_control"):
+            out[record["arm"]][int(record["seed"])] = float(record["flow"])
+    return out
+
+
+def header_identity(header: dict) -> tuple[str | None, str | None]:
+    """`(checkpoint sha256, actuation)` a block header ran."""
+    return ((header.get("checkpoint") or {}).get("sha256"),
+            (header.get("config") or {}).get("actuation"))
+
+
+def require_one_identity(headers: list[dict], episodes: list[dict], block: str) -> None:
+    """Amendment 3, C2: refuse a block whose headers or episode records disagree on the
+    checkpoint sha256 or the actuation."""
+    identities = {header_identity(h) for h in headers}
+    shas = {sha for sha, _ in identities} | {
+        r["checkpoint_sha256"] for r in episodes if r.get("checkpoint_sha256") is not None}
+    actuations = {act for _, act in identities} | {
+        r["actuation"] for r in episodes if r.get("actuation") is not None}
+    if len(identities) > 1 or len(shas) > 1 or len(actuations) > 1:
+        raise SystemExit(f"block {block} mixes checkpoints {sorted(shas, key=str)} or "
+                         f"actuations {sorted(actuations, key=str)}; it is not summarised")
+
+
+def _reference_check(references: dict, headers: list[dict],
+                     episodes: list[dict] | None = None) -> dict[str, Any]:
+    """The reference's identity against the block's, read from the block's last header;
+    the block's seeds are the seeds of its episodes (the header's list without any)."""
+    if not headers:
+        return reference_identity(references, None, None, None)
+    sha, actuation = header_identity(headers[-1])
+    config = headers[-1].get("config") or {}
+    seeds = sorted({r["seed"] for r in episodes or []}) or list(config.get("seeds") or [])
+    protocol = {"seeds": seeds, "duration_s": config.get("duration_s"),
+                "window_start_s": config.get("window_start_s"),
+                "step_length_s": config.get("step_length_s")}
+    return reference_identity(references, sha, actuation, protocol)
+
+
+def reference_identity(references: dict, block_sha: str | None,
+                       block_actuation: str | None,
+                       protocol: dict | None = None) -> dict[str, Any]:
+    """Whether the reference file exists, ran the block's checkpoint and actuation, and
+    (Amendment 3, C2) covers the block's seeds at the block's duration, flow window and
+    step length.
+
+    A reference file whose header carries no actuation was written before Amendment 1,
+    so it is read as the legacy `set_speed`.
+    """
+    protocol = protocol or {}
+
+    def same(key):
+        return (protocol.get(key) is not None and references.get(key) is not None
+                and float(protocol[key]) == float(references[key]))
+
+    block_seeds = set(protocol.get("seeds") or [])
+    return {"source": references.get("source"), "exists": bool(references.get("exists")),
+            "actuation": references.get("actuation"),
+            "same_checkpoint": (block_sha is not None
+                                and block_sha == references.get("here_checkpoint_sha256")),
+            "same_actuation": (block_actuation is not None
+                               and block_actuation == references.get("actuation")),
+            "seeds_contained": bool(block_seeds) and block_seeds <= set(
+                references.get("seeds") or []),
+            "same_duration": same("duration_s"), "same_window": same("window_start_s"),
+            "same_step": same("step_length_s"),
+            "reference_protocol": {k: references.get(k) for k in
+                                   ("seeds", "duration_s", "window_start_s", "step_length_s")}}
+
+
+#: Every count a reference check must pass, with the reason a failure gives.
+REFERENCE_CONDITIONS = (
+    ("same_actuation", "its actuation is not the block's"),
+    ("same_checkpoint", "its here checkpoint is not the block's"),
+    ("seeds_contained", "its seeds do not contain the block's"),
+    ("same_duration", "its episode duration is not the block's"),
+    ("same_window", "its flow window is not the block's"),
+    ("same_step", "its step length is not the block's"),
+)
+
+
+def reference_problems(check: dict | None) -> list[str]:
+    """Why a reference check fails, empty when it passes (Amendments 2 B1 and 3 C2)."""
+    if not check:
+        return ["no reference check was recorded"]
+    if not check.get("exists"):
+        return [f"{check.get('source')} does not exist"]
+    problems = []
+    for key, reason in REFERENCE_CONDITIONS:
+        if not check.get(key):
+            problems.append(reason if key != "same_actuation" else
+                            f"its actuation is {check.get('actuation')!r}, not the block's")
+    return problems
+
+
+def require_reference(check: dict, block: str) -> None:
+    """Blocks B and C pair against the reference; refuse when it is not the block's."""
+    problems = reference_problems(check)
+    if problems:
+        raise SystemExit(f"block {block} pairs against {check.get('source')}, but "
+                         + "; ".join(problems) + ". Run Amendment 1's cap evaluation "
+                         "(evaluate_mainz_checkpoints.py --checkpoint-suffix _cap "
+                         "--out-name mainz_paired_seeds_cap) with this checkpoint first.")
+
+
+def _paired(arm: dict[int, float], reference: dict[int, float]) -> dict[str, Any] | None:
+    seeds = sorted(set(arm) & set(reference))
+    if len(seeds) < 2:
+        return {"seeds": seeds, "note": "fewer than two paired seeds"} if seeds else None
+    stats = paired_statistics([arm[s] for s in seeds], [reference[s] for s in seeds])
+    return {"seeds": seeds, **stats}
+
+
+def _group(episodes: list[dict]) -> dict[tuple[str, str], list[dict]]:
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for record in episodes:
+        groups.setdefault((record["arm"], record["variant"]), []).append(record)
+    return groups
+
+
+def _mean(values) -> float | None:
+    values = [v for v in values if v is not None]
+    return statistics.fmean(values) if values else None
+
+
+def _arm_rows(episodes: list[dict]) -> dict[str, Any]:
+    rows = {}
+    for (arm, variant), records in sorted(_group(episodes).items()):
+        rows[f"{arm}/{variant}"] = {
+            "arm": arm, "variant": variant, "seeds": sorted(r["seed"] for r in records),
+            "flow_mean": _mean(r["flow"] for r in records),
+            "delta_mean": _mean(r.get("delta_mean") for r in records),
+            "command_delta_mean": _mean(r.get("command_delta_mean") for r in records),
+            "age_mean_s": _mean(r.get("age_mean_s") for r in records),
+            "previous_fraction_mean": _mean(r.get("previous_fraction_mean") for r in records),
+            "set_speed_writes_mean": _mean(r.get("set_speed_writes") for r in records),
+            "commanded_ids_mean": _mean(r.get("commanded_ids") for r in records),
+            "wall_s_mean": _mean(r.get("wall_s") for r in records),
+            "flow_by_seed": {str(r["seed"]): r["flow"] for r in records},
+        }
+    return rows
+
+
+def origin_fit(points: Sequence[tuple[float, float]]) -> dict[str, Any] | None:
+    """Least-squares `y = b1 x` and `y = b1 x + b2 x^2`, both through the origin (D25).
+
+    The quadratic term is resolved when `|b2|` exceeds twice its standard error.
+    """
+    import numpy as np
+
+    if len(points) < 3:
+        return None
+    x = np.array([p[0] for p in points], float)
+    y = np.array([p[1] for p in points], float)
+    slope = float((x * y).sum() / (x * x).sum())
+    if len(np.unique(x)) < 2:
+        # One x value cannot separate a curve from a line.
+        return {"slope": slope, "n": len(points), "quadratic": None,
+                "quadratic_resolved": None}
+    design = np.stack([x, x * x], axis=1)
+    coefficients, *_ = np.linalg.lstsq(design, y, rcond=None)
+    residual = y - design @ coefficients
+    dof = len(y) - 2
+    out = {"slope": slope, "n": len(points), "quadratic": coefficients.tolist()}
+    if dof > 0:
+        sigma2 = float(residual @ residual) / dof
+        covariance = sigma2 * np.linalg.inv(design.T @ design)
+        se = float(math.sqrt(max(covariance[1, 1], 0.0)))
+        out.update(quadratic_se=se, quadratic_resolved=bool(abs(coefficients[1]) > 2 * se))
+    return out
+
+
+def summarize_a(episodes, headers, context: Context) -> dict[str, Any]:
+    from src.sumo.feed import lemma_cycle_average, lemma_skip_bound
+
+    rows = _arm_rows(episodes)
+    published = {r["seed"]: r["flow"] for r in episodes if r["arm"] == "published"}
+    for row in rows.values():
+        row["paired_vs_published"] = _paired(
+            {int(s): f for s, f in row["flow_by_seed"].items()}, published)
+    feed = (headers[-1]["config"]["feed"] if headers else context.feed) or {}
+    lemma = []
+    if feed:
+        for offset, D in zip(feed.get("D_offsets", []), feed.get("D_values", [])):
+            measured = rows.get(f"version_keyed/D{offset:+g}", {}).get("delta_mean")
+            lemma.append({
+                "D_minus_L_bar": offset, "D": D,
+                "bound_cycle_average_g_min": lemma_cycle_average(D, feed["L_bar"], feed["P_q"],
+                                                                 feed["g_min"]),
+                "bound_cycle_average_g60": lemma_cycle_average(D, feed["L_bar"], feed["P_q"], 60.0),
+                "measured_delta_mean": measured})
+    condition = feed.get("condition_simulated")
+    return {
+        "block": "A", "rows": rows, "lemma": lemma,
+        "feed": feed,
+        "placeholder": feed.get("placeholder"),
+        # Amendment 1, A9: only a placeholder replay may wrap; the count is reported.
+        "replays_wrapped": sum(1 for r in episodes if (r.get("feed") or {}).get("wraps")),
+        "lemma_condition": {
+            "g_min": feed.get("g_min"), "P_q": feed.get("P_q"),
+            "J_measured": feed.get("J_measured"), "J_simulated": feed.get("J_simulated"),
+            "P_q_le_g_min_minus_J_measured": feed.get("condition_measured"),
+            "P_q_le_g_min_minus_J_simulated": condition,
+            "skip_bound_measured": (lemma_skip_bound(feed["P_q"], feed["g_min"], feed["J_measured"])
+                                    if feed.get("J_measured") is not None else None),
+            "skip_bound_simulated": (lemma_skip_bound(feed["P_q"], feed["g_min"], feed["J_simulated"])
+                                     if feed.get("J_simulated") is not None else None),
+            "zero_disagreement_claimed": bool(feed.get("condition_measured")),
+        },
+    }
+
+
+def summarize_b(episodes, references) -> dict[str, Any]:
+    """Paired flow loss against `published`, by injection.
+
+    Amendment 1, A6: the disagreement axis is the measured, time-averaged fraction of
+    vehicles on the previous snapshot, per episode, not the configured `delta`, and the
+    F1 line is fitted on it.
+    """
+    rows = _arm_rows(episodes)
+    published = references["here"]
+    for row in rows.values():
+        by_seed = {int(s): f for s, f in row["flow_by_seed"].items()}
+        row["paired_vs_published"] = _paired(by_seed, published)
+        row["reference"] = references.get("source")
+    delta_points, stale_points = [], []
+    for record in episodes:
+        if record["seed"] not in published:
+            continue
+        loss = published[record["seed"]] - record["flow"]
+        if record["arm"] == "inject_delta" and record.get("previous_fraction_mean") is not None:
+            delta_points.append((record["previous_fraction_mean"], loss))
+        elif record["arm"] == "inject_stale":
+            stale_points.append((float(record["variant"][1:]), loss))
+    return {"block": "B", "rows": rows,
+            "delta_axis": "fraction of vehicles on the previous snapshot (measured)",
+            "fit_loss_vs_delta": origin_fit(delta_points),
+            "fit_loss_vs_staleness": origin_fit(stale_points),
+            "loss_points_delta": delta_points, "loss_points_staleness": stale_points}
+
+
+def summarize_c(episodes, references) -> dict[str, Any]:
+    rows = _arm_rows(episodes)
+    for row in rows.values():
+        by_seed = {int(s): f for s, f in row["flow_by_seed"].items()}
+        row["paired_vs_published"] = _paired(by_seed, references["here"])
+        row["paired_vs_no_control"] = _paired(by_seed, references["no_control"])
+        row["penetration"] = float(row["variant"][1:])
+    loss_points = []
+    for row in rows.values():
+        for seed, flow in row["flow_by_seed"].items():
+            if int(seed) in references["here"]:
+                loss_points.append((1.0 - row["penetration"],
+                                    references["here"][int(seed)] - flow))
+    return {"block": "C", "rows": rows, "loss_points_one_minus_p": loss_points,
+            "references": {"p=1": f"here rows of {references.get('source')}",
+                           "p=0": f"no_control rows of {references.get('source')}"}}
+
+
+def _load_trace(record: dict) -> list[dict] | None:
+    path = Path(record["trace_file"])
+    if not path.exists():
+        return None
+    return json.loads(path.read_text()).get("trace")
+
+
+def pilot_decision(no_control_trace: list[dict], here_trace: list[dict], cap: float,
+                   v_jam: float | None, t_0: float = 1500.0,
+                   hold: float = HOLD_S) -> dict[str, Any]:
+    """Plan section 5's pilot rule for scenario (b), as Amendment 1 (A5) states it.
+
+    No control breaks down if it has a jam spell (any segment below `v_jam`, the network
+    threshold) lasting at least `hold` after `t_0`. The controlled arm must drain under
+    the A3 rule before the cap. The fall-backs are the plan's. Served flow and pending,
+    the criterion A5 replaced, are recorded for reference only.
+    """
+    import numpy as np
+
+    from src.sumo.drain import drain_time, jam_indicator, spells
+
+    def at(trace, t):
+        return next((s for s in trace if s["t"] >= t), trace[-1])
+
+    start, end = at(no_control_trace, t_0), at(no_control_trace, 2 * t_0)
+    served = (end["arrived"] - start["arrived"]) * 3600.0 / (end["t"] - start["t"])
+    if v_jam is None:
+        return {"action": "no network threshold: run block D's sustained episodes first",
+                "breaks_no_control_down": None, "controlled_drains_before_cap": None,
+                "served_flow_no_control": served}
+    times = np.array([s["t"] for s in no_control_trace], float)
+    spacing = float(np.median(np.diff(times)))
+    jammed = jam_indicator(no_control_trace, v_jam).any(axis=1) & (times > t_0) & (times <= cap)
+    lengths = [last - first + spacing for first, last in spells(jammed, times)]
+    breaks = any(length >= hold for length in lengths)
+    drain, drained = drain_time(here_trace, t_0, hold, cap, v_jam)
+    if not breaks:
+        action = ("rebuild mainz_burst with a 6,000 veh/h burst and a 16,000 s cap: "
+                  "--demand-burst 900 1500 0.333333 --duration-s 16000 "
+                  "--demand-duration-s 16000, and repeat the pilot once")
+    elif not drained:
+        action = ("rebuild mainz_burst with a 3,600 veh/h background: "
+                  "--demand-scale 0.2, and repeat the pilot once")
+    else:
+        action = "keep the scenario"
+    if action != "keep the scenario":
+        action += ("; move results/feed/D.jsonl and outputs/feed/traces/D away first, "
+                   "since the pilot's episodes are of the old scenario")
+    return {"v_jam": v_jam, "hold_s": hold, "t_0": t_0,
+            "longest_jam_spell_after_t0_s": max(lengths, default=0.0),
+            "breaks_no_control_down": breaks,
+            "controlled_drain_s": drain, "controlled_drains_before_cap": drained,
+            "served_flow_no_control": served, "pending_at_t0": start["pending"],
+            "pending_at_2t0": end["pending"], "action": action}
+
+
+def network_threshold(episodes: list[dict]) -> dict[str, Any] | None:
+    """Amendment 1, A4: one threshold for the whole network, fitted on the sustained
+    scenario's `here` (published) and `no_control` episodes from 300 to 2,500 s."""
+    from src.sumo.drain import NETWORK_WINDOW_S, thresholds_from_traces
+
+    traces = [t for t in (_load_trace(r) for r in episodes if r["scenario"] == "mainz"
+                          and r["arm"] in ("here", "no_control")) if t]
+    if not traces:
+        return None
+    fit = thresholds_from_traces(traces, *NETWORK_WINDOW_S)
+    fit["episodes"] = len(traces)
+    return fit
+
+
+def summarize_d(episodes, smoke: bool = False,
+                results_dir: Path | None = None) -> dict[str, Any]:
+    import numpy as np
+
+    from src.sumo.drain import (
+        drain_summary, drain_time, jam_segment_minutes, onset, open_spell_at_cap,
+        thresholds_from_traces,
+    )
+
+    network = network_threshold(episodes)
+    primary_v = network["pooled"]["v_jam"] if network else None
+    out: dict[str, Any] = {
+        "block": "D", "scenarios": {},
+        "network_threshold": network,
+        "primary_unavailable_reason": (
+            None if primary_v is not None else
+            "no sustained-scenario episode to fit the network threshold on" if network is None
+            else f"the network fit is refused: {network['pooled']['reason']}")}
+    for scenario, setting in DRAIN.items():
+        records = [r for r in episodes if r["scenario"] == scenario]
+        if not records:
+            continue
+        cap = records[0]["duration_s"]
+        t_0 = setting["t_0"]
+        traces = {(r["arm"], r["seed"]): _load_trace(r) for r in records}
+        entry: dict[str, Any] = {"t_0": t_0, "cap_s": cap, "hold_s": HOLD_S,
+                                 "hold_sensitivities_s": list(HOLD_SENSITIVITIES)}
+        if cap <= t_0:
+            entry["note"] = "the episode ends before the drain clock starts (smoke run)"
+            entry["episodes"] = [{"arm": r["arm"], "seed": r["seed"], "flow": r["flow"]}
+                                 for r in records]
+            out["scenarios"][scenario] = entry
+            continue
+        rules: dict[str, Any] = {}
+        if primary_v is not None:
+            rules["network"] = primary_v
+            per_segment = [e["v_jam"] for e in network["per_segment"]]
+            if all(v is not None for v in per_segment):
+                rules["network_per_segment"] = per_segment
+        no_control = [traces[k] for k in traces if k[0] == "no_control" and traces[k]]
+        if no_control:
+            # The plan's original per-scenario fit, now a sensitivity (A4).
+            scenario_fit = thresholds_from_traces(no_control, t_0 - 600.0, cap)
+            entry["scenario_threshold"] = scenario_fit
+            if scenario_fit["pooled"]["v_jam"] is not None:
+                rules["scenario"] = scenario_fit["pooled"]["v_jam"]
+        rules["fixed_30"] = 30.0
+        entry["rules"] = {name: v for name, v in rules.items()}
+        results: dict[str, Any] = {}
+        for rule, v_jam in rules.items():
+            v = np.asarray(v_jam, float)
+            for hold in (HOLD_S, *HOLD_SENSITIVITIES):
+                per_seed: dict[str, dict[int, tuple[float, bool]]] = {}
+                extra = {}
+                for (arm, seed), trace in traces.items():
+                    if trace is None:
+                        continue
+                    per_seed.setdefault(arm, {})[seed] = drain_time(trace, t_0, hold, cap, v)
+                    extra[f"{arm}/{seed}"] = {
+                        "onset": onset(trace, setting["onset_from"], v),
+                        "jam_segment_minutes": jam_segment_minutes(trace, v,
+                                                                   setting["onset_from"], cap),
+                        "open_spell_at_cap": open_spell_at_cap(trace, cap, v)}
+                # Amendment 2, B5: drained runs whose trace ends inside a spell (shorter
+                # than H, or it would have undone the drain) still open at the cap.
+                open_and_drained = sorted(
+                    key for key, values in extra.items()
+                    if values["open_spell_at_cap"] is not None
+                    and per_seed[key.split("/")[0]][int(key.split("/")[1])][1])
+                results[f"{rule}/H{hold:g}"] = {**drain_summary(per_seed, cap - t_0),
+                                                "per_episode": extra,
+                                                "drained_ending_in_open_spell":
+                                                    open_and_drained}
+        entry["drain"] = results
+        entry["primary"] = f"network/H{HOLD_S:g}" if primary_v is not None else None
+        out["scenarios"][scenario] = entry
+    if results_dir is not None:
+        _write_json(results_dir / "drain_thresholds.json", {
+            "network": network,
+            "scenarios": {name: entry.get("scenario_threshold")
+                          for name, entry in out["scenarios"].items()}})
+    return out
+
+
+def require_identical_before(pulsed: list[dict], base: list[dict], start: float, key: str,
+                             base_path: str | None) -> None:
+    """Refuse a pulsed/baseline pair whose traces differ at any sample before `start`."""
+    before_pulsed = [s for s in pulsed if s["t"] < start]
+    before_base = [s for s in base if s["t"] < start]
+    if [s["t"] for s in before_pulsed] != [s["t"] for s in before_base]:
+        raise SystemExit(f"{key} and its baseline {base_path} do not share their samples "
+                         f"before the pulse at {start:g} s")
+    for a, b in zip(before_pulsed, before_base):
+        if a != b:
+            raise SystemExit(f"{key} differs from its baseline {base_path} at {a['t']:g} s, "
+                             f"before the pulse at {start:g} s: the baseline is not the "
+                             "same run; block E is not summarised")
+
+
+def site_resolution(pulse_peaks: dict[int, list[float]],
+                    null_peaks: dict[int, list[float]]) -> dict[str, Any]:
+    """Amendment 2, B2: which sites' pulse response stands above its own null.
+
+    For each site, the statistic is the peak self-deviation at the pulsed segment from
+    the pulse's start to `DEVIATION_END_S`; the null is that statistic on a one-vehicle
+    pulse at the same site and level. A site is resolved when the 60-vehicle pulses'
+    mean peak exceeds the 95th percentile of its null peaks. A site with no null run
+    or no pulse run is not resolved.
+    """
+    import numpy as np
+
+    sites = []
+    for site in range(12):
+        pulses, nulls = pulse_peaks.get(site, []), null_peaks.get(site, [])
+        entry: dict[str, Any] = {"site": site, "pulse_runs": len(pulses), "null_runs": len(nulls)}
+        if pulses and nulls:
+            mean = float(np.mean(pulses))
+            p95 = float(np.percentile(nulls, 95))
+            entry.update(pulse_peak_mean=mean, null_peak_p95=p95, resolved=bool(mean > p95))
+        else:
+            entry.update(pulse_peak_mean=None, null_peak_p95=None, resolved=False)
+        sites.append(entry)
+    resolved = sum(1 for e in sites if e["resolved"])
+    return {"sites": sites, "resolved": resolved, "required": RESOLVED_SITES_REQUIRED,
+            "available": resolved >= RESOLVED_SITES_REQUIRED,
+            "status": ("available" if resolved >= RESOLVED_SITES_REQUIRED else
+                       f"unavailable ({resolved} of 12 sites resolved)")}
+
+
+def summarize_e(episodes, traces_dir: Path, results_dir: Path) -> dict[str, Any]:
+    from src.analysis.gains import deviations, estimate_level, linearity_ratio, min_penetration
+
+    def baseline_trace(p: float, seed: int):
+        candidates = []
+        if p == 1.0:
+            candidates.append(traces_dir / "A" / f"published_-_{seed}.json")
+        else:
+            candidates.append(traces_dir / "C" / f"penetration_p{p:g}_{seed}.json")
+        candidates.append(traces_dir / "E" / f"baseline_p{p:g}_{seed}.json")
+        for path in candidates:
+            if path.exists():
+                return json.loads(path.read_text())["trace"], str(path)
+        return None, None
+
+    def peak_self(record: dict, base: list[dict], site: int) -> float:
+        response = deviations(_load_trace(record), base, _pulse_start(record), DEVIATION_END_S)
+        return float(response[:, site].max())
+
+    by_arm: dict[str, dict[float, dict[int, dict[int, dict]]]] = {
+        "pulse60": {}, "pulse30": {}, "pulse1": {}}
+    for record in episodes:
+        if record["arm"] not in by_arm:
+            continue
+        site = int(record["pulse"][0])
+        by_arm[record["arm"]].setdefault(record["penetration"], {}).setdefault(
+            record["seed"], {})[site] = record
+    by_level, small, nulls = by_arm["pulse60"], by_arm["pulse30"], by_arm["pulse1"]
+    # Amendment 3, C3: a pulsed run and its unperturbed baseline are the same run until
+    # the pulse starts (A8), so any difference before it means the baseline came from
+    # another checkpoint, actuation or scenario. Every pair is checked before use.
+    pairs_checked = 0
+    for arm_runs in by_arm.values():
+        for p, seeds in arm_runs.items():
+            for seed, sites in seeds.items():
+                base, base_path = baseline_trace(p, seed)
+                if base is None:
+                    continue
+                for site, record in sites.items():
+                    require_identical_before(_load_trace(record), base, _pulse_start(record),
+                                             record["key"], base_path)
+                    pairs_checked += 1
+    levels: dict[str, Any] = {}
+    rho_by_level: dict[float, float | None] = {}
+    missing = []
+    for p in sorted(by_level, reverse=True):
+        seed_runs, peaks, noise = {}, [], []
+        pulse_peaks: dict[int, list[float]] = {}
+        null_peaks: dict[int, list[float]] = {}
+        for seed, sites in sorted(by_level[p].items()):
+            base, base_path = baseline_trace(p, seed)
+            if base is None:
+                missing.append(f"p{p:g}/seed{seed}")
+                continue
+            for site, record in sites.items():
+                pulse_peaks.setdefault(site, []).append(peak_self(record, base, site))
+            if len(sites) < 12:
+                continue
+            runs = []
+            for site in range(12):
+                trace = _load_trace(sites[site])
+                runs.append(deviations(trace, base, *_regression_window(sites[site])))
+                peaks.append(pulse_peaks[site][-1])
+                tail = [s for s in trace if NOISE_WINDOW[0] <= s["t"] <= NOISE_WINDOW[1]]
+                if tail:
+                    noise.extend(deviations(trace, base, *NOISE_WINDOW).ravel().tolist())
+            seed_runs[seed] = runs
+        for seed, sites in sorted(nulls.get(p, {}).items()):
+            base, _ = baseline_trace(p, seed)
+            if base is None:
+                missing.append(f"p{p:g}/seed{seed} (null)")
+                continue
+            for site, record in sites.items():
+                null_peaks.setdefault(site, []).append(peak_self(record, base, site))
+        resolution = site_resolution(pulse_peaks, null_peaks)
+        entry: dict[str, Any] = {"seeds_used": sorted(seed_runs), "sites": resolution,
+                                 "certificate_status": resolution["status"]}
+        # Informational since Amendment 2: pooled over segments, so not like for like.
+        entry["noise_floor"] = _noise_floor(peaks, noise)
+        if len(seed_runs) >= 2:
+            estimate = estimate_level(seed_runs)
+            if resolution["available"]:
+                entry.update(estimate)
+                resolved_sites = [e["site"] for e in resolution["sites"] if e["resolved"]]
+                if len(resolved_sites) < 12:
+                    # Amendment 3, C4: the pooled regression also stacks the unresolved
+                    # sites' runs, which moved rho_hat by about 10% on a seed-16 probe.
+                    # Fit again on the resolved sites alone; certify only if both do.
+                    resolved = estimate_level({seed: [runs[site] for site in resolved_sites]
+                                               for seed, runs in seed_runs.items()})
+                    bounds = (estimate["rho_UCB"], resolved["rho_UCB"])
+                    entry.update(
+                        fit_resolved_sites={"sites": resolved_sites, **resolved},
+                        rho_UCB_resolved_sites=resolved["rho_UCB"],
+                        rho_hat_resolved_sites=resolved["rho_hat"],
+                        certificate=all(b is not None and b < 1.0 for b in bounds))
+                    rho_by_level[p] = (None if None in bounds else max(bounds))
+                else:
+                    entry.update(rho_UCB_resolved_sites=entry["rho_UCB"],
+                                 rho_hat_resolved_sites=entry["rho_hat"],
+                                 fit_resolved_sites={"same_as_all_sites": True})
+                    rho_by_level[p] = entry["rho_UCB"]
+                entry["fit_all_sites"] = {"sites": list(range(12)),
+                                          "rho_UCB": estimate["rho_UCB"],
+                                          "rho_hat": estimate["rho_hat"]}
+            else:
+                # The bound is not reported where the responses are not resolved; the
+                # estimate is kept for inspection under its own key.
+                entry.update(certificate=False, rho_UCB=None, rho_hat=None,
+                             estimate_unresolved=estimate)
+                rho_by_level[p] = None
+        else:
+            entry.update(note="fewer than two complete seeds: no bound", certificate=False,
+                         certificate_status="unavailable (fewer than two complete seeds)")
+            rho_by_level[p] = None
+        ratios = []
+        for seed, sites in sorted(small.get(p, {}).items()):
+            base, _ = baseline_trace(p, seed)
+            if base is None:
+                continue
+            for site, record in sorted(sites.items()):
+                large = by_level.get(p, {}).get(seed, {}).get(site)
+                if large is None:
+                    continue
+                window = (_pulse_start(record), DEVIATION_END_S)
+                y60 = deviations(_load_trace(large), base, *window)
+                y30 = deviations(_load_trace(record), base, *window)
+                ratios.append({"seed": seed, "site": site,
+                               "ratio": linearity_ratio(y60, y30, site)})
+        entry["linearity"] = ratios
+        entry["linearity_outside_1p6_2p4"] = sum(
+            1 for r in ratios if not (1.6 <= r["ratio"] <= 2.4))
+        levels[f"{p:g}"] = entry
+    inserted = _inserted_differences(episodes, results_dir)
+    summary = {"block": "E", "levels": levels, "missing_baselines": missing,
+               "inserted_difference": inserted,
+               "baseline_pairs_checked": pairs_checked,
+               "p_min": min_penetration(rho_by_level) if rho_by_level else None,
+               "resolution_rule": (f"a site is resolved when the 60-vehicle pulses' mean "
+                                   f"peak self-deviation exceeds the 95th percentile of its "
+                                   f"one-vehicle null on seeds {list(NULL_SEEDS)}; a level "
+                                   f"needs {RESOLVED_SITES_REQUIRED} of 12"),
+               "regression_window": "from the injection's end to "
+                                    f"{DEVIATION_END_S:g} s",
+               "noise_window_s": list(NOISE_WINDOW)}
+    _write_json(results_dir / "certificate.json", summary)
+    return summary
+
+
+def _pulse_start(record: dict) -> float:
+    return float(record["pulse"][2])
+
+
+def _regression_window(record: dict) -> tuple[float, float]:
+    """From the injection's end (start + duration) to `DEVIATION_END_S`."""
+    _, _, start, duration = record["pulse"]
+    return float(start) + float(duration), DEVIATION_END_S
+
+
+def _noise_floor(peaks: list[float], noise: list[float]) -> dict[str, Any]:
+    """The deviation a pulse leaves once it has gone, against the response it causes.
+
+    `noise` is every segment's deviation over `NOISE_WINDOW` (a single inserted vehicle
+    changes the realisation after it departs, so this is not zero); `peaks` is each
+    pulse's largest self-deviation from its start to `DEVIATION_END_S`. The response is
+    resolved when the mean peak exceeds the noise's 95th percentile.
+    """
+    import numpy as np
+
+    if not noise or not peaks:
+        return {"note": "no pulse ran to the noise window"}
+    p95 = float(np.percentile(noise, 95))
+    return {"noise_mean": float(np.mean(noise)), "noise_p95": p95,
+            "noise_samples": len(noise), "peak_self_deviation_mean": float(np.mean(peaks)),
+            "resolved": bool(np.mean(peaks) > p95),
+            "rule": "mean peak self-deviation > 95th percentile of the noise"}
+
+
+def _accounted(record: dict) -> int:
+    """Every vehicle handed to SUMO or held for it: arrived, running, pending, held, and
+    (Amendment 1, A8) in a teleport, which no other count includes."""
+    return (record["arrived"] + record["running"] + record["pending"]
+            + record["held_at_entry"] + record.get("in_teleport", 0))
+
+
+def _inserted_differences(episodes: list[dict], results_dir: Path) -> dict[str, Any]:
+    """Pulsed minus unperturbed `arrived + running + pending + held`, which must be the
+    pulse size exactly (plan attack point 11)."""
+    baselines: dict[tuple[float, int], dict] = {}
+    for block, arm in (("A", "published"), ("C", "penetration"), ("E", "baseline")):
+        for record in read_block(results_dir, block)[1]:
+            if record["arm"] == arm:
+                baselines.setdefault((record["penetration"], record["seed"]), record)
+    checked, mismatched, unmatched = 0, [], 0
+    for record in episodes:
+        if not record["arm"].startswith("pulse"):
+            continue
+        base = baselines.get((record["penetration"], record["seed"]))
+        if base is None or base["duration_s"] != record["duration_s"]:
+            unmatched += 1
+            continue
+        checked += 1
+        difference = _accounted(record) - _accounted(base)
+        if difference != record["pulse"][1]:
+            mismatched.append({"key": record["key"], "difference": difference})
+    return {"checked": checked, "mismatched": mismatched, "without_baseline": unmatched}
+
+
+def collision_counts(episodes: list[dict]) -> dict[str, Any]:
+    """Plan Amendment 1: no reported number may silently contain collisions."""
+    controlled = [r for r in episodes if r["arm"] != "no_control"]
+    return {
+        "controlled_episodes_with_collisions": sum(
+            1 for r in controlled
+            if r.get("colliding_vehicles", 0) or r.get("collision_teleports", 0)),
+        "controlled_episodes": len(controlled),
+        "colliding_vehicles_total": sum(r.get("colliding_vehicles", 0) for r in episodes),
+        "collision_teleports_total": sum(r.get("collision_teleports", 0) for r in episodes),
+        "actuations": sorted({r.get("actuation", "unrecorded") for r in episodes}),
+    }
+
+
+def summarize(block: str, results_dir: Path, traces_dir: Path,
+              context: Context) -> dict[str, Any]:
+    headers, episodes = read_block(results_dir, block)
+    require_one_identity(headers, episodes, block)
+    references = committed_references(context.reference)
+    if block in ("B", "C"):
+        check = _reference_check(references, headers, episodes)
+        # Amendment 2, B1: a summary paired against the wrong arm is not built. A smoke
+        # run's summary records the check and is refused by the figure instead.
+        if not context.smoke:
+            require_reference(check, block)
+    if block == "A":
+        summary = summarize_a(episodes, headers, context)
+    elif block == "B":
+        summary = summarize_b(episodes, references)
+        summary["reference_check"] = check
+    elif block == "C":
+        summary = summarize_c(episodes, references)
+        summary["reference_check"] = check
+    elif block == "D":
+        summary = summarize_d(episodes, context.smoke, results_dir)
+        pilot_path = results_dir / "D_pilot.json"
+        if pilot_path.exists():
+            summary["pilot"] = json.loads(pilot_path.read_text())
+    elif block == "E":
+        summary = summarize_e(episodes, traces_dir, results_dir)
+    else:
+        raise ValueError(block)
+    seeds_by_arm = {}
+    for record in episodes:
+        seeds_by_arm.setdefault(f"{record['arm']}/{record['variant']}", set()).add(record["seed"])
+    summary.update({
+        "episodes": len(episodes),
+        **collision_counts(episodes),
+        "seeds_by_arm": {k: sorted(v) for k, v in sorted(seeds_by_arm.items())},
+        "identical_seed_lists": len({tuple(sorted(v)) for v in seeds_by_arm.values()}) <= 1,
+        "headers": [{k: h.get(k) for k in ("started_wall", "commit", "dirty", "sumo_version",
+                                            "libsumo_version", "resumed")} for h in headers],
+        "wall_s_total": sum(r.get("wall_s", 0.0) for r in episodes),
+        "smoke": bool(headers and headers[-1].get("config", {}).get("smoke")),
+    })
+    _write_json(results_dir / f"{block}_summary.json", summary)
+    return summary
+
+
+# ----------------------------------------------------------------------- CLI
+
+
+SMOKE_GUARD = {"results": "results/feed", "traces": "outputs/feed/traces"}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--block", nargs="+", choices=BLOCKS, required=True)
+    parser.add_argument("--seeds", type=int, nargs="+", default=list(DEFAULT_SEEDS))
+    parser.add_argument("--duration-s", type=float, default=2500.0)
+    parser.add_argument("--feed-artefact", default=str(DEFAULT_ARTEFACT))
+    parser.add_argument("--feed-session", default=None,
+                        help="the artefact session block A replays; default its own default")
+    parser.add_argument("--allow-placeholder", action="store_true",
+                        help="let block A replay the drive-log placeholder process")
+    parser.add_argument("--start-s", type=float, default=60.0,
+                        help="simulation time of the replayed process's first stamp, moved "
+                             "forward to that stamp's second of the minute")
+    parser.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT))
+    parser.add_argument("--reference", default=str(REFERENCE_EVALUATION),
+                        help="the evaluation blocks B and C pair against; it must have run "
+                             "the block's checkpoint under the block's actuation")
+    parser.add_argument("--actuation", choices=("max_speed", "set_speed"),
+                        default="max_speed",
+                        help="max_speed caps the vehicle's maximum speed (Amendment 1); "
+                             "set_speed is the legacy actuation that collides")
+    parser.add_argument("--results-dir", default="results/feed")
+    parser.add_argument("--traces-dir", default="outputs/feed/traces")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--pause-file", default=None,
+                        help="default <results-dir>/PAUSE")
+    parser.add_argument("--summarize-only", action="store_true")
+    parser.add_argument("--pilot", action="store_true",
+                        help="block D only: run seed 16 on mainz_burst in both arms and apply "
+                             "the plan's pilot rule")
+    parser.add_argument("--smoke", action="store_true",
+                        help=f"one episode per block on seed {SMOKE_SEED}, "
+                             f"{SMOKE_DURATION_S:g} s")
+    return parser
+
+
+def _resolve(path: str) -> Path:
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else REPO_ROOT / candidate
+
+
+def main(argv: list[str] | None = None, run_episode_factory=None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.smoke:
+        # A smoke episode must never land in a block's real JSONL, where --resume would
+        # take its 600 s result for the experiment's own episode of the same key.
+        if args.results_dir == SMOKE_GUARD["results"]:
+            args.results_dir = "outputs/feed/smoke/results"
+        if args.traces_dir == SMOKE_GUARD["traces"]:
+            args.traces_dir = "outputs/feed/smoke/traces"
+    results_dir, traces_dir = _resolve(args.results_dir), _resolve(args.traces_dir)
+    pause_file = _resolve(args.pause_file) if args.pause_file else results_dir / "PAUSE"
+    checkpoint = _resolve(args.checkpoint)
+    context = Context(seeds=tuple(args.seeds), duration_s=args.duration_s,
+                      artefact=_resolve(args.feed_artefact), session=args.feed_session,
+                      allow_placeholder=args.allow_placeholder, start_s=args.start_s,
+                      smoke=args.smoke, actuation=args.actuation,
+                      reference=_resolve(args.reference))
+    if args.smoke:
+        context.seeds = (SMOKE_SEED,)
+        context.duration_s = SMOKE_DURATION_S
+        context.pulse_start_s = 400.0
+        context.window_start_s = 300.0
+    if len(set(context.seeds)) != len(context.seeds):
+        raise SystemExit("duplicate seeds")
+    if "A" in args.block:
+        context.feed = load_feed_parameters(context.artefact, context.session,
+                                            context.allow_placeholder, context.P_q)
+        context.session = context.feed["session"]
+
+    model = None
+    if not args.summarize_only:
+        if run_episode_factory is None:
+            import evaluate_mainz_checkpoints as emc
+
+            if not checkpoint.exists():
+                raise SystemExit(f"{checkpoint} does not exist: run Amendment 1's retraining "
+                                 "(scripts/train_mainz_src.py --save-as "
+                                 "results/checkpoints/mainz_here_cap) or pass --checkpoint")
+            model = emc._build_and_load(checkpoint, emc.CHECKPOINT_FEATURES["here"],
+                                        emc._num_segments(SCENARIOS["mainz"]))
+            run_episode_factory = episode_runner
+    for block in args.block:
+        if args.summarize_only:
+            summarize(block, results_dir, traces_dir, context)
+            print(f"wrote {results_dir / f'{block}_summary.json'}")
+            continue
+        if block in ("B", "C") and not args.smoke:
+            # Amendment 2, B1: refuse before any episode runs.
+            require_reference(reference_identity(
+                committed_references(context.reference),
+                _sha256(checkpoint) if checkpoint.exists() else None, context.actuation,
+                {"seeds": list(context.seeds), "duration_s": context.duration_s,
+                 "window_start_s": context.window_start_s,
+                 "step_length_s": context.step_length_s}),
+                block)
+        specs = block_specs(block, context)
+        if block == "D" and args.pilot:
+            # The sustained episodes the network threshold needs, then seed 16 of (b).
+            specs = ([s for s in specs if s.scenario == "mainz"]
+                     + [s for s in specs if s.scenario == "mainz_burst" and s.seed == SMOKE_SEED])
+        if block == "E":
+            specs = _with_baselines(specs, context, traces_dir)
+        if args.smoke:
+            # One episode: block A's version-keyed rule at D = L_bar (it replays the
+            # artefact), and every other block's first arm that is not a reused baseline.
+            wanted = ((lambda s: s.arm == "version_keyed" and s.variant == "D+0")
+                      if block == "A" else (lambda s: s.arm != "baseline"))
+            specs = [s for s in specs if wanted(s)][:1]
+        record = header(block, context, checkpoint, argv if argv is not None else sys.argv)
+        result = run_block(block, specs, run_episode_factory(model, context),
+                           results_dir=results_dir, traces_dir=traces_dir,
+                           header_record=record, resume=args.resume or args.pilot,
+                           pause_file=pause_file)
+        if result["status"] == "paused":
+            return 0
+        if block == "D" and args.pilot:
+            _, episodes = read_block(results_dir, "D")
+            pilot = [r for r in episodes if r["scenario"] == "mainz_burst"
+                     and r["seed"] == SMOKE_SEED]
+            traces = {r["arm"]: _load_trace(r) for r in pilot}
+            network = network_threshold(episodes)
+            decision = pilot_decision(traces["no_control"], traces["here"],
+                                      DRAIN["mainz_burst"]["cap_s"],
+                                      network["pooled"]["v_jam"] if network else None,
+                                      DRAIN["mainz_burst"]["t_0"])
+            _write_json(results_dir / "D_pilot.json", decision)
+            print(f"pilot: {decision['action']}")
+        summarize(block, results_dir, traces_dir, context)
+        print(f"block {block}: ran {len(result['ran'])}, skipped {len(result['skipped'])}; "
+              f"wrote {results_dir / f'{block}_summary.json'}")
+    return 0
+
+
+def _with_baselines(specs: list[Spec], context: Context, traces_dir: Path) -> list[Spec]:
+    """Add block E's unperturbed episodes for every (level, seed) no earlier block traced."""
+    needed = sorted({(s.penetration, s.seed) for s in specs}, reverse=True)
+    extra = []
+    for p, seed in needed:
+        reused = (traces_dir / "A" / f"published_-_{seed}.json" if p == 1.0 else
+                  traces_dir / "C" / f"penetration_p{p:g}_{seed}.json")
+        if not reused.exists():
+            extra.append(baseline_spec(p, seed, context))
+    return extra + specs
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

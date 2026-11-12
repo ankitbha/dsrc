@@ -1,0 +1,2571 @@
+{
+ "v_jam": 19.0,
+ "v_jam_sha256": "df30a8769e15aeecf82a21638500feb198dc843f125d7598f3907bf5a9362c81",
+ "episodes": [
+  {
+   "scenario": "B5",
+   "seed": 16,
+   "onset": 3470.0,
+   "segment": 9,
+   "W_feed": 1520.0,
+   "W_cam": 1840.0,
+   "W_true": 1820.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012369999999999992,
+    "rate_per_s": 0.0004123333333333331,
+    "at": 2380.0
+   },
+   "all": {
+    "onset": 3470.0,
+    "segment": 9,
+    "W_feed": 1520.0,
+    "W_cam": 1840.0,
+    "W_true": 1820.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012369999999999992,
+     "rate_per_s": 0.0004123333333333331,
+     "at": 2380.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 17,
+   "onset": 2990.0,
+   "segment": 9,
+   "W_feed": 980.0,
+   "W_cam": 1240.0,
+   "W_true": 1230.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.008892000000000011,
+    "rate_per_s": 0.0002964000000000004,
+    "at": 2990.0
+   },
+   "all": {
+    "onset": 2990.0,
+    "segment": 9,
+    "W_feed": 980.0,
+    "W_cam": 1240.0,
+    "W_true": 1230.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.008892000000000011,
+     "rate_per_s": 0.0002964000000000004,
+     "at": 2990.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 18,
+   "onset": 3090.0,
+   "segment": 9,
+   "W_feed": 990.0,
+   "W_cam": 1290.0,
+   "W_true": 1470.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010438000000000003,
+    "rate_per_s": 0.0003479333333333334,
+    "at": 3090.0
+   },
+   "all": {
+    "onset": 3090.0,
+    "segment": 9,
+    "W_feed": 990.0,
+    "W_cam": 1290.0,
+    "W_true": 1470.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.010438000000000003,
+     "rate_per_s": 0.0003479333333333334,
+     "at": 3090.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 19,
+   "onset": 2570.0,
+   "segment": 9,
+   "W_feed": 670.0,
+   "W_cam": 1000.0,
+   "W_true": 1000.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.008504999999999999,
+    "rate_per_s": 0.00028349999999999995,
+    "at": 1930.0
+   },
+   "all": {
+    "onset": 2570.0,
+    "segment": 9,
+    "W_feed": 670.0,
+    "W_cam": 1000.0,
+    "W_true": 1000.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.008504999999999999,
+     "rate_per_s": 0.00028349999999999995,
+     "at": 1930.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 20,
+   "onset": 6330.0,
+   "segment": 9,
+   "W_feed": 4170.0,
+   "W_cam": 4650.0,
+   "W_true": 4610.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012370999999999993,
+    "rate_per_s": 0.0004123666666666664,
+    "at": 5580.0
+   },
+   "all": {
+    "onset": 6330.0,
+    "segment": 9,
+    "W_feed": 4170.0,
+    "W_cam": 4650.0,
+    "W_true": 4610.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012370999999999993,
+     "rate_per_s": 0.0004123666666666664,
+     "at": 5580.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 21,
+   "onset": 2400.0,
+   "segment": 9,
+   "W_feed": 390.0,
+   "W_cam": 970.0,
+   "W_true": 880.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010437999999999996,
+    "rate_per_s": 0.0003479333333333332,
+    "at": 2160.0
+   },
+   "all": {
+    "onset": 2400.0,
+    "segment": 9,
+    "W_feed": 390.0,
+    "W_cam": 970.0,
+    "W_true": 880.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.010437999999999996,
+     "rate_per_s": 0.0003479333333333332,
+     "at": 2160.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 22,
+   "onset": 4310.0,
+   "segment": 9,
+   "W_feed": 2210.0,
+   "W_cam": 2970.0,
+   "W_true": 2900.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.008892000000000004,
+    "rate_per_s": 0.00029640000000000016,
+    "at": 2310.0
+   },
+   "all": {
+    "onset": 4310.0,
+    "segment": 9,
+    "W_feed": 2210.0,
+    "W_cam": 2970.0,
+    "W_true": 2900.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.008892000000000004,
+     "rate_per_s": 0.00029640000000000016,
+     "at": 2310.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 23,
+   "onset": 2460.0,
+   "segment": 11,
+   "W_feed": 700.0,
+   "W_cam": 710.0,
+   "W_true": 750.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.035745,
+    "rate_per_s": 0.0011915,
+    "at": 820.0
+   },
+   "all": {
+    "onset": 2460.0,
+    "segment": 11,
+    "W_feed": 700.0,
+    "W_cam": 710.0,
+    "W_true": 750.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.035745,
+     "rate_per_s": 0.0011915,
+     "at": 820.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 24,
+   "onset": 6220.0,
+   "segment": 9,
+   "W_feed": 4170.0,
+   "W_cam": 4390.0,
+   "W_true": 4670.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.013144000000000003,
+    "rate_per_s": 0.00043813333333333343,
+    "at": 2340.0
+   },
+   "all": {
+    "onset": 6220.0,
+    "segment": 9,
+    "W_feed": 4170.0,
+    "W_cam": 4390.0,
+    "W_true": 4670.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.013144000000000003,
+     "rate_per_s": 0.00043813333333333343,
+     "at": 2340.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 25,
+   "onset": 2820.0,
+   "segment": 9,
+   "W_feed": 800.0,
+   "W_cam": 1360.0,
+   "W_true": 1500.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.00889100000000001,
+    "rate_per_s": 0.000296366666666667,
+    "at": 2810.0
+   },
+   "all": {
+    "onset": 2820.0,
+    "segment": 9,
+    "W_feed": 800.0,
+    "W_cam": 1360.0,
+    "W_true": 1500.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.00889100000000001,
+     "rate_per_s": 0.000296366666666667,
+     "at": 2810.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 26,
+   "onset": 2450.0,
+   "segment": 9,
+   "W_feed": 440.0,
+   "W_cam": 600.0,
+   "W_true": 600.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.009277999999999998,
+    "rate_per_s": 0.0003092666666666666,
+    "at": 1470.0
+   },
+   "all": {
+    "onset": 2450.0,
+    "segment": 9,
+    "W_feed": 440.0,
+    "W_cam": 600.0,
+    "W_true": 600.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.009277999999999998,
+     "rate_per_s": 0.0003092666666666666,
+     "at": 1470.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 27,
+   "onset": 2370.0,
+   "segment": 9,
+   "W_feed": 390.0,
+   "W_cam": 1010.0,
+   "W_true": 1080.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.011210999999999999,
+    "rate_per_s": 0.0003737,
+    "at": 2070.0
+   },
+   "all": {
+    "onset": 2370.0,
+    "segment": 9,
+    "W_feed": 390.0,
+    "W_cam": 1010.0,
+    "W_true": 1080.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.011210999999999999,
+     "rate_per_s": 0.0003737,
+     "at": 2070.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 28,
+   "onset": 3130.0,
+   "segment": 9,
+   "W_feed": 1040.0,
+   "W_cam": 1710.0,
+   "W_true": 1560.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010825000000000001,
+    "rate_per_s": 0.0003608333333333334,
+    "at": 2480.0
+   },
+   "all": {
+    "onset": 3130.0,
+    "segment": 9,
+    "W_feed": 1040.0,
+    "W_cam": 1710.0,
+    "W_true": 1560.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.010825000000000001,
+     "rate_per_s": 0.0003608333333333334,
+     "at": 2480.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 29,
+   "onset": 2200.0,
+   "segment": 9,
+   "W_feed": 350.0,
+   "W_cam": 990.0,
+   "W_true": 1010.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012758000000000002,
+    "rate_per_s": 0.00042526666666666674,
+    "at": 1200.0
+   },
+   "all": {
+    "onset": 2200.0,
+    "segment": 9,
+    "W_feed": 350.0,
+    "W_cam": 990.0,
+    "W_true": 1010.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012758000000000002,
+     "rate_per_s": 0.00042526666666666674,
+     "at": 1200.0
+    }
+   }
+  },
+  {
+   "scenario": "B5",
+   "seed": 30,
+   "onset": 2810.0,
+   "segment": 9,
+   "W_feed": 760.0,
+   "W_cam": 1240.0,
+   "W_true": 1240.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012757000000000004,
+    "rate_per_s": 0.0004252333333333335,
+    "at": 2810.0
+   },
+   "all": {
+    "onset": 2810.0,
+    "segment": 9,
+    "W_feed": 760.0,
+    "W_cam": 1240.0,
+    "W_true": 1240.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012757000000000004,
+     "rate_per_s": 0.0004252333333333335,
+     "at": 2810.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 16,
+   "onset": 2080.0,
+   "segment": 9,
+   "W_feed": 370.0,
+   "W_cam": 660.0,
+   "W_true": 650.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010824,
+    "rate_per_s": 0.0003608,
+    "at": 2080.0
+   },
+   "all": {
+    "onset": 2080.0,
+    "segment": 9,
+    "W_feed": 370.0,
+    "W_cam": 660.0,
+    "W_true": 650.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.010824,
+     "rate_per_s": 0.0003608,
+     "at": 2080.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 17,
+   "onset": 2780.0,
+   "segment": 9,
+   "W_feed": 970.0,
+   "W_cam": 1230.0,
+   "W_true": 1210.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012370999999999993,
+    "rate_per_s": 0.0004123666666666664,
+    "at": 2210.0
+   },
+   "all": {
+    "onset": 2780.0,
+    "segment": 9,
+    "W_feed": 970.0,
+    "W_cam": 1230.0,
+    "W_true": 1210.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012370999999999993,
+     "rate_per_s": 0.0004123666666666664,
+     "at": 2210.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 18,
+   "onset": 2630.0,
+   "segment": 9,
+   "W_feed": 830.0,
+   "W_cam": 1090.0,
+   "W_true": 1250.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.011983999999999995,
+    "rate_per_s": 0.0003994666666666665,
+    "at": 2140.0
+   },
+   "all": {
+    "onset": 2630.0,
+    "segment": 9,
+    "W_feed": 830.0,
+    "W_cam": 1090.0,
+    "W_true": 1250.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.011983999999999995,
+     "rate_per_s": 0.0003994666666666665,
+     "at": 2140.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 19,
+   "onset": 2530.0,
+   "segment": 9,
+   "W_feed": 790.0,
+   "W_cam": 990.0,
+   "W_true": 1020.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.015463999999999992,
+    "rate_per_s": 0.0005154666666666664,
+    "at": 2510.0
+   },
+   "all": {
+    "onset": 2530.0,
+    "segment": 9,
+    "W_feed": 790.0,
+    "W_cam": 990.0,
+    "W_true": 1020.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.015463999999999992,
+     "rate_per_s": 0.0005154666666666664,
+     "at": 2510.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 20,
+   "onset": 2220.0,
+   "segment": 9,
+   "W_feed": 330.0,
+   "W_cam": 770.0,
+   "W_true": 770.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012371,
+    "rate_per_s": 0.00041236666666666664,
+    "at": 1920.0
+   },
+   "all": {
+    "onset": 2220.0,
+    "segment": 9,
+    "W_feed": 330.0,
+    "W_cam": 770.0,
+    "W_true": 770.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012371,
+     "rate_per_s": 0.00041236666666666664,
+     "at": 1920.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 21,
+   "onset": 2000.0,
+   "segment": 11,
+   "W_feed": 300.0,
+   "W_cam": 400.0,
+   "W_true": 420.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.025996000000000005,
+    "rate_per_s": 0.0008665333333333335,
+    "at": 1920.0
+   },
+   "all": {
+    "onset": 2000.0,
+    "segment": 11,
+    "W_feed": 300.0,
+    "W_cam": 400.0,
+    "W_true": 420.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.025996000000000005,
+     "rate_per_s": 0.0008665333333333335,
+     "at": 1920.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 22,
+   "onset": 2140.0,
+   "segment": 9,
+   "W_feed": 380.0,
+   "W_cam": 810.0,
+   "W_true": 810.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.016237,
+    "rate_per_s": 0.0005412333333333334,
+    "at": 2100.0
+   },
+   "all": {
+    "onset": 2140.0,
+    "segment": 9,
+    "W_feed": 380.0,
+    "W_cam": 810.0,
+    "W_true": 810.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.016237,
+     "rate_per_s": 0.0005412333333333334,
+     "at": 2100.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 23,
+   "onset": 2240.0,
+   "segment": 9,
+   "W_feed": 410.0,
+   "W_cam": 670.0,
+   "W_true": 660.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.011984000000000002,
+    "rate_per_s": 0.0003994666666666667,
+    "at": 1590.0
+   },
+   "all": {
+    "onset": 2240.0,
+    "segment": 9,
+    "W_feed": 410.0,
+    "W_cam": 670.0,
+    "W_true": 660.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.011984000000000002,
+     "rate_per_s": 0.0003994666666666667,
+     "at": 1590.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 24,
+   "onset": 2010.0,
+   "segment": 9,
+   "W_feed": 350.0,
+   "W_cam": 520.0,
+   "W_true": 490.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.01430300000000001,
+    "rate_per_s": 0.000476766666666667,
+    "at": 1990.0
+   },
+   "all": {
+    "onset": 2010.0,
+    "segment": 9,
+    "W_feed": 350.0,
+    "W_cam": 520.0,
+    "W_true": 490.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.01430300000000001,
+     "rate_per_s": 0.000476766666666667,
+     "at": 1990.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 25,
+   "onset": 2170.0,
+   "segment": 9,
+   "W_feed": 470.0,
+   "W_cam": 860.0,
+   "W_true": 890.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010824,
+    "rate_per_s": 0.0003608,
+    "at": 1710.0
+   },
+   "all": {
+    "onset": 2170.0,
+    "segment": 9,
+    "W_feed": 470.0,
+    "W_cam": 860.0,
+    "W_true": 890.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.010824,
+     "rate_per_s": 0.0003608,
+     "at": 1710.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 26,
+   "onset": 2040.0,
+   "segment": 9,
+   "W_feed": 320.0,
+   "W_cam": 560.0,
+   "W_true": 510.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.014690999999999996,
+    "rate_per_s": 0.0004896999999999998,
+    "at": 2040.0
+   },
+   "all": {
+    "onset": 2040.0,
+    "segment": 9,
+    "W_feed": 320.0,
+    "W_cam": 560.0,
+    "W_true": 510.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.014690999999999996,
+     "rate_per_s": 0.0004896999999999998,
+     "at": 2040.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 27,
+   "onset": 2240.0,
+   "segment": 10,
+   "W_feed": 830.0,
+   "W_cam": 800.0,
+   "W_true": 840.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010048999999999999,
+    "rate_per_s": 0.0003349666666666666,
+    "at": 1870.0
+   },
+   "all": {
+    "onset": 2240.0,
+    "segment": 10,
+    "W_feed": 830.0,
+    "W_cam": 800.0,
+    "W_true": 840.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.010048999999999999,
+     "rate_per_s": 0.0003349666666666666,
+     "at": 1870.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 28,
+   "onset": 2210.0,
+   "segment": 9,
+   "W_feed": 440.0,
+   "W_cam": 680.0,
+   "W_true": 710.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.008118,
+    "rate_per_s": 0.0002706,
+    "at": 2140.0
+   },
+   "all": {
+    "onset": 2210.0,
+    "segment": 9,
+    "W_feed": 440.0,
+    "W_cam": 680.0,
+    "W_true": 710.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.008118,
+     "rate_per_s": 0.0002706,
+     "at": 2140.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 29,
+   "onset": 2320.0,
+   "segment": 9,
+   "W_feed": 540.0,
+   "W_cam": 1130.0,
+   "W_true": 1130.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.011984000000000002,
+    "rate_per_s": 0.0003994666666666667,
+    "at": 1200.0
+   },
+   "all": {
+    "onset": 2320.0,
+    "segment": 9,
+    "W_feed": 540.0,
+    "W_cam": 1130.0,
+    "W_true": 1130.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.011984000000000002,
+     "rate_per_s": 0.0003994666666666667,
+     "at": 1200.0
+    }
+   }
+  },
+  {
+   "scenario": "B7.5",
+   "seed": 30,
+   "onset": 2210.0,
+   "segment": 11,
+   "W_feed": 530.0,
+   "W_cam": 530.0,
+   "W_true": 560.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.032494999999999996,
+    "rate_per_s": 0.0010831666666666665,
+    "at": 1030.0
+   },
+   "all": {
+    "onset": 2210.0,
+    "segment": 11,
+    "W_feed": 530.0,
+    "W_cam": 530.0,
+    "W_true": 560.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.032494999999999996,
+     "rate_per_s": 0.0010831666666666665,
+     "at": 1030.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 16,
+   "onset": 2010.0,
+   "segment": 9,
+   "W_feed": 310.0,
+   "W_cam": 600.0,
+   "W_true": 600.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010437999999999989,
+    "rate_per_s": 0.00034793333333333297,
+    "at": 1910.0
+   },
+   "all": {
+    "onset": 2010.0,
+    "segment": 9,
+    "W_feed": 310.0,
+    "W_cam": 600.0,
+    "W_true": 600.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.010437999999999989,
+     "rate_per_s": 0.00034793333333333297,
+     "at": 1910.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 17,
+   "onset": 2230.0,
+   "segment": 9,
+   "W_feed": 540.0,
+   "W_cam": 710.0,
+   "W_true": 720.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.008504999999999999,
+    "rate_per_s": 0.00028349999999999995,
+    "at": 1900.0
+   },
+   "all": {
+    "onset": 2230.0,
+    "segment": 9,
+    "W_feed": 540.0,
+    "W_cam": 710.0,
+    "W_true": 720.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.008504999999999999,
+     "rate_per_s": 0.00028349999999999995,
+     "at": 1900.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 18,
+   "onset": 1950.0,
+   "segment": 9,
+   "W_feed": 210.0,
+   "W_cam": 430.0,
+   "W_true": 570.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.009278000000000002,
+    "rate_per_s": 0.00030926666666666674,
+    "at": 1520.0
+   },
+   "all": {
+    "onset": 1950.0,
+    "segment": 9,
+    "W_feed": 210.0,
+    "W_cam": 430.0,
+    "W_true": 570.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.009278000000000002,
+     "rate_per_s": 0.00030926666666666674,
+     "at": 1520.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 19,
+   "onset": 1970.0,
+   "segment": 9,
+   "W_feed": 270.0,
+   "W_cam": 480.0,
+   "W_true": 690.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012370999999999993,
+    "rate_per_s": 0.0004123666666666664,
+    "at": 1960.0
+   },
+   "all": {
+    "onset": 1970.0,
+    "segment": 9,
+    "W_feed": 270.0,
+    "W_cam": 480.0,
+    "W_true": 690.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012370999999999993,
+     "rate_per_s": 0.0004123666666666664,
+     "at": 1960.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 20,
+   "onset": 2270.0,
+   "segment": 8,
+   "W_feed": 1040.0,
+   "W_cam": 1070.0,
+   "W_true": 1000.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.016603,
+    "rate_per_s": 0.0005534333333333334,
+    "at": 2110.0
+   },
+   "all": {
+    "onset": 2270.0,
+    "segment": 8,
+    "W_feed": 1040.0,
+    "W_cam": 1070.0,
+    "W_true": 1000.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.016603,
+     "rate_per_s": 0.0005534333333333334,
+     "at": 2110.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 21,
+   "onset": 2000.0,
+   "segment": 9,
+   "W_feed": 420.0,
+   "W_cam": 580.0,
+   "W_true": 560.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.011210999999999999,
+    "rate_per_s": 0.0003737,
+    "at": 1860.0
+   },
+   "all": {
+    "onset": 2000.0,
+    "segment": 9,
+    "W_feed": 420.0,
+    "W_cam": 580.0,
+    "W_true": 560.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.011210999999999999,
+     "rate_per_s": 0.0003737,
+     "at": 1860.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 22,
+   "onset": 2100.0,
+   "segment": 9,
+   "W_feed": 420.0,
+   "W_cam": 680.0,
+   "W_true": 580.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010051999999999998,
+    "rate_per_s": 0.0003350666666666666,
+    "at": 1520.0
+   },
+   "all": {
+    "onset": 1420.0,
+    "segment": 35,
+    "W_feed": 50.0,
+    "W_cam": 70.0,
+    "W_true": 230.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.018,
+     "rate_per_s": 0.0006,
+     "at": 1330.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 23,
+   "onset": 2070.0,
+   "segment": 9,
+   "W_feed": 420.0,
+   "W_cam": 540.0,
+   "W_true": 530.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.014304000000000011,
+    "rate_per_s": 0.00047680000000000037,
+    "at": 2070.0
+   },
+   "all": {
+    "onset": 1420.0,
+    "segment": 35,
+    "W_feed": 60.0,
+    "W_cam": 190.0,
+    "W_true": 280.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.01575,
+     "rate_per_s": 0.000525,
+     "at": 1360.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 24,
+   "onset": 2180.0,
+   "segment": 9,
+   "W_feed": 530.0,
+   "W_cam": 700.0,
+   "W_true": 690.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.009278000000000002,
+    "rate_per_s": 0.00030926666666666674,
+    "at": 1240.0
+   },
+   "all": {
+    "onset": 1430.0,
+    "segment": 35,
+    "W_feed": 70.0,
+    "W_cam": 210.0,
+    "W_true": 290.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.01575,
+     "rate_per_s": 0.000525,
+     "at": 1120.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 25,
+   "onset": 2240.0,
+   "segment": 9,
+   "W_feed": 520.0,
+   "W_cam": 950.0,
+   "W_true": 950.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.01275699999999999,
+    "rate_per_s": 0.000425233333333333,
+    "at": 2240.0
+   },
+   "all": {
+    "onset": 1440.0,
+    "segment": 35,
+    "W_feed": 90.0,
+    "W_cam": 110.0,
+    "W_true": 270.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.013500000000000005,
+     "rate_per_s": 0.00045000000000000015,
+     "at": 1390.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 26,
+   "onset": 2040.0,
+   "segment": 9,
+   "W_feed": 290.0,
+   "W_cam": 530.0,
+   "W_true": 510.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012758000000000005,
+    "rate_per_s": 0.00042526666666666685,
+    "at": 2040.0
+   },
+   "all": {
+    "onset": 2040.0,
+    "segment": 9,
+    "W_feed": 290.0,
+    "W_cam": 530.0,
+    "W_true": 510.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012758000000000005,
+     "rate_per_s": 0.00042526666666666685,
+     "at": 2040.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 27,
+   "onset": 2000.0,
+   "segment": 9,
+   "W_feed": 320.0,
+   "W_cam": 720.0,
+   "W_true": 730.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.011983999999999995,
+    "rate_per_s": 0.0003994666666666665,
+    "at": 1970.0
+   },
+   "all": {
+    "onset": 2000.0,
+    "segment": 9,
+    "W_feed": 320.0,
+    "W_cam": 720.0,
+    "W_true": 730.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.011983999999999995,
+     "rate_per_s": 0.0003994666666666665,
+     "at": 1970.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 28,
+   "onset": 1890.0,
+   "segment": 9,
+   "W_feed": 160.0,
+   "W_cam": 360.0,
+   "W_true": 470.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012371000000000007,
+    "rate_per_s": 0.0004123666666666669,
+    "at": 1850.0
+   },
+   "all": {
+    "onset": 1890.0,
+    "segment": 9,
+    "W_feed": 160.0,
+    "W_cam": 360.0,
+    "W_true": 470.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012371000000000007,
+     "rate_per_s": 0.0004123666666666669,
+     "at": 1850.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 29,
+   "onset": 2030.0,
+   "segment": 9,
+   "W_feed": 380.0,
+   "W_cam": 810.0,
+   "W_true": 840.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.011597000000000003,
+    "rate_per_s": 0.0003865666666666668,
+    "at": 1190.0
+   },
+   "all": {
+    "onset": 2030.0,
+    "segment": 9,
+    "W_feed": 380.0,
+    "W_cam": 810.0,
+    "W_true": 840.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.011597000000000003,
+     "rate_per_s": 0.0003865666666666668,
+     "at": 1190.0
+    }
+   }
+  },
+  {
+   "scenario": "B9",
+   "seed": 30,
+   "onset": 2040.0,
+   "segment": 9,
+   "W_feed": 370.0,
+   "W_cam": 570.0,
+   "W_true": 630.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.010051000000000004,
+    "rate_per_s": 0.00033503333333333347,
+    "at": 1840.0
+   },
+   "all": {
+    "onset": 2040.0,
+    "segment": 9,
+    "W_feed": 370.0,
+    "W_cam": 570.0,
+    "W_true": 630.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.010051000000000004,
+     "rate_per_s": 0.00033503333333333347,
+     "at": 1840.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 16,
+   "onset": 1230.0,
+   "segment": 11,
+   "W_feed": 40.0,
+   "W_cam": 40.0,
+   "W_true": 50.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.03412,
+    "rate_per_s": 0.0011373333333333333,
+    "at": 1220.0
+   },
+   "all": {
+    "onset": 1230.0,
+    "segment": 11,
+    "W_feed": 40.0,
+    "W_cam": 40.0,
+    "W_true": 50.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.03412,
+     "rate_per_s": 0.0011373333333333333,
+     "at": 1220.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 17,
+   "onset": 1270.0,
+   "segment": 11,
+   "W_feed": 20.0,
+   "W_cam": 20.0,
+   "W_true": 20.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.025996,
+    "rate_per_s": 0.0008665333333333333,
+    "at": 1270.0
+   },
+   "all": {
+    "onset": 1270.0,
+    "segment": 11,
+    "W_feed": 20.0,
+    "W_cam": 20.0,
+    "W_true": 20.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.025996,
+     "rate_per_s": 0.0008665333333333333,
+     "at": 1270.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 18,
+   "onset": 1220.0,
+   "segment": 11,
+   "W_feed": 30.0,
+   "W_cam": 30.0,
+   "W_true": 40.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.032494999999999996,
+    "rate_per_s": 0.0010831666666666665,
+    "at": 1210.0
+   },
+   "all": {
+    "onset": 1220.0,
+    "segment": 11,
+    "W_feed": 30.0,
+    "W_cam": 30.0,
+    "W_true": 40.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.032494999999999996,
+     "rate_per_s": 0.0010831666666666665,
+     "at": 1210.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 19,
+   "onset": 1240.0,
+   "segment": 11,
+   "W_feed": 40.0,
+   "W_cam": 30.0,
+   "W_true": 40.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.030870999999999996,
+    "rate_per_s": 0.001029033333333333,
+    "at": 1230.0
+   },
+   "all": {
+    "onset": 1240.0,
+    "segment": 11,
+    "W_feed": 40.0,
+    "W_cam": 30.0,
+    "W_true": 40.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.030870999999999996,
+     "rate_per_s": 0.001029033333333333,
+     "at": 1230.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 20,
+   "onset": 1200.0,
+   "segment": 11,
+   "W_feed": 20.0,
+   "W_cam": 30.0,
+   "W_true": 50.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.03574399999999999,
+    "rate_per_s": 0.0011914666666666663,
+    "at": 1190.0
+   },
+   "all": {
+    "onset": 1200.0,
+    "segment": 11,
+    "W_feed": 20.0,
+    "W_cam": 30.0,
+    "W_true": 50.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.03574399999999999,
+     "rate_per_s": 0.0011914666666666663,
+     "at": 1190.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 21,
+   "onset": 1200.0,
+   "segment": 11,
+   "W_feed": 20.0,
+   "W_cam": 30.0,
+   "W_true": 30.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.032494999999999996,
+    "rate_per_s": 0.0010831666666666665,
+    "at": 1200.0
+   },
+   "all": {
+    "onset": 1200.0,
+    "segment": 11,
+    "W_feed": 20.0,
+    "W_cam": 30.0,
+    "W_true": 30.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.032494999999999996,
+     "rate_per_s": 0.0010831666666666665,
+     "at": 1200.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 22,
+   "onset": 1190.0,
+   "segment": 11,
+   "W_feed": 30.0,
+   "W_cam": 30.0,
+   "W_true": 40.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.032495,
+    "rate_per_s": 0.0010831666666666667,
+    "at": 1190.0
+   },
+   "all": {
+    "onset": 1190.0,
+    "segment": 11,
+    "W_feed": 30.0,
+    "W_cam": 30.0,
+    "W_true": 40.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.032495,
+     "rate_per_s": 0.0010831666666666667,
+     "at": 1190.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 23,
+   "onset": 1220.0,
+   "segment": 11,
+   "W_feed": 40.0,
+   "W_cam": 40.0,
+   "W_true": 50.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.047117000000000006,
+    "rate_per_s": 0.0015705666666666668,
+    "at": 1210.0
+   },
+   "all": {
+    "onset": 1220.0,
+    "segment": 11,
+    "W_feed": 40.0,
+    "W_cam": 40.0,
+    "W_true": 50.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.047117000000000006,
+     "rate_per_s": 0.0015705666666666668,
+     "at": 1210.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 24,
+   "onset": 1230.0,
+   "segment": 11,
+   "W_feed": 50.0,
+   "W_cam": 50.0,
+   "W_true": 60.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.035744,
+    "rate_per_s": 0.0011914666666666665,
+    "at": 1200.0
+   },
+   "all": {
+    "onset": 1230.0,
+    "segment": 11,
+    "W_feed": 50.0,
+    "W_cam": 50.0,
+    "W_true": 60.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.035744,
+     "rate_per_s": 0.0011914666666666665,
+     "at": 1200.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 25,
+   "onset": 1250.0,
+   "segment": 11,
+   "W_feed": 40.0,
+   "W_cam": 50.0,
+   "W_true": 60.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.050366999999999995,
+    "rate_per_s": 0.0016788999999999999,
+    "at": 1250.0
+   },
+   "all": {
+    "onset": 1250.0,
+    "segment": 11,
+    "W_feed": 40.0,
+    "W_cam": 50.0,
+    "W_true": 60.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.050366999999999995,
+     "rate_per_s": 0.0016788999999999999,
+     "at": 1250.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 26,
+   "onset": 1210.0,
+   "segment": 11,
+   "W_feed": 20.0,
+   "W_cam": 30.0,
+   "W_true": 40.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.043868,
+    "rate_per_s": 0.0014622666666666666,
+    "at": 1200.0
+   },
+   "all": {
+    "onset": 1210.0,
+    "segment": 11,
+    "W_feed": 20.0,
+    "W_cam": 30.0,
+    "W_true": 40.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.043868,
+     "rate_per_s": 0.0014622666666666666,
+     "at": 1200.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 27,
+   "onset": 1220.0,
+   "segment": 11,
+   "W_feed": 40.0,
+   "W_cam": 40.0,
+   "W_true": 50.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.03736899999999999,
+    "rate_per_s": 0.001245633333333333,
+    "at": 1210.0
+   },
+   "all": {
+    "onset": 1220.0,
+    "segment": 11,
+    "W_feed": 40.0,
+    "W_cam": 40.0,
+    "W_true": 50.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.03736899999999999,
+     "rate_per_s": 0.001245633333333333,
+     "at": 1210.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 28,
+   "onset": 1210.0,
+   "segment": 11,
+   "W_feed": 40.0,
+   "W_cam": 40.0,
+   "W_true": 40.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.035744,
+    "rate_per_s": 0.0011914666666666665,
+    "at": 1210.0
+   },
+   "all": {
+    "onset": 1210.0,
+    "segment": 11,
+    "W_feed": 40.0,
+    "W_cam": 40.0,
+    "W_true": 40.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.035744,
+     "rate_per_s": 0.0011914666666666665,
+     "at": 1210.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 29,
+   "onset": 1280.0,
+   "segment": 11,
+   "W_feed": 60.0,
+   "W_cam": 60.0,
+   "W_true": 70.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.03736899999999999,
+    "rate_per_s": 0.001245633333333333,
+    "at": 1270.0
+   },
+   "all": {
+    "onset": 1280.0,
+    "segment": 11,
+    "W_feed": 60.0,
+    "W_cam": 60.0,
+    "W_true": 70.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.03736899999999999,
+     "rate_per_s": 0.001245633333333333,
+     "at": 1270.0
+    }
+   }
+  },
+  {
+   "scenario": "I_exit",
+   "seed": 30,
+   "onset": 1230.0,
+   "segment": 11,
+   "W_feed": 40.0,
+   "W_cam": 40.0,
+   "W_true": 50.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.035745,
+    "rate_per_s": 0.0011915,
+    "at": 1210.0
+   },
+   "all": {
+    "onset": 1230.0,
+    "segment": 11,
+    "W_feed": 40.0,
+    "W_cam": 40.0,
+    "W_true": 50.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.035745,
+     "rate_per_s": 0.0011915,
+     "at": 1210.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 16,
+   "onset": 1340.0,
+   "segment": 6,
+   "W_feed": 140.0,
+   "W_cam": 160.0,
+   "W_true": 170.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.00875,
+    "rate_per_s": 0.0002916666666666667,
+    "at": 1260.0
+   },
+   "all": {
+    "onset": 1340.0,
+    "segment": 6,
+    "W_feed": 140.0,
+    "W_cam": 160.0,
+    "W_true": 170.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.00875,
+     "rate_per_s": 0.0002916666666666667,
+     "at": 1260.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 17,
+   "onset": 2790.0,
+   "segment": 9,
+   "W_feed": 920.0,
+   "W_cam": 1090.0,
+   "W_true": 1090.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.011598,
+    "rate_per_s": 0.0003866,
+    "at": 1650.0
+   },
+   "all": {
+    "onset": 2790.0,
+    "segment": 9,
+    "W_feed": 920.0,
+    "W_cam": 1090.0,
+    "W_true": 1090.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.011598,
+     "rate_per_s": 0.0003866,
+     "at": 1650.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 18,
+   "onset": 5290.0,
+   "segment": 9,
+   "W_feed": 3480.0,
+   "W_cam": 3610.0,
+   "W_true": 3630.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.013144000000000003,
+    "rate_per_s": 0.00043813333333333343,
+    "at": 1650.0
+   },
+   "all": {
+    "onset": 5290.0,
+    "segment": 9,
+    "W_feed": 3480.0,
+    "W_cam": 3610.0,
+    "W_true": 3630.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.013144000000000003,
+     "rate_per_s": 0.00043813333333333343,
+     "at": 1650.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 19,
+   "onset": 3910.0,
+   "segment": 11,
+   "W_feed": 2050.0,
+   "W_cam": 2050.0,
+   "W_true": 2110.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.03412,
+    "rate_per_s": 0.0011373333333333333,
+    "at": 1970.0
+   },
+   "all": {
+    "onset": 3910.0,
+    "segment": 11,
+    "W_feed": 2050.0,
+    "W_cam": 2050.0,
+    "W_true": 2110.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.03412,
+     "rate_per_s": 0.0011373333333333333,
+     "at": 1970.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 20,
+   "onset": 1970.0,
+   "segment": 10,
+   "W_feed": 210.0,
+   "W_cam": 220.0,
+   "W_true": 220.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012561000000000001,
+    "rate_per_s": 0.00041870000000000004,
+    "at": 1970.0
+   },
+   "all": {
+    "onset": 1970.0,
+    "segment": 10,
+    "W_feed": 210.0,
+    "W_cam": 220.0,
+    "W_true": 220.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012561000000000001,
+     "rate_per_s": 0.00041870000000000004,
+     "at": 1970.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 21,
+   "onset": 4770.0,
+   "segment": 9,
+   "W_feed": 2960.0,
+   "W_cam": 3110.0,
+   "W_true": 3090.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.012757000000000004,
+    "rate_per_s": 0.0004252333333333335,
+    "at": 2940.0
+   },
+   "all": {
+    "onset": 4770.0,
+    "segment": 9,
+    "W_feed": 2960.0,
+    "W_cam": 3110.0,
+    "W_true": 3090.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.012757000000000004,
+     "rate_per_s": 0.0004252333333333335,
+     "at": 2940.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 22,
+   "onset": 3350.0,
+   "segment": 9,
+   "W_feed": 1520.0,
+   "W_cam": 1680.0,
+   "W_true": 1680.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.016236,
+    "rate_per_s": 0.0005412,
+    "at": 1670.0
+   },
+   "all": {
+    "onset": 3350.0,
+    "segment": 9,
+    "W_feed": 1520.0,
+    "W_cam": 1680.0,
+    "W_true": 1680.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.016236,
+     "rate_per_s": 0.0005412,
+     "at": 1670.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 23,
+   "onset": 6230.0,
+   "segment": 9,
+   "W_feed": 4350.0,
+   "W_cam": 4470.0,
+   "W_true": 4550.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.013529999999999999,
+    "rate_per_s": 0.00045099999999999996,
+    "at": 1630.0
+   },
+   "all": {
+    "onset": 6230.0,
+    "segment": 9,
+    "W_feed": 4350.0,
+    "W_cam": 4470.0,
+    "W_true": 4550.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.013529999999999999,
+     "rate_per_s": 0.00045099999999999996,
+     "at": 1630.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 24,
+   "onset": 3410.0,
+   "segment": 11,
+   "W_feed": 1590.0,
+   "W_cam": 1620.0,
+   "W_true": 2010.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.032494999999999996,
+    "rate_per_s": 0.0010831666666666665,
+    "at": 1930.0
+   },
+   "all": {
+    "onset": 3410.0,
+    "segment": 11,
+    "W_feed": 1590.0,
+    "W_cam": 1620.0,
+    "W_true": 2010.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.032494999999999996,
+     "rate_per_s": 0.0010831666666666665,
+     "at": 1930.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 25,
+   "onset": 5000.0,
+   "segment": 9,
+   "W_feed": 3160.0,
+   "W_cam": 3350.0,
+   "W_true": 3360.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.017010000000000004,
+    "rate_per_s": 0.0005670000000000001,
+    "at": 1660.0
+   },
+   "all": {
+    "onset": 5000.0,
+    "segment": 9,
+    "W_feed": 3160.0,
+    "W_cam": 3350.0,
+    "W_true": 3360.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.017010000000000004,
+     "rate_per_s": 0.0005670000000000001,
+     "at": 1660.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 26,
+   "onset": 3210.0,
+   "segment": 9,
+   "W_feed": 1370.0,
+   "W_cam": 1500.0,
+   "W_true": 1540.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.013531000000000001,
+    "rate_per_s": 0.00045103333333333336,
+    "at": 1660.0
+   },
+   "all": {
+    "onset": 3210.0,
+    "segment": 9,
+    "W_feed": 1370.0,
+    "W_cam": 1500.0,
+    "W_true": 1540.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.013531000000000001,
+     "rate_per_s": 0.00045103333333333336,
+     "at": 1660.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 27,
+   "onset": 6950.0,
+   "segment": 9,
+   "W_feed": 5120.0,
+   "W_cam": 5280.0,
+   "W_true": 5290.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.014304,
+    "rate_per_s": 0.00047680000000000004,
+    "at": 1660.0
+   },
+   "all": {
+    "onset": 6950.0,
+    "segment": 9,
+    "W_feed": 5120.0,
+    "W_cam": 5280.0,
+    "W_true": 5290.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.014304,
+     "rate_per_s": 0.00047680000000000004,
+     "at": 1660.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 28,
+   "onset": 1350.0,
+   "segment": 6,
+   "W_feed": 150.0,
+   "W_cam": 180.0,
+   "W_true": 180.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.007656000000000003,
+    "rate_per_s": 0.0002552000000000001,
+    "at": 1240.0
+   },
+   "all": {
+    "onset": 1350.0,
+    "segment": 6,
+    "W_feed": 150.0,
+    "W_cam": 180.0,
+    "W_true": 180.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.007656000000000003,
+     "rate_per_s": 0.0002552000000000001,
+     "at": 1240.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 29,
+   "onset": 2410.0,
+   "segment": 11,
+   "W_feed": 620.0,
+   "W_cam": 620.0,
+   "W_true": 1080.0,
+   "k_hat_available": true,
+   "ramp": {
+    "rise": 0.03249400000000001,
+    "rate_per_s": 0.0010831333333333336,
+    "at": 1860.0
+   },
+   "all": {
+    "onset": 2410.0,
+    "segment": 11,
+    "W_feed": 620.0,
+    "W_cam": 620.0,
+    "W_true": 1080.0,
+    "k_hat_available": true,
+    "ramp": {
+     "rise": 0.03249400000000001,
+     "rate_per_s": 0.0010831333333333336,
+     "at": 1860.0
+    }
+   }
+  },
+  {
+   "scenario": "I_mid",
+   "seed": 30,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 16,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 17,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 18,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 19,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 20,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 21,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 22,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 23,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 24,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 25,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 26,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 27,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 28,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 29,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  },
+  {
+   "scenario": "BG",
+   "seed": 30,
+   "onset": null,
+   "segment": null,
+   "W_feed": null,
+   "W_cam": null,
+   "W_true": null,
+   "k_hat_available": true,
+   "ramp": null,
+   "all": {
+    "onset": null,
+    "segment": null,
+    "W_feed": null,
+    "W_cam": null,
+    "W_true": null,
+    "k_hat_available": true,
+    "ramp": null
+   }
+  }
+ ],
+ "speed_density_break": {
+  "k_b": 0.01,
+  "bins": [
+   {
+    "lower": 0.0,
+    "n": 4118,
+    "median_speed_kmh": 57.47155
+   },
+   {
+    "lower": 0.01,
+    "n": 14563,
+    "median_speed_kmh": 55.3516
+   },
+   {
+    "lower": 0.02,
+    "n": 6834,
+    "median_speed_kmh": 55.6258
+   },
+   {
+    "lower": 0.03,
+    "n": 7624,
+    "median_speed_kmh": 55.4975
+   },
+   {
+    "lower": 0.04,
+    "n": 5307,
+    "median_speed_kmh": 54.9624
+   },
+   {
+    "lower": 0.05,
+    "n": 1094,
+    "median_speed_kmh": 51.55695
+   },
+   {
+    "lower": 0.06,
+    "n": 554,
+    "median_speed_kmh": 35.78825
+   },
+   {
+    "lower": 0.07,
+    "n": 566,
+    "median_speed_kmh": 29.0668
+   },
+   {
+    "lower": 0.08,
+    "n": 776,
+    "median_speed_kmh": 23.97935
+   },
+   {
+    "lower": 0.09,
+    "n": 932,
+    "median_speed_kmh": 20.654049999999998
+   },
+   {
+    "lower": 0.1,
+    "n": 792,
+    "median_speed_kmh": 19.605400000000003
+   },
+   {
+    "lower": 0.11,
+    "n": 526,
+    "median_speed_kmh": 19.24785
+   },
+   {
+    "lower": 0.12,
+    "n": 259,
+    "median_speed_kmh": 17.6226
+   },
+   {
+    "lower": 0.13,
+    "n": 73,
+    "median_speed_kmh": 15.9099
+   }
+  ],
+  "free_flow_kmh": 60.0,
+  "share": 0.95,
+  "bin_width": 0.01,
+  "samples": 44034
+ },
+ "offset_s": 240.0,
+ "measured_columns": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11
+ ],
+ "speed_density_break_all": {
+  "k_b": 0.03,
+  "bins": [
+   {
+    "lower": 0.0,
+    "n": 6352,
+    "median_speed_kmh": 57.765100000000004
+   },
+   {
+    "lower": 0.01,
+    "n": 61871,
+    "median_speed_kmh": 57.3221
+   },
+   {
+    "lower": 0.02,
+    "n": 43272,
+    "median_speed_kmh": 57.0354
+   },
+   {
+    "lower": 0.03,
+    "n": 12731,
+    "median_speed_kmh": 55.6325
+   },
+   {
+    "lower": 0.04,
+    "n": 6235,
+    "median_speed_kmh": 54.8051
+   },
+   {
+    "lower": 0.05,
+    "n": 1158,
+    "median_speed_kmh": 50.96285
+   },
+   {
+    "lower": 0.06,
+    "n": 559,
+    "median_speed_kmh": 36.0318
+   },
+   {
+    "lower": 0.07,
+    "n": 567,
+    "median_speed_kmh": 29.1138
+   },
+   {
+    "lower": 0.08,
+    "n": 776,
+    "median_speed_kmh": 23.97935
+   },
+   {
+    "lower": 0.09,
+    "n": 932,
+    "median_speed_kmh": 20.654049999999998
+   },
+   {
+    "lower": 0.1,
+    "n": 792,
+    "median_speed_kmh": 19.605400000000003
+   },
+   {
+    "lower": 0.11,
+    "n": 526,
+    "median_speed_kmh": 19.24785
+   },
+   {
+    "lower": 0.12,
+    "n": 259,
+    "median_speed_kmh": 17.6226
+   },
+   {
+    "lower": 0.13,
+    "n": 73,
+    "median_speed_kmh": 15.9099
+   }
+  ],
+  "free_flow_kmh": 60.0,
+  "share": 0.95,
+  "bin_width": 0.01,
+  "samples": 136119
+ }
+}

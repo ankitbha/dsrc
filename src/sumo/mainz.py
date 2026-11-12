@@ -12,14 +12,17 @@ truth. Training is centralized in the simulator and may use privileged informati
 execution reads only what a deployed vehicle can read. The reward is SRC's unchanged.
 
 The action is SRC's too: one speed from {30, 45, 60} km/h per super-segment per 60 s,
-written to every controlled vehicle on that segment as a DESIRED speed. SUMO bounds it
-by the car-following safe speed exactly as Vissim bounds `DesSpeed`, so the advisory is
-gated by local conditions rather than commanded through them.
+written to every controlled vehicle on that segment as its maximum speed (`ACTUATIONS`).
+The car-following model still chooses the speed under that cap, as Vissim does under
+`DesSpeed`, so the advisory is gated by local conditions rather than commanded through
+them.
 """
 from __future__ import annotations
 
+import bisect
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,17 @@ SPEED_ACTIONS_KMH: tuple[float, ...] = (30.0, 45.0, 60.0)
 #: limit -- `inverted_tree` is 108 km/h, where a literal 30/45/60 would be a standing
 #: order to crawl rather than a speed advisory.
 SPEED_ACTION_FRACTIONS: tuple[float, ...] = (0.5, 0.75, 1.0)
+#: How an advisory reaches a controlled vehicle.
+#:
+#: `max_speed` (the default, plan Amendment 1) caps the vehicle's maximum speed with
+#: `setMaxSpeed`, which is what Vissim's `DesSpeed` is: the car-following model keeps
+#: choosing the speed, under the cap, so it still brakes for a stopped leader.
+#: `set_speed` is the actuation every result before the amendment was produced with:
+#: `setSpeed` under EIDM with a 1.0 s action step lets a controlled vehicle run into a
+#: stopped leader, and SUMO resolves the collision by teleporting the follower (76
+#: collision teleports on seed 16 in 2,500 s; none without control). It is kept only so
+#: the committed numbers can be reproduced.
+ACTUATIONS: tuple[str, ...] = ("max_speed", "set_speed")
 #: SRC's `FEEDBACK_STEP`.
 DECISION_INTERVAL_S: float = 60.0
 #: The density past which flow falls on THIS network, measured rather than adopted.
@@ -86,6 +100,60 @@ def jam_factor(speed_kmh: float, free_flow_kmh: float) -> float:
     return float(min(10.0, max(0.0, 10.0 * (1.0 - speed_kmh / free_flow_kmh))))
 
 
+def controlled_index(index: int, penetration: float) -> bool:
+    """Whether the vehicle at position `index` of the departure schedule runs the policy.
+
+    `floor((i + 1) p) - floor(i p) == 1`. Over the first `n` vehicles this controls
+    exactly `floor(n p)` of them, spread so that two consecutive controlled vehicles are
+    never more than `ceil(1 / p)` positions apart. The builder's `--av-fraction` rule,
+    `i % round(1 / p) == 0`, cannot express 0.75: `round(1 / 0.75)` is 1, so it controls
+    every vehicle.
+    """
+    return math.floor((index + 1) * penetration) - math.floor(index * penetration) == 1
+
+
+#: Approach plan 2026-10-17 section 5.4: a queue member is below this speed, consecutive
+#: members are at most `QUEUE_GAP_M` apart, and a slow vehicle within `NEAR_INSERTION_M` of
+#: a far end is counted on its own.
+QUEUE_SPEED_KMH: float = 19.0
+QUEUE_GAP_M: float = 100.0
+NEAR_INSERTION_M: float = 200.0
+
+
+def contiguous_queue(distances, gap: float = QUEUE_GAP_M) -> float:
+    """The length of the queue standing from the entry link's start (approach plan 5.4).
+
+    `distances` are the slow vehicles' distances upstream of the entry link's start. Walk
+    outward from 0 in order of distance: the queue ends at the first vehicle more than `gap`
+    beyond the previous member (or beyond 0, for the first). Its length is the last
+    member's distance, 0 when there is none. An isolated slow vehicle far up the road is
+    not a queue.
+    """
+    reach = 0.0
+    for distance in sorted(float(d) for d in distances):
+        if distance - reach > gap:
+            break
+        reach = distance
+    return reach
+
+
+def _here_row(members: list[dict[str, float]]) -> dict[str, float]:
+    """A super-segment's HERE-shaped quantities from its edges' readings (`_per_edge`).
+
+    Aggregated with `nanmean`, unweighted by length, as SRC pools its links; an empty edge
+    contributes no speed rather than a zero.
+    """
+    speed = _nanmean([m["speed_kmh"] for m in members])
+    free_flow = _nanmean([m["free_flow_kmh"] for m in members])
+    return {
+        "speed": speed,
+        "free_flow": free_flow,
+        "jam_factor": jam_factor(speed, free_flow),
+        "lanes": _nanmean([m["lanes"] for m in members]),
+        "length_km": sum(m["length_m"] for m in members) / 1000.0,
+    }
+
+
 class MainzEnv:
     """One SUMO episode on the SRC Mainz network.
 
@@ -111,8 +179,25 @@ class MainzEnv:
         route_file: Path | None = None,
         segment_file: Path | None = None,
         schedule_file: Path | None = None,
+        #: The share of vehicles that run the policy, chosen at run time by
+        #: `controlled_index` over the schedule's departure order. Only controlled
+        #: vehicles are commanded, released or held by the gate.
+        penetration: float = 1.0,
+        #: One of `ACTUATIONS`.
+        actuation: str = "max_speed",
+        #: The approach boundary's metadata (`data/mainz/mainz_approach.json`, approach
+        #: plan 2026-10-17): roads in front of the entry links whose edges become
+        #: super-segments 12 to 35. None is the gated boundary, on which every method
+        #: behaves as it did before the approach roads existed.
+        approach_file: Path | None = None,
     ) -> None:
+        if not 0.0 <= penetration <= 1.0:
+            raise ValueError(f"penetration must lie in [0, 1], got {penetration}")
+        if actuation not in ACTUATIONS:
+            raise ValueError(f"actuation must be one of {ACTUATIONS}, got {actuation!r}")
+        self.actuation = actuation
         self.seed = seed
+        self.penetration = penetration
         self.duration_s = duration_s
         self.warmup_s = warmup_s
         self.step_length_s = step_length_s
@@ -124,6 +209,7 @@ class MainzEnv:
         self.segment_file = segment_file or DATA / "mainz_segments.json"
         self.schedule_file = schedule_file or DATA / "mainz_schedule.json"
         self.segments: list[list[str]] = json.loads(self.segment_file.read_text())
+        self._load_approach(approach_file)
         self._running = False
         self._static: dict[str, dict[str, float]] = {}
         self._previous: list[set[str]] = [set() for _ in self.segments]
@@ -136,14 +222,82 @@ class MainzEnv:
         self._speed_weight = 0.0
         self._vehicle_weight = 0.0
         self._samples = 0
-        # Per entry link, the vehicles scheduled to start there and how many of them
-        # have been let in. Empty when SUMO is doing the inserting.
+        # Per entry link, the CONTROLLED vehicles scheduled to start there and how many
+        # of them have been let in, and the same for the uncontrolled ones, which the
+        # gate never holds. Empty when SUMO is doing the inserting.
         self._schedule: dict[str, list[dict[str, Any]]] = {}
         self._admitted: dict[str, int] = {}
+        self._departs: dict[str, list[float]] = {}
+        self._free: dict[str, list[dict[str, Any]]] = {}
+        self._freed: dict[str, int] = {}
+        # Schedule position of every vehicle and the set the policy controls. A vehicle
+        # added later (a pulse) is appended with the next free position.
+        self._index: dict[str, int] | None = None
+        self._controlled_ids: set[str] = set()
+        self._load_controlled()
+        # Under `max_speed`, each capped vehicle's own maximum speed before its first
+        # cap, which `release` restores.
+        self._capped: dict[str, float] = {}
+        # Pulse vehicles not yet handed to SUMO, in departure order.
+        self._pulse_queue: list[dict[str, Any]] = []
+        # Summed over every step since `reset`: vehicles SUMO reports colliding, and
+        # teleports started (all of them collision teleports, since jam teleports are
+        # off). `_in_teleport` holds the vehicles whose teleport has not ended.
+        self.colliding_vehicles = 0
+        self.collision_teleports = 0
+        self._in_teleport: set[str] = set()
+        # Incidents (`schedule_incident`): their specs, their ids, and the ones standing on
+        # the road now, by edge.
+        self._incidents: list[dict[str, Any]] = []
+        self._incident_ids: set[str] = set()
+        self._incidents_on_road: dict[str, str] = {}
+        self._incident_lane: dict[str, int] = {}
+
+    def _load_approach(self, approach_file: Path | None) -> None:
+        """The approach super-segments and the two tables of approach plan section 4.1.
+
+        `plan_row[s]` is the Q-network row super-segment `s` reads (its entry segment for
+        an approach super-segment); `downstream[s]` lists the super-segments a vehicle on
+        `s` passes next. Without an approach file both are the identity on the original
+        segments: `[s]` and `[s + 1, ..., last]`.
+        """
+        self.approach_file = Path(approach_file) if approach_file is not None else None
+        n = len(self.segments)
+        self.approach: dict[str, Any] | None = None
+        self.approach_segments: list[list[str]] = []
+        self.plan_row: list[int] = list(range(n))
+        self.downstream: list[list[int]] = [list(range(s + 1, n)) for s in range(n)]
+        if self.approach_file is not None:
+            if self.gate_entries:
+                raise ValueError("the approach boundary has no entry gate; build the env "
+                                 "with gate_entries=False")
+            meta = json.loads(self.approach_file.read_text())
+            if meta["num_original_segments"] != n:
+                raise ValueError(f"{self.approach_file} extends {meta['num_original_segments']} "
+                                 f"super-segments, this env has {n}")
+            listed = json.loads((REPO_ROOT / meta["segments_file"]).read_text())
+            if listed != meta["approach_segments"]:
+                raise ValueError(f"{meta['segments_file']} does not match {self.approach_file}")
+            self.approach = meta
+            self.approach_segments = [list(s) for s in listed]
+            self.plan_row = [int(r) for r in meta["plan_row"]]
+            self.downstream = [[int(v) for v in chain] for chain in meta["downstream"]]
+        if not len(self.plan_row) == len(self.downstream) == len(self.all_segments):
+            raise ValueError("plan_row and downstream must cover every super-segment")
+
+    @property
+    def all_segments(self) -> list[list[str]]:
+        """The original super-segments and then the approach ones, in index order."""
+        return list(self.segments) + self.approach_segments
 
     # ----------------------------------------------------------------- lifecycle
 
-    def reset(self) -> np.ndarray:
+    def reset(self, on_warmup_tick: Callable[[float], None] | None = None) -> np.ndarray:
+        """Start SUMO, run the warm-up, open the window and return the first state.
+
+        With `on_warmup_tick` the warm-up runs through `advance_ticks`, which steps the
+        simulation identically and calls back once per second.
+        """
         self.close()
         _sumo.start([
             self._binary(), "-n", str(self.net_file), "-r", str(self.route_file),
@@ -157,11 +311,22 @@ class MainzEnv:
         ])
         self._running = True
         self.arrived_total = 0
+        self.colliding_vehicles = 0
+        self.collision_teleports = 0
+        self._in_teleport = set()
+        self._capped = {}
+        self._pulse_queue = []
+        self._incidents, self._incident_ids, self._incidents_on_road = [], set(), {}
+        self._incident_lane = {}
+        self._load_controlled()  # drops any pulse or incident a previous episode appended
         self._load_schedule()
         self._load_static()
         self._previous = [set() for _ in self.segments]
         self._rates = [(0.0, 0.0) for _ in self.segments]
-        self._advance(self.warmup_s)
+        if on_warmup_tick is None:
+            self._advance(self.warmup_s)
+        else:
+            self.advance_ticks(self.warmup_s, on_tick=on_warmup_tick)
         self.mark_window()
         return self.observe()
 
@@ -178,17 +343,54 @@ class MainzEnv:
 
         return checkBinary("sumo")
 
+    def _load_controlled(self) -> None:
+        """Index every scheduled vehicle by departure order and pick the controlled set.
+
+        The schedule rows are written in departure order, so a row's position is its
+        departure index. Without a schedule file every vehicle typed `av` is controlled,
+        which is what the env did before penetration was a run-time setting.
+        """
+        if not self.schedule_file.exists():
+            self._index, self._controlled_ids = None, set()
+            return
+        rows = json.loads(self.schedule_file.read_text())
+        self._index = {row["id"]: position for position, row in enumerate(rows)}
+        self._controlled_ids = {row["id"] for position, row in enumerate(rows)
+                                if controlled_index(position, self.penetration)}
+
+    def controlled(self, vehicle_id: str) -> bool:
+        """Whether this vehicle runs the policy; an id the env never scheduled is an error."""
+        if vehicle_id in self._controlled_ids:
+            return True
+        if self._index is None:
+            return _sumo.vehicle.getTypeID(vehicle_id) == "av"
+        if vehicle_id in self._index:
+            return False
+        raise KeyError(f"{vehicle_id} is not a vehicle this env scheduled")
+
     def _load_schedule(self) -> None:
-        """Read the vehicles the route file omits, grouped by the entry they start at."""
-        self._schedule, self._admitted = {}, {}
+        """Read the vehicles the route file omits, grouped by the entry they start at.
+
+        Controlled and uncontrolled vehicles are queued separately per entry: the gate
+        holds only the first kind (plan decision D8), so an uncontrolled vehicle is
+        inserted at its departure time and never waits behind a held controlled one.
+        """
+        self._schedule, self._admitted, self._departs = {}, {}, {}
+        self._free, self._freed = {}, {}
         if not self.gate_entries:
             return
         rows = json.loads(self.schedule_file.read_text())
         for row in rows:
-            self._schedule.setdefault(row["entry"], []).append(row)
+            queue = self._schedule if self.controlled(row["id"]) else self._free
+            self._schedule.setdefault(row["entry"], [])
+            self._free.setdefault(row["entry"], [])
+            queue[row["entry"]].append(row)
         for entry, queued in self._schedule.items():
             queued.sort(key=lambda row: row["depart"])
+            self._free[entry].sort(key=lambda row: row["depart"])
+            self._departs[entry] = [row["depart"] for row in queued]
             self._admitted[entry] = 0
+            self._freed[entry] = 0
 
     def _entry_open(self, entry: str) -> bool:
         """Whether the entry link is under the density past which its flow falls."""
@@ -227,11 +429,28 @@ class MainzEnv:
         A vehicle held here has not entered the simulation at all. It is latent demand,
         counted by `metrics` and never discarded. At most one vehicle per entry per
         step is released, so a backlog leaves as a stream rather than as a block.
+
+        At partial penetration the gate holds only controlled vehicles. An uncontrolled
+        vehicle does not run the policy on the unsimulated link above the entry either,
+        so it is handed to SUMO at its departure time without the density check.
         """
+        now = float(_sumo.simulation.getTime())
+        if self._incidents:
+            self._place_incidents(now)
+        while self._pulse_queue and self._pulse_queue[0]["depart"] <= now:
+            vehicle = self._pulse_queue.pop(0)
+            _sumo.vehicle.add(vehicle["id"], vehicle["route"], typeID=vehicle["type"],
+                              depart="now", departLane="best", departSpeed="max")
         if not self._schedule:
             return
-        now = float(_sumo.simulation.getTime())
         for entry, queued in self._schedule.items():
+            free, freed = self._free[entry], self._freed[entry]
+            while freed < len(free) and free[freed]["depart"] <= now:
+                vehicle = free[freed]
+                _sumo.vehicle.add(vehicle["id"], vehicle["route"], typeID=vehicle["type"],
+                                  depart="now", departLane="best", departSpeed="max")
+                freed += 1
+            self._freed[entry] = freed
             index = self._admitted[entry]
             if index >= len(queued) or queued[index]["depart"] > now:
                 continue
@@ -243,19 +462,110 @@ class MainzEnv:
             self._admitted[entry] = index + 1
 
     def held_at_entry(self) -> int:
-        """Vehicles whose departure time has passed but which the gate has not let in."""
+        """Controlled vehicles whose departure time has passed but which the gate has
+        not let in. Uncontrolled vehicles are never held, so they never count here."""
         if not self._schedule:
             return 0
         now = float(_sumo.simulation.getTime())
         return sum(
-            sum(1 for row in queued[self._admitted[entry]:] if row["depart"] <= now)
-            for entry, queued in self._schedule.items()
+            max(0, bisect.bisect_right(self._departs[entry], now) - self._admitted[entry])
+            for entry in self._schedule
         )
+
+    def pending(self) -> int:
+        """Vehicles handed to SUMO that it has not yet found room to insert.
+
+        With `--max-depart-delay -1` such a vehicle waits rather than being dropped, so
+        it is latent demand outside the simulated road, like a vehicle held at the gate.
+        An incident vehicle waiting for its spot is not demand and is not counted.
+        """
+        pending = _sumo.simulation.getPendingVehicles()
+        if not self._incident_ids:
+            return len(pending)
+        return sum(1 for vehicle in pending if vehicle not in self._incident_ids)
+
+    # ---------------------------------------------------------------- incidents
+
+    def schedule_incident(self, edge: str, lanes: list[int], pos_m: float, start_s: float,
+                          duration_s: float) -> list[str]:
+        """Block `lanes` of `edge` at `pos_m` on `[start_s, start_s + duration_s)` (plan
+        section 4.5), with one stopped vehicle per lane.
+
+        Call after `reset`, which clears every incident. Vehicle `k` is `incident_<k>`,
+        type `human`, on a one-edge route; it is requested at the first step at or after
+        `start_s` with `departLane`, `departPos` and `departSpeed=0` and given a stop at
+        `pos_m` for `duration_s`. SUMO inserts it only once the spot is clear, which was 0
+        to 15.5 s after the request on the plan's two blocks (three seeds each), so it is
+        removed at the first step at or after its own insertion plus `duration_s` and
+        every arm of a seed faces a block of the same length (validation R1-2); a request
+        never inserted by `start_s + duration_s` is withdrawn then. `incident_report`
+        records the request, insertion and removal instants and the standing length. Its ids take the next departure
+        positions as uncontrolled vehicles. It is excluded from edge counts and speeds,
+        the segment state, the feed snapshot, arrivals, pending and running, and stays
+        visible to anything reading the lanes, as a stopped vehicle on the road.
+        """
+        if not lanes or duration_s <= 0.0:
+            raise ValueError("an incident needs at least one lane and a positive duration")
+        ids = []
+        for lane in lanes:
+            vehicle = f"incident_{len(self._incidents)}"
+            if self._index is not None:
+                self._index[vehicle] = len(self._index)
+            self._incidents.append({
+                "id": vehicle, "edge": edge, "lane": int(lane), "pos_m": float(pos_m),
+                "start_s": float(start_s), "end_s": float(start_s) + float(duration_s),
+                "duration_s": float(duration_s), "requested_s": None, "inserted_s": None,
+                "removed_s": None, "standing_s": None, "never_inserted": None})
+            self._incident_ids.add(vehicle)
+            self._incident_lane[vehicle] = int(lane)
+            ids.append(vehicle)
+        return ids
+
+    def _place_incidents(self, now: float) -> None:
+        for incident in self._incidents:
+            vehicle = incident["id"]
+            if incident["requested_s"] is None and now >= incident["start_s"]:
+                route = f"incident_route_{vehicle}"
+                _sumo.route.add(route, [incident["edge"]])
+                _sumo.vehicle.add(vehicle, route, typeID="human", depart="now",
+                                  departLane=str(incident["lane"]),
+                                  departPos=str(incident["pos_m"]), departSpeed="0")
+                _sumo.vehicle.setStop(vehicle, incident["edge"], pos=incident["pos_m"],
+                                      laneIndex=incident["lane"],
+                                      duration=incident["duration_s"])
+                incident["requested_s"] = now
+            elif incident["requested_s"] is not None and incident["removed_s"] is None:
+                inserted = incident["inserted_s"]
+                # The block stands `duration_s` from its own insertion, so every arm of a
+                # seed faces a block of the same length (validation R1-2). A request SUMO
+                # never found room for is withdrawn at the end of its window.
+                due = (inserted + incident["duration_s"] if inserted is not None
+                       else incident["end_s"])
+                if now >= due - 1e-9:
+                    _sumo.vehicle.remove(vehicle)
+                    self._incidents_on_road.pop(vehicle, None)
+                    incident["removed_s"] = now
+                    incident["never_inserted"] = inserted is None
+                    incident["standing_s"] = (now - inserted) if inserted is not None else 0.0
+
+    def _note_inserted_incidents(self) -> None:
+        departed = _sumo.simulation.getDepartedIDList()
+        if not departed:
+            return
+        for incident in self._incidents:
+            vehicle = incident["id"]
+            if incident["inserted_s"] is None and vehicle in departed:
+                incident["inserted_s"] = float(_sumo.vehicle.getDeparture(vehicle))
+                self._incidents_on_road[vehicle] = incident["edge"]
+
+    def incident_report(self) -> list[dict[str, Any]]:
+        """Every scheduled incident with its requested, inserted and removed instants."""
+        return [dict(incident) for incident in self._incidents]
 
     def _load_static(self) -> None:
         """Lane count, length and free-flow speed per edge, read once from the map."""
         self._static = {}
-        for segment in list(self.segments) + [list(self._schedule)]:
+        for segment in list(self.all_segments) + [list(self._schedule)]:
             for edge in segment:
                 lanes = int(_sumo.edge.getLaneNumber(edge))
                 length = float(_sumo.lane.getLength(f"{edge}_0"))
@@ -279,9 +589,55 @@ class MainzEnv:
 
     def _advance(self, seconds: float) -> None:
         for _ in range(int(round(seconds / self.step_length_s))):
-            self._admit()
-            _sumo.simulationStep()
+            self._step()
+        self._update_rates()
+        self._accumulate()
+
+    def _step(self) -> None:
+        """One simulation step: admit, step, and count arrivals, collisions and teleports."""
+        self._admit()
+        _sumo.simulationStep()
+        if self._incidents:
+            self._note_inserted_incidents()
+            self.arrived_total += sum(1 for vehicle in _sumo.simulation.getArrivedIDList()
+                                      if vehicle not in self._incident_ids)
+        else:
             self.arrived_total += int(_sumo.simulation.getArrivedNumber())
+        self.colliding_vehicles += int(_sumo.simulation.getCollidingVehiclesNumber())
+        starting = _sumo.simulation.getStartingTeleportIDList()
+        self.collision_teleports += len(starting)
+        if starting or self._in_teleport:
+            self._in_teleport.update(starting)
+            self._in_teleport.difference_update(_sumo.simulation.getEndingTeleportIDList())
+            self._in_teleport.difference_update(_sumo.simulation.getArrivedIDList())
+
+    def in_teleport(self) -> int:
+        """Vehicles whose teleport started and has not ended: in no other count."""
+        return len(self._in_teleport)
+
+    def advance_ticks(self, seconds: float, tick_s: float = 1.0,
+                      on_tick: Callable[[float], None] | None = None) -> None:
+        """`_advance`, calling `on_tick(t)` after every `tick_s` of simulation.
+
+        The simulation steps are the same as `_advance`'s, one `_admit` before each,
+        and the interval ends with the same rate update and window accumulation, so a
+        callback that only reads leaves the episode exactly as `step()` would. The
+        callback is where per-vehicle feed versions take snapshots, switch vehicles at
+        their own instants and record traces.
+        """
+        steps_per_tick = int(round(tick_s / self.step_length_s))
+        if steps_per_tick < 1 or not math.isclose(steps_per_tick * self.step_length_s,
+                                                  tick_s, abs_tol=1e-9):
+            raise ValueError(f"a tick of {tick_s} s is not a whole number of "
+                             f"{self.step_length_s} s steps")
+        ticks = int(round(seconds / tick_s))
+        if not math.isclose(ticks * tick_s, seconds, abs_tol=1e-9):
+            raise ValueError(f"{seconds} s is not a whole number of {tick_s} s ticks")
+        for _ in range(ticks):
+            for _ in range(steps_per_tick):
+                self._step()
+            if on_tick is not None:
+                on_tick(float(_sumo.simulation.getTime()))
         self._update_rates()
         self._accumulate()
 
@@ -315,37 +671,204 @@ class MainzEnv:
         self._previous = present
 
     def _command(self, actions: list[int] | np.ndarray) -> None:
-        """Write the advisory to controlled vehicles as a desired speed.
+        """Write the advisory to the controlled vehicles on each segment.
 
-        `setSpeed` is bounded by SUMO's car-following safe speed, so a vehicle whose
-        leader is slower than the advisory follows its leader. That is the local
-        safety gate, and it is the same semantics as Vissim's `DesSpeed`.
+        Under `max_speed` it is the vehicle's maximum speed, so a vehicle whose leader is
+        slower than the advisory follows its leader under the car-following model; that
+        is the local safety gate. See `ACTUATIONS` for the legacy `set_speed`.
         """
         for index, segment in enumerate(self.segments):
             fraction = SPEED_ACTION_FRACTIONS[int(actions[index])]
             for edge in segment:
                 target_mps = fraction * self._static[edge]["free_flow_kmh"] / 3.6
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
-                    if _sumo.vehicle.getTypeID(vehicle) == "av":
-                        _sumo.vehicle.setSpeed(vehicle, target_mps)
+                    if self.controlled(vehicle):
+                        self._apply(vehicle, target_mps)
 
-    def release(self) -> None:
-        """Hand every controlled vehicle back to the car-following model."""
-        for segment in self.segments:
+    def _apply(self, vehicle: str, target_mps: float) -> None:
+        """Apply one advisory to one controlled vehicle under this env's actuation."""
+        if self.actuation == "max_speed":
+            if vehicle not in self._capped:
+                self._capped[vehicle] = float(_sumo.vehicle.getMaxSpeed(vehicle))
+            _sumo.vehicle.setMaxSpeed(vehicle, target_mps)
+        else:
+            _sumo.vehicle.setSpeed(vehicle, target_mps)
+
+    def controlled_on_segments(self) -> list[tuple[str, str, int]]:
+        """`(vehicle, edge, segment index)` for every controlled vehicle on a segment edge.
+
+        In the order `_command` visits them, so a caller that writes in this order
+        writes in the same order `step()` does. Vehicles crossing a junction are on an
+        internal edge and are not listed, exactly as `_command` does not reach them.
+        """
+        found = []
+        for index, segment in enumerate(self.all_segments):
             for edge in segment:
                 for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
-                    if _sumo.vehicle.getTypeID(vehicle) == "av":
+                    if self.controlled(vehicle):
+                        found.append((vehicle, edge, index))
+        return found
+
+    def time_s(self) -> float:
+        return float(_sumo.simulation.getTime())
+
+    def running(self) -> int:
+        """Vehicles in the network, incident vehicles standing on the road excluded."""
+        return int(_sumo.vehicle.getIDCount()) - len(self._incidents_on_road)
+
+    def position(self, vehicle_id: str) -> int:
+        """The vehicle's position in the departure order (pulses continue it)."""
+        if self._index is None:
+            raise KeyError("this env has no schedule, so no departure order")
+        return self._index[vehicle_id]
+
+    @property
+    def schedule_size(self) -> int:
+        """Positions taken in the departure order, pulses included."""
+        return len(self._index) if self._index is not None else 0
+
+    def pulse_route(self, site: int) -> tuple[str, list[str]]:
+        """The route a pulse at `site` rides: `(source route id, edges to the exit)`."""
+        from src.analysis.gains import load_routes, pulse_sites
+
+        chosen = pulse_sites(self.segments, load_routes(self.route_file))[site]
+        return chosen["route"], chosen["suffix"]
+
+    def inject_pulse(self, site: int, n: int, start_s: float, duration_s: float,
+                     seed: int) -> dict[str, Any]:
+        """Add `n` vehicles at super-segment `site`, evenly over `[start_s, start_s +
+        duration_s)`, for the gain certificate.
+
+        They ride the suffix of the longest route through the site from the site's first
+        edge to the exit (`pulse_route`), added as its own route, and depart at
+        `start_s + h/2 + j h` with `h = duration_s / n`, the builder's spacing. Each is
+        handed to SUMO at the first step at or after its own departure (plan Amendment
+        1, A8): handing all of them over at once, with future departure times, changed
+        the simulation from that instant on, 900 s before the first one left. The entry
+        gate does not apply, since they are a perturbation inside the network rather
+        than demand at its boundary. Vehicle `j` is `pulse_{site}_{j}` and takes the
+        departure position after the schedule's last, so the floor rule continues over
+        it. `seed` is recorded only: the pulse is deterministic.
+        """
+        if n <= 0 or duration_s <= 0.0:
+            raise ValueError("a pulse needs at least one vehicle and a positive duration")
+        if self._index is None:
+            raise ValueError("a pulse needs the schedule's departure order")
+        source, edges = self.pulse_route(site)
+        route_id = f"pulse_route_{site}"
+        _sumo.route.add(route_id, edges)
+        headway = duration_s / n
+        first_position = len(self._index)
+        ids, departs, controlled = [], [], 0
+        for j in range(n):
+            vehicle = f"pulse_{site}_{j}"
+            position = first_position + j
+            self._index[vehicle] = position
+            is_controlled = controlled_index(position, self.penetration)
+            if is_controlled:
+                self._controlled_ids.add(vehicle)
+                controlled += 1
+            depart = round(start_s + headway / 2.0 + j * headway, 2)
+            self._pulse_queue.append({"id": vehicle, "route": route_id, "depart": depart,
+                                      "type": "av" if is_controlled else "human"})
+            ids.append(vehicle)
+            departs.append(depart)
+        self._pulse_queue.sort(key=lambda row: row["depart"])
+        return {"site": site, "n": n, "start_s": start_s, "duration_s": duration_s,
+                "seed": seed, "source_route": source, "route_edges": edges, "ids": ids,
+                "departs": departs, "controlled": controlled,
+                "first_position": first_position}
+
+    def command_vehicles(self, mapping: dict[str, float],
+                         edge_of: dict[str, str] | None = None) -> int:
+        """Write `fraction * free-flow speed of the vehicle's edge` to the listed vehicles.
+
+        Vehicles not listed keep their last command, exactly as a vehicle that changes
+        segment between two `step()` decisions does. `edge_of` gives each vehicle's edge
+        when the caller already has it from an edge scan; otherwise it is read per
+        vehicle. Returns the number of writes.
+        """
+        for vehicle, fraction in mapping.items():
+            edge = edge_of[vehicle] if edge_of is not None else _sumo.vehicle.getRoadID(vehicle)
+            self._apply(vehicle, fraction * self._static[edge]["free_flow_kmh"] / 3.6)
+        return len(mapping)
+
+    def release(self) -> None:
+        """Hand every controlled vehicle on a segment back to the car-following model.
+
+        Under `max_speed` a capped vehicle gets back the maximum speed it had before its
+        first cap, its type's; a vehicle never capped is not touched, so a run that never
+        advises, the no-control arm, makes no call at all.
+        """
+        for segment in self.all_segments:
+            for edge in segment:
+                for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
+                    if not self.controlled(vehicle):
+                        continue
+                    if self.actuation == "max_speed":
+                        if vehicle in self._capped:
+                            _sumo.vehicle.setMaxSpeed(vehicle, self._capped.pop(vehicle))
+                    else:
                         _sumo.vehicle.setSpeed(vehicle, -1.0)
 
     # ------------------------------------------------------------------- state
 
-    def _per_edge(self) -> dict[str, dict[str, float]]:
+    def _edge_reading(self, edge: str, blocked: dict[str, list[str]]) -> tuple[int, float]:
+        """`(count, mean speed in m/s)` of the edge's traffic, incident vehicles removed.
+
+        An edge with no incident is read exactly as SUMO reports it. On an edge holding an
+        incident vehicle, SUMO's own estimator is rebuilt from its lanes without it:
+        `sum_l max(n_l, 1) v_l / sum_l max(n_l, 1)`, where `n_l` counts every vehicle on
+        lane `l` and `v_l` is the lane's mean speed, an empty lane reading its speed limit
+        (measured equal to SUMO's edge mean to 5e-15 m/s). A lane without an incident keeps
+        SUMO's own count and mean. A lane with one takes the count and the plain mean
+        speed of its other vehicles, which is what SUMO's lane mean would be without it:
+        on a multi-lane edge SUMO's lane mean already leaves a stopped vehicle out, so
+        removing the incident's zero from the edge mean, as an earlier version did,
+        removed it a second time (validation R1-1); on a one-lane edge it keeps it.
+        """
+        count = int(_sumo.edge.getLastStepVehicleNumber(edge))
+        speed_mps = float(_sumo.edge.getLastStepMeanSpeed(edge))
+        incidents = blocked.get(edge)
+        if not incidents:
+            return count, speed_mps
+        blocked_lanes = {self._incident_lane[v] for v in incidents}
+        weight = total = 0.0
+        vehicles = 0
+        for lane in range(int(self._static[edge]["lanes"])):
+            lane_id = f"{edge}_{lane}"
+            if lane in blocked_lanes:
+                others = [v for v in _sumo.lane.getLastStepVehicleIDs(lane_id)
+                          if v not in self._incident_ids]
+                n = len(others)
+                v_lane = (sum(float(_sumo.vehicle.getSpeed(v)) for v in others) / n if n
+                          else float(_sumo.lane.getMaxSpeed(lane_id)))
+            else:
+                n = int(_sumo.lane.getLastStepVehicleNumber(lane_id))
+                v_lane = float(_sumo.lane.getLastStepMeanSpeed(lane_id))
+            w = max(n, 1)
+            weight += w
+            total += w * v_lane
+            vehicles += n
+        if vehicles == 0:
+            return 0, 0.0
+        return vehicles, total / weight
+
+    def _blocked_edges(self) -> dict[str, list[str]]:
+        blocked: dict[str, list[str]] = {}
+        for vehicle, edge in self._incidents_on_road.items():
+            blocked.setdefault(edge, []).append(vehicle)
+        return blocked
+
+    def _per_edge(self, segments: list[list[str]] | None = None) -> dict[str, dict[str, float]]:
+        """Per edge of `segments` (the original super-segments by default): count, speed,
+        density, lanes, length and free-flow speed."""
         values: dict[str, dict[str, float]] = {}
-        for segment in self.segments:
+        blocked = self._blocked_edges()
+        for segment in (self.segments if segments is None else segments):
             for edge in segment:
                 static = self._static[edge]
-                count = int(_sumo.edge.getLastStepVehicleNumber(edge))
-                speed_mps = float(_sumo.edge.getLastStepMeanSpeed(edge))
+                count, speed_mps = self._edge_reading(edge, blocked)
                 lane_metres = static["length_m"] * static["lanes"]
                 values[edge] = {
                     "count": float(count),
@@ -366,10 +889,13 @@ class MainzEnv:
         return values
 
     def _segment_vehicles(self) -> list[set[str]]:
-        return [
+        present = [
             {v for edge in segment for v in _sumo.edge.getLastStepVehicleIDs(edge)}
             for segment in self.segments
         ]
+        if self._incidents_on_road:
+            present = [vehicles - self._incident_ids for vehicles in present]
+        return present
 
     def _mean_gap(self, vehicles: set[str]) -> float:
         """Mean gap to the leader, SRC's `FollowDistGr` averaged over the segment.
@@ -397,14 +923,8 @@ class MainzEnv:
         for index, segment in enumerate(self.segments):
             members = [edges[e] for e in segment]
             here = present[index]
-            speed = _nanmean([m["speed_kmh"] for m in members])
-            free_flow = _nanmean([m["free_flow_kmh"] for m in members])
             row = {
-                "speed": speed,
-                "free_flow": free_flow,
-                "jam_factor": jam_factor(speed, free_flow),
-                "lanes": _nanmean([m["lanes"] for m in members]),
-                "length_km": sum(m["length_m"] for m in members) / 1000.0,
+                **_here_row(members),
                 "density": _nanmean([m["density"] for m in members]),
                 # SRC counts a segment's arrivals and departures as the set
                 # difference of the vehicle ids present now and one decision ago.
@@ -415,6 +935,55 @@ class MainzEnv:
             rows.append([row[name] for name in self.features])
         return np.nan_to_num(np.array(rows, dtype=np.float32))
 
+    def observe_approaches(self) -> np.ndarray:
+        """`(approach super-segments, 5)`: `HERE_FEATURES` of each approach super-segment,
+        by `observe()`'s formula (approach plan section 4.3).
+
+        The real feed covers these roads, so the lookahead and the learned arm may read
+        them; the Q-network never does, and `observe()` stays the original segments'.
+        """
+        edges = self._per_edge(self.approach_segments)
+        rows = []
+        for segment in self.approach_segments:
+            row = _here_row([edges[e] for e in segment])
+            rows.append([row[name] for name in HERE_FEATURES])
+        return np.nan_to_num(np.array(rows, dtype=np.float32).reshape(len(rows),
+                                                                     len(HERE_FEATURES)))
+
+    def approach_report(self, v_queue_kmh: float = QUEUE_SPEED_KMH, gap_m: float = QUEUE_GAP_M,
+                        near_m: float = NEAR_INSERTION_M) -> dict[str, Any]:
+        """Vehicles on the approaches, and per approach the queue and the slow vehicles
+        near the far end (approach plan sections 5.1 and 5.4), in entry order.
+
+        A vehicle's distance upstream of its entry link's start is the length of the
+        approach edges after its own plus what remains of its own edge ahead of its front.
+        `queue_m` is `contiguous_queue` of the vehicles below `v_queue_kmh`;
+        `slow_near_insertion` counts those within `near_m` of the far end.
+        """
+        report: dict[str, Any] = {"on_approach": 0, "queue_m": [], "slow_near_insertion": []}
+        if self.approach is None:
+            return report
+        for entry in self.approach["entries"]:
+            edges = self.approach["approach"][entry]["edges"]
+            lengths = [self._static[e]["length_m"] for e in edges]
+            total = sum(lengths)
+            slow, near = [], 0
+            for i, edge in enumerate(edges):
+                after = sum(lengths[i + 1:])
+                for vehicle in _sumo.edge.getLastStepVehicleIDs(edge):
+                    if vehicle in self._incident_ids:
+                        continue
+                    report["on_approach"] += 1
+                    if float(_sumo.vehicle.getSpeed(vehicle)) * 3.6 >= v_queue_kmh:
+                        continue
+                    distance = after + lengths[i] - float(_sumo.vehicle.getLanePosition(vehicle))
+                    slow.append(distance)
+                    if total - distance <= near_m + 1e-9:
+                        near += 1
+            report["queue_m"].append(round(contiguous_queue(slow, gap_m), 2))
+            report["slow_near_insertion"].append(near)
+        return report
+
     def densities(self) -> np.ndarray:
         """Per-super-segment density, for the reward. Ground truth, not observable."""
         edges = self._per_edge()
@@ -422,6 +991,30 @@ class MainzEnv:
             [_nanmean([edges[e]["density"] for e in segment]) for segment in self.segments],
             dtype=np.float32,
         )
+
+    def segment_state(self) -> dict[str, list[float]]:
+        """Per super-segment: vehicle-weighted space-mean speed, density and count.
+
+        From one `_per_edge` read. The speed is `sum(count * speed) / sum(count)` over the
+        segment's occupied edges, nan for an empty segment; the density is occupancy,
+        `count * VEHICLE_LENGTH_M` over every lane-metre of the segment, zero when
+        empty. This is the state the drain metric and the gain estimate read; it is not
+        the reward's `densities()`, which averages per-edge densities over occupied
+        edges only. On the approach boundary the approach super-segments follow the
+        original ones, so every list has 36 entries.
+        """
+        edges = (self._per_edge(self.all_segments) if self.approach_segments
+                 else self._per_edge())
+        speed, density, count = [], [], []
+        for segment in self.all_segments:
+            members = [edges[e] for e in segment]
+            vehicles = sum(m["count"] for m in members)
+            lane_metres = sum(m["length_m"] * m["lanes"] for m in members)
+            speed.append(sum(m["count"] * m["speed_kmh"] for m in members if m["count"])
+                         / vehicles if vehicles else math.nan)
+            density.append(vehicles * VEHICLE_LENGTH_M / lane_metres if lane_metres else 0.0)
+            count.append(int(vehicles))
+        return {"speed_kmh": speed, "density": density, "count": count}
 
     def speeds_kmh(self) -> np.ndarray:
         edges = self._per_edge()
@@ -475,8 +1068,8 @@ class MainzEnv:
         return self._vehicle_weight / self._samples if self._samples else 0.0
 
     def metrics(self) -> dict[str, Any]:
-        running = int(_sumo.vehicle.getIDCount())
-        waiting = len(_sumo.simulation.getPendingVehicles())
+        running = self.running()
+        waiting = self.pending()
         speed = float(np.nan_to_num(_nanmean(list(self.speeds_kmh()))))
         density = np.nan_to_num(self.densities())
         return {
@@ -486,7 +1079,8 @@ class MainzEnv:
             "running": running,
             "waiting_to_enter": waiting,
             "held_at_entry": self.held_at_entry(),
-            "admitted": sum(self._admitted.values()) if self._schedule else -1,
+            "admitted": (sum(self._admitted.values()) + sum(self._freed.values())
+                         if self._schedule else -1),
             # An unweighted mean of segment means, read at this instant. Kept because
             # it is the quantity SRC's reward is built from; it is not a description of
             # how fast the traffic is moving, for which use `space_mean_speed_kmh`.
@@ -495,6 +1089,10 @@ class MainzEnv:
             "mean_vehicles": self.mean_vehicles(),
             "segments_over_critical": int((density > DENSITY_CRITICAL).sum()),
             "max_density": float(density.max()),
+            "colliding_vehicles": self.colliding_vehicles,
+            "collision_teleports": self.collision_teleports,
+            "in_teleport": self.in_teleport(),
+            "actuation": self.actuation,
         }
 
 

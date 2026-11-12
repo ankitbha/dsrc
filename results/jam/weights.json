@@ -1,0 +1,8 @@
+{
+ "path": "outputs/models/yolov8n.pt",
+ "sha256": "f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36",
+ "bytes": 6549796,
+ "source_url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolov8n.pt",
+ "recorded_wall": 1792179836.387543,
+ "note": "official Ultralytics release asset, fetched once; kept out of git"
+}

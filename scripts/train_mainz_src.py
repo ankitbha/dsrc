@@ -10,6 +10,22 @@ are read on the final line and nowhere else.
 `--features src` trains the same model on SRC's original six features instead, which
 are not obtainable from a traffic API. The difference between the two on the same test
 seeds is what restricting the controller to deployable observations costs.
+
+Since plan Amendment 1 advice is applied as a maximum-speed cap (`--actuation
+max_speed`, the default). The retraining under it uses the published protocol and
+writes beside, never over, the committed checkpoints:
+
+    .venv/bin/python scripts/train_mainz_src.py --features here --episodes 80 \\
+        --duration-s 2500 --step-length 0.5 --window-start-s 900 \\
+        --save-as results/checkpoints/mainz_here_cap \\
+        --log results/checkpoints/mainz_here_cap_training.log
+
+and the same with `--features src --save-as results/checkpoints/mainz_src_cap`.
+`--save-as P` writes `P_best.pt` and `P_result.json` and refuses to start if either
+exists. `--log` appends the run's output to the log only after that check, so a
+refused run leaves an existing log as it was (a shell `>` would truncate it first).
+The result file records the seed split, the git commit and dirty flag, and the saved
+checkpoint's sha256 (plan Amendment 2, B3).
 """
 from __future__ import annotations
 
@@ -44,10 +60,47 @@ SCENARIOS = {
               "gated_routes": "data/mainz/mainz_routes.rou.xml",
               "segments": "data/mainz/mainz_segments.json",
               "schedule": "data/mainz/mainz_schedule.json"},
+    # The feed program's two drain scenarios: the same network with a different demand,
+    # built by `build_mainz_scenario.py --demand-only` (its docstring has the commands).
+    # `mainz_surge` is the published 18,000 veh/h for 1,200 s; `mainz_burst` is
+    # 3,650 veh/h with a 5,000 veh/h burst on [900, 1,500) s.
+    "mainz_surge": {"net": "data/mainz/mainz.net.xml",
+                    "routes": "data/mainz/mainz_surge.rou.xml",
+                    "gated_routes": "data/mainz/mainz_surge_routes.rou.xml",
+                    "segments": "data/mainz/mainz_segments.json",
+                    "schedule": "data/mainz/mainz_surge_schedule.json"},
+    "mainz_burst": {"net": "data/mainz/mainz.net.xml",
+                    "routes": "data/mainz/mainz_burst.rou.xml",
+                    "gated_routes": "data/mainz/mainz_burst_routes.rou.xml",
+                    "segments": "data/mainz/mainz_segments.json",
+                    "schedule": "data/mainz/mainz_burst_schedule.json"},
 }
+# The jam program's demands (plan 2026-10-16 section 4.2): a 3,572 veh/h background for
+# 7,200 s, alone and with a 7,500 or 9,000 veh/h burst on [900, 1,200) s.
+for _name in ("mainz_bg", "mainz_b7500", "mainz_b9000"):
+    SCENARIOS[_name] = {"net": "data/mainz/mainz.net.xml",
+                        "routes": f"data/mainz/{_name}.rou.xml",
+                        "gated_routes": f"data/mainz/{_name}_routes.rou.xml",
+                        "segments": "data/mainz/mainz_segments.json",
+                        "schedule": f"data/mainz/{_name}_schedule.json"}
+# The approach boundary (approach plan 2026-10-17 section 2.1): the same five demands on
+# `mainz_approach.net.xml`, every vehicle inserted at the far end of a 3 km road in front of
+# its entry link. `gated_routes` is the routes-only file, read for the route successors;
+# no arm is gated on this boundary. `approach` names the boundary's metadata.
+for _name in ("mainz_bg", "mainz_b7500", "mainz_b9000", "mainz_burst", "mainz"):
+    SCENARIOS[f"{_name}_A"] = {"net": "data/mainz/mainz_approach.net.xml",
+                               "routes": f"data/mainz/{_name}_A.rou.xml",
+                               "gated_routes": f"data/mainz/{_name}_A_routes.rou.xml",
+                               "segments": "data/mainz/mainz_segments.json",
+                               "schedule": f"data/mainz/{_name}_A_schedule.json",
+                               "approach": "data/mainz/mainz_approach.json",
+                               "approach_segments": "data/mainz/mainz_approach_segments.json",
+                               "approach_travel": "data/mainz/mainz_approach_travel.json"}
+del _name
 
 
-def make_env(paths, *, seed, duration_s, features, step_length, gate_entries):
+def make_env(paths, *, seed, duration_s, features, step_length, gate_entries,
+             actuation="max_speed"):
     return MainzEnv(
         seed=seed, duration_s=duration_s, features=features,
         step_length_s=step_length, gate_entries=gate_entries,
@@ -55,6 +108,7 @@ def make_env(paths, *, seed, duration_s, features, step_length, gate_entries):
         route_file=REPO_ROOT / paths["gated_routes" if gate_entries else "routes"],
         segment_file=REPO_ROOT / paths["segments"],
         schedule_file=REPO_ROOT / paths["schedule"],
+        actuation=actuation,
     )
 
 
@@ -67,7 +121,7 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
                 duration_s: float, epsilon: float,
                 generator: torch.Generator | None, step_length: float = 1.0,
                 window_start_s: float = 0.0, gate_entries: bool = True,
-                paths=None) -> dict:
+                paths=None, actuation: str = "max_speed") -> dict:
     """One episode. Returns the trajectory and the outcome metrics.
 
     The controller acts from t=0 so it can prevent a jam rather than inherit one, but
@@ -75,7 +129,7 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
     """
     env = make_env(paths or SCENARIOS["mainz"], seed=seed, duration_s=duration_s,
                    features=features, step_length=step_length,
-                   gate_entries=gate_entries)
+                   gate_entries=gate_entries, actuation=actuation)
     states, actions, rewards = [], [], []
     marked = window_start_s <= 0.0
     try:
@@ -107,13 +161,16 @@ def run_episode(model: SrcQNetwork, seed: int, features: tuple[str, ...],
         "space_mean_speed_kmh": metrics["space_mean_speed_kmh"],
         "mean_vehicles": metrics["mean_vehicles"],
         "held_at_entry": metrics["held_at_entry"],
+        "colliding_vehicles": metrics["colliding_vehicles"],
+        "collision_teleports": metrics["collision_teleports"],
     }
 
 
 def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
-             window_start_s=0.0, gate_entries=True, paths=None) -> dict:
+             window_start_s=0.0, gate_entries=True, paths=None,
+             actuation="max_speed") -> dict:
     runs = [run_episode(model, s, features, duration_s, 0.0, None, step_length,
-                        window_start_s, gate_entries, paths) for s in seeds]
+                        window_start_s, gate_entries, paths, actuation) for s in seeds]
     return {
         "return": statistics.fmean(r["return"] for r in runs),
         "arrived": statistics.fmean(r["arrived"] for r in runs),
@@ -122,11 +179,14 @@ def evaluate(model: SrcQNetwork, seeds, features, duration_s, step_length=1.0,
         "space_mean_speed_kmh": statistics.fmean(r["space_mean_speed_kmh"] for r in runs),
         "mean_vehicles": statistics.fmean(r["mean_vehicles"] for r in runs),
         "held_at_entry": statistics.fmean(r["held_at_entry"] for r in runs),
+        "colliding_vehicles": statistics.fmean(r["colliding_vehicles"] for r in runs),
+        "collision_teleports": statistics.fmean(r["collision_teleports"] for r in runs),
     }
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scenario", choices=tuple(SCENARIOS), default="mainz")
     parser.add_argument("--episodes", type=int, default=30)
     parser.add_argument("--duration-s", type=float, default=2500.0)
@@ -149,11 +209,68 @@ def main() -> int:
                              "policy and never to the no-control baseline")
     parser.add_argument("--validate-every", type=int, default=5)
     parser.add_argument("--out", default="outputs/mainz_src")
-    args = parser.parse_args()
+    parser.add_argument("--save-as", default=None,
+                        help="write PREFIX_best.pt and PREFIX_result.json instead of "
+                             "OUT/FEATURES/best.pt and result.json; refuses to start if "
+                             "either exists, so a committed checkpoint is never replaced")
+    parser.add_argument("--actuation", choices=("max_speed", "set_speed"),
+                        default="max_speed",
+                        help="max_speed caps each controlled vehicle's maximum speed "
+                             "(plan Amendment 1); set_speed is the legacy actuation, under "
+                             "which controlled vehicles collide")
+    parser.add_argument("--log", default=None,
+                        help="append everything printed to this file, opened only after "
+                             "--save-as has been checked")
+    args = parser.parse_args(argv)
 
     features = HERE_FEATURES if args.features == "here" else SRC_FEATURES
-    out = REPO_ROOT / args.out / args.features
-    out.mkdir(parents=True, exist_ok=True)
+    best_path, result_path = output_paths(args.out, args.features, args.save_as)
+    best_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.log is None:
+        return _train(args, argv, features, best_path, result_path)
+    log_path = Path(args.log) if Path(args.log).is_absolute() else REPO_ROOT / args.log
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a") as log:
+        original = sys.stdout
+        sys.stdout = _Tee(original, log)
+        try:
+            return _train(args, argv, features, best_path, result_path)
+        finally:
+            sys.stdout = original
+
+
+class _Tee:
+    """Write to the terminal and the log at once."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
+def _provenance() -> dict:
+    """Git commit and dirty flag of the tree the run trained from (None when unknown)."""
+    scripts = str(Path(__file__).resolve().parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    from record_deployed_commit import _git_commit, _git_is_dirty
+
+    commit = _git_commit(REPO_ROOT)
+    return {"commit": commit, "dirty": _git_is_dirty(REPO_ROOT) if commit else None}
+
+
+def _train(args, argv, features, best_path: Path, result_path: Path) -> int:
+    import hashlib
+
+    actuation = args.actuation
+    provenance = _provenance()
 
     gate = not args.no_gate_entries
     paths = SCENARIOS[args.scenario]
@@ -183,7 +300,7 @@ def main() -> int:
         started = time.time()
         run = run_episode(model, seed, features, args.duration_s, epsilon,
                           generator, args.step_length, args.window_start_s, gate,
-                          paths)
+                          paths, actuation)
         loss = td_loss(model, run["states"], run["actions"], run["rewards"], DISCOUNT)
         total = loss.sum(dim=1).mean()
         optimizer.zero_grad()
@@ -196,25 +313,26 @@ def main() -> int:
         note = ""
         if (episode + 1) % args.validate_every == 0 or episode == args.episodes - 1:
             scores = evaluate(model, VALIDATION_SEEDS, features, args.duration_s,
-                              args.step_length, args.window_start_s, gate, paths)
+                              args.step_length, args.window_start_s, gate, paths,
+                              actuation)
             note = (f"   return {scores['return']:.1f}  flow {scores['flow']:.0f}"
                     f"  speed {scores['mean_speed_kmh']:.2f}")
             if scores["return"] > best["return"]:
                 best = {"return": scores["return"], "episode": episode, **scores}
-                torch.save(model.state_dict(), out / "best.pt")
+                torch.save(model.state_dict(), best_path)
                 note += "  <- best"
             history.append({"episode": episode, **scores})
         print(line + note + f"   [{time.time()-started:.0f}s]", flush=True)
 
     print(f"\nbest checkpoint: episode {best['episode']}, "
           f"validation return {best['return']:.2f}")
-    model.load_state_dict(torch.load(out / "best.pt", weights_only=True))
+    model.load_state_dict(torch.load(best_path, weights_only=True))
 
     print("\nreading the held-out test seeds, once")
     test = evaluate(model, TEST_SEEDS, features, args.duration_s, args.step_length,
-                    args.window_start_s, gate, paths)
+                    args.window_start_s, gate, paths, actuation)
     baseline = evaluate_no_control(TEST_SEEDS, features, args.duration_s,
-                                   args.step_length, args.window_start_s, paths)
+                                   args.step_length, args.window_start_s, paths, actuation)
     for label, row in (("trained   ", test), ("no control", baseline)):
         print(f"  {label} flow {row['flow']:>7.0f} veh/h  return {row['return']:>8.1f}"
               f"  space-mean speed {row['space_mean_speed_kmh']:>6.2f} km/h"
@@ -224,15 +342,42 @@ def main() -> int:
     print(f"  difference {100*(test['flow']-baseline['flow'])/baseline['flow']:+.1f}% "
           f"in steady-state flow")
 
-    (out / "result.json").write_text(json.dumps(
-        {"scenario": args.scenario, "features": args.features,
+    result_path.write_text(json.dumps(
+        {"scenario": args.scenario, "features": args.features, "actuation": actuation,
+         "train_seeds": list(TRAIN_SEEDS), "validation_seeds": list(VALIDATION_SEEDS),
+         "test_seeds": list(TEST_SEEDS),
+         "commit": provenance["commit"], "dirty": provenance["dirty"],
+         "checkpoint_sha256": hashlib.sha256(best_path.read_bytes()).hexdigest(),
+         "command": list(argv) if argv is not None else sys.argv,
+         "config": {"episodes": args.episodes, "duration_s": args.duration_s,
+                    "step_length_s": args.step_length,
+                    "window_start_s": args.window_start_s,
+                    "learning_rate": args.learning_rate, "epsilon": args.epsilon,
+                    "epsilon_final": args.epsilon_final, "gate_entries": gate,
+                    "validate_every": args.validate_every},
+         "checkpoint": str(best_path),
          "best": best, "test": test,
          "no_control": baseline, "history": history}, indent=1))
     return 0
 
 
+def output_paths(out: str, features: str, save_as: str | None) -> tuple[Path, Path]:
+    """Where the best checkpoint and the result go; `save_as` never overwrites."""
+    if save_as is None:
+        directory = REPO_ROOT / out / features
+        return directory / "best.pt", directory / "result.json"
+    prefix = Path(save_as)
+    prefix = prefix if prefix.is_absolute() else REPO_ROOT / prefix
+    paths = (prefix.with_name(prefix.name + "_best.pt"),
+             prefix.with_name(prefix.name + "_result.json"))
+    existing = [str(p) for p in paths if p.exists()]
+    if existing:
+        raise SystemExit(f"refusing to overwrite {existing}; choose another --save-as")
+    return paths
+
+
 def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
-                        window_start_s=0.0, paths=None) -> dict:
+                        window_start_s=0.0, paths=None, actuation="max_speed") -> dict:
     """Every vehicle left to the car-following model, on the same seeds.
 
     NO CONTROL RUNS WITHOUT THE ENTRY GATE, and that is deliberate rather than an
@@ -253,7 +398,8 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
     runs = []
     for seed in seeds:
         env = make_env(paths or SCENARIOS["mainz"], seed=seed, duration_s=duration_s,
-                       features=features, step_length=step_length, gate_entries=False)
+                       features=features, step_length=step_length, gate_entries=False,
+                       actuation=actuation)
         total = 0.0
         marked = window_start_s <= 0.0
         try:
@@ -278,6 +424,8 @@ def evaluate_no_control(seeds, features, duration_s, step_length=1.0,
         "space_mean_speed_kmh": statistics.fmean(r["space_mean_speed_kmh"] for r in runs),
         "mean_vehicles": statistics.fmean(r["mean_vehicles"] for r in runs),
         "held_at_entry": statistics.fmean(r["held_at_entry"] for r in runs),
+        "colliding_vehicles": statistics.fmean(r["colliding_vehicles"] for r in runs),
+        "collision_teleports": statistics.fmean(r["collision_teleports"] for r in runs),
     }
 
 
