@@ -1,57 +1,73 @@
 """Label the rig photo in the image itself, so the caption does not carry a legend.
 
-The photo is used whole rather than cropped. It is printed at roughly 1.9 inches
-wide, so text set on it has to be large in pixels to survive the reduction: at
-1100 px wide, a 6 pt label needs about 50 px of cap height. That is why the
-labels are single words.
+The photo is used whole rather than cropped. In Fig. 1 it is printed 1.48 in tall, about
+1.11 in wide, so text set on it has to be large in pixels to survive the reduction: at
+1100 px wide, a 6.5 pt label is about 90 px. That is why the labels are single words.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import cv2
+from PIL import Image, ImageDraw, ImageFont
 
-IMAGES = Path("/Users/ankit_nash/Desktop/ankit_summer_2026/dsrc/paper/images")
+IMAGES = Path(__file__).resolve().parents[2] / "paper" / "images"
+FONT_FILE = "/System/Library/Fonts/Supplemental/Arial Bold.ttf"
 
+PRINT_WIDTH_IN = 1.11
+LABEL_PT = 6.5
 WHITE = (255, 255, 255)
 INK = (18, 18, 18)
-FONT = cv2.FONT_HERSHEY_DUPLEX
-SCALE = 1.9
-THICK = 3
-PAD = 12
+PAD = 18
+BORDER = 5
 
-# (text, the point it names, the label's anchor, which side the leader leaves from)
+# (text, the point it names, the label box's top-left corner)
 CALLOUTS = [
-    ("phone", (522, 169), (690, 96), "left"),
-    ("Jetson", (720, 667), (830, 560), "left"),
-    ("inverter", (508, 619), (96, 556), "right"),
-    ("laptop", (396, 990), (660, 940), "left"),
+    ("phone", (522, 169), (600, 50)),
+    ("Jetson", (720, 667), (640, 420)),
+    ("inverter", (508, 619), (15, 430)),
+    ("laptop", (396, 990), (630, 1040)),
 ]
 
 
-def draw(img, text, target, anchor, side):
-    (tw, th), _ = cv2.getTextSize(text, FONT, SCALE, THICK)
-    x, y = anchor
-    x0, y0, x1, y1 = x, y, x + tw + 2 * PAD, y + th + 2 * PAD
-    overlay = img.copy()
-    cv2.rectangle(overlay, (x0, y0), (x1, y1), INK, -1)
-    cv2.addWeighted(overlay, 0.85, img, 0.15, 0, img)
-    cv2.rectangle(img, (x0, y0), (x1, y1), WHITE, 3, cv2.LINE_AA)
-    cv2.putText(img, text, (x0 + PAD, y1 - PAD - 2), FONT, SCALE, WHITE, THICK, cv2.LINE_AA)
-    start = (x0, (y0 + y1) // 2) if side == "left" else (x1, (y0 + y1) // 2)
-    cv2.line(img, start, target, INK, 7, cv2.LINE_AA)
-    cv2.line(img, start, target, WHITE, 3, cv2.LINE_AA)
-    cv2.circle(img, target, 11, WHITE, -1, cv2.LINE_AA)
+def font_px(image_width: int) -> int:
+    return round(LABEL_PT / 72 * image_width / PRINT_WIDTH_IN)
+
+
+def draw(img: Image.Image, font, text: str, target, corner) -> tuple[int, int, int, int]:
+    pen = ImageDraw.Draw(img)
+    left, top, right, bottom = pen.textbbox((0, 0), text, font=font)
+    x0, y0 = corner
+    x1, y1 = x0 + (right - left) + 2 * PAD, y0 + (bottom - top) + 2 * PAD
+    if x0 < 0 or y0 < 0 or x1 > img.width or y1 > img.height:
+        raise SystemExit(f"the {text} label runs off the photo: {(x0, y0, x1, y1)}")
+    if x0 <= target[0] <= x1 and y0 <= target[1] <= y1:
+        raise SystemExit(f"the {text} label covers the point it names")
+    # The leader leaves from the point of the box nearest the target.
+    start = (min(max(target[0], x0), x1), min(max(target[1], y0), y1))
+    pen.line([start, target], fill=INK, width=12)
+    pen.line([start, target], fill=WHITE, width=5)
+    pen.ellipse([target[0] - 16, target[1] - 16, target[0] + 16, target[1] + 16], fill=WHITE)
+    shade = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(shade).rectangle([x0, y0, x1, y1], fill=INK + (217,))
+    img.paste(Image.alpha_composite(img.convert("RGBA"), shade).convert("RGB"))
+    pen = ImageDraw.Draw(img)
+    pen.rectangle([x0, y0, x1, y1], outline=WHITE, width=BORDER)
+    pen.text((x0 + PAD - left, y0 + PAD - top), text, font=font, fill=WHITE)
+    return x0, y0, x1, y1
 
 
 def main() -> None:
-    img = cv2.imread(str(IMAGES / "deployed_prototype_upright.jpg")).copy()
-    for text, target, anchor, side in CALLOUTS:
-        draw(img, text, target, anchor, side)
+    img = Image.open(IMAGES / "deployed_prototype_upright.jpg").convert("RGB")
+    font = ImageFont.truetype(FONT_FILE, font_px(img.width))
+    boxes = [draw(img, font, *callout) for callout in CALLOUTS]
+    for i, a in enumerate(boxes):
+        for b in boxes[i + 1:]:
+            if a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]:
+                raise SystemExit(f"two labels overlap: {a} and {b}")
     out = IMAGES / "rig_dashboard.jpg"
-    cv2.imwrite(str(out), img, [cv2.IMWRITE_JPEG_QUALITY, 93])
-    print("wrote", out, img.shape, "aspect", round(img.shape[1] / img.shape[0], 2))
+    img.save(out, quality=93)
+    print("wrote", out, img.size, "font", font_px(img.width), "px")
 
 
 if __name__ == "__main__":

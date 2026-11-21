@@ -1,8 +1,5 @@
-
-
-
-
 % Anonymous IEEE RA-L manuscript.
+
 % Previous work is cited in the third person.
 
 \documentclass[letterpaper, 10pt, journal, twoside]{IEEEtran}
@@ -40,6 +37,10 @@
 \setcounter{dbltopnumber}{3}
 
 \setcounter{totalnumber}{4}
+\setlength{\textfloatsep}{8pt plus 2pt minus 2pt}
+\setlength{\dbltextfloatsep}{10pt plus 2pt minus 2pt}
+\setlength{\abovecaptionskip}{4pt}
+
 
 \title{A Decentralized Speed Advisory System for Preventing Traffic Jams}
 
@@ -57,7 +58,7 @@
 
 \begin{abstract}
 
-Traffic congestion can persist long after the disturbance that caused it, making early intervention essential to preventing breakdown. Existing traffic control approaches often rely on roadside infrastructure, centralized coordination, or vehicles equipped with automated control capabilities, limiting their accessibility. We present a decentralized speed advisory system that operates on commodity hardware and combines two complementary sources of traffic information: commercial traffic feeds that provide network-wide awareness and onboard cameras that capture immediate changes in nearby traffic. Each equipped vehicle independently computes speed recommendations for the road network, with a shared schedule ensuring consistent advisories despite differences in when vehicles receive traffic updates. Camera observations allow vehicles to respond to developing congestion before it becomes visible in the delayed traffic feed, while network-wide information prevents unnecessary local interventions. We analyze how observation delays and sensing frequency affect the opportunity to prevent traffic breakdown. A prototype costing approximately US\$500 was deployed on public roads to evaluate the sensing and computational pipeline, and measurements from 18,818 camera frames were used to model sensing errors in simulation. Across five traffic disturbances on the Mainz highway network, the system prevented 55 of 74 jams observed without control, reduced average jam time by 97\%, increased throughput by 3.9\%, and reduced network vehicle-hours by 12.6\%. These simulation results demonstrate the benefits of combining global traffic awareness with timely local sensing, while highlighting the importance of selective intervention and driver compliance.
+Traffic congestion can persist long after the disturbance that caused it, making early intervention essential to preventing breakdown. Existing traffic control approaches often rely on roadside infrastructure, centralized coordination, or vehicles equipped with automated control capabilities, limiting their accessibility. We present a decentralized speed advisory system that operates on commodity hardware without requiring vehicle modifications and combines two complementary sources of traffic information: commercial traffic feeds that provide global network-wide awareness and onboard cameras that capture immediate local changes in nearby traffic. Each equipped vehicle independently computes speed recommendations for the road network, with a shared schedule ensuring consistent advisories despite differences in when vehicles receive traffic updates. Camera observations allow vehicles to respond to developing congestion before it becomes visible in the delayed traffic feed, while network-wide information prevents unnecessary local interventions. We analyze how observation delays and sensing frequency affect the opportunity to prevent traffic breakdown. A prototype costing approximately US\$500 was deployed on public roads to evaluate the sensing and computational pipeline, and measurements from 18,818 camera frames were used to model sensing errors in simulation. Across five traffic disturbances on the Mainz highway network, the system prevented 55 of 74 jams observed without control, reduced average jam time by 97\%, increased throughput by 3.9\%, and reduced network vehicle-hours by 12.6\%. These simulation results demonstrate the benefits of combining global traffic awareness with timely local sensing, while highlighting the importance of selective intervention and driver compliance.
 
 \end{abstract}
 
@@ -65,23 +66,38 @@ Traffic congestion can persist long after the disturbance that caused it, making
 
 \label{sec:intro}
 
-\begin{figure}[t]
+\begin{figure*}[t]
 
 \centering
 
-\includegraphics[height=2.13in]{images/rig_dashboard.jpg}\\[1pt]
+\begin{minipage}[b]{0.7\textwidth}
 
-{\footnotesize (a) The rig.}\\[4pt]
+\centering
 
-\includegraphics[width=0.8\columnwidth]{images/perception_drive_frame.jpg}\\[1pt]
+\includegraphics[width=\linewidth]{images/system_overview.jpg}\\[1pt]
 
-{\footnotesize (b) The local layer's view on a drive.}
+{\footnotesize (a) System overview.}
 
-\caption{\small The deployed system. (a) The phone provides sensing and display, while the Jetson runs perception, advisory computation, and safety filtering, powered through an inverter. (b) The ego-lane leader is highlighted in amber and other tracked vehicles in cyan. No connection to vehicle controls is required.}
+\end{minipage}\hfill
+\begin{minipage}[b]{0.29\textwidth}
 
-\label{fig:teaser}
+\centering
 
-\end{figure}
+\includegraphics[height=1.32in]{images/rig_dashboard.jpg}\\[1pt]
+
+{\footnotesize (b) The rig.}\\[4pt]
+
+\includegraphics[width=0.78\linewidth]{images/perception_drive_frame.jpg}\\[1pt]
+
+{\footnotesize (c) The local layer's view on a drive.}
+
+\end{minipage}
+
+\caption{System overview and the deployed system. (a) A burst of inflow pushes a stretch of road toward its critical density. Each equipped vehicle reads the network from a commercial probe feed (global layer) and the road ahead from its own camera (local layer), computes its advisory onboard, and shows the driver a recommended speed. The vehicles coordinate only through the feed version they read; none talks to another. (b) The phone provides sensing and display, while the Jetson runs perception, advisory computation, and safety filtering, powered through an inverter. (c) The ego-lane leader is highlighted in amber and other tracked vehicles in cyan. No connection to vehicle controls is required.}
+
+\label{fig:overview}\label{fig:teaser}
+
+\end{figure*}
 
 Traffic jams have a measurable cost for both travelers and regional economies. According to the Urban Mobility Report, the extra travel time caused by congestion in U.S. urban areas increased from 1.8 billion hours in 1982 to 9.8 billion hours in 2024~\cite{schrank2025urban}. In Europe, road congestion costs for passenger and freight transport have been estimated at approximately 1\% of GDP~\cite{christidis2012measuring}. The cost is not limited to time and fuel, as congestion also slows regional economic growth, including employment growth~\cite{sweet2014traffic,hymel2009does}. Reducing congestion therefore benefits not only individual travelers but also regional economic productivity.
 
@@ -109,32 +125,14 @@ We implemented the proposed system using a smartphone and an NVIDIA Jetson Orin 
 
 \label{sec:method}
 
-\begin{figure*}[t]
-
-\centering
-
-\includegraphics[width=0.7\textwidth]{images/system_overview.jpg}
-
-\caption{System overview. A burst of inflow pushes a stretch of road toward its critical density. Each equipped vehicle reads the network from a commercial probe feed (global layer) and the road ahead from its own camera (local layer), computes its advisory onboard, and shows the driver a recommended speed. The vehicles coordinate only through the feed version they read; none talks to another.}
-
-\label{fig:overview}
-
-\end{figure*}
-
 \noindent\textbf{Design goals.} The system must support preventive traffic control while remaining practical to deploy on ordinary vehicles. We translate these objectives into five requirements:
 
 \begin{itemize}[wide=0pt,itemsep=1pt,topsep=2pt]
-
 \item[(G1)] \emph{Network-wide awareness.} Advisories must account for traffic conditions beyond a vehicle's immediate surroundings, allowing it to regulate arrivals at downstream bottlenecks.
-
 \item[(G2)] \emph{Timely intervention.} The system must detect developing congestion early enough to adjust vehicle arrivals before traffic breaks down.
-
 \item[(G3)] \emph{Decentralized coordination.} Vehicles must produce consistent speed recommendations without exchanging messages~\cite{kenney2011dedicated,sae2020j2735} or relying on a central controller.
-
 \item[(G4)] \emph{Driver control.} Unlike systems that directly control vehicle acceleration or braking~\cite{lee2024traffic}, advisories must work without modifying the vehicle and leave driving decisions to the driver.
-
 \item[(G5)] \emph{Affordable deployment.} The system must operate on inexpensive, commercially available hardware to reduce barriers to adoption.
-
 \end{itemize}
 
 \begin{table}[t]
@@ -150,25 +148,15 @@ We implemented the proposed system using a smartphone and an NVIDIA Jetson Orin 
 \setlength{\tabcolsep}{4pt}
 
 \begin{tabular}{@{}lll@{}}
-
 \toprule
-
  & Feed (global layer) & Camera (local layer) \\
-
 \midrule
-
 Coverage & every network segment & 60\,m, own and side lanes \\
-
 Measures & segment speed, jam factor & gaps, vehicles in range \\
-
 Update & one version per 60\,s & every 5\,s \\
-
 Delay to act & 99.5\,s & about 6\,s \\
-
 Sees a jam when & speed has fallen & density is rising \\
-
 \bottomrule
-
 \end{tabular}
 
 \end{table}
@@ -192,13 +180,9 @@ A common policy does not, by itself, synchronize decisions: independently pollin
 \label{alg:agreement}
 
 \begin{algorithmic}[1]
-
 \State Query the traffic feed every $P_q$ seconds
-
 \State Upon receiving a newer update published at time $T$, compute $a=\pi(x)$
-
 \State Apply the new plan $a$ at time $T+D$, or immediately if that time has passed
-
 \end{algorithmic}
 
 \end{algorithm}
@@ -240,7 +224,7 @@ Near capacity, occupancy may rise before speed falls appreciably, leaving a shor
 
 This timing difference motivates the occupancy-trend correction in Section~\ref{sec:controller}. It is an information advantage, not a guarantee of jam prevention; the effect of driver participation and response is evaluated in Section~\ref{sec:eval}.
 
-\section{Implementation and On-Road Deployment}
+\section{Implementation and On-Road Measurement}
 
 \label{sec:road}
 
@@ -250,11 +234,11 @@ This timing difference motivates the occupancy-trend correction in Section~\ref{
 
 \noindent\textbf{Latency and operational reliability.} The prototype achieved a median detection-to-advisory latency of 19.8 ms, while USB communication reduced the 95th-percentile transfer latency from 215.63 to 116.19 ms. Despite these low latencies, real-world operation exposed several reliability constraints. Direct sunlight caused the windscreen-mounted phone to enter Android's severe thermal tier, terminating the application during the first drive. A cable failure and a sunlight-disabled hotspot interrupted two additional drives. These observations identify thermal management and connectivity, rather than inference latency, as the principal practical constraints.
 
-\noindent\textbf{From road video to simulated observations.} The road recordings allow us to evaluate the controller under sensing errors observed in the deployed system rather than assuming perfect camera measurements. We processed 18,818 synchronized frames from six drives using the deployed detection, tracking, and distance estimation pipeline, constructing error tables from the four drives recorded at five frames per second. Two sources of error were particularly important. First, detection reliability decreased with distance: relative to a higher-resolution 1,280\,px reference pass, detection rates fell from 0.95 within 10\,m to 0.53 at 40--50\,m and 0.32 at 50--60\,m. We therefore model a 60\,m effective camera range and occlusion by nearer vehicles. Second, distance estimates based on vehicle bounding-box widths exhibited both frame-level noise, increasing from 0.05\,m at 10\,m to 1.1\,m at 50--60\,m, and persistent per-vehicle errors associated with a 31\% spread in vehicle widths. These errors are incorporated into the simulated camera observations. 
+\noindent\textbf{From road video to simulated observations.} The road recordings let us evaluate the controller using measured sensing errors rather than assuming perfect camera observations. We processed 18,818 synchronized frames from six drives using the deployed detection, tracking, and distance estimation pipeline, constructing error tables from the four drives recorded at five frames per second. Two sources of error were particularly important. First, detection reliability decreased with distance: relative to a higher-resolution 1,280\,px reference pass, detection rates fell from 0.95 within 10\,m to 0.53 at 40--50\,m and 0.32 at 50--60\,m. We therefore model a 60\,m effective camera range and occlusion by nearer vehicles. Second, distance estimates based on vehicle bounding-box widths exhibited both frame-level noise, increasing from 0.05\,m at 10\,m to 1.1\,m at 50--60\,m, and persistent per-vehicle errors associated with a 31\% spread in vehicle widths. These errors are incorporated into the simulated camera observations. 
 
 % Because the phone's focal length was not recorded, the absolute distance scale remains an assumption, whose effect is evaluated in Section~\ref{sec:sens}.
 
-\section{Evaluation in Simulation}
+\section{Evaluation}
 
 \label{sec:eval}
 
@@ -275,33 +259,19 @@ This timing difference motivates the occupancy-trend correction in Section~\ref{
 \setlength{\tabcolsep}{2.2pt}
 
 \begin{tabular}{@{}lrrrrr@{}}
-
 \toprule
-
 & \multicolumn{4}{c}{Five triggers} & No trigger \\
-
 \cmidrule(lr){2-5}\cmidrule(l){6-6}
-
 Controller & Jam-free & Jam & Throughput & Travel time & Throughput \\
-
 \midrule
-
 No control & 1 & 130.8 & 3,456 & 1,622 & 3,546 \\
-
 Feed lookahead & 46 & 11.6 & $-5.4$\% & $+11.9$\% & $-20.8$\% \\
-
 Plan only & 39 & 22.1 & $+2.6$\% & $-10.0$\% & $-2.9$\% \\
-
 Camera only & 5 & 95.5 & $+1.3$\% & $-1.1$\% & $-0.9$\% \\
-
 No gate & 51 & 4.4 & $+2.5$\% & $-6.0$\% & $-6.9$\% \\
-
 \textbf{Global-local} & \textbf{56} & \textbf{3.9} & $\mathbf{+3.9}$\% & $\mathbf{-12.6}$\% & $\mathbf{-3.0}$\% \\
-
 True occupancy & 58 & 3.4 & $+4.3$\% & $-14.3$\% & $-3.0$\% \\
-
 \bottomrule
-
 \end{tabular}
 
 \end{table}
@@ -339,7 +309,7 @@ True occupancy & 58 & 3.4 & $+4.3$\% & $-14.3$\% & $-3.0$\% \\
 
 \noindent\textbf{Traffic disturbances.} We set background demand to 3,572\,veh/h, slightly above the jammed exit's discharge rate of 3,535\,veh/h. At this demand, traffic remains stable in the absence of disturbances, but queues that form after breakdown cannot dissipate while demand is sustained. This allows us to evaluate whether preventive control can avoid persistent congestion.
 
-To examine how the available intervention time affects performance, we introduce five disturbances 15 minutes into each two-hour simulation. Three increase total inflow to 5,000\,veh/h for ten minutes or to 7,500 and 9,000\,veh/h for five minutes. Without control, these bursts produce breakdown after a median of 14--28 minutes. The remaining two disturbances block lanes for five minutes, producing much shorter warning times at the exit (80\,s) than at a mid-network location (37 minutes). Together, these scenarios test whether the controller can prevent both gradually developing and rapidly emerging congestion. The traffic feed follows the measured Mainz delivery process, with an application delay of $D=99.5$\,s.
+We introduce five disturbances 15 minutes into each two-hour simulation to examine how intervention time affects performance. Three increase total inflow to 5,000\,veh/h for ten minutes or to 7,500 and 9,000\,veh/h for five minutes. Without control, these bursts produce breakdown after a median of 14--28 minutes. The remaining two disturbances block lanes for five minutes, producing much shorter warning times at the exit (80\,s) than at a mid-network location (37 minutes). Together, these scenarios test whether the controller can prevent both gradually developing and rapidly emerging congestion. The traffic feed follows the measured Mainz delivery process, with an application delay of $D=99.5$\,s.
 
 \noindent\textbf{Metrics.} A super-segment is classified as jammed when its mean speed falls below 19\,km/h, using a threshold fitted to the network's speed distribution following~\cite{bhardwaj2023understanding}. A jam begins when this condition persists for 120\,s. We measure congestion through the total jammed segment-minutes across the network and count runs without any jam as jam-free. We also measure throughput at the network exit and total vehicle-hours spent in the network.
 
@@ -375,9 +345,11 @@ However, earlier intervention is useful only when it is necessary. Even without 
 
 The global gate addresses this problem by requiring network-wide evidence of congestion before allowing local corrections. It reduces the fraction of vehicle-ticks receiving a correction from 15.5\% to 0.2\%, limiting the no-trigger throughput penalty to 3.0\%. Yet this selectivity introduces a competing limitation: when a disturbance develops faster than the feed can report it, the gate may suppress an otherwise useful local intervention. Under the rapid exit blockage, gating increases jam time by $3.0\pm0.9$ segment-minutes relative to the ungated controller. Thus, a more selective trigger reduces unnecessary slowing but can miss a rapidly developing bottleneck.
 
-\subsection{Robustness and Practical Limitations}
+\subsection{Robustness}
 
 \label{sec:sens}
+
+We examine how the system performs under practical deployment constraints, including partial driver participation, imperfect responses to speed advisories, and uncertainty in camera measurements and traffic-feed delays. These experiments identify the conditions under which the benefits of global-local control persist and where its effectiveness begins to degrade.
 
 \begin{figure}[t]
 
@@ -412,235 +384,121 @@ Extending these benefits to real-world traffic requires understanding how driver
 The results also reveal a tradeoff between timely intervention and unnecessary slowing. Using global traffic information to enable local corrections reduces unnecessary interventions, but its delay can prevent the system from responding to rapidly developing jams. Future work should therefore investigate how local observations can distinguish emerging congestion from normal high-density traffic without waiting for global confirmation, and evaluate whether such approaches remain effective across different road networks.
 
 \begin{thebibliography}{10}
-
+\setlength{\itemsep}{-1pt}
 \providecommand{\url}[1]{#1}
-
 \csname url@rmstyle\endcsname
-
 \providecommand{\newblock}{\relax}
-
 \providecommand{\bibinfo}[2]{#2}
-
 \providecommand\BIBentrySTDinterwordspacing{\spaceskip=0pt\relax}
-
 \providecommand\BIBentryALTinterwordstretchfactor{4}
-
 \providecommand\BIBentryALTinterwordspacing{\spaceskip=\fontdimen2\font plus
-
 \BIBentryALTinterwordstretchfactor\fontdimen3\font minus
-
   \fontdimen4\font\relax}
-
 \providecommand\BIBforeignlanguage[2]{{%
-
 \expandafter\ifx\csname l@#1\endcsname\relax
-
-\typeout{** WARNING: IEEEtran.bst: No hyphenation pattern has been}%
-
-\typeout{** loaded for the language `#1'. Using the pattern for}%
-
-\typeout{** the default language instead.}%
-
+\typeout{\*\* WARNING: IEEEtran.bst: No hyphenation pattern has been}%
+\typeout{\*\* loaded for the language \`#1'. Using the pattern for}%
+\typeout{\*\* the default language instead.}%
 \else
-
 \language=\csname l@#1\endcsname
-
 \fi
-
 #2}}
-
 \bibitem{schrank2025urban}
-
 D.~Schrank, L.~Albert, K.~Jha, and B.~Eisele, ``{2025 Urban Mobility Report},''
-
   Texas A\&M Transportation Institute, College Station, TX, USA, Tech. Rep.,
-
   Aug. 2025.
-
 \bibitem{christidis2012measuring}
-
 P.~Christidis and J.~N. Ib{\'a}{\~n}ez~Rivas, ``Measuring road congestion,''
-
   European Commission, Joint Research Centre, Seville, Spain, Report EUR 25550
-
   EN, 2012.
-
 \bibitem{sweet2014traffic}
-
 M.~Sweet, ``Traffic congestion's economic impacts: Evidence from {US}
-
   metropolitan regions,'' \emph{Urban Studies}, vol.~51, no.~10, pp.
-
   2088--2110, 2014.
-
 \bibitem{hymel2009does}
-
 K.~Hymel, ``Does traffic congestion reduce employment growth?'' \emph{Journal of Urban Economics}, vol.~65, no.~2, pp. 127--135, 2009.
-
 \bibitem{bhardwaj2023understanding}
-
 A.~Bhardwaj, S.~R. Iyer, S.~Ramesh, J.~White, and L.~Subramanian,
-
   ``Understanding sudden traffic jams: From emergence to impact,''
-
   \emph{Development Engineering}, vol.~8, p. 100105, 2023.
-
 \bibitem{papageorgiou2002freeway}
-
 M.~Papageorgiou and A.~Kotsialos, ``Freeway ramp metering: An overview,''
-
   \emph{IEEE transactions on intelligent transportation systems}, vol.~3,
-
   no.~4, pp. 271--281, 2002.
-
 \bibitem{hegyi2008specialist}
-
 A.~Hegyi, S.~P. Hoogendoorn, M.~Schreuder, H.~Stoelhorst, and F.~Viti,
-
   ``{SPECIALIST}: A dynamic speed limit control algorithm based on shock wave
-
   theory,'' in \emph{Proceedings of the 11th International IEEE Conference on Intelligent Transportation Systems (ITSC)}, 2008, pp. 827--832.
-
 \bibitem{lee2024traffic}
-
 {CIRCLES Consortium}, ``Traffic control via connected and automated vehicles:
-
   An open-road field experiment with 100 cavs,'' \emph{arXiv preprint arXiv:2402.17043}, 2024.
-
 \bibitem{wang2018latency}
-
 Z.~Wang, M.~Hamedi, E.~Sharifi, and S.~Young, ``A cross-vendor and cross-state
-
   analysis of the {GPS}-probe data latency,'' \emph{Transportation Research Record}, vol. 2672, no.~42, pp. 180--191, 2018.
-
 \bibitem{self_regulating_cars}
-
 A.~Bhardwaj, R.~Asim, S.~K. Chauhan, Y.~Zaki, and L.~Subramanian,
-
   ``Self-regulating cars: Automating traffic control in free flow road
-
   networks,'' in \emph{Proceedings of the AAAI Conference on Artificial Intelligence}, 2026.
-
 \bibitem{arnold1998ramp}
-
 E.~D. Arnold, Jr., ``Ramp metering: a review of the literature.'' Virginia
-
   Transportation Research Council, Tech. Rep., 1998.
-
 \bibitem{li2017reinforcement}
-
 Z.~Li, P.~Liu, C.~Xu, H.~Duan, and W.~Wang, ``Reinforcement learning-based
-
   variable speed limit control strategy to reduce traffic congestion at freeway
-
   recurrent bottlenecks,'' \emph{IEEE transactions on intelligent transportation systems}, vol.~18, no.~11, pp. 3204--3217, 2017.
-
 \bibitem{hegyi2013cooperative}
-
 A.~Hegyi, \emph{et~al.}, ``A cooperative system based variable speed limit
-
   control algorithm against jam waves -- an extension of the {SPECIALIST}
-
   algorithm,'' in \emph{Proceedings of the 16th International IEEE Conference on Intelligent Transportation Systems (ITSC)}, 2013, pp. 973--978.
-
 \bibitem{stern2018dissipation}
-
 R.~E. Stern, \emph{et~al.}, ``Dissipation of stop-and-go waves via control of
-
   autonomous vehicles: Field experiments,'' \emph{Transportation Research Part C: Emerging Technologies}, vol.~89, pp. 205--221, 2018.
-
 \bibitem{wu2017flow}
-
 C.~Wu, A.~Kreidieh, K.~Parvate, E.~Vinitsky, and A.~M. Bayen, ``Flow: A modular
-
   learning framework for mixed autonomy traffic,'' \emph{arXiv preprint arXiv:1710.05465}, 2017.
-
 \bibitem{vinitsky2018benchmarks}
-
 E.~Vinitsky, A.~Kreidieh, L.~L. Flem, N.~Kheterpal, K.~Jang, F.~Wu, C.~Wu,
-
   R.~Liaw, E.~Liang, and A.~M. Bayen, ``Benchmarks for reinforcement learning
-
   in mixed-autonomy traffic,'' in \emph{Proceedings of the 2nd Conference on Robot Learning}.\hskip 1em plus 0.5em minus 0.4em\relax PMLR, 2018, pp.
-
   399--409.
-
 \bibitem{kreidieh2018dissipating}
-
 A.~R. Kreidieh, C.~Wu, and A.~M. Bayen, ``Dissipating stop-and-go waves in
-
   closed and open networks via deep reinforcement learning,'' in \emph{2018 21st International Conference on Intelligent Transportation Systems (ITSC)}.\hskip 1em plus 0.5em minus 0.4em\relax IEEE, 2018, pp. 1475--1480.
-
 \bibitem{cho2023temporal}
-
 J.-H. Cho, S.~Li, J.~Kim, and C.~Wu, ``Temporal transfer learning for traffic
-
   optimization with coarse-grained advisory autonomy,'' \emph{arXiv preprint arXiv:2312.09436}, 2023.
-
 \bibitem{nayyar2013common}
-
 A.~Nayyar, A.~Mahajan, and D.~Teneketzis, ``Decentralized stochastic control
-
   with partial history sharing: A common information approach,'' \emph{IEEE Transactions on Automatic Control}, vol.~58, no.~7, pp. 1644--1658, 2013.
-
 \bibitem{kenney2011dedicated}
-
 J.~B. Kenney, ``Dedicated short-range communications ({DSRC}) standards in the
-
   united states,'' \emph{Proceedings of the IEEE}, vol.~99, no.~7, pp.
-
   1162--1182, 2011.
-
 \bibitem{sae2020j2735}
-
 {SAE International}, ``{V2X} communications message set dictionary,'' SAE
-
   International, Tech. Rep. J2735, 2020.
-
 \bibitem{here_traffic_api}
-
 {HERE Technologies}, ``{HERE} traffic {API} v7 developer guide,''
-
   \url{https://www.here.com/docs/bundle/traffic-api-v7-api-reference}, 2025,
-
   accessed: 2026-09-12.
-
 \bibitem{redmon2016yolo}
-
 J.~Redmon, S.~Divvala, R.~Girshick, and A.~Farhadi, ``You only look once:
-
   Unified, real-time object detection,'' in \emph{Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR)}, 2016, pp.
-
   779--788.
-
 \bibitem{schroeder2019common}
-
 C. A. Schroeder de Witt, J. N. Foerster, G. Farquhar,
-
 P. H. S. Torr, W. B{\"o}hmer, and S. Whiteson,
-
 ``Multi-agent common knowledge reinforcement learning,''
-
 in \emph{Advances in Neural Information Processing Systems},
-
 vol. 32, 2019.
-
 \bibitem{danassis2022environmental}
-
 P. Danassis, Z. D. Erden, and B. Faltings,
-
 ``Exploiting environmental signals to enable policy
-
 correlation in large-scale decentralized systems,''
-
 \emph{Autonomous Agents and Multi-Agent Systems},
-
 vol. 36, art. 13, 2022.
-
 \end{thebibliography}
 
 \end{document}
-
-
 
 
